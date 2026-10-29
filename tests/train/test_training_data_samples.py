@@ -222,7 +222,7 @@ def test_request_only_batch_preserves_manual_training_contract():
     assert replace(batch, data_id="next").request is request
 
 
-def test_report_processor_reserves_and_acknowledges_mixed_data():
+def test_report_processor_reserves_and_acknowledges_mixed_data_one_kind_per_job():
     from reef.pipeline_context import PipelineContext
     from reef.record2sample import ReportSamples
     from reef.sample2job import Sample2Job
@@ -269,14 +269,18 @@ def test_report_processor_reserves_and_acknowledges_mixed_data():
                 payload={"references": [f"inference-{index}"], "score": 1.0},
             )
         )
-    batch = processor.build_job_data(2)
-    assert processor.build_job_data(2) is batch
-    assert isinstance(batch.samples[0], TrajectorySample)
-    assert isinstance(batch.samples[1], TaskSample)
     ids = frozenset({"inference-0", "report-0", "inference-1", "report-1"})
-    assert processor.releasable_record_ids().isdisjoint(ids)
-    assert processor.acknowledge(batch.data_id) == ids
+    assert ids <= processor.releasable_record_ids()
+    # One job's data holds samples of one kind, in store order: the trajectory first, then the task.
     assert not processor.ready(2)
+    batch = processor.build_job_data(1)
+    assert processor.build_job_data(1) is batch
+    assert [type(sample) for sample in batch.samples] == [TrajectorySample]
+    assert processor.acknowledge(batch.data_id) == {"sample:report-0:0"}
+    batch = processor.build_job_data(1)
+    assert [type(sample) for sample in batch.samples] == [TaskSample]
+    assert processor.acknowledge(batch.data_id) == {"sample:report-1:0"}
+    assert not processor.ready(1)
 
 
 @pytest.mark.parametrize("algorithm", ["sao", "openclawrl"])

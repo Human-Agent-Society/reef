@@ -23,7 +23,6 @@ from reef.recipe.config import recipe_config_from_mapping
 from reef.recipe.registry import build_named_recipe, build_recipe, recipe_class_for
 from reef.sample2job import NoJobData
 from reef.storage.sqlite import SQLiteRecordStore
-from reef.train.jobs import FixedJobPlan, JobPlanContext
 from reef.train.pipeline import PipelineConfig, PipelineSpec, TrainingPipeline
 from reef.train.types import JobData
 
@@ -140,10 +139,7 @@ def test_concrete_recipe_builds_its_processor_objective_and_report_type(
         assert trainer.job_loop is None
     else:
         assert trainer.job_loop is not None
-        plan = trainer.job_loop.plan
-        assert isinstance(plan, FixedJobPlan)
-        request = plan.next_job(JobPlanContext(JobData("math:1"), 0, None))
-        assert request.parameters["method"]["objective"] == objective
+        assert trainer.pipeline.context.job_parameters["trajectory"]["method"]["objective"] == objective
     assert trainer.pipeline.context.report_type is report_type
 
 
@@ -190,7 +186,7 @@ def test_tttd_build_resolves_its_backend_registered_objective_in_a_fresh_process
                 "stages = PipelineConfig.from_setting(grid, spec=TTTDRecipe.pipeline_spec(), environ={})\n"
                 "trainer = TTTDRecipe(**runtime_bindings(), pipeline_stages=stages)"
                 ".build('math', SQLiteRecordStore())\n"
-                "assert trainer.job_loop.plan.request.parameters['method']['objective'] == 'tttd'\n"
+                "assert trainer.pipeline.context.job_parameters['trajectory']['method']['objective'] == 'tttd'\n"
             ),
         ],
         check=True,
@@ -434,7 +430,6 @@ def test_cookbook_objectives_signal_their_recipes_loss_family() -> None:
 
     from reef.train.algos.registry import resolve_objective
     from reef.train.slime_backend.loss_families import resolve_loss_family
-    from reef.train.types import JobData
 
     first = policy_trajectory("i1", (5, 1), (1,), (-0.1,), 0.5)
     second = first.with_metadata(source_agent_record_id="i2", reward=1.5)

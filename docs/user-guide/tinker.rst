@@ -123,8 +123,8 @@ Reef's serving takes no part, so another runtime, such as an inference
 component, can serve the releases.
 
 Each job trains the Tinker loss of the objective that its recipe selected
-(`Switch methods within a run
-<../developer-guide/write-a-recipe.rst#switch-methods-within-a-run>`__).
+(`Train each kind of sample with its own method
+<../developer-guide/write-a-recipe.rst#train-each-kind-of-sample-with-its-own-method>`__).
 Tinker preparation needs one advantage per trajectory, so a supervised or
 distillation objective fails before training.
 ``kl-coef`` applies to every job. When it is not zero, a job whose loss has no
@@ -146,7 +146,7 @@ restores the saved weights **and optimizer state** in a new Tinker training
 session. It then saves the state (``save_state``) and the sampler weights
 (``save_weights_for_sampler``). Each save has one
 explicit unique name and no expiration. Then the session closes. The job
-parameter ``save_interval``, which a recipe's job plan can set, gives the
+parameter ``save_interval``, which ``recipe.config.job_parameters`` can set, gives the
 optimizer steps between two saved checkpoints. Without it, a job saves one checkpoint
 when it ends. Each saved checkpoint is a candidate. Candidate evaluation
 decides whether Reef publishes it; a rejected candidate changes no served

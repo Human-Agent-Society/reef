@@ -468,8 +468,8 @@ def test_recipe_builds_the_stages_its_pipeline_section_names(tmp_path: Path) -> 
     reported = trainer_of(from_config(settings(), runtime=proxy))
     stages = (reported.pipeline.record2record, reported.pipeline.record2sample, reported.pipeline.sample2job)
     assert [type(stage).__name__ for stage in stages] == ["ReportRecord2Record", "TraceSamples", "TraceJobData"]
-    # The default buffer holds the data of four jobs.
-    assert (reported.job_samples, reported.pipeline.buffer_size) == (1, 4)
+    # The default buffer holds the data of one job.
+    assert (reported.job_samples, reported.pipeline.buffer_size) == (1, 1)
     # The stage config sets job_samples over evolution.batch_size.
     sized = trainer_of(
         from_config(settings(pipeline={"sample2job": {"config": {"job_samples": 3}}}, batch_size=2), runtime=proxy)

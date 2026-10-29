@@ -33,7 +33,7 @@ from reef.observability import ExperimentLogger, NullExperimentLogger
 from reef.observability.operations import OperationMetrics
 from reef.pipeline_context import PipelineContext
 from reef.storage.records import RecordStore
-from reef.storage.samples import SampleStore
+from reef.storage.samples import SAMPLE_KINDS, SampleKind, TrainerSamples
 from reef.storage.tasks import TaskStorage
 from reef.train.backend import CandidateBackend, PreparedStep
 from reef.train.jobs import JobLoop, JobLoopState
@@ -113,7 +113,8 @@ class Trainer:
         experiment_logger: ExperimentLogger | None = None,
         training_mode: str = "auto",
         task_storage: TaskStorage | None = None,
-        samples: SampleStore | None = None,
+        samples: TrainerSamples | None = None,
+        job_parameters: Mapping[SampleKind, Mapping[str, Any]] | None = None,
         default_job_samples: int | None = None,
         reads_imported_tasks: bool = False,
     ) -> Trainer:
@@ -126,11 +127,14 @@ class Trainer:
         deployment sets the size. The trainer's ``job_samples`` is the
         sample-to-job stage's ``job_samples``, which is ``default_job_samples``
         unless the stage config sets it; the stage checks its own size rules.
-        A trainer that trains with no ``job_samples``, through a stage that
-        trains more than its own job data, is a ``PluginConfigError``.
-        ``reads_imported_tasks`` is the recipe's declaration that the trainer
-        reads the scenario's imported tasks outside its pipeline, as a harness
-        evaluation on their eval split does (see ``accepts_imported_tasks``).
+        A trainer that trains with no ``job_samples`` is a ``PluginConfigError``.
+        ``job_parameters`` is the parameters of each job of ``job_loop``, by
+        the kind of its samples (``PipelineContext.job_parameters``); the
+        pipeline's stage gives them with each job's data. ``None`` gives
+        every kind empty parameters, so the training component's defaults
+        apply. ``reads_imported_tasks`` is the recipe's declaration that the
+        trainer reads the scenario's imported tasks outside its pipeline, as a
+        harness evaluation on their eval split does (see ``accepts_imported_tasks``).
         """
         if candidate_backend is None and candidate_evaluator is not None:
             raise ValueError("candidate evaluation requires a candidate backend; a job loop holds its own")
@@ -145,6 +149,8 @@ class Trainer:
                 training_mode=training_mode,
                 task_storage=task_storage,
                 samples=samples,
+                # None gives every kind empty parameters: the training component's own defaults.
+                job_parameters={kind: {} for kind in SAMPLE_KINDS} if job_parameters is None else job_parameters,
                 # A trainer that trains nothing has no job size, so its pipeline keeps every sample.
                 default_job_samples=default_job_samples if trains else None,
             )
@@ -153,7 +159,7 @@ class Trainer:
             pipeline.close()
             raise ValueError("pipeline_factory must preserve the requested training_mode")
         stage = pipeline.sample2job
-        if trains and stage.job_samples is None and not stage.trains_own_job_data_only:
+        if trains and stage.job_samples is None:
             pipeline.close()
             raise PluginConfigError(
                 f"{type(stage).__name__} has no job_samples: set pipeline.sample2job.config.job_samples, "
@@ -216,18 +222,11 @@ class Trainer:
         else:
             self._candidate_evaluator = BackendAlwaysSelectPlugin(candidate_backend)
         #: The fewest samples one job trains: automatic job data holds at least this many. None when the
-        #: trainer trains nothing (it reads every record and is never ready) and when its stage trains only
-        #: its own job data.
+        #: trainer trains nothing (it reads every record and is never ready).
         self.job_samples = pipeline.sample2job.job_samples if self.trains else None
         self._state = dict(state)
         self._data_offset = 0
         self._data_sequence = 0
-        #: The training samples of the scenario, after ``read_samples``.
-        self.sample_store: SampleStore | None = None
-        #: The component that this trainer's commits name, or None for a scenario's only trainer.
-        self.sample_component: str | None = None
-        #: The sequence of the last sample that the trainer read.
-        self.sample_sequence = 0
         self.consumed_record_ids: set[str] = set()
         self.skipped_record_ids: set[str] = set()
         self._pending: _PendingStep | None = None
@@ -281,10 +280,10 @@ class Trainer:
     def scenario(self) -> str:
         return self._scenario
 
-    def set_training_mode(self, training_mode: str) -> None:
-        """Serialize mode selection with record push and job data reservation."""
+    def set_training_mode(self, training_mode: str, *, fill_manual_buffer: bool = False) -> None:
+        """Serialize mode selection with record push and job data reservation (``TrainingPipeline.set_training_mode``)."""
         with self._lock:
-            self._pipeline.set_training_mode(training_mode)
+            self._pipeline.set_training_mode(training_mode, fill_manual_buffer=fill_manual_buffer)
 
     def pending_instructions(self) -> int:
         """Instructions accepted and not yet consumed: the ones the pipeline buffers plus those unread in storage."""
@@ -430,28 +429,27 @@ class Trainer:
                 or self._pipeline.holds_job_data(self.job_samples)
             ):
                 return True
-            samples = self.sample_store
-            if (
-                samples is not None
-                and self._pipeline.accepts_trajectories
-                and samples.count(after_sequence=self.sample_sequence, kind="trajectory") > 0
-            ):
+            if self._pipeline.has_unread_samples():
                 return True
             return self._records.count(self.scenario, after_sequence=self._data_sequence) > 0
 
-    def read_samples(self, store: SampleStore, component: str | None) -> None:
-        """Read the training samples of the scenario from ``store``, from the first one.
+    def buffer_listing(self) -> Mapping[str, Any]:
+        """The trainer's training mode and the samples of its buffer (``TrainingPipeline.buffer_listing``)."""
+        with self._lock:
+            self._pipeline.read_store()
+            return {"training_mode": self._pipeline.training_mode, "samples": list(self._pipeline.buffer_listing())}
 
-        The scenario factory calls this when it builds the trainer.
-        ``component`` is the component that this trainer's commits name, or
-        ``None`` for the only trainer of a scenario. The trainer skips a sample
-        that one of its own committed jobs trained, so each trainer of a
-        scenario of several components trains each sample.
+    def change_buffer(self, sample_ids: tuple[str, ...], *, insert: bool) -> Mapping[str, Any]:
+        """Insert ``sample_ids`` into the manual buffer, or remove them; return ``buffer_listing`` after it.
+
+        Raise as ``TrainingPipeline.insert_into_buffer`` and ``remove_from_buffer`` do.
         """
         with self._lock:
-            self.sample_store = store
-            self.sample_component = component
-            self.sample_sequence = 0
+            if insert:
+                self._pipeline.insert_into_buffer(sample_ids)
+            else:
+                self._pipeline.remove_from_buffer(sample_ids)
+        return self.buffer_listing()
 
     def pipeline_status(self) -> Mapping[str, Any]:
         """Return caller-visible pipeline state under the pipeline's lock."""
@@ -518,31 +516,6 @@ class Trainer:
             self._pipeline.push(item)
 
     def _consume_data(self) -> None:
-        # Uploaded trajectories go first in job data, so the trainer reads them before the records.
-        while self.sample_store is not None and self._pipeline.accepts_trajectories:
-            stored_samples = self.sample_store.page(
-                after_sequence=self.sample_sequence, limit=self._DATA_READ_BATCH_SIZE, kind="trajectory"
-            )
-            if not stored_samples:
-                break
-            for stored in stored_samples:
-                self.sample_sequence = stored.sequence
-                trajectory = stored.sample
-                if not isinstance(trajectory, TrajectorySample) or stored.train_count(self.sample_component) > 0:
-                    continue
-                try:
-                    self._pipeline.push_trajectory(stored.sample_id, trajectory)
-                except ValueError:
-                    # Admission rendered it; a config that changed since, such as a lower max_tokens, can refuse it.
-                    logger.warning(
-                        "uploaded trajectory %s of scenario %s cannot train and is skipped",
-                        stored.sample_id,
-                        self.scenario,
-                        exc_info=True,
-                    )
-                    continue
-                if self.pipeline_ready():
-                    return
         while True:
             items = self._records.replay_page(
                 self.scenario,
@@ -599,7 +572,8 @@ class Trainer:
             elif self._job_loop is None:
                 result = self._execute_backend_step(data, scenario_step)
             else:
-                result = self._job_loop.submit(JobLoopState.from_dict(observed_state), data).result
+                parameters = self._pipeline.sample2job.job_parameters(data)
+                result = self._job_loop.submit(JobLoopState.from_dict(observed_state), data, parameters).result
         with self._lock:
             if data is None:
                 # A new training start set meanwhile replaced the state this poll read: its result is stale.
@@ -638,7 +612,7 @@ class Trainer:
             raise
 
     def _skip_failed_instruction(self, data: JobData, request: TrainingRequest, error: str) -> TrainStepResult:
-        """Consume the instruction alone; the units beside it go back to the pipeline for job data that a proposer reads."""
+        """Consume the instruction alone; the samples of its job data stay in the buffer."""
         with self._lock:
             pending = self._pending
             if pending is None or pending.data_id != data.data_id:
@@ -659,7 +633,7 @@ class Trainer:
         """Return the reserved job data, or reserve the next data when the pipeline is ready. The caller holds the lock.
 
         ``serving_runtime_load_id`` is the version that serves the scenario now.
-        The staleness check of the pipeline measures the lag of each held set against it.
+        The staleness check of the pipeline measures the lag of each buffered record sample against it.
         """
         if self._pending is not None:
             return self._pending.data

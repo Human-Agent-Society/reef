@@ -1,11 +1,11 @@
-"""Harness evolution's job data: trace batching, and offline rollouts of the imported train tasks.
+"""Harness evolution's job data: trace batching, and offline runs of the imported train tasks.
 
 The trace pipeline pairs reports with their inference records and batches
 every valid scored trace; the evolution backend (``HarnessBackend``)
 consumes the batch. The stages are built from a ``pipeline`` section, as a
 deployment configures them, rather than through any Recipe wrapper.
-``TrainTaskRollouts`` hands out the scenario's imported train tasks instead,
-chunk by chunk and epoch by epoch, for offline steps.
+``TrainTaskRollouts`` also trains the scenario's imported train tasks, for
+offline steps.
 """
 
 from __future__ import annotations
@@ -24,7 +24,8 @@ from reef.pipeline_context import PipelineContext
 from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.record2record import InferenceRecord2Record, ReportGrouping, ReportRecord2Record
 from reef.record2sample.traces import InferenceSamples, TraceSamples
-from reef.sample2job.traces import TraceJobData, TrainTaskRollouts, TrainTaskRolloutSettings
+from reef.sample2job.traces import TraceJobData, TrainTaskRollouts
+from reef.storage.samples import TrainerSamples
 from reef.storage.scenario import ScenarioStore
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.pipeline import PipelineConfig, TrainingPipeline
@@ -105,7 +106,7 @@ def test_the_default_stages_train_reports_and_the_inference_stages_train_records
         InferenceSamples,
         TraceJobData,
     )
-    assert recorded.buffer_size == 8
+    assert recorded.buffer_size == 2, "the buffer takes one job's data"
 
 
 def test_trace_processor_batches_a_failed_trace() -> None:
@@ -231,13 +232,12 @@ def test_record_driven_processor_batches_every_n_inferences_unscored() -> None:
     assert [recorded_payload(s) for s in batch.samples] == [first, second]
     assert {s.metadata.get("reward") for s in batch.samples} == {None}
 
-    retention = processor.releasable_record_ids()
-    assert retention.isdisjoint(frozenset({"inf-1", "inf-2"}))
-
-    consumed = processor.acknowledge(batch.data_id)
-    assert consumed == frozenset({"inf-1", "inf-2"})
+    # The stored samples consume their records; the job data consumes the samples.
     retention = processor.releasable_record_ids()
     assert retention == frozenset({"inf-1", "inf-2"})
+
+    consumed = processor.acknowledge(batch.data_id)
+    assert consumed == frozenset({"sample:inf-1:0", "sample:inf-2:0"})
     assert not processor.ready(2)
 
 
@@ -256,14 +256,14 @@ def test_record_driven_processor_releases_reports_untouched() -> None:
 
 
 def test_record_driven_processor_overflow_stays_pending_for_the_next_batch() -> None:
-    processor = _record_processor()
+    processor = harness_stages(inference=True).build(PipelineContext("s", default_job_samples=2))
     for index in range(3):
         processor.push(_inference(f"inf-{index}", {"messages": []}))
     batch = processor.build_job_data(2)
     assert [source_record_id(s) for s in batch.samples] == ["inf-0", "inf-1"]
-    processor.acknowledge(batch.data_id)
-    retention = processor.releasable_record_ids()
-    assert retention.isdisjoint(frozenset({"inf-2"}))
+    assert processor.acknowledge(batch.data_id) == {"sample:inf-0:0", "sample:inf-1:0"}
+    # The overflow sample waits for the next job data.
+    assert processor.status()["ready_samples"] == 1
     assert not processor.ready(2)
 
 
@@ -274,60 +274,17 @@ def import_tasks(session: ScenarioStore, root: Path, split: str, *names: str) ->
         session.samples.add_tasks((directory,), split)
 
 
-def rollout_pipeline(session: ScenarioStore, *, tasks_per_step: int) -> TrainingPipeline:
-    """A pipeline whose sample-to-job stage rolls the imported train tasks out over two epochs."""
-    context = PipelineContext("offline", task_storage=session.tasks, samples=session.samples, default_job_samples=1)
-    settings = TrainTaskRolloutSettings(tasks_per_step=tasks_per_step, epochs=2)
-    return TrainingPipeline(context, sample2job=TrainTaskRollouts(context, settings))
-
-
-def rollout_step(pipeline: TrainingPipeline, *, durable: bool = True) -> list[str]:
-    """The task names of one offline step; its commit is prepared, and it is durable when ``durable``."""
-    data = pipeline.build_job_data(1)
-    consumed = pipeline.acknowledge(data.data_id)
-    if durable:
-        pipeline.release_records(frozenset(consumed))
-    return [sample.metadata["task"]["name"] for sample in data.samples if isinstance(sample, TaskSample)]
-
-
-def test_a_manual_scenario_refuses_offline_rollouts(tmp_path: Path) -> None:
-    session = SQLiteScenarioStorage(tmp_path / "records").open("offline")
-    context = PipelineContext(
-        "offline", training_mode="manual", task_storage=session.tasks, samples=session.samples, default_job_samples=1
-    )
-    with pytest.raises(NotImplementedError, match="training_mode='manual'"):
-        TrainingPipeline(context, sample2job=TrainTaskRollouts(context, TrainTaskRolloutSettings()))
-
-
-def test_each_epoch_rolls_out_every_train_task_once_in_chunks_and_then_the_run_ends(tmp_path: Path) -> None:
+def test_offline_steps_roll_out_each_train_task_once_in_upload_order(tmp_path: Path) -> None:
     session = SQLiteScenarioStorage(tmp_path / "records").open("offline")
     import_tasks(session, tmp_path / "tasks", "train", "task-a", "task-b", "task-c")
     import_tasks(session, tmp_path / "tasks", "eval", "held-out")
-    pipeline = rollout_pipeline(session, tasks_per_step=2)
-    chunks = [rollout_step(pipeline) for _ in range(4)]
-    # The last chunk of an epoch takes what is left, and eval tasks never roll out.
-    assert [len(chunk) for chunk in chunks] == [2, 1, 2, 1]
-    assert sorted(chunks[0] + chunks[1]) == sorted(chunks[2] + chunks[3]) == ["task-a", "task-b", "task-c"]
-    assert not pipeline.ready(1)
+    context = PipelineContext("offline", samples=TrainerSamples(session.samples), default_job_samples=1)
+    pipeline = TrainingPipeline(context, sample2job=TrainTaskRollouts(context, 2, 1))
+    steps = []
+    while pipeline.ready(1):
+        data = pipeline.build_job_data(1)
+        pipeline.acknowledge(data.data_id)
+        steps.append([sample.metadata["task"]["name"] for sample in data.samples if isinstance(sample, TaskSample)])
+    # A step takes at most buffer_size train tasks, and an eval task never trains.
+    assert steps == [["task-a", "task-b"], ["task-c"]]
     pipeline.close()
-
-
-def test_a_restart_resumes_after_the_last_durable_step_and_a_later_task_joins_the_next_epoch(
-    tmp_path: Path,
-) -> None:
-    session = SQLiteScenarioStorage(tmp_path / "records").open("offline")
-    import_tasks(session, tmp_path / "tasks", "train", "task-a", "task-b", "task-c")
-    first = rollout_pipeline(session, tasks_per_step=1)
-    done = rollout_step(first)
-    lost = rollout_step(first, durable=False)
-    import_tasks(session, tmp_path / "tasks", "train", "task-d")
-    first.close()
-
-    restarted = rollout_pipeline(session, tasks_per_step=1)
-    # The step whose commit never became durable runs again; the epoch keeps the three tasks it started with.
-    rest = [rollout_step(restarted) for _ in range(2)]
-    assert rest[0] == lost
-    assert sorted(done + rest[0] + rest[1]) == ["task-a", "task-b", "task-c"]
-    next_epoch = [name for _ in range(4) for name in rollout_step(restarted)]
-    assert sorted(next_epoch) == ["task-a", "task-b", "task-c", "task-d"] and not restarted.ready(1)
-    restarted.close()

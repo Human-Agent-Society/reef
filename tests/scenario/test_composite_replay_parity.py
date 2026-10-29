@@ -131,7 +131,7 @@ class _StepGrouping(ReportGrouping):
 def step_pipeline(context: PipelineContext) -> TrainingPipeline:
     """TTTD's shape: a step is one group of two (step, slot) reports, sources are exclusive, a step with a report
     marked mixed is discarded once complete, and a report that names no step is another role's and released."""
-    stage = ReportRecord2Record(context, _StepGrouping(), exclusive_sources=True, ordered_groups=True)
+    stage = ReportRecord2Record(context, _StepGrouping(), exclusive_sources=True)
     return threshold_pipeline(context, record2record=stage)
 
 
@@ -293,7 +293,7 @@ def _discarded_step(tmp_path: Path, reload: bool) -> tuple[Any, ...]:
         assert _step(scenario, HARNESS) is None
         trained = _step(scenario, WEIGHTS)
         metrics = scenario.trainer_for(HARNESS).pipeline.operational_metrics()
-        return trained, metrics["unreserved_reports"], _stored(scenario)
+        return trained, metrics["waiting_reports"], _stored(scenario)
     finally:
         dispatcher.close()
 

@@ -840,25 +840,27 @@ the runtime under ``recipe.runtime``. Harness settings live in
 ``recipe.config.training_mode`` is shared by all recipes and defaults to ``auto``.
 It has two values:
 
-- ``auto``: a job starts when the held data reaches ``job_samples`` samples.
+- ``auto``: a job starts when the `buffer
+  <../developer-guide/processors.rst#the-buffer>`__ holds ``job_samples``
+  samples: the untrained samples that the next job takes.
   ``POST /reef/train`` is refused.
 - ``manual``: a job starts only for a ``POST /reef/train`` instruction. The
-  instruction's job takes the samples that automatic job data would take next,
-  up to ``job_samples``. A weight recipe waits until ``job_samples`` samples are
-  held, then trains them; the instruction text goes into the commit's
-  ``training_request`` metrics. Harness evolution runs the instruction at once:
-  the method gets the instruction and up to ``job_samples`` traces (by default
-  ``evolution.batch_size``), possibly none. The traces are scored traces, or
-  unscored records when the ``pipeline`` section names the inference stages.
-  An RL task job of ``sft-then-rl``'s imported tasks also starts only for an
-  instruction.
+  job trains the manual buffer: the samples that a client chose with the
+  buffer routes (`Choose the samples that train
+  <http-api.rst#choose-the-samples-that-train>`__). New samples do not join it
+  by themselves, in any recipe. A weight recipe waits until the manual buffer
+  holds a sample, then trains the whole buffer; the instruction text goes into
+  the commit's ``training_request`` metrics. Harness evolution runs the
+  instruction at once: the method gets the instruction and the traces of the
+  manual buffer, possibly none.
 
-Records arrive and the buffer fills in both modes, so a switch from ``manual``
-to ``auto`` can train on data already collected. A recipe's ``Sample2Job``
+Records arrive and the sample store fills in both modes, so a switch from
+``manual`` to ``auto`` can train on data already collected. A switch from
+``auto`` to ``manual`` puts the samples that the next automatic job would take
+into the manual buffer. A recipe's ``Sample2Job``
 declares ``supported_training_modes``; an unsupported mode raises
-``NotImplementedError``. A stage that trains only its own job data, such as
-generated tasks, supports only ``auto``. Harness evolution supports both modes,
-and every method takes a request step. Setting ``manual`` on an
+``NotImplementedError``. Harness evolution supports both modes, and every
+method takes a request step. Setting ``manual`` on an
 inference-only recipe does not create a training backend.
 
 .. code:: yaml
@@ -874,22 +876,22 @@ to select another mode at runtime. This changes subsequent job data; reserved
 job data completes under its original mode. Reef stores the selected mode in
 the scenario's settings, so reloads and restarts apply it again, and it takes
 precedence over the configured mode. A stored mode that the recipe does not
-support keeps the configured mode and logs a warning. In every mode the held
-record sets keep at most ``pipeline.sample2job.config.buffer_size`` samples. As
-records arrive, the pipeline releases the oldest sets beyond that limit and
-logs one warning.
+support keeps the configured mode and logs a warning. In every mode, the
+samples of ready record sets wait in the scenario's sample store until a job
+trains them.
 
 .. config::
 
    recipe.config.training_mode | auto | ``auto`` starts a job when ``job_samples`` samples are held; ``manual`` starts a job only for a ``POST /reef/train`` instruction
 
-``recipe.config.job_parameters`` is an object that a weight recipe's default
-job plan sends with every job, beside ``method``. The training component
+``recipe.config.job_parameters`` is an object that a weight recipe sends with
+every job, beside ``method``. The training component
 reads it: for example ``scheduling`` (`Step scheduling
 <python-api.rst#training-objective>`__) or ``save_interval``. The component
 refuses a parameter that it does not take, and the job is not submitted. The
 recipe refuses a ``method`` key, because the recipe's objective is the
-method. A recipe with its own ``job_plan`` does not read the setting.
+method. A recipe that overrides ``parameters_by_kind`` decides where the setting
+goes.
 
 .. code:: yaml
 
@@ -1095,15 +1097,12 @@ Reef refuses ``batch_size`` and ``batch_policy`` directly under
 To evolve offline, on the train split of the scenario's imported tasks
 instead of on traffic, set
 ``pipeline.sample2job.module: reef.sample2job.traces:TrainTaskRollouts``. Each
-step then rolls out the next train tasks on the head tree as the method's
-traces. Startup refuses it without an adapter that plays task directories
-(an npm ``install``) and ``evolution.evaluation.scorer``:
-
-.. config::
-
-   pipeline.sample2job.config.tasks_per_step | 8 | the most train tasks one offline step rolls out on the head tree
-   pipeline.sample2job.config.epochs | 1 | how many times the run goes through the train split; the run stops after the last epoch
-   pipeline.sample2job.config.shuffle_seed | 0 | the seed of each epoch's task order
+uploaded train task then joins the buffer and trains once, in upload order. A
+step holds either traces or train tasks; a step of train tasks rolls out up to
+``pipeline.sample2job.config.buffer_size`` of them (default ``job_samples``) on
+the head tree as the method's traces. Startup refuses it without an adapter
+that plays task directories (an npm ``install``) and
+``evolution.evaluation.scorer``.
 
 .. config::
 
@@ -1371,10 +1370,10 @@ job is one optimizer step:
        config:
          job_samples: ${training.config.global_batch_size}
 
-The two values can differ. Job data takes whole record sets until it holds at
-least ``job_samples``, so it can hold more: a group of rollouts is one unit,
-and a job with more samples than the batch size trains more than one
-optimizer step. A job with fewer samples than the batch size trains one
+The two values can differ. Job data takes up to ``buffer_size`` samples and
+the rest of each group that those samples touch, so it can hold more than
+``job_samples``: a group of rollouts trains in one job, and a job with more
+samples than the batch size trains more than one optimizer step. A job with fewer samples than the batch size trains one
 partial step. The ``remainder`` field of a job's optional ``scheduling``
 parameter decides what happens to a shorter last step; by default, the
 component trains it as a smaller step. See `Job size
@@ -1386,7 +1385,7 @@ and ``buffer_size``. A recipe's page lists the other keys of its stage.
 .. config::
 
    pipeline.sample2job.config.job_samples | required for weight recipes; ``evolution.batch_size`` for harness evolution | the fewest samples of one job, a positive int; at most the stage's grid for TTTD and SDPO
-   pipeline.sample2job.config.buffer_size | four times ``job_samples`` | the most samples that wait for a job; at least ``job_samples``. Beyond it, the pipeline releases the oldest record sets, in every training mode; it keeps the newest one, so a record set larger than the buffer still trains. Uploaded trajectories do not count toward it.
+   pipeline.sample2job.config.buffer_size | ``job_samples`` | the most samples that one job takes from the buffer, beside the rest of a group that those samples touch; at least ``job_samples``. Uploaded trajectories count toward it. Samples beyond it wait in the sample store for later jobs.
 
 Reef checks each stage when it loads the recipe config, before a scenario
 starts: it imports a named class, rejects functions and abstract classes, and
@@ -1409,7 +1408,8 @@ The built-in generated-task recipe,
 objective on Tinker's ``importance_sampling`` loss, so it requires the
 ``tinker`` training backend. Its stages are ``GeneratedTaskRecord2Record``,
 ``GeneratedTaskSamples``, and ``GeneratedTaskJobData``. Without
-``pipeline.record2sample.config.rounds`` no round runs and nothing trains. Each
+``pipeline.record2sample.config.rounds`` no round runs, and the recipe trains
+only the train tasks that earlier generations saved in the scenario. Each
 job is a task job: the training component rolls the job's tasks out on its own
 sampler and trains on their rollouts, as
 ``recipe.config.job_parameters.rollout`` says. The recipe requires that
@@ -1441,7 +1441,7 @@ parameter.
              state_dir: ${REEF_STATE_DIR}/generations
      sample2job:
        config:
-         tasks_per_step: 2
+         buffer_size: 2
 
 ``GeneratedTaskRecord2Record`` paces the rounds and holds their source
 sessions. It trains on no report: the recipe trains on the rollouts that the
@@ -1452,7 +1452,7 @@ training component runs, which are not records.
    pipeline.record2record.config.jobs_per_round | 1 | trained jobs after which the next round starts
    pipeline.record2record.config.source_records_per_round | 0 | recorded sessions that each round gives the generator, at most; 0 generates from the description only
    pipeline.record2record.config.source_tag | the ``name=value`` tag that marks a source session: each of its model calls carries the header ``x-reef-tag-<name>: <value>``. Required when ``source_records_per_round`` is above 0.
-   pipeline.record2record.config.refill_tasks | 1 | the next round starts only while fewer saved tasks than this wait to roll out
+   pipeline.record2record.config.refill_tasks | 1 | the next round starts only while fewer saved tasks than this wait to train; a task in a running job does not wait
 
 ``GeneratedTaskSamples`` runs the generations and sends their results to the
 generator:
@@ -1481,13 +1481,15 @@ Set ``eval_fraction`` and ``split_seed`` here rather than in a generator's confi
 The defaults keep every task in train.
 A published task keeps its split. A change of these values applies to the tasks generated after it.
 
-``GeneratedTaskJobData`` hands saved tasks to the training component as one
-task job, whatever Tinker's batch size (``training.options.batch-size``) is,
-so the stage has no ``buffer_size`` and no ``job_samples``:
+The saved train tasks go to the scenario's sample store, as samples
+``generated-tasks/<task name>``, and train from the buffer like every other
+sample. ``GeneratedTaskJobData`` makes one task job of the buffer's tasks,
+whatever Tinker's batch size (``training.options.batch-size``) is:
 
 .. config::
 
-   pipeline.sample2job.config.tasks_per_step | 4 | saved tasks of one task job
+   pipeline.sample2job.config.job_samples | 1 | the fewest saved tasks of one task job
+   pipeline.sample2job.config.buffer_size | 4 | the most saved tasks of one task job; at least ``job_samples``, and ``job_samples`` when it is more than 4
 
 The Tinker component runs a task job's rollouts on Tinker's sampler at the
 job's start weights. The ``rollout`` job parameter configures them:
@@ -1513,66 +1515,14 @@ records all carry ``source_tag``. The generator service accepts at most
 512 KiB of records and files in one request, so keep
 ``source_records_per_round`` small when the sessions are long.
 
-SFT then RL
-~~~~~~~~~~~
-
-The built-in SFT-then-RL recipe, ``reef.recipe.sft_then_rl:SFTThenRLRecipe``,
-trains one scenario in two ways:
-
-- SFT jobs, as the SFT recipe trains them, on demonstration reports and on
-  uploaded ATIF trajectories (`Upload trajectories
-  <http-api.rst#upload-trajectories>`__). They use ``SftObjective`` and
-  ``recipe.config.job_parameters``.
-- RL task jobs on the scenario's imported train tasks, which `Upload Harbor
-  tasks <http-api.rst#upload-harbor-tasks>`__ or the ``task-import`` section
-  add. A task trains in one task job, whichever component's trainer runs it. They use the ``task_group`` objective and
-  ``recipe.config.task_job_parameters``. The training component rolls each
-  job's tasks out on its own sampler, as ``task_job_parameters.rollout`` says.
-
-Held SFT samples train first: while ``job_samples`` of them wait, the next job
-is an SFT job. Each job starts from the last checkpoint of the job before it,
-so the RL jobs start from the SFT weights. Each train task trains in one task
-job; eval tasks never train. The training component must run task jobs, so the
-recipe requires the ``tinker`` training backend with a sampler.
-
-The eval tasks never train. The recipe does not evaluate the artifacts that
-its trainer publishes: a client asks Reef to evaluate one on the eval tasks
-(`Evaluate an artifact <http-api.rst#evaluate-an-artifact>`__). The
-``evaluation`` section decides which release serves.
-
-.. code:: yaml
-
-   recipe:
-     implementation: reef.recipe.sft_then_rl:SFTThenRLRecipe
-     config:
-       task_job_parameters:
-         rollout:
-           rollouts_per_task: 4
-           environment: e2b
-   pipeline:
-     record2sample:
-       config:
-         tokenizer_path: Qwen/Qwen3-8B
-     sample2job:
-       config:
-         job_samples: 64
-         tasks_per_job: 8
-
-.. config::
-
-   recipe.config.job_parameters | none | parameters of every SFT job beside ``method``, such as ``save_interval``
-   recipe.config.task_job_parameters | required | parameters of every RL task job beside ``method``: ``rollout``, as for the generated-task recipe above, and the component's own parameters, such as ``learning_rate``
-   pipeline.sample2job.config.job_samples | required | the fewest SFT samples of one SFT job
-   pipeline.sample2job.config.tasks_per_job | 8 | the most imported train tasks of one RL task job
-
 The ``generator`` section
 -------------------------
 
 Absent by default. When present, ``reef serve`` starts the generator service
 (``python -m reef.service.deploy.generator_process``) before the HTTP service, which depends on
 it, and publishes its address as ``${endpoints.generator}`` for the
-generated-task stages to consume. The generator writes and checks Harbor tasks and runs their rollouts for the
-generated-task recipe and for a task generator such as SPADE, under the same
+generated-task stages to consume. The generator writes and checks Harbor tasks for the generated-task recipe,
+and runs the plays of a task generator such as SPADE, under the same
 interpreter as the Reef service (``REEF_PYTHON``, otherwise the launcher's). Its
 host needs the ``harbor`` command line and the Harbor environment that
 ``generator.environment`` selects; the Reef service itself needs neither. The
@@ -1764,18 +1714,19 @@ The following names are relative to ``operations/``:
    * - ``records/oldest_unread_age_seconds``
      - Age of the first unread record, measured from its recorded creation
        time; zero when none remain.
-   * - ``processor/unreserved_reports``, ``processor/reserved_reports``
-     - Reported-feedback records waiting outside, or held inside, the reserved
-       job data. An incomplete group still counts as waiting.
+   * - ``processor/waiting_reports``
+     - Reported-feedback reports that wait for their group or for the sample
+       store. An incomplete group still counts as waiting.
    * - ``processor/oldest_report_wait_seconds``
-     - Age of the oldest unreserved report; zero when none remain.
+     - Age of the oldest waiting report; zero when none remain.
    * - ``processor/tracked_records``, ``processor/judging_records``
      - Computed-feedback records waiting for more traffic or a judgment.
-   * - ``processor/unreserved_candidates``, ``processor/reserved_candidates``
-     - Computed-feedback candidates outside or inside the reserved job data.
+   * - ``processor/waiting_candidates``
+     - Computed-feedback candidates that wait for the sample store.
    * - ``processor/ready_samples``, ``processor/job_samples``, ``processor/buffer_size``
-     - Samples that job data can take now, samples that automatic job data
-       needs, and the most samples that the held record sets keep.
+     - Samples that job data can take now (the buffer), samples that
+       automatic job data needs, and the most samples that one job takes
+       from the buffer.
    * - ``processor/buffered_requests``
      - Explicit training instructions already buffered by the processor.
    * - ``training/reserved_job_data``

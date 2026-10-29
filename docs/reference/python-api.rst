@@ -239,8 +239,8 @@ stages <#pipeline-stages>`__). Weight-training recipes add these members:
 
 - ``training_spec()`` binds the registered or dotted training objective.
   The objective declares the backend loss family.
-- ``job_plan()`` returns the ``JobPlan`` that chooses the parameters of each
-  training job (see `Training objective`_).
+- ``parameters_by_kind()`` returns the parameters of each training job by the
+  kind of its samples (see `Training objective`_).
 
 Every recipe's ``activation_rule()`` returns the rule that decides whether an
 artifact that its trainers make serves; the deployment's ``activation``
@@ -520,10 +520,15 @@ The session contract is:
        session and survive restarts when ``durable``.
    * - ``samples``
      - The ``SampleStore`` of the scenario's training samples, in arrival
-       order: the uploaded trajectories, and the imported Harbor tasks of the
-       ``train`` and ``eval`` splits. Each sample has ``train_counts``, the
-       number of committed jobs of each trainer that trained it. It closes with the session and
-       survives restarts when ``durable``.
+       order: the uploaded trajectories, the imported Harbor tasks of the
+       ``train`` and ``eval`` splits, and the samples that each trainer made
+       from records. Each sample has ``train_counts``, the
+       number of committed jobs of each trainer that trained it. It also keeps
+       each trainer's manual buffer (``manual_buffer``,
+       ``insert_into_buffer``, ``remove_from_buffer``); a commit removes the
+       samples that it trained from its trainer's manual buffer in the same
+       transaction. It closes with the session and survives restarts when
+       ``durable``.
    * - ``history()``
      - Committed ``CommitRecord`` values in step order: training steps
        (including inactive releases), activations, and new training starts.
@@ -589,8 +594,8 @@ Task stores
 A ``TaskStore`` holds published Harbor tasks, each in the ``train`` or
 ``eval`` split. A record-to-sample stage that generates tasks saves them in a
 task store before any rollout. Thus generation and rollout can recover
-independently after a restart. A caller can also add a task directory with
-``add_task``. The contract and its values are in ``reef.storage.tasks``.
+independently after a restart. The contract and its values are in
+``reef.storage.tasks``.
 
 To open a store, call ``task_storage.open(name)``. Each record-to-sample stage
 uses its own ``name``.
@@ -627,9 +632,8 @@ in the task file store. Each ``TaskCandidate`` holds the task ``name``, the
 A task is a Harbor task directory. The database keeps the state of the store
 and the digest of each task directory. The task file store keeps the files,
 text or binary, under that digest. ``publish_task`` records the publication of
-a saved candidate. ``add_task`` saves a task directory, such as one with
-images, and then records its publication. A ``StoredTask`` holds the task
-``name``, its ``split`` and its ``files_digest``.
+a saved candidate. A ``StoredTask`` holds the task ``name``, its ``split`` and
+its ``files_digest``.
 
 .. list-table::
    :header-rows: 1
@@ -647,10 +651,6 @@ images, and then records its publication. A ``StoredTask`` holds the task
      - Publish one candidate and return its ``StoredTask``. Each task name is
        published once. A later candidate with the same files must give the
        same split. It then returns the published task.
-   * - ``add_task(directory=..., split=...)``
-     - Publish a Harbor task directory under its directory name, and return
-       its ``StoredTask``. The caller checks that the directory is a Harbor
-       task. A retry with the same files and split returns the published task.
    * - ``reject_task(generation=..., index=..., reason=...)``
      - Save the rejection of one candidate.
    * - ``complete_generation(generation=...)``
@@ -664,10 +664,6 @@ images, and then records its publication. A ``StoredTask`` holds the task
      - Return the local task directory of a candidate or a published task,
        for example for ``read_harbor_task`` or ``TaskRolloutRunner.run``. Do not
        change it.
-   * - ``mark_trained(task_names=...)``, ``trained_task_names()``
-     - Mark published train tasks as trained, or return the trained ones. The
-       rollout of a task pool marks a task once the commit of its training step
-       is durable, so a restart rolls out only the others.
    * - ``write_document(key=..., document=...)``, ``documents()``
      - Save a text document under a non-empty key, or return every document by
        key. Each key holds one document; another document under a used key
@@ -1047,10 +1043,11 @@ for each in ``pipeline_spec()`` (``PipelineSpec(record2record=...,
 record2sample=..., sample2job=...)``):
 
 - ``record2record``: the record-to-record stage
-  (``reef.record2record``). It decides which records train and in what order:
-  it groups reports, judges records, and drops records that can no longer
-  train, including data more than ``max_staleness`` versions behind the
-  serving version. ``max_staleness`` is the stage's own setting, from
+  (``reef.record2record``). It decides which records train and which train together:
+  it groups reports, judges records, and ends records that can no longer
+  train. Its staleness check (``is_stale``) keeps samples with data more than
+  ``max_staleness`` versions behind the serving version out of the buffer.
+  ``max_staleness`` is the stage's own setting, from
   ``Record2RecordSettings`` (see `the staleness check
   <../developer-guide/processors.rst#staleness>`__). Without
   one, the pipeline forms no record set and nothing trains.
@@ -1068,21 +1065,20 @@ record2sample=..., sample2job=...)``):
   ``ValueError`` to refuse the upload (see `Uploaded trajectories
   <../developer-guide/processors.rst#uploaded-trajectories>`__).
 - ``sample2job``: the sample-to-job stage (``reef.sample2job.Sample2Job``).
-  Its ``make_job_data(samples, data_id)`` shapes the samples of the selected
-  sets into one job's data with the ID ``data_id``. The pipeline assigns the
+  Its ``make_job_data(samples, data_id)`` shapes the samples of the buffer,
+  in store order, into one job's data with the ID ``data_id``. The pipeline assigns the
   ID. Automatic job data gets ``<scenario>:data:<number>``. An instruction's
   data gets ``<scenario>:instruction:<request id>``. The number counts the
   job data of one pipeline. It is not a training step.
   ``Sample2Job.__init__(context, buffer_size, job_samples, *, max_job_samples=None)``
-  sets the most samples that wait for a job and the fewest samples of one
-  job. A ``job_samples`` of ``None`` takes ``context.default_job_samples``; a
-  ``buffer_size`` of ``None`` holds the data of four jobs
-  (``DEFAULT_BUFFER_JOBS``). The constructor raises ``PluginConfigError`` for
+  sets the most samples that one job takes from the buffer and the fewest
+  samples of one job. A ``job_samples`` of ``None`` takes
+  ``context.default_job_samples``; a ``buffer_size`` of ``None`` takes
+  ``job_samples``. The constructor raises ``PluginConfigError`` for
   a buffer smaller than ``job_samples`` and for a ``job_samples`` above
-  ``max_job_samples`` (an SDPO or TTTD grid). A stage with the class
-  attribute ``trains_own_job_data_only`` takes neither size.
+  ``max_job_samples`` (an SDPO or TTTD grid).
   ``Trainer.build`` raises ``PluginConfigError`` for a training trainer whose
-  other stage has no ``job_samples``. ``Sample2JobSettings`` parses the
+  stage has no ``job_samples``. ``Sample2JobSettings`` parses the
   ``buffer_size`` and ``job_samples`` keys, and a stage with more keys
   extends it. See `Job size <../developer-guide/processors.rst#job-size>`__.
 
@@ -1115,8 +1111,8 @@ in the same scenario.
 ``TrainingPipeline.training_mode`` selects automatic (``auto``) or
 instruction-triggered (``manual``) training. A ``Sample2Job`` declares
 ``supported_training_modes``. In ``manual`` an instruction's data takes the
-sets that automatic job data would; ``Sample2Job.reads_instructions`` says
-whether the instruction may run with fewer than ``job_samples`` samples. Record push, acknowledgement, retention, buffer release
+samples that automatic job data would; ``Sample2Job.reads_instructions`` says
+whether the instruction may run with fewer than ``job_samples`` samples. Record push, sample storage, acknowledgement, retention
 and background derivation are shared. See
 `Training pipeline <../developer-guide/processors.rst>`__ for the instruction queue and job data contract.
 
@@ -1142,8 +1138,7 @@ A reported-feedback recipe implements these hooks:
      - Shape the flat tuple of selected tasks into job data with the ID ``data_id``.
 
 The recipe owns the report policy. Its record stage is a subclass of
-``ReportRecord2Record(context, grouping, *, exclusive_sources=False,
-ordered_groups=False)``; ``ReportRecord2Record(context, ReportGrouping())``
+``ReportRecord2Record(context, grouping, *, exclusive_sources=False)``; ``ReportRecord2Record(context, ReportGrouping())``
 trains every report by itself. ``ExclusiveReportRecord2Record(context)`` also
 trains every report by itself, and a report that ends owns its inference
 records. No inference is in two record sets: a report that references an
@@ -1178,12 +1173,16 @@ consumption state stay in the stage; recipes never receive buffered report objec
 and a slot deduplicates retries within that group (None uses the report id).
 This collection group differs from ``TrajectorySample.group_id``: TTTD waits for
 a complete step, then trains several comparison groups within it.
-``make_job_data`` receives samples in group/arrival order. Acknowledgement consumes
-all selected reports, even when the recipe omits constant-reward groups from
-its output. Reports arriving after reservation remain for later job data.
+The pipeline stores the samples of a report or a ready group when it is
+ready, and that consumes their records. A group is fixed when it is first
+ready; later reports for its key form a new group. ``make_job_data``
+receives the samples of the `buffer
+<../developer-guide/processors.rst#the-buffer>`__ in store order: units in
+the order they became ready, interleaved with uploads by arrival. The job's commit consumes every sample that it receives, even
+when the recipe omits constant-reward groups from its output. Samples stored
+after the job data was built wait for later job data.
 ``output_schema`` declares the job data type. On the stage, ``exclusive_sources``
-controls source release for terminal group/duplicate reports, and
-``ordered_groups`` orders ready groups by their keys.
+controls source release for terminal group/duplicate reports.
 
 There is no report-level ``judge``, ``WAIT``, ``NEVER``, or eligibility flag.
 Reference validation runs at admission; incomplete groups wait for more valid
@@ -1303,7 +1302,7 @@ Job data
 
 ``Sample = TrajectorySample | TaskSample``. Every processor returns a frozen
 ``JobData(data_id, samples, request=None)`` with an ordered tuple of samples.
-The same job data may contain both kinds. ``request`` is keyword-only and carries
+One job's data holds samples of one kind. ``request`` is keyword-only and carries
 an optional explicit training instruction; request-only job data may be empty.
 The pipeline returns the same pending job data until its id is acknowledged.
 Reef submits one training job for each value. The training component cuts the
@@ -1315,7 +1314,7 @@ samples into its own optimizer batches.
        "scenario:data:1",
        (
            TrajectorySample(atif_document, source_agent_record_ids=("inference-1", "report-1")),
-           TaskSample(Path("tasks/example"), source_agent_record_ids=("record-2",)),
+           TrajectorySample(other_atif_document, source_agent_record_ids=("inference-2", "report-2")),
        ),
    )
 
@@ -1461,34 +1460,27 @@ the packing: best-fit decreasing, which puts each rollout, longest first, into
 the pack whose free tokens it fills most closely. The packs decide only which
 rollouts share a step. The loss and the micro-batches stay the component's.
 
-``WeightTrainingRecipe.job_plan()`` returns the recipe's ``JobPlan``
-(``reef.train.jobs``). When a job's data is ready and no job runs, the weight
-trainer calls ``next_job(context)``. ``context`` is a ``JobPlanContext`` with
-three fields:
+``WeightTrainingRecipe.parameters_by_kind()`` returns the parameters of each
+training job by the kind of the job's samples: ``trajectory`` or ``task``.
+The trainer gives them to its pipeline (``PipelineContext.job_parameters``).
+When a job's data is ready and no job runs, the pipeline's sample-to-job stage
+gives the job's parameters, ``Sample2Job.job_parameters(data)``: those of the
+kind of the data's samples, with the keys of the instruction's ``parameters``
+(``TrainingRequest.parameters``) put over them. It refuses data that holds
+both kinds, and a kind that the recipe does not name when no instruction gives
+parameters. A kind that the recipe does not name never trains in ``auto``. Reef reads none of the parameters; it submits
+them to the deployment's training component, whose name is the job's
+``backend``. ``TrainingMethod`` (``reef.runtime.interfaces``) is an objective
+reference and an optional ``LearningRateSchedule``.
 
-- ``data``: the ready job data that the job trains.
-- ``finished_jobs``: the number of this trainer's jobs that ended, finished
-  or failed.
-- ``last_job``: the ``JobOutcome`` (``reef.core.job_data``) of the last job
-  that ended, or ``None`` before the first one. A ``JobOutcome`` holds
-  ``job_id``, ``backend``, ``event`` (``finished`` or ``failed``),
-  ``metrics``, and ``error``, which is set exactly when the job failed.
+By default, the parameters of both kinds are ``method``
+(``TrainingMethod(objective).to_dict()``) and the recipe's ``job_parameters``
+config, such as ``scheduling`` or ``save_interval``.
 
-The plan always returns a ``JobRequest(parameters, restart=False)``. Reef reads
-none of the ``parameters``; it submits them to the deployment's training
-component, whose name is the job's ``backend``. With ``restart=True``, the job
-starts from the component's ``fresh_start`` of the trainer's start. ``TrainingMethod`` (``reef.runtime.interfaces``)
-is an objective reference and an optional ``LearningRateSchedule``.
-
-The default ``FixedJobPlan`` submits one job each time job data is ready. Its
-parameters are ``method`` (``TrainingMethod(objective).to_dict()``) and the
-recipe's ``job_parameters`` config, such as ``scheduling`` or
-``save_interval``.
-
-``next_job`` must be a function of its argument. The request is part of the
-job's ID, so a retry after a restart must get the same request. See `Write a
-recipe <../developer-guide/write-a-recipe.rst#switch-methods-within-a-run>`__
-for a plan that changes the method between jobs.
+The parameters are part of the job's ID, so ``parameters_by_kind()`` must
+return the same value at every call. See `Write a recipe
+<../developer-guide/write-a-recipe.rst#train-each-kind-of-sample-with-its-own-method>`__
+for a recipe that trains each kind with its own method.
 
 ``TrainingSignal`` carries:
 
@@ -1964,12 +1956,6 @@ loop:
        manifest and looks up its ``state_path`` on its service. The Tinker
        API describes no sampler or exported-adapter path, so those are
        checked only for their ``tinker://`` form.
-   * - ``fresh_start(start)``
-     - Return a start with the weights of ``start`` and no training state: a
-       new optimizer state, the learning-rate schedule at step 0, and an
-       empty objective state. The same ``start`` always gives the same
-       result. Raise ``ValueError`` when the component cannot do this; the
-       default refuses. Slime implements it; Tinker does not.
    * - ``close()``
      - Release the component's resources; safe to call repeatedly.
 
@@ -1987,11 +1973,11 @@ call ``start_jobs()`` once it can train. Until then no job runs, including
 the jobs that a restart left.
 
 ``reef.train.jobs.JobLoop`` is the control plane's side. It holds the weight
-trainer's one training component and the recipe's ``JobPlan``. It returns the
-result that the trainer commits:
+trainer's one training component. It returns the result that the trainer
+commits:
 
-1. When no job runs, the trainer reserves ready job data. The plan names the
-   job, the loop submits it, and the trainer commits the submission, which
+1. When no job runs, the trainer reserves ready job data. The pipeline's
+   sample-to-job stage gives the job's parameters, the loop submits it, and the trainer commits the submission, which
    consumes the records of the job's data.
 2. While the job runs, the trainer commits each new saved checkpoint: its
    ``release_path`` becomes a new artifact, with the checkpoint's training
@@ -2014,10 +2000,10 @@ A failed job ends like a finished one. Reef consumed the records of its data whe
 it submitted the job, so they do not train again.
 
 Once the commit of a job's end is durable, the trainer calls
-``Sample2Job.job_ended(outcome)`` with ``last_job``. The default does nothing.
+``Record2Sample.job_ended(outcome)`` with ``last_job``. The default does nothing.
 A trainer that starts with no running job calls it again for the last job
 that ended, before any other call to a new stage. The stage takes it as the
-end of the last job that it may have handed out.
+end of the last job that may have trained its samples.
 A stage whose job data holds ``TaskSample`` values (Harbor tasks) reads each
 task's rollout results from the outcome's ``metrics``: the Tinker component
 reports ``rollout_rewards``, the rewards of each task's rollouts, by task

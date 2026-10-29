@@ -69,7 +69,7 @@ from reef.record2sample.traces import TraceSamples
 from reef.runtime.executor.config import ExecutorSettings, role_executor_settings
 from reef.sample2job.traces import TraceJobData, TrainTaskRollouts
 from reef.storage.records import RecordStore
-from reef.storage.samples import SampleStore
+from reef.storage.samples import TrainerSamples
 from reef.storage.tasks import TaskStorage
 from reef.surface.base import ArtifactLayout, Surface
 from reef.train.backend import ComponentReleases
@@ -506,7 +506,7 @@ class HarnessEvolutionRecipe(Recipe):
         experiment_logger: ExperimentLogger | None = None,
         task_storage: TaskStorage | None = None,
         releases: ComponentReleases | None = None,
-        samples: SampleStore | None = None,
+        samples: TrainerSamples | None = None,
     ) -> Trainer:
         if releases is None:
             raise RecipeConfigError("harness evolution reads its head tree from the scenario's committed releases")
@@ -537,7 +537,9 @@ class HarnessEvolutionRecipe(Recipe):
             return FloorPolicy(backend, floor_score=evaluation.floor_score)
         return NoEvaluationPolicy()
 
-    def build_backend(self, scenario: str, releases: ComponentReleases, samples: SampleStore | None) -> HarnessBackend:
+    def build_backend(
+        self, scenario: str, releases: ComponentReleases, samples: TrainerSamples | None
+    ) -> HarnessBackend:
         """The scenario's backend: the binary installed, the history, the evaluator, the tasks, the records and the
         coding agent bound."""
         descriptor = get_adapter(self.evolution.adapter)
@@ -561,7 +563,7 @@ class HarnessEvolutionRecipe(Recipe):
             evaluator=evaluator,
             tasks=EvaluationTasks(
                 seed_tasks=self.configured_tasks(),
-                imported_tasks=samples if self.evaluation.imported_tasks else None,
+                samples=samples if self.evaluation.imported_tasks else None,
                 collect_failures=self.evaluation.collect_failures,
                 collector=self.collector,
                 max_collected=self.evaluation.max_collected_tasks,

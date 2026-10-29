@@ -305,7 +305,7 @@ class ScenarioRegistry:
         """Select an existing scenario's mode and store it, so reloads and restarts apply it again."""
         with self.lock_for(scenario):
             current = self.require(scenario)
-            current.set_training_mode(training_mode)
+            current.set_training_mode(training_mode, fill_manual_buffer=True)
             settings = self._storage.read_settings(scenario)
             self._storage.write_settings(scenario, replace(settings, training_mode=training_mode))
             return current

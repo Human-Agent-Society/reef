@@ -20,6 +20,7 @@ from reef.service.deploy.service_config import service_config_from_mapping
 from reef.service.streaming import stream_record
 from reef.storage.commits import CommitRecord
 from reef.storage.observer import ObservedScenarioStorage, RecordObserver
+from reef.storage.samples import consumed_sample_id
 from reef.storage.sqlite import SQLiteScenarioStorage
 
 
@@ -473,7 +474,7 @@ def test_dispatcher_traffic_reaches_the_observer_through_the_storage(tmp_path) -
     assert observer.accepted == ["i1", "r1"]
     # The job's submission consumes the records; its checkpoint and its end commit after it.
     assert [(commit.scenario, commit.step, commit.consumed_ids) for commit in observer.committed] == [
-        ("math", 1, frozenset({"i1", "r1"})),
+        ("math", 1, frozenset({"i1", "r1", consumed_sample_id("r1:0")})),
         ("math", 2, frozenset()),
         ("math", 3, frozenset()),
     ]

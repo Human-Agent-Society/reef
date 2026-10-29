@@ -746,7 +746,7 @@ class ScenarioCommitter:
             if backend is not None:
                 backend_config: dict[str, Any] | None = dict(backend.experiment_config())
             elif job_loop is not None:
-                backend_config = dict(job_loop.plan.experiment_config())
+                backend_config = dict(trainer.pipeline.sample2job.experiment_config())
             else:
                 backend_config = None
         except Exception:

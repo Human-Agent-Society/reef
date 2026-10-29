@@ -2,8 +2,7 @@
 
 Reef submits one training job for each ``JobData`` value. The training
 framework cuts the value's items into its own optimizer batches. When the job
-ends, its ``JobOutcome`` is what the training pipeline and the recipe's job plan
-learn about it.
+ends, its ``JobOutcome`` is what the training pipeline learns about it.
 """
 
 from __future__ import annotations
@@ -256,8 +255,8 @@ class JobOutcome:
     ``finished`` or ``failed``; ``metrics`` is the component's telemetry for the whole job, a mapping that
     encodes as JSON and that Reef records without reading, such as a task job's ``rollout_rewards``;
     ``error`` is a non-empty string exactly when ``event`` is ``failed``. Purpose: the weight trainer's job
-    loop makes it when it commits a job's end and keeps the last one in its state; the recipe's job plan
-    (``JobPlanContext.last_job``) and the sample-to-job stage (``Sample2Job.job_ended``) read it.
+    loop makes it when it commits a job's end and keeps the last one in its state; the record-to-sample stage
+    (``Record2Sample.job_ended``) reads it.
     """
 
     job_id: str

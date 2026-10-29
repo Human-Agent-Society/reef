@@ -374,8 +374,7 @@ def test_experiment_provider_observes_the_generic_commit_boundary(start_dispatch
     assert event.context.recipe == "test_policy"
     assert event.context.backend == "stub"
     assert event.context.backend_config == {
-        "job_plan": "fixed",
-        "parameters": {"method": {"objective": "sft"}},
+        "job_parameters": {kind: {"method": {"objective": "sft"}} for kind in ("trajectory", "task")},
     }
     assert event.context.source_artifact_ref.release_id == produced.parent_release_id
     assert event.produced_artifact_ref == produced
@@ -410,11 +409,11 @@ def test_periodic_metrics_report_backlog_during_training_without_status_reads(st
     assert sample["training/execution/elapsed_seconds"] >= 0
     assert sample["records/oldest_unread_age_seconds"] >= 0
     assert sample["training/reserved_job_data"] == 1
-    assert sample["processor/unreserved_reports"] == 0
-    assert sample["processor/reserved_reports"] == 1
-    # The pipeline status is exported too; the default buffer holds the data of four jobs.
+    # A ready report leaves the record stage when its sample is stored, so the reserved job data holds none.
+    assert sample["processor/waiting_reports"] == 0
+    # The pipeline status is exported too; the default buffer holds the data of one job.
     assert "processor/ready_samples" in sample
-    assert (sample["processor/job_samples"], sample["processor/buffer_size"]) == (1, 4)
+    assert (sample["processor/job_samples"], sample["processor/buffer_size"]) == (1, 1)
     assert not tracker.events
     component.release.set()
     _wait_for_jobs(dispatcher, 2)

@@ -347,8 +347,10 @@ def test_failed_multi_turn_assembly_preserves_inputs_and_other_live_reports() ->
     processor.push(report("single", "i1", 1.0))
     with pytest.raises(ValueError, match="accept_multi_turn"):
         processor.push(report("multi", ("i2", "i3"), 1.0))
-    assert processor.releasable_record_ids().isdisjoint({"i1", "i2", "i3", "single", "multi"})
-    processor.acknowledge(processor.build_job_data(1).data_id)
+    # The single report's sample is stored, which consumes its records; the failed report keeps its inputs held.
+    assert {"i1", "single"} <= processor.releasable_record_ids()
+    assert processor.releasable_record_ids().isdisjoint({"i2", "i3", "multi"})
+    assert processor.acknowledge(processor.build_job_data(1).data_id) == {"sample:single:0"}
     assert processor.releasable_record_ids().isdisjoint({"i2", "i3", "multi"})
 
 
@@ -378,13 +380,13 @@ def test_pairing_retention_trains_one_report_per_inference_and_releases_it() -> 
     processor = threshold_pipeline(PipelineContext("math"))
     processor.push(inference("i1"))
     processor.push(report("r1", "i1", 1.0))
-    # r2 ends at once: r1 holds i1.
+    # r1's sample is stored, which consumes r1 and i1; r2 ends at once without training.
     processor.push(report("r2", "i1", 0.5))
-    assert processor.releasable_record_ids() == frozenset({"r2"})
+    assert processor.releasable_record_ids() == frozenset({"i1", "r1", "r2"})
 
     batch = processor.build_job_data(1)
-    assert trajectory_reward(batch.samples[0]) == 1.0
-    processor.acknowledge(batch.data_id)
+    assert len(batch.samples) == 1 and trajectory_reward(batch.samples[0]) == 1.0
+    assert processor.acknowledge(batch.data_id) == {"sample:r1:0"}
     assert not processor.ready(1)
     assert processor.releasable_record_ids() == frozenset({"i1", "r1", "r2"})
 
@@ -394,13 +396,16 @@ def test_pairing_retention_trains_one_report_per_inference_and_releases_it() -> 
 
 
 @pytest.mark.unit
-def test_pairing_retention_protects_low_score_feedback_until_consumed() -> None:
+def test_pairing_retention_keeps_low_score_feedback_until_its_sample_is_stored() -> None:
     processor = threshold_pipeline(PipelineContext("math"))
     processor.push(inference("i1"))
+    assert processor.releasable_record_ids().isdisjoint({"i1"})
     processor.push(report("low", "i1", 0.1))
-    assert processor.releasable_record_ids().isdisjoint({"i1", "low"})
-    processor.acknowledge(processor.build_job_data(1).data_id)
+    # The low-score sample is stored, so its records are consumed; the sample trains in the next job data.
     assert processor.releasable_record_ids() == {"i1", "low"}
+    batch = processor.build_job_data(1)
+    assert trajectory_reward(batch.samples[0]) == 0.1
+    assert processor.acknowledge(batch.data_id) == {"sample:low:0"}
 
 
 @pytest.mark.unit
@@ -444,10 +449,10 @@ def test_trainer_reserves_batch_and_commits_backend_preparation() -> None:
 
     assert result is not None
     assert trainer.pending_job_data is not None
-    # The reserved batch has not been consumed yet, so its sample is still counted as held.
+    # The reserved batch's sample leaves the buffer, and the buffer takes one job's data.
     assert trainer.pipeline_status() == {
-        "ready_samples": 1,
-        "buffer_size": 4,
+        "ready_samples": 0,
+        "buffer_size": 1,
         "buffered_requests": 0,
         "job_samples": 1,
     }
@@ -460,20 +465,20 @@ def test_trainer_reserves_batch_and_commits_backend_preparation() -> None:
 
 
 @pytest.mark.unit
-def test_trainer_takes_job_samples_and_buffers_four_jobs_only_with_a_backend() -> None:
+def test_trainer_takes_job_samples_and_buffers_one_job_only_with_a_backend() -> None:
     records = SQLiteRecordStore()
     for sequence in range(3):
         records.append(inference(f"i{sequence}"))
         records.append(report(f"r{sequence}", f"i{sequence}", 1.0))
     trainer = preparing_trainer(records, default_job_samples=2)
-    assert (trainer.job_samples, trainer.pipeline.buffer_size) == (2, 8)
+    assert (trainer.job_samples, trainer.pipeline.buffer_size) == (2, 2)
     assert trainer.run_once() is not None
     data = trainer.pending_job_data
     assert data is not None and len(data.samples) == 2
     # The trainer stops reading records once it holds one job's data.
     assert trainer.pipeline_status() == {
-        "ready_samples": 2,
-        "buffer_size": 8,
+        "ready_samples": 0,
+        "buffer_size": 2,
         "buffered_requests": 0,
         "job_samples": 2,
     }
@@ -492,7 +497,7 @@ def test_the_stage_config_sets_job_samples_over_the_default() -> None:
         ).build(context)
 
     trainer = preparing_trainer(SQLiteRecordStore(), pipeline_factory=pipeline, default_job_samples=2)
-    assert (trainer.job_samples, trainer.pipeline.buffer_size) == (3, 12)
+    assert (trainer.job_samples, trainer.pipeline.buffer_size) == (3, 3)
 
 
 @pytest.mark.unit
@@ -731,7 +736,8 @@ def test_a_grouped_recipe_trains_one_comparison_set_as_one_job(tmp_path) -> None
                 scenario,
                 records,
                 pipeline_factory=grouped_policy_pipeline,
-                job_loop=JobLoop(component, self.job_plan(), scenario=scenario),
+                job_loop=JobLoop(component, scenario=scenario),
+                job_parameters=self.parameters_by_kind(),
                 algorithm_state=algorithm_state,
                 experiment_logger=experiment_logger,
                 default_job_samples=1,
@@ -807,7 +813,9 @@ def test_reported_samples_leave_required_tensor_validation_to_training_backend(m
     with pytest.raises(ValueError):
         to_slime_rollout_data(prepared.payload)
     assert processor.build_job_data(1) is batch
-    assert processor.releasable_record_ids().isdisjoint({"i1", "r1"})
+    # The job data trains nothing until it is acknowledged: released, the next job data holds the same sample.
+    processor.release_job_data(batch.data_id)
+    assert processor.build_job_data(1).samples == batch.samples
 
 
 def test_capacity_loss_skips_orphan_report_and_remains_visible_after_restart(tmp_path, caplog):

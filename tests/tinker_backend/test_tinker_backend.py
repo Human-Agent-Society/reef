@@ -517,9 +517,7 @@ def test_each_job_trains_the_loss_of_its_selected_objective(component, client, o
     assert (manifest.objective, manifest.algorithm_state) == (second_objective.name, {"steps": 1})
 
 
-def test_tinker_cannot_restart_training_and_names_the_objective_of_a_saved_state(component, objective):
-    with pytest.raises(ValueError, match="the tinker training component cannot restart training"):
-        component.fresh_start(None)
+def test_a_saved_tinker_state_names_its_objective(objective):
     with pytest.raises(ValueError, match="objective of a non-empty state, and only of one"):
         TinkerCheckpoint(MODEL, 32, "tinker://s", "tinker://p", algorithm_state={"steps": 1})
     with pytest.raises(ValueError, match="objective of a non-empty state, and only of one"):

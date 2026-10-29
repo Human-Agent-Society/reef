@@ -497,8 +497,17 @@ def test_the_sft_recipe_takes_uploaded_trajectories_as_rendered_samples(tokenize
         record2sample=SFTSamples(SFTSettings(tokenizer_path=TOKENIZER_PATH)),
         sample2job=SFTJobData(context, None, 1),
     )
-    pipeline.push_trajectory("t1", _uploaded(ASK, ANSWER))
+    pipeline.store.store.add_trajectories((("t1", _uploaded(ASK, ANSWER)),))
     data = pipeline.build_job_data(1)
     (item,) = data.samples
     assert item.training["loss_mask"] == [1] * (len(TurnTokenizer.text_ids({"content": "100 C"})) + 1)
     assert pipeline.acknowledge(data.data_id) == {"sample:t1"}
+
+
+def test_sft_gives_parameters_to_trajectory_jobs_and_trains_imported_tasks_only_by_instruction() -> None:
+    recipe = SFTRecipe(**runtime_bindings())
+    assert set(recipe.parameters_by_kind()) == {"trajectory"}
+    assert (
+        recipe.parameters_by_kind()["trajectory"]["method"] == TrainingMethod("reef.recipe.sft:SftObjective").to_dict()
+    )
+    assert SFTJobData.accepts_trajectories and SFTJobData.accepts_imported_tasks

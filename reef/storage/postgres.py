@@ -1,7 +1,7 @@
-"""PostgreSQL records, commits, settings, generated tasks, pooled transactions, and scenario storage lifecycle.
+"""PostgreSQL records, commits, settings, samples, tasks, evaluations, pooled transactions, and storage lifecycle.
 
 Every per-scenario table is keyed by a store generation, so archiving a
-scenario retires its records, commits, settings and tasks together. The database
+scenario retires its records, commits, settings, samples and tasks together. The database
 alone holds a scenario's state; the local directory holds no scenario state.
 """
 
@@ -48,8 +48,10 @@ from reef.storage.commit_history import CommitHistoryScenarioStore
 from reef.storage.migrations import (
     archive_imported_files,
     legacy_model_configs,
+    migrate_generated_task_marks,
     migrate_imported_tasks,
     migrate_record_storage,
+    migrate_sample_columns,
     migrate_uploaded_trajectories,
 )
 from reef.storage.records import RecordLoss, RecordRetention
@@ -57,11 +59,14 @@ from reef.storage.scenario import ScenarioSettings, ScenarioStorage
 from reef.storage.sql_commits import SQLCommitHistory, commit_table
 from reef.storage.sql_evaluations import SQLEvaluationStore, evaluation_table
 from reef.storage.sql_records import RecordTables, ScopedTable, SQLRecordRetention, SQLRecordStore
-from reef.storage.sql_samples import SQLSampleStore, sample_table, sample_train_count_table
+from reef.storage.sql_samples import SQLSampleStore, manual_buffer_table, sample_table, sample_train_count_table
 from reef.storage.sql_tasks import SQLTaskStorage, task_tables
 from reef.storage.tasks import LocalTaskFileStore, TaskFileStore
 
 logger = logging.getLogger(__name__)
+
+#: The version of the record schema that this adapter writes; it upgrades every older version.
+POSTGRES_SCHEMA_VERSION = 13
 
 
 def postgres_url(database_url: str) -> URL:
@@ -177,6 +182,7 @@ class PostgresRecordDatabase:
         self.task_tables = task_tables(metadata, foreign_key="record_store.storage_id")
         self.sample_table = sample_table(metadata, foreign_key="record_store.storage_id")
         self.sample_train_count_table = sample_train_count_table(metadata, foreign_key="record_store.storage_id")
+        self.manual_buffer_table = manual_buffer_table(metadata, foreign_key="record_store.storage_id")
         self.evaluation_table = evaluation_table(metadata, foreign_key="record_store.storage_id")
         self.commit_table = commit_table(metadata, foreign_key="record_store.storage_id")
         try:
@@ -193,7 +199,7 @@ class PostgresRecordDatabase:
                 connection.execute(CreateSchema(schema, if_not_exists=True))
                 version.create(connection, checkfirst=True)
                 versions: list[int] = list(connection.execute(select(version.c.version)).scalars().all())
-                if versions and versions not in ([1], [2], [3], [4], [5], [6], [7], [8], [9], [10]):
+                if versions and (len(versions) != 1 or not 1 <= versions[0] <= POSTGRES_SCHEMA_VERSION):
                     raise ReefError("unsupported PostgreSQL record schema version")
                 # Version 4 adds the commit and settings tables. Version 5 adds the task tables.
                 # Version 6 adds the uploaded trajectory table. Version 7 replaces task_candidate and
@@ -203,9 +209,13 @@ class PostgresRecordDatabase:
                 # evaluations that clients ask for. Version 10 replaces uploaded_trajectory with training_sample and
                 # sample_train_count, which counts the committed jobs of each trainer that trained a sample. create_all adds them to an older
                 # schema, migrate_uploaded_trajectories moves the uploaded trajectories, and migrate_imported_tasks
-                # moves the tasks of the imported-tasks task store.
+                # moves the tasks of the imported-tasks task store. Version 11 adds component, group_key and
+                # record_ids_json to training_sample (migrate_sample_columns): the samples that the record stages make.
+                # Version 12 adds manual_buffer, the samples of each trainer's manual buffer. Version 13 drops
+                # task_trained (migrate_generated_task_marks): the sample store counts the trained generated tasks.
                 metadata.create_all(connection)
                 migrate_record_storage(connection, self.tables.records, self.tables.consumption)
+                migrate_sample_columns(connection, self.sample_table)
                 migrate_uploaded_trajectories(
                     connection, self.sample_table, self.sample_train_count_table, self.commit_table
                 )
@@ -215,14 +225,14 @@ class PostgresRecordDatabase:
                     self.sample_train_count_table,
                     self.commit_table,
                     self.task_tables.published,
-                    self.task_tables.trained,
                 )
+                migrate_generated_task_marks(connection, self.sample_train_count_table)
                 for index in self.tables.records.indexes:
                     index.create(connection, checkfirst=True)
-                if versions and versions != [10]:
-                    connection.execute(version.update().values(version=10))
+                if versions and versions != [POSTGRES_SCHEMA_VERSION]:
+                    connection.execute(version.update().values(version=POSTGRES_SCHEMA_VERSION))
                 elif not versions:
-                    connection.execute(version.insert().values(version=10))
+                    connection.execute(version.insert().values(version=POSTGRES_SCHEMA_VERSION))
         except BaseException:
             self._engine.dispose()
             raise
@@ -399,6 +409,7 @@ class PostgresRecordStore(SQLRecordStore):
             self,
             ScopedTable(self._database.sample_table, scope=scope),
             ScopedTable(self._database.sample_train_count_table, scope=scope),
+            ScopedTable(self._database.manual_buffer_table, scope=scope),
             files,
             scenario,
         )
@@ -415,6 +426,7 @@ class PostgresRecordStore(SQLRecordStore):
             self,
             ScopedTable(self._database.commit_table, scope={"storage_id": self.storage_id}),
             ScopedTable(self._database.sample_train_count_table, scope={"storage_id": self.storage_id}),
+            ScopedTable(self._database.manual_buffer_table, scope={"storage_id": self.storage_id}),
             label=f"postgres://{self._database.schema}/record-store/{self.storage_id}/commits",
             durable=True,
         )

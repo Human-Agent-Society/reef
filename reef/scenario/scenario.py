@@ -192,8 +192,11 @@ class Scenario:
         stepping = tuple(component_trainer for component_trainer in self.trainers if component_trainer.trainer.trains)
         return stepping or self.trainers[:1]
 
-    def set_training_mode(self, training_mode: str) -> None:
+    def set_training_mode(self, training_mode: str, *, fill_manual_buffer: bool = False) -> None:
         """Select future job data without waiting for a running backend step.
+
+        ``fill_manual_buffer`` is for a person's switch: a switch from ``auto`` to ``manual`` then starts each
+        trainer's manual buffer from what auto would train next (``TrainingPipeline.set_training_mode``).
 
         Every trainer that runs a step switches or none does: a scenario whose
         components run in different modes would accept instructions for some
@@ -211,7 +214,7 @@ class Scenario:
         if unsupported:
             raise NotImplementedError(f"{', '.join(unsupported)} does not implement training_mode={training_mode!r}")
         for component_trainer in stepping:
-            component_trainer.trainer.set_training_mode(training_mode)
+            component_trainer.trainer.set_training_mode(training_mode, fill_manual_buffer=fill_manual_buffer)
 
     def prepare_training_step(self, component: str | None = None) -> TrainStepResult | None:
         """Prepare ``component``'s next commit: a harness step, a job submission or a job's checkpoint decision.

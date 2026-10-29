@@ -36,6 +36,7 @@ from reef.storage.records import RecordRetention
 from reef.storage.samples import StoredSample
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage
 from reef.storage.tasks import SplitName
+from reef.train.trainer import Trainer
 
 logger = logging.getLogger(__name__)
 
@@ -477,6 +478,36 @@ class Dispatcher(ScenarioLifecycle):
             self.local_workers.wake(current)
             return published
 
+    def sample_buffer(self, scenario: str, component: str | None = None) -> Mapping[str, Any]:
+        """The buffer of the trainer of ``component`` (the only one when None): its mode and its samples."""
+        with self.locked_scenario(scenario) as current:
+            return self.trainer_of(current, component).buffer_listing()
+
+    def change_buffer(
+        self, scenario: str, sample_ids: tuple[str, ...], *, insert: bool, component: str | None = None
+    ) -> Mapping[str, Any]:
+        """Insert ``sample_ids`` into the manual buffer of the trainer of ``component``, or remove them.
+
+        Raise ``ManualBufferRefused`` in automatic mode and ``ValueError`` for an ID that the trainer cannot take.
+        """
+        with self.locked_scenario(scenario) as current:
+            listing = self.trainer_of(current, component).change_buffer(sample_ids, insert=insert)
+            # A queued instruction may now have samples to train.
+            self.local_workers.wake(current)
+            return listing
+
+    def stored_samples(self, scenario: str, *, after_sequence: int, limit: int) -> tuple[StoredSample, ...]:
+        """The scenario's stored samples after ``after_sequence``, at most ``limit``, in arrival order."""
+        with self.locked_scenario(scenario) as current:
+            return current.store.samples.page(after_sequence=after_sequence, limit=limit)
+
+    @staticmethod
+    def trainer_of(current: Scenario, component: str | None) -> Trainer:
+        """The trainer of ``component`` in ``current``; ``ValueError`` for None in a scenario of several."""
+        if component is None and len(current.trainers) > 1:
+            raise ValueError(f"scenario {current.name!r} has several components: name one with component")
+        return current.trainer_for(component)
+
     @contextmanager
     def locked_scenario(self, scenario: str) -> Iterator[Scenario]:
         """The loaded scenario ``scenario``, loaded again when it was unloaded, held under its lock.
@@ -523,11 +554,8 @@ class Dispatcher(ScenarioLifecycle):
 
     def imported_tasks(self, scenario: str) -> tuple[StoredSample, ...]:
         """The scenario's imported tasks in the order they arrived, each with its train counts."""
-        with self.registry.lock_for(scenario):
-            current = self.get_or_create_scenario(scenario)
-            if current is None:
-                raise UnknownScenario(f"unknown scenario {scenario!r}")
-            return current.store.samples.tasks()
+        with self.locked_scenario(scenario) as current:
+            return current.store.samples.imported_tasks()
 
     def process_accepted_records(self, current: Scenario) -> None:
         """Start consumption only after the accepted records are durable."""

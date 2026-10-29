@@ -144,7 +144,7 @@ Change the deployment's evaluation and add a ``pipeline`` section:
    pipeline:
      sample2job:
        module: reef.sample2job.traces:TrainTaskRollouts
-       config: {tasks_per_step: 4}
+       config: {buffer_size: 4}
 
 Then upload Harbor task directories. The first train task starts the run:
 
@@ -300,11 +300,11 @@ Offline runs on uploaded tasks
 ``reef.sample2job.traces:TrainTaskRollouts`` makes each step from the train
 split of the scenario's imported tasks:
 
-- Each step runs the next ``tasks_per_step`` train tasks (default 8) on the
-  head, and the method reads those rollouts.
-- The run goes through the train split ``epochs`` times (default 1), in a new
-  order each time, then stops. A restart continues after the last committed
-  step.
+- Each uploaded train task joins the buffer and trains once, in upload
+  order. A step of train tasks runs up to ``buffer_size`` of them (default
+  ``job_samples``) on the head, and the method reads those rollouts.
+- A step holds either traces or train tasks, so recorded sessions still
+  start their own steps.
 - The eval split is the evaluation's task source. The stage needs a scorer
   and task directories (see `Task directories`_).
 

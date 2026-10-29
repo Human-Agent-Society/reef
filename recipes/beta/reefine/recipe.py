@@ -36,7 +36,7 @@ from reef.recipe.config_fields import config_field
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.runtime.interfaces import MultimodalRelay
-from reef.storage.samples import SampleStore
+from reef.storage.samples import TrainerSamples
 from reef.train.backend import ComponentReleases
 from reef.train.harness_backend.backend import HarnessBackend
 
@@ -155,7 +155,9 @@ class ReefineRecipe(HarnessEvolutionRecipe):
         kwargs["trial_timeout_s"] = float(trial_timeout_s)
         return kwargs
 
-    def build_backend(self, scenario: str, releases: ComponentReleases, samples: SampleStore | None) -> HarnessBackend:
+    def build_backend(
+        self, scenario: str, releases: ComponentReleases, samples: TrainerSamples | None
+    ) -> HarnessBackend:
         """The scenario's backend. With an agent configured, its Reefine method runs the agent, bound here to pi
         once per scenario as the evaluator is: the binary is resolved, and installed when missing, on the Reef
         host, or named in a cloud sandbox's image."""
