@@ -289,17 +289,27 @@ def _tool_call(call: Mapping[str, Any], step_id: int, index: int) -> dict[str, A
 
 
 def _provider_content(content: Any) -> Any:
-    """Project ATIF multimodal parts into OpenAI message content."""
+    """Project ATIF multimodal parts into OpenAI message content.
+
+    ``ValueError``: a part is not an object, a text part has a ``text`` that is not a string, or an image part has
+    no ``source.path``.
+    """
     if not isinstance(content, list):
         return content
-    return [
-        (
-            {"type": "image_url", "image_url": {"url": part["source"]["path"]}}
-            if part.get("type") == "image"
-            else dict(part)
-        )
-        for part in content
-    ]
+    parts: list[dict[str, Any]] = []
+    for part in content:
+        if not isinstance(part, Mapping):
+            raise ValueError("ATIF content parts must be objects")
+        if part.get("type") == "text" and not isinstance(part.get("text", ""), str):
+            raise ValueError("an ATIF text part needs a string text")
+        if part.get("type") != "image":
+            parts.append(dict(part))
+            continue
+        source = part.get("source")
+        if not isinstance(source, Mapping) or "path" not in source:
+            raise ValueError("an ATIF image part needs source.path")
+        parts.append({"type": "image_url", "image_url": {"url": source["path"]}})
+    return parts
 
 
 def atif_messages(trajectory: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -309,7 +319,9 @@ def atif_messages(trajectory: Mapping[str, Any]) -> list[dict[str, Any]]:
     keeps the source as its role. Each result of a step's observation follows the step as a ``tool`` message, or as
     a ``user`` message when it names no tool call. ``ValueError``: ``steps`` is not a list of objects, each with a
     string ``source``; or a step's ``tool_calls`` is not a list of objects with ``tool_call_id``, ``function_name``
-    and object ``arguments``; or its ``observation.results`` is not a list of objects.
+    and object ``arguments``; or its ``observation`` is not empty and not an object, or ``observation.results`` is not
+    a list of objects; or a message or result content list holds a part that is not an object, a text part whose
+    ``text`` is not a string, or an image part without ``source.path``.
     """
     steps = trajectory.get("steps")
     if not isinstance(steps, list) or any(
@@ -326,7 +338,10 @@ def atif_messages(trajectory: Mapping[str, Any]) -> list[dict[str, Any]]:
             for call in calls
         ):
             raise ValueError("ATIF tool_calls must be objects with tool_call_id, function_name and object arguments")
-        results = (step.get("observation") or {}).get("results", [])
+        observation = step.get("observation") or {}
+        if not isinstance(observation, Mapping):
+            raise ValueError("ATIF observation must be an object")
+        results = observation.get("results", [])
         if not isinstance(results, list) or any(not isinstance(result, Mapping) for result in results):
             raise ValueError("ATIF observation results must be a list of objects")
     messages: list[dict[str, Any]] = []

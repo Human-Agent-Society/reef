@@ -140,6 +140,9 @@ upload with 400, naming the trajectory, when one cannot train:
 - it has no agent step that trains (all its agent steps are copied context),
   or its first trained agent step has no step before it;
 - ``is_copied_context`` is not a boolean;
+- a step's ``observation`` is not empty and is not an object; a content part
+  of a message or an observation result is not an object, a text part has a
+  ``text`` that is not a string, or an image part has no ``source.path``;
 - the chat template does not render each turn as a prefix of the whole
   conversation. A template that removes the reasoning of earlier turns, for
   example, does not; set ``chat_template_kwargs`` so that it keeps them, or

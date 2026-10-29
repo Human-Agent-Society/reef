@@ -1,7 +1,8 @@
 """SDK sessions on a Tinker-compatible service: the SDK module, and closing a ``ServiceClient``.
 
-This module and the two SDK classes that use it (``reef.tinker.sampling.TinkerSDKSampler`` and
-``reef.train.tinker_backend.client.TinkerSDKClient``) are the only code that imports Tinker's SDK.
+This module and the SDK classes that use it (``reef.tinker.sampling.TinkerSDKSampler``,
+``reef.tinker.weights.TinkerSamplerWeights`` and ``reef.train.tinker_backend.client.TinkerSDKClient``) are the only
+code that imports Tinker's SDK.
 """
 
 from __future__ import annotations
