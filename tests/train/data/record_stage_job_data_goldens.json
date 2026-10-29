@@ -511,7 +511,7 @@
    "request": null
   }
  ],
- "ordered_groups": [
+ "keyed_groups": [
   {
    "data_id": "s:data:1",
    "consumed": [

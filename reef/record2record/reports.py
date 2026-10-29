@@ -397,7 +397,7 @@ class ReportRecord2Record(Record2Record):
             self.ended_set_ids.add(entry.report_id)
             if entry.group_key is None:
                 continue
-            # A reserved group that was discarded after its reservation has no slots left to free.
+            # A group that was discarded has no slots left to free.
             group = self.groups.get(entry.group_key)
             if group is not None and not group.discarded:
                 group.entries.pop(entry.slot, None)

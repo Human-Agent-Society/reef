@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -14,8 +13,6 @@ from reef.core.artifact_ref import RuntimeLoadSpan
 from reef.core.job_data import TaskSample
 from reef.core.plugins import PluginConfigError
 from reef.record2record import (
-    ArrivalOrder,
-    GroupKeyOrder,
     InferenceRecord2Record,
     Record2RecordSettings,
     RecordSet,
@@ -24,11 +21,10 @@ from reef.record2record import (
     ReportGrouping,
     ReportRecord2Record,
     SampleStatus,
-    SelectionPolicy,
     SingleRecordSet,
     SingleSetUnit,
 )
-from reef.record2record.staleness import producing_runtime_load_ids, stale_units
+from reef.record2record.staleness import is_stale, producing_runtime_load_ids
 from reef.record2sample import SampleResult
 from reef.train import PipelineContext
 
@@ -70,11 +66,6 @@ def named(unit_id: str, arrival_index: int, group_key: int | None = None) -> Rec
     )
 
 
-class ForeignUnit(SelectionPolicy):
-    def select(self, candidates: Sequence[RecordSetUnit], max_unit_count: int) -> tuple[RecordSetUnit, ...]:
-        return (named("not-held", 1),)
-
-
 def test_a_record_set_holds_one_or_more_records_and_every_record_they_reference() -> None:
     assert RecordsSet(set_id="r", arrival_index=1, held=(inference("i"), report("r", "i"))).record_ids() == ("i", "r")
     with pytest.raises(ValueError, match="one or more records"):
@@ -112,57 +103,20 @@ def test_a_ready_result_holds_one_or_more_samples_and_a_skipped_result_none() ->
             SampleResult(status, samples)
 
 
-def test_arrival_order_takes_the_oldest_units_up_to_the_maximum_count() -> None:
-    candidates = (named("c", 3), named("a", 1), named("b", 2))
-    assert [selected.unit_id for selected in ArrivalOrder().select(candidates, 2)] == ["a", "b"]
-
-
-def test_group_key_order_takes_ungrouped_units_before_groups_in_key_order() -> None:
-    candidates = (named("late-group", 1, group_key=2), named("single", 3), named("early-group", 2, group_key=1))
-    selected = GroupKeyOrder().select(candidates, 3)
-    assert [chosen.unit_id for chosen in selected] == ["single", "early-group", "late-group"]
-
-
-def test_a_reservation_does_not_change_until_it_is_consumed() -> None:
+def test_the_pool_holds_ready_units_in_the_order_they_came_and_replaces_one_by_its_id() -> None:
     pool = RecordSetUnitPool()
     for name in ("a", "b", "c"):
         pool.put(named(name, pool.next_arrival_index()))
-    reserved = pool.reserve(pool.ordered_units()[:2])
-    pool.remove("a")
+    assert pool.remove("b") is not None and pool.remove("missing") is None
+    replacement = named("a", pool.next_arrival_index())
+    pool.put(replacement)
     pool.put(named("d", pool.next_arrival_index()))
-    assert pool.reserved_units() == reserved
-    # The consumed batch includes a reserved unit that was removed after the reservation.
-    assert [consumed.unit_id for consumed in pool.consume_reserved()] == ["a", "b"]
-    assert [remaining.unit_id for remaining in pool.units()] == ["c", "d"]
-    assert pool.reserved_units() == ()
-
-
-def test_a_reservation_refuses_a_repeated_unit_and_units_the_pool_does_not_hold() -> None:
-    pool = RecordSetUnitPool()
-    held = named("held", pool.next_arrival_index())
-    pool.put(held)
-    with pytest.raises(ValueError, match="more than one time"):
-        pool.reserve((held, held))
-    with pytest.raises(ValueError, match="units that the pool holds"):
-        pool.reserve((named("not-held", 2),))
-    assert pool.reserved_units() == ()
-
-
-def test_the_pool_refuses_a_selection_policy_that_returns_units_it_does_not_hold() -> None:
-    pool = RecordSetUnitPool(ForeignUnit())
-    pool.put(named("held", pool.next_arrival_index()))
-    with pytest.raises(ValueError, match="does not hold"):
-        pool.ordered_units()
+    assert [unit.unit_id for unit in pool.units()] == ["a", "c", "d"]
+    assert pool.units()[0] is replacement and len(pool) == 3
 
 
 def test_staleness_check_measures_lag_in_versions_the_scenario_served() -> None:
-    units = tuple(
-        named(name, index)
-        for index, name in enumerate(
-            ("current", "one-behind", "two-behind", "never-served", "unknown", "mixed", "rolled-out"), start=1
-        )
-    )
-    producing_runtime_load_ids_by_set = {
+    versions = {
         "current": frozenset({"e:5"}),
         "one-behind": frozenset({"e:4"}),
         "two-behind": frozenset({"e:3"}),
@@ -174,13 +128,11 @@ def test_staleness_check_measures_lag_in_versions_the_scenario_served() -> None:
     # The engine sequence skips e:2: lag counts the scenario's own versions, not sequence numbers.
     served = ("e:1", "e:3", "e:4", "e:5")
     stale = {"two-behind", "never-served", "unknown", "mixed"}
-    assert {unit.unit_id for unit in stale_units(units, producing_runtime_load_ids_by_set, served, 1)} == stale
+    assert {name for name, produced in versions.items() if is_stale(produced, served, 1)} == stale
     # Window 0 keeps only data of the current version, and data that the algorithm rolls out.
-    assert {unit.unit_id for unit in stale_units(units, producing_runtime_load_ids_by_set, served, 0)} == stale | {
-        "one-behind"
-    }
+    assert {name for name, produced in versions.items() if is_stale(produced, served, 0)} == stale | {"one-behind"}
     # An unknown serving version checks nothing.
-    assert stale_units(units, producing_runtime_load_ids_by_set, (), 0) == ()
+    assert not any(is_stale(produced, (), 0) for produced in versions.values())
 
 
 def test_producing_runtime_load_ids_come_from_every_sample_and_token_span() -> None:

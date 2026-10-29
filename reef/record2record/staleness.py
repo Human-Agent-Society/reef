@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Hashable, Mapping, Sequence
+from collections.abc import Sequence
 
 from reef.core.artifact_ref import parse_runtime_load_spans
 from reef.core.job_data import Sample, TrajectorySample
-from reef.record2record.sets import RecordSetUnit
 from reef.runtime.interfaces import RuntimeLoadId
 
 

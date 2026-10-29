@@ -33,6 +33,12 @@ class SampleStatus(Enum):
     SKIPPED = "skipped"
 
 
+def require_max_staleness(value: object) -> None:
+    """Raise ``ValueError`` unless ``value`` is a non-negative int (not a bool)."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"max_staleness must be a non-negative int, got {value!r}")
+
+
 @dataclass(frozen=True)
 class Record2RecordSettings(PluginSettings):
     """The config of a record-to-record stage: how many versions its training data may lag behind.
