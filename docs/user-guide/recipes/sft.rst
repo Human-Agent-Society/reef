@@ -267,16 +267,14 @@ end. Each checkpoint is a candidate that Reef can publish.
 Train SFT for some jobs of another recipe
 -----------------------------------------
 
-A recipe can train some jobs with SFT, for example an SFT warmup before RL.
-Its ``JobPlan`` puts
-``TrainingMethod("reef.recipe.sft:SftObjective")`` in the ``method``
-parameter of those jobs (`Switch
-methods within a run
-<../../developer-guide/write-a-recipe.rst#switch-methods-within-a-run>`__).
+A recipe can train some jobs with SFT, for example its trajectory jobs before
+RL task jobs, as the SFT-then-RL recipe does. Its ``parameters_by_kind()``
+puts ``TrainingMethod("reef.recipe.sft:SftObjective")`` in the ``method``
+parameter of the jobs of that kind (`Train each kind of sample with its own
+method
+<../../developer-guide/write-a-recipe.rst#train-each-kind-of-sample-with-its-own-method>`__).
 The pipeline of that recipe must make samples that the ``sft`` family can
-train. The first job after the SFT phase can restart training
-(``JobRequest(..., restart=True)``): it keeps the weights and starts a new
-optimizer state and learning-rate schedule.
+train.
 
 Limitations
 -----------

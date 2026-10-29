@@ -35,7 +35,7 @@ from reef.storage.records import RecordStore
 from reef.storage.samples import SampleStore
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.tasks import TaskStorage
-from reef.train.jobs import FixedJobPlan, JobLoop, JobLoopState, JobRequest, RunningJob
+from reef.train.jobs import JobLoop, JobLoopState, RunningJob
 from reef.train.trainer import Trainer
 from reef.train.types import Sample
 
@@ -155,7 +155,7 @@ def test_status_reports_the_running_job_and_the_finished_jobs_of_a_job_trainer()
     running = JobLoopState(
         "stub:base", job=RunningJob("job-3", checkpoints_handled=1), finished_jobs=2, last_job=finished
     )
-    loop = JobLoop(StubTrainingComponent(), FixedJobPlan(JobRequest()), scenario="s")
+    loop = JobLoop(StubTrainingComponent(), scenario="s")
     dispatcher = bound_dispatcher(scenario_double(job_loop=loop, state=running.to_dict()))
 
     status = dispatcher.build_training_status()["scenarios"]["s"]
@@ -300,7 +300,7 @@ class BackgroundStepRecipe(TestPolicyRecipe):
             pipeline_factory=lambda context: threshold_pipeline(
                 context, sample2job=BackgroundStepJobData(context, self.step_finished)
             ),
-            job_loop=JobLoop(self.training_component, FixedJobPlan(JobRequest()), scenario=scenario),
+            job_loop=JobLoop(self.training_component, scenario=scenario),
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
             default_job_samples=1,
