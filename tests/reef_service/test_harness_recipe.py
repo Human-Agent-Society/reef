@@ -324,7 +324,8 @@ def test_a_seed_that_fails_validation_refuses_boot_naming_the_problem(
 
 
 def test_a_split_manifest_gives_the_evaluation_its_eval_task_directories(tmp_path: Path) -> None:
-    """Task directories need an adapter that plays them, and collection, which adds prompts, does not apply."""
+    """Every adapter plays task directories: terminus by its own command, a prompt adapter with an npm install in
+    each task's container. Collection, which adds prompts, does not apply."""
     root = tmp_path / "tasks"
     for name in ("held-1", "held-2", "train-1"):
         write_task(root, name)
@@ -335,9 +336,9 @@ def test_a_split_manifest_gives_the_evaluation_its_eval_task_directories(tmp_pat
         return from_config(evolution_config(evaluation={**manifest, **evaluation}, adapter=adapter), runtime=runtime())
 
     assert boot().configured_tasks() == (str(root / "held-1"), str(root / "held-2"))
-    assert get_adapter("terminus").is_prompt_task_directory and not get_adapter("pi").is_prompt_task_directory
-    with pytest.raises(RecipeConfigError, match="'pi' takes a prompt"):
-        boot(adapter="pi")
+    assert boot(adapter="pi").task_directories(get_adapter("pi"))
+    with pytest.raises(RecipeConfigError, match="'hermes' cannot play Harbor task directories"):
+        boot(adapter="hermes")
     with pytest.raises(RecipeConfigError, match="collect_failures adds prompts"):
         boot(collect_failures=True)
     with pytest.raises(RecipeConfigError, match="one task source, not tasks and task_manifest"):
@@ -380,15 +381,19 @@ def test_each_step_evaluates_on_the_eval_split_of_a_task_store_as_the_step_reads
         assert backend.tasks.seed() == (str(store.path(first.files_digest)), str(store.path(second.files_digest)))
         with pytest.raises(RecipeConfigError, match="needs the task storage"):
             built.build_backend("s", releases_for(built), None)
-    with pytest.raises(RecipeConfigError, match="'pi' takes a prompt"):
-        from_config(evolution_config(evaluation=store_settings), runtime=runtime())
+    assert from_config(evolution_config(evaluation=store_settings), runtime=runtime()).task_directories(
+        get_adapter("pi")
+    )
 
 
-def test_offline_rollouts_need_an_adapter_that_plays_task_directories_and_a_scorer() -> None:
+def test_offline_rollouts_need_task_directories_to_evaluate_on_and_a_scorer() -> None:
+    """A prompt adapter's offline steps play train task directories, so its evaluation tasks are directories too."""
     offline = {"pipeline": {"sample2job": {"module": "reef.sample2job.traces:TrainTaskRollouts"}}}
     built = from_config({**evolution_config(adapter="terminus"), **offline}, runtime=runtime())
     assert built.stages().sample2job.plugin_class is TrainTaskRollouts
-    with pytest.raises(RecipeConfigError, match="offline rollouts play task directories, and adapter 'pi'"):
+    store = {"tasks": [], "task_store": IMPORTED_TASK_STORE}
+    assert from_config({**evolution_config(evaluation=store), **offline}, runtime=runtime()).runs_offline()
+    with pytest.raises(RecipeConfigError, match="the evaluation tasks must be task directories too"):
         from_config({**evolution_config(), **offline}, runtime=runtime())
     unscored = evolution_config(adapter="terminus", evaluation={"scorer": None, "policy": "none"})
     with pytest.raises(RecipeConfigError, match=r"they need evaluation\.scorer"):

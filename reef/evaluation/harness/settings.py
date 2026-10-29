@@ -34,7 +34,9 @@ class EvaluationSettings(Settings):
     ``policy`` is ``none``. ``policy`` is one of ``POLICIES`` and ``statistic`` one of
     ``STATISTICS``. ``min_margin`` ≥ 0, ``floor_score`` > 0 and
     ``episode_timeout_s`` > 0 are finite numbers, ``repeats`` ≥ 1, and every
-    count ≥ 0. ``collector`` needs ``collect_failures``.
+    count ≥ 0. ``collector`` needs ``collect_failures``. ``agent_host`` is a
+    non-empty host name or address: an agent that plays a Harbor task in the
+    task's container reaches Reef's model route there.
     Purpose: the harness recipe parses it and builds the evaluator, the task
     source and the publication policy from it.
     """
@@ -52,6 +54,9 @@ class EvaluationSettings(Settings):
     floor_score: float = config_option(1.0, help="The score every floor episode must reach.")
     repeats: int = config_option(1, help="The episodes per task and tree.")
     episode_timeout_s: float = config_option(600.0, help="The seconds one episode may run.")
+    agent_host: str = config_option(
+        "host.docker.internal", help="The address at which an agent in a Harbor task's container reaches Reef."
+    )
     forbid_residue: bool = config_option(False, help="Score an episode that leaves files behind as not run.")
     collect_failures: bool = config_option(False, help="Add failing traffic prompts to the evaluation tasks.")
     collector: str | Mapping[str, Any] | None = config_option(None, help="The TaskCollector that picks the prompts.")
@@ -74,6 +79,8 @@ class EvaluationSettings(Settings):
             raise ValueError(f"evaluation takes one task source, not {' and '.join(sources)}")
         if (self.task_manifest is None) != (self.tasks_root is None):
             raise ValueError("evaluation.task_manifest and evaluation.tasks_root go together")
+        if not isinstance(self.agent_host, str) or not self.agent_host.strip():
+            raise ValueError("evaluation.agent_host must be a non-empty host name or address")
         if self.policy not in POLICIES:
             raise ValueError(f"evaluation.policy must be one of {', '.join(POLICIES)}")
         if self.policy != "none" and not sources:

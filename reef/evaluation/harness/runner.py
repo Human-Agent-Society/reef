@@ -22,6 +22,7 @@ from threading import Lock
 
 from reef.evaluation.harness.scoring import EpisodeScorer, FailureObservation, ScoredEpisode
 from reef.harness.adapters.descriptor import AdapterDescriptor
+from reef.harness.episodes.harbor_task import run_task_episode
 from reef.harness.episodes.model_binding import ModelBindings
 from reef.harness.episodes.run import EpisodeError, EpisodeResult, run_episode
 from reef.harness.episodes.trajectory import (
@@ -77,7 +78,9 @@ class EpisodeEvaluationWorker:
     not run.
     ``owner_lease`` marks the episode's processes as owned by this worker.
     ``transfer_records`` returns the record as an archive, for a worker that
-    does not share the driver's file system.
+    does not share the driver's file system. ``task_containers`` runs each
+    task, a Harbor task directory, in the task's own container
+    (``run_task_episode``) instead of in ``executor``.
     Purpose: the worker pool builds one per worker; only episode and scorer
     state crosses the process boundary, never the recipe.
     """
@@ -90,6 +93,7 @@ class EpisodeEvaluationWorker:
     forbid_residue: bool
     owner_lease: bool = False
     transfer_records: bool = False
+    task_containers: bool = False
 
     def __post_init__(self) -> None:
         self.executor.preflight()
@@ -122,15 +126,18 @@ class EpisodeEvaluationWorker:
         """
         token = EPISODE_OWNER_LEASE.set(self.owner_lease)
         try:
-            result = run_episode(
-                self.descriptor,
-                files,
-                task,
-                binary=self.binary,
-                timeout=self.timeout,
-                executor=self.executor,
-                keep_dir=record_dir,
-            )
+            if self.task_containers:
+                result = run_task_episode(self.descriptor, files, task, timeout=self.timeout, keep_dir=record_dir)
+            else:
+                result = run_episode(
+                    self.descriptor,
+                    files,
+                    task,
+                    binary=self.binary,
+                    timeout=self.timeout,
+                    executor=self.executor,
+                    keep_dir=record_dir,
+                )
         except EpisodeError as error:
             scored = ScoredEpisode(None, FailureObservation(task=task, stage="launch", cause=str(error)))
             write_episode_record(record_dir, task, None, scored)

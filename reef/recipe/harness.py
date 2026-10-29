@@ -48,6 +48,7 @@ from reef.evaluation.harness import (
 )
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import AdapterDescriptor, DescriptorError
+from reef.harness.episodes.harbor_task import can_run_in_task_container
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings, ModelBindingsResolver
 from reef.harness.episodes.vendor_install import AdapterProgram
 from reef.harness.sync import create_harness_surface
@@ -246,29 +247,49 @@ class HarnessEvolutionRecipe(Recipe):
         seed_problems = validate_tree(self.seed, descriptor).problems
         if seed_problems:
             raise RecipeConfigError(f"evolution.seed fails validation: {'; '.join(seed_problems)}")
-        directories = self.evaluation.task_manifest is not None or self.evaluation.task_store is not None
-        if directories and not descriptor.is_prompt_task_directory:
-            raise RecipeConfigError(
-                f"evaluation tasks from a manifest or a task store are task directories, and adapter "
-                f"{descriptor.name!r} takes a prompt (terminus takes a task directory)"
-            )
-        if self.evaluation.collect_failures and descriptor.is_prompt_task_directory:
-            raise RecipeConfigError(
-                "evaluation.collect_failures adds prompts, and this adapter plays task directories"
-            )
-        if issubclass(self.stages().sample2job.plugin_class, TrainTaskRollouts):
-            # An offline step plays the imported train tasks, which are task directories, and scores each episode.
-            if not descriptor.is_prompt_task_directory:
+        offline = self.runs_offline()
+        task_directories = self.task_directories(descriptor)
+        if task_directories and not descriptor.is_prompt_task_directory:
+            # An adapter whose command takes text plays each Harbor task in the task's own container.
+            if not can_run_in_task_container(descriptor):
                 raise RecipeConfigError(
-                    f"offline rollouts play task directories, and adapter {descriptor.name!r} takes a prompt "
-                    "(terminus takes a task directory)"
+                    f"adapter {descriptor.name!r} cannot play Harbor task directories: Reef installs the agent in "
+                    "each task's container with npm, and the adapter declares no npm install"
                 )
-            if self.scorer is None:
-                raise RecipeConfigError("offline rollouts score each train task, so they need evaluation.scorer")
+            if self.evolution.executor != "local":
+                raise RecipeConfigError(
+                    "Harbor task directories run in their own containers, which are the episodes' boundary: "
+                    "set evolution.executor to local"
+                )
+            if offline and self.evaluation.tasks:
+                raise RecipeConfigError(
+                    "offline rollouts play task directories, so the evaluation tasks must be task directories "
+                    "too: use evaluation.task_store or evaluation.task_manifest instead of evaluation.tasks"
+                )
+        if self.evaluation.collect_failures and task_directories:
+            raise RecipeConfigError("evaluation.collect_failures adds prompts, and these tasks are task directories")
+        if offline and self.scorer is None:
+            # An offline step plays the imported train tasks and scores each episode.
+            raise RecipeConfigError("offline rollouts score each train task, so they need evaluation.scorer")
         if self.scorer is not None:
             evaluation_selection(self.scorer, self.worker_executor)
         # A task manifest is read now, so a deployment with an unreadable one refuses to start.
         self.configured_tasks()
+
+    def runs_offline(self) -> bool:
+        """Whether the steps roll out the imported train tasks (``TrainTaskRollouts``)."""
+        return issubclass(self.stages().sample2job.plugin_class, TrainTaskRollouts)
+
+    def task_directories(self, descriptor: AdapterDescriptor) -> bool:
+        """Whether the episodes play Harbor task directories rather than prompts: always for an adapter whose
+        command takes a task directory, else when the evaluation reads a task manifest or a task store, or the
+        steps roll out the imported train tasks."""
+        return (
+            descriptor.is_prompt_task_directory
+            or self.evaluation.task_manifest is not None
+            or self.evaluation.task_store is not None
+            or self.runs_offline()
+        )
 
     def configured_tasks(self) -> tuple[str, ...]:
         """The configured evaluation tasks: ``evaluation.tasks``, or the eval tasks the task manifest names."""
@@ -523,6 +544,7 @@ class HarnessEvolutionRecipe(Recipe):
             rules=ReleaseRules(publish=self.evolution.publish),
             review_parts=frozenset(self.evolution.review_parts),
             records=records,
+            task_directories=self.task_directories(descriptor),
         )
 
     def build_evaluator(
@@ -561,6 +583,8 @@ class HarnessEvolutionRecipe(Recipe):
             worker_selection=selection,
             worker_requirements=requirements,
             history=history,
+            task_directories=self.task_directories(descriptor),
+            agent_host=self.evaluation.agent_host,
         )
 
 

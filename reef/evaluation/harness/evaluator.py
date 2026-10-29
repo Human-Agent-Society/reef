@@ -17,9 +17,10 @@ import hashlib
 import json
 import math
 import tarfile
+import urllib.parse
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from io import BytesIO
 from pathlib import Path
 from typing import Any
@@ -29,7 +30,8 @@ from reef.evaluation.harness.history import EpisodeRecord, History
 from reef.evaluation.harness.runner import EpisodeEvaluationWorker, EpisodeRun, EvaluationWorkerPool
 from reef.evaluation.harness.scoring import EpisodeScorer
 from reef.harness.adapters.descriptor import AdapterDescriptor
-from reef.harness.episodes.model_binding import ModelBindings
+from reef.harness.episodes.harbor_task import can_run_in_task_container
+from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
 from reef.harness.episodes.run import TrajectoryKeepError
 from reef.harness.episodes.trajectory import sum_agents
 from reef.harness.tree import HarnessTree, TreePatch, render_tree
@@ -141,6 +143,20 @@ class HarnessCandidateEvaluator(CandidateEvaluator, ABC):
         """The scores of ``candidate`` on the named ``sides``, from ``EVALUATION_SIDES``."""
 
 
+#: The hosts that name the Reef host only from the Reef host itself.
+LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "0.0.0.0"})
+
+
+def container_binding(binding: ModelBinding, agent_host: str) -> ModelBinding:
+    """``binding`` as a task's container reaches it: ``agent_host`` in place of a loopback host of its base URL,
+    the port and path kept. A base URL with any other host is reachable as it is and stays."""
+    parts = urllib.parse.urlsplit(binding.base_url)
+    if parts.hostname not in LOOPBACK_HOSTS:
+        return binding
+    netloc = agent_host if parts.port is None else f"{agent_host}:{parts.port}"
+    return replace(binding, base_url=urllib.parse.urlunsplit(parts._replace(netloc=netloc)))
+
+
 class HarnessEpisodeEvaluator(HarnessCandidateEvaluator):
     """Score harness trees on tasks by running episodes, reusing the scores that the history holds.
 
@@ -149,8 +165,12 @@ class HarnessEpisodeEvaluator(HarnessCandidateEvaluator):
     run; ``binary_setting`` is the deployment's ``evolution.binary``, which
     the evaluation context names, and ``executor_setting`` is the episode
     executor's configuration as canonical JSON text, which the context
-    digests. The evaluator owns the worker pool, so the caller must
-    :meth:`close` it.
+    digests. ``task_directories`` says that every task is a Harbor task
+    directory. An adapter whose command takes the task as text then plays
+    each task in the task's own container (``task_containers``), and the
+    served model's base URL there names ``agent_host``, the address at which
+    the container reaches Reef. The evaluator owns the worker pool, so the
+    caller must :meth:`close` it.
     """
 
     def __init__(
@@ -170,9 +190,21 @@ class HarnessEpisodeEvaluator(HarnessCandidateEvaluator):
         worker_selection: ExecutorSelection,
         worker_requirements: ExecutionRequirements,
         history: History,
+        task_directories: bool = False,
+        agent_host: str = "host.docker.internal",
     ) -> None:
         if episode_repeats < 1:
             raise ValueError("episode_repeats must be at least 1")
+        # An adapter whose command takes a task directory plays nothing else.
+        self.task_directories = task_directories or descriptor.is_prompt_task_directory
+        self.task_containers = self.task_directories and not descriptor.is_prompt_task_directory
+        if self.task_containers and not can_run_in_task_container(descriptor):
+            raise ValueError(
+                f"adapter {descriptor.name!r} cannot play a Harbor task directory: it needs an npm install"
+            )
+        if not agent_host:
+            raise ValueError("agent_host must name the address at which a task container reaches Reef")
+        self.agent_host = agent_host
         self.descriptor = descriptor
         self.scorer_name = scorer_name
         self.binary_setting = binary_setting
@@ -197,6 +229,7 @@ class HarnessEpisodeEvaluator(HarnessCandidateEvaluator):
                     forbid_residue,
                     worker_selection.settings.backend != "uni",
                     worker_selection.settings.backend not in ("uni", "mp"),
+                    self.task_containers,
                 ),
             ),
         )
@@ -225,14 +258,18 @@ class HarnessEpisodeEvaluator(HarnessCandidateEvaluator):
         )
 
     def render(self, tree: HarnessTree) -> dict[str, str]:
-        """``tree``'s files for one episode, pointed at the served model."""
-        return render_tree(tree, self.descriptor, self.models.served.config_overlays(self.descriptor))
+        """``tree``'s files for one episode, pointed at the served model: through ``agent_host`` in a task's
+        container, which cannot reach the Reef host's loopback by its own name."""
+        served = self.models.served
+        if self.task_containers:
+            served = container_binding(served, self.agent_host)
+        return render_tree(tree, self.descriptor, served.config_overlays(self.descriptor))
 
     def task_key(self, task: str) -> str:
         """What identifies a task's content: the digest of a task directory's files, or of a prompt's text."""
         key = self.task_keys.get(task)
         if key is None:
-            if self.descriptor.is_prompt_task_directory:
+            if self.task_directories:
                 key = files_digest(Path(task))
             else:
                 key = hashlib.sha256(task.encode("utf-8")).hexdigest()

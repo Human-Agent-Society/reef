@@ -35,7 +35,7 @@ from typing import Any
 
 from reef.core.job_data import TrajectorySample
 from reef.core.requirements import parse_requires
-from reef.core.tasks import read_harbor_task
+from reef.core.tasks import task_instruction
 from reef.core.training_request import TrainingRequest
 from reef.core.trajectories import source_record_id
 from reef.evaluation.harness import EpisodeRecord, History
@@ -210,6 +210,7 @@ class Workspace:
         descriptor: AdapterDescriptor,
         tasks: Sequence[str],
         repeats: int,
+        task_directories: bool = False,
         samples: Sequence[TrajectorySample] = (),
         rollouts: Sequence[EpisodeRecord] = (),
         request: TrainingRequest | None = None,
@@ -221,7 +222,8 @@ class Workspace:
         text) to ``state/``. ``material/`` gets one traffic trace per sample,
         then one rollout trace per episode of ``rollouts``, the request, the
         evaluation's ``tasks`` and ``repeats`` (0 when no episode can run), and
-        the host facts.
+        the host facts. ``task_directories`` says that the tasks are Harbor
+        task directories rather than prompts.
         """
         workspace = cls(Path(root), Path(history_dir), step)
         for directory in (workspace.harness, workspace.material, workspace.state, workspace.scratch, workspace.output):
@@ -229,14 +231,16 @@ class Workspace:
         tree.write(workspace.harness)
         HarnessTree(dict(state_files or {})).write(workspace.state)
         material = workspace.material
+        # An adapter whose command takes a task directory plays nothing else.
+        task_directories = task_directories or descriptor.is_prompt_task_directory
         for index, sample in enumerate(samples):
             write_traffic_trace(material / TRACES_DIR / str(index), sample)
         for index, record in enumerate(rollouts, start=len(samples)):
-            write_rollout_trace(material / TRACES_DIR / str(index), record, descriptor)
+            write_rollout_trace(material / TRACES_DIR / str(index), record, task_directories)
         if request is not None:
             write_json(material / REQUEST_FILE, {"id": request.id, **request.to_dict()})
         write_json(material / EVALUATION_FILE, {"tasks": list(tasks), "repeats": repeats})
-        write_json(material / HOST_FILE, host_facts(descriptor))
+        write_json(material / HOST_FILE, host_facts(descriptor, task_directories))
         return workspace
 
     def tree(self) -> HarnessTree:
@@ -377,13 +381,13 @@ def write_traffic_trace(directory: Path, sample: TrajectorySample) -> None:
     write_json(directory / TRAJECTORY_FILE, dict(sample.trajectory))
 
 
-def write_rollout_trace(directory: Path, record: EpisodeRecord, descriptor: AdapterDescriptor) -> None:
+def write_rollout_trace(directory: Path, record: EpisodeRecord, task_directories: bool) -> None:
     """One rolled-out episode: ``trace.json`` alone, since the episode keeps its trajectory files in the history.
 
     The trace's task is what the harness was asked: the prompt itself, or the
-    instruction of the task directory when ``descriptor`` plays task directories.
+    instruction of the task directory when the tasks are ``task_directories``.
     """
-    task = read_harbor_task(Path(record.task)).instruction if descriptor.is_prompt_task_directory else record.task
+    task = task_instruction(Path(record.task)) if task_directories else record.task
     trace = Trace(
         directory=directory,
         source="rollout",
@@ -418,13 +422,14 @@ def reply_of(sample: TrajectorySample) -> str | None:
     return None
 
 
-def host_facts(descriptor: AdapterDescriptor) -> dict[str, Any]:
-    """What a method needs to know about the adapter: the parts of its tree and its config targets."""
+def host_facts(descriptor: AdapterDescriptor, task_directories: bool) -> dict[str, Any]:
+    """What a method needs to know about the adapter: the parts of its tree, its config targets, and whether the
+    tasks are Harbor task directories."""
     return {
         "adapter": descriptor.name,
         "parts": {name: part.to_json() for name, part in descriptor.layout.parts.items()},
         "config_targets": sorted(descriptor.config_targets),
-        "tasks_are_directories": descriptor.is_prompt_task_directory,
+        "tasks_are_directories": task_directories,
     }
 
 

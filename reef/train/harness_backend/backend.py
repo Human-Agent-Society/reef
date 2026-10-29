@@ -111,6 +111,7 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator, StepRecords, S
         rules: ReleaseRules,
         review_parts: frozenset[str] = frozenset(),
         records: StepRecord,
+        task_directories: bool = False,
     ) -> None:
         self.descriptor = descriptor
         self.releases = releases
@@ -124,6 +125,8 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator, StepRecords, S
         self.rules = rules
         self.review_parts = review_parts
         self.records = records
+        # An adapter whose command takes a task directory plays nothing else.
+        self.task_directories = task_directories or descriptor.is_prompt_task_directory
         # The selected tree of the step in flight, until the committer stored it.
         self.pending_artifact: Artifact | None = None
         #: Written by the training thread, read by the request page: each write is one assignment of a frozen value.
@@ -202,6 +205,7 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator, StepRecords, S
             step=step,
             tree=head_tree,
             descriptor=self.descriptor,
+            task_directories=self.task_directories,
             tasks=step_tasks.tasks,
             repeats=0 if self.evaluator is None else self.evaluator.episode_repeats,
             samples=samples,
