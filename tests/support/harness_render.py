@@ -25,6 +25,7 @@ import yaml
 
 import reef.harness.adapters
 from reef.harness.adapters.descriptor import ADAPTER_FILE, AdapterDescriptor
+from reef.harness.episodes import run as episode_run
 from reef.harness.episodes.model_binding import ModelBinding
 from reef.harness.sync import TOKEN_PLACEHOLDER, LayerInstall
 from reef.harness.tree import HarnessTree, render_tree
@@ -82,13 +83,11 @@ def native_json(kind: str, value: Mapping[str, Any]) -> dict[str, str]:
 def write_rendered(
     root: Path, tree: HarnessTree, descriptor: AdapterDescriptor, binding: ModelBinding | None = None
 ) -> dict[str, str]:
-    """``tree`` rendered for ``descriptor``, pointed at ``binding`` when one is given, and written under ``root``."""
+    """``tree`` rendered for ``descriptor``, pointed at ``binding`` when one is given, and written under ``root`` as
+    an episode writes it."""
     overlays = () if binding is None else binding.config_overlays(descriptor)
     files = render_tree(tree, descriptor, overlays)
-    for relative, text in files.items():
-        path = root / relative
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text, encoding="utf-8")
+    episode_run.write_rendered(descriptor, files, root, str(root))
     return files
 
 
