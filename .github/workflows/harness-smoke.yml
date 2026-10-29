@@ -132,7 +132,7 @@ jobs:
         with:
           node-version: "22"
       - run: python -m pip install ./third_party/reef-client
-      - run: python -m pip install -e . aiohttp pyyaml huggingface_hub pytest
+      - run: python -m pip install -e . aiohttp pyyaml huggingface_hub pytest pytest-xdist==3.8.0
       - run: npm install --prefix "$RUNNER_TEMP/claude" @anthropic-ai/claude-code@2.1.257
       - run: python -m pytest tests/smoke/test_real_claude.py
         env:
@@ -156,7 +156,7 @@ jobs:
         with:
           node-version: "22"
       - run: python -m pip install ./third_party/reef-client
-      - run: python -m pip install -e . aiohttp pyyaml huggingface_hub pytest
+      - run: python -m pip install -e . aiohttp pyyaml huggingface_hub pytest pytest-xdist==3.8.0
       - run: npm install --prefix "$RUNNER_TEMP/opencode" opencode-ai@1.18.18
       - run: python -m pytest tests/smoke/test_real_opencode.py
         env:
