@@ -380,52 +380,47 @@ class ScenarioCommitter:
             if surface.component_artifact(served, selected.component).artifact_id == selected.artifact_id:
                 return replace(selected, release_id=current_ref.release_id)
             self.require_no_pending_commit("activate an artifact")
-            target, recorded_component, components = self.release_binding(selected, release, served)
+            target = self.release_with(served, selected, release)
             surface.activate(target, self._binding.runtime, previous=served)
             record = self.append_operation_record(
-                "activate", target.ref, component=recorded_component, components=components
+                "activate",
+                target.ref,
+                component=None if surface.single else selected.component,
+                components=self.recorded_components(target, target.ref.release_id),
             )
             self._artifacts.activate(target.ref, expected=current_ref)
             self.advance_to(record.step)
             return replace(selected, release_id=target.ref.release_id)
 
-    def release_binding(
-        self, selected: ComponentArtifact, release: Artifact, active: Artifact
-    ) -> tuple[Artifact, str | None, Mapping[str, str] | None]:
-        """The release that binds ``selected`` on ``active``, and the ``component`` and ``components`` of its record.
+    def release_with(self, active: Artifact, selected: ComponentArtifact, release: Artifact) -> Artifact:
+        """The release ``active`` with ``selected.component`` bound to the artifact ``selected``.
 
         ``release`` is the release that made the artifact. With one component,
-        the result is ``release`` after its own admission check, as at its
-        publication, and the record names no component and no manifest. With
-        several, the result is a new release: ``active`` with
-        ``selected.component`` bound to the artifact. It is published beside
-        the chain, so the chain tip and the backend head stay. The record
-        names the component and the release's manifest.
+        the result is ``release``, after its own admission check, as at its
+        publication. With several, the result is a new release: ``active``
+        with the one component replaced. It is published beside the chain, so
+        the chain tip and the backend head stay.
         """
         surface = self._binding.surface
         if surface.single:
             surface.validate(release)
-            return release, None, None
+            return release
         staged = self.stage_combination(
             self._step + 1, active, selected.component, release.component(selected.component)
         )
-        manifest = self.release_manifest(staged)
         published_ref = self._artifacts.publish(
             staged,
             expected_parent=self._artifacts.checkpoint,
-            metadata={**dict(staged.metadata), COMPONENTS_METADATA_KEY: manifest.to_dict()},
+            metadata={**dict(staged.metadata), COMPONENTS_METADATA_KEY: self.release_manifest(staged).to_dict()},
             advance_heads=False,
         )
-        return (
-            self._artifacts.resolve(published_ref),
-            selected.component,
-            manifest.artifact_ids(published_ref.release_id),
-        )
+        return self._artifacts.resolve(published_ref)
 
     def serve(self, artifact_id: str, component: str | None = None) -> ComponentArtifact:
         """Serve ``artifact_id`` as ``component`` beside the active release; return it with the release that serves it.
 
-        The release that serves it is the one of :meth:`release_binding`.
+        The release that serves it is the active release with the artifact in
+        its component (:meth:`release_with`).
         Then the ``"serve"`` record lands at the next step. The active
         release, the chain tip and every training start stay. Serving a
         served artifact changes nothing. An artifact of the active release can
@@ -460,9 +455,12 @@ class ScenarioCommitter:
                         f"scenario {self._name!r}'s runtime answers only from the release it has loaded, so it "
                         f"cannot serve artifact {selected.artifact_id!r} beside the active release"
                     )
-            target, recorded_component, components = self.release_binding(selected, release, current)
+            target = self.release_with(current, selected, release)
             record = self.append_operation_record(
-                "serve", target.ref, component=recorded_component, components=components
+                "serve",
+                target.ref,
+                component=None if surface.single else selected.component,
+                components=self.recorded_components(target, target.ref.release_id),
             )
             self.advance_to(record.step)
             return replace(selected, release_id=target.ref.release_id)
