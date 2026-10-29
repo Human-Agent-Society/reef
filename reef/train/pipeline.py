@@ -206,9 +206,8 @@ class TrainingPipeline:
         #: The sample-to-job stage that shapes the samples of the selected units into job data.
         self.sample2job = NoJobData(context) if sample2job is None else sample2job
         self.supported_training_modes = self.sample2job.supported_training_modes
-        # The two modes that take an instruction go together: a recipe that cannot run one cannot run it in either.
         if not context.manual_enabled:
-            self.supported_training_modes = self.supported_training_modes - {"manual", "hybrid"}
+            self.supported_training_modes = self.supported_training_modes - {"manual"}
         self.training_requests: dict[str, TrainingRequest] = {}
         self.consumed_requests: set[str] = set()
         # The error of each buffered instruction whose step failed; its next job data is a skip row, not a run.
@@ -242,7 +241,9 @@ class TrainingPipeline:
 
     @property
     def required_request_types(self) -> frozenset[RequestType]:
-        """The kinds of record that the trainer gives the pipeline."""
+        """The kinds of record that the trainer gives the pipeline: the stage's, and instructions in ``manual``."""
+        if "manual" in self.supported_training_modes:
+            return self.sample2job.required_request_types | {RequestType.TRAIN}
         return self.sample2job.required_request_types
 
     @property
@@ -272,8 +273,8 @@ class TrainingPipeline:
 
     def set_training_mode(self, training_mode: str) -> None:
         """Select future job data while preserving the held units and the reservation."""
-        if training_mode not in ("auto", "manual", "hybrid"):
-            raise ValueError("training_mode must be 'auto', 'manual' or 'hybrid'")
+        if training_mode not in ("auto", "manual"):
+            raise ValueError("training_mode must be 'auto' or 'manual'")
         if training_mode not in self.supported_training_modes:
             raise NotImplementedError(
                 f"{type(self.sample2job).__name__} does not implement training_mode={training_mode!r}"
@@ -432,9 +433,8 @@ class TrainingPipeline:
     # --------------------------------------------------------- job data cycle
     #
     # Make job data when the held units and uploaded trajectories hold the trainer's
-    # sample count (auto, hybrid) or an instruction is queued (manual, hybrid), hand
-    # the same data out until it is acknowledged, then end the units and
-    # trajectories it consumed.
+    # sample count (auto) or an instruction is queued (manual), hand the same data
+    # out until it is acknowledged, then end the units and trajectories it consumed.
 
     def advance(self) -> None:
         """Advance background work and settle its results without reserving job data.
@@ -454,24 +454,31 @@ class TrainingPipeline:
     def ready(self, sample_count: int | None) -> bool:
         """Advance the pipeline and check readiness; auto mode needs ``sample_count`` held samples.
 
-        The stage's own job data (``Sample2Job.own_job_data``) makes the pipeline ready, whatever its sample count.
-        With ``sample_count`` None, as for a stage that ``trains_own_job_data_only``, held samples never make
-        the pipeline ready.
+        The stage's own job data (``Sample2Job.own_job_data``) makes the pipeline ready, whatever its sample count;
+        in ``manual`` it also needs a queued instruction, which it consumes. With ``sample_count`` None, as for a
+        stage that ``trains_own_job_data_only``, held samples never make the pipeline ready.
         """
         self.advance()
         return self.holds_job_data(sample_count)
 
     def holds_job_data(self, sample_count: int | None) -> bool:
         """Whether the pipeline holds the next job's data now, as ``ready`` decides it, without advancing it."""
-        if self.pending is not None or self.sample2job.own_job_data() is not None:
+        if self.pending is not None:
+            return True
+        if self.sample2job.own_job_data() is not None and (self.training_mode == "auto" or self.training_requests):
             return True
         return self.held_data_ready(sample_count)
 
     def held_data_ready(self, sample_count: int | None) -> bool:
-        """Whether the training mode lets held samples and instructions make job data of ``sample_count`` samples."""
-        if self.training_mode == "manual":
-            return bool(self.training_requests)
-        if self.training_mode == "hybrid" and self.training_requests:
+        """Whether the training mode lets held samples and instructions make job data of ``sample_count`` samples.
+
+        ``auto`` needs ``sample_count`` held samples. ``manual`` needs a queued instruction, and the same held
+        samples unless the stage reads instructions (``Sample2Job.reads_instructions``): such a stage runs an
+        instruction with fewer samples or none.
+        """
+        if self.training_mode == "manual" and not self.training_requests:
+            return False
+        if self.training_mode == "manual" and self.sample2job.reads_instructions:
             return True
         return sample_count is not None and self.count_held_samples() >= sample_count
 
@@ -482,22 +489,16 @@ class TrainingPipeline:
                 raise RuntimeError(f"scenario {self.scenario!r} has no job data ready")
             self.data_number += 1
             own = self.sample2job.own_job_data()
+            # Manual runs the oldest queued instruction with the samples that automatic job data would take;
+            # auto leaves the queue to manual.
+            request = next(iter(self.training_requests.values())) if self.training_mode == "manual" else None
             # Held samples go first; the stage's own samples wait while they are ready.
             if own is not None and not self.held_data_ready(sample_count):
                 # The stage's own samples train as one job, however many they are.
-                self.pending = self.sample2job.make_job_data(own, f"{self.scenario}:data:{self.data_number}")
+                self.pending = self.job_data_for(own, request)
                 self.pending_is_own = True
                 return self.pending
-            # Manual and hybrid run the oldest queued instruction first; auto leaves the queue to a mode that takes it.
-            request = (
-                next(iter(self.training_requests.values()))
-                if self.training_mode != "auto" and self.training_requests
-                else None
-            )
-            # In manual mode an instruction runs alone; in hybrid it takes the samples that automatic job data would.
-            selected_samples = (
-                0 if sample_count is None or (request is not None and self.training_mode == "manual") else sample_count
-            )
+            selected_samples = 0 if sample_count is None else sample_count
             # Uploaded trajectories go first, in upload order. Whole record set units, in selection order, fill
             # the rest of the data until it holds ``selected_samples`` samples.
             self.reserved_trajectory_ids = tuple(self.uploaded_trajectories)[:selected_samples]
@@ -513,12 +514,15 @@ class TrainingPipeline:
                 *(self.uploaded_trajectories[trajectory_id] for trajectory_id in self.reserved_trajectory_ids),
                 *(sample for unit in selected for set_id in unit.set_ids() for sample in self.samples[set_id]),
             )
-            if request is None:
-                self.pending = self.sample2job.make_job_data(samples, f"{self.scenario}:data:{self.data_number}")
-            else:
-                data = self.sample2job.make_job_data(samples, f"{self.scenario}:instruction:{request.id}")
-                self.pending = replace(data, request=request)
+            self.pending = self.job_data_for(samples, request)
         return self.pending
+
+    def job_data_for(self, samples: tuple[Sample, ...], request: TrainingRequest | None) -> JobData:
+        """The stage's job data of ``samples``: automatic data without ``request``, else the instruction's data."""
+        if request is None:
+            return self.sample2job.make_job_data(samples, f"{self.scenario}:data:{self.data_number}")
+        data = self.sample2job.make_job_data(samples, f"{self.scenario}:instruction:{request.id}")
+        return replace(data, request=request)
 
     def acknowledge(self, data_id: str) -> frozenset[str]:
         """The commit that submits the job data's job consumed it: end its units and uploaded trajectories, and
@@ -529,6 +533,9 @@ class TrainingPipeline:
             # The stage's own job data consumes no record: the stage names what the commit lists.
             own_ids = self.sample2job.own_job_data_submitted()
             self.consumed_own_ids |= own_ids
+            if self.pending.request is not None:
+                self.consume_request(self.pending.request.id)
+                own_ids = own_ids | {self.pending.request.id}
             self.pending = None
             self.pending_is_own = False
             return own_ids
@@ -614,7 +621,7 @@ class TrainingPipeline:
             "ready_samples": self.count_held_samples(),
             "buffer_size": self.buffer_size,
         }
-        if self.supported_training_modes & {"manual", "hybrid"}:
+        if "manual" in self.supported_training_modes:
             state["buffered_requests"] = self.buffered_requests()
         return {**state, **self.record2record.status(), **self.record2sample.status(), **self.sample2job.status()}
 

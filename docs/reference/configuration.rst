@@ -837,46 +837,50 @@ the runtime under ``recipe.runtime``. Harness settings live in
 ``recipe.config.evolution``.
 
 ``recipe.config.training_mode`` is shared by all recipes and defaults to ``auto``.
-In ``auto``, the recipe's processor decides when its data can form a job,
-and ``POST /reef/train`` is refused. In ``manual``, inference and reports
-cannot authorize training by themselves; ``POST /reef/train`` supplies the
-user instruction, and harness evolution runs it alone. In ``hybrid``, the
-processor makes job data as in ``auto`` and runs instructions too, a queued
-instruction first; harness evolution hands the proposer, beside the
-instruction, the units that automatic job data would take next, up to
-``job_samples`` traces (by default ``evolution.batch_size``) and possibly none: scored traces, or
-unscored records when the ``pipeline`` section names the inference stages. The processor defines
-what an instruction's data carries, independently of its automatic
-policy.
+It has two values:
 
-The training pipeline receives ``PipelineContext.training_mode`` as its
-initial training mode. The modes share record push and retention. In ``manual``
-an instruction's data has no record set units; in ``hybrid`` it takes the units that
-automatic job data would. A recipe's ``Sample2Job`` declares
-``supported_training_modes``; an unsupported mode raises ``NotImplementedError``.
-Harness evolution supports the three modes and requires a proposer that
-explicitly accepts ``requests`` for ``manual`` and ``hybrid``. Setting either
-on an inference-only recipe does not create a training backend.
+- ``auto``: a job starts when the held data reaches ``job_samples`` samples.
+  ``POST /reef/train`` is refused.
+- ``manual``: a job starts only for a ``POST /reef/train`` instruction. The
+  instruction's job takes the samples that automatic job data would take next,
+  up to ``job_samples``. A weight recipe waits until ``job_samples`` samples are
+  held, then trains them; the instruction text goes into the commit's
+  ``training_request`` metrics. Harness evolution runs the instruction at once:
+  the proposer gets the instruction and up to ``job_samples`` traces (by default
+  ``evolution.batch_size``), possibly none. The traces are scored traces, or
+  unscored records when the ``pipeline`` section names the inference stages.
+  An RL task job of ``sft-then-rl``'s imported tasks also starts only for an
+  instruction.
+
+Records arrive and the buffer fills in both modes, so a switch from ``manual``
+to ``auto`` can train on data already collected. A recipe's ``Sample2Job``
+declares ``supported_training_modes``; an unsupported mode raises
+``NotImplementedError``. A stage that trains only its own job data, such as
+generated tasks, supports only ``auto``. Harness evolution requires a proposer
+that explicitly accepts ``requests`` for ``manual``. Setting ``manual`` on an
+inference-only recipe does not create a training backend.
 
 .. code:: yaml
 
    recipe:
      config:
-       training_mode: hybrid
+       training_mode: manual
 
+The ``reef serve`` option ``--recipe.config.training-mode manual`` sets the same field at deployment.
 The mode controls training initiation, independently of the `activation
-rule <#the-activation-section>`__. It supplies the initial processor mode.
-Use ``POST /reef/scenarios/{scenario}/update`` to select another mode
-at runtime. This changes subsequent job data; reserved job data completes under
-its original mode. Mode changes are not persisted: a service restart uses the
-recipe's configured mode again, while a scenario reload after a failed step
-keeps the selected mode. In every mode the held record sets keep at most
-``pipeline.sample2job.config.buffer_size`` samples. As records arrive, the
-pipeline releases the oldest sets beyond that limit and logs one warning.
+rule <#the-activation-section>`__. Use ``POST /reef/scenarios/{scenario}/update``
+to select another mode at runtime. This changes subsequent job data; reserved
+job data completes under its original mode. Reef stores the selected mode in
+the scenario's settings, so reloads and restarts apply it again, and it takes
+precedence over the configured mode. A stored mode that the recipe does not
+support keeps the configured mode and logs a warning. In every mode the held
+record sets keep at most ``pipeline.sample2job.config.buffer_size`` samples. As
+records arrive, the pipeline releases the oldest sets beyond that limit and
+logs one warning.
 
 .. config::
 
-   recipe.config.training_mode | auto | ``manual`` waits for ``POST /reef/train`` instructions instead of training by the recipe's rules; ``hybrid`` trains by the recipe's rules and runs a queued instruction first
+   recipe.config.training_mode | auto | ``auto`` starts a job when ``job_samples`` samples are held; ``manual`` starts a job only for a ``POST /reef/train`` instruction
 
 ``recipe.config.job_parameters`` is an object that a weight recipe's default
 job plan sends with every job, beside ``method``. The training component
@@ -1120,7 +1124,7 @@ Reef refuses ``batch_size`` and ``batch_policy`` directly under
    evolution.seed | entry options loaded into the tree on first boot, or a dotted ``module:attribute`` naming a sequence of them (``reef.harness.runners.native.seed:SEED_NODES`` is the native harness's shipped tools and hook); recovered state takes precedence
    evolution.models | auxiliary models for the method: ``url``, ``model``, optional ``api`` (default ``openai``) and ``timeout_s``, with the credential as a literal ``api_key`` or an ``api_key_env`` variable name
    evolution.version_check | appends the adapter's update notice; an interactive pulled tree offers to run the update or skip when behind
-   evolution.requests | false | appends the adapter's harness requests extension and its extension API skill after the notice (the reserved entries ``reef-requests`` and ``reef-pi-extension-api``), so a ``reef-pi`` session gets ``/reefine <request>`` in the TUI (submits to ``POST /reef/train``, which needs ``recipe.config.training_mode: hybrid`` or ``manual``) and the method reads the API reference before it writes an extension; on ``claude``, ``codex``, ``opencode``, ``hermes`` and ``dsh`` it appends one ``agent_command`` named ``reefine`` under the same reserved id, which has the session's model file the request with ``reef-<adapter> evolve``, wait with ``reef-<adapter> wait`` and offer ``reef-<adapter> update``; an adapter with no command surface (``terminus``, ``native``) refuses boot (a seed entry: a deployment that boots from a recovered state keeps its tree, as with ``version_check``); the tutorial's ``tutorials/evolve-your-harness/configs/deployment.yaml`` sets it, with ``version_check: true`` and an ``always`` activation rule whose ``review_kinds`` is ``[code_extension]``
+   evolution.requests | false | appends the adapter's harness requests extension and its extension API skill after the notice (the reserved entries ``reef-requests`` and ``reef-pi-extension-api``), so a ``reef-pi`` session gets ``/reefine <request>`` in the TUI (submits to ``POST /reef/train``, which needs ``recipe.config.training_mode: manual``) and the method reads the API reference before it writes an extension; on ``claude``, ``codex``, ``opencode``, ``hermes`` and ``dsh`` it appends one ``agent_command`` named ``reefine`` under the same reserved id, which has the session's model file the request with ``reef-<adapter> evolve``, wait with ``reef-<adapter> wait`` and offer ``reef-<adapter> update``; an adapter with no command surface (``terminus``, ``native``) refuses boot (a seed entry: a deployment that boots from a recovered state keeps its tree, as with ``version_check``); the tutorial's ``tutorials/evolve-your-harness/configs/deployment.yaml`` sets it, with ``version_check: true`` and an ``always`` activation rule whose ``review_kinds`` is ``[code_extension]``
    evolution.proposals_dir | .reef/proposals | where agent proposals from ``POST /reef/harness/proposals`` wait for the next evolve step: one directory per scenario under it (``<dir>/<scenario>``, made absolute at build, created when the first proposal arrives), with ``claimed/``, ``refused/`` and ``settled/`` beside the pending files
    evolution.max_pending_proposals | 8 | how many admitted proposals one scenario holds; the route answers ``admitted: false`` with reason ``inbox full`` beyond it, and with reason ``manual mode takes instructions only`` on a scenario in ``recipe.config.training_mode: manual``
    evolution.step_record_dir | | off by default; when set, every step writes its record under ``<dir>/<scenario>/<step>`` (the path is made absolute at build): ``proposer.json`` (each model call the proposer made: ``model``, ``messages`` and ``params`` for a ``chat`` or ``body`` for a ``complete``, then ``reply`` and the provider ``response`` for a built-in ``chat`` binding, ``response`` for ``complete``, or ``error``, and ``seconds``; the response retains provider reasoning/thinking fields when returned; long text is clipped with a marker and a credential shaped literal is replaced by ``[redacted credential]``), ``mutations.json`` (the parsed proposal with its full options, refused or not, redacted the same way) and ``rollouts/<side>-<task index>/`` (each evaluation rollout's trajectory files as the adapter writes them, copied out of its root before the root is removed, plus ``rollout.json`` with the task, the exit code, stdout and stderr, the residue, the score, the failure and the stage path; a repeat adds ``-<repeat>``); a recheck step writes ``rollouts/`` only and has no proposer files; a step skipped on the step cap or the failure streak writes nothing; a step directory is never reused, so a retried step lands in ``<step>-2``, then ``<step>-3``; nothing prunes the directory; an unwritable path refuses boot and a record copy that fails aborts the step instead of scoring it
@@ -1723,7 +1727,7 @@ The following names are relative to ``operations/``:
      - Zero or one. A reservation can be executing or waiting for settlement;
        it is not necessarily queued job data.
    * - ``training/auto_enabled``
-     - One for auto/hybrid training, zero for manual training. Waiting data in
+     - One for auto training, zero for manual training. Waiting data in
        manual mode does not by itself indicate a stalled worker.
    * - ``training/error``, ``training/failed_attempts_total``
      - Current recorded training error (zero/one) and cumulative failures

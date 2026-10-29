@@ -121,11 +121,10 @@ class Proposer(ConfiguredPlugin, ABC):
     in tree order, so a method can name the entry an ``update`` or ``remove``
     targets. Every keyword is always passed.
 
-    In ``manual`` and ``hybrid`` mode, when an instruction is queued,
+    In ``manual`` mode, when an instruction is queued,
     ``requests`` contains exactly one mapping with ``id``, ``text``,
     ``session``, ``release_id``, ``requires`` and ``untrusted=True``. It is the
-    instruction that owns this step; ``samples`` is empty in ``manual``, and
-    in ``hybrid`` it is what automatic job data would take next, up to
+    instruction that owns this step; ``samples`` is what automatic job data would take next, up to
     ``job_samples`` (by default ``evolution.batch_size``) and possibly none (scored traces, or unscored records
     when the ``pipeline`` section names the inference stages). A proposer that takes
     instructions sets ``reads_requests``. It generates mutations against the current tree, then the
@@ -146,7 +145,7 @@ class Proposer(ConfiguredPlugin, ABC):
 
     @property
     def reads_requests(self) -> bool:
-        """Whether this proposer can honor a training instruction (``manual`` and ``hybrid``); override to say so."""
+        """Whether this proposer can honor a training instruction (``manual``); override to say so."""
         return False
 
     @property

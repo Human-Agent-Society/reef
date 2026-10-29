@@ -20,7 +20,6 @@ from tests.support.component_trainers import (
     HARNESS,
     HELD,
     WEIGHTS,
-    HybridThresholdJobData,
     JudgedAtOnce,
     Judgment,
     WeightsJobComponent,
@@ -35,7 +34,6 @@ from tests.support.component_trainers import (
     _TwoTrainerRecipe,
     component_files,
 )
-from tests.support.runtime_stubs import StubInferenceRuntime
 
 from reef.artifact import Artifact, ArtifactNotFound, ArtifactRef
 from reef.artifact.release_chain import ArtifactReleaseChain
@@ -952,16 +950,16 @@ def test_a_job_submitted_on_an_instance_reloaded_under_it_is_the_same_job_on_the
 @pytest.mark.unit
 def test_training_mode_switches_every_trainer_or_none(dispatchers: _Dispatchers) -> None:
     """A mode one component cannot run is refused before any component switches."""
-    dispatcher, _ = dispatchers.open(hybrid_components=frozenset({WEIGHTS}))
+    dispatcher, _ = dispatchers.open(auto_only_components=frozenset({HARNESS}))
     scenario = _scenario(dispatcher)
-    with pytest.raises(NotImplementedError, match=r"harness \(ThresholdJobData\)"):
-        scenario.set_training_mode("hybrid")
+    with pytest.raises(NotImplementedError, match=r"harness \(AutoOnlyThresholdJobData\)"):
+        scenario.set_training_mode("manual")
     assert [component_trainer.trainer.pipeline.training_mode for component_trainer in scenario.trainers] == [
         "auto",
         "auto",
     ]
-    with pytest.raises(ValueError, match="training_mode must be"):
-        scenario.set_training_mode("bogus")
+    with pytest.raises(ValueError, match="training_mode must be 'auto' or 'manual'"):
+        scenario.set_training_mode("hybrid")
 
 
 @pytest.mark.unit
@@ -1607,33 +1605,16 @@ def test_dispatcher_runs_the_weights_jobs_and_the_harness_on_their_own_workers(
     assert dispatcher.build_training_status()["error"] is None
 
 
-class InstructedJobData(HybridThresholdJobData):
-    """The hybrid batches, which also read training instructions."""
-
-    required_request_types = frozenset({RequestType.INFERENCE, RequestType.REPORT, RequestType.TRAIN})
-
-
-@dataclass(frozen=True)
-class _InstructedRecipe(_TwoTrainerRecipe):
-    """The two trainer recipe whose trainers take training instructions."""
-
-    def pipeline_for(self, component: str, context: PipelineContext) -> TrainingPipeline:
-        return threshold_pipeline(context, sample2job=InstructedJobData(context, None, None))
-
-
 @pytest.mark.unit
-def test_a_hybrid_weights_trainer_submits_a_job_for_an_instruction(tmp_path: Path, dispatchers: _Dispatchers) -> None:
-    """In hybrid mode an instruction makes the weights batch ready: its job carries the instruction, and the
-    submission consumes it."""
+def test_a_manual_weights_trainer_waits_for_its_job_samples_and_submits_them_with_the_instruction(
+    tmp_path: Path, dispatchers: _Dispatchers
+) -> None:
+    """In manual mode a weights stage takes an instruction as a request to train: the job waits until the trainer
+    holds its job samples, then carries them and the instruction, and the submission consumes both."""
     training = WeightsJobComponent(tmp_path / "checkpoints")
-    recipe = _InstructedRecipe(
-        backends={HARNESS: _ComponentBackend(HARNESS, tmp_path / "candidates")},
-        runtime=StubInferenceRuntime(),
-        training_component=training,
-    )
-    dispatcher, _ = dispatchers.open(recipe=recipe, hold_local_cycles=True)
+    dispatcher, _ = dispatchers.open(training=training, hold_local_cycles=True)
     scenario = _scenario(dispatcher)
-    scenario.set_training_mode("hybrid")
+    scenario.set_training_mode("manual")
     scenario.records.append(
         AgentRecord.create(
             scenario="agent",
@@ -1642,10 +1623,13 @@ def test_a_hybrid_weights_trainer_submits_a_job_for_an_instruction(tmp_path: Pat
             payload={"text": "learn the tool", "session": "session-1", "release_id": "release-1"},
         )
     )
-    assert _commit_step(scenario, WEIGHTS) == []
+    assert scenario.prepare_training_step(WEIGHTS) is None
+    _append_records(scenario, 1)
+    assert _commit_step(scenario, WEIGHTS) == [("i1", "r1")]
     [job] = training.submitted
+    assert job.data.data_id == "agent:instruction:t1"
     assert job.data.request is not None and job.data.request.id == "t1"
-    assert "t1" in scenario.store.history()[-1].consumed_ids
+    assert {"t1", "i1", "r1"} <= scenario.store.history()[-1].consumed_ids
     _settle_weights_job(scenario)
     assert _job_events(scenario) == ["submitted", "checkpoint", "finished"]
 

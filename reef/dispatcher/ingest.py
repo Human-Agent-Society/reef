@@ -53,7 +53,7 @@ def validate_record(current: Scenario, item: AgentRecord, preceding: Mapping[str
             if (existing := current.records.existing_receipt(item)) is not None:
                 return existing
             if current.training_mode == "auto":
-                raise ValueError("explicit training requests require training_mode='manual' or 'hybrid'")
+                raise ValueError("explicit training requests require training_mode='manual'")
             if not any(component_trainer.trainer.trains for component_trainer in current.trainers):
                 raise ValueError("explicit training requests require a training backend")
             request = normalize_training_request_payload(item.payload)

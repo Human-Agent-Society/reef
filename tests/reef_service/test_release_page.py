@@ -2,11 +2,11 @@
 
 ``GET /reef/harness/releases/{step}/page`` renders it from the releases row,
 the step being the row's position oldest first with the creation row as 0. The
-chain driven here runs in ``training_mode: hybrid``: one published win and one
+chain driven here runs in ``training_mode: manual``: one published win and one
 rejected candidate answering requests posted to ``POST /reef/train``, one
-rejected automatic step from a scored report with no request, and one inactive
-extension update, again from a request, whose page diffs the file against the
-head.
+rejected automatic step from a scored report with no request, run after a switch
+to ``auto``, and one inactive extension update, again from a request in
+``manual``, whose page diffs the file against the head.
 """
 
 from __future__ import annotations
@@ -102,7 +102,7 @@ def _dispatcher(tmp_path: Path, *, keep_records: bool = False) -> Dispatcher:
         proposals_dir=str(tmp_path / "inbox"),
         step_record_dir=str(tmp_path / "steps") if keep_records else None,
         activation=PluginReference(AlwaysActivate, {"review_kinds": ["code_extension"]}),
-        training_mode="hybrid",
+        training_mode="manual",
     )
     bootstrap = tmp_path / "bootstrap"
     bootstrap.mkdir()
@@ -121,7 +121,7 @@ def _dispatcher(tmp_path: Path, *, keep_records: bool = False) -> Dispatcher:
 
 
 def _report(dispatcher: Dispatcher, suffix: str) -> None:
-    """One scored exchange through the dispatcher: what wakes an automatic step in ``hybrid`` mode."""
+    """One scored exchange through the dispatcher: what wakes an automatic step in ``auto`` mode."""
     inference = AgentRecord.create(
         scenario=SCENARIO,
         request_type=RequestType.INFERENCE,
@@ -162,8 +162,10 @@ def _chain(tmp_path: Path) -> Dispatcher:
                 response = await _post(client, body, SCENARIO)
                 assert response.status == 200, await response.text()
                 await _committed(scenario, count)
+            dispatcher.set_training_mode(SCENARIO, "auto")
             _report(dispatcher, "3")
             await _committed(scenario, 4)
+            dispatcher.set_training_mode(SCENARIO, "manual")
             response = await _post(client, _request(FOURTH, session="s4", release_id="rel-1"), SCENARIO)
             assert response.status == 200, await response.text()
             await _committed(scenario, 5)

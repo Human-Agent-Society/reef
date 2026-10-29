@@ -69,8 +69,8 @@ recipe:
               concrete guidance learned from failing tasks.
 
               '
-    # The person asks with POST /reef/train while the deployment keeps learning from failures.
-    training-mode: hybrid
+    # A person asks with POST /reef/train; each step reads the ask beside the failures held for it.
+    training-mode: manual
 
 # Every kept tree serves at once, except one that changes an extension: an evolved extension runs in pi's process
 # with your privileges, so a person activates it (POST /reef/scenarios/{scenario}/activate).
