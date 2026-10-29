@@ -203,13 +203,20 @@ def migrate_uploaded_trajectories(connection: Connection, samples: Table, train_
     legacy.drop(connection)
 
 
+def legacy_task_trained(connection: Connection, schema: str | None) -> Table | None:
+    """The old ``task_trained`` table, the trained marks of the task stores, or None when the schema has none."""
+    if not inspect(connection).has_table("task_trained", schema=schema):
+        return None
+    return Table("task_trained", MetaData(), schema=schema, autoload_with=connection)
+
+
 def migrate_imported_tasks(
-    connection: Connection, samples: Table, train_counts: Table, commits: Table, published: Table, trained: Table
+    connection: Connection, samples: Table, train_counts: Table, commits: Table, published: Table
 ) -> None:
     """Move the tasks of the old ``imported-tasks`` task store into ``samples``, then delete them from the task tables.
 
-    Run in the caller's schema transaction, after ``create_all``. ``published`` and ``trained`` are the
-    ``published_task`` and ``task_trained`` tables of the task stores. Each task keeps its name as its sample ID,
+    Run in the caller's schema transaction, after ``create_all``. ``published`` is the ``published_task`` table of
+    the task stores; the trained marks come from the old ``task_trained`` table. Each task keeps its name as its sample ID,
     its split, the digest of its files, and its publication order after the samples already stored. A trained
     task gets a train count of 1 for each commit of a trainer (the commit's ``component``, or ``""``) whose
     consumed IDs list a rollout of the task, ``rollout:<task use>`` whose task use ends in ``/<name>``. A trained
@@ -221,10 +228,15 @@ def migrate_imported_tasks(
     if not rows:
         return
     scoped = "storage_id" in published.c
-    trained_names = {
-        (row["storage_id"] if scoped else None, row["task_name"])
-        for row in connection.execute(select(trained).where(trained.c.store_name == "imported-tasks")).mappings()
-    }
+    trained = legacy_task_trained(connection, published.schema)
+    trained_names = (
+        set()
+        if trained is None
+        else {
+            (row["storage_id"] if scoped else None, row["task_name"])
+            for row in connection.execute(select(trained).where(trained.c.store_name == "imported-tasks")).mappings()
+        }
+    )
     counted: dict[tuple[str | None, str, str], int] = defaultdict(int)
     for row in connection.execute(select(commits)).mappings():
         commit = json.loads(row["commit_json"])
@@ -260,8 +272,42 @@ def migrate_imported_tasks(
         connection.execute(
             train_counts.insert().values(**scope, sample_id=name, component=component, train_count=count)
         )
-    connection.execute(trained.delete().where(trained.c.store_name == "imported-tasks"))
+    if trained is not None:
+        connection.execute(trained.delete().where(trained.c.store_name == "imported-tasks"))
     connection.execute(published.delete().where(store))
+
+
+def migrate_generated_task_marks(connection: Connection, train_counts: Table) -> None:
+    """Turn the trained marks of the generated-task stores into train counts, then drop the old ``task_trained`` table.
+
+    Run in the caller's schema transaction, after ``migrate_imported_tasks``. A mark of task ``n`` in the store
+    ``generated-tasks`` is a count of 1 of sample ``generated-tasks/<n>`` for the scenario's only trainer (``""``);
+    a mark in ``<c>/generated-tasks`` is a count of 1 of sample ``<c>:generated-tasks/<n>`` for the component
+    ``c``. The generated-task stage stores those samples on its next start, and they then read as trained. A
+    count that exists stays. A schema without the old table is left unchanged.
+    """
+    trained = legacy_task_trained(connection, train_counts.schema)
+    if trained is None:
+        return
+    scoped = "storage_id" in trained.c
+    for row in connection.execute(select(trained).where(trained.c.store_name.like("%generated-tasks"))).mappings():
+        component, separator, store_name = str(row["store_name"]).rpartition("/")
+        if store_name != "generated-tasks" or (separator and not component):
+            continue
+        sample_id = (
+            f"{component}:generated-tasks/{row['task_name']}" if component else f"generated-tasks/{row['task_name']}"
+        )
+        scope = {"storage_id": row["storage_id"]} if scoped else {}
+        exists = select(train_counts.c.sample_id).where(
+            train_counts.c.sample_id == sample_id,
+            train_counts.c.component == component,
+            *(train_counts.c[name] == value for name, value in scope.items()),
+        )
+        if connection.execute(exists).first() is None:
+            connection.execute(
+                train_counts.insert().values(**scope, sample_id=sample_id, component=component, train_count=1)
+            )
+    trained.drop(connection)
 
 
 def legacy_model_configs(directory: Path) -> dict[str, tuple[Mapping[str, object] | None, Path]]:
