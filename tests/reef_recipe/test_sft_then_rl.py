@@ -83,7 +83,7 @@ def test_held_trajectories_train_before_the_imported_train_tasks_and_each_task_t
     # Two uploads make SFT data ready, so they go first although tasks wait.
     sft = pipeline.build_job_data(2)
     assert [type(item) for item in sft.samples] == [TrajectorySample, TrajectorySample]
-    assert pipeline.acknowledge(sft.data_id) == {"trajectory:t1", "trajectory:t2"}
+    assert pipeline.acknowledge(sft.data_id) == {"sample:t1", "sample:t2"}
 
     first = pipeline.build_job_data(2)
     assert task_names(first) == ["task-a", "task-b"]

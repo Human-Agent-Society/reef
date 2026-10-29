@@ -59,7 +59,7 @@ from reef.record2record import NoRecordSets, Record2Record, RecordSet, RecordSet
 from reef.record2record.staleness import producing_runtime_load_ids
 from reef.record2sample import NoSamples, Record2Sample
 from reef.sample2job import NoJobData, Sample2Job
-from reef.storage.trajectories import consumed_trajectory_id
+from reef.storage.samples import consumed_sample_id
 from reef.train.types import JobData, Sample, TrajectorySample
 
 #: The keys of the deployment's ``pipeline`` section, one for each stage.
@@ -419,7 +419,7 @@ class TrainingPipeline:
 
     def push_trajectory(self, trajectory_id: str, trajectory: TrajectorySample) -> None:
         """Read one uploaded trajectory as its training sample. It waits here for job data."""
-        if consumed_trajectory_id(trajectory_id) not in self.consumed_trajectory_ids:
+        if consumed_sample_id(trajectory_id) not in self.consumed_trajectory_ids:
             self.uploaded_trajectories.setdefault(trajectory_id, self.uploaded_sample(trajectory))
 
     def job_ended(self, outcome: JobOutcome) -> None:
@@ -544,8 +544,8 @@ class TrainingPipeline:
         self.forget_ended_sets()
         for trajectory_id in self.reserved_trajectory_ids:
             self.uploaded_trajectories.pop(trajectory_id)
-            self.consumed_trajectory_ids.add(consumed_trajectory_id(trajectory_id))
-        consumed = consumed | {consumed_trajectory_id(trajectory_id) for trajectory_id in self.reserved_trajectory_ids}
+            self.consumed_trajectory_ids.add(consumed_sample_id(trajectory_id))
+        consumed = consumed | {consumed_sample_id(trajectory_id) for trajectory_id in self.reserved_trajectory_ids}
         self.reserved_trajectory_ids = ()
         if self.pending.request is not None:
             self.consume_request(self.pending.request.id)

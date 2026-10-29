@@ -501,4 +501,4 @@ def test_the_sft_recipe_takes_uploaded_trajectories_as_rendered_samples(tokenize
     data = pipeline.build_job_data(1)
     (item,) = data.samples
     assert item.training["loss_mask"] == [1] * (len(TurnTokenizer.text_ids({"content": "100 C"})) + 1)
-    assert pipeline.acknowledge(data.data_id) == {"trajectory:t1"}
+    assert pipeline.acknowledge(data.data_id) == {"sample:t1"}
