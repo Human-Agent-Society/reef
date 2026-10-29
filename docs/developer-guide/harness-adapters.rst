@@ -1793,8 +1793,8 @@ does not enter the session model's context. A session without a model is
 prompted to select one or use ``--direct``.
 
 With ``--direct`` as the first word, or without a UI, ``/reefine`` sends the
-request unchanged to ``POST /reef/train``. This requires ``manual`` or
-``hybrid`` training mode and leaves captured receipts available for
+request unchanged to ``POST /reef/train``. This requires ``manual``
+training mode and leaves captured receipts available for
 feedback. Both paths require ``.reef-harness-release`` beside the tree to
 identify the release; without it, no request is sent.
 The two request tools are:

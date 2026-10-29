@@ -1086,10 +1086,11 @@ They run synchronously on the trainer thread, so they must not block on
 network or model latency. Reports must reference existing inference records
 in the same scenario.
 
-``TrainingPipeline.training_mode`` selects automatic, instruction-triggered or
-combined training. A ``Sample2Job`` declares ``supported_training_modes``. In
-``manual`` an instruction's data has no tasks; in ``hybrid`` it takes the sets
-that automatic job data would. Record push, acknowledgement, retention, buffer release
+``TrainingPipeline.training_mode`` selects automatic (``auto``) or
+instruction-triggered (``manual``) training. A ``Sample2Job`` declares
+``supported_training_modes``. In ``manual`` an instruction's data takes the
+sets that automatic job data would; ``Sample2Job.reads_instructions`` says
+whether the instruction may run with fewer than ``job_samples`` samples. Record push, acknowledgement, retention, buffer release
 and background derivation are shared. See
 `Training pipeline <../developer-guide/processors.rst>`__ for the instruction queue and job data contract.
 

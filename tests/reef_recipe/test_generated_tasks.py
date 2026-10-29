@@ -201,6 +201,14 @@ def test_the_contract_values_refuse_what_the_recipe_cannot_run(build: Any, messa
         build()
 
 
+def test_the_task_stage_refuses_manual_and_takes_no_instruction() -> None:
+    pipeline = processor()
+    with pytest.raises(NotImplementedError, match="GeneratedTaskJobData does not implement training_mode='manual'"):
+        pipeline.set_training_mode("manual")
+    assert RequestType.TRAIN not in pipeline.required_request_types
+    pipeline.close()
+
+
 def test_a_rollout_result_reads_back_from_its_document_as_the_generators_result() -> None:
     task = task_for("t-a", "r", 1)
     ran = TaskRolloutResult("t-a", (1.0, 0.0))

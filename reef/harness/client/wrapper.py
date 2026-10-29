@@ -54,8 +54,8 @@ When invoked with ``evolve`` (e.g. ``reef-pi evolve "text me when you are blocke
   the installed release and a session id: inside a session the wrapper
   started, that session's (``REEF_HARNESS_SESSION``, the tag every call of
   the run carries); outside one, the oldest pending session's (or a fresh id
-  when nothing is spooled). The scenario must use ``training_mode: manual``
-  or ``hybrid``. Acceptance queues a step without inference receipts or a
+  when nothing is spooled). The scenario must use ``training_mode: manual``.
+  Acceptance queues a step without inference receipts or a
   feedback report; the merged ``requires`` list rides ``training_request``
   in the commit's metrics. The accepted line is followed by a link to the
   request's page, the ``page_path`` the service answered with (its query
