@@ -93,6 +93,44 @@ this:
 Reef never reads, syncs or evolves the person's own configuration. `Use a
 published tree`_ lists what that configuration holds for each agent.
 
+Uploaded tasks, step by step
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Offline, the person who runs the deployment gives Reef Harbor tasks instead
+of sessions. The deployment sets ``pipeline.sample2job`` to
+``TrainTaskRollouts`` and ``evolution.evaluation.task_store`` to
+``imported-tasks`` (see `Offline: learn from uploaded tasks`_). Then a run
+goes like this:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 10 90
+
+   * - Step
+     - What happens
+   * - upload
+     - The person uploads task directories to the scenario, train and eval
+       (``POST /reef/scenarios/<scenario-name>/tasks?split=train`` or
+       ``?split=eval``). The first train task starts the run.
+   * - 4
+     - A step takes the next ``tasks_per_step`` train tasks (8 by default).
+       Each one runs on the head in its own container: Harbor starts the
+       container, Reef installs the agent there, the agent plays the task's
+       instruction, and the task's tests score it. These episodes are the
+       step's traces.
+   * - 5, 6
+     - The method edits a copy of the head, and Reef checks it, as for
+       sessions.
+   * - 7
+     - The candidate and the head play each eval task, each in its own
+       container, and the policy compares their scores.
+   * - 8
+     - The release rule publishes a selected candidate as the new head.
+   * - after
+     - ``GET /reef/scenarios/<scenario-name>/tasks`` shows which tasks have
+       trained. After ``epochs`` passes over the train split (1 by default),
+       the run stops. People use the head as after a session.
+
 Two ways to evolve
 ~~~~~~~~~~~~~~~~~~
 
