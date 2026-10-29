@@ -1150,11 +1150,11 @@ def test_deployment_yaml_names_directories_that_exist_and_boots_its_named_recipe
     assert service.upstream_model == model_id
     assert built.model_binding().model == model_id
     assert built.build_surface("demo").harness.served_model == model_id
-    # The person asks while it keeps learning from failures, so the tutorial proposer must take requests.
-    assert built.training_mode == "hybrid"
+    # Only a person's ask starts a step, so the tutorial proposer must take requests.
+    assert built.training_mode == "manual"
     records = SQLiteRecordStore()
     trainer = replace(built, binary=str(tmp_path / "fake-pi")).build("demo", records)
-    assert trainer.pipeline.training_mode == "hybrid"
+    assert trainer.pipeline.training_mode == "manual"
     # Each report is one job's data: the deployment sets evolution.batch_size 1, the default job_samples.
     assert trainer.job_samples == 1
     trainer.close()
@@ -1175,7 +1175,7 @@ def test_deployment_yaml_sets_the_review_default_for_evolved_extensions(evolutio
     monkeypatch.setenv("REEF_PYTHON", sys.executable)
     monkeypatch.setenv("PWD", str(EXAMPLE_DIR.parents[1]))
     config = load_config(EXAMPLE_DIR / "configs" / "deployment.yaml")
-    assert config["data"]["training_mode"] == "hybrid"
+    assert config["data"]["training_mode"] == "manual"
     assert config["evolution"]["requests"] is True and config["evolution"]["version_check"] is True
     assert config["activation"] == {"module": "always", "config": {"review_kinds": ["code_extension"]}}
     for name in ("serve", "serve-native"):

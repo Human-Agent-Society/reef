@@ -77,9 +77,7 @@ class RecordingSamples(ImmediateRecord2Sample):
 
 
 class RecordingJobData(Sample2Job):
-    """Takes instructions in every mode."""
-
-    supported_training_modes = frozenset({"auto", "manual", "hybrid"})
+    """Makes job data of the samples as they come; in ``manual`` it takes instructions."""
 
     def __init__(self, context: PipelineContext) -> None:
         super().__init__(context, None, None)
@@ -205,7 +203,7 @@ def test_the_inference_stage_forms_one_set_per_inference_record_in_arrival_order
 
 @pytest.mark.unit
 def test_the_pipeline_keeps_instructions_and_sends_other_records_through_its_stage() -> None:
-    processor = RecordingPipeline(PipelineContext("s", training_mode="hybrid"))
+    processor = RecordingPipeline(PipelineContext("s", training_mode="manual"))
     processor.push(inference("i1"))
     processor.push(inference("drop-1"))
     processor.push(instruction("train-1"))
@@ -216,7 +214,7 @@ def test_the_pipeline_keeps_instructions_and_sends_other_records_through_its_sta
 
 @pytest.mark.unit
 def test_the_pipeline_adds_its_stages_background_work_and_status_and_closes_them() -> None:
-    processor = RecordingPipeline(PipelineContext("s", training_mode="hybrid"))
+    processor = RecordingPipeline(PipelineContext("s", training_mode="manual"))
     assert not processor.background_jobs_running()
     processor.stage.pending = True
     assert processor.background_jobs_running()

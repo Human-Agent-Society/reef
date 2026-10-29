@@ -200,8 +200,8 @@ class Scenario:
         and drop them for others. A trainer without a step builds no job data,
         so it has no mode to switch.
         """
-        if training_mode not in ("auto", "manual", "hybrid"):
-            raise ValueError("training_mode must be 'auto', 'manual' or 'hybrid'")
+        if training_mode not in ("auto", "manual"):
+            raise ValueError("training_mode must be 'auto' or 'manual'")
         stepping = self.stepping_trainers()
         unsupported = [
             f"{component_trainer.component} ({type(component_trainer.trainer.pipeline.sample2job).__name__})"
