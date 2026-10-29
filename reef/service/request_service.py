@@ -238,9 +238,13 @@ class RequestService:
         record: bool = True,
         evaluated: str | None = None,
         rollout: bool = False,
+        artifact_id: str | None = None,
     ) -> tuple[dict[str, Any], AgentRecord | None]:
         """Serve one inference; ``record`` False serves it without keeping a record, as an evaluation call of the
         ``evaluated`` component (see ``Surface.inference_for_evaluation``).
+
+        ``artifact_id`` names the served artifact that answers, at its own URL (``Scenario.served_release``);
+        ``None`` is the active release.
 
         ``rollout`` True serves a call of a rollout that Reef runs itself: the served release with its
         hooks, as for a recorded call, but no record is kept, and the response keeps its ``training`` block
@@ -249,7 +253,7 @@ class RequestService:
         if rollout and record:
             raise ValueError("a rollout call keeps no record")
         family = request_family(record, rollout=rollout)
-        operations = await self.inference_operations(headers, record=record)
+        operations = await self.inference_operations(headers, record=record, artifact_id=artifact_id)
         # Evaluation and rollout traffic is measured apart, so Reef's own rollouts do not read as served requests.
         measurement = operations.start(f"{family}/request")
         succeeded = False
@@ -265,7 +269,14 @@ class RequestService:
                 if attempt > 1:
                     operations.increment(f"{family}/retries_total")
                 prepared, payload = await self._prepare_request(
-                    headers, original_payload, path, handler, record=record, evaluated=evaluated, rollout=rollout
+                    headers,
+                    original_payload,
+                    path,
+                    handler,
+                    record=record,
+                    evaluated=evaluated,
+                    rollout=rollout,
+                    artifact_id=artifact_id,
                 )
                 try:
                     if prepared.durable:
@@ -343,12 +354,13 @@ class RequestService:
         *,
         record: bool = True,
         evaluated: str | None = None,
+        artifact_id: str | None = None,
     ) -> tuple[InferenceStream, PendingInference]:
-        operations = await self.inference_operations(headers, record=record)
+        operations = await self.inference_operations(headers, record=record, artifact_id=artifact_id)
         measurement = operations.start(f"{request_family(record)}/request")
         try:
             prepared, payload = await self._prepare_request(
-                headers, payload, path, handler, record=record, evaluated=evaluated
+                headers, payload, path, handler, record=record, evaluated=evaluated, artifact_id=artifact_id
             )
             admission = prepared.admission
             lease = prepared.lease
@@ -482,18 +494,25 @@ class RequestService:
                 if pending.admission is not None:
                     pending.admission.release()
 
-    async def inference_operations(self, headers: Mapping[str, str], *, record: bool = True) -> OperationMetrics:
+    async def inference_operations(
+        self, headers: Mapping[str, str], *, record: bool = True, artifact_id: str | None = None
+    ) -> OperationMetrics:
         """Resolve the scenario before measuring its inference request lifetime."""
         parsed = parse_request_headers(headers, RequestType.INFERENCE)
-        scenario = await asyncio.to_thread(self.inference_scenario, parsed, record=record)
+        scenario = await asyncio.to_thread(self.inference_scenario, parsed, record=record, artifact_id=artifact_id)
         return scenario.operations
 
-    def inference_scenario(self, parsed: RequestHeaders, *, record: bool) -> Scenario:
-        """The scenario an inference serves. A recorded call may create it; an evaluation call (``record`` False)
-        reads the loaded instance only, never waiting for the scenario's lock and never creating it (see
+    def inference_scenario(self, parsed: RequestHeaders, *, record: bool, artifact_id: str | None = None) -> Scenario:
+        """The scenario an inference serves. A recorded call may create it, unless it names an artifact
+        (``artifact_id``): only a scenario that exists has one. An evaluation call (``record`` False) reads the
+        loaded instance only, never waiting for the scenario's lock and never creating it (see
         ``ScenarioRegistry.get_loaded``)."""
         if record:
-            scenario = self._dispatcher.get_or_create_scenario(parsed.scenario, release_id=parsed.release_id)
+            scenario = self._dispatcher.get_or_create_scenario(
+                parsed.scenario,
+                release_id=parsed.release_id,
+                allow_implicit_creation=None if artifact_id is None else False,
+            )
         else:
             scenario = self._dispatcher.loaded_scenario(parsed.scenario, release_id=parsed.release_id)
         if scenario is None:
@@ -510,6 +529,7 @@ class RequestService:
         record: bool = True,
         evaluated: str | None = None,
         rollout: bool = False,
+        artifact_id: str | None = None,
     ) -> tuple[PreparedInference, dict[str, Any]]:
         """The shared first half of every inference: freeze the serving state
         (headers, scenario, artifact, handler, surface) and let the surface
@@ -517,7 +537,7 @@ class RequestService:
         an evaluation call (``record`` False) runs every component's hooks but
         the ``evaluated`` one's, whose candidate the rollout runs."""
         parsed = parse_request_headers(headers, RequestType.INFERENCE)
-        initial = await asyncio.to_thread(self.inference_scenario, parsed, record=record)
+        initial = await asyncio.to_thread(self.inference_scenario, parsed, record=record, artifact_id=artifact_id)
         if evaluated is not None and evaluated not in initial.surface.names:
             raise UnknownScenario(f"scenario {parsed.scenario!r} serves no component {evaluated!r}")
         if initial.runtime is not None:
@@ -537,6 +557,7 @@ class RequestService:
                 record=record,
                 evaluated=evaluated,
                 rollout=rollout,
+                artifact_id=artifact_id,
             )
             hooks = prepared.hooks
             transformed = (
@@ -593,12 +614,13 @@ class RequestService:
         record: bool = True,
         evaluated: str | None = None,
         rollout: bool = False,
+        artifact_id: str | None = None,
     ) -> PreparedInference:
-        scenario = self.inference_scenario(parsed, record=record)
+        scenario = self.inference_scenario(parsed, record=record, artifact_id=artifact_id)
         selected_handler = handler if handler is not None else scenario.inference_handler
         if selected_handler is None:
             raise RecipeConfigError("the served recipe has no inference handler")
-        ref = scenario.current_artifact_ref()
+        ref = scenario.current_artifact_ref() if artifact_id is None else scenario.served_release(artifact_id)
         artifact = Artifact(ref, scenario.repository)
         surface = scenario.surface
         # A rollout call samples the served policy, so it runs the served hooks as a recorded call does.
