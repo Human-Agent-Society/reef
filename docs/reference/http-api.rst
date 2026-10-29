@@ -1246,8 +1246,8 @@ checks the layout below on the source, and then copies the directory from one
 of these URIs:
 
 - ``hf://org/model@revision``: a Hugging Face snapshot. When ``revision`` is a
-  full 40-digit commit SHA, Reef keeps a reference to the revision instead of
-  a copy (see below).
+  full 40-digit commit SHA and the component holds model weights, Reef keeps a
+  reference to the revision instead of a copy (see below).
 - ``s3://bucket/prefix/``: every object under the prefix. Empty folder
   markers, keys that end in ``/``, are skipped.
 - ``file:///absolute/path``: a directory on the service's file system,
@@ -1269,8 +1269,10 @@ content_id}``. ``content_id`` comes from the files: the SHA-256 of each file's
 path and SHA-256. The same files from two sources have the same
 ``content_id``, and each import is a new artifact.
 
-An import of ``hf://org/model@<commit>`` with a full commit SHA stores only a
-reference, ``hf-reference.json``. Reef checks the layout from the revision's
+An import of ``hf://org/model@<commit>`` with a full commit SHA into a
+component of model weights stores only a reference, ``hf-reference.json``.
+Any other component, such as a harness, stores a copy, because its readers
+read the files themselves. Reef checks the layout from the revision's
 file list and its small files, and takes each weight file's SHA-256 from the
 Hub, so it downloads no weights. ``content_id`` is the value that a copy of
 the same files gets. The repo must stay on the Hub while Reef serves or trains
