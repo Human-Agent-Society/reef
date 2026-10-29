@@ -445,7 +445,9 @@ class ScenarioCommitter:
         first, outside the locks, since it can ask a remote service, and
         before anything is copied. Then Reef stores the artifact in the empty
         ``directory``: ``files.reference`` when the source keeps the files
-        fixed (RFC #995), else a copy of the files (RFC #980). The release's
+        fixed and the layout's readers resolve a reference (RFC #995,
+        ``ArtifactLayout.resolves_references``), else a copy of the files
+        (RFC #980). The release's
         own admission check runs on what is stored, as at a training
         publication. The artifact's content id is the content id of
         ``files``: a copy's is computed from the copy, which has the same
@@ -464,7 +466,7 @@ class ScenarioCommitter:
         surface = self._binding.surface
         component_surface = surface.components[component]
         layout.check(files)
-        if files.reference is None:
+        if files.reference is None or not layout.resolves_references:
             files.copy_into(directory)
             content_id = directory_content_id(directory)
         else:
