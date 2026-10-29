@@ -31,7 +31,7 @@ from reef.recipe.sft.processor import SFTJobData
 from reef.record2record import Record2Record
 from reef.record2sample import Record2Sample
 from reef.sample2job import Sample2JobSettings
-from reef.storage.samples import SampleStore, consumed_sample_id
+from reef.storage.samples import TrainerSamples, consumed_sample_id
 
 #: The imported train tasks of one task job when ``pipeline.sample2job.config.tasks_per_job`` is not set.
 DEFAULT_TASKS_PER_JOB = 8
@@ -88,7 +88,7 @@ class SFTThenRLJobData(SFTJobData):
     def __init__(self, context: PipelineContext, settings: SFTThenRLJobSettings) -> None:
         super().__init__(context, settings.buffer_size, settings.job_samples)
         self.tasks_per_job = settings.tasks_per_job
-        self.samples: SampleStore | None = context.samples
+        self.samples: TrainerSamples | None = context.samples
         self.task_pool = TaskPool()
         self.handed_out: HandedOutTasks | None = None
         #: The tasks of the task jobs submitted in this process that did not end.

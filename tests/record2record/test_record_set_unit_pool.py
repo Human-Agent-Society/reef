@@ -197,22 +197,19 @@ def test_producing_runtime_load_ids_come_from_every_sample_and_token_span() -> N
     assert producing_runtime_load_ids(tasks) == frozenset({"e:1", "e:2", "e:3", None})
 
 
-def test_the_stage_drops_held_units_behind_the_serving_version_but_not_a_reserved_batch() -> None:
+def test_the_stage_finds_samples_behind_the_serving_version_stale() -> None:
     stage = InferenceRecord2Record()
-    for record_id, version in (("old", "e:1"), ("new", "e:2")):
-        stage.settle(single(record_id, stage.pool.next_arrival_index()), SampleStatus.READY, frozenset({version}))
+    old = policy_trajectory("old", (1, 2), (1,), (-0.1,), 1.0, runtime_load_id="e:1")
+    new = policy_trajectory("new", (1, 2), (1,), (-0.1,), 1.0, runtime_load_id="e:2")
+    unversioned = policy_trajectory("unversioned", (1, 2), (1,), (-0.1,), 1.0)
+    # Before the serving version is known, no sample is stale.
+    assert not stage.is_stale((old, unversioned))
     stage.observe_serving_runtime_load_id("e:1")
     stage.observe_serving_runtime_load_id("e:2")
-    stage.pool.reserve(stage.pool.ordered_units())
-    stage.drop_stale_units()
-    assert len(stage.pool) == 2
-
-    stage.pool.release_reservation()
-    stage.drop_stale_units()
-    assert [held.unit_id for held in stage.pool.units()] == ["new"]
-    assert stage.take_ended() == frozenset({"old"})
-    assert "old" in stage.releasable_record_ids()
-    assert set(stage.producing_runtime_load_ids) == {"new"}
+    assert stage.is_stale((old,)) and not stage.is_stale((new,))
+    assert stage.is_stale((new, old)), "one stale sample makes the samples stale"
+    assert stage.is_stale((unversioned,)), "a sample without a producing version is stale"
+    assert not stage.is_stale((TaskSample(Path("task")),)), "a task rolls out with the weights it trains"
 
 
 def test_record_stage_settings_default_to_zero_and_refuse_a_negative_limit() -> None:
@@ -224,15 +221,15 @@ def test_record_stage_settings_default_to_zero_and_refuse_a_negative_limit() -> 
         InferenceRecord2Record.from_config({"max_staleness": -1}, context=PipelineContext("s"), environ={})
 
 
-def test_a_stage_drops_only_the_units_more_than_its_configured_limit_behind() -> None:
+def test_a_stage_finds_only_the_samples_more_than_its_configured_limit_behind_stale() -> None:
     stage = InferenceRecord2Record.from_config({"max-staleness": 1}, context=PipelineContext("s"), environ={})
-    for record_id, version in (("two-behind", "e:1"), ("one-behind", "e:2"), ("current", "e:3")):
-        stage.settle(single(record_id, stage.pool.next_arrival_index()), SampleStatus.READY, frozenset({version}))
     for version in ("e:1", "e:2", "e:3"):
         stage.observe_serving_runtime_load_id(version)
-    stage.drop_stale_units()
-    assert [held.unit_id for held in stage.pool.units()] == ["one-behind", "current"]
-    assert stage.take_ended() == frozenset({"two-behind"})
+    stale = {
+        name: stage.is_stale((policy_trajectory(name, (1, 2), (1,), (-0.1,), 1.0, runtime_load_id=version),))
+        for name, version in (("two-behind", "e:1"), ("one-behind", "e:2"), ("current", "e:3"))
+    }
+    assert stale == {"two-behind": True, "one-behind": False, "current": False}
 
 
 def test_a_serving_version_of_another_incarnation_restarts_the_served_versions() -> None:

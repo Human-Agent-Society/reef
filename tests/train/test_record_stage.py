@@ -27,7 +27,7 @@ from reef.record2record import (
 from reef.record2sample import ImmediateRecord2Sample, Record2Sample, ReportSamples, SampleResult, SkippedReport
 from reef.sample2job import Sample2Job, Sample2JobSettings
 from reef.storage.commits import CommitRecord
-from reef.storage.samples import consumed_sample_id
+from reef.storage.samples import TrainerSamples, consumed_sample_id
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train import PipelineContext, Trainer
 from reef.train.pipeline import TrainingPipeline
@@ -246,7 +246,7 @@ def test_a_record_the_stage_ends_is_consumed_by_the_next_commit_and_then_release
     result = trainer.run_once(0)
     assert result is not None
     prepared = trainer.prepare_commit(result)
-    assert prepared.consumed_ids == {"i1", "r1", "drop-1"}
+    assert prepared.consumed_ids == {"i1", "r1", "drop-1", consumed_sample_id("r1:0")}
     trainer.commit(prepared)
     assert not trainer.pipeline.releasable_record_ids()
     assert "drop-1" in trainer.consumed_record_ids
@@ -309,7 +309,9 @@ def test_a_batch_holds_the_tasks_of_every_report_in_a_group_in_arrival_order() -
     processor.push(slotted("r1", "i1", "a"))
     batch = processor.build_job_data(1)
     assert [str(item.task_path) for item in batch.samples] == ["r2", "r1"]
-    assert processor.acknowledge(batch.data_id) == {"i1", "i2", "r1", "r2"}
+    # The ready group's records are consumed when its samples are stored; the job data consumes the samples.
+    assert {"i1", "i2", "r1", "r2"} <= processor.releasable_record_ids()
+    assert processor.acknowledge(batch.data_id) == {consumed_sample_id("r2:0"), consumed_sample_id("r1:0")}
     assert not processor.samples
 
 
@@ -398,7 +400,7 @@ TRAJECTORY = TrajectorySample({"schema_version": "ATIF-v1.4", "agent": {"name": 
 
 
 @pytest.mark.unit
-def test_uploaded_trajectories_go_first_in_a_batch_and_count_as_one_sample_each() -> None:
+def test_uploaded_trajectories_train_in_store_order_and_count_as_one_sample_each() -> None:
     context = PipelineContext("s")
     processor = TrainingPipeline(
         context,
@@ -406,11 +408,11 @@ def test_uploaded_trajectories_go_first_in_a_batch_and_count_as_one_sample_each(
         record2sample=InferenceSamples(),
         sample2job=UploadJobData(context, None, None),
     )
+    processor.store.store.add_trajectories((("t1", TRAJECTORY), ("t2", TRAJECTORY)))
     processor.push(inference("i1"))
-    assert not processor.ready(2)
-    processor.push_trajectory("t1", TRAJECTORY)
-    processor.push_trajectory("t2", TRAJECTORY)
-    assert processor.status()["ready_samples"] == 3
+    assert processor.ready(2)
+    # The task sample of i1 is another kind of sample, so it waits for a job of its own.
+    assert processor.status()["ready_samples"] == 2
 
     batch = processor.build_job_data(2)
     assert batch.samples == (TRAJECTORY, TRAJECTORY)
@@ -419,16 +421,16 @@ def test_uploaded_trajectories_go_first_in_a_batch_and_count_as_one_sample_each(
     assert batch.samples == (TRAJECTORY, TRAJECTORY)
     assert processor.acknowledge(batch.data_id) == {"sample:t1", "sample:t2"}
 
-    # A consumed trajectory that the trainer reads again before the commit releases it does not queue again.
-    processor.push_trajectory("t1", TRAJECTORY)
-    processor.push_trajectory("t3", TRAJECTORY)
-    batch = processor.build_job_data(2)
-    assert batch.samples == (TRAJECTORY, TaskSample(Path("i1"), source_agent_record_ids=("i1",)))
-    assert processor.acknowledge(batch.data_id) == {"sample:t3", "i1"}
-    consumed = frozenset({"sample:t1", "sample:t2", "sample:t3"})
-    assert consumed <= processor.releasable_record_ids()
-    processor.release_records(consumed)
-    assert not processor.consumed_trajectory_ids
+    # A trained trajectory that is uploaded again does not queue again; job data takes the samples in store order.
+    processor.store.store.add_trajectories((("t1", TRAJECTORY), ("t3", TRAJECTORY)))
+    batch = processor.build_job_data(1)
+    assert batch.samples == (TaskSample(Path("i1"), source_agent_record_ids=("i1",)),)
+    assert processor.acknowledge(batch.data_id) == {"sample:i1:0"}
+    batch = processor.build_job_data(1)
+    assert batch.samples == (TRAJECTORY,)
+    assert processor.acknowledge(batch.data_id) == {"sample:t3"}
+    assert "i1" in processor.releasable_record_ids()
+    assert not processor.ready(1)
 
 
 def upload_pipeline(context: PipelineContext) -> TrainingPipeline:
@@ -462,8 +464,8 @@ def test_each_trainer_skips_only_the_samples_that_its_own_component_trained() ->
             pipeline_factory=upload_pipeline,
             candidate_backend=CountingBackend(),
             default_job_samples=1,
+            samples=TrainerSamples(session.samples, component),
         )
-        trainer.read_samples(session.samples, component)
         consumed[component] = trainer.prepare_commit(trainer.run_once(0)).consumed_ids
     # Component a trained t1, so its next job takes t2; component b has not trained t1 yet.
     assert consumed == {"a": {consumed_sample_id("t2")}, "b": {consumed_sample_id("t1")}}
@@ -476,7 +478,11 @@ def test_a_pipeline_refuses_a_trajectory_that_its_task_to_job_stage_does_not_acc
     context = PipelineContext("s")
     processor = TrainingPipeline(context, sample2job=PairJobData(context, None, None))
     with pytest.raises(ValueError, match="does not accept uploaded trajectories"):
-        processor.push_trajectory("t1", TRAJECTORY)
+        processor.uploaded_sample(TRAJECTORY)
+    # A stored upload does not reach its job data either.
+    processor.store.store.add_trajectories((("t1", TRAJECTORY),))
+    assert not processor.ready(1)
+    assert processor.status()["ready_samples"] == 0
 
 
 def ready_tasks(*names: str) -> SampleResult:
@@ -514,13 +520,13 @@ def test_advancing_collects_later_results_without_reserving_or_replacing_a_batch
     processor.later_tasks.finish("i2", ready_tasks("c"))
     processor.advance()
     assert processor.build_job_data(2) is batch
-    assert processor.acknowledge(batch.data_id) == {"i1"}
+    assert processor.acknowledge(batch.data_id) == {"sample:i1:0", "sample:i1:1"}
     assert processor.status()["ready_samples"] == 1
     assert [str(item.task_path) for item in processor.build_job_data(1).samples] == ["c"]
 
 
 @pytest.mark.unit
-def test_buffer_eviction_and_staleness_reach_the_stage_with_distinct_reasons() -> None:
+def test_samples_beyond_the_buffer_size_wait_and_stale_samples_leave_the_buffer_without_a_drop() -> None:
     context = PipelineContext("s")
     records = DropRecordingRecords()
     later_tasks = LaterSamples()
@@ -535,13 +541,16 @@ def test_buffer_eviction_and_staleness_reach_the_stage_with_distinct_reasons() -
     later_tasks.finish("i1", SampleResult.ready((TRAJECTORY,)))
     later_tasks.finish("i2", SampleResult.ready((TRAJECTORY,)))
     processor.advance()
-    assert records.dropped == [("i1", UnitDropReason.BUFFER_LIMIT)]
+    # Both units are stored and their records consumed; the buffer takes one sample, and the other waits.
+    assert records.dropped == []
+    assert processor.status()["ready_samples"] == 1
+    assert processor.releasable_record_ids() == {"i1", "i2"}
     # Trajectories without a producing version become stale once the serving version is known.
     processor.observe_serving_runtime_load_id("e:1")
     processor.advance()
-    assert records.dropped == [("i1", UnitDropReason.BUFFER_LIMIT), ("i2", UnitDropReason.STALE)]
+    assert records.dropped == []
     assert processor.status()["ready_samples"] == 0
-    assert processor.releasable_record_ids() == {"i1", "i2"}
+    assert not processor.ready(1)
 
 
 @pytest.mark.unit
@@ -559,22 +568,31 @@ def test_the_pipeline_is_ready_when_its_held_units_hold_the_asked_sample_count()
 
 
 @pytest.mark.unit
-def test_a_batch_takes_whole_units_in_selection_order_until_it_holds_the_sample_count() -> None:
-    processor = WaitingPipeline(PipelineContext("s"))
+def test_a_batch_takes_the_buffer_size_in_store_order_and_the_rest_of_each_unit_it_touches() -> None:
+    context = PipelineContext("s")
+    later_tasks = LaterSamples()
+    processor = TrainingPipeline(
+        context,
+        record2record=InferenceRecord2Record(),
+        record2sample=later_tasks,
+        sample2job=PairJobData(context, 2, None),
+    )
     for record_id in ("i1", "i2", "i3"):
         processor.push(inference(record_id))
-    processor.later_tasks.finish("i3", ready_tasks("c"))
-    processor.later_tasks.finish("i2", ready_tasks("b1", "b2"))
-    processor.later_tasks.finish("i1", ready_tasks("a1", "a2"))
-    batch = processor.build_job_data(3)
-    # The second unit passes the sample count; the batch keeps it whole and leaves the third unit held.
-    assert [str(item.task_path) for item in batch.samples] == ["a1", "a2", "b1", "b2"]
-    assert processor.acknowledge(batch.data_id) == {"i1", "i2"}
-    assert processor.status()["ready_samples"] == 1
+    later_tasks.finish("i3", ready_tasks("c"))
+    later_tasks.finish("i2", ready_tasks("b1", "b2"))
+    later_tasks.finish("i1", ready_tasks("a1", "a2"))
+    batch = processor.build_job_data(2)
+    # Units go to the store in the order they became ready. The second unit passes the buffer size; the batch
+    # keeps it whole and leaves the third unit held.
+    assert [str(item.task_path) for item in batch.samples] == ["c", "b1", "b2"]
+    assert processor.acknowledge(batch.data_id) == {"sample:i3:0", "sample:i2:0", "sample:i2:1"}
+    assert processor.status()["ready_samples"] == 2
+    assert [str(item.task_path) for item in processor.build_job_data(2).samples] == ["a1", "a2"]
 
 
 @pytest.mark.unit
-def test_the_pipeline_drops_the_oldest_unreserved_units_beyond_the_buffer_size() -> None:
+def test_samples_beyond_the_buffer_size_wait_for_the_next_job_data() -> None:
     context = PipelineContext("s")
     processor = TrainingPipeline(
         context,
@@ -586,14 +604,25 @@ def test_the_pipeline_drops_the_oldest_unreserved_units_beyond_the_buffer_size()
     reserved = processor.build_job_data(1)
     for record_id in ("i2", "i3", "i4"):
         processor.push(inference(record_id))
-    for trajectory_id in ("t1", "t2", "t3"):
-        processor.push_trajectory(trajectory_id, TRAJECTORY)
+    processor.store.store.add_trajectories(tuple((trajectory_id, TRAJECTORY) for trajectory_id in ("t1", "t2", "t3")))
     processor.push(inference("i5"))
-    # The reserved batch stays, and uploaded trajectories do not count toward the buffer.
-    assert [unit.unit_id for unit in processor.record2record.pool.units()] == ["i1", "i4", "i5"]
-    assert {"i2", "i3"} <= processor.releasable_record_ids()
-    assert processor.status()["ready_samples"] == 6
-    assert processor.acknowledge(reserved.data_id) == {"i1"}
+    processor.advance()
+    # The reserved job data stays, nothing is dropped, and the buffer holds buffer_size samples of one kind.
+    assert processor.build_job_data(1) is reserved
+    assert {"i1", "i2", "i3", "i4", "i5"} <= processor.releasable_record_ids()
+    assert processor.status()["ready_samples"] == 2
+    assert processor.acknowledge(reserved.data_id) == {"sample:i1:0"}
+    # Each later job data takes the next buffer_size samples in store order; the uploads wait for their own kind.
+    jobs = []
+    while processor.ready(1):
+        batch = processor.build_job_data(1)
+        jobs.append(sorted(processor.acknowledge(batch.data_id)))
+    assert jobs == [
+        ["sample:i2:0", "sample:i3:0"],
+        ["sample:i4:0", "sample:i5:0"],
+        ["sample:t1", "sample:t2"],
+        ["sample:t3"],
+    ]
 
 
 @pytest.mark.unit
@@ -615,10 +644,10 @@ def test_the_pipeline_keeps_the_newest_unit_even_when_it_alone_is_over_the_buffe
 @pytest.mark.unit
 def test_the_stage_sizes_are_its_own_or_else_follow_the_context_default() -> None:
     defaulted = PairJobData(PipelineContext("s", default_job_samples=3), None, None)
-    assert (defaulted.job_samples, defaulted.buffer_size) == (3, 12), "the buffer holds the data of four jobs"
+    assert (defaulted.job_samples, defaulted.buffer_size) == (3, 3), "the buffer holds the data of one job"
     configured = PairJobData(PipelineContext("s", default_job_samples=3), 5, 2)
     assert (configured.job_samples, configured.buffer_size) == (2, 5)
-    assert (PairJobData(PipelineContext("s", default_job_samples=3), None, 2).buffer_size) == 8
+    assert (PairJobData(PipelineContext("s", default_job_samples=3), None, 2).buffer_size) == 2
     unsized = PairJobData(PipelineContext("s"), None, None)
     assert (unsized.job_samples, unsized.buffer_size) == (None, None), "no default holds every sample"
     with pytest.raises(ValueError, match="job_samples must be None or a positive int"):
@@ -711,7 +740,13 @@ def test_aborted_report_references_are_released_and_stay_excluded_after_replay(
     assert len(batch.samples) == 1
     assert batch.samples[0].source_agent_record_ids == ("valid", "valid-report")
     prepared = trainer.prepare_commit(result)
-    assert prepared.consumed_ids == {"valid", "valid-report", "aborted-report", *references}
+    assert prepared.consumed_ids == {
+        "valid",
+        "valid-report",
+        "aborted-report",
+        *references,
+        consumed_sample_id("valid-report:0"),
+    }
     trainer.commit(prepared)
     assert not trainer.pipeline.releasable_record_ids()
 

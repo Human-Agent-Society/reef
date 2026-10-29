@@ -1,12 +1,13 @@
-"""The sample-to-job contract: a buffer of samples, and the samples of the selected record set units become one job's data.
+"""The sample-to-job contract: the size of a job, and the samples of the buffer become one job's data.
 
-The record-to-sample stage makes the samples of each record set. The buffer
-holds the samples of the record sets that wait for a job, at most
-``buffer_size``. When the buffer holds at least
-``job_samples`` samples, the trainer asks the training pipeline
-(:class:`~reef.train.pipeline.TrainingPipeline`) for the next job's data. The
-pipeline selects whole record set units from the record-to-record stage and
-gives their samples to a recipe's ``Sample2Job``. A sample is a ``Sample``.
+The record-to-sample stage makes the samples of each record set, and the
+pipeline stores the samples of each ready unit in the scenario's sample store.
+The buffer is the untrained samples that the next job takes: the first
+``buffer_size`` of them in store order, and the rest of each group that those
+touch. When the buffer holds at least ``job_samples`` samples, the trainer
+asks the training pipeline (:class:`~reef.train.pipeline.TrainingPipeline`)
+for the next job's data, and the pipeline gives the buffer's samples to a
+recipe's ``Sample2Job``. A sample is a ``Sample``.
 """
 
 from __future__ import annotations
@@ -26,9 +27,6 @@ from reef.record2record import Record2Record
 from reef.record2sample import Record2Sample
 from reef.storage.samples import SampleKind
 
-#: The jobs whose data the sample buffer holds when ``pipeline.sample2job.config.buffer_size`` is not set.
-DEFAULT_BUFFER_JOBS = 4
-
 
 def require_optional_positive(value: object, name: str) -> None:
     """Raise ``ValueError`` unless ``value`` is None or a positive int (not a bool)."""
@@ -38,7 +36,7 @@ def require_optional_positive(value: object, name: str) -> None:
 
 @dataclass(frozen=True)
 class Sample2JobSettings(PluginSettings):
-    """The config of a sample-to-job stage: the size of its sample buffer and the fewest samples of one job.
+    """The config of a sample-to-job stage: the most samples of one automatic job, and the fewest.
 
     Values: ``buffer_size`` and ``job_samples`` are each None or a positive
     int. The constructor refuses other values.
@@ -50,7 +48,10 @@ class Sample2JobSettings(PluginSettings):
 
     buffer_size: int | None = config_option(
         None,
-        help="The most samples the buffer holds; at least job_samples. Omitted holds the data of four jobs.",
+        help=(
+            "The most samples that one job takes from the buffer, beside the rest of a group; at least "
+            "job_samples. Omitted takes job_samples."
+        ),
     )
     job_samples: int | None = config_option(
         None,
@@ -66,23 +67,24 @@ class Sample2JobSettings(PluginSettings):
 
 
 class Sample2Job(ABC, Plugin):
-    """The sample-to-job stage: bound the sample buffer, and shape the samples of the selected record set units into one job's data.
+    """The sample-to-job stage: the size of each job, and the job's data and parameters from the buffer's samples.
 
     Values: for a stage that ``trains_own_job_data_only``, ``job_samples`` and
     ``buffer_size`` are None: its jobs are its own samples, which wait in the
     stage, not in a buffer. For any other stage, ``job_samples`` is None or a
     positive int: the configured value, or else ``context.default_job_samples``;
     it is None only for a trainer that trains nothing. ``buffer_size`` is None
-    or a positive int: the configured size, or else ``DEFAULT_BUFFER_JOBS *
-    job_samples``; None holds every sample. ``max_job_samples`` is None or a
+    or a positive int: the configured size, or else ``job_samples``; None
+    takes every untrained sample. ``max_job_samples`` is None or a
     positive int, the most samples one job's data may hold; None sets no limit.
     ``buffer_size`` is at least ``job_samples``, and ``job_samples`` at most
-    ``max_job_samples``, when both are set. The constructor refuses other
+    ``max_job_samples``, and ``buffer_size`` at most ``max_job_samples``,
+    when both are set. The constructor refuses other
     values with ``PluginConfigError``.
-    Purpose: the pipeline is ready when its held samples are at least
-    ``job_samples``, and it keeps at most ``buffer_size`` samples of held
-    record sets. The pipeline takes whole record set units, so one job's data
-    can hold more than ``job_samples``.
+    Purpose: the pipeline is ready when its buffer holds at least
+    ``job_samples`` samples. The buffer is the first ``buffer_size`` untrained
+    samples and the rest of each group that those touch, so one job's data can
+    hold more than ``buffer_size``.
     A recipe implements ``make_job_data``. It runs on the trainer thread
     without network or model calls. The class attributes declare what the
     pipeline and the trainer need to know about the recipe's job data.
@@ -143,7 +145,7 @@ class Sample2Job(ABC, Plugin):
             if buffer_size is not None:
                 self.buffer_size = buffer_size
             elif self.job_samples is not None:
-                self.buffer_size = DEFAULT_BUFFER_JOBS * self.job_samples
+                self.buffer_size = self.job_samples
             else:
                 self.buffer_size = None
         #: The most samples one job's data may hold; None sets no limit. A stage whose data is one fixed unit sets it.
@@ -155,6 +157,10 @@ class Sample2Job(ABC, Plugin):
         if self.job_samples is not None and max_job_samples is not None and self.job_samples > max_job_samples:
             raise PluginConfigError(
                 f"{stage} holds at most {max_job_samples} samples in one job's data, not job_samples {self.job_samples}"
+            )
+        if self.buffer_size is not None and max_job_samples is not None and self.buffer_size > max_job_samples:
+            raise PluginConfigError(
+                f"{stage} holds at most {max_job_samples} samples in one job's data, not buffer_size {self.buffer_size}"
             )
 
     @classmethod
@@ -181,17 +187,17 @@ class Sample2Job(ABC, Plugin):
 
     @abstractmethod
     def make_job_data(self, samples: tuple[Sample, ...], data_id: str) -> JobData:
-        """Build one job's data from the samples of the selected record sets, in selection order.
+        """Build one job's data from the samples of the buffer, in store order.
 
         Use ``data_id`` as the ID of the returned value. The pipeline assigns
         it. Automatic job data gets ``<scenario>:data:<number>``. An
         instruction's data gets ``<scenario>:instruction:<request id>``. The
         number counts the job data of this pipeline and starts again when the
         pipeline restarts. It is not a training step.
-        The pipeline tracks consumption by record set, including the samples
-        that the recipe leaves out of the job data. In ``manual`` mode an
-        instruction's data holds the samples that automatic job data would take next: ``job_samples`` of them, or
-        fewer when the stage ``reads_instructions``.
+        The job's commit consumes every sample of ``samples``, including the
+        samples that the recipe leaves out of the job data. In ``manual`` mode an
+        instruction's data holds the samples that automatic job data would take next: the buffer, which holds at
+        least ``job_samples`` samples unless the stage ``reads_instructions``.
         """
 
     def job_parameters(self, data: JobData) -> Mapping[str, Any]:

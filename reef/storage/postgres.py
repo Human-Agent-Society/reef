@@ -50,6 +50,7 @@ from reef.storage.migrations import (
     legacy_model_configs,
     migrate_imported_tasks,
     migrate_record_storage,
+    migrate_sample_columns,
     migrate_uploaded_trajectories,
 )
 from reef.storage.records import RecordLoss, RecordRetention
@@ -193,7 +194,7 @@ class PostgresRecordDatabase:
                 connection.execute(CreateSchema(schema, if_not_exists=True))
                 version.create(connection, checkfirst=True)
                 versions: list[int] = list(connection.execute(select(version.c.version)).scalars().all())
-                if versions and versions not in ([1], [2], [3], [4], [5], [6], [7], [8], [9], [10]):
+                if versions and versions not in ([1], [2], [3], [4], [5], [6], [7], [8], [9], [10], [11]):
                     raise ReefError("unsupported PostgreSQL record schema version")
                 # Version 4 adds the commit and settings tables. Version 5 adds the task tables.
                 # Version 6 adds the uploaded trajectory table. Version 7 replaces task_candidate and
@@ -203,9 +204,11 @@ class PostgresRecordDatabase:
                 # evaluations that clients ask for. Version 10 replaces uploaded_trajectory with training_sample and
                 # sample_train_count, which counts the committed jobs of each trainer that trained a sample. create_all adds them to an older
                 # schema, migrate_uploaded_trajectories moves the uploaded trajectories, and migrate_imported_tasks
-                # moves the tasks of the imported-tasks task store.
+                # moves the tasks of the imported-tasks task store. Version 11 adds component, group_key and
+                # record_ids_json to training_sample (migrate_sample_columns): the samples that the record stages make.
                 metadata.create_all(connection)
                 migrate_record_storage(connection, self.tables.records, self.tables.consumption)
+                migrate_sample_columns(connection, self.sample_table)
                 migrate_uploaded_trajectories(
                     connection, self.sample_table, self.sample_train_count_table, self.commit_table
                 )
@@ -219,10 +222,10 @@ class PostgresRecordDatabase:
                 )
                 for index in self.tables.records.indexes:
                     index.create(connection, checkfirst=True)
-                if versions and versions != [10]:
-                    connection.execute(version.update().values(version=10))
+                if versions and versions != [11]:
+                    connection.execute(version.update().values(version=11))
                 elif not versions:
-                    connection.execute(version.insert().values(version=10))
+                    connection.execute(version.insert().values(version=11))
         except BaseException:
             self._engine.dispose()
             raise
