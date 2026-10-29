@@ -652,10 +652,6 @@ images, and then records its publication. A ``StoredTask`` holds the task
      - Return the local task directory of a candidate or a published task,
        for example for ``read_harbor_task`` or ``TaskRolloutRunner.run``. Do not
        change it.
-   * - ``mark_trained(task_names=...)``, ``trained_task_names()``
-     - Mark published train tasks as trained, or return the trained ones. The
-       rollout of a task pool marks a task once the commit of its training step
-       is durable, so a restart rolls out only the others.
    * - ``write_document(key=..., document=...)``, ``documents()``
      - Save a text document under a non-empty key, or return every document by
        key. Each key holds one document; another document under a used key
@@ -1068,10 +1064,9 @@ record2sample=..., sample2job=...)``):
   ``context.default_job_samples``; a ``buffer_size`` of ``None`` takes
   ``job_samples``. The constructor raises ``PluginConfigError`` for
   a buffer smaller than ``job_samples`` and for a ``job_samples`` above
-  ``max_job_samples`` (an SDPO or TTTD grid). A stage with the class
-  attribute ``trains_own_job_data_only`` takes neither size.
+  ``max_job_samples`` (an SDPO or TTTD grid).
   ``Trainer.build`` raises ``PluginConfigError`` for a training trainer whose
-  other stage has no ``job_samples``. ``Sample2JobSettings`` parses the
+  stage has no ``job_samples``. ``Sample2JobSettings`` parses the
   ``buffer_size`` and ``job_samples`` keys, and a stage with more keys
   extends it. See `Job size <../developer-guide/processors.rst#job-size>`__.
 
@@ -1928,10 +1923,10 @@ A failed job ends like a finished one. Reef consumed the records of its data whe
 it submitted the job, so they do not train again.
 
 Once the commit of a job's end is durable, the trainer calls
-``Sample2Job.job_ended(outcome)`` with ``last_job``. The default does nothing.
+``Record2Sample.job_ended(outcome)`` with ``last_job``. The default does nothing.
 A trainer that starts with no running job calls it again for the last job
 that ended, before any other call to a new stage. The stage takes it as the
-end of the last job that it may have handed out.
+end of the last job that may have trained its samples.
 A stage whose job data holds ``TaskSample`` values (Harbor tasks) reads each
 task's rollout results from the outcome's ``metrics``: the Tinker component
 reports ``rollout_rewards``, the rewards of each task's rollouts, by task
