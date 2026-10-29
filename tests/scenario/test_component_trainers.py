@@ -633,7 +633,11 @@ def test_a_weights_job_commits_while_the_harness_backend_is_away(tmp_path: Path,
     )
     time.sleep(0.2)
     assert 1 <= away.attempts <= 3
-    assert dispatcher.build_training_status()["error"] == "agent: RuntimeError: proposer away"
+    # A retry clears the error until it fails again, so wait for a status read that shows it.
+    assert _wait_for(
+        lambda: dispatcher.build_training_status()["error"] == "agent: RuntimeError: proposer away",
+        timeout_seconds=15,
+    )
 
 
 @pytest.mark.unit

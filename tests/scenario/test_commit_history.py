@@ -961,8 +961,11 @@ def test_local_backend_failure_reaches_status_and_retries_pending_job_data(tmp_p
     dispatcher.accept_record(trace_inference("i1"))
     dispatcher.accept_record(trace_report("r1", "i1"))
 
-    wait_until(lambda: dispatcher.build_training_status()["error"] is not None, "the failure did not reach the status")
-    assert dispatcher.build_training_status()["error"] == "skills: RuntimeError: the method failed"
+    # A retry clears the error until it fails again, so wait for a status read that shows it.
+    wait_until(
+        lambda: dispatcher.build_training_status()["error"] == "skills: RuntimeError: the method failed",
+        "the failure did not reach the status",
+    )
 
     failed_attempts = calls
     should_fail = False
