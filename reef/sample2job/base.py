@@ -105,8 +105,9 @@ class Sample2Job(ABC, Plugin):
     #: Whether the recipe trains on uploaded trajectories. Admission refuses an upload
     #: when no trainer of the scenario accepts uploaded trajectories.
     accepts_trajectories: bool = False
-    #: Whether the recipe reads the scenario's imported tasks (its sample store's tasks). Admission refuses a
-    #: task upload (``POST /reef/scenarios/{scenario}/tasks``) when no trainer of the scenario reads them.
+    #: Whether the recipe trains the scenario's imported ``train`` tasks: they are samples of its buffer, as
+    #: uploaded trajectories are. Admission refuses an import to the ``train`` split
+    #: (``POST /reef/scenarios/{scenario}/tasks``, ``task-import``) when no trainer of the scenario trains them.
     accepts_imported_tasks: bool = False
 
     def __init__(
@@ -181,13 +182,15 @@ class Sample2Job(ABC, Plugin):
         """
 
     def job_parameters(self, data: JobData) -> Mapping[str, Any]:
-        """The parameters of the training job that trains ``data``: ``context.job_parameters`` of its samples' kind.
+        """The parameters of the training job that trains ``data``: ``context.job_parameters`` of its samples' kind,
+        with the keys of its instruction's ``parameters`` put over them.
 
         Together with ``make_job_data``, this is the stage's function from the selected samples to the job: the
-        data, and the parameters that the job loop submits with it. The result depends only on ``data``, since a
-        resubmission after a restart must name the same job. Raise ``ValueError`` for data with both trajectories
-        and tasks, and for a kind that the recipe gives no parameters. Data with no sample has no parameters: a
-        harness step trains such data, and a harness step takes none.
+        data, and the parameters that the job loop submits with it. The result depends only on ``data``, which
+        holds the instruction, since a resubmission after a restart must name the same job. The training
+        component checks the result. Raise ``ValueError`` for data with both trajectories and tasks, and for a
+        kind that the recipe gives no parameters when no instruction gives any. Data with no sample has no
+        parameters: a harness step trains such data, and a harness step takes none.
         """
         kinds: set[SampleKind] = {
             "task" if isinstance(sample, TaskSample) else "trajectory" for sample in data.samples
@@ -197,10 +200,11 @@ class Sample2Job(ABC, Plugin):
         if not kinds:
             return {}
         (kind,) = kinds
-        parameters = self.context.job_parameters.get(kind)
-        if parameters is None:
+        defaults = self.context.job_parameters.get(kind)
+        overrides = {} if data.request is None else data.request.parameters
+        if defaults is None and not overrides:
             raise ValueError(f"the recipe gives no job parameters for a job of {kind} samples")
-        return dict(parameters)
+        return {**(defaults or {}), **overrides}
 
     def experiment_config(self) -> Mapping[str, Any]:
         """A non-secret description of the jobs that the stage makes, which experiment runs record."""
