@@ -1,0 +1,372 @@
+"""The private HTTP boundary between the routing controller and its REEF child.
+
+The child serves ``/reef/lifecycle`` and its candidate check only on a Unix
+socket in a private directory; the public TCP listener has no lifecycle route.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import http.client
+import json
+import math
+import socket
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from reef.service.routing import is_router_config_hash
+
+#: AF_UNIX paths are limited to 108 bytes on Linux, including the terminating NUL; keep a margin.
+MAX_SOCKET_PATH_BYTES = 103
+#: The child's private route that checks a candidate manifest's providers; it is not a lifecycle command.
+CANDIDATE_CHECK_PATH = "/reef/lifecycle/check"
+#: The most of a control reply that the client reads.
+CONTROL_REPLY_LIMIT_BYTES = 1024 * 1024
+#: The most characters of a refused candidate check's reason that reach the owner's events.
+CHECK_REASON_LIMIT = 300
+
+
+class RoutingControlError(RuntimeError):
+    """A bounded control request failed without exposing credentials or bodies.
+
+    Values: ``retryable`` is a bool; ``status_code`` is None when no HTTP reply status exists, or the
+    child's HTTP status from 100 to 599. ``retryable`` tells the controller whether waiting and checking
+    again can succeed; ``ReefLifecycleClient.request`` itself retries only transport timeouts.
+    """
+
+    def __init__(self, message: str, *, retryable: bool = True, status_code: int | None = None) -> None:
+        if type(retryable) is not bool:
+            raise ValueError("routing control retryable must be a boolean")
+        if status_code is not None and (type(status_code) is not int or not 100 <= status_code <= 599):
+            raise ValueError("routing control status_code must be None or an HTTP status")
+        super().__init__(message)
+        self.retryable = retryable
+        self.status_code = status_code
+
+
+class RoutingControlTimeout(RoutingControlError):
+    """No timely reply: every attempt timed out, or the reply came after the caller's deadline.
+
+    It does not show that the child did nothing: a command may have been applied before its reply was lost.
+    """
+
+
+@dataclass(frozen=True)
+class LifecycleStatus:
+    """The admission state and outstanding work of one managed REEF child, as its lifecycle status reports them.
+
+    Values: ``deployment_id`` and ``generation`` are non-empty strings. ``snapshot_version`` is a string, empty
+    only before the child names a manifest. ``router_config_hash`` is empty before the owner publishes a runtime,
+    otherwise a router runtime hash. ``accepting`` and ``stopping`` are bools, and ``stopping`` implies not
+    ``accepting``. ``control_revision`` is an int ≥ -1, and -1 exactly before the child applies a command.
+    ``active_requests``, ``pending_writes``, ``drain_pending_writes``, ``failed_writes`` and ``forced_requests`` are
+    ints ≥ 0, and ``drain_pending_writes ≤ pending_writes``: the drain counts a subset of the pending writes.
+    Purpose: ``RequestAcceptance.status`` makes it, and ``to_json`` gives its wire form. ``from_json`` reads that
+    form for ``ReefLifecycleClient.request``, whose deployment controller checks the identity and waits for
+    ``idle``: no admitted request, including an upload in progress, and no pending write the drain waits for.
+    """
+
+    deployment_id: str
+    generation: str
+    snapshot_version: str
+    router_config_hash: str
+    accepting: bool
+    stopping: bool
+    control_revision: int
+    active_requests: int
+    pending_writes: int
+    drain_pending_writes: int
+    failed_writes: int
+    forced_requests: int
+
+    def __post_init__(self) -> None:
+        if any(not isinstance(text, str) or not text for text in (self.deployment_id, self.generation)):
+            raise ValueError("a lifecycle status needs a deployment ID and a generation")
+        if not isinstance(self.snapshot_version, str):
+            raise ValueError("a lifecycle status snapshot_version must be a string")
+        if self.router_config_hash != "" and not is_router_config_hash(self.router_config_hash):
+            raise ValueError("a lifecycle status router_config_hash must be empty or a router runtime hash")
+        if type(self.accepting) is not bool or type(self.stopping) is not bool:
+            raise ValueError("lifecycle status accepting and stopping must be booleans")
+        if self.stopping and self.accepting:
+            raise ValueError("a stopping lifecycle cannot accept requests")
+        if type(self.control_revision) is not int or self.control_revision < -1:
+            raise ValueError("a lifecycle status control_revision must be an integer of at least -1")
+        counts = (
+            self.active_requests,
+            self.pending_writes,
+            self.drain_pending_writes,
+            self.failed_writes,
+            self.forced_requests,
+        )
+        if any(type(count) is not int or count < 0 for count in counts):
+            raise ValueError("lifecycle status counts must be nonnegative integers")
+        if self.drain_pending_writes > self.pending_writes:
+            raise ValueError("a lifecycle status cannot drain more writes than are pending")
+
+    @property
+    def idle(self) -> bool:
+        return self.active_requests == 0 and self.drain_pending_writes == 0
+
+    def to_json(self) -> dict[str, object]:
+        return dataclasses.asdict(self)
+
+    @classmethod
+    def from_json(cls, value: object) -> LifecycleStatus:
+        """Read the wire form: a JSON object with exactly this type's fields.
+
+        Raises:
+            ValueError: ``value`` has another shape, or a field is outside its domain.
+        """
+        if not isinstance(value, dict) or value.keys() != {item.name for item in dataclasses.fields(cls)}:
+            raise ValueError("a lifecycle status must be an object with exactly its fields")
+        return cls(**value)
+
+
+def lifecycle_status(body: bytes) -> LifecycleStatus:
+    """The child's status reply. Another body cannot become valid by waiting, so its error is not retryable."""
+    try:
+        return LifecycleStatus.from_json(json.loads(body))
+    except ValueError as exc:
+        # JSON and UTF-8 decoding errors are ValueErrors too.
+        raise RoutingControlError("control response is not a lifecycle status", retryable=False) from exc
+
+
+class UnixHTTPConnection(http.client.HTTPConnection):
+    """One HTTP exchange over a Unix socket; each blocking step gets only the time left before ``deadline``.
+
+    ``deadline`` is a finite value of the ``time.monotonic`` clock and may already have passed, which makes
+    the next step raise ``TimeoutError``. A socket timeout bounds each blocking socket call, not the whole
+    exchange. ``ReefLifecycleClient.request`` makes one connection per attempt and closes it, together with
+    any response that ``getresponse`` handed the socket to.
+    """
+
+    def __init__(self, socket_path: Path, deadline: float) -> None:
+        if not math.isfinite(deadline):
+            raise ValueError("a Unix HTTP connection deadline must be finite")
+        super().__init__("localhost")
+        self.socket_path = socket_path
+        self.deadline = deadline
+        #: Kept after ``getresponse``, which can hand the connection to the response it returns.
+        self.connected_socket: socket.socket | None = None
+
+    def remaining_seconds(self) -> float:
+        remaining = self.deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("REEF lifecycle attempt deadline passed")
+        return remaining
+
+    def connect(self) -> None:
+        timeout_seconds = self.remaining_seconds()
+        connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        connection.settimeout(timeout_seconds)
+        try:
+            connection.connect(str(self.socket_path))
+        except OSError:
+            connection.close()
+            raise
+        self.sock = self.connected_socket = connection
+
+    def limit_next_step(self) -> None:
+        """Give the next blocking step only the time left in this attempt."""
+        if self.connected_socket is not None:
+            self.connected_socket.settimeout(self.remaining_seconds())
+
+
+#: Attempts for one control request whose reply does not arrive in time. Every attempt sends the same bytes.
+CONTROL_ATTEMPTS = 3
+
+
+@dataclass
+class ReefLifecycleClient:
+    """Owner-generation control requests to the REEF child over its private Unix socket.
+
+    Values: ``deployment_id``, ``generation`` and ``token`` are non-empty strings; ``revision`` is an int ≥ 0,
+    the last allocated command revision. Both timeouts are finite positive numbers of seconds.
+    ``socket_path`` is always dialed as a Unix socket, whatever it looks like; it need not exist yet.
+    Operations: ``request(None)`` reads the status and leaves ``revision`` unchanged; each command
+    increments it once, and its retries resend the same bytes. ``timeout_seconds`` bounds one attempt of an
+    ordinary request. An ``open`` checks every provider and previews every Scenario first, so its first
+    attempt gets ``open_timeout_seconds``; the controller sets it for the policy it opens.
+    ``check_candidate`` makes one attempt and leaves ``revision`` unchanged. One controller owns a client, so
+    the child sees one sequence of revisions per generation; the client keeps no connection between requests.
+    """
+
+    socket_path: Path
+    deployment_id: str
+    generation: str
+    token: str = field(repr=False)
+    revision: int = 0
+    timeout_seconds: float = 2.0
+    open_timeout_seconds: float = 30.0
+
+    def __post_init__(self) -> None:
+        if any(not isinstance(text, str) or not text for text in (self.deployment_id, self.generation, self.token)):
+            raise ValueError("REEF lifecycle control needs a deployment ID, a generation and a token")
+        if type(self.revision) is not int or self.revision < 0:
+            raise ValueError("REEF lifecycle control revision must be a nonnegative integer")
+        for seconds in (self.timeout_seconds, self.open_timeout_seconds):
+            if (
+                not isinstance(seconds, (int, float))
+                or isinstance(seconds, bool)
+                or not math.isfinite(seconds)
+                or seconds <= 0
+            ):
+                raise ValueError("REEF lifecycle control timeouts must be finite positive seconds")
+
+    def request(
+        self,
+        action: str | None = None,
+        *,
+        cancel_active: bool = False,
+        publication: dict[str, str] | None = None,
+        deadline: float | None = None,
+    ) -> LifecycleStatus:
+        """Send one command, or read the status when ``action`` is None, and return the child's status.
+
+        Only a transport timeout is tried again, on a new connection, at most ``CONTROL_ATTEMPTS`` times in
+        all. Every attempt sends the same revision and body: the child applies a revision once and answers
+        a repeated one with its status. A later attempt waits at most ``timeout_seconds``.
+
+        An ``open`` carries the end of its first attempt. The child does not open after that time, so a
+        reply the owner stopped waiting for cannot open admission later; a retry can only read an open that
+        the child already applied.
+
+        Args:
+            deadline: The caller's phase end on the ``time.monotonic`` clock. Each blocking step of every
+                attempt gets only the time left before it, no attempt starts after it, and a reply that
+                completes after it is rejected.
+
+        Raises:
+            RoutingControlTimeout: No reply arrived in time.
+            RoutingControlError: The request failed, the child refused it, or its reply is not a lifecycle
+                status; that last error is not retryable.
+        """
+        phase_end = math.inf if deadline is None else deadline
+        first_attempt_seconds = self.open_timeout_seconds if action == "open" else self.timeout_seconds
+        attempt_end = min(time.monotonic() + first_attempt_seconds, phase_end)
+        body = None
+        if action is not None:
+            self.revision += 1
+            command: dict[str, object] = {
+                "deployment_id": self.deployment_id,
+                "generation": self.generation,
+                "control_revision": self.revision,
+                "action": action,
+                "cancel_active": cancel_active,
+                **(publication or {}),
+            }
+            if action == "open":
+                command["open_deadline_monotonic"] = attempt_end
+            body = json.dumps(command).encode()
+        attempt = 1
+        while True:
+            try:
+                method = "GET" if action is None else "POST"
+                status, reply = self.exchange(method, "/reef/lifecycle", body, attempt_end)
+                if status != 200:
+                    raise RoutingControlError(
+                        f"REEF lifecycle returned HTTP {status}",
+                        retryable=status >= 500 or status == 409,
+                        status_code=status,
+                    )
+            except TimeoutError as exc:
+                if attempt == CONTROL_ATTEMPTS or time.monotonic() >= phase_end:
+                    raise RoutingControlTimeout("REEF lifecycle request timed out") from exc
+            except (OSError, ValueError, http.client.HTTPException) as exc:
+                raise RoutingControlError("REEF lifecycle request failed") from exc
+            else:
+                if time.monotonic() > phase_end:
+                    raise RoutingControlTimeout("REEF lifecycle replied after the caller's deadline")
+                return lifecycle_status(reply)
+            attempt += 1
+            attempt_end = min(time.monotonic() + self.timeout_seconds, phase_end)
+
+    def check_candidate(
+        self, manifest_path: str, snapshot_version: str, expected_snapshot_version: str, *, deadline: float
+    ) -> None:
+        """Ask the child to check the providers of the candidate at ``manifest_path`` with its own credentials.
+
+        The child refuses a candidate whose digest is not ``snapshot_version`` or that it would not publish,
+        and a check while its current snapshot is not ``expected_snapshot_version``. It changes nothing.
+        There is one attempt, which ends at ``deadline`` on the ``time.monotonic`` clock; the child stops
+        its own check then too.
+
+        Raises:
+            RoutingControlTimeout: No reply arrived before ``deadline``.
+            RoutingControlError: The child refused the candidate or a provider check failed, with the child's
+                status and at most ``CHECK_REASON_LIMIT`` characters of its reason, or the transport failed.
+                Not retryable: the owner rejects this update.
+        """
+        body = json.dumps(
+            {
+                "deployment_id": self.deployment_id,
+                "generation": self.generation,
+                "manifest_path": manifest_path,
+                "snapshot_version": snapshot_version,
+                "expected_snapshot_version": expected_snapshot_version,
+                "check_deadline_monotonic": deadline,
+            }
+        ).encode()
+        try:
+            status, reply = self.exchange(
+                "POST", CANDIDATE_CHECK_PATH, body, deadline, refusal_bytes=CHECK_REASON_LIMIT * 4
+            )
+        except TimeoutError as exc:
+            raise RoutingControlTimeout("REEF candidate check timed out", retryable=False) from exc
+        except (OSError, ValueError, http.client.HTTPException) as exc:
+            raise RoutingControlError("REEF candidate check failed", retryable=False) from exc
+        # A reply after the deadline does not count: the child gave up its check then.
+        if time.monotonic() > deadline:
+            raise RoutingControlTimeout("REEF candidate check replied after its deadline", retryable=False)
+        if status != 200:
+            reason = reply.decode("utf-8", "replace")[:CHECK_REASON_LIMIT]
+            raise RoutingControlError(
+                f"REEF candidate check returned HTTP {status}: {reason}", retryable=False, status_code=status
+            )
+        try:
+            confirmed = json.loads(reply).get("snapshot_version")
+        except (ValueError, AttributeError) as exc:
+            raise RoutingControlError("REEF candidate check reply is not an object", retryable=False) from exc
+        if time.monotonic() > deadline:
+            raise RoutingControlTimeout("REEF candidate check replied after its deadline", retryable=False)
+        if confirmed != snapshot_version:
+            raise RoutingControlError("REEF candidate check confirmed another snapshot", retryable=False)
+
+    def exchange(
+        self, method: str, path: str, body: bytes | None, end: float, *, refusal_bytes: int = 0
+    ) -> tuple[int, bytes]:
+        """One authenticated exchange on a new connection: the reply's status and part of its body.
+
+        A 200 reply's body is read up to ``CONTROL_REPLY_LIMIT_BYTES``, and another reply's up to
+        ``refusal_bytes``; with the default 0 it is not read at all. Each blocking step gets only the time
+        left before ``end``.
+
+        Raises:
+            TimeoutError: A step reached ``end``.
+            OSError, ValueError, http.client.HTTPException: The exchange failed.
+        """
+        connection = UnixHTTPConnection(self.socket_path, end)
+        # Closed with the connection: after an HTTP/1.0 or Connection: close reply, it holds the socket alone.
+        response: http.client.HTTPResponse | None = None
+        try:
+            connection.connect()
+            connection.limit_next_step()
+            connection.request(
+                method,
+                path,
+                body=body,
+                headers={"Authorization": "Bearer " + self.token, "Content-Type": "application/json"},
+            )
+            connection.limit_next_step()
+            response = connection.getresponse()
+            if response.status != 200 and not refusal_bytes:
+                return response.status, b""
+            connection.limit_next_step()
+            limit = CONTROL_REPLY_LIMIT_BYTES if response.status == 200 else refusal_bytes
+            return response.status, response.read(limit)
+        finally:
+            if response is not None:
+                response.close()
+            connection.close()

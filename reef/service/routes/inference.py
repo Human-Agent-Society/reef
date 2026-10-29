@@ -9,8 +9,10 @@ from aiohttp import web
 
 from reef.core.records_types import ROLLOUT_HEADER
 from reef.runtime.interfaces import INFERENCE_ABORT_ERROR, MULTIMODAL_ROUTES, InferenceHandler, inference_aborted
+from reef.service.lifecycle import ADMITTED_ROUTING
 from reef.service.request_service import RequestService
 from reef.service.routes.payload import read_object
+from reef.service.routing import RoutingDecision, RoutingRequestError
 from reef.service.streaming import (
     SSEFrameDecoder,
     chat_completion_chunk_identity,
@@ -92,6 +94,7 @@ async def _relay_inference_stream(
     request_service: RequestService,
     inference_handler: InferenceHandler | None,
     evaluated: str | None = None,
+    decision: RoutingDecision | None = None,
     artifact_id: str | None = None,
 ) -> web.StreamResponse:
     """Stream one upstream inference to the client and, unless it is an evaluation call, record what it sent.
@@ -99,36 +102,45 @@ async def _relay_inference_stream(
     ``artifact_id`` names the served artifact that answers at its own URL; ``None`` is the active release.
     """
     upstream, pending = await request_service.start_stream(
-        headers, payload, path, inference_handler, record=record, evaluated=evaluated, artifact_id=artifact_id
+        headers,
+        payload,
+        path,
+        inference_handler,
+        record=record,
+        evaluated=evaluated,
+        decision=decision,
+        artifact_id=artifact_id,
     )
-    response_headers = {
-        name: value
-        for name, value in upstream.headers.items()
-        if name.lower() not in ("x-reef-agent-record-id", RELEASE_ID_HEADER)
-    }
-    if record and artifact_id is None:
-        # Only a resident harness reads the head. An evaluation rollout runs a candidate, not the served tree. A call
-        # to a served artifact's URL runs that artifact.
-        response_headers.update(await _release_header(request_service, headers))
-    content_type = next(
-        (value for name, value in response_headers.items() if name.lower() == "content-type"),
-        "",
-    )
-    is_sse = "text/event-stream" in content_type.lower()
-
-    def engine_aborted() -> bool:
-        # A stream cannot restart after it sent frames. An engine-aborted stream
-        # ends like an incomplete one, without a receipt.
-        return upstream.record_response is not None and inference_aborted(upstream.record_response)
-
-    if not is_sse and record and not engine_aborted():
-        response_headers["x-reef-agent-record-id"] = pending.item.agent_record_id
-    response = web.StreamResponse(status=upstream.status, headers=response_headers)
     body = bytearray()
     complete = False
     error = None
     record_attempted = False
+    response_created = False
+    # The stream is open: from here on, every await, including the header lookup, ends in its cleanup below.
     try:
+        response_headers = {
+            name: value
+            for name, value in upstream.headers.items()
+            if name.lower() not in ("x-reef-agent-record-id", RELEASE_ID_HEADER)
+        }
+        if record and artifact_id is None:
+            # Only a resident harness reads the head. An artifact URL serves its named artifact.
+            response_headers.update(await _release_header(request_service, headers))
+        content_type = next(
+            (value for name, value in response_headers.items() if name.lower() == "content-type"),
+            "",
+        )
+        is_sse = "text/event-stream" in content_type.lower()
+
+        def engine_aborted() -> bool:
+            # A stream cannot restart after it sent frames. An engine-aborted stream
+            # ends like an incomplete one, without a receipt.
+            return upstream.record_response is not None and inference_aborted(upstream.record_response)
+
+        if not is_sse and record and not engine_aborted():
+            response_headers["x-reef-agent-record-id"] = pending.item.agent_record_id
+        response = web.StreamResponse(status=upstream.status, headers=response_headers)
+        response_created = True
         await response.prepare(request)
         if is_sse:
             # A codex-bound stream speaks for a Codex client, which drops OpenRouter's
@@ -152,10 +164,12 @@ async def _relay_inference_stream(
             else:
                 record_attempted = True
                 # Off the loop: recording takes the scenario's lock, which a commit may hold for a while.
-                item = await asyncio.to_thread(
-                    request_service.record_stream,
-                    pending,
-                    stream_record(upstream, bytes(body), complete=True),
+                item = await request_service.persist(
+                    asyncio.to_thread(
+                        request_service.record_stream,
+                        pending,
+                        stream_record(upstream, bytes(body), complete=True),
+                    )
                 )
                 frames = (
                     receipt_sse_events(path, relay.chat_identity, relay.terminal, item.agent_record_id)
@@ -173,7 +187,11 @@ async def _relay_inference_stream(
                 error = INFERENCE_ABORT_ERROR
             else:
                 complete = True
-    except ConnectionResetError:
+    except ConnectionResetError as exc:
+        if not response_created:
+            # Not the client: no response exists yet, so the caller gets the original failure.
+            error = f"{type(exc).__name__}: {exc}"
+            raise
         error = "client disconnected"
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"
@@ -190,10 +208,12 @@ async def _relay_inference_stream(
             await upstream.close()
         finally:
             if not record_attempted:
-                await asyncio.to_thread(
-                    request_service.record_stream,
-                    pending,
-                    stream_record(upstream, bytes(body), complete=complete, error=error),
+                await request_service.persist(
+                    asyncio.to_thread(
+                        request_service.record_stream,
+                        pending,
+                        stream_record(upstream, bytes(body), complete=complete, error=error),
+                    )
                 )
     return response
 
@@ -213,29 +233,52 @@ def register_inference_routes(
         evaluated: str | None = None,
         artifact_id: str | None = None,
     ) -> web.StreamResponse:
-        payload = await read_object(request)
-        if payload.get("stream") is True:
-            return await _relay_inference_stream(
-                request,
-                payload,
-                headers=headers,
-                path=path,
-                record=record,
-                request_service=request_service,
-                inference_handler=inference_handler,
-                evaluated=evaluated,
-                artifact_id=artifact_id,
-            )
-        response_payload, item = await request_service.infer_with_data(
-            headers, payload, path, inference_handler, record=record, evaluated=evaluated, artifact_id=artifact_id
+        # Read before the first await. A managed deployment captured the policy when it admitted the request.
+        routing = request.get(ADMITTED_ROUTING, request_service.routing) if record else None
+        decision: RoutingDecision | None = None
+        handler = inference_handler
+        # A JSON answer returns from its own branch; a stream continues to the shared relay below.
+        if routing is None:
+            payload = await read_object(request)
+            if payload.get("stream") is not True:
+                response_payload, item = await request_service.infer_with_data(
+                    headers, payload, path, handler, record=record, evaluated=evaluated, artifact_id=artifact_id
+                )
+                response_headers = {} if item is None else {"x-reef-agent-record-id": item.agent_record_id}
+                if record and artifact_id is None:
+                    response_headers.update(await _release_header(request_service, headers))
+                return web.json_response(response_payload, headers=response_headers)
+        else:
+            scenario = routing.check_request(request.headers.items(), path)
+            client_payload = await read_object(request, strict=True)
+            decision = await request_service.select_route(routing, scenario, client_payload)
+            # The target and its handler stay fixed for the provider call and every retry.
+            handler = routing.handler_for(decision)
+            payload = {**client_payload, "model": decision.target.provider_model}
+            if payload.get("stream") is not True:
+                response_payload, routed_item = await request_service.infer_routed(
+                    headers, payload, path, decision, handler
+                )
+                return web.json_response(
+                    response_payload, headers={"x-reef-agent-record-id": routed_item.agent_record_id}
+                )
+        return await _relay_inference_stream(
+            request,
+            payload,
+            headers=headers,
+            path=path,
+            record=record,
+            request_service=request_service,
+            inference_handler=handler,
+            evaluated=evaluated,
+            decision=decision,
+            artifact_id=artifact_id,
         )
-        response_headers = {} if item is None else {"x-reef-agent-record-id": item.agent_record_id}
-        if record and artifact_id is None:
-            response_headers.update(await _release_header(request_service, headers))
-        return web.json_response(response_payload, headers=response_headers)
 
     async def inference(request: web.Request) -> web.StreamResponse:
         if request.headers.get(ROLLOUT_HEADER, "").strip().lower() in ("1", "true"):
+            if request.get(ADMITTED_ROUTING, request_service.routing) is not None:
+                raise RoutingRequestError("routed deployments do not serve rollout calls", code="unsupported_rollout")
             return await rollout(request)
         return await serve(request, request.headers, request.path, record=True)
 

@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
-from tests.support.runtime_stubs import runtime_bindings
+from tests.support.runtime_stubs import StubInferenceRuntime, runtime_bindings
 
 from reef.artifact import (
     Artifact,
@@ -28,7 +28,7 @@ from reef.recipe import Recipe
 from reef.runtime.interfaces import InferenceHandler, InferenceStream
 from reef.service.app import InferenceRetryPolicy, RequestService, create_app
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.surface import Surface, create_harness_surface, create_weight_surface
+from reef.surface import Surface, adapter_name, create_harness_surface, create_weight_surface
 from reef.train import TrainStepResult
 from reef.train.types import JobData
 
@@ -317,17 +317,41 @@ def test_http_app_records_inference_and_returns_backend_response() -> None:
 
 
 @pytest.mark.unit
-def test_a_rollout_call_keeps_no_record_and_returns_its_training_block() -> None:
-    training = {"tokens": [1, 2, 3], "loss_mask": [1], "rollout_log_probs": [-0.5]}
+def test_a_rollout_call_keeps_no_record_and_returns_its_training_block(tmp_path: Path) -> None:
+    class AdapterRuntime(StubInferenceRuntime):
+        """Serve a fixed adapter version for chat, and no adapter for other Scenarios."""
 
-    async def backend(artifact: Artifact, path: str, payload: dict) -> dict:
-        return {"choices": [{"message": {"content": "hi"}}], "training": training}
+        def serving_adapter_runtime_load_id(self, scenario: str) -> str | None:
+            return "served:1" if scenario == "chat" else None
 
-    dispatcher = build_default_dispatcher(scenario_storage=SQLiteScenarioStorage())
-    assert dispatcher.get_or_create_scenario("chat") is not None
+    runtime = AdapterRuntime()
+
+    class RolloutRecipe(Recipe):
+        """Serve one fixed adapter so the test detects calls that skip the served hooks."""
+
+        def build_surface(self, scenario: str) -> Surface:
+            return create_weight_surface(kind="model_adapter", scenario=scenario, runtime=runtime)
 
     async def run() -> None:
-        async with serving_client(dispatcher, backend) as client:
+        training = {"tokens": [1, 2, 3], "loss_mask": [1], "rollout_log_probs": [-0.5]}
+
+        async def backend(artifact: Artifact, path: str, payload: dict) -> dict:
+            assert payload["lora_path"] == adapter_name("chat", "served:1")
+            return {"choices": [{"message": {"content": "hi"}}], "training": training}
+
+        initial = tmp_path / "initial"
+        initial.mkdir()
+        (initial / "model.txt").write_text("base")
+        dispatcher = Dispatcher(
+            RolloutRecipe(),
+            InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
+            local_artifact_dir=tmp_path / "local",
+            scenario_storage=SQLiteScenarioStorage(),
+        )
+        assert dispatcher.get_or_create_scenario("chat") is not None
+        client = serving_client(dispatcher, backend)
+        await client.start_server()
+        try:
             rollout = {"x-reef-scenario": "chat", ROLLOUT_HEADER: "1"}
             body = {"model": "reef", "messages": [{"role": "user", "content": "hi"}]}
             response = await client.post("/v1/chat/completions", headers=rollout, json=body)
@@ -337,10 +361,18 @@ def test_a_rollout_call_keeps_no_record_and_returns_its_training_block() -> None
             assert streamed.status == 400
             served = await client.post("/v1/chat/completions", headers={"x-reef-scenario": "chat"}, json=body)
             assert "training" not in await served.json(), "a served call never shows its training block"
+            scenario = dispatcher.get_or_create_scenario("chat")
+            records = scenario.records.replay("chat")
+            assert len(records) == 1, "only the served call is a record"
+            metrics = scenario.operations.snapshot()
+            assert metrics["rollout/request/completed_total"] == 1
+            assert metrics["serve/request/completed_total"] == 1
+            assert metrics["evaluate/request/started_total"] == 0
+        finally:
+            await client.close()
+            dispatcher.close()
 
     asyncio.run(run())
-    records = dispatcher.get_or_create_scenario("chat").records.replay("chat")
-    assert len(records) == 1, "only the served call is a record"
 
 
 @pytest.mark.unit

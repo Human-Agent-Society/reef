@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import NoReturn
 
 import pytest
 import yaml
@@ -182,3 +183,44 @@ def test_print_config_for_a_provider_needs_no_training_imports(tmp_path):
     assert "  inference.upstream-model = demo  (command line)" in completed.stdout
     assert "  inference.upstream-api-key = ****  (command line)" in completed.stdout
     assert not (tmp_path / ".reef").exists()
+
+
+@pytest.mark.parametrize("token_key", ["client_token", "client-token"])
+def test_an_unknown_routing_credential_is_refused_without_repeating_it(tmp_path: Path, token_key: str) -> None:
+    raw = {
+        "reef": {"routing_deployment": {"deployment_id": "test-routing", token_key: "routing-client-secret"}},
+        "inference": {"upstream-url": "http://localhost:8000", "upstream-model": "student"},
+    }
+    with pytest.raises(orchestrator.DeployConfigError) as error:
+        _report(raw, {}, tmp_path / "reef.yaml")
+    assert "unknown config fields: client_token" in str(error.value)
+    assert "routing-client-secret" not in str(error.value)
+
+
+@pytest.mark.usefixtures("idle_stack")
+def test_print_config_reports_a_cli_routing_object_without_creating_a_deployment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def must_not_run(*args: object, **kwargs: object) -> NoReturn:
+        pytest.fail("--print-config must not create a routing deployment")
+
+    monkeypatch.setattr(orchestrator, "RoutingDeploymentController", must_not_run)
+    path = tmp_path / "reef.yaml"
+    path.write_text(
+        yaml.safe_dump({"inference": {"upstream-url": "http://localhost:8000", "upstream-model": "student"}})
+    )
+    with pytest.raises(SystemExit) as result:
+        cli_main(
+            [
+                "serve",
+                "-c",
+                str(path),
+                "--print-config",
+                "--reef.routing-deployment",
+                '{"deployment_id":"test-routing","sr_management_port":18080}',
+            ]
+        )
+    assert result.value.code == 0
+    output = capsys.readouterr()
+    assert '"deployment_id": "test-routing"' in output.out
+    assert '"sr_management_port": 18080' in output.out

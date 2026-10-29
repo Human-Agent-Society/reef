@@ -45,7 +45,14 @@ def _with_path_entry(current: str | None, entry: Path) -> str:
 
 
 class ProcessWorker:
-    """Own a set of node-local service process trees (one per deployment worker)."""
+    """Own a set of node-local service process trees (one per deployment worker).
+
+    ``routing_owner_descriptors`` lists, in start order, the write end of each managed routing REEF child's
+    owner pipe; it starts empty and holds at most one per such child. The child inherits only the read end,
+    so it sees end of file when this worker closes the write end or dies. ``shutdown`` closes and clears
+    them after its termination attempts (SIGTERM, the grace period, SIGKILL and a bounded wait to reap each
+    leader), whether or not every process was confirmed to have exited.
+    """
 
     def __init__(
         self,
@@ -70,6 +77,7 @@ class ProcessWorker:
         self._process_groups: dict[str, int] = {}
         self._log_fps: dict[str, TextIO] = {}
         self._names = [svc["name"] for svc in services]
+        self.routing_owner_descriptors: list[int] = []
 
     def _pid_file(self, name: str) -> Path:
         return self.run_dir / f"{name}.pid"
@@ -111,6 +119,12 @@ class ProcessWorker:
         log_fp = open(self._log_file(name), "a")  # noqa: SIM115
         self._log_fps[name] = log_fp
         # Logs stay on the worker node and are tailed through Executor RPC.
+        read_descriptor: int | None = None
+        write_descriptor: int | None = None
+        managed_http = name == "reef" and "REEF_ROUTING_CONTROL_FILE" in (svc.get("env") or {})
+        if managed_http:
+            read_descriptor, write_descriptor = os.pipe()
+            env["REEF_ROUTING_OWNER_FD"] = str(read_descriptor)
         try:
             proc = self._spawn(
                 command,
@@ -119,9 +133,17 @@ class ProcessWorker:
                 stdout=log_fp,
                 stderr=subprocess.STDOUT,
                 start_new_session=os.name == "posix",
+                **({"pass_fds": (read_descriptor,)} if read_descriptor is not None else {}),
             )
         except OSError as exc:
+            if write_descriptor is not None:
+                os.close(write_descriptor)
             raise OSError(exc.errno, f"service {name!r} could not start: {exc.strerror}", exc.filename) from exc
+        finally:
+            if read_descriptor is not None:
+                os.close(read_descriptor)
+        if write_descriptor is not None:
+            self.routing_owner_descriptors.append(write_descriptor)
         self._procs[name] = proc
         if os.name == "posix":
             self._process_groups[name] = proc.pid
@@ -234,6 +256,9 @@ class ProcessWorker:
                 except subprocess.TimeoutExpired:
                     _log(f"{name}: leader pid {proc.pid} could not be reaped after SIGKILL")
             self._pid_file(name).unlink(missing_ok=True)
+        for descriptor in self.routing_owner_descriptors:
+            os.close(descriptor)
+        self.routing_owner_descriptors.clear()
         for fp in self._log_fps.values():
             with contextlib.suppress(Exception):
                 fp.close()
@@ -253,9 +278,14 @@ class ProcessWorker:
         """Snapshot resolved endpoints on the execution node, before spawning."""
         self.config = config
         self.run_dir.mkdir(parents=True, exist_ok=True)
+        managed_routing = any("REEF_ROUTING_CONTROL_FILE" in (service.get("env") or {}) for service in self.services)
+        if managed_routing:
+            self.run_dir.chmod(0o700)
         self.config_path = self.run_dir / "runtime.yaml"
         fd = os.open(self.config_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w") as handle:
+            if managed_routing:
+                os.fchmod(handle.fileno(), 0o600)
             yaml.safe_dump(config, handle, sort_keys=False)
         return self.describe()
 

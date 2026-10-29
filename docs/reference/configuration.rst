@@ -50,6 +50,204 @@ CLI settings win. ``--model ollama/my-model`` fills the Ollama endpoint and
 model; ``--model openai/my-model`` uses ``REEF_UPSTREAM_API_KEY``. A model ID
 with any other prefix still needs an upstream URL.
 
+Scenario routing between students and teachers
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``reef.routing_manifest`` (CLI: ``--reef.routing-manifest``) enables routing
+from an immutable deployment manifest. It is unset by default. This mode
+supports ordinary and SSE ``/v1/chat/completions`` requests for online OPD:
+each configured Scenario serves its default target (usually the student),
+sends requests that match a keyword or domain rule to another target (usually the
+teacher), and accepts explicit pins to its own targets.
+
+Clients call Reef directly. ``reef serve`` owns one unmodified Semantic Router
+(SR) container, the upstream version pinned in ``third_party/semantic-router``.
+For ``model: auto``, Reef sends one ``POST /api/v1/routing/preview`` for the
+client's ``x-reef-scenario`` to that Scenario's private entrypoint, then checks
+the selected rule and target against the manifest and the SR runtime it
+verified. A pin to one of the Scenario's targets is checked locally and never
+calls SR. See the `Semantic Router tutorial
+<../../tutorials/semantic-router/README.md>`__. Select the core
+``recipe.implementation: recipe``: routing requires the base record-only
+Recipe, without a training runtime or a specialized recipe. It records
+inference and feedback; it does not train the routed models.
+
+Configure ``reef.tokens`` and ``reef.host: 127.0.0.1``. Clients present a Reef
+service token and ``x-reef-scenario``; they may not send Reef's or SR's
+selection headers. SR credentials are generated per start and never reach
+clients: one grants only ``classify.invoke`` (previews), the other only
+configuration and readiness.
+
+The manifest (``schema_version: 2``) has three parts:
+
+* ``targets`` maps target IDs to provider model IDs, endpoints and immutable
+  external deployment revisions. Optional ``api_key_env`` fields name provider
+  credential environment variables.
+* ``scenarios`` lists, for each Scenario, its ``targets``, its
+  ``default_target``, and optional ``rules``. Each rule has a ``name``, a
+  ``target`` and exactly one of ``keywords`` or ``domains``. A keyword rule
+  matches automatic requests whose text contains any of its keywords
+  (``match: any``, the default) or all of them (``match: all``), ignoring case
+  unless ``case_sensitive: true``. SR checks only the latest user message that
+  has text; a keyword of letters, digits or underscores matches only as a
+  whole word. Only when no user message has text or an inline image does SR
+  check the system, developer and assistant text instead; tool results are
+  never checked. A domain rule matches when the deployment's domain classifier
+  predicts one of its labels; it needs ``deployment.domain_classifier``, and
+  within one Scenario a label may appear in only one rule, ignoring case. If
+  several rules match, the first one listed is used, whatever its kind.
+* ``deployment`` pins the Semantic Router image (``semantic_router_image``) by
+  digest. Optional ``domain_classifier`` names a local pretrained domain
+  classifier: ``model_directory`` (an absolute path without symlinks),
+  ``threshold`` (a number from 0 to 1) and ``files``, the ``sha256:`` digest
+  of each of exactly ``config.json``, ``tokenizer.json``, ``model.safetensors``
+  and ``category_mapping.json``. Reef checks the files and labels when it
+  renders a configuration and mounts only these four files read-only into SR.
+  Targets, rules, defaults and Scenario target membership can change in
+  place. A classifier change needs a restart.
+  See the `domain classifier section
+  <../../tutorials/semantic-router/README.md#route-by-a-pretrained-domain-classifier>`__.
+
+Target IDs and ``automatic_model`` must not start with ``reef-entrypoint/``,
+in any letter case: that prefix names the private router entrypoints.
+
+See `Routed external-model requests
+<http-api.rst#routed-external-model-requests>`__ for the request and record
+contract.
+
+Managed routing lifecycle
+^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Setting ``reef.routing_manifest`` makes ``reef serve`` own the SR container
+and a routed Reef child; there is no separately launched mode. This requires
+Linux, a local Docker daemon with Compose, and the local ``uni`` service
+executor. External model services remain independently managed. The SR image
+must already be available locally and pinned by digest in the manifest.
+Before starting or recreating the container, Reef checks that the image's
+``org.opencontainers.image.revision`` label matches the SR commit pinned by
+this Reef release. A missing or different label prevents container creation.
+This checks declared source metadata, not the binaries themselves. See the
+`image build instructions <../../tutorials/semantic-router/README.md#1-build-the-semantic-router-image>`__
+for the required commit and label.
+
+.. code-block:: yaml
+
+   reef:
+     host: 127.0.0.1
+     routing_manifest: /path/to/input-manifest.yaml
+     routing_deployment:
+       deployment_id: code-opd-local
+       restart_policy: fail_stop
+
+Startup renders a private, frozen configuration generation. The container
+publishes only SR's HTTP API, on ``127.0.0.1:<sr_management_port>``; SR's gRPC
+and metrics ports are not published. The Reef child starts closed, with its
+lifecycle control on a private Unix socket (directory 0700, socket 0600), never
+on ``reef.port``. The owner then waits for SR's actual runtime
+(``active == generated``, ``activation_status: active``, ``/ready``),
+publishes that verified runtime hash to the closed child, and opens admission;
+opening first checks the providers and sends one preview per Scenario, and any
+valid selection passes. Periodic checks read SR's readiness and runtime hash
+only. ``/healthz`` remains a liveness check; it does not express routing
+readiness.
+
+The following keys are inside ``reef.routing_deployment``. Unknown keys are
+errors; YAML accepts underscores or hyphens. The CLI accepts the complete object
+through ``--reef.routing-deployment``.
+
+.. csv-table::
+   :header: "Setting", "Default", "Meaning"
+   :delim: |
+
+   deployment_id | required with routing_manifest | 1-48 lowercase letters, digits or hyphens; must start with a letter or digit.
+   restart_policy | fail_stop | ``bounded`` permits a limited number of SR container recoveries.
+   max_restarts | 2 | Attempts per explicit deployment; failed startup attempts count and the budget never resets automatically.
+   restart_backoff_seconds | [1.0, 2.0] | Delay before each recovery; later attempts reuse the last delay.
+   ready_timeout_seconds | 120 | Complete startup or recovery readiness deadline.
+   drain_timeout_seconds | 30 | Deadline for accepted requests, including uploads, and local response sends to finish.
+   finalization_timeout_seconds | 5 | Additional deadline for record writes after cancellation.
+   container_stop_timeout_seconds | 10 | Container stop operation timeout.
+   sr_management_port | 50053 | SR's authenticated HTTP API (previews and configuration), published on host loopback.
+   selection_timeout_seconds | 10 | Whole seconds SR may spend on one preview; Reef waits five seconds longer for SR's reply.
+   preview_max_concurrency | 32 | Concurrent SR previews; more are refused with 429. Changes need a restart.
+   sr_cpus / sr_memory_bytes | 4 / 4294967296 | SR CPU and memory limits.
+
+To change targets, rules, a Scenario's default target or its target membership
+without restarting Reef or SR, edit the configured ``reef.routing_manifest`` and
+send ``SIGHUP`` to the ``reef serve`` process. A target can be added, removed,
+enabled or disabled, or given another provider model, revision or endpoint.
+A target that a default or rule still names cannot be removed or disabled in
+the same update. The model services themselves must already be running. A
+target's ``api_key_env`` can name only a variable that the Reef child already
+had when it started, even if no earlier target used it; Reef never adds
+credentials to a running process. The automatic model, Scenario names, the
+domain classifier, images and deployment settings must stay the same;
+otherwise the update is rejected, logged as ``policy_rejected``, and the
+current policy keeps serving. Preview settings also need a restart.
+
+Before anything closes, the Reef child checks the new manifest's providers
+(their model lists) with its own credentials. A missing credential, a provider
+that does not list its model, or a check that runs past its deadline rejects
+the update as ``policy_rejected``, and the current policy keeps serving. An
+accepted update then pauses admission; it does not restart Reef or SR. It
+closes admission and drains requests and record writes, replaces the router's
+configuration through its authenticated management API, waits for that exact
+configuration to be active, then publishes the new manifest, new handlers for
+its provider endpoints and the SR runtime hash to Reef together, checks every
+provider and Scenario again, and reopens. An endpoint change leaves SR's
+configuration the same, and Reef still publishes the new manifest. New
+inference receives 503 during the pause; an admitted request keeps the
+manifest, provider endpoint and runtime hash it captured. A failed activation
+restores the previous configuration; SR re-encodes stored documents, so the
+restored runtime can have a new hash, which is published before reopening.
+Another writer, an unconfirmed result, or a failed publication stops the
+deployment instead of reopening. The early provider check cannot promise that
+a provider stays available: once SR runs the new configuration, a failed final
+check keeps admission closed and the deployment's usual failure handling
+applies; Reef does not return to the old policy. Every reopening, including
+startup, rollback and container recovery, first checks that the router's
+active runtime is the committed one and ready. Results are recorded in the
+generation's ``lifecycle-events.jsonl`` (``policy_committed``,
+``policy_rolled_back``, ``policy_rejected``). If ``reef serve`` stops while an
+update is pending, the next start renders the last committed manifest, not the
+edited source file, and records ``pending_policy_recovered``. Send ``SIGHUP``
+again to apply the source. A ``SIGHUP`` that arrives while ``reef serve`` is
+starting or recovering is applied once the deployment is ready; one that
+arrives after a stop began is ignored.
+
+SR keeps each target as model metadata only, with no inference listener or
+backend, so its configuration can change in place. An existing deployment
+whose SR configuration was rendered with the old placeholder listener and
+backends needs one restart to render this form; later updates then apply in
+place.
+
+Reef accepts request bodies up to 64 MiB, and a body must finish uploading
+within 30 seconds; otherwise Reef answers 408 without calling SR or a model.
+An automatic request's preview body (its Scenario entrypoint and messages) must
+fit SR's 10 MiB limit; a larger one gets 413 from Reef without calling SR,
+while the same body as a pin is served.
+
+Ctrl-C or SIGTERM first closes acceptance, then drains accepted requests and
+pending record writes before removing the owned container and its anonymous
+volumes. New inference requests receive 503 during this interval. A client that
+disconnects while its request awaits SR cancels the request before any provider
+call. Work that exceeds the configured deadlines can be cancelled; local
+response completion does not establish client delivery. ``bounded`` recovery
+recreates the SR container without replaying requests or restarting Reef or
+model services. Reef failure, unresolved record writes, or exhausted recovery
+attempts stop the deployment.
+
+Ownership is recorded under ``${XDG_STATE_HOME:-~/.local/state}/reef/routing/``
+and locked per deployment ID. A different run directory does not permit a second
+owner. Containers and networks are removed only after their ownership matches;
+records, model caches and provider containers are preserved. A killed parent may
+leave the SR container behind until the next start or explicit cleanup;
+the managed Reef child detects owner loss and stops serving. If a Docker mutation
+was interrupted, its outstanding operation ID blocks the next start. Cleanup
+preserves this marker until the operator establishes that the daemon operation
+has finished and explicitly acknowledges it. See the tutorial for status,
+cleanup and configuration replacement commands.
+
 Configuration file layout
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 

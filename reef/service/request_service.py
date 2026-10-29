@@ -10,11 +10,16 @@ scenario surface's request/response checks. No aiohttp types appear here;
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import math
+import time
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Mapping, Sequence
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import Any, TypeVar
+
+from aiohttp import ClientError
 
 from reef.artifact.artifact import Artifact, ArtifactError, ArtifactNotFound, ArtifactRef
 from reef.core.errors import ReefError, UnknownScenario
@@ -28,11 +33,21 @@ from reef.harness.tree.mutations import Mutation, MutationError
 from reef.harness.tree.render import RenderError, render_composition
 from reef.observability.operations import OperationMeasurement, OperationMetrics
 from reef.recipe.errors import RecipeConfigError
-from reef.runtime.interfaces import InferenceAdmissionHandle, InferenceHandler, InferenceStream, inference_aborted
+from reef.runtime.interfaces import (
+    InferenceAdmissionHandle,
+    InferenceHandler,
+    InferenceStream,
+    UpstreamStatusError,
+    inference_aborted,
+)
 from reef.scenario.scenario import Scenario
 from reef.service.install_script import TOKEN_PLACEHOLDER, render_install_script
+from reef.service.lifecycle import PendingWrites
 from reef.service.release_page import before_release_id, build_release_page, build_running_step_page, result_of
 from reef.service.request_page import STATE_WORDS, build_request_page, request_state, settled_step
+from reef.service.routing import RoutingAdapter, RoutingDecision, RoutingScenario
+from reef.service.routing_preview import RoutingPreviewClient
+from reef.service.streaming import sse_events
 from reef.service.wire import SCENARIO_HEADER, ProposalPayload, ReportPayload, RequestHeaders, parse_request_headers
 from reef.surface.base import InferenceHooks, InferenceLease, LeasingInferenceHooks, Surface
 from reef.surface.weights import RuntimeLoadMismatch, reported_runtime_load_id, reported_runtime_load_spans
@@ -42,6 +57,7 @@ from reef.train.cordis_backend.proposals import ProposalInbox
 from reef.train.trainer import Trainer
 
 logger = logging.getLogger(__name__)
+WriteResult = TypeVar("WriteResult")
 
 
 def request_family(record: bool, *, rollout: bool = False) -> str:
@@ -82,6 +98,25 @@ def install_service_url(headers: Mapping[str, str]) -> str | None:
     return f"{normalized.get('x-forwarded-proto') or 'http'}://{host}"
 
 
+def recorded_stream_aborted(response: Mapping[str, Any]) -> bool:
+    """Whether a recorded stream reports the ``abort`` finish reason that marks an unusable inference.
+
+    A relayed provider stream keeps its raw SSE ``body``, read event by event; a handler's own captured
+    response is one object.
+    """
+    body = response.get("body")
+    if not isinstance(body, str):
+        return inference_aborted(response)
+    for data in sse_events(body):
+        try:
+            event = json.loads(data)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, Mapping) and inference_aborted(event):
+            return True
+    return False
+
+
 def normalize_request_payload(
     request_type: RequestType,
     payload: Mapping[str, Any],
@@ -97,6 +132,19 @@ def normalize_request_payload(
 
 @dataclass(frozen=True)
 class PendingInference:
+    """State retained to finalize one provider stream, including after its connection has closed.
+
+    ``item`` is the record to finalize. ``record_stream`` releases the optional ``admission`` and ``lease``
+    handles in its finalization path, whether storage succeeds or fails. ``deferred_prepared`` is None if and
+    only if ``path`` is None; both are set when the handler validates its response only at the end.
+    ``routing_decision`` is None or a ``RoutingDecision`` and ``routing_request_id`` a string. For a routed
+    stream, ``routing_decision`` is its decision, ``record`` is true, ``routing_request_id`` is non-empty and
+    ``routing_decision.scenario == item.scenario``; otherwise ``routing_decision`` is None and
+    ``routing_request_id`` is empty. ``routing_started`` is a finite int or float, normally the
+    ``time.monotonic`` reading taken at the provider call, or zero by default. A routed record's elapsed
+    time is measured from it. The other fields retain their existing contracts.
+    """
+
     item: AgentRecord
     release_id: str | None
     admission: InferenceAdmissionHandle | None = None
@@ -106,6 +154,24 @@ class PendingInference:
     measurement: OperationMeasurement | None = None
     #: False for an evaluation call: served like any other, kept by nobody.
     record: bool = True
+    routing_decision: RoutingDecision | None = None
+    routing_request_id: str = ""
+    routing_started: float = 0.0
+
+    def __post_init__(self) -> None:
+        if (self.deferred_prepared is None) != (self.path is None):
+            raise ValueError("a stream's deferred response check needs both its prepared inference and its path")
+        if self.routing_decision is not None and not isinstance(self.routing_decision, RoutingDecision):
+            raise ValueError("a stream's routing decision must be None or a routing decision")
+        if not isinstance(self.routing_request_id, str):
+            raise ValueError("a stream's routing request ID must be a string")
+        if type(self.routing_started) not in (float, int) or not math.isfinite(self.routing_started):
+            raise ValueError("a stream's routing start must be a finite monotonic reading")
+        if self.routing_decision is None:
+            if self.routing_request_id:
+                raise ValueError("an unrouted stream has no routing request ID")
+        elif not self.record or not self.routing_request_id or self.routing_decision.scenario != self.item.scenario:
+            raise ValueError("a routed stream keeps a record of its own Scenario under a routing request ID")
 
 
 @dataclass(frozen=True)
@@ -157,9 +223,33 @@ class InferenceRetryTimeout(ReefError):
 
 
 class RequestService:
-    def __init__(self, dispatcher: Dispatcher, *, retry_policy: InferenceRetryPolicy | None = None) -> None:
+    """The HTTP routes' inference, record and report operations over one dispatcher.
+
+    Routing state: ``routing`` is the routing adapter requests are admitted with, or None without routing; a
+    managed child's publication replaces it. ``preview`` is the router's preview client, needed only for
+    automatic selection: without it ``select_route`` raises for the automatic model, while explicit pins
+    still resolve. ``writes`` is the managed child's ``PendingWrites``, or None, which makes ``persist`` a
+    plain await.
+    Routed operations: ``select_route`` decides once per request; ``infer_routed`` and the routed branch of
+    ``start_stream`` use that decision and its handler for the provider call and every retry; each provider
+    attempt keeps one record, and a success's receipt names a record that is already stored.
+    """
+
+    def __init__(
+        self,
+        dispatcher: Dispatcher,
+        *,
+        retry_policy: InferenceRetryPolicy | None = None,
+        routing: RoutingAdapter | None = None,
+        writes: PendingWrites | None = None,
+        preview: RoutingPreviewClient | None = None,
+    ) -> None:
         self._dispatcher = dispatcher
         self._retry_policy = retry_policy or InferenceRetryPolicy()
+        #: The published routing policy; a request reads it once, when it is admitted.
+        self.routing = routing
+        self.writes = writes
+        self.preview = preview
         # The harness head of a scenario with several components, by scenario step and active release: it is
         # read on every inference answer and changes only when a commit lands.
         self.harness_heads: dict[str, tuple[int, str, str]] = {}
@@ -167,6 +257,12 @@ class RequestService:
     @property
     def dispatcher(self) -> Dispatcher:
         return self._dispatcher
+
+    async def persist(self, write: Awaitable[WriteResult]) -> WriteResult:
+        """Await one write, retaining it after cancellation in managed deployments."""
+        if self.writes is None:
+            return await write
+        return await self.writes.run(write)
 
     def accept(
         self,
@@ -241,7 +337,7 @@ class RequestService:
         artifact_id: str | None = None,
     ) -> tuple[dict[str, Any], AgentRecord | None]:
         """Serve one inference; ``record`` False serves it without keeping a record, as an evaluation call of the
-        ``evaluated`` component (see ``Surface.inference_for_evaluation``).
+        ``evaluated`` component (see ``Surface.inference_for_evaluation``). Routed requests use ``infer_routed``.
 
         ``artifact_id`` names the served artifact that answers, at its own URL (``Scenario.served_release``);
         ``None`` is the active release.
@@ -345,6 +441,183 @@ class RequestService:
         finally:
             measurement.finish(succeeded=succeeded)
 
+    async def select_route(
+        self, routing: RoutingAdapter, scenario: RoutingScenario, payload: Mapping[str, object]
+    ) -> RoutingDecision:
+        """The target of one routed request under the policy it captured; JSON and SSE requests share it.
+
+        An explicit target is checked locally and never reaches the router. An automatic request makes exactly
+        one routing preview against ``routing``'s router runtime. A failed selection raises before any provider
+        call or record.
+        """
+        decision = routing.explicit_decision(scenario, payload)
+        if decision is not None:
+            return decision
+        if self.preview is None:
+            raise RuntimeError("routing has no Semantic Router preview client")
+        return await self.preview.select(routing, scenario, payload)
+
+    @staticmethod
+    def routed_payload(
+        payload: Mapping[str, object],
+        decision: RoutingDecision,
+        *,
+        request_id: str,
+        attempt_index: int,
+        prior_attempt_ids: Sequence[str],
+        execution_outcome: str,
+        delivery_outcome: str,
+        started: float,
+        client_visible: bool,
+    ) -> dict[str, object]:
+        """Add authoritative routing fields to a stored copy, never the provider body."""
+        raw_metadata = payload.get("metadata")
+        metadata = dict(raw_metadata) if isinstance(raw_metadata, Mapping) else {}
+        metadata["routing"] = {
+            **decision.metadata(),
+            "request_id": request_id,
+            "attempt_index": attempt_index,
+            "prior_attempt_ids": list(prior_attempt_ids),
+            "purpose": "serve",
+            "execution_outcome": execution_outcome,
+            "delivery_outcome": delivery_outcome,
+            "elapsed_seconds": max(0.0, time.monotonic() - started),
+            "client_visible": client_visible,
+        }
+        stored = {**payload, "metadata": metadata}
+        if execution_outcome != "completed":
+            stored.pop("training", None)
+        return stored
+
+    async def record_routed_failure(
+        self,
+        error: BaseException,
+        prepared: PreparedInference,
+        provider_payload: Mapping[str, object],
+        decision: RoutingDecision,
+        *,
+        request_id: str,
+        prior_attempt_ids: Sequence[str],
+        started: float,
+    ) -> None:
+        """Keep one routed provider attempt that failed before the client received any of its output.
+
+        JSON and SSE requests share it. The caller awaits it before it releases the attempt's admission and
+        lease, then raises its own error.
+        """
+        if isinstance(error, asyncio.CancelledError):
+            execution_outcome = "cancelled"
+        elif isinstance(error, TimeoutError):
+            execution_outcome = "timeout"
+        else:
+            execution_outcome = "error"
+        failed_payload = self.routed_payload(
+            {**provider_payload, "response": {"error_type": type(error).__name__}},
+            decision,
+            request_id=request_id,
+            attempt_index=len(prior_attempt_ids) + 1,
+            prior_attempt_ids=prior_attempt_ids,
+            execution_outcome=execution_outcome,
+            delivery_outcome="not_started",
+            started=started,
+            client_visible=False,
+        )
+        await self.persist(
+            asyncio.to_thread(self._accept, prepared.parsed, failed_payload, artifact_ref=prepared.record_ref)
+        )
+
+    async def infer_routed(
+        self,
+        headers: Mapping[str, str],
+        payload: dict[str, Any],
+        path: str,
+        decision: RoutingDecision,
+        handler: InferenceHandler,
+    ) -> tuple[dict[str, Any], AgentRecord]:
+        """Serve ``payload``, the provider body, with the target and handler the request selected.
+
+        Every attempt and retry uses the same ``handler``; nothing selects again. Each provider attempt keeps
+        a record, and only a completed one is answered with a receipt.
+        """
+        operations = await self.inference_operations(headers)
+        measurement = operations.start("serve/request")
+        request_id = uuid.uuid4().hex
+        prior_attempt_ids: list[str] = []
+        deadline = time.monotonic() + self._retry_policy.timeout_s
+        retry_delay = self._retry_policy.initial_s
+        succeeded = False
+        try:
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise InferenceRetryTimeout("routed inference retry deadline exceeded")
+                prepared, provider_payload = await self._prepare_request(headers, payload, path, handler)
+                started = time.monotonic()
+                execution_outcome = "completed"
+                # Persistence precedes the HTTP response; client delivery is not yet confirmed.
+                delivery_outcome = "unconfirmed"
+                response: dict[str, Any] = {}
+                try:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise InferenceRetryTimeout("routed inference retry deadline exceeded before dispatch")
+                    try:
+                        response = await asyncio.wait_for(
+                            handler.inference(prepared.served, path, provider_payload), timeout=remaining
+                        )
+                        if inference_aborted(response):
+                            execution_outcome = "aborted"
+                            delivery_outcome = "not_started"
+                    except BaseException as exc:
+                        # This provider boundary records failures, then preserves the original exception.
+                        await self.record_routed_failure(
+                            exc,
+                            prepared,
+                            provider_payload,
+                            decision,
+                            request_id=request_id,
+                            prior_attempt_ids=prior_attempt_ids,
+                            started=started,
+                        )
+                        # A timeout first: aiohttp's ServerTimeoutError is also a ClientError.
+                        if isinstance(exc, TimeoutError):
+                            raise InferenceRetryTimeout("routed inference timed out") from exc
+                        if isinstance(exc, ClientError):
+                            raise UpstreamStatusError(
+                                "routed inference upstream connection failed", status=502
+                            ) from exc
+                        raise
+                    recorded_response = dict(response)
+                    if execution_outcome != "completed":
+                        recorded_response.pop("training", None)
+                    stored_payload = self.routed_payload(
+                        {**provider_payload, "response": recorded_response},
+                        decision,
+                        request_id=request_id,
+                        attempt_index=len(prior_attempt_ids) + 1,
+                        prior_attempt_ids=prior_attempt_ids,
+                        execution_outcome=execution_outcome,
+                        delivery_outcome=delivery_outcome,
+                        started=started,
+                        client_visible=execution_outcome == "completed",
+                    )
+                    item = await self.persist(
+                        asyncio.to_thread(
+                            self._accept, prepared.parsed, stored_payload, artifact_ref=prepared.record_ref
+                        )
+                    )
+                    if execution_outcome == "completed":
+                        succeeded = True
+                        return client_inference_response(response), item
+                    prior_attempt_ids.append(item.agent_record_id)
+                    operations.increment("serve/retries_total")
+                finally:
+                    prepared.release()
+                await asyncio.sleep(min(retry_delay, max(0.0, deadline - time.monotonic())))
+                retry_delay = min(retry_delay * 2, self._retry_policy.max_s)
+        finally:
+            measurement.finish(succeeded=succeeded)
+
     async def start_stream(
         self,
         headers: Mapping[str, str],
@@ -354,8 +627,20 @@ class RequestService:
         *,
         record: bool = True,
         evaluated: str | None = None,
+        decision: RoutingDecision | None = None,
         artifact_id: str | None = None,
     ) -> tuple[InferenceStream, PendingInference]:
+        """Open one provider stream. A routed request passes its ``decision`` and the ``handler`` it selected,
+        its ``headers`` name the decision's Scenario, and ``payload`` is then its provider body."""
+        routing_request_id = ""
+        routing_started = 0.0
+        if decision is not None:
+            if handler is None or not record:
+                raise ValueError("a routed stream needs its selected handler and keeps a record")
+            # Checked before the provider call: PendingInference refuses another Scenario only after the stream opens.
+            if parse_request_headers(headers, RequestType.INFERENCE).scenario != decision.scenario:
+                raise ValueError("a routed stream's headers name another Scenario than its routing decision")
+            routing_request_id = uuid.uuid4().hex
         operations = await self.inference_operations(headers, record=record, artifact_id=artifact_id)
         measurement = operations.start(f"{request_family(record)}/request")
         try:
@@ -364,8 +649,15 @@ class RequestService:
             )
             admission = prepared.admission
             lease = prepared.lease
+            routing_started = time.monotonic()
             try:
                 stream = await prepared.handler.inference_stream(prepared.served, path, payload)
+                if decision is not None:
+                    content_type = next(
+                        (value for name, value in stream.headers.items() if name.lower() == "content-type"), ""
+                    )
+                    if "text/event-stream" not in content_type.lower():
+                        raise UpstreamStatusError("routed streaming requires an SSE response", status=502)
                 record_response = stream.record_response
                 record_response_pending = stream.record_response_pending
                 if record_response is not None:
@@ -388,10 +680,20 @@ class RequestService:
                     raise RuntimeLoadMismatch(
                         "durable streaming inference requires an atomic record_response with serving runtime load IDs"
                     )
-            except BaseException:
+            except BaseException as exc:
                 try:
                     if "stream" in locals():
                         await stream.close()
+                    if decision is not None:
+                        await self.record_routed_failure(
+                            exc,
+                            prepared,
+                            payload,
+                            decision,
+                            request_id=routing_request_id,
+                            prior_attempt_ids=(),
+                            started=routing_started,
+                        )
                 finally:
                     try:
                         if lease is not None:
@@ -399,6 +701,11 @@ class RequestService:
                     finally:
                         if admission is not None:
                             admission.release()
+                # A timeout first: aiohttp's ServerTimeoutError is also a ClientError.
+                if decision is not None and isinstance(exc, TimeoutError):
+                    raise InferenceRetryTimeout("routed streaming inference timed out") from exc
+                if decision is not None and isinstance(exc, ClientError):
+                    raise UpstreamStatusError("routed streaming upstream connection failed", status=502) from exc
                 raise
             pending = PendingInference(
                 item=AgentRecord.create(
@@ -414,6 +721,9 @@ class RequestService:
                 deferred_prepared=prepared if record_response_pending else None,
                 path=path if record_response_pending else None,
                 record=record,
+                routing_decision=decision,
+                routing_request_id=routing_request_id,
+                routing_started=routing_started,
             )
             return stream, pending
         except BaseException as exc:
@@ -466,14 +776,36 @@ class RequestService:
                 pending.item,
                 payload={**payload, "response": dict(response)},
             )
+            delivery = response.get("stream_delivery", response)
+            complete = isinstance(delivery, Mapping) and delivery.get("complete") is True and not delivery.get("error")
+            if pending.routing_decision is not None:
+                # An explicit abort describes the generation; ``complete`` still describes the transport.
+                if recorded_stream_aborted(response):
+                    execution_outcome = "aborted"
+                elif complete:
+                    execution_outcome = "completed"
+                else:
+                    execution_outcome = "unknown"
+                item = replace(
+                    item,
+                    payload=self.routed_payload(
+                        item.payload,
+                        pending.routing_decision,
+                        request_id=pending.routing_request_id,
+                        attempt_index=1,
+                        prior_attempt_ids=(),
+                        execution_outcome=execution_outcome,
+                        delivery_outcome="unconfirmed" if complete else "incomplete",
+                        started=pending.routing_started,
+                        client_visible=bool(response.get("body")) or complete,
+                    ),
+                )
             # An evaluation call is served like any other and kept by nobody.
             stored = (
                 item if not pending.record else self._dispatcher.accept_record(item, release_id=pending.release_id)
             )
-            delivery = response.get("stream_delivery", response)
-            succeeded = (
-                isinstance(delivery, Mapping) and delivery.get("complete") is True and not delivery.get("error")
-            )
+            # Set after the record step, so a rejected record is never measured as a success.
+            succeeded = complete
             return stored
         except Exception as exc:
             if isinstance(exc, RuntimeLoadMismatch) and pending.measurement is not None:
@@ -499,7 +831,9 @@ class RequestService:
     ) -> OperationMetrics:
         """Resolve the scenario before measuring its inference request lifetime."""
         parsed = parse_request_headers(headers, RequestType.INFERENCE)
-        scenario = await asyncio.to_thread(self.inference_scenario, parsed, record=record, artifact_id=artifact_id)
+        scenario = await self.persist(
+            asyncio.to_thread(self.inference_scenario, parsed, record=record, artifact_id=artifact_id)
+        )
         return scenario.operations
 
     def inference_scenario(self, parsed: RequestHeaders, *, record: bool, artifact_id: str | None = None) -> Scenario:
@@ -537,7 +871,9 @@ class RequestService:
         an evaluation call (``record`` False) runs every component's hooks but
         the ``evaluated`` one's, whose candidate the rollout runs."""
         parsed = parse_request_headers(headers, RequestType.INFERENCE)
-        initial = await asyncio.to_thread(self.inference_scenario, parsed, record=record, artifact_id=artifact_id)
+        initial = await self.persist(
+            asyncio.to_thread(self.inference_scenario, parsed, record=record, artifact_id=artifact_id)
+        )
         if evaluated is not None and evaluated not in initial.surface.names:
             raise UnknownScenario(f"scenario {parsed.scenario!r} serves no component {evaluated!r}")
         if initial.runtime is not None:
@@ -549,25 +885,29 @@ class RequestService:
             # Re-resolve after admission: a queued request must freeze the head
             # committed by the weight update that released it, never the head it
             # observed before waiting.
-            prepared = await asyncio.to_thread(
-                self._prepare_inference,
-                parsed,
-                handler,
-                admission,
-                record=record,
-                evaluated=evaluated,
-                rollout=rollout,
-                artifact_id=artifact_id,
+            prepared = await self.persist(
+                asyncio.to_thread(
+                    self._prepare_inference,
+                    parsed,
+                    handler,
+                    admission,
+                    record=record,
+                    evaluated=evaluated,
+                    rollout=rollout,
+                    artifact_id=artifact_id,
+                )
             )
             hooks = prepared.hooks
             transformed = (
                 dict(payload)
                 if hooks is None
-                else await asyncio.to_thread(
-                    hooks.prepare_request,
-                    prepared.artifact,
-                    path,
-                    dict(payload),
+                else await self.persist(
+                    asyncio.to_thread(
+                        hooks.prepare_request,
+                        prepared.artifact,
+                        path,
+                        dict(payload),
+                    )
                 )
             )
             if isinstance(hooks, LeasingInferenceHooks):

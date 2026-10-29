@@ -27,7 +27,7 @@ Routes
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | Route                                                                            | Response                                          |
 +==================================================================================+===================================================+
-| ``GET /healthz``                                                                 | readiness; the only unauthenticated route         |
+| ``GET /healthz``                                                                 | liveness; the only unauthenticated route          |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /v1/chat/completions``                                                    | OpenAI-format inference                           |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
@@ -198,6 +198,164 @@ B. If these conditions hold, its calls tagged with A are recorded against A;
 an untagged call or a call tagged with an unknown release is recorded against B.
 This tag is separate from ``x-reef-release-id``, which binds a scenario to its
 starting release.
+
+Routed external-model requests
+------------------------------
+
+When `Scenario routing <configuration.rst#scenario-routing-between-students-and-teachers>`__
+is enabled, clients send ``POST /v1/chat/completions`` directly to Reef with a
+service token. Only the base record-only Recipe is supported. A routed Reef
+serves only this route, ``POST /reef/report`` and ``GET /healthz``; other
+routes return 404. Calls with ``x-reef-rollout: 1`` or ``true`` return 400
+(``unsupported_rollout``). Rollout calls remain available when routing is disabled.
+
+.. list-table:: Client fields
+   :header-rows: 1
+
+   * - Field
+     - Required value
+   * - ``x-reef-scenario``
+     - A Scenario listed in the manifest.
+   * - JSON ``model``
+     - The manifest's automatic model name, or one of the Scenario's target IDs.
+
+For the automatic model, Reef sends one ``POST /api/v1/routing/preview`` to
+the Scenario's private Semantic Router entrypoint, with the request's
+messages and the router runtime hash Reef verified at startup. Reef accepts
+the reply only if it names that hash, the Scenario's entrypoint, and either
+``default`` or one of the Scenario's rules with its configured target. A pin is
+resolved locally and never calls the router. Reef then sets the provider
+``model``; the rest of the JSON body is the client's original body, not the
+router's re-encoded copy. The target is frozen for every attempt of the
+request. These checks precede Scenario creation and provider execution:
+
+* An unconfigured Scenario returns 403 (``unknown_scenario``), and so does a
+  pin to a target outside the Scenario (``target_not_allowed``).
+* A missing Scenario or model, an unknown target, a private router entrypoint
+  as ``model``, a repeated ``x-reef-*`` header, a client-supplied
+  ``x-reef-routing-*``, ``x-reef-sr-decision`` or ``x-selected-model`` header,
+  and a nonempty ``x-reef-release-id`` return 400.
+* A disabled target returns 503.
+* A managed deployment returns 408 when the request body does not finish
+  uploading within 30 seconds.
+* For the automatic model only: messages the router cannot classify return
+  400, a preview body over the router's 10 MiB limit returns 413 without
+  calling the router, and a full router returns 429. A router connection that
+  is refused, reset or closed before any reply arrives, as when SR stops or
+  restarts, returns 503 (``routing_unavailable``), and so do an unverified
+  runtime (``routing_unpublished``) and a runtime that changed
+  (``routing_runtime_changed``). A router timeout returns 504. A reply that
+  starts but is malformed or cut off, or a selection that does not match the
+  manifest and runtime, returns 502 (``routing_protocol`` or
+  ``routing_selection``).
+
+None of these failures is retried or sent to another target. See the
+`Semantic Router tutorial <../../tutorials/semantic-router/README.md>`__.
+
+Each dispatched attempt produces an INFERENCE record in the request's
+Scenario. Server-generated ``payload.metadata.routing`` replaces
+caller-supplied routing metadata and contains ``target_id``, ``role``,
+``provider_model``, ``model_revision``, ``snapshot_version``,
+``router_config_hash`` (``null`` for a pin),
+``original_selector``, the selection ``reason`` (``default``, ``rule`` or
+``explicit_pin``) and ``rule_name`` (``null`` for pins). ``request_id``,
+``attempt_index`` and ``prior_attempt_ids`` link retries; the successful
+attempt's normal receipt remains the reference for Scenario-local REPORT
+feedback.
+
+``model_revision`` is declared by the deployment manifest, with
+``identity_source: deployment_manifest``. It does not replace Reef's
+``artifact_ref``, ``runtime_load_id`` or release identity, and does not prove
+which external weights executed.
+
+``execution_outcome`` is ``completed``, ``aborted``, ``error``, ``timeout`` or
+``cancelled``; interrupted streams whose execution cannot be established use
+``unknown``. Failed attempts are diagnostic records without training data.
+``delivery_outcome`` is ``not_started`` for failures
+before delivery, or ``incomplete`` for interrupted streams. Successful
+generation uses ``unconfirmed``: Reef persists the record before returning a
+buffered response or writing the SSE receipt and terminal event, so it cannot
+confirm client receipt. ``client_visible`` likewise describes the serving
+attempt, not a delivery acknowledgement.
+
+Persistence failure produces no success receipt. An SSE response that has
+already started ends without a successful terminal event. This recording
+mode does not train models or supply the sampled tensors required for OPD.
+
+Managed routing lifecycle
+-------------------------
+
+With ``reef.routing_manifest`` set, the deployment controller uses
+``GET /reef/lifecycle`` and ``POST /reef/lifecycle`` on a private Unix socket
+that the routed Reef child serves (directory 0700, socket 0600). These routes
+are never served on ``reef.port``. They require a separate per-generation
+control credential: service and evaluation tokens cannot open them, and the
+control credential is not a service token on public routes. Operators normally use
+``reef serve`` and the deployment status/cleanup commands rather than calling
+this private interface.
+
+``GET`` returns ``deployment_id``, ``generation``, ``snapshot_version``,
+``router_config_hash`` (empty until the owner publishes a verified runtime),
+``control_revision``, ``accepting``, ``stopping``, ``active_requests`` and
+``pending_writes``, plus ``drain_pending_writes`` and diagnostic
+``forced_requests`` and ``failed_writes`` counts. An admitted request keeps the
+manifest and router runtime hash it captured at admission, including while the
+router previews it. ``GET /healthz`` remains a
+liveness check; it does not mean the managed
+routing deployment is ready to accept inference.
+
+``POST`` takes the deployment ID, generation, a nonnegative integer
+``control_revision`` and an ``action``: ``open``, ``close``, ``stop`` or
+``activate``. ``activate`` also takes ``manifest_path``, ``snapshot_version``,
+``expected_snapshot_version`` and a 64-hex ``router_config_hash``; it publishes
+them together while admission is closed and drained, and leaves admission
+closed. ``open`` also requires ``open_deadline_monotonic``: a positive, finite
+value of the owner's ``time.monotonic()`` clock, which the child shares because
+both run on the same host. ``open`` returns 409 until a router runtime hash has
+been published, and on a routed deployment first checks every provider and
+sends one preview per Scenario under that hash; a failed check returns 503 and
+stays closed. An ``open`` that has not opened admission by its deadline returns
+503 and changes nothing, including the revision. Revisions increase
+monotonically. Repeating the same revision and command, including the deadline,
+is idempotent: an applied ``open`` returns the current status, also after its
+deadline. Stale revisions, conflicting commands and identity mismatches
+return 409. ``stop`` is terminal for the generation. ``close`` and ``stop``
+also accept ``cancel_active: true`` to cancel accepted inference requests
+after their drain deadline; ``open`` and ``activate`` cannot use this option.
+
+``POST /reef/lifecycle/check`` on the same socket, with the same control
+credential, checks a candidate manifest before the owner changes anything. It
+takes exactly ``deployment_id``, ``generation``, ``manifest_path``,
+``snapshot_version`` (the candidate's digest), ``expected_snapshot_version``
+(the child's current snapshot) and ``check_deadline_monotonic``, a positive,
+finite value of the owner's ``time.monotonic()`` clock. The child refuses the
+candidate with 409 when it would not publish it: an unreadable manifest,
+another digest, a changed automatic model, Scenario names or domain
+classifier, or a target credential variable missing from the child's own
+environment. That reply is the fixed text ``routing candidate rejected``; the
+reason goes only to the child's log. It then checks each enabled
+target's provider model list with the child's credentials and returns 200 with
+``{"snapshot_version": ...}``, or 503 with only an error code when a provider
+fails or the deadline passes. It is not a command: it has no revision, does not
+wait for or block other commands, publishes nothing, does not change admission
+and keeps nothing. A check that a ``stop`` or another publication overtakes
+returns 409. A malformed body returns 400, and identity mismatches return 409.
+
+Managed inference starts closed. A closed deployment rejects new inference
+with 503 without invoking a provider. Admission and the request's routing
+policy are fixed together before the body is read, so the upload counts toward
+a later close's drain and a policy published meanwhile does not change it.
+An accepted request remains active through local response EOF or connection
+termination, including SSE terminal frames. Local EOF does not establish
+client receipt. Reports can finish during ``close``;
+``stop`` rejects new mutations. Record writes already submitted remain counted
+after request cancellation and are not retried by the lifecycle controller.
+During ``close``, ``drain_pending_writes`` counts all inference-owned writes,
+including finalization submitted after close, and other writes submitted before
+the first close. Reports accepted after close do not extend that drain. Repeated
+close commands preserve its boundary, and ``open`` rejects with 409 until these
+writes finish. During terminal ``stop``, the drain count includes every pending
+write. ``pending_writes`` always reports the total.
 
 Scenario model settings
 -----------------------

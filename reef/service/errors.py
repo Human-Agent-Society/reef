@@ -26,6 +26,8 @@ from reef.core.errors import (
 from reef.runtime.interfaces import UpstreamStatusError
 from reef.service.artifact_evaluations import EvaluationLimitReached
 from reef.service.request_service import InferenceRetryTimeout
+from reef.service.routing import RoutingRequestError
+from reef.service.routing_preview import PREVIEW_BODY_LIMIT_BYTES
 from reef.storage.records import RecordConflict
 from reef.storage.samples import SampleConflict
 from reef.surface.weights import RuntimeLoadMismatch
@@ -70,6 +72,17 @@ _UPSTREAM_CLIENT_ERRORS: dict[int, type[web.HTTPError]] = {
     429: web.HTTPTooManyRequests,
 }
 
+#: Every status a routing check or routing preview reports. A 413 is a preview body over the router's limit.
+ROUTING_ERRORS: dict[int, type[web.HTTPError]] = {
+    400: web.HTTPBadRequest,
+    403: web.HTTPForbidden,
+    409: web.HTTPConflict,
+    429: web.HTTPTooManyRequests,
+    502: web.HTTPBadGateway,
+    503: web.HTTPServiceUnavailable,
+    504: web.HTTPGatewayTimeout,
+}
+
 
 def _translate_upstream(exc: UpstreamStatusError) -> web.HTTPError:
     """Relay an upstream failure without flattening it into a 500.
@@ -86,6 +99,11 @@ def _translate_upstream(exc: UpstreamStatusError) -> web.HTTPError:
 
 def translate_error(exc: Exception) -> web.HTTPError | None:
     """The HTTP error for a domain exception, or None when it is not mapped."""
+    if isinstance(exc, RoutingRequestError):
+        text = f"{exc.code}: {exc}"
+        if exc.status == 413:
+            return web.HTTPRequestEntityTooLarge(PREVIEW_BODY_LIMIT_BYTES, text=text)
+        return ROUTING_ERRORS[exc.status](text=text)
     if isinstance(exc, UpstreamStatusError):  # before the table: status is dynamic
         return _translate_upstream(exc)
     if isinstance(exc, ScenarioCapacityFull):  # Before the table: the response tells when to retry.

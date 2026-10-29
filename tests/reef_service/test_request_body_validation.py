@@ -32,6 +32,9 @@ def test_object_routes_reject_non_object_bodies_with_400() -> None:
                     assert "request body must be an object" in await response.text()
                 empty = await client.post(path, data="", headers=json_headers)
                 assert empty.status == 400, (path, empty.status)
+                # A caller's malformed JSON stays the caller's 400; only a provider's is a 502.
+                malformed = await client.post(path, data="{not json", headers=json_headers)
+                assert malformed.status == 400, (path, malformed.status)
             created = await client.post("/reef/scenarios", json={"name": "still-works"}, headers=HEADERS)
             assert created.status in (200, 201)
         finally:
