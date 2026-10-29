@@ -81,18 +81,25 @@ workflow dispatches run the full matrix; use a PR workflow rerun to satisfy
 that PR's required checks. See the
 `maintenance model <https://github.com/Human-Agent-Society/reef/blob/main/.github/MAINTAINER.md#5-continuous-integration>`_.
 
-Tests in the same file stay in one worker, preserving
-module fixture reuse. The ``dev`` extra installs the same test runner plugin,
-so an activated development environment reproduces the parallel run:
+``pyproject.toml`` selects ``--dist worksteal``: the workers share single
+tests, not files, and an idle worker takes queued tests from a busy one. The
+``dev`` extra installs the same test runner plugin, so an activated
+development environment reproduces the parallel run:
 
 .. code:: bash
 
    GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
-     pytest tests/ -n 8 --dist loadfile
+     pytest tests/ -n 8
 
-Use ``-n 0`` for a serial run when diagnosing a failure. Tests in different
-files may run at the same time; use temporary directories and dynamically
-allocated ports for their external resources.
+Use ``-n 0`` for a serial run when diagnosing a failure. Any two tests,
+including two tests of the same file, may run at the same time in different
+processes, in any order. Each test must pass alone:
+
+- Keep files and other external resources in ``tmp_path`` and allocate ports
+  dynamically.
+- Do not depend on state that another test sets.
+- Use a module-scoped fixture only for read-only setup. Each worker builds
+  its own copy.
 
 CI installs dependencies with ``uv pip`` and caches downloads and built wheels
 separately for each job and Python version. It still creates a fresh installed
@@ -164,9 +171,9 @@ Markers
 <marker>``.
 
 ``sandbox`` selects tests that need real nested bubblewrap jails. Reproduce
-the two source-suite groups with ``pytest tests -m 'not sandbox' -n 8 --dist
-loadfile`` and ``REEF_REQUIRE_SANDBOX=1 pytest tests -m sandbox``. The second
-command requires a Linux host that supports nested jails.
+the two source-suite groups with ``pytest tests -m 'not sandbox' -n 8`` and
+``REEF_REQUIRE_SANDBOX=1 pytest tests -m sandbox``. The second command requires
+a Linux host that supports nested jails.
 
 Coverage
 --------
@@ -182,7 +189,7 @@ below the floor. Reproduce it the way CI does:
 
 .. code:: bash
 
-   pytest tests -n 8 --dist loadfile --cov --cov-report=term
+   pytest tests -n 8 --cov --cov-report=term
 
 ``pytest-cov`` ships in the ``dev`` extra. The floor applies to the whole
 package, so a partial run reports far less than CI does; measure against the
