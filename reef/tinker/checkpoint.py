@@ -23,11 +23,12 @@ MANIFEST = "tinker-checkpoint.json"
 
 @dataclass(frozen=True)
 class TinkerCheckpoint:
-    """One durable Tinker checkpoint of a LoRA of ``base_model`` with rank ``lora_rank``.
+    """One durable Tinker checkpoint of ``base_model``: a LoRA of rank ``lora_rank``, or all its parameters.
 
-    Values: ``base_model`` is non-empty and ``lora_rank`` positive. ``state_path`` (the weights and optimizer state
-    that a later job restores) and ``sampler_path`` (the LoRA adapter that Tinker's sampler serves, and that a
-    serving runtime downloads to load into its own engines) are ``tinker://`` paths. ``service`` is the base URL of
+    Values: ``base_model`` is non-empty. ``lora_rank`` is a positive int for a LoRA, or ``None`` for a checkpoint of
+    all the parameters, which Spindle's full-parameter training saves. ``state_path`` (the weights and optimizer state
+    that a later job restores) and ``sampler_path`` (the weights that the service's sampler serves; for a LoRA, the
+    adapter that a serving runtime downloads to load into its own engines) are ``tinker://`` paths. ``service`` is the base URL of
     the Tinker-compatible service that holds every path (``TinkerConfig.base_url``), or ``None`` for Thinking
     Machines' hosted Tinker; a path resolves only on that service. The training component makes the values and
     writes them as the manifest ``MANIFEST`` of a checkpoint directory, which is the whole release; the component,
@@ -37,7 +38,7 @@ class TinkerCheckpoint:
     """
 
     base_model: str
-    lora_rank: int
+    lora_rank: int | None
     state_path: str
     sampler_path: str
     schema_version: int = 1
@@ -53,22 +54,24 @@ class TinkerCheckpoint:
     service: str | None = None
 
     def __post_init__(self) -> None:
-        if self.schema_version != 1 or not self.base_model or self.lora_rank <= 0:
+        rank = self.lora_rank
+        if self.schema_version != 1 or not self.base_model:
             raise ValueError("invalid Tinker checkpoint version or model configuration")
+        if rank is not None and (isinstance(rank, bool) or not isinstance(rank, int) or rank <= 0):
+            raise ValueError("a Tinker checkpoint's lora_rank is a positive int, or null for all the parameters")
         for path in (self.state_path, self.sampler_path):
             if not isinstance(path, str) or not path.startswith("tinker://"):
                 raise ValueError("Tinker checkpoints require remote tinker:// paths")
         if (self.objective is None) != (not self.algorithm_state):
             raise ValueError("a Tinker checkpoint names the objective of a non-empty state, and only of one")
 
-    def check_compatible(self, base_model: str, *, service: str | None, lora_rank: int | None = None) -> None:
-        """Raise ``ValueError`` unless the checkpoint is of ``base_model``, held by ``service``, and of ``lora_rank``
-        when it is given (the trainer's check; a sampler serves any rank)."""
-        if self.base_model != base_model or (lora_rank is not None and self.lora_rank != lora_rank):
-            raise ValueError(
-                f"the Tinker checkpoint is a rank {self.lora_rank} LoRA of base model {self.base_model}, not one of "
-                f"{base_model}" + ("" if lora_rank is None else f" with rank {lora_rank}")
-            )
+    def check_compatible(self, base_model: str, *, service: str | None) -> None:
+        """Raise ``ValueError`` unless the checkpoint is of ``base_model`` and held by ``service``.
+
+        A sampler serves a checkpoint of any rank; a trainer also checks its parameterization (``lora_rank``).
+        """
+        if self.base_model != base_model:
+            raise ValueError(f"the Tinker checkpoint is of base model {self.base_model}, not of {base_model}")
         if self.service != service:
             raise ValueError(
                 f"the Tinker checkpoint is held by {self.service or 'hosted Tinker'}, "
@@ -110,3 +113,39 @@ class TinkerCheckpoint:
     @classmethod
     def read(cls, directory: Path) -> TinkerCheckpoint:
         return cls.from_dict(json.loads((directory / MANIFEST).read_text()))
+
+
+@dataclass(frozen=True)
+class FreshStart:
+    """The start of a new model of all the parameters of ``base_model``, with the base model's own weights.
+
+    Values: ``base_model`` is non-empty. The start has no training state: no optimizer state, no learning-rate
+    schedule progress, and an empty objective state, as a ``TinkerCheckpoint`` of the untrained base would have; it
+    names no sampler, so its rollouts sample the base model. Purpose: the full-parameter training component starts a
+    job from it when the job starts from the base; ``TinkerClient.train`` creates the model on the service.
+    """
+
+    base_model: str
+
+    def __post_init__(self) -> None:
+        if not self.base_model:
+            raise ValueError("a fresh start names its base model")
+
+    @property
+    def learning_rate_schedule_state(self) -> LearningRateScheduleState | None:
+        return None
+
+    @property
+    def algorithm_state(self) -> Mapping[str, Any]:
+        return {}
+
+    @property
+    def objective(self) -> str | None:
+        return None
+
+    @property
+    def sampler_path(self) -> str | None:
+        return None
+
+    def state_for(self, objective: str) -> Mapping[str, Any]:
+        return {}
