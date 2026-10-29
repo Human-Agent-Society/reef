@@ -1,8 +1,9 @@
 """Policy-only updates of a managed routing deployment through the router's management API.
 
-The owner changes Scenario rules, defaults and target membership in place.
-Target catalog, provider, revision, endpoint, automatic selector, Scenario
-names and image changes require a restart. The committed router/Reef pair and
+The owner changes the target catalog (targets, provider models, revisions and
+endpoints), Scenario rules, defaults and target membership in place. Domain
+classifier, automatic selector, Scenario name, image and deployment setting
+changes require a restart. The committed router/Reef pair and
 any pending update are stored privately, so a lost reply or an owner restart is
 inspected instead of replayed.
 """

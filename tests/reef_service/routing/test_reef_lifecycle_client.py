@@ -11,9 +11,11 @@ from collections.abc import Callable, Iterator
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from socketserver import ThreadingUnixStreamServer
+from types import SimpleNamespace
 
 import pytest
 
+import reef.service.deploy.routing.reef_lifecycle_client as client_module
 from reef.service.deploy.routing.reef_lifecycle_client import (
     LifecycleStatus,
     ReefLifecycleClient,
@@ -88,7 +90,8 @@ class SlowChild:
                 with child.lock:
                     index = len(child.bodies)
                     child.bodies.append(body)
-                    revision = json.loads(body)["control_revision"] if body else child.revision
+                    # A candidate check has no revision and applies nothing.
+                    revision = json.loads(body).get("control_revision", child.revision) if body else child.revision
                     if revision > child.revision:
                         child.revision = revision
                         child.applied.append(revision)
@@ -319,6 +322,44 @@ def test_control_uses_its_socket_ignores_proxies_and_never_follows_redirects(
             server.shutdown()
             server.server_close()
             worker.join()
+
+
+@pytest.mark.parametrize("late_step", ["on_time", "exchange", "decode"])
+def test_a_candidate_check_confirmed_after_its_deadline_rejects_the_update(
+    monkeypatch: pytest.MonkeyPatch, late_step: str
+) -> None:
+    """The child confirms the candidate, but the owner's clock passes the deadline right after one step."""
+    clock = {"offset": 0.0}
+    monkeypatch.setattr(client_module, "time", SimpleNamespace(monotonic=lambda: time.monotonic() + clock["offset"]))
+
+    def then_late(function: Callable[..., object]) -> Callable[..., object]:
+        def late(*arguments: object, **options: object) -> object:
+            result = function(*arguments, **options)
+            clock["offset"] = 60.0
+            return result
+
+        return late
+
+    if late_step == "exchange":
+        monkeypatch.setattr(ReefLifecycleClient, "exchange", then_late(ReefLifecycleClient.exchange))
+    elif late_step == "decode":
+        monkeypatch.setattr(client_module, "json", SimpleNamespace(dumps=json.dumps, loads=then_late(json.loads)))
+    child = SlowChild([], reply_body=json.dumps({"snapshot_version": "candidate"}).encode())
+    with serving(child) as path:
+        client = client_for(path)
+
+        def check() -> None:
+            client.check_candidate("/m.yaml", "candidate", "current", deadline=time.monotonic() + 30)
+
+        if late_step == "on_time":
+            check()
+        else:
+            with pytest.raises(RoutingControlTimeout, match="after its deadline") as error:
+                check()
+            assert error.value.retryable is False
+    # One attempt, which neither the client nor the child counts as a command.
+    assert len(child.bodies) == 1 and child.applied == [] and client.revision == 0
+    assert "control_revision" not in json.loads(child.bodies[0])
 
 
 def test_a_missing_socket_is_a_retryable_control_failure(tmp_path: Path) -> None:

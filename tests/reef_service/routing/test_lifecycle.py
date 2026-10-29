@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
-from aiohttp import ClientConnectionError, ClientPayloadError, ClientResponse, ClientSession, web
+from aiohttp import ClientConnectionError, ClientPayloadError, ClientResponse, ClientSession, UnixConnector, web
 from aiohttp.test_utils import TestClient, TestServer
 from tests.reef_service.routing.routing_fakes import (
     OPEN_DEADLINE,
@@ -32,6 +32,7 @@ from tests.reef_service.routing.routing_fakes import (
     routing_adapter,
     routing_dispatcher,
     routing_headers,
+    routing_manifest,
     running_router,
 )
 from yarl import URL
@@ -41,7 +42,12 @@ from reef.scenario.scenario import Scenario
 from reef.service.app import CONTROL_APPLICATION, create_app
 from reef.service.auth import create_authentication_middleware
 from reef.service.deploy.routing.deployment_controller import RoutingDeploymentController
-from reef.service.deploy.routing.reef_lifecycle_client import LifecycleStatus, ReefLifecycleClient, RoutingControlError
+from reef.service.deploy.routing.reef_lifecycle_client import (
+    CANDIDATE_CHECK_PATH,
+    LifecycleStatus,
+    ReefLifecycleClient,
+    RoutingControlError,
+)
 from reef.service.deploy.routing.settings import RoutingDeploymentSettings
 from reef.service.deploy.service_config import ServiceConfig
 from reef.service.lifecycle import (
@@ -59,6 +65,7 @@ from reef.service.lifecycle import (
 )
 from reef.service.request_service import RequestService
 from reef.service.routes.payload import read_object
+from reef.service.routing import RoutingAdapter, RoutingSnapshot
 from reef.service.wire import RequestHeaders
 from reef.storage.records import AppendResult, RecordConflict
 from reef.storage.sqlite import SQLiteRecordStore
@@ -1026,7 +1033,8 @@ def test_an_open_past_its_deadline_never_opens_but_an_applied_open_still_answers
 class ScriptedReadiness(RoutingPublisher):
     """Readiness that passes after ``seconds``, waiting on the event loop or, with ``blocking``, holding it.
 
-    Only the readiness part of a publisher: nothing is published (``current`` is None) and ``publish`` is unsupported.
+    Only the readiness part of a publisher: nothing is published (``current`` is None), and ``candidate`` and
+    ``publish`` are unsupported.
     """
 
     def __init__(self, seconds: float, *, blocking: bool = False) -> None:
@@ -1037,6 +1045,9 @@ class ScriptedReadiness(RoutingPublisher):
 
     def current(self) -> None:
         return None
+
+    def candidate(self, manifest_path: str, snapshot_version: str, router_config_hash: str | None) -> RoutingAdapter:
+        raise NotImplementedError
 
     def publish(self, manifest_path: str, snapshot_version: str, router_config_hash: str) -> None:
         raise NotImplementedError
@@ -1108,20 +1119,35 @@ class SocketChild:
     #: The provider of every model-list check the child started, and every lifecycle POST it received.
     checks: list[str]
     posts: list[str]
+    #: The ``Authorization`` header of every model-list check, "" when absent, in arrival order.
+    authorizations: list[str]
 
 
 @contextlib.asynccontextmanager
-async def child_on_socket(tmp_path: Path, delay_seconds: float, timeout_s: float) -> AsyncIterator[SocketChild]:
+async def child_on_socket(
+    tmp_path: Path,
+    delay_seconds: float,
+    timeout_s: float,
+    *,
+    environ: dict[str, str] | None = None,
+    hold: asyncio.Event | None = None,
+) -> AsyncIterator[SocketChild]:
     """A routed child whose private control listens on a Unix socket without handler cancellation, as in production.
 
-    Its two targets have separate provider endpoints; each answers a model-list check after ``delay_seconds``.
+    Its two targets have separate provider endpoints; each answers a model-list check after ``delay_seconds``,
+    and, given ``hold``, not before ``hold`` is set; leaving the context sets it. The child reads credentials
+    from ``environ`` (default: none).
     """
     checks: list[str] = []
     posts: list[str] = []
+    authorizations: list[str] = []
 
     def provider(name: str) -> web.Application:
         async def models(request: web.Request) -> web.Response:
             checks.append(name)
+            authorizations.append(request.headers.get("Authorization", ""))
+            if hold is not None:
+                await hold.wait()
             await asyncio.sleep(delay_seconds)
             return await provider_models(request)
 
@@ -1145,7 +1171,11 @@ async def child_on_socket(tmp_path: Path, delay_seconds: float, timeout_s: float
             contextlib.AsyncExitStack() as stack,
         ):
             adapter = routing_adapter(
-                tmp_path, str(student.make_url("")), teacher_url=str(teacher.make_url("")), timeout_s=timeout_s
+                tmp_path,
+                str(student.make_url("")),
+                teacher_url=str(teacher.make_url("")),
+                timeout_s=timeout_s,
+                environ=environ,
             )
             dispatcher = routing_dispatcher(tmp_path)
             stack.callback(dispatcher.close)
@@ -1170,7 +1200,10 @@ async def child_on_socket(tmp_path: Path, delay_seconds: float, timeout_s: float
             stack.push_async_callback(runner.cleanup)
             socket_path = Path(directory) / "control.sock"
             await web.UnixSite(runner, str(socket_path)).start()
-            yield SocketChild(socket_path, app[REQUEST_ACCEPTANCE], router, checks, posts)
+            if hold is not None:
+                # Registered last, so it runs first: held provider checks end before anything else closes.
+                stack.callback(hold.set)
+            yield SocketChild(socket_path, app[REQUEST_ACCEPTANCE], router, checks, posts, authorizations)
 
 
 def test_an_open_with_two_slow_healthy_providers_opens_on_its_first_attempt(tmp_path: Path) -> None:
@@ -1228,5 +1261,191 @@ def test_an_open_whose_deadline_passes_during_readiness_stays_closed(tmp_path: P
             # Readiness ran once, for the first attempt only.
             assert child.checks == (["student"] if phase == "provider_check" else ["student", "teacher"])
             assert len(child.router.previews) == (0 if phase == "provider_check" else 1)
+
+    asyncio.run(run())
+
+
+#: A credential the candidate checks below may name: present in the child's startup environment, unused at first.
+SPARE_CREDENTIAL = {"SPARE_KEY": "spare-secret"}
+
+
+def candidate_manifest(child: SocketChild, tmp_path: Path, change: str) -> tuple[Path, str]:
+    """Write ``child``'s policy with one ``change`` as a candidate; return its path and snapshot version."""
+    targets = child.router.snapshot.targets
+    manifest = routing_manifest(targets["student"].url, teacher_url=targets["teacher"].url)
+    coding, candidate_targets = manifest["scenarios"]["coding"], manifest["targets"]
+    if change in ("spare_credential", "missing_credential"):
+        # A new target on the teacher's provider, with a credential of its own.
+        variable = "SPARE_KEY" if change == "spare_credential" else "DISTINCTIVE_ABSENT_KEY"
+        reviewer = {"provider_model": "teacher-v2", "revision": "r1", "url": targets["teacher"].url}
+        candidate_targets["reviewer"] = {**reviewer, "api_key_env": variable}
+        coding["targets"].append("reviewer")
+    elif change == "unreachable":
+        candidate_targets["teacher"]["url"] = "http://127.0.0.1:9"
+    elif change == "selector":
+        manifest["automatic_model"] = "router-auto"
+    elif change == "keyword":
+        coding["rules"][0]["keywords"] = ["escalate"]
+    path = tmp_path / f"candidate-{change}.json"
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    return path, RoutingSnapshot.load(path).version
+
+
+def check_body(child: SocketChild, path: Path, version: str, **overrides: object) -> dict[str, object]:
+    return {
+        "deployment_id": "deployment",
+        "generation": "generation",
+        "manifest_path": str(path),
+        "snapshot_version": version,
+        "expected_snapshot_version": child.acceptance.settings.snapshot_version,
+        "check_deadline_monotonic": time.monotonic() + 5,
+        **overrides,
+    }
+
+
+async def post_check(child: SocketChild, body: object, headers: dict[str, str] = CONTROL_HEADERS) -> tuple[int, str]:
+    """POST ``body``, JSON or raw ``bytes``, to the child's candidate check over its socket; no client deadline."""
+    payload = {"data": body} if isinstance(body, bytes) else {"json": body}
+    async with (
+        ClientSession(connector=UnixConnector(path=str(child.socket_path))) as session,
+        session.post("http://control" + CANDIDATE_CHECK_PATH, headers=headers, **payload) as response,
+    ):
+        return response.status, await response.text()
+
+
+def test_a_candidate_check_probes_the_candidates_providers_with_the_childs_credentials_and_changes_nothing(
+    tmp_path: Path,
+) -> None:
+    async def run() -> None:
+        async with child_on_socket(tmp_path, delay_seconds=0, timeout_s=2, environ=SPARE_CREDENTIAL) as child:
+            before = child.acceptance.status()
+            assert child.acceptance.publisher is not None
+            current = child.acceptance.publisher.current()
+            path, version = candidate_manifest(child, tmp_path, "spare_credential")
+            client = ReefLifecycleClient(child.socket_path, "deployment", "generation", "control")
+            expected, deadline = str(before["snapshot_version"]), time.monotonic() + 5
+            await asyncio.to_thread(client.check_candidate, str(path), version, expected, deadline=deadline)
+            # A variable present at startup is usable although no earlier policy named it; only its provider sees it.
+            assert child.checks == ["student", "teacher", "teacher"]
+            assert child.authorizations == ["", "", "Bearer spare-secret"]
+            # Not a command: no revision, publication, admission change or preview, and nothing kept.
+            assert client.revision == 0 and child.acceptance.status() == before
+            assert child.acceptance.publisher.current() is current and child.router.previews == []
+            with pytest.raises(RoutingControlError, match="another current snapshot") as error:
+                await asyncio.to_thread(
+                    client.check_candidate, str(path), version, "sha256:" + "0" * 64, deadline=time.monotonic() + 5
+                )
+            assert (error.value.status_code, error.value.retryable, client.revision) == (409, False, 0)
+            assert child.posts == [CANDIDATE_CHECK_PATH, CANDIDATE_CHECK_PATH]
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(
+    ("change", "overrides", "status", "reason"),
+    [
+        ("missing_credential", {}, 409, "routing candidate rejected"),
+        ("selector", {}, 409, "routing candidate rejected"),
+        ("spare_credential", {"snapshot_version": "sha256:" + "0" * 64}, 409, "routing candidate rejected"),
+        ("spare_credential", {"manifest_path": "/missing/distinctive.json"}, 409, "routing candidate rejected"),
+        ("spare_credential", {"expected_snapshot_version": "sha256:" + "0" * 64}, 409, "another current snapshot"),
+        ("spare_credential", {"generation": "other"}, 409, "identity mismatch"),
+        ("spare_credential", {"control_revision": 1}, 400, "invalid routing candidate check fields"),
+        ("spare_credential", {"check_deadline_monotonic": True}, 400, "check_deadline_monotonic"),
+        ("spare_credential", {"check_deadline_monotonic": 10**1000}, 400, "check_deadline_monotonic"),
+        ("spare_credential", {"check_deadline_monotonic": 1.0}, 503, "deadline passed"),
+        ("unreachable", {}, 503, "target_unavailable"),
+    ],
+    ids=[
+        "missing_credential",
+        "restart_change",
+        "digest",
+        "unreadable_manifest",
+        "stale_snapshot",
+        "generation",
+        "command_field",
+        "deadline_type",
+        "unrepresentable_deadline",
+        "past_deadline",
+        "unavailable_provider",
+    ],
+)
+def test_a_refused_candidate_check_answers_a_bounded_reason_and_changes_nothing(
+    tmp_path: Path, change: str, overrides: dict[str, object], status: int, reason: str
+) -> None:
+    async def run() -> None:
+        async with child_on_socket(tmp_path, delay_seconds=0, timeout_s=2, environ=SPARE_CREDENTIAL) as child:
+            before = child.acceptance.status()
+            assert child.acceptance.publisher is not None
+            current = child.acceptance.publisher.current()
+            path, version = candidate_manifest(child, tmp_path, change)
+            answer_status, text = await post_check(child, check_body(child, path, version, **overrides))
+            assert (answer_status, reason in text) == (status, True), text
+            # A refused candidate's own reason names paths and manifest names; it stays in the child's log.
+            assert "distinctive" not in text.casefold() and str(tmp_path) not in text and "spare-secret" not in text
+            assert child.acceptance.status() == before and child.acceptance.publisher.current() is current
+            # Only a candidate that passed every local check reaches a provider.
+            assert child.checks == (["student"] if change == "unreachable" else [])
+
+    asyncio.run(run())
+
+
+def test_a_candidate_check_needs_the_control_token_and_a_json_object(tmp_path: Path) -> None:
+    async def run() -> None:
+        async with child_on_socket(tmp_path, delay_seconds=0, timeout_s=2) as child:
+            path, version = candidate_manifest(child, tmp_path, "keyword")
+            body = check_body(child, path, version)
+            assert (await post_check(child, body, headers={}))[0] == 401
+            assert (await post_check(child, body, headers={"Authorization": f"Bearer {SERVICE_TOKEN}"}))[0] == 401
+            assert (await post_check(child, b"not json"))[0] == 400
+            assert (await post_check(child, [body]))[0] == 400
+            assert child.checks == []
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("interruption", ["stop", "publication", "deadline"])
+def test_a_candidate_check_never_holds_a_command_and_fails_once_it_is_overtaken(
+    tmp_path: Path, interruption: str
+) -> None:
+    async def run() -> None:
+        # The first provider holds the check's model-list request until the test releases it.
+        hold = asyncio.Event()
+        async with child_on_socket(
+            tmp_path, delay_seconds=0, timeout_s=2, environ=SPARE_CREDENTIAL, hold=hold
+        ) as child:
+            path, version = candidate_manifest(child, tmp_path, "spare_credential")
+            deadline = time.monotonic() + (0.3 if interruption == "deadline" else 30)
+            body = check_body(child, path, version, check_deadline_monotonic=deadline)
+            checking = asyncio.create_task(post_check(child, body))
+
+            async def held() -> None:
+                while not child.checks:
+                    await asyncio.sleep(0.01)
+
+            # The timeouts here only stop a failing test; nothing waits for them to pass.
+            await asyncio.wait_for(held(), 10)
+            client = ReefLifecycleClient(child.socket_path, "deployment", "generation", "control")
+            if interruption == "stop":
+                assert (await asyncio.wait_for(asyncio.to_thread(client.request, "stop"), 10)).stopping
+            elif interruption == "publication":
+                published, published_version = candidate_manifest(child, tmp_path, "keyword")
+                publication = {
+                    "manifest_path": str(published),
+                    "snapshot_version": published_version,
+                    "router_config_hash": "2" * 64,
+                    "expected_snapshot_version": child.acceptance.settings.snapshot_version,
+                }
+                activating = asyncio.to_thread(client.request, "activate", publication=publication)
+                assert (await asyncio.wait_for(activating, 10)).snapshot_version == published_version
+            if interruption != "deadline":
+                # The command finished while a provider still held the check: the check took no command lock.
+                assert not checking.done()
+                hold.set()
+            answer_status, text = await asyncio.wait_for(checking, 10)
+            if interruption == "deadline":
+                assert (answer_status, text) == (503, "routing candidate check deadline passed")
+            else:
+                assert answer_status == 409, text
 
     asyncio.run(run())

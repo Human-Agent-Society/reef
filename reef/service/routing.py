@@ -65,6 +65,20 @@ def is_router_config_hash(value: object) -> bool:
     return isinstance(value, str) and ROUTER_CONFIG_HASH.fullmatch(value) is not None
 
 
+def finite_positive_seconds(value: object) -> bool:
+    """Whether ``value`` is a positive int or float, not a bool, representable as a finite float.
+
+    An int too large to convert to a float, such as ``10**1000`` read from JSON, is refused.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        seconds = float(value)
+    except OverflowError:
+        return False
+    return math.isfinite(seconds) and seconds > 0
+
+
 def scenario_entrypoint(scenario: str) -> str:
     """The private Semantic Router model name that selects one Scenario's recipe."""
     return ENTRYPOINT_PREFIX + scenario
@@ -147,8 +161,8 @@ class RoutingTarget:
     is given, and no credentials, query or fragment. ``role`` is None or a manifest string; it is a label,
     not a closed set. ``api_key_env`` is None or an environment variable name. ``enabled`` is a bool.
     Purpose: ``parse_target`` makes it from one ``targets`` entry. A request is served only by an enabled
-    target; a disabled one stays in the catalog, so a policy update cannot change the catalog. Several
-    Scenarios may list the same target; listing it does not reserve it.
+    target; a disabled one stays in the catalog without a handler, and a later policy may enable it again.
+    Several Scenarios may list the same target; listing it does not reserve it.
     """
 
     target_id: str
@@ -545,16 +559,17 @@ class RoutingSnapshot:
 
 
 def check_policy_change(current: RoutingSnapshot, candidate: RoutingSnapshot) -> None:
-    """Allow a policy update to change only rules, defaults and Scenario membership within the same catalog.
+    """Allow a policy update to change the target catalog, rules, defaults and Scenario membership.
 
-    Keyword and domain rules may change; the domain classifier may not. The managed owner checks a candidate
+    Targets may be added, removed, enabled or disabled, and may change their provider model, revision,
+    endpoint, role or credential variable; the candidate's own snapshot checks already require every default
+    and rule target to be an enabled target of its Scenario. Keyword and domain rules may change; the domain
+    classifier, the automatic selector and the Scenario names may not. The managed owner checks a candidate
     before it changes the router, and the REEF child checks it again before it publishes the candidate.
 
     Raises:
         ValueError: The candidate changes something that needs a restart.
     """
-    if candidate.targets != current.targets:
-        raise ValueError("target catalog, provider, revision or endpoint changed; restart the deployment")
     if candidate.domain_classifier != current.domain_classifier:
         raise ValueError("domain classifier directory, files or threshold changed; restart the deployment")
     if candidate.automatic_model != current.automatic_model:
@@ -650,10 +665,15 @@ class RoutingAdapter:
     (``is_router_config_hash``). ``handlers`` (to ``HttpInferenceHandler`` values) and ``api_keys`` are
     read-only mappings whose keys are target IDs of ``snapshot``; either may be partial or empty. Each
     credential is a non-empty string. ``readiness_timeout_s`` is finite with
-    ``0 < readiness_timeout_s ≤ MAX_READINESS_TIMEOUT_SECONDS``.
-    Purpose: ``from_manifest`` makes the first adapter, with one handler per enabled target and a credential
-    only for an enabled target that names ``api_key_env``; the others call their provider without one.
-    ``RoutingPublication.publish`` replaces it with a new snapshot and runtime that keep those handlers.
+    ``0 < readiness_timeout_s ≤ MAX_READINESS_TIMEOUT_SECONDS``. ``inference_timeout_s`` is finite and
+    positive. ``credential_environment`` is a read-only copy of a mapping from environment variable names to
+    values; it is excluded from ``repr`` and equality.
+    Purpose: ``from_snapshot`` makes an adapter with one handler per enabled target, each waiting up to
+    ``inference_timeout_s``, and with a credential only for an enabled target that names ``api_key_env``,
+    read from ``credential_environment``; the others call their provider without one. ``from_manifest``
+    makes the first adapter of a service from its startup environment. ``RoutingPublication`` makes every
+    later one with ``from_snapshot`` and the current adapter's ``credential_environment`` and
+    ``inference_timeout_s``, so a published policy gets new handlers for its own targets and endpoints.
     A request captures one adapter when it is admitted and keeps it for selection, its provider call and
     every retry. With ``router_config_hash`` None no automatic request can select: a managed child starts
     this way, closed. ``handler_for`` reports a target without a handler as unavailable (503).
@@ -666,6 +686,10 @@ class RoutingAdapter:
     handlers: Mapping[str, HttpInferenceHandler]
     api_keys: Mapping[str, str] = field(default_factory=dict, repr=False, compare=False)
     readiness_timeout_s: float = MAX_READINESS_TIMEOUT_SECONDS
+    #: The longest one provider call of a handler may take; a later policy's handlers get the same.
+    inference_timeout_s: float = 300.0
+    #: Where a later policy's handlers read the credentials that its targets name.
+    credential_environment: Mapping[str, str] = field(default_factory=dict, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if not isinstance(self.snapshot, RoutingSnapshot):
@@ -674,39 +698,47 @@ class RoutingAdapter:
             raise ValueError("router_config_hash must be 64 lowercase hexadecimal characters")
         object.__setattr__(self, "handlers", MappingProxyType(dict(self.handlers)))
         object.__setattr__(self, "api_keys", MappingProxyType(dict(self.api_keys)))
+        object.__setattr__(self, "credential_environment", MappingProxyType(dict(self.credential_environment)))
         if not (set(self.handlers) | set(self.api_keys)).issubset(self.snapshot.targets):
             raise ValueError("routing handlers and credentials must belong to the snapshot's targets")
         if not all(isinstance(handler, HttpInferenceHandler) for handler in self.handlers.values()):
             raise ValueError("routing handlers must be HTTP inference handlers")
         if any(not isinstance(key, str) or not key for key in self.api_keys.values()):
             raise ValueError("routing credentials must be non-empty strings")
-        timeout = self.readiness_timeout_s
-        if (
-            not isinstance(timeout, (int, float))
-            or isinstance(timeout, bool)
-            or not math.isfinite(timeout)
-            or not 0 < timeout <= MAX_READINESS_TIMEOUT_SECONDS
+        if not all(
+            isinstance(name, str) and isinstance(value, str) for name, value in self.credential_environment.items()
         ):
+            raise ValueError("a routing credential environment must map variable names to strings")
+        readiness = self.readiness_timeout_s
+        if not finite_positive_seconds(readiness) or readiness > MAX_READINESS_TIMEOUT_SECONDS:
             raise ValueError(f"routing readiness timeout must be in (0, {MAX_READINESS_TIMEOUT_SECONDS:g}] seconds")
+        if not finite_positive_seconds(self.inference_timeout_s):
+            raise ValueError("routing inference timeout must be finite positive seconds")
 
     @classmethod
-    def from_manifest(
+    def from_snapshot(
         cls,
-        path: str | Path,
+        snapshot: RoutingSnapshot,
         *,
         router_config_hash: str | None,
-        environ: Mapping[str, str] | None = None,
-        timeout_s: float = 300.0,
+        credential_environment: Mapping[str, str],
+        timeout_s: float,
     ) -> RoutingAdapter:
-        """Resolve credential references at startup without storing them in metadata."""
-        snapshot = RoutingSnapshot.load(path)
-        environment = os.environ if environ is None else environ
+        """An adapter of ``snapshot`` with a new handler per enabled target, each waiting up to ``timeout_s``.
+
+        A credential is read only for an enabled target that names ``api_key_env``; a variable that is present
+        is usable even when no earlier policy named it. Credential values are kept out of metadata and errors.
+
+        Raises:
+            ValueError: An enabled target names a variable that ``credential_environment`` lacks or holds
+                empty, or a value is outside its domain.
+        """
         handlers: dict[str, HttpInferenceHandler] = {}
         api_keys: dict[str, str] = {}
         for target in snapshot.targets.values():
             if not target.enabled:
                 continue
-            key = environment.get(target.api_key_env) if target.api_key_env is not None else None
+            key = credential_environment.get(target.api_key_env) if target.api_key_env is not None else None
             if target.api_key_env is not None and not key:
                 raise ValueError(
                     f"routing target {target.target_id!r} requires environment variable {target.api_key_env}"
@@ -718,7 +750,33 @@ class RoutingAdapter:
                 request_headers=provider_request_headers(key) if key is not None else None,
                 timeout_s=timeout_s,
             )
-        return cls(snapshot, router_config_hash, handlers, api_keys, min(timeout_s, MAX_READINESS_TIMEOUT_SECONDS))
+        return cls(
+            snapshot,
+            router_config_hash,
+            handlers,
+            api_keys,
+            min(timeout_s, MAX_READINESS_TIMEOUT_SECONDS),
+            timeout_s,
+            credential_environment,
+        )
+
+    @classmethod
+    def from_manifest(
+        cls,
+        path: str | Path,
+        *,
+        router_config_hash: str | None,
+        environ: Mapping[str, str] | None = None,
+        timeout_s: float = 300.0,
+    ) -> RoutingAdapter:
+        """The adapter of the manifest at ``path``, reading credentials from ``environ`` (default: this process's
+        environment as it is now); see ``from_snapshot``."""
+        return cls.from_snapshot(
+            RoutingSnapshot.load(path),
+            router_config_hash=router_config_hash,
+            credential_environment=os.environ if environ is None else environ,
+            timeout_s=timeout_s,
+        )
 
     async def check_ready(self) -> None:
         """Check configured model availability; this does not verify model weights."""

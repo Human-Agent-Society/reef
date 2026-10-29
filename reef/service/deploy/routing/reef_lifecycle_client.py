@@ -1,7 +1,7 @@
 """The private HTTP boundary between the routing controller and its REEF child.
 
-The child serves ``/reef/lifecycle`` only on a Unix socket in a private
-directory; the public TCP listener has no lifecycle route.
+The child serves ``/reef/lifecycle`` and its candidate check only on a Unix
+socket in a private directory; the public TCP listener has no lifecycle route.
 """
 
 from __future__ import annotations
@@ -19,6 +19,12 @@ from reef.service.routing import is_router_config_hash
 
 #: AF_UNIX paths are limited to 108 bytes on Linux, including the terminating NUL; keep a margin.
 MAX_SOCKET_PATH_BYTES = 103
+#: The child's private route that checks a candidate manifest's providers; it is not a lifecycle command.
+CANDIDATE_CHECK_PATH = "/reef/lifecycle/check"
+#: The most of a control reply that the client reads.
+CONTROL_REPLY_LIMIT_BYTES = 1024 * 1024
+#: The most characters of a refused candidate check's reason that reach the owner's events.
+CHECK_REASON_LIMIT = 300
 
 
 class RoutingControlError(RuntimeError):
@@ -182,8 +188,9 @@ class ReefLifecycleClient:
     Operations: ``request(None)`` reads the status and leaves ``revision`` unchanged; each command
     increments it once, and its retries resend the same bytes. ``timeout_seconds`` bounds one attempt of an
     ordinary request. An ``open`` checks every provider and previews every Scenario first, so its first
-    attempt gets ``open_timeout_seconds``. One controller owns a client, so the child sees one sequence of
-    revisions per generation; the client keeps no connection between requests.
+    attempt gets ``open_timeout_seconds``; the controller sets it for the policy it opens.
+    ``check_candidate`` makes one attempt and leaves ``revision`` unchanged. One controller owns a client, so
+    the child sees one sequence of revisions per generation; the client keeps no connection between requests.
     """
 
     socket_path: Path
@@ -255,28 +262,15 @@ class ReefLifecycleClient:
             body = json.dumps(command).encode()
         attempt = 1
         while True:
-            connection = UnixHTTPConnection(self.socket_path, attempt_end)
-            # Closed with the connection: after an HTTP/1.0 or Connection: close reply, it holds the socket alone.
-            response: http.client.HTTPResponse | None = None
             try:
-                connection.connect()
-                connection.limit_next_step()
-                connection.request(
-                    "GET" if action is None else "POST",
-                    "/reef/lifecycle",
-                    body=body,
-                    headers={"Authorization": "Bearer " + self.token, "Content-Type": "application/json"},
-                )
-                connection.limit_next_step()
-                response = connection.getresponse()
-                if response.status != 200:
+                method = "GET" if action is None else "POST"
+                status, reply = self.exchange(method, "/reef/lifecycle", body, attempt_end)
+                if status != 200:
                     raise RoutingControlError(
-                        f"REEF lifecycle returned HTTP {response.status}",
-                        retryable=response.status >= 500 or response.status == 409,
-                        status_code=response.status,
+                        f"REEF lifecycle returned HTTP {status}",
+                        retryable=status >= 500 or status == 409,
+                        status_code=status,
                     )
-                connection.limit_next_step()
-                reply = response.read(1024 * 1024)
             except TimeoutError as exc:
                 if attempt == CONTROL_ATTEMPTS or time.monotonic() >= phase_end:
                     raise RoutingControlTimeout("REEF lifecycle request timed out") from exc
@@ -286,9 +280,93 @@ class ReefLifecycleClient:
                 if time.monotonic() > phase_end:
                     raise RoutingControlTimeout("REEF lifecycle replied after the caller's deadline")
                 return lifecycle_status(reply)
-            finally:
-                if response is not None:
-                    response.close()
-                connection.close()
             attempt += 1
             attempt_end = min(time.monotonic() + self.timeout_seconds, phase_end)
+
+    def check_candidate(
+        self, manifest_path: str, snapshot_version: str, expected_snapshot_version: str, *, deadline: float
+    ) -> None:
+        """Ask the child to check the providers of the candidate at ``manifest_path`` with its own credentials.
+
+        The child refuses a candidate whose digest is not ``snapshot_version`` or that it would not publish,
+        and a check while its current snapshot is not ``expected_snapshot_version``. It changes nothing.
+        There is one attempt, which ends at ``deadline`` on the ``time.monotonic`` clock; the child stops
+        its own check then too.
+
+        Raises:
+            RoutingControlTimeout: No reply arrived before ``deadline``.
+            RoutingControlError: The child refused the candidate or a provider check failed, with the child's
+                status and at most ``CHECK_REASON_LIMIT`` characters of its reason, or the transport failed.
+                Not retryable: the owner rejects this update.
+        """
+        body = json.dumps(
+            {
+                "deployment_id": self.deployment_id,
+                "generation": self.generation,
+                "manifest_path": manifest_path,
+                "snapshot_version": snapshot_version,
+                "expected_snapshot_version": expected_snapshot_version,
+                "check_deadline_monotonic": deadline,
+            }
+        ).encode()
+        try:
+            status, reply = self.exchange(
+                "POST", CANDIDATE_CHECK_PATH, body, deadline, refusal_bytes=CHECK_REASON_LIMIT * 4
+            )
+        except TimeoutError as exc:
+            raise RoutingControlTimeout("REEF candidate check timed out", retryable=False) from exc
+        except (OSError, ValueError, http.client.HTTPException) as exc:
+            raise RoutingControlError("REEF candidate check failed", retryable=False) from exc
+        # A reply after the deadline does not count: the child gave up its check then.
+        if time.monotonic() > deadline:
+            raise RoutingControlTimeout("REEF candidate check replied after its deadline", retryable=False)
+        if status != 200:
+            reason = reply.decode("utf-8", "replace")[:CHECK_REASON_LIMIT]
+            raise RoutingControlError(
+                f"REEF candidate check returned HTTP {status}: {reason}", retryable=False, status_code=status
+            )
+        try:
+            confirmed = json.loads(reply).get("snapshot_version")
+        except (ValueError, AttributeError) as exc:
+            raise RoutingControlError("REEF candidate check reply is not an object", retryable=False) from exc
+        if time.monotonic() > deadline:
+            raise RoutingControlTimeout("REEF candidate check replied after its deadline", retryable=False)
+        if confirmed != snapshot_version:
+            raise RoutingControlError("REEF candidate check confirmed another snapshot", retryable=False)
+
+    def exchange(
+        self, method: str, path: str, body: bytes | None, end: float, *, refusal_bytes: int = 0
+    ) -> tuple[int, bytes]:
+        """One authenticated exchange on a new connection: the reply's status and part of its body.
+
+        A 200 reply's body is read up to ``CONTROL_REPLY_LIMIT_BYTES``, and another reply's up to
+        ``refusal_bytes``; with the default 0 it is not read at all. Each blocking step gets only the time
+        left before ``end``.
+
+        Raises:
+            TimeoutError: A step reached ``end``.
+            OSError, ValueError, http.client.HTTPException: The exchange failed.
+        """
+        connection = UnixHTTPConnection(self.socket_path, end)
+        # Closed with the connection: after an HTTP/1.0 or Connection: close reply, it holds the socket alone.
+        response: http.client.HTTPResponse | None = None
+        try:
+            connection.connect()
+            connection.limit_next_step()
+            connection.request(
+                method,
+                path,
+                body=body,
+                headers={"Authorization": "Bearer " + self.token, "Content-Type": "application/json"},
+            )
+            connection.limit_next_step()
+            response = connection.getresponse()
+            if response.status != 200 and not refusal_bytes:
+                return response.status, b""
+            connection.limit_next_step()
+            limit = CONTROL_REPLY_LIMIT_BYTES if response.status == 200 else refusal_bytes
+            return response.status, response.read(limit)
+        finally:
+            if response is not None:
+                response.close()
+            connection.close()

@@ -323,6 +323,24 @@ return 409. ``stop`` is terminal for the generation. ``close`` and ``stop``
 also accept ``cancel_active: true`` to cancel accepted inference requests
 after their drain deadline; ``open`` and ``activate`` cannot use this option.
 
+``POST /reef/lifecycle/check`` on the same socket, with the same control
+credential, checks a candidate manifest before the owner changes anything. It
+takes exactly ``deployment_id``, ``generation``, ``manifest_path``,
+``snapshot_version`` (the candidate's digest), ``expected_snapshot_version``
+(the child's current snapshot) and ``check_deadline_monotonic``, a positive,
+finite value of the owner's ``time.monotonic()`` clock. The child refuses the
+candidate with 409 when it would not publish it: an unreadable manifest,
+another digest, a changed automatic model, Scenario names or domain
+classifier, or a target credential variable missing from the child's own
+environment. That reply is the fixed text ``routing candidate rejected``; the
+reason goes only to the child's log. It then checks each enabled
+target's provider model list with the child's credentials and returns 200 with
+``{"snapshot_version": ...}``, or 503 with only an error code when a provider
+fails or the deadline passes. It is not a command: it has no revision, does not
+wait for or block other commands, publishes nothing, does not change admission
+and keeps nothing. A check that a ``stop`` or another publication overtakes
+returns 409. A malformed body returns 400, and identity mismatches return 409.
+
 Managed inference starts closed. A closed deployment rejects new inference
 with 503 without invoking a provider. Admission and the request's routing
 policy are fixed together before the body is read, so the upload counts toward

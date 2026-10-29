@@ -376,25 +376,42 @@ Error bodies are plain text starting with a code, such as
 
 ## Change the routing policy
 
-To change rules, a Scenario's default target or its target membership, edit
-the manifest named by `reef.routing_manifest` and send `SIGHUP` to `reef serve`:
+To change targets, rules, a Scenario's default target or its target membership,
+edit the manifest named by `reef.routing_manifest` and send `SIGHUP` to `reef serve`:
 
 ```bash
 kill -HUP <reef serve PID>
 ```
 
-Reef stops admitting requests, waits for admitted requests and record writes,
-updates SR's configuration, waits until SR runs it, publishes the new manifest
-and runtime hash to Reef together, and reopens. Requests admitted earlier keep
-the policy they started with; new requests get 503 meanwhile. An invalid or
-unchanged manifest is logged (`policy_rejected`, `policy_unchanged`) and the
-current policy keeps serving. If SR does not accept the update, Reef restores
-the previous policy and reopens with it; if Reef cannot confirm what SR runs,
-the deployment stops instead of reopening. A `SIGHUP` sent while `reef serve` is
-starting is applied once it is ready; one sent while it is stopping is ignored.
+You can add, remove, enable or disable a target, or give it another provider
+model, revision or endpoint. Start a new model service before you name it. A
+target's `api_key_env` must name a variable that was already set when
+`reef serve` started; exporting it later in a shell does not reach the running
+Reef.
 
-Changes to targets, endpoints, revisions, Scenario names, the image, the
-domain classifier or the preview settings need a restart. Check a candidate configuration first; this
+Reef first checks the new manifest's providers with its own credentials. If a
+credential is missing or a provider does not list its model, the update is
+rejected and the current policy keeps serving. Otherwise Reef pauses
+admission: it stops admitting requests, waits for admitted requests and record
+writes, updates SR's configuration, waits until SR runs it, publishes the new
+manifest, provider endpoints and runtime hash to Reef together, checks the
+providers and Scenarios again, and reopens. Neither Reef nor SR restarts.
+Requests admitted earlier keep the policy and provider they started with; new
+requests get 503 meanwhile. An invalid or unchanged manifest is logged
+(`policy_rejected`, `policy_unchanged`) and the current policy keeps serving.
+If SR does not accept the update, Reef restores the previous policy and
+reopens with it; if Reef cannot confirm what SR runs, or the final provider
+check fails after SR switched, the deployment stays closed instead of
+reopening. A `SIGHUP` sent while `reef serve` is starting is applied once it
+is ready; one sent while it is stopping is ignored.
+
+An existing deployment whose SR configuration was rendered with the old
+placeholder listener and backends needs one restart to adopt the new form,
+which keeps models without inference backends; after that, target changes
+apply in place.
+
+Changes to Scenario names, the automatic model, the image, the domain
+classifier or the preview settings need a restart. Check a candidate configuration first; this
 uses no Docker and changes no deployment, but cannot tell whether the image
 exists or will become ready:
 

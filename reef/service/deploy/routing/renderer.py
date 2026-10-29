@@ -42,9 +42,6 @@ SELECTION_ROLE = "reef-selection"
 ROUTER_CONFIG_DIRECTORY = "router-config"
 #: The router's HTTP API inside its container (start-router.sh enables it there).
 ROUTER_HTTP_PORT = 8080
-#: SR requires a backend address for every model, although previews only select a model.
-#: This unused loopback address satisfies the configuration schema; tests check for backend calls.
-UNUSED_BACKEND = "127.0.0.1:9"
 #: The router container's directory of the domain classifier; each file is bind-mounted into it by itself.
 DOMAIN_CLASSIFIER_DIRECTORY = "/models/reef-domain"
 #: The native classifier fallback category; preview domain matching uses the threshold separately.
@@ -173,21 +170,16 @@ def router_configuration(snapshot: RoutingSnapshot, settings: RoutingDeploymentS
         "classifier": {"domain": domain_module, "pii": {"model_ref": "", "model_id": "", "pii_mapping_path": ""}},
         "feedback_detector": {"enabled": False, "model_ref": "", "model_id": ""},
     }
+    # Each model is metadata only: previews select a model, and Reef calls every provider itself.
     providers = [
-        {
-            "name": name,
-            "provider_model_id": target.provider_model,
-            "api_format": "openai",
-            "backend_refs": [
-                {"name": "unused-" + str(index), "endpoint": UNUSED_BACKEND, "protocol": "http", "provider": "vllm"}
-            ],
-        }
-        for index, (name, target) in enumerate(enabled.items())
+        {"name": name, "provider_model_id": target.provider_model, "api_format": "openai"}
+        for name, target in enabled.items()
     ]
     return {
         "version": "v0.3",
-        # The router's own inference listener stays on container loopback and is never published.
-        "listeners": [{"name": "reef-unused", "address": "127.0.0.1", "port": 18899}],
+        # Without an inference listener the router needs no backend per model, and its hot reload compares no
+        # backend topology, so models can be added, removed or changed in place.
+        "listeners": [],
         # No deployment-wide default model: a request outside every entrypoint fails instead of using
         # another Scenario's model.
         "providers": {"models": providers},

@@ -137,10 +137,14 @@ def routing_adapter(
     teacher_url: str | None = None,
     timeout_s: float = 2.0,
     router_config_hash: str = ROUTER_HASH,
+    environ: dict[str, str] | None = None,
 ) -> RoutingAdapter:
+    """The adapter of ``routing_manifest``, reading credentials from ``environ`` (default: none)."""
     path = tmp_path / "routing.yaml"
     path.write_text(json.dumps(routing_manifest(upstream_url, teacher_url=teacher_url)), encoding="utf-8")
-    return RoutingAdapter.from_manifest(path, router_config_hash=router_config_hash, environ={}, timeout_s=timeout_s)
+    return RoutingAdapter.from_manifest(
+        path, router_config_hash=router_config_hash, environ={} if environ is None else environ, timeout_s=timeout_s
+    )
 
 
 def routing_headers(scenario: str = "coding") -> dict[str, str]:
@@ -385,7 +389,9 @@ class FakeControl(ReefLifecycleClient):
     one; an ``open`` raises a retryable 409 before any runtime is published, then ``open_error`` if set.
     A command that does not fail becomes ``control_revision``, and ``open``, ``close`` and ``stop`` set
     ``accepting`` as the child does. As in the child, ``stopping`` closes admission, a forced close counts the
-    requests it cancels in ``forced_requests``, and the drain counts every pending write.
+    requests it cancels in ``forced_requests``, and the drain counts every pending write. ``check_candidate``
+    logs ``control:check`` and the candidate's snapshot in ``checked``, never changes ``revision``, and raises
+    ``check_error`` if set.
     """
 
     def __init__(self, actions: list[str]) -> None:
@@ -403,6 +409,8 @@ class FakeControl(ReefLifecycleClient):
         self.available = True
         self.open_error: RoutingControlError | None = None
         self.activation_error: RoutingControlError | None = None
+        self.check_error: RoutingControlError | None = None
+        self.checked: list[str] = []
         self.publications: list[dict[str, str]] = []
         #: The action and phase deadline of every request that reached the child.
         self.deadlines: list[tuple[str | None, float | None]] = []
@@ -444,6 +452,17 @@ class FakeControl(ReefLifecycleClient):
         if action == "stop":
             self.stopping = True
         return self.status()
+
+    def check_candidate(
+        self, manifest_path: str, snapshot_version: str, expected_snapshot_version: str, *, deadline: float
+    ) -> None:
+        if not self.available:
+            raise RoutingControlError("REEF child exited", retryable=False)
+        self.actions.append("control:check")
+        self.deadlines.append(("check", deadline))
+        if self.check_error is not None:
+            raise self.check_error
+        self.checked.append(snapshot_version)
 
     def status(self) -> LifecycleStatus:
         return LifecycleStatus(

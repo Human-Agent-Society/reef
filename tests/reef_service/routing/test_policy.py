@@ -36,7 +36,9 @@ from tests.reef_service.routing.routing_fakes import (
     write_domain_classifier,
 )
 
-from reef.service.app import CONTROL_APPLICATION, create_app
+import reef.service.routing as routing_module
+from reef.inference.http import HttpInferenceHandler, RequestHeadersFactory
+from reef.service.app import CONTROL_APPLICATION, REQUEST_SERVICE_KEY, RoutingPublication, create_app
 from reef.service.deploy.routing.deployment_controller import (
     RoutingDeploymentController,
     RoutingDeploymentError,
@@ -50,11 +52,12 @@ from reef.service.deploy.routing.policy import (
     RouterRuntime,
     document_etag,
 )
-from reef.service.deploy.routing.reef_lifecycle_client import RoutingControlError
+from reef.service.deploy.routing.reef_lifecycle_client import RoutingControlError, RoutingControlTimeout
 from reef.service.deploy.routing.renderer import ManagedRoutingRender, generate
 from reef.service.deploy.routing.settings import RoutingDeploymentSettings
 from reef.service.deploy.service_config import ServiceConfig
 from reef.service.lifecycle import REQUEST_ACCEPTANCE, LifecycleSettings
+from reef.service.request_service import RequestService
 from reef.service.routing import RoutingAdapter, RoutingSnapshot
 
 pytestmark = pytest.mark.unit
@@ -344,6 +347,8 @@ def started_case(tmp_path: Path, source: Path) -> Iterator[PolicyCase]:
     controller.snapshot_version = startup.version
     control = FakeControl(actions)
     control.snapshot_version = startup.version
+    # As ``prepare`` sets it for the startup policy.
+    control.open_timeout_seconds = controller.open_timeout_seconds(startup)
     controller.control = control
     controller.event_stream = runtime.events(controller.ownership)
     controller.inspect_ready(runtime.inventory)
@@ -398,8 +403,6 @@ def test_policy_update_activates_then_publishes_while_closed(case: PolicyCase, m
 @pytest.mark.parametrize(
     ("change", "event"),
     [
-        ({"revision": "r2"}, "policy_rejected"),
-        ({"url": "http://127.0.0.1:10"}, "policy_rejected"),
         ({"automatic_model": "router-auto"}, "policy_rejected"),
         ({"scenario": "review"}, "policy_rejected"),
         ({}, "policy_unchanged"),
@@ -416,7 +419,139 @@ def test_incompatible_or_unchanged_sources_leave_the_serving_policy_untouched(
         last = json.loads((case.controller.directory / "lifecycle-events.jsonl").read_text().splitlines()[-1])
         assert last["reason"].endswith("restart the deployment")
     assert case.control.snapshot_version == case.controller.snapshot_version == case.startup_version
-    assert case.router.puts == [] and "control:close" not in case.actions
+    # Nothing reaches the child or the router: not even a candidate check.
+    assert case.router.puts == [] and case.actions == []
+
+
+def edit_source(path: Path, change: str) -> None:
+    """Apply one catalog ``change`` to the source that ``write_source`` wrote."""
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    targets, coding = manifest["targets"], manifest["scenarios"]["coding"]
+    if change == "add":
+        targets["reviewer"] = {"provider_model": "reviewer-v1", "revision": "r1", "url": "http://127.0.0.1:11"}
+        coding["targets"].append("reviewer")
+    elif change in ("remove", "disable"):
+        # The teacher's rule goes too: a default or rule target must stay an enabled target of its Scenario.
+        coding["rules"] = []
+        if change == "remove":
+            del targets["teacher"]
+            coding["targets"] = ["student"]
+        else:
+            targets["teacher"]["enabled"] = False
+    elif change == "provider_model":
+        targets["student"]["provider_model"] = "student-v2"
+    elif change == "endpoint":
+        targets["student"]["url"] = "http://127.0.0.1:12"
+    elif change == "remove_referenced":
+        del targets["teacher"]
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+
+
+@pytest.mark.parametrize("change", ["add", "remove", "disable", "provider_model", "endpoint"])
+def test_catalog_changes_apply_in_place_after_the_child_checks_the_candidate(case: PolicyCase, change: str) -> None:
+    first_allowance = case.control.open_timeout_seconds
+    edit_source(case.source, change)
+    reload(case)
+
+    # The rendered manifest that the router and the child received; it adds the deployment's configuration digest.
+    candidate = RoutingSnapshot.load(case.controller.committed_policy().manifest)
+    assert candidate.targets.keys() == json.loads(case.source.read_text())["targets"].keys()
+    assert case.events()[-2:] == ["policy_committed", "ready"]
+    assert case.control.snapshot_version == case.controller.snapshot_version == candidate.version
+    # The child checked the candidate's providers before anything closed, then published it with the router's runtime.
+    assert case.control.checked == [candidate.version]
+    assert case.actions.index("control:check") < case.actions.index("control:close")
+    [publication] = case.control.publications
+    assert publication["router_config_hash"] == case.router.active
+    models = yaml.safe_load(case.router.document)["providers"]["models"]
+    enabled = {name: target.provider_model for name, target in candidate.targets.items() if target.enabled}
+    assert {model["name"]: model["provider_model_id"] for model in models} == enabled
+    # The next open checks each enabled target, so its allowance follows the committed catalog.
+    assert case.control.open_timeout_seconds == case.controller.open_timeout_seconds(candidate)
+    assert (case.control.open_timeout_seconds != first_allowance) == (change in ("add", "remove", "disable"))
+
+
+@pytest.mark.parametrize("mode", ["ok", "lost"])
+def test_an_endpoint_change_republishes_the_child_although_the_router_runs_the_same_document(
+    case: PolicyCase, mode: str
+) -> None:
+    """The router never sees endpoints: it keeps its document and runtime; Reef still publishes the new manifest."""
+    document, runtime_hash = case.router.document, case.router.active
+    edit_source(case.source, "endpoint")
+    case.router.mode = mode
+    reload(case)
+    assert case.router.document == document and case.router.active == runtime_hash
+    # The proven transaction stays: one conditional PUT of the same document, inspected rather than replayed.
+    assert case.router.puts == [document]
+    [publication] = case.control.publications
+    assert publication["router_config_hash"] == runtime_hash
+    committed = case.controller.committed_policy()
+    assert publication["snapshot_version"] == committed.snapshot_version != case.startup_version
+    assert RoutingSnapshot.load(committed.manifest).targets["student"].url == "http://127.0.0.1:12"
+    assert case.events()[-2:] == ["policy_committed", "ready"]
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        RoutingControlError("REEF candidate check returned HTTP 409: requires environment variable NEW_KEY"),
+        RoutingControlError("REEF candidate check returned HTTP 503: target_unavailable"),
+        RoutingControlTimeout("REEF candidate check timed out"),
+    ],
+    ids=["refused", "provider_unavailable", "timeout"],
+)
+def test_a_failed_candidate_check_rejects_the_update_before_anything_closes(
+    case: PolicyCase, error: RoutingControlError
+) -> None:
+    allowance = case.control.open_timeout_seconds
+    edit_source(case.source, "add")
+    case.control.check_error = error
+    reload(case)
+    event = last_event(case)
+    assert (event["state"], event["reason"]) == ("policy_rejected", str(error))
+    # No drain, journal or router write: the old policy keeps serving, and a later valid source still applies.
+    assert case.actions == ["control:check"] and case.router.puts == [] and "pending" not in case.state()
+    assert case.control.snapshot_version == case.controller.snapshot_version == case.startup_version
+    assert case.control.open_timeout_seconds == allowance and case.controller.state == "ready"
+    case.control.check_error = None
+    reload(case)
+    assert case.events()[-2:] == ["policy_committed", "ready"]
+
+
+def test_a_stop_during_the_candidate_check_ends_the_update_before_anything_closes(
+    case: PolicyCase, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    check = case.control.check_candidate
+
+    def stopped_during_check(*arguments: str, deadline: float) -> None:
+        case.controller.request_stop()
+        check(*arguments, deadline=deadline)
+
+    monkeypatch.setattr(case.control, "check_candidate", stopped_during_check)
+    edit_source(case.source, "add")
+    reload(case)
+    # The check passed, but stop intent wins: no drain, journal, router write or publication.
+    assert case.actions == ["control:check"] and case.router.puts == [] and "pending" not in case.state()
+    assert case.control.publications == [] and case.controller.stop_requested
+    assert case.control.snapshot_version == case.controller.snapshot_version == case.startup_version
+
+
+def test_removing_a_target_that_a_rule_still_names_is_rejected_before_the_child_is_asked(case: PolicyCase) -> None:
+    edit_source(case.source, "remove_referenced")
+    reload(case)
+    event = last_event(case)
+    assert event["state"] == "policy_rejected" and "unknown target 'teacher'" in str(event["reason"])
+    assert case.actions == [] and case.router.puts == []
+
+
+def test_a_rolled_back_catalog_change_keeps_the_committed_open_allowance(case: PolicyCase) -> None:
+    allowance = case.control.open_timeout_seconds
+    edit_source(case.source, "add")
+    case.router.mode = "failed"
+    reload(case)
+    assert "policy_rolled_back" in case.events() and case.control.publications == []
+    assert case.control.snapshot_version == case.startup_version
+    assert case.control.open_timeout_seconds == allowance and case.actions[-1] == "control:open"
 
 
 def test_a_source_that_is_not_yaml_is_rejected_and_the_next_valid_source_applies(case: PolicyCase) -> None:
@@ -777,9 +912,9 @@ def test_reopening_requires_the_committed_runtime_active_and_ready(case: PolicyC
 
 
 def test_child_publishes_policy_only_closed_and_drained_and_rejects_the_old_digest(tmp_path: Path) -> None:
-    async def run() -> None:
-        received: list[dict[str, object]] = []
+    """The new policy also moves both targets to another provider endpoint: only new handlers reach it."""
 
+    def provider_app(received: list[dict[str, object]]) -> web.Application:
         async def models(request: web.Request) -> web.Response:
             return web.json_response({"data": [{"id": "student-v1"}, {"id": "teacher-v2"}]})
 
@@ -793,17 +928,26 @@ def test_child_publishes_policy_only_closed_and_drained_and_rejects_the_old_dige
                 )
             return web.json_response({"choices": [{"message": {"content": "a"}, "finish_reason": "stop"}]})
 
-        provider_app = web.Application()
-        provider_app.router.add_get("/v1/models", models)
-        provider_app.router.add_post("/v1/chat/completions", inference)
+        app = web.Application()
+        app.router.add_get("/v1/models", models)
+        app.router.add_post("/v1/chat/completions", inference)
+        return app
+
+    async def run() -> None:
+        received: list[dict[str, object]] = []
+        moved: list[dict[str, object]] = []
         old_hash, new_hash = "4" * 64, "5" * 64
-        async with TestServer(provider_app) as provider, contextlib.AsyncExitStack() as stack:
+        async with (
+            TestServer(provider_app(received)) as provider,
+            TestServer(provider_app(moved)) as moved_provider,
+            contextlib.AsyncExitStack() as stack,
+        ):
             url = str(provider.make_url("")).rstrip("/")
+            moved_url = str(moved_provider.make_url("")).rstrip("/")
             old_path = write_source(tmp_path / "old.json", url=url)
             old = RoutingAdapter.from_manifest(old_path, router_config_hash=old_hash, environ={})
-            new_path = write_source(tmp_path / "new.json", keyword="escalate", rule="escalated", url=url)
+            new_path = write_source(tmp_path / "new.json", keyword="escalate", rule="escalated", url=moved_url)
             new_version = RoutingSnapshot.load(new_path).version
-            catalog_path = write_source(tmp_path / "catalog.json", url=url, revision="r2")
             selector_path = write_source(tmp_path / "selector.json", url=url, automatic_model="router-auto")
             scenario_path = write_source(tmp_path / "scenario.json", url=url, scenario="review")
             dispatcher = routing_dispatcher(tmp_path)
@@ -885,8 +1029,8 @@ def test_child_publishes_policy_only_closed_and_drained_and_rejects_the_old_dige
                         "/v1/chat/completions", headers=routing_headers(), json=routed("escalate", False)
                     )
                     assert closed.status == 503
-                    # The child keeps its own check: a catalog, selector or Scenario-name change is refused.
-                    for incompatible_path in (catalog_path, selector_path, scenario_path):
+                    # The child keeps its own check: a selector or Scenario-name change is refused.
+                    for incompatible_path in (selector_path, scenario_path):
                         incompatible_version = RoutingSnapshot.load(incompatible_path).version
                         incompatible = activation(incompatible_path, incompatible_version, old.snapshot.version)
                         assert await control(lifecycle, "activate", **incompatible) == 409
@@ -934,17 +1078,62 @@ def test_child_publishes_policy_only_closed_and_drained_and_rejects_the_old_dige
                         (new_version, new_hash, "escalated"),
                         (new_version, new_hash, "escalated"),
                     ]
-                    assert len(received) == 3
+                    # The call admitted under the old policy used the old endpoint; JSON and SSE after it, the new.
+                    assert len(received) == 1 and [payload.get("stream", False) for payload in moved] == [False, True]
+                    # The old policy's adapter and handlers are unchanged, for any request that still holds them.
+                    assert old.handlers["teacher"] is not app[REQUEST_SERVICE_KEY].routing.handlers["teacher"]
             finally:
                 dispatcher.close()
 
     asyncio.run(run())
 
 
+def test_a_published_catalog_gets_new_handlers_with_the_startup_credentials_and_full_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    built: list[tuple[str, float, bool]] = []
+
+    class RecordingHandler(HttpInferenceHandler):
+        """Records each new handler's endpoint, timeout and whether it sends a credential."""
+
+        def __init__(
+            self, upstream_url: str, *, request_headers: RequestHeadersFactory | None = None, timeout_s: float = 300.0
+        ) -> None:
+            built.append((upstream_url, timeout_s, request_headers is not None))
+            super().__init__(upstream_url, request_headers=request_headers, timeout_s=timeout_s)
+
+    monkeypatch.setattr(routing_module, "HttpInferenceHandler", RecordingHandler)
+    # The child's startup environment: one variable the first policy uses, one it does not.
+    environment = {"STUDENT_KEY": "student-secret", "SPARE_KEY": "spare-secret"}
+    first = write_source(tmp_path / "first.json", api_key_env="STUDENT_KEY")
+    old = RoutingAdapter.from_manifest(first, router_config_hash=None, environ=environment, timeout_s=123.0)
+    old_handlers = dict(old.handlers)
+    # A variable set after startup never reaches the running child.
+    environment["LATE_KEY"] = "late-secret"
+    built.clear()
+    with contextlib.closing(routing_dispatcher(tmp_path)) as dispatcher:
+        publication = RoutingPublication(RequestService(dispatcher, routing=old))
+        moved = write_source(tmp_path / "moved.json", url="http://127.0.0.1:12", api_key_env="SPARE_KEY")
+        publication.publish(str(moved), RoutingSnapshot.load(moved).version, "5" * 64)
+        published = publication.current()
+        assert published is not None and published.snapshot.version == RoutingSnapshot.load(moved).version
+        # Every enabled target gets a new handler for its new endpoint, with the startup timeout, not the
+        # readiness cap; the student's credential comes from the spare variable.
+        assert built == [("http://127.0.0.1:12", 123.0, True), ("http://127.0.0.1:12", 123.0, False)]
+        assert published.readiness_timeout_s == 10 and "secret" not in repr(published)
+        # The old adapter, which an admitted request may still hold, is unchanged.
+        assert dict(old.handlers) == old_handlers and old.snapshot.version == RoutingSnapshot.load(first).version
+        for variable in ("LATE_KEY", "ABSENT_KEY"):
+            refused = write_source(tmp_path / f"{variable}.json", api_key_env=variable)
+            with pytest.raises(ValueError, match=f"requires environment variable {variable}") as error:
+                publication.publish(str(refused), RoutingSnapshot.load(refused).version, "5" * 64)
+            assert "secret" not in str(error.value) and publication.current() is published
+
+
 @pytest.mark.parametrize("kind", ["rejected", "unchanged"])
 def test_diagnostic_policy_outcome_keeps_following_reload_live(case: PolicyCase, kind: str) -> None:
     if kind == "rejected":
-        write_source(case.source, revision="unsupported-revision-change")
+        write_source(case.source, automatic_model="unsupported-selector-change")
     reload(case)
     write_source(case.source, keyword="after-diagnostic", rule="updated")
     reload(case)
@@ -957,7 +1146,7 @@ def test_diagnostic_policy_outcome_keeps_following_reload_live(case: PolicyCase,
 @pytest.mark.parametrize("kind", ["rejected", "unchanged"])
 def test_diagnostic_policy_outcome_keeps_dependency_monitoring_live(case: PolicyCase, kind: str) -> None:
     if kind == "rejected":
-        write_source(case.source, revision="unsupported-revision-change")
+        write_source(case.source, automatic_model="unsupported-selector-change")
     reload(case)
     case.router.active = "f" * 64
     case.controller.next_probe = 0

@@ -82,14 +82,15 @@ async def _maintain_records(dispatcher: Dispatcher, retention: RecordRetention, 
 
 
 class RoutingPublication(RoutingPublisher):
-    """Replace the service's routing policy and router runtime together, keeping the per-target handlers.
+    """Replace the service's routing policy, router runtime and per-target handlers together.
 
     It holds ``request_service`` and reads and replaces only that service's ``routing`` adapter.
-    ``current`` returns it, None without routing. ``publish`` refuses when routing is off, loads the
+    ``current`` returns it, None without routing. ``candidate`` refuses when routing is off, loads the
     manifest, and refuses one whose digest is not ``snapshot_version`` or that ``check_policy_change``
-    refuses (a changed catalog, automatic model or set of Scenario names). Otherwise it assigns a new
-    adapter with the old handlers, credentials and readiness timeout, whose constructor checks the router
-    runtime hash; a refusal leaves the adapter unchanged. ``check_ready``
+    refuses (a changed classifier, automatic model or set of Scenario names). Otherwise it builds the
+    candidate's adapter with ``RoutingAdapter.from_snapshot`` from the current adapter's credential
+    environment and inference timeout, which refuses a target whose credential variable is missing there.
+    ``publish`` assigns that adapter in one step; a refusal leaves the adapter unchanged. ``check_ready``
     refuses a missing or unpublished runtime, then checks every provider and previews every Scenario.
     """
 
@@ -107,7 +108,7 @@ class RoutingPublication(RoutingPublisher):
         await routing.check_ready()
         await preview.check_ready(routing)
 
-    def publish(self, manifest_path: str, snapshot_version: str, router_config_hash: str) -> None:
+    def candidate(self, manifest_path: str, snapshot_version: str, router_config_hash: str | None) -> RoutingAdapter:
         current = self.request_service.routing
         if current is None:
             raise ValueError("routing is not enabled")
@@ -116,10 +117,16 @@ class RoutingPublication(RoutingPublisher):
             raise ValueError("manifest does not have the requested snapshot version")
         # The owner checked this before changing the router; the child keeps its own boundary.
         check_policy_change(current.snapshot, snapshot)
-        # One assignment: a request admitted later captures the new manifest and runtime hash together.
-        self.request_service.routing = RoutingAdapter(
-            snapshot, router_config_hash, current.handlers, current.api_keys, current.readiness_timeout_s
+        return RoutingAdapter.from_snapshot(
+            snapshot,
+            router_config_hash=router_config_hash,
+            credential_environment=current.credential_environment,
+            timeout_s=current.inference_timeout_s,
         )
+
+    def publish(self, manifest_path: str, snapshot_version: str, router_config_hash: str) -> None:
+        # One assignment: a request admitted later captures the new manifest, runtime hash and handlers together.
+        self.request_service.routing = self.candidate(manifest_path, snapshot_version, router_config_hash)
 
 
 def create_app(

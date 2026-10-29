@@ -37,8 +37,12 @@ from typing import TypeVar, cast
 from aiohttp import web
 from aiohttp.typedefs import Middleware
 
-from reef.service.deploy.routing.reef_lifecycle_client import MAX_SOCKET_PATH_BYTES, LifecycleStatus
-from reef.service.routing import RoutingAdapter, RoutingRequestError, is_router_config_hash
+from reef.service.deploy.routing.reef_lifecycle_client import (
+    CANDIDATE_CHECK_PATH,
+    MAX_SOCKET_PATH_BYTES,
+    LifecycleStatus,
+)
+from reef.service.routing import RoutingAdapter, RoutingRequestError, finite_positive_seconds, is_router_config_hash
 
 WriteResult = TypeVar("WriteResult")
 logger = logging.getLogger(__name__)
@@ -48,6 +52,12 @@ RESPONSE_STARTED = web.RequestKey("reef_lifecycle_response_started", bool)
 ADMITTED_ROUTING = web.RequestKey("reef_admitted_routing", RoutingAdapter)
 #: The reply to an ``open`` that reached its deadline before admission opened; the owner may send a new one.
 OPEN_DEADLINE_PASSED = "lifecycle open deadline passed before admission opened"
+#: The reply to a candidate check that did not finish by its deadline; the serving policy is unchanged.
+CHECK_DEADLINE_PASSED = "routing candidate check deadline passed"
+#: The reply to a candidate this child would not publish; the reason goes only to the child's log.
+CANDIDATE_REJECTED = "routing candidate rejected"
+#: The most characters of a refused candidate's reason that the child logs.
+CANDIDATE_REASON_LIMIT = 300
 
 
 @dataclass(frozen=True)
@@ -224,8 +234,9 @@ class RoutingPublisher(ABC):
 
     An implementation holds one current ``RoutingAdapter`` or None and belongs to one event loop.
     ``current`` returns it without copying; a request keeps the adapter it read, so a later ``publish``
-    never changes a request already admitted. ``publish`` either replaces the adapter in one assignment or
-    raises and leaves it unchanged. ``check_ready`` changes nothing.
+    never changes a request already admitted. ``candidate`` builds the adapter a manifest would get and
+    changes nothing. ``publish`` either replaces the adapter in one assignment or raises and leaves it
+    unchanged. ``check_ready`` changes nothing.
     """
 
     @abstractmethod
@@ -233,17 +244,29 @@ class RoutingPublisher(ABC):
         """The policy a request admitted now keeps until it completes."""
 
     @abstractmethod
-    def publish(self, manifest_path: str, snapshot_version: str, router_config_hash: str) -> None:
-        """Load the manifest at ``manifest_path`` and publish it with the router runtime ``router_config_hash``.
+    def candidate(self, manifest_path: str, snapshot_version: str, router_config_hash: str | None) -> RoutingAdapter:
+        """The adapter that publishing the manifest at ``manifest_path`` with ``router_config_hash`` assigns.
 
-        Only a manifest whose digest is ``snapshot_version`` is published. If this raises, the current
-        adapter is unchanged.
+        Its handlers are new: one per enabled target of the manifest, with the current policy's credential
+        environment and inference timeout. Nothing is published.
 
         Raises:
             OSError: The manifest file cannot be read.
             ValueError: Routing is disabled, the manifest or runtime hash is invalid, or the digest differs
-                from ``snapshot_version``. Also raised when the candidate changes the target catalog,
-                automatic selector, or set of Scenario names.
+                from ``snapshot_version``. Also raised when the candidate changes the domain classifier,
+                automatic selector or set of Scenario names, or when an enabled target names a credential
+                variable that the service's environment lacks.
+        """
+
+    @abstractmethod
+    def publish(self, manifest_path: str, snapshot_version: str, router_config_hash: str) -> None:
+        """Publish ``candidate(manifest_path, snapshot_version, router_config_hash)`` in one assignment.
+
+        If this raises, the current adapter is unchanged.
+
+        Raises:
+            OSError: As for ``candidate``.
+            ValueError: As for ``candidate``.
         """
 
     @abstractmethod
@@ -280,7 +303,9 @@ class RequestAcceptance:
     close it, and ``stop`` also sets ``stopping``. ``activate`` replaces ``settings`` through ``publisher``
     while closed and drained. Repeating the last revision with the same command returns the status and
     changes nothing. An older or conflicting revision is refused. ``status`` returns the wire form of a
-    ``LifecycleStatus``. ``writes`` is shared with the service.
+    ``LifecycleStatus``. ``validated_candidate_check`` and ``require_candidate_check`` read a candidate
+    check, which is not a command: they change nothing, including the revision. ``writes`` is shared with the
+    service.
     """
 
     def __init__(
@@ -440,6 +465,38 @@ class RequestAcceptance:
             raise web.HTTPConflict(text="stale or conflicting lifecycle control revision")
         return str(action), revision, command
 
+    def validated_candidate_check(self, body: Mapping[str, object]) -> tuple[str, str, str, float]:
+        """The manifest path, candidate and expected snapshot versions, and deadline of a candidate check.
+
+        A check names exactly this generation, the manifest path, both snapshot versions as non-empty strings,
+        and ``check_deadline_monotonic``, a finite positive value of the owner's ``time.monotonic()`` clock.
+
+        Raises:
+            web.HTTPException: The body is invalid (400) or names another deployment or generation (409).
+        """
+        names = ("manifest_path", "snapshot_version", "expected_snapshot_version")
+        if body.keys() != {"deployment_id", "generation", "check_deadline_monotonic", *names}:
+            raise web.HTTPBadRequest(text="invalid routing candidate check fields")
+        if not all(isinstance(body[name], str) and body[name] for name in names):
+            raise web.HTTPBadRequest(text="a candidate check names a manifest path and both snapshot versions")
+        deadline = body["check_deadline_monotonic"]
+        if not isinstance(deadline, (int, float)) or not finite_positive_seconds(deadline):
+            raise web.HTTPBadRequest(text="a candidate check requires a finite positive check_deadline_monotonic")
+        if body["deployment_id"] != self.settings.deployment_id or body["generation"] != self.settings.generation:
+            raise web.HTTPConflict(text="lifecycle deployment identity mismatch")
+        manifest_path, snapshot_version, expected = (str(body[name]) for name in names)
+        return manifest_path, snapshot_version, expected, float(deadline)
+
+    def require_candidate_check(self, expected_snapshot_version: str, deadline: float) -> None:
+        """Refuse a candidate check that can no longer pass: a stopping child or another current snapshot (409),
+        or a deadline that has passed (503). It changes nothing."""
+        if self.stopping:
+            raise web.HTTPConflict(text="stopping is terminal for this generation")
+        if self.settings.snapshot_version != expected_snapshot_version:
+            raise web.HTTPConflict(text="routing candidate check expected another current snapshot")
+        if time.monotonic() >= deadline:
+            raise web.HTTPServiceUnavailable(text=CHECK_DEADLINE_PASSED)
+
     def control(self, body: Mapping[str, object]) -> dict[str, object]:
         action, revision, command = self.validated(body)
         cancel = command[1]
@@ -554,14 +611,30 @@ def register_admission(app: web.Application, acceptance: RequestAcceptance) -> N
 def create_control_app(acceptance: RequestAcceptance) -> web.Application:
     """The private lifecycle application; ``serve_managed`` serves it only on the control socket.
 
-    Only the control token opens it, and it has no other route. Commands are
+    Only the control token opens it, and it has no other routes. Commands are
     serialized: an ``open`` of a routed deployment first checks every provider
     and previews every Scenario under the published runtime, and no other
     command can run until it finishes. That check stops at the open's
     deadline, and an open whose deadline has passed never opens admission.
+
+    ``POST CANDIDATE_CHECK_PATH`` checks the providers of a candidate manifest
+    with this child's credentials before the owner changes anything. It is
+    not a command: it has no revision, takes no command lock, publishes
+    nothing and keeps nothing, so a close or stop never waits for it.
     """
     control_digest = hashlib.sha256(acceptance.settings.control_token.encode("utf-8")).digest()
     commands = asyncio.Lock()
+
+    async def read_body(request: web.Request) -> dict[str, object]:
+        try:
+            body = await asyncio.wait_for(request.json(), acceptance.settings.body_timeout_seconds)
+        except TimeoutError as exc:
+            raise web.HTTPRequestTimeout(text="lifecycle body deadline exceeded") from exc
+        except ValueError as exc:
+            raise web.HTTPBadRequest(text="request body must be a JSON object") from exc
+        if not isinstance(body, dict):
+            raise web.HTTPBadRequest(text="request body must be an object")
+        return body
 
     @web.middleware
     async def authenticate(
@@ -577,12 +650,7 @@ def create_control_app(acceptance: RequestAcceptance) -> web.Application:
         return web.json_response(acceptance.status())
 
     async def control(request: web.Request) -> web.Response:
-        try:
-            body = await asyncio.wait_for(request.json(), acceptance.settings.body_timeout_seconds)
-        except TimeoutError as exc:
-            raise web.HTTPRequestTimeout(text="lifecycle body deadline exceeded") from exc
-        if not isinstance(body, dict):
-            raise web.HTTPBadRequest(text="request body must be an object")
+        body = await read_body(request)
         async with commands:
             if acceptance.publisher is not None and (deadline := acceptance.readiness_deadline(body)) is not None:
                 if not acceptance.settings.router_config_hash:
@@ -600,9 +668,38 @@ def create_control_app(acceptance: RequestAcceptance) -> web.Application:
                     raise web.HTTPServiceUnavailable(text=f"routing readiness failed: {exc.code}") from exc
             return web.json_response(acceptance.control(body))
 
+    async def check_candidate(request: web.Request) -> web.Response:
+        body = await read_body(request)
+        manifest_path, snapshot_version, expected, deadline = acceptance.validated_candidate_check(body)
+        publisher = acceptance.publisher
+        if publisher is None:
+            raise web.HTTPConflict(text="this service has no routing publication")
+        acceptance.require_candidate_check(expected, deadline)
+        captured = publisher.current()
+        try:
+            candidate = publisher.candidate(manifest_path, snapshot_version, None)
+        except (OSError, ValueError) as exc:
+            # The reason can hold manifest paths and long manifest names: it stays in this child's log, bounded.
+            logger.warning("routing candidate check refused the candidate: %s", str(exc)[:CANDIDATE_REASON_LIMIT])
+            raise web.HTTPConflict(text=CANDIDATE_REJECTED) from exc
+        try:
+            # A blocked event loop can run this timer late; the deadline is checked again below.
+            async with asyncio.timeout(deadline - time.monotonic()):
+                await candidate.check_ready()
+        except TimeoutError as exc:
+            raise web.HTTPServiceUnavailable(text=CHECK_DEADLINE_PASSED) from exc
+        except RoutingRequestError as exc:
+            raise web.HTTPServiceUnavailable(text=f"routing candidate readiness failed: {exc.code}") from exc
+        # A command may have published another policy, stopped the child or let the deadline pass meanwhile.
+        if publisher.current() is not captured:
+            raise web.HTTPConflict(text="the routing policy changed during the candidate check")
+        acceptance.require_candidate_check(expected, deadline)
+        return web.json_response({"snapshot_version": snapshot_version})
+
     app = web.Application(middlewares=[authenticate])
     app.router.add_get("/reef/lifecycle", status)
     app.router.add_post("/reef/lifecycle", control)
+    app.router.add_post(CANDIDATE_CHECK_PATH, check_candidate)
     return app
 
 

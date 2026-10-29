@@ -12,7 +12,7 @@ import pytest
 import yaml
 from tests.reef_service.routing.routing_fakes import DOMAIN_LABELS, write_domain_classifier
 
-from reef.service.deploy.routing.renderer import UNUSED_BACKEND, ManagedRoutingRender, generate
+from reef.service.deploy.routing.renderer import ManagedRoutingRender, generate
 from reef.service.deploy.routing.settings import RoutingDeploymentSettings, routing_deployment_settings
 from reef.service.deploy.service_config import normalize_service_config, service_config_from_mapping
 from reef.service.routing import RoutingSnapshot
@@ -86,10 +86,11 @@ def test_each_scenario_becomes_a_native_recipe_behind_a_private_entrypoint(
         "REEF_TOKEN": "provider-teacher",
         "math-student": "math-student",
     }
-    # Previews never call a backend; the schema still requires one, so it points nowhere reachable.
+    # Previews never call a model: without an inference listener, each model is metadata alone, with no backend,
+    # endpoint or credential, so the router's hot reload accepts catalog changes.
+    assert router["listeners"] == []
     for model in router["providers"]["models"]:
-        assert [ref["endpoint"] for ref in model["backend_refs"]] == [UNUSED_BACKEND]
-        assert all("api_key_env" not in ref and "api_key" not in ref for ref in model["backend_refs"])
+        assert set(model) == {"name", "provider_model_id", "api_format"}
     assert router["entrypoints"] == [
         {"model_names": ["reef-entrypoint/code-opd"], "recipe": "code-opd"},
         {"model_names": ["reef-entrypoint/math-opd"], "recipe": "math-opd"},

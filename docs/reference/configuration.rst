@@ -103,8 +103,8 @@ The manifest (``schema_version: 2``) has three parts:
   of each of exactly ``config.json``, ``tokenizer.json``, ``model.safetensors``
   and ``category_mapping.json``. Reef checks the files and labels when it
   renders a configuration and mounts only these four files read-only into SR.
-  Rules, defaults and Scenario target membership can change in place. A
-  classifier change or a target catalog change needs a restart.
+  Targets, rules, defaults and Scenario target membership can change in
+  place. A classifier change needs a restart.
   See the `domain classifier section
   <../../tutorials/semantic-router/README.md#route-by-a-pretrained-domain-classifier>`__.
 
@@ -172,31 +172,54 @@ through ``--reef.routing-deployment``.
    preview_max_concurrency | 32 | Concurrent SR previews; more are refused with 429. Changes need a restart.
    sr_cpus / sr_memory_bytes | 4 / 4294967296 | SR CPU and memory limits.
 
-To change rules, a Scenario's default target or its target membership without a
-restart, edit the configured ``reef.routing_manifest`` and send ``SIGHUP`` to the
-``reef serve`` process. The target catalog (providers, revisions, endpoints), the
-automatic model, Scenario names and images must stay the same; otherwise the
-update is rejected, logged as ``policy_rejected``, and the current policy keeps
-serving. Preview settings also need a restart. An accepted update closes
-admission and drains requests and record writes, replaces the router's
+To change targets, rules, a Scenario's default target or its target membership
+without restarting Reef or SR, edit the configured ``reef.routing_manifest`` and
+send ``SIGHUP`` to the ``reef serve`` process. A target can be added, removed,
+enabled or disabled, or given another provider model, revision or endpoint.
+A target that a default or rule still names cannot be removed or disabled in
+the same update. The model services themselves must already be running. A
+target's ``api_key_env`` can name only a variable that the Reef child already
+had when it started, even if no earlier target used it; Reef never adds
+credentials to a running process. The automatic model, Scenario names, the
+domain classifier, images and deployment settings must stay the same;
+otherwise the update is rejected, logged as ``policy_rejected``, and the
+current policy keeps serving. Preview settings also need a restart.
+
+Before anything closes, the Reef child checks the new manifest's providers
+(their model lists) with its own credentials. A missing credential, a provider
+that does not list its model, or a check that runs past its deadline rejects
+the update as ``policy_rejected``, and the current policy keeps serving. An
+accepted update then pauses admission; it does not restart Reef or SR. It
+closes admission and drains requests and record writes, replaces the router's
 configuration through its authenticated management API, waits for that exact
-configuration to be active, then publishes the new manifest and SR runtime hash
-to Reef together and reopens. New inference receives 503 during the update; an
-admitted request keeps the manifest and runtime hash it captured. A failed
-activation restores the previous configuration; SR re-encodes stored
-documents, so the restored runtime can have a new hash, which is published
-before reopening. Another writer, an unconfirmed result, or a failed
-publication stops the deployment instead of reopening. Every reopening,
-including startup, rollback and container recovery, first checks that the
-router's active runtime is the committed one and ready. Results are recorded in
-the generation's
-``lifecycle-events.jsonl`` (``policy_committed``, ``policy_rolled_back``,
-``policy_rejected``). If ``reef serve`` stops while an update is pending, the next
-start renders the last committed manifest, not the edited source file, and
-records ``pending_policy_recovered``. Send ``SIGHUP`` again to apply the source.
-A ``SIGHUP`` that arrives while ``reef serve`` is starting or recovering is
-applied once the deployment is ready; one that arrives after a stop began is
-ignored.
+configuration to be active, then publishes the new manifest, new handlers for
+its provider endpoints and the SR runtime hash to Reef together, checks every
+provider and Scenario again, and reopens. An endpoint change leaves SR's
+configuration the same, and Reef still publishes the new manifest. New
+inference receives 503 during the pause; an admitted request keeps the
+manifest, provider endpoint and runtime hash it captured. A failed activation
+restores the previous configuration; SR re-encodes stored documents, so the
+restored runtime can have a new hash, which is published before reopening.
+Another writer, an unconfirmed result, or a failed publication stops the
+deployment instead of reopening. The early provider check cannot promise that
+a provider stays available: once SR runs the new configuration, a failed final
+check keeps admission closed and the deployment's usual failure handling
+applies; Reef does not return to the old policy. Every reopening, including
+startup, rollback and container recovery, first checks that the router's
+active runtime is the committed one and ready. Results are recorded in the
+generation's ``lifecycle-events.jsonl`` (``policy_committed``,
+``policy_rolled_back``, ``policy_rejected``). If ``reef serve`` stops while an
+update is pending, the next start renders the last committed manifest, not the
+edited source file, and records ``pending_policy_recovered``. Send ``SIGHUP``
+again to apply the source. A ``SIGHUP`` that arrives while ``reef serve`` is
+starting or recovering is applied once the deployment is ready; one that
+arrives after a stop began is ignored.
+
+SR keeps each target as model metadata only, with no inference listener or
+backend, so its configuration can change in place. An existing deployment
+whose SR configuration was rendered with the old placeholder listener and
+backends needs one restart to render this form; later updates then apply in
+place.
 
 Reef accepts request bodies up to 64 MiB, and a body must finish uploading
 within 30 seconds; otherwise Reef answers 408 without calling SR or a model.

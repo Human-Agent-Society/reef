@@ -659,7 +659,11 @@ class RoutingDeploymentController:
         return directory, candidate
 
     def update_policy(self) -> None:
-        """Apply the source manifest's rules and defaults in place, or leave the serving policy unchanged."""
+        """Apply the source manifest's targets, rules and defaults in place, or leave the serving policy unchanged.
+
+        Before anything closes or changes, the child checks the candidate's providers with its own credentials;
+        a refused or failed check, or one that times out, rejects the update and the old policy keeps serving.
+        """
         self.reload_requested = False
         _, control = self.require_clients()
         management = self.management
@@ -680,11 +684,23 @@ class RoutingDeploymentController:
             return
         if current_etag != committed.router_etag:
             raise RoutingDeploymentError("another writer changed the router configuration; update refused")
+        manifest, router_document = directory / "manifest.yaml", directory / "router.yaml"
+        # The check gets the time an open of the candidate could take, within the readiness deadline.
+        check_seconds = min(self.policy.ready_timeout_seconds, self.open_timeout_seconds(candidate))
+        try:
+            control.check_candidate(
+                str(manifest), candidate.version, self.snapshot_version, deadline=time.monotonic() + check_seconds
+            )
+        except RoutingControlError as exc:
+            self.event("policy_rejected", reason=str(exc)[:300])
+            return
+        if self.stop_requested:
+            # Stop came during the check: nothing has closed or changed, and shutdown drains as usual.
+            return
         self.event("policy_updating", snapshot_version=candidate.version)
         self.drain(recovery=False)
         if self.stop_requested:
             return
-        manifest, router_document = directory / "manifest.yaml", directory / "router.yaml"
         pending = PendingPolicy(
             phase="replacing",
             from_etag=current_etag,
@@ -726,6 +742,9 @@ class RoutingDeploymentController:
                 )
                 self.policy_store.write(PolicyState(activated))
                 self.snapshot_version = candidate.version
+                # Opening checks each enabled target, so the committed catalog sets how long an open may take.
+                # A rollback keeps the committed policy, and with it this allowance.
+                control.open_timeout_seconds = self.open_timeout_seconds(candidate)
                 self.event("policy_committed", snapshot_version=candidate.version)
             else:
                 # The restored policy may run under a new runtime hash; wait_ready publishes it before opening.
