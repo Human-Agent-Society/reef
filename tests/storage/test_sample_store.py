@@ -80,7 +80,7 @@ def test_uploaded_trajectories_survive_a_restart_and_archive_retires_them(open_d
             assert session.samples.count() == 0
 
 
-def training_commit(step: int, *consumed: str) -> CommitRecord:
+def training_commit(step: int, *consumed: str, component: str | None = None) -> CommitRecord:
     return CommitRecord(
         scenario="math",
         step=step,
@@ -91,24 +91,30 @@ def training_commit(step: int, *consumed: str) -> CommitRecord:
         high_water_offset=step,
         consumed_ids=frozenset(consumed),
         recorded_at=1000.0 + step,
+        component=component,
     )
 
 
-def train_counts(session) -> dict[str, int]:
-    return {item.sample_id: item.train_count for item in session.samples.page()}
+def train_counts(session) -> dict[str, dict[str, int]]:
+    return {item.sample_id: item.train_counts for item in session.samples.page()}
 
 
-def test_a_commit_counts_each_sample_it_consumed_once(storage):
+def test_a_commit_counts_each_sample_it_consumed_once_for_its_trainer(storage):
     with closing(storage.open("math")) as session:
         session.samples.add((("t1", trajectory("a")), ("t2", trajectory("b"))))
         session.commit_step(expected_step=0, commit=training_commit(1, consumed_sample_id("t1"), "record-1"))
-        assert train_counts(session) == {"t1": 1, "t2": 0}
+        assert train_counts(session) == {"t1": {"": 1}, "t2": {}}
         # A retry of the stored commit counts nothing again; a later commit counts again.
         session.commit_step(expected_step=0, commit=training_commit(1, consumed_sample_id("t1"), "record-1"))
         session.commit_step(
             expected_step=1, commit=training_commit(2, consumed_sample_id("t1"), consumed_sample_id("t2"))
         )
-        assert train_counts(session) == {"t1": 2, "t2": 1}
+        assert train_counts(session) == {"t1": {"": 2}, "t2": {"": 1}}
+        # The commit of one component of several counts for that component only.
+        session.commit_step(expected_step=2, commit=training_commit(3, consumed_sample_id("t2"), component="b"))
+        (_, second) = session.samples.page()
+        assert second.train_counts == {"": 1, "b": 1}
+        assert (second.train_count(None), second.train_count("b"), second.train_count("c")) == (1, 1, 0)
 
 
 def test_a_commit_that_fails_counts_no_sample(storage, monkeypatch):
@@ -124,12 +130,15 @@ def test_a_commit_that_fails_counts_no_sample(storage, monkeypatch):
         monkeypatch.setattr(history, "append", append_then_fail)
         with pytest.raises(RuntimeError, match="after the counts"):
             session.commit_step(expected_step=0, commit=training_commit(1, consumed_sample_id("t1")))
-        assert train_counts(session) == {"t1": 0}
+        assert train_counts(session) == {"t1": {}}
         assert session.history() == ()
 
 
 def write_legacy_trajectories(connection, *, schema: str | None, storage_id: str | None) -> None:
-    """Make the uploaded_trajectory table of the older schema hold t1 and t2, and a commit list t1 as consumed."""
+    """Make the uploaded_trajectory table of the older schema hold t1 and t2, and two commits list t1 as consumed.
+
+    The first commit names no component, and the second names the component ``b``.
+    """
     scope = [] if storage_id is None else [Column("storage_id", String(32), nullable=False)]
     legacy = Table(
         "uploaded_trajectory",
@@ -150,9 +159,12 @@ def write_legacy_trajectories(connection, *, schema: str | None, storage_id: str
         }
         connection.execute(legacy.insert().values(row if storage_id is None else {**row, "storage_id": storage_id}))
     commits = Table("scenario_commit", MetaData(schema=schema), autoload_with=connection)
-    encoded = json.dumps(training_commit(1, "trajectory:t1").to_dict())
-    values = {"step": 1, "commit_json": encoded}
-    connection.execute(commits.insert().values(values if storage_id is None else {**values, "storage_id": storage_id}))
+    for step, component in ((1, None), (2, "b")):
+        encoded = json.dumps(training_commit(step, "trajectory:t1", component=component).to_dict())
+        values = {"step": step, "commit_json": encoded}
+        connection.execute(
+            commits.insert().values(values if storage_id is None else {**values, "storage_id": storage_id})
+        )
     samples = Table("training_sample", MetaData(schema=schema), autoload_with=connection)
     connection.execute(samples.delete())
 
@@ -167,7 +179,7 @@ def test_sqlite_moves_the_uploaded_trajectories_of_an_older_schema_with_their_tr
     engine.dispose()
 
     with closing(SQLiteScenarioStorage(tmp_path)) as storage, closing(storage.open("math")) as session:
-        assert train_counts(session) == {"t1": 1, "t2": 0}
+        assert train_counts(session) == {"t1": {"": 1, "b": 1}, "t2": {}}
         assert [item.sample for item in session.samples.page()] == [trajectory("a"), trajectory("b")]
     engine = create_engine(f"sqlite:///{database}")
     assert not inspect(engine).has_table("uploaded_trajectory")
@@ -191,7 +203,7 @@ def test_postgres_moves_the_uploaded_trajectories_of_schema_version_9_with_their
         closing(PostgresScenarioStorage(url, tmp_path, schema=schema)) as storage,
         closing(storage.open("math")) as session,
     ):
-        assert train_counts(session) == {"t1": 1, "t2": 0}
+        assert train_counts(session) == {"t1": {"": 1, "b": 1}, "t2": {}}
     with engine.connect() as connection:
         assert not inspect(connection).has_table("uploaded_trajectory", schema=schema)
         version = Table("schema_version", MetaData(schema=schema), autoload_with=connection)

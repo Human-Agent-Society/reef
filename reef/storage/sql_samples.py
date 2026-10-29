@@ -1,16 +1,18 @@
 """The sample store in the record database of a scenario, for each SQL backend.
 
-The sample table is in the same database as the records and the commits. Each
-database operation uses one transaction of the record store. The commit history
-counts the samples that a commit consumed in the transaction of the commit
-(``SQLCommitHistory``). The adapters build the table with :func:`sample_table`
-and supply their namespace.
+The sample table and the train count table are in the same database as the
+records and the commits. Each database operation uses one transaction of the
+record store. The commit history counts the samples that a commit consumed in
+the transaction of the commit (``SQLCommitHistory``). The adapters build the
+tables with :func:`sample_table` and :func:`sample_train_count_table` and supply
+their namespace.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 
 from sqlalchemy import (
     BigInteger,
@@ -40,11 +42,10 @@ def sample_table(metadata: MetaData, *, foreign_key: str | None = None) -> Table
     ``kind`` is the kind of the sample, ``trajectory`` or ``task``, and
     ``split`` is ``train`` or ``eval``; a trajectory is always ``train``.
     ``content_json`` holds the sample as canonical JSON (``sample_content``),
-    and ``content_sha256`` its SHA-256. ``train_count`` is the number of
-    committed jobs that trained the sample. If ``foreign_key`` names a column,
-    the table also has the column ``storage_id``, which refers to it. The
-    adapter then gives ``storage_id`` in ``ScopedTable.scope``. Sample IDs are
-    unique in each namespace.
+    and ``content_sha256`` its SHA-256. If ``foreign_key`` names a column, the
+    table also has the column ``storage_id``, which refers to it. The adapter
+    then gives ``storage_id`` in ``ScopedTable.scope``. Sample IDs are unique in
+    each namespace.
     """
     columns = (
         Column("sample_id", Text, nullable=False),
@@ -52,7 +53,6 @@ def sample_table(metadata: MetaData, *, foreign_key: str | None = None) -> Table
         Column("split", String(8), nullable=False),
         Column("content_json", Text, nullable=False),
         Column("content_sha256", String(64), nullable=False),
-        Column("train_count", Integer, nullable=False, server_default="0"),
     )
     if foreign_key is None:
         return Table(
@@ -74,6 +74,31 @@ def sample_table(metadata: MetaData, *, foreign_key: str | None = None) -> Table
     )
 
 
+def sample_train_count_table(metadata: MetaData, *, foreign_key: str | None = None) -> Table:
+    """Define the ``sample_train_count`` table in ``metadata``: how many committed jobs of each trainer held a sample.
+
+    A row ``(sample_id, component, train_count)`` says that ``train_count``
+    committed jobs of the trainer ``component`` listed
+    ``consumed_sample_id(sample_id)``. ``component`` is the component that
+    the commits name, or ``""`` for the only trainer of a scenario, whose
+    commits name none. A missing row is a count of 0. ``foreign_key`` adds
+    the ``storage_id`` column as for ``sample_table``.
+    """
+    columns = (
+        Column("sample_id", Text, primary_key=True),
+        Column("component", Text, primary_key=True),
+        Column("train_count", Integer, nullable=False),
+    )
+    if foreign_key is None:
+        return Table("sample_train_count", metadata, *columns)
+    return Table(
+        "sample_train_count",
+        metadata,
+        Column("storage_id", String(32), ForeignKey(foreign_key), primary_key=True),
+        *columns,
+    )
+
+
 def sample_content(sample: TrajectorySample) -> str:
     """The canonical JSON of ``sample`` that the sample table stores; ``stored_sample`` reads it back."""
     content = {
@@ -85,11 +110,16 @@ def sample_content(sample: TrajectorySample) -> str:
 
 
 class SQLSampleStore(SampleStore):
-    """The training samples of one scenario in its record database."""
+    """The training samples of one scenario in its record database.
 
-    def __init__(self, records: SQLRecordStore, table: ScopedTable) -> None:
+    ``table`` is the sample table and ``train_counts`` the train count table
+    (``sample_train_count_table``), both in the namespace of the scenario.
+    """
+
+    def __init__(self, records: SQLRecordStore, table: ScopedTable, train_counts: ScopedTable) -> None:
         self.records = records
         self.table = table
+        self.train_counts = train_counts
 
     def add(self, samples: tuple[tuple[str, TrajectorySample], ...]) -> bool:
         rows = []
@@ -126,6 +156,7 @@ class SQLSampleStore(SampleStore):
         if after_sequence < 0 or limit <= 0:
             raise ValueError("after_sequence must be non-negative and limit positive")
         table = self.table.table
+        counts = self.train_counts.table
         with self.records._transaction(write=False) as connection:
             rows = (
                 connection.execute(
@@ -137,7 +168,15 @@ class SQLSampleStore(SampleStore):
                 .mappings()
                 .all()
             )
-        return tuple(stored_sample(row) for row in rows)
+            train_counts: dict[str, dict[str, int]] = {row["sample_id"]: {} for row in rows}
+            if train_counts:
+                for count in connection.execute(
+                    select(counts.c.sample_id, counts.c.component, counts.c.train_count).where(
+                        self.train_counts.condition(), counts.c.sample_id.in_(list(train_counts))
+                    )
+                ):
+                    train_counts[count.sample_id][count.component] = int(count.train_count)
+        return tuple(stored_sample(row, train_counts[row["sample_id"]]) for row in rows)
 
     def count(self, *, after_sequence: int = 0) -> int:
         table = self.table.table
@@ -150,8 +189,8 @@ class SQLSampleStore(SampleStore):
             )
 
 
-def stored_sample(row: RowMapping) -> StoredSample:
-    """Return the stored sample of one table row."""
+def stored_sample(row: RowMapping, train_counts: Mapping[str, int]) -> StoredSample:
+    """Return the stored sample of one table row, with its train counts by component."""
     content = json.loads(row["content_json"])
     sample = TrajectorySample(
         content["trajectory"],
@@ -162,5 +201,5 @@ def stored_sample(row: RowMapping) -> StoredSample:
         sequence=int(row["sequence"]),
         sample_id=row["sample_id"],
         sample=sample,
-        train_count=int(row["train_count"]),
+        train_counts=train_counts,
     )

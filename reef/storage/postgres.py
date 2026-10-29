@@ -56,7 +56,7 @@ from reef.storage.scenario import ScenarioSettings, ScenarioStorage
 from reef.storage.sql_commits import SQLCommitHistory, commit_table
 from reef.storage.sql_evaluations import SQLEvaluationStore, evaluation_table
 from reef.storage.sql_records import RecordTables, ScopedTable, SQLRecordRetention, SQLRecordStore
-from reef.storage.sql_samples import SQLSampleStore, sample_table
+from reef.storage.sql_samples import SQLSampleStore, sample_table, sample_train_count_table
 from reef.storage.sql_tasks import SQLTaskStorage, task_tables
 from reef.storage.tasks import LocalTaskFileStore, TaskFileStore
 
@@ -175,6 +175,7 @@ class PostgresRecordDatabase:
         self.tables = _record_tables(metadata)
         self.task_tables = task_tables(metadata, foreign_key="record_store.storage_id")
         self.sample_table = sample_table(metadata, foreign_key="record_store.storage_id")
+        self.sample_train_count_table = sample_train_count_table(metadata, foreign_key="record_store.storage_id")
         self.evaluation_table = evaluation_table(metadata, foreign_key="record_store.storage_id")
         self.commit_table = commit_table(metadata, foreign_key="record_store.storage_id")
         try:
@@ -198,12 +199,14 @@ class PostgresRecordDatabase:
                 # generated_task with candidate_task and published_task, which keep each task by the digest
                 # of its directory, and no longer uses task_store. Version 8 adds task_trained and task_document, the
                 # trained marks and the stage documents of a task store. Version 9 adds artifact_evaluation, the
-                # evaluations that clients ask for. Version 10 replaces uploaded_trajectory with training_sample,
-                # which also counts the committed jobs that trained each sample. create_all adds them to an older
+                # evaluations that clients ask for. Version 10 replaces uploaded_trajectory with training_sample and
+                # sample_train_count, which counts the committed jobs of each trainer that trained a sample. create_all adds them to an older
                 # schema, and migrate_uploaded_trajectories moves the uploaded trajectories.
                 metadata.create_all(connection)
                 migrate_record_storage(connection, self.tables.records, self.tables.consumption)
-                migrate_uploaded_trajectories(connection, self.sample_table, self.commit_table)
+                migrate_uploaded_trajectories(
+                    connection, self.sample_table, self.sample_train_count_table, self.commit_table
+                )
                 for index in self.tables.records.indexes:
                     index.create(connection, checkfirst=True)
                 if versions and versions != [10]:
@@ -381,7 +384,12 @@ class PostgresRecordStore(SQLRecordStore):
 
     def sample_store(self) -> SQLSampleStore:
         """Open the training samples of this store generation."""
-        return SQLSampleStore(self, ScopedTable(self._database.sample_table, scope={"storage_id": self.storage_id}))
+        scope = {"storage_id": self.storage_id}
+        return SQLSampleStore(
+            self,
+            ScopedTable(self._database.sample_table, scope=scope),
+            ScopedTable(self._database.sample_train_count_table, scope=scope),
+        )
 
     def evaluation_store(self) -> SQLEvaluationStore:
         """Open the artifact evaluations of this store generation."""
@@ -394,7 +402,7 @@ class PostgresRecordStore(SQLRecordStore):
         return SQLCommitHistory(
             self,
             ScopedTable(self._database.commit_table, scope={"storage_id": self.storage_id}),
-            ScopedTable(self._database.sample_table, scope={"storage_id": self.storage_id}),
+            ScopedTable(self._database.sample_train_count_table, scope={"storage_id": self.storage_id}),
             label=f"postgres://{self._database.schema}/record-store/{self.storage_id}/commits",
             durable=True,
         )

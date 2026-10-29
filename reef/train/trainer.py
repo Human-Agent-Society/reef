@@ -215,6 +215,8 @@ class Trainer:
         self._data_sequence = 0
         #: The training samples of the scenario, after ``read_samples``.
         self.sample_store: SampleStore | None = None
+        #: The component that this trainer's commits name, or None for a scenario's only trainer.
+        self.sample_component: str | None = None
         #: The sequence of the last sample that the trainer read.
         self.sample_sequence = 0
         self.consumed_record_ids: set[str] = set()
@@ -419,14 +421,18 @@ class Trainer:
                 return True
             return self._records.count(self.scenario, after_sequence=self._data_sequence) > 0
 
-    def read_samples(self, store: SampleStore) -> None:
+    def read_samples(self, store: SampleStore, component: str | None) -> None:
         """Read the training samples of the scenario from ``store``, from the first one.
 
-        The scenario factory calls this when it builds the trainer. The trainer
-        skips a sample that a committed job trained (``train_count`` above 0).
+        The scenario factory calls this when it builds the trainer.
+        ``component`` is the component that this trainer's commits name, or
+        ``None`` for the only trainer of a scenario. The trainer skips a sample
+        that one of its own committed jobs trained, so each trainer of a
+        scenario of several components trains each sample.
         """
         with self._lock:
             self.sample_store = store
+            self.sample_component = component
             self.sample_sequence = 0
 
     def pipeline_status(self) -> Mapping[str, Any]:
@@ -503,7 +509,7 @@ class Trainer:
                 break
             for stored in stored_samples:
                 self.sample_sequence = stored.sequence
-                if stored.train_count > 0:
+                if stored.train_count(self.sample_component) > 0:
                     continue
                 try:
                     self._pipeline.push_trajectory(stored.sample_id, stored.sample)

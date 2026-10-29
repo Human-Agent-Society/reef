@@ -51,16 +51,18 @@ class SQLCommitHistory(CommitHistory):
 
     Values: ``record_store`` is the open record store whose transactions the
     history uses. ``table`` is the commit table and the namespace of this
-    generation. ``samples`` is the sample table (``sample_table``) in the same
-    namespace. ``label`` names the table for error messages, and ``durable``
+    generation. ``train_counts`` is the train count table
+    (``sample_train_count_table``) in the same namespace. ``label`` names the table for error messages, and ``durable``
     is true when the database outlives the process. ``records()`` is the rows
     of the namespace in step order, decoded. The cached records are always a
     prefix of those rows, so a read fetches only the steps after them; a
     locked block that rolls back clears the cache. A row deleted by anything
     but this class is outside the contract.
 
-    ``append`` stores a new commit and adds one to the ``train_count`` of each
-    sample whose ``consumed_sample_id`` the commit lists, in one transaction. An
+    ``append`` stores a new commit and adds one to the train count of the
+    commit's trainer (``record.component``, or ``""`` when it names none) for
+    each sample whose ``consumed_sample_id`` the commit lists, in one
+    transaction. An
     append of a commit that is already stored changes nothing, so a retry
     counts no sample twice.
 
@@ -78,11 +80,11 @@ class SQLCommitHistory(CommitHistory):
     """
 
     def __init__(
-        self, record_store: SQLRecordStore, table: ScopedTable, samples: ScopedTable, *, label: str, durable: bool
+        self, record_store: SQLRecordStore, table: ScopedTable, train_counts: ScopedTable, *, label: str, durable: bool
     ) -> None:
         self.record_store = record_store
         self.table = table
-        self.samples = samples
+        self.train_counts = train_counts
         self._label = label
         self._durable = durable
         self._lock = RLock()
@@ -136,11 +138,24 @@ class SQLCommitHistory(CommitHistory):
                 if consumed.startswith(CONSUMED_SAMPLE_PREFIX)
             )
             if sample_ids:
-                samples = self.samples.table
+                counts = self.train_counts.table
+                component = record.component or ""
+                self.record_store._insert_if_absent(
+                    connection,
+                    counts,
+                    [
+                        {**self.train_counts.scope, "sample_id": sample_id, "component": component, "train_count": 0}
+                        for sample_id in sample_ids
+                    ],
+                )
                 connection.execute(
-                    update(samples)
-                    .where(self.samples.condition(), samples.c.sample_id.in_(sample_ids))
-                    .values(train_count=samples.c.train_count + 1)
+                    update(counts)
+                    .where(
+                        self.train_counts.condition(),
+                        counts.c.component == component,
+                        counts.c.sample_id.in_(sample_ids),
+                    )
+                    .values(train_count=counts.c.train_count + 1)
                 )
 
     @contextmanager

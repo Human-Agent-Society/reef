@@ -512,8 +512,8 @@ The session contract is:
        session and survive restarts when ``durable``.
    * - ``samples``
      - The ``SampleStore`` of the scenario's training samples: the uploaded
-       trajectories in upload order, each with ``train_count``, the number of
-       committed jobs that trained it. It closes with the session and
+       trajectories in upload order, each with ``train_counts``, the number of
+       committed jobs of each trainer that trained it. It closes with the session and
        survives restarts when ``durable``.
    * - ``history()``
      - Committed ``CommitRecord`` values in step order: training steps
@@ -547,8 +547,8 @@ expected step, or a retry with conflicting content, raises
 ``SQLCommitHistory`` holds one write transaction of the record store, which
 SQLite locks with ``BEGIN IMMEDIATE`` and PostgreSQL with a row lock on the
 store generation. It reads the history and inserts the commit row in that
-transaction. In the same transaction, it adds one to the ``train_count`` of
-each sample whose ``sample:<sample_id>`` the commit lists. The commit is
+transaction. In the same transaction, it adds one to the train count of the
+commit's trainer for each sample whose ``sample:<sample_id>`` the commit lists. The commit is
 durable when the transaction ends; an exception before then stores no commit
 and counts no sample. Direct writes through a ``CommitHistory``
 bypass this store contract.

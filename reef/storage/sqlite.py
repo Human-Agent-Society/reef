@@ -34,7 +34,7 @@ from reef.storage.scenario import ScenarioSettings, ScenarioStorage
 from reef.storage.sql_commits import SQLCommitHistory, commit_table
 from reef.storage.sql_evaluations import SQLEvaluationStore, evaluation_table
 from reef.storage.sql_records import RecordTables, ScopedTable, SQLRecordRetention, SQLRecordStore
-from reef.storage.sql_samples import SQLSampleStore, sample_table
+from reef.storage.sql_samples import SQLSampleStore, sample_table, sample_train_count_table
 from reef.storage.sql_tasks import SQLTaskStorage, task_tables
 from reef.storage.tasks import LocalTaskFileStore, TaskFileStore
 
@@ -96,6 +96,7 @@ _SCENARIO_SETTING = Table(
 )
 TASK_TABLES = task_tables(_METADATA)
 SAMPLE_TABLE = ScopedTable(sample_table(_METADATA))
+SAMPLE_TRAIN_COUNT_TABLE = ScopedTable(sample_train_count_table(_METADATA))
 EVALUATION_TABLE = ScopedTable(evaluation_table(_METADATA))
 COMMIT_TABLE = ScopedTable(commit_table(_METADATA))
 logger = logging.getLogger(__name__)
@@ -190,7 +191,9 @@ class SQLiteRecordStore(SQLRecordStore):
                 self._connection.exec_driver_sql("BEGIN IMMEDIATE")
                 _METADATA.create_all(self._connection)
                 migrate_record_storage(self._connection, _AGENT_RECORD, CONSUMPTION_RECEIPTS)
-                migrate_uploaded_trajectories(self._connection, SAMPLE_TABLE.table, COMMIT_TABLE.table)
+                migrate_uploaded_trajectories(
+                    self._connection, SAMPLE_TABLE.table, SAMPLE_TRAIN_COUNT_TABLE.table, COMMIT_TABLE.table
+                )
                 # create_all skips indexes on tables that already existed.
                 for index in _AGENT_RECORD.indexes:
                     index.create(self._connection, checkfirst=True)
@@ -217,7 +220,7 @@ class SQLiteRecordStore(SQLRecordStore):
 
     def sample_store(self) -> SQLSampleStore:
         """Open the training samples in this database."""
-        return SQLSampleStore(self, SAMPLE_TABLE)
+        return SQLSampleStore(self, SAMPLE_TABLE, SAMPLE_TRAIN_COUNT_TABLE)
 
     def evaluation_store(self) -> SQLEvaluationStore:
         """Open the artifact evaluations in this database."""
@@ -228,7 +231,7 @@ class SQLiteRecordStore(SQLRecordStore):
         return SQLCommitHistory(
             self,
             COMMIT_TABLE,
-            SAMPLE_TABLE,
+            SAMPLE_TRAIN_COUNT_TABLE,
             label=f"{self._database}#scenario_commit",
             durable=self._database != ":memory:",
         )
