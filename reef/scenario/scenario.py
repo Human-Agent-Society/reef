@@ -288,9 +288,10 @@ class Scenario:
     def served_release(self, artifact_id: str) -> ArtifactRef:
         """The release that answers a call to the URL of ``artifact_id``.
 
-        It is the release that serves the artifact beside the active release
-        when the scenario serves it so, else the active release when that
-        binds it. Raise ``ArtifactNotFound`` when neither serves it.
+        When the scenario serves the artifact beside its active release, it is
+        the release that serves it there. Else it is the active release, when
+        that release binds the artifact. Raise ``ArtifactNotFound`` when
+        neither serves it.
         """
         with self.release_queries.publication_lock:
             step = self._committer.step

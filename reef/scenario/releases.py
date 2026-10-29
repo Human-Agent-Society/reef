@@ -257,9 +257,9 @@ class ScenarioReleases:
     def bound_artifact_ids(self, release_id: str, components: tuple[str, ...], scenario_step: int) -> dict[str, str]:
         """The ``artifact_id`` of each of ``components`` that the release ``release_id`` binds, as the records name it.
 
-        With one component, the artifact of a release is the one it made: its ``release_id``, or for the creation the
-        artifact that the scenario started from. With several, it is the release's manifest entry, and a component
-        that no known manifest names is left out.
+        With one component, the artifact of a release is the one that it made: its ``release_id``. For the creation,
+        it is the artifact that the scenario started from. With several components, it is the release's manifest
+        entry. A component that no known manifest names is left out.
         """
         if len(components) == 1:
             (component,) = components
@@ -273,10 +273,10 @@ class ScenarioReleases:
     def served_beside(self, scenario_step: int, components: tuple[str, ...]) -> Mapping[str, ServedArtifact]:
         """The artifacts that the scenario serves beside its active release, by ``artifact_id``.
 
-        The result is the fold of the commit history: a ``"serve"`` record adds its artifact, and a
-        ``"stop_serving"`` record removes it. An activation changes nothing here, so an artifact of the active
-        release can be in the result too. A store without a durable history serves none. The result of one
-        ``scenario_step`` is read once.
+        The result is the fold of the commit history. A ``"serve"`` record adds its artifact, and a
+        ``"stop_serving"`` record removes it. An activation changes nothing here, so the result can hold an
+        artifact of the active release. A store without a durable history serves none. Each ``scenario_step``
+        is read once.
         """
         if self.served_read is not None and self.served_read[0] == scenario_step:
             return self.served_read[1]
@@ -284,12 +284,10 @@ class ScenarioReleases:
         for record in self.records():
             if record.operation in ("serve", "stop_serving"):
                 component = components[0] if record.component is None else record.component
-                if record.components is None:
-                    artifact_id = self.bound_artifact_ids(record.artifact_ref.release_id, components, scenario_step)[
-                        component
-                    ]
-                else:
-                    artifact_id = record.components[component]
+                bound = record.components or self.bound_artifact_ids(
+                    record.artifact_ref.release_id, components, scenario_step
+                )
+                artifact_id = bound[component]
                 if record.operation == "serve":
                     served[artifact_id] = ServedArtifact(component, artifact_id, record.artifact_ref)
                 else:

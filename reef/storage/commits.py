@@ -12,7 +12,7 @@ import time
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, get_args
 
 from reef.core.artifact_ref import ArtifactRef, decode_artifact_ref, encode_artifact_ref
 from reef.core.errors import ReefError
@@ -82,8 +82,6 @@ def to_json_value(value: Any) -> Any:
 #: What a commit record does: a training step, the activation of an artifact, a trainer's new training start, an
 #: import, or the start or the end of serving an artifact beside the active release.
 CommitOperation = Literal["training", "activate", "train_from", "import", "serve", "stop_serving"]
-#: The operations of ``CommitOperation`` that carry no trainer state.
-NON_TRAINING_OPERATIONS = ("activate", "train_from", "import", "serve", "stop_serving")
 
 
 @dataclass(frozen=True, kw_only=True, eq=False)
@@ -130,12 +128,12 @@ class CommitRecord:
       where the content was read from; it is no part of the artifact's
       identity.
     - ``"serve"``: Reef serves one artifact beside the active release from
-      now on. ``artifact_ref`` is the release that serves it: in a scenario
-      of one component the release that made it, and ``component`` and
-      ``components`` are ``None``; in a scenario of several a release that
-      the serve published, and ``component`` and ``components`` are as for
-      an ``"activate"`` record. The served artifact is the one that
-      ``artifact_ref`` binds as ``component``.
+      now on. ``artifact_ref`` is the release that serves it, and the served
+      artifact is the one that it binds as ``component``. In a scenario of
+      one component, it is the release that made the artifact, and
+      ``component`` and ``components`` are ``None``. In a scenario of
+      several, it is a release that the serve published, and ``component``
+      and ``components`` are as for an ``"activate"`` record.
     - ``"stop_serving"``: Reef no longer serves the artifact of the
       ``"serve"`` record with the same ``artifact_ref``, ``component`` and
       ``components``.
@@ -201,8 +199,8 @@ class CommitRecord:
         ):
             if not isinstance(value, int) or isinstance(value, bool) or value < 0:
                 raise CommitHistoryError(f"commit record {name} must be a non-negative integer")
-        if self.operation != "training" and self.operation not in NON_TRAINING_OPERATIONS:
-            raise CommitHistoryError(f"commit record operation must be 'training' or one of {NON_TRAINING_OPERATIONS}")
+        if self.operation not in get_args(CommitOperation):
+            raise CommitHistoryError(f"commit record operation must be one of {get_args(CommitOperation)}")
         if not isinstance(self.operation_verified, bool):
             raise CommitHistoryError("commit record operation_verified must be a boolean")
         if not isinstance(self.checkpoint, bool) or not isinstance(self.activated, bool):

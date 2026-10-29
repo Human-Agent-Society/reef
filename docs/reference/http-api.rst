@@ -1448,9 +1448,11 @@ explains how to go back to an older one for good.
 Serve an artifact beside the active release
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The default inference routes answer from the active release. To keep an
-older artifact answering while a newer one is active, or to try a new
-artifact before it is active, serve it beside the active release:
+The default inference routes answer from the active release. Serve an
+artifact beside the active release to:
+
+- keep an older artifact answering while a newer one is active;
+- try a new artifact before it is active.
 
 .. code:: bash
 
@@ -1480,9 +1482,9 @@ A serve appends a ``serve`` record, so the artifact stays served after a
 restart. It changes neither the active release, nor the chain tip, nor a
 training start. An activation does not change what is served: serve the
 active artifact first to keep it answering after you activate another one.
-Serving a served artifact changes nothing. Only the active release trains:
-the staleness check of a recipe refuses the records of a served artifact,
-because it counts only the versions of the active release.
+Serving a served artifact changes nothing. Only the active release trains.
+The staleness check of a recipe counts only the versions of the active
+release, so it refuses the records of a served artifact.
 
 ``POST /reef/scenarios/{scenario}/stop-serving`` with ``{"artifact_id":
 "<id>"}`` ends the serve and appends a ``stop_serving`` record. It answers

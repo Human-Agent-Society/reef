@@ -503,16 +503,16 @@ class RequestService:
         return scenario.operations
 
     def inference_scenario(self, parsed: RequestHeaders, *, record: bool, artifact_id: str | None = None) -> Scenario:
-        """The scenario an inference serves. A recorded call may create it, unless it names a served artifact
-        (``artifact_id``), which only a scenario that exists has; an evaluation call (``record`` False) reads the
+        """The scenario an inference serves. A recorded call may create it, unless it names an artifact
+        (``artifact_id``): only a scenario that exists has one. An evaluation call (``record`` False) reads the
         loaded instance only, never waiting for the scenario's lock and never creating it (see
         ``ScenarioRegistry.get_loaded``)."""
-        if record and artifact_id is not None:
+        if record:
             scenario = self._dispatcher.get_or_create_scenario(
-                parsed.scenario, release_id=parsed.release_id, allow_implicit_creation=False
+                parsed.scenario,
+                release_id=parsed.release_id,
+                allow_implicit_creation=None if artifact_id is None else False,
             )
-        elif record:
-            scenario = self._dispatcher.get_or_create_scenario(parsed.scenario, release_id=parsed.release_id)
         else:
             scenario = self._dispatcher.loaded_scenario(parsed.scenario, release_id=parsed.release_id)
         if scenario is None:

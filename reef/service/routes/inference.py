@@ -107,8 +107,8 @@ async def _relay_inference_stream(
         if name.lower() not in ("x-reef-agent-record-id", RELEASE_ID_HEADER)
     }
     if record and artifact_id is None:
-        # Only a resident harness reads the head; an evaluation rollout runs a candidate, not the served tree, and a
-        # call to a served artifact's URL runs that artifact.
+        # Only a resident harness reads the head. An evaluation rollout runs a candidate, not the served tree. A call
+        # to a served artifact's URL runs that artifact.
         response_headers.update(await _release_header(request_service, headers))
     content_type = next(
         (value for name, value in response_headers.items() if name.lower() == "content-type"),

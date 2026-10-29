@@ -44,7 +44,7 @@ Read the artifacts
    curl -sS -H "Authorization: Bearer $REEF_TOKEN" \
      "$REEF_URL/reef/scenarios/code-repair/artifacts"
 
-An artifact is the content of one component, such as a checkpoint's weights or a harness tree. Each training step that saves a checkpoint or keeps a tree makes one, and so does each import (`Import an artifact`_). The list is newest first, one row for each artifact. ``active`` marks the component's active artifact, ``activated`` marks each artifact that has been active at some time, and ``served`` marks each artifact that the scenario serves beside its active release (`Serve an artifact beside the active release`_). `Artifacts <../reference/http-api.rst#artifacts>`__ in the HTTP API lists every field. In a scenario of one component, which every shipped recipe is, ``artifact_id`` equals the ``release_id`` of the release that made the artifact. The creation artifact is the artifact that the scenario started from, usually the base artifact (`The base artifact`_). Its ``artifact_id`` is the ``release_id`` of the release that made it.
+An artifact is the content of one component, such as a checkpoint's weights or a harness tree. Each training step that saves a checkpoint or keeps a tree makes one, and so does each import (`Import an artifact`_). The list is newest first, one row for each artifact. ``active`` marks the component's active artifact, and ``activated`` marks each artifact that has been active at some time. ``served`` marks each artifact that the scenario serves beside its active release (`Serve an artifact beside the active release`_). `Artifacts <../reference/http-api.rst#artifacts>`__ in the HTTP API lists every field. In a scenario of one component, which every shipped recipe is, ``artifact_id`` equals the ``release_id`` of the release that made the artifact. The creation artifact is the artifact that the scenario started from, usually the base artifact (`The base artifact`_). Its ``artifact_id`` is the ``release_id`` of the release that made it.
 
 A training step that made no artifact, such as a rejected or skipped step, has no row. Neither do activations, train-from operations and serves. ``GET /reef/scenarios/{scenario}/commits`` lists every step (`Record and commit history <../reference/http-api.rst#record-and-commit-history>`__).
 
@@ -115,7 +115,7 @@ Reef reads the model and the seed only to make the base artifact. When a restart
 Choose a starting release
 -------------------------
 
-The default inference routes answer from the scenario's active release. No request header keeps a client on an older release; to keep an older artifact answering, serve it beside the active release (`Serve an artifact beside the active release`_).
+The default inference routes answer from the scenario's active release. No request header keeps a client on an older release. To keep an older artifact answering, serve it beside the active release (`Serve an artifact beside the active release`_).
 
 A new scenario starts from the base artifact. A request can carry ``x-reef-release-id: <id>``. If the request creates the scenario, Reef binds the new scenario to that starting release instead. On a scenario that already exists, the header must name the bound starting release. Otherwise, Reef refuses the request with HTTP 409. `Headers <../reference/http-api.rst#headers>`__ in the HTTP API lists this header.
 
@@ -202,7 +202,11 @@ The new scenario's first job continues from the weights that the workers loaded.
 Serve an artifact beside the active release
 -------------------------------------------
 
-A scenario can serve other artifacts beside its active release, each at its own URL. Use it to keep the current artifact answering while you move traffic to a new one, or to try a new artifact before it is active:
+A scenario can serve other artifacts beside its active release, each at its own URL. Use it to:
+
+- keep the current artifact answering while you move traffic to a new one;
+- try a new artifact before it is active.
+
 
 .. code:: bash
 
@@ -218,7 +222,7 @@ A scenario can serve other artifacts beside its active release, each at its own 
 
 The default routes keep answering from the active release. A call to the artifact's URL is recorded like any other call, and its record names the release that answered. An activation does not change what is served, so serve the active artifact before you activate another one to keep it answering. ``POST /reef/scenarios/{scenario}/stop-serving`` with the same body ends the serve. Both survive a restart.
 
-Only the active release trains. Which client calls which URL is your choice, for example a gateway that moves traffic from one URL to the other. The runtime must answer each call from the release that the call names: a Tinker scenario can serve any of its artifacts, and a runtime that loads weights into engines refuses a serve. `Serve an artifact beside the active release <../reference/http-api.rst#serve-an-artifact-beside-the-active-release>`__ in the HTTP API lists the answers and status codes.
+Only the active release trains. Which client calls which URL is your choice, for example a gateway that moves traffic from one URL to the other. The runtime must answer each call from the release that the call names. A Tinker scenario can serve any of its artifacts. A runtime that loads weights into engines refuses a serve. `Serve an artifact beside the active release <../reference/http-api.rst#serve-an-artifact-beside-the-active-release>`__ in the HTTP API lists the answers and status codes.
 
 Go back to an older artifact
 ----------------------------
