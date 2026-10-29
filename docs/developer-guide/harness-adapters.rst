@@ -232,6 +232,59 @@ Render paths
 ``claude`` also takes ``memory``: ``claude/memory/<name>.md``, where its
 render points Claude Code's automatic memory.
 
+Config targets and a person's machine
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A tree's ``config/<target>.json`` merges into the target's file and must pass
+the target's checks (`Config checks`_). A key that the model binding writes
+never comes from a tree: validation refuses it. The last column says whether
+the adapter has a ``run.layer``, so that ``reef-client`` runs its releases on a
+person's machine (`A person's machine`_). Without one, a release runs only in
+Reef's episodes.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 12 64 24
+
+   * - Adapter
+     - Config targets, and what a tree may set in them
+     - Person's machine
+   * - ``pi``
+     - ``primary`` (``pi-agent/settings.json``): only
+       ``defaultThinkingLevel`` and an empty ``defaultTools``. ``models``
+       (``pi-agent/models.json``): nothing; the binding writes it.
+     - yes
+   * - ``opencode``
+     - ``primary`` (``opencode/opencode.json``): any key except a model
+       choice; ``autoupdate``, ``share`` and ``enabled_providers`` keep
+       their defaults.
+     - yes
+   * - ``claude``
+     - ``primary`` (``claude/settings.json``): any key except the model,
+       credential and login settings and the ``env`` names that choose an
+       endpoint or a model; the updater and telemetry stay off.
+     - yes
+   * - ``codex``
+     - ``primary`` (``codex/config.toml``): only the tuning keys its checks
+       list. ``models`` (``codex/models.json``): nothing; the binding
+       writes it.
+     - yes
+   * - ``dsh``
+     - ``primary`` and ``web`` (each profile's ``cordis.patch.yml``): any
+       plugin's config except the model and provider routes.
+       ``web_manifest`` (``dsh/profiles/web/package.json``) and ``env``
+       (``dsh/.env``): no checks besides the binding's keys.
+     - no
+   * - ``hermes``
+     - ``primary`` (``hermes/config.yaml``): any key except the model
+       routes; the background calls (title, nudges, curator) stay off.
+       ``env`` (``hermes/.env``): no checks besides the binding's keys.
+     - no
+   * - ``native``
+     - ``primary`` (``native/config.json``): no checks. ``models``
+       (``native/models.json``): no checks besides the binding's keys.
+     - no
+
 Bundled adapters
 ----------------
 
@@ -256,7 +309,9 @@ campaign adds ``terminus`` (`its README
    * - ``opencode``
      - npm 1.18.18; ``opencode run --format json --auto``
      - Frontmatter must be a plain YAML mapping. A command's ``agent`` must
-       name an enabled agent.
+       name an enabled agent. An episode's task never runs a command:
+       ``opencode run`` expands one only from ``--command``, so a command
+       takes effect when a person runs it.
    * - ``claude``
      - npm 2.1.257; ``claude -p --output-format json``
      - An extension is a script that a ``hooks`` entry of the settings runs.

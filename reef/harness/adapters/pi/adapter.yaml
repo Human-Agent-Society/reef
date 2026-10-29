@@ -133,6 +133,10 @@ config:
     # with its own baseUrl or pi's built in one with a new endpoint, is the
     # tree choosing where calls go.
     checks:
+      # The entire file is treated as a dict: the binding's providers are all a tree may name.
+      - key: "."
+        match: Each(Key(Eq("providers")))
+        reason: Reef's model binding writes models.json
       - key: providers
         match: Each(Key(Eq("reef")))
         reason: Reef's model binding chooses the provider, the endpoint, the credential and the model
