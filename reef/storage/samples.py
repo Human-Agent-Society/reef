@@ -45,8 +45,9 @@ def consumed_sample_id(sample_id: str) -> str:
 class StoredSample:
     """One sample in a sample store, and the number of committed jobs of each trainer that trained it.
 
-    Values: ``(sequence, sample_id, split, sample, files_digest, train_counts)``
-    is a stored sample if and only if all of these hold:
+    Values: ``(sequence, sample_id, split, sample, files_digest, train_counts,
+    component, group, record_ids)`` is a stored sample if and only if all of
+    these hold:
 
     * ``sequence`` is a positive int, the position of the sample in arrival order.
     * ``sample_id`` is a non-empty string: the ID that the client gave a
@@ -63,6 +64,13 @@ class StoredSample:
       commits name, or ``""`` for the only trainer of a scenario, whose
       commits name none. A trainer that is not a key has trained the sample
       0 times. The value keeps its own copy of ``train_counts``.
+    * ``component`` is the trainer that made the sample from records, as a
+      ``train_counts`` key, or ``None`` for a sample that every trainer reads:
+      an upload or an imported task. Only a trajectory has a ``component``.
+    * ``group`` is ``None`` or a non-empty string that the samples of one unit
+      share, so that they train together. ``record_ids`` is a tuple of
+      distinct non-empty strings: the records that the sample's unit consumed,
+      empty exactly when ``component`` is ``None``.
 
     Operations: ``kind`` is ``trajectory`` for a ``TrajectorySample`` and
     ``task`` for a ``TaskSample``. ``train_count(component)`` is
@@ -82,6 +90,9 @@ class StoredSample:
     sample: TrajectorySample | TaskSample
     files_digest: str | None = None
     train_counts: Mapping[str, int] = field(default_factory=dict)
+    component: str | None = None
+    group: str | None = None
+    record_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if isinstance(self.sequence, bool) or not isinstance(self.sequence, int) or self.sequence < 1:
@@ -107,6 +118,18 @@ class StoredSample:
         ):
             raise ValueError("a stored sample's train_counts map component names to positive ints")
         object.__setattr__(self, "train_counts", dict(self.train_counts))
+        if self.component is not None and (not isinstance(self.component, str) or self.kind != "trajectory"):
+            raise ValueError("only a trajectory made from records has a component, a string")
+        if self.group is not None and (not isinstance(self.group, str) or not self.group):
+            raise ValueError("a stored sample's group is a non-empty string or None")
+        ids = self.record_ids
+        if (
+            not isinstance(ids, tuple)
+            or any(not isinstance(record_id, str) or not record_id for record_id in ids)
+            or len(set(ids)) != len(ids)
+            or (not ids) != (self.component is None)
+        ):
+            raise ValueError("a stored sample's record_ids are distinct record IDs, empty exactly without a component")
 
     @property
     def kind(self) -> SampleKind:
@@ -130,7 +153,9 @@ class SampleStore(ABC):
 
     Purpose: the dispatcher adds the trajectories of each upload
     (``add_trajectories``) and the tasks of each task upload or deployment
-    import (``add_tasks``). The trainer reads the trajectories in arrival order,
+    import (``add_tasks``). A trainer's pipeline adds the samples of each unit
+    that its record stages make (``add_record_samples``), and a rebuilt trainer
+    skips the records they consumed (``consumed_record_ids``). The trainer reads the trajectories in arrival order,
     after its cursor (``page`` and ``count`` with ``kind="trajectory"``). A
     recipe's stage, an evaluation and the task listing read the tasks
     (``page`` with ``kind="task"``).
@@ -148,6 +173,28 @@ class SampleStore(ABC):
         """
 
     @abstractmethod
+    def add_record_samples(
+        self,
+        trainer: str,
+        group: str | None,
+        record_ids: tuple[str, ...],
+        trajectories: tuple[tuple[str, TrajectorySample], ...],
+    ) -> bool:
+        """Save the samples of one unit that ``trainer`` made from ``record_ids``, in one transaction, in order.
+
+        ``trainer`` is a ``train_counts`` key: the component that the trainer's commits name, or ``""`` for the
+        only trainer of a scenario. Each sample gets ``component`` ``trainer``, ``group`` ``group`` and
+        ``record_ids`` ``record_ids``; once the transaction ends, the records are consumed for ``trainer``
+        (``consumed_record_ids``). Return True if one or more sample is new. Raises ``ValueError`` for no sample
+        or an empty record ID, and ``SampleConflict`` if an ID is stored with another sample; then the store saves
+        no sample of the call.
+        """
+
+    @abstractmethod
+    def consumed_record_ids(self, trainer: str) -> frozenset[str]:
+        """The records that the stored samples of ``trainer`` (a ``train_counts`` key) consumed."""
+
+    @abstractmethod
     def add_tasks(self, directories: tuple[Path, ...], split: SplitName) -> tuple[StoredSample, ...]:
         """Save the Harbor task in each directory to ``split`` in one transaction, in order; return the stored tasks.
 
@@ -161,13 +208,22 @@ class SampleStore(ABC):
 
     @abstractmethod
     def page(
-        self, *, after_sequence: int = 0, limit: int = 256, kind: SampleKind | None = None
+        self,
+        *,
+        after_sequence: int = 0,
+        limit: int = 256,
+        kind: SampleKind | None = None,
+        trainer: str | None = None,
     ) -> tuple[StoredSample, ...]:
-        """Read at most ``limit`` stored samples after ``after_sequence``, in arrival order; only ``kind``'s if given."""
+        """Read at most ``limit`` stored samples after ``after_sequence``, in arrival order.
+
+        Only ``kind``'s if given. With ``trainer`` (a ``train_counts`` key), only the samples that trainer reads:
+        its own and those of no component.
+        """
 
     @abstractmethod
-    def count(self, *, after_sequence: int = 0, kind: SampleKind | None = None) -> int:
-        """Return the number of stored samples after ``after_sequence``; only ``kind``'s if given."""
+    def count(self, *, after_sequence: int = 0, kind: SampleKind | None = None, trainer: str | None = None) -> int:
+        """Return the number of stored samples after ``after_sequence`` that ``page`` would read with the filters."""
 
     def tasks(self, split: SplitName | None = None) -> tuple[StoredSample, ...]:
         """Every stored task, in arrival order; only ``split``'s if given."""
