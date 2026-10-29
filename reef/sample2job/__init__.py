@@ -25,11 +25,10 @@ on ``reef.core``, ``reef.observability``, ``reef.pipeline_context``, and the
 two earlier stage packages, whose classes ``Sample2Job.from_config`` receives.
 """
 
-from reef.sample2job.base import DEFAULT_BUFFER_JOBS, NoJobData, Sample2Job, Sample2JobSettings
+from reef.sample2job.base import NoJobData, Sample2Job, Sample2JobSettings
 from reef.sample2job.distill import DistillJobData
 
 __all__ = [
-    "DEFAULT_BUFFER_JOBS",
     "DistillJobData",
     "NoJobData",
     "Sample2Job",

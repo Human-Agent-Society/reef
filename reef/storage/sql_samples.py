@@ -34,7 +34,7 @@ from sqlalchemy import (
 from sqlalchemy.engine import Connection, RowMapping
 from sqlalchemy.sql.elements import ColumnElement
 
-from reef.core.job_data import TaskSample, TrajectorySample
+from reef.core.job_data import Sample, TaskSample, TrajectorySample
 from reef.storage.samples import SampleConflict, SampleKind, SampleStore, StoredSample
 from reef.storage.sql_records import ScopedTable, SQLRecordStore
 from reef.storage.tasks import SPLIT_NAMES, SplitName, TaskFileStore
@@ -121,6 +121,17 @@ def sample_content(sample: TrajectorySample) -> str:
     return canonical_json(content)
 
 
+def record_task_content(task: TaskSample) -> str:
+    """The canonical JSON of a task that a trainer made from records: its path, records and metadata."""
+    return canonical_json(
+        {
+            "task_path": str(task.task_path),
+            "source_agent_record_ids": list(task.source_agent_record_ids),
+            "metadata": dict(task.metadata),
+        }
+    )
+
+
 def task_content(files_digest: str) -> str:
     """The canonical JSON of a task that the sample table stores: the digest of its directory's files."""
     return canonical_json({"files_digest": files_digest})
@@ -175,29 +186,34 @@ class SQLSampleStore(SampleStore):
         trainer: str,
         group: str | None,
         record_ids: tuple[str, ...],
-        trajectories: tuple[tuple[str, TrajectorySample], ...],
+        samples: tuple[tuple[str, Sample], ...],
     ) -> bool:
         if not isinstance(trainer, str):
             raise TypeError("trainer must be a string")
         if group is not None and (not isinstance(group, str) or not group):
             raise ValueError("a sample group must be a non-empty string or None")
-        if not trajectories or any(not isinstance(record_id, str) or not record_id for record_id in record_ids):
+        if not samples or any(not isinstance(record_id, str) or not record_id for record_id in record_ids):
             raise ValueError("record samples need one or more samples and non-empty record IDs")
-        rows = [(sample_id, sample_content(trajectory)) for sample_id, trajectory in trajectories]
+        rows: list[tuple[str, SampleKind, str]] = [
+            (sample_id, "trajectory", sample_content(sample))
+            if isinstance(sample, TrajectorySample)
+            else (sample_id, "task", record_task_content(sample))
+            for sample_id, sample in samples
+        ]
         consumed = canonical_json_list(record_ids)
         with self.records._transaction(write=True) as connection:
             inserted = [
                 self.insert(
                     connection,
                     sample_id,
-                    "trajectory",
+                    kind,
                     "train",
                     content,
                     component=trainer,
                     group_key=group,
                     record_ids_json=consumed,
                 )
-                for sample_id, content in rows
+                for sample_id, kind, content in rows
             ]
         return any(inserted)
 
@@ -322,6 +338,21 @@ class SQLSampleStore(SampleStore):
         """Return the stored sample of one table row, with its train counts by component."""
         content = json.loads(row["content_json"])
         split = row["split"]
+        if row["kind"] == "task" and row["component"] is not None:
+            made = TaskSample(
+                Path(content["task_path"]), tuple(content["source_agent_record_ids"]), content["metadata"]
+            )
+            return StoredSample(
+                int(row["sequence"]),
+                row["sample_id"],
+                split,
+                made,
+                None,
+                train_counts,
+                component=row["component"],
+                group=row["group_key"],
+                record_ids=tuple(json.loads(row["record_ids_json"])),
+            )
         if row["kind"] == "task":
             digest = content["files_digest"]
             task = TaskSample(

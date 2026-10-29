@@ -51,7 +51,7 @@ from reef.recipe.errors import RecipeConfigError
 from reef.record2record import ReportRecord2Record
 from reef.runtime.executor.config import ExecutorSettings, role_executor_settings
 from reef.storage.records import RecordStore
-from reef.storage.samples import SampleStore
+from reef.storage.samples import TrainerSamples
 from reef.storage.tasks import TaskStorage
 from reef.surface.base import ArtifactLayout, Surface
 from reef.surface.files import ENTRIES_FILE, entries_file, read_entries
@@ -766,7 +766,7 @@ class CordisRecipe(Recipe):
         algorithm_state: Mapping[str, Any] | None = None,
         experiment_logger: ExperimentLogger | None = None,
         task_storage: TaskStorage | None = None,
-        samples: SampleStore | None = None,
+        samples: TrainerSamples | None = None,
     ) -> Trainer:
         kwargs = self._backend_kwargs(scenario)
         if self.scenario_model is not None:
@@ -841,7 +841,7 @@ class CordisRecipe(Recipe):
         algorithm_state: Mapping[str, Any] | None,
         experiment_logger: ExperimentLogger | None,
         task_storage: TaskStorage | None = None,
-        samples: SampleStore | None = None,
+        samples: TrainerSamples | None = None,
     ) -> Trainer:
         if self.training_mode != "auto" and not self.propose.reads_requests:
             raise RecipeConfigError(

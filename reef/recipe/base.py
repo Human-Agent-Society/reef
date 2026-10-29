@@ -32,7 +32,7 @@ from reef.runtime.interfaces import InferenceHandler, InferenceRuntime, Multimod
 from reef.runtime.jobs import ReleaseLayout, TrainingComponent
 from reef.sample2job import NoJobData
 from reef.storage.records import RecordStore
-from reef.storage.samples import SAMPLE_KINDS, SampleKind, SampleStore
+from reef.storage.samples import SAMPLE_KINDS, SampleKind, SampleStore, TrainerSamples
 from reef.storage.tasks import TaskStorage
 from reef.surface.base import AcceptAnyArtifact, Surface
 from reef.surface.weights import create_weight_surface
@@ -251,7 +251,7 @@ class Recipe:
         algorithm_state: Mapping[str, Any] | None = None,
         experiment_logger: ExperimentLogger | None = None,
         task_storage: TaskStorage | None = None,
-        samples: SampleStore | None = None,
+        samples: TrainerSamples | None = None,
     ) -> Trainer:
         return Trainer.build(
             scenario,
@@ -285,7 +285,9 @@ class Recipe:
         separate workers that take turns, one step at a time.
         ``algorithm_states`` carries each one's recovered state under its
         component name. ``task_storage`` opens the generated task stores of
-        the scenario session. Each trainer gives it to its pipeline.
+        the scenario session, and ``samples`` is its sample store. Each trainer
+        gives them to its pipeline; a trainer reads the samples as
+        ``TrainerSamples`` of its key (``""`` for the only trainer).
         """
         if len(surface.names) > 1:
             raise RecipeConfigError(
@@ -302,7 +304,7 @@ class Recipe:
                     algorithm_state=algorithm_states.get(component),
                     experiment_logger=experiment_logger,
                     task_storage=task_storage,
-                    samples=samples,
+                    samples=None if samples is None else TrainerSamples(samples),
                 ),
             ),
         )
@@ -566,7 +568,7 @@ class WeightTrainingRecipe(Recipe):
         algorithm_state: Mapping[str, Any] | None = None,
         experiment_logger: ExperimentLogger | None = None,
         task_storage: TaskStorage | None = None,
-        samples: SampleStore | None = None,
+        samples: TrainerSamples | None = None,
     ) -> Trainer:
         """Build a trainer from this recipe's pipeline, objective, and report contract.
 
@@ -591,7 +593,7 @@ class WeightTrainingRecipe(Recipe):
         algorithm_state: Mapping[str, Any] | None,
         experiment_logger: ExperimentLogger | None = None,
         task_storage: TaskStorage | None = None,
-        samples: SampleStore | None = None,
+        samples: TrainerSamples | None = None,
     ) -> Trainer:
         """Build the shared weight trainer with this recipe's report contract."""
         spec = type(self).training_spec()
