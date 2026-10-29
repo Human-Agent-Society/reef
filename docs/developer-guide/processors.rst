@@ -158,36 +158,25 @@ The trainer calls it on its own thread, under its lock; no call may block:
   each listed sample for the commit's trainer. A job that later fails does
   not give its samples back: they never train again for that trainer.
 
-A sample-to-job stage can also make samples from no record and train them as
-job data of its own. The pipeline drives this through the stage's optional
-hooks, whose defaults make no such samples:
+A record-to-sample stage can also make samples from no record set, such as
+generated tasks. Two optional hooks serve such a stage; their defaults do
+nothing:
 
-- ``advance()``: start or take in the stage's own work. The pipeline calls it
-  in each ``advance()``.
-- ``own_job_data()``: return the samples that train now, or ``None``. While it
-  returns samples, the pipeline is ready. Its next job data holds exactly
-  these samples, whatever their count, unless the buffer also makes job data
-  ready: the buffer's samples train first.
-- ``own_job_data_submitted()``: the commit that submits a job of the stage's
-  own job data is being prepared. Return the IDs that the commit lists for it.
-  The pipeline gives them to ``release_own_ids(ids)`` once the commit is
-  durable.
+- ``made_samples()``: return the samples that the stage made since the last
+  call, as ``(name, sample)`` pairs. The pipeline stores each one as sample
+  ``<name>`` (``<component>:<name>`` for a trainer of a scenario of several),
+  with no group and no consumed record. A sample that the store holds already
+  changes nothing, so a stage may return a sample again after a restart. A
+  stored sample trains from the buffer like every other sample.
 - ``job_ended(outcome)``: a training job ended, and the commit of its end is
   durable. ``outcome`` is a ``JobOutcome`` (``reef.core.job_data``): the job
   ID, the component name, ``event`` (``finished`` or ``failed``), the job's
   ``metrics``, and ``error``, which is set exactly when the job failed. A
   trainer that starts with no running job calls it again for the last job
   that ended, before any other call to a new stage.
-- ``background_jobs_running``, ``status``, and ``close``: as on the record
-  stage.
 
-A stage that trains only its own job data sets the class attribute
-``trains_own_job_data_only``. It takes no ``buffer_size`` and no
-``job_samples``, and the buffer never makes its pipeline ready.
-
-Released own job data stays the stage's, and the next ``build_job_data`` builds
-it again. The generated-task recipe rolls its saved tasks out this way (see
-`Task generation contract <#task-generation-contract>`__).
+The generated-task recipe trains its saved tasks this way (see `Task
+generation contract <#task-generation-contract>`__).
 
 The pipeline also merges the record and sample stages' ``status()`` and metrics.
 ``background_jobs_running()`` is true while a set waits for its result or the
@@ -253,8 +242,7 @@ from the scenario's sample store, in the same way in every training mode:
    They are in store order: units in the order they became ready, and
    uploads in upload order, interleaved by arrival. The samples of job data
    that the pipeline handed out are not in the buffer. Imported Harbor tasks
-   are not in the buffer either; a stage that trains them reads them as its
-   own job data.
+   are not in the buffer either: an evaluation runs them.
 2. It keeps the samples of one kind, trajectory or task: the kind of the first
    sample.
 3. It leaves out each stale sample that the trainer made from records (see
@@ -427,8 +415,7 @@ Training modes
 ``training_mode`` is an attribute of each pipeline. The recipe passes its
 initial value through ``Trainer.build`` and ``PipelineContext``; it defaults
 to ``auto``. A ``Sample2Job`` declares the modes it supports in
-``supported_training_modes``; the default is ``auto`` and ``manual``. A stage
-that trains only its own job data declares ``auto`` only. Record push,
+``supported_training_modes``; the default is ``auto`` and ``manual``. Record push,
 sample storage and acknowledgement use the same methods and the same buffer
 in both modes. ``GET /reef/status`` reports ``pending_instructions`` as the
 pipeline's ``buffered_requests`` plus the instructions still unread in
@@ -447,8 +434,7 @@ storage.
   empty buffer; harness evolution sets it, because its proposer reads the
   instruction. The commit of the job removes the trained samples from the
   manual buffer. A switch from ``auto`` to ``manual`` puts the automatic
-  buffer into the manual buffer. A stage's own job data also waits for an
-  instruction, and its job consumes the instruction.
+  buffer into the manual buffer.
 
 The pipeline runs the oldest instruction first, one per step. It gives the
 instruction's data the id ``<scenario>:instruction:<request id>`` and attaches
@@ -632,41 +618,42 @@ A generation job runs no rollouts. It:
 A generator or check that fails to run is retried from the saved candidates,
 up to ``generation_attempts`` times within ``generation_deadline_seconds``.
 After that the round ends without a task, and the next round takes the same
-sessions again, so it finishes the same generation. A round that made train
-tasks puts them in the task pool. A task identical to one that
-was already published is rejected as a duplicate.
+sessions again, so it finishes the same generation. A task identical to one
+that was already published is rejected as a duplicate. The record-to-sample
+stage hands each train task of a complete generation to the pipeline
+(``made_samples``), which stores it in the scenario's sample store as
+``generated-tasks/<task name>``.
 
-Saved tasks train as task jobs. Reef runs no rollout of them: the training
-component rolls each job's tasks out on its own sampler, at the job's start
-weights, and trains on their rollouts. ``GeneratedTaskJobData`` drives the
-loop through the stage's own-job-data hooks:
+Stored tasks train from the buffer as task jobs, like every other sample.
+Reef runs no rollout of them: the training component rolls each job's tasks
+out on its own sampler, at the job's start weights, and trains on their
+rollouts.
 
-1. When no tasks are handed out, the stage takes up to ``tasks_per_step``
-   tasks from its task pool as the next job's data: the ``TaskSample`` values.
+1. ``GeneratedTaskJobData`` makes one job's data of the buffer's tasks: the
+   ``TaskSample`` values. A job takes at least ``job_samples`` tasks, 1 by
+   default, and at most ``buffer_size``, 4 by default.
 2. The trainer submits the job. Its ``rollout`` parameter (``recipe.config.job_parameters.rollout``)
    tells the component how many rollouts of each task to run, and with which
    agent and sandbox. The Tinker component runs them, assembles one sample
    from each rollout that ran, scored with the task's verifier reward, and
    trains on the groups of at least two samples. It reports each task's
    rollout rewards in the job's metrics (``rollout_rewards``).
-3. The commit of the submission consumes the tasks: each is marked trained
-   in the task store once that commit is durable. The tasks stay in the pool
-   until the job ends.
+3. The commit of the submission counts the tasks trained in the sample
+   store, as it does for every sample.
 4. When the commit of the job's end is durable, the trainer gives the job's
-   outcome to the stage (``Sample2Job.job_ended``). The tasks leave the pool.
-   The stage gives each trained task without a result its rewards from
-   ``rollout_rewards``. A task without rewards, for example in a job that
-   failed or that a ``train-from`` cancelled, gets an infrastructure-failure
-   result, so its generation's feedback still goes out.
+   outcome to the record-to-sample stage (``Record2Sample.job_ended``). The
+   stage gives each task that a committed job trained and that has no result
+   its rewards from ``rollout_rewards``. A task without rewards, for example
+   in a job that failed or that a ``train-from`` cancelled, gets an
+   infrastructure-failure result, so its generation's feedback still goes out.
 
 A result that the task store fails to save is saved again by the next job. On
-a restart, the train tasks that did not train go back to the task pool. A job
-that runs across a restart saves its tasks' results when it ends. A trainer
-that starts with no running job gives the stage the last job's outcome again,
-so a restart just after a job's end loses no result. The loop is the
-recipe's (``reef.recipe.generated_tasks.rollout``); the pipeline only reads
-the stage's own job data. Its ``job_samples`` is ``tasks_per_step``, so the
-deployment does not set it.
+a restart, the sample store still holds the train tasks that did not train,
+and the buffer takes them again. A job that runs across a restart saves its
+tasks' results when it ends. A trainer that starts with no running job gives
+the stage the last job's outcome again, so a restart just after a job's end
+loses no result. In ``manual`` mode, a client chooses the stored tasks that
+train, as for every sample.
 
 When every train task of a generation has a result, the next job sends the
 generation's results to ``record_results``. A generation can therefore close
@@ -694,12 +681,12 @@ last round is released at once.
 
 The first round starts when the pipeline first looks for job data. The next
 round starts after ``jobs_per_round`` jobs trained since the previous
-round started, and only while the task pool holds fewer than ``refill_tasks``
-tasks, so saved tasks roll out before more are generated. The pool counts
-tasks that wait for a rollout, not tasks in a rollout that runs. Job data that
-the backend dropped as stale does not count. A round that made no train task
-and a rollout that trained nothing are followed at once, because no job data comes
-from them, and so is an empty task pool with no rollout running. The ``rounds``
+round started, and only while fewer than ``refill_tasks`` stored train tasks
+wait to train, so saved tasks train before more are generated. A task waits
+until a committed job trains it; a task in a running job does not wait. A
+round that made no train task and a failed task job are followed at once,
+because no job end comes from them. So is a state in which every train task
+has a result. The ``rounds``
 limit counts the rounds that finished a generation; a round of replayed
 sessions does not count. A round whose generation ran out of attempts counts
 too, and the next round retries the same sessions and finishes the same
@@ -711,14 +698,14 @@ publication or rejection, so a retry of a generation uses the saved candidates
 and does not generate the tasks again. Tasks that share a source record get the
 same split, and a published task keeps its split. A task whose sources join
 tasks of both splits is rejected. The store also keeps each train task's first
-rollout result, the generations whose results the generator received, and the
-tasks that trained.
+rollout result and the generations whose results the generator received. The
+sample store counts the tasks that trained.
 
 After a restart, the record-to-sample stage continues with the next generation number.
-It puts the train tasks that did not train back in the task pool and sends the results that the generator did not receive, even when no other job is due. A task that trained before its result was saved gets an infrastructure-failure result, so its generation's feedback completes.
+The sample store still holds the train tasks that did not train, so the buffer takes them again. The stage sends the results that the generator did not receive, even when no other job is due. A task that trained before its result was saved gets an infrastructure-failure result, so its generation's feedback completes.
 A replayed session that a complete generation already used makes no new generation.
 A task whose rollouts were running at the stop has no result, so it runs again.
-``GET /reef/status`` shows the generator, the generation in flight, the completed generations and the last error under ``task_generation``, task counts under ``task_store``, and the task pool size.
+``GET /reef/status`` shows the generator, the generation in flight, the completed generations and the last error under ``task_generation``, task counts under ``task_store``, and the stored tasks that wait under ``ready_samples``.
 
 Container operations run in the generator service, ``reef.record2sample.generator``.
 The record-to-sample stage calls this service over HTTP. The task store is the

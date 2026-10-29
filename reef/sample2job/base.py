@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from typing import Any, Self
 
 from reef.core.config import config_option
-from reef.core.job_data import JobData, JobOutcome, Sample, TaskSample
+from reef.core.job_data import JobData, Sample, TaskSample
 from reef.core.plugins import NoSettings, Plugin, PluginConfigError, PluginSettings
 from reef.core.records_types import RequestType
 from reef.observability import ExperimentLogger
@@ -69,11 +69,9 @@ class Sample2JobSettings(PluginSettings):
 class Sample2Job(ABC, Plugin):
     """The sample-to-job stage: the size of each job, and the job's data and parameters from the buffer's samples.
 
-    Values: for a stage that ``trains_own_job_data_only``, ``job_samples`` and
-    ``buffer_size`` are None: its jobs are its own samples, which wait in the
-    stage, not in a buffer. For any other stage, ``job_samples`` is None or a
-    positive int: the configured value, or else ``context.default_job_samples``;
-    it is None only for a trainer that trains nothing. ``buffer_size`` is None
+    Values: ``job_samples`` is None or a positive int: the configured value,
+    or else ``context.default_job_samples``; it is None only for a trainer
+    that trains nothing. ``buffer_size`` is None
     or a positive int: the configured size, or else ``job_samples``; None
     takes every untrained sample. ``max_job_samples`` is None or a
     positive int, the most samples one job's data may hold; None sets no limit.
@@ -110,9 +108,6 @@ class Sample2Job(ABC, Plugin):
     #: Whether the recipe reads the scenario's imported tasks (its sample store's tasks). Admission refuses a
     #: task upload (``POST /reef/scenarios/{scenario}/tasks``) when no trainer of the scenario reads them.
     accepts_imported_tasks: bool = False
-    #: Whether every job of the stage trains only the samples it makes itself (``own_job_data``), so it has no
-    #: buffer and no ``job_samples``.
-    trains_own_job_data_only: bool = False
 
     def __init__(
         self,
@@ -128,26 +123,10 @@ class Sample2Job(ABC, Plugin):
         self.context = context
         self.scenario = context.scenario
         stage = type(self).__name__
-        #: The fewest samples one job trains; None for a stage that trains only its own job data, and for a
-        #: trainer that trains nothing.
-        self.job_samples: int | None
+        #: The fewest samples one job trains; None for a trainer that trains nothing.
+        self.job_samples = context.default_job_samples if job_samples is None else job_samples
         #: The most samples that the buffer holds; None holds every sample.
-        self.buffer_size: int | None
-        if self.trains_own_job_data_only:
-            if buffer_size is not None or job_samples is not None:
-                raise PluginConfigError(
-                    f"{stage} trains only its own job data: it takes no buffer_size or job_samples"
-                )
-            self.job_samples = None
-            self.buffer_size = None
-        else:
-            self.job_samples = context.default_job_samples if job_samples is None else job_samples
-            if buffer_size is not None:
-                self.buffer_size = buffer_size
-            elif self.job_samples is not None:
-                self.buffer_size = self.job_samples
-            else:
-                self.buffer_size = None
+        self.buffer_size = self.job_samples if buffer_size is None else buffer_size
         #: The most samples one job's data may hold; None sets no limit. A stage whose data is one fixed unit sets it.
         self.max_job_samples = max_job_samples
         if self.job_samples is not None and self.buffer_size is not None and self.buffer_size < self.job_samples:
@@ -225,46 +204,6 @@ class Sample2Job(ABC, Plugin):
     def experiment_config(self) -> Mapping[str, Any]:
         """A non-secret description of the jobs that the stage makes, which experiment runs record."""
         return {"job_parameters": {kind: dict(parameters) for kind, parameters in self.context.job_parameters.items()}}
-
-    # A stage may also make samples itself, from no record, and train them as one job of its own: the
-    # pipeline asks ``own_job_data`` before it selects record sets. The defaults make no such samples.
-
-    def advance(self) -> None:
-        """Advance the stage's own work on the trainer thread, such as starting the next rollout. The default does nothing."""
-        return
-
-    def own_job_data(self) -> tuple[Sample, ...] | None:
-        """Return samples that the stage made itself and that train now as one job, or None.
-
-        While the value is not None, the pipeline is ready and its next job data holds exactly these samples. It
-        stays the same until ``own_job_data_submitted``.
-        """
-        return None
-
-    def own_job_data_submitted(self) -> frozenset[str]:
-        """The trainer prepared the commit that submits the stage's own job data as a job.
-
-        Return the IDs that the commit lists for it; the pipeline gives them back to ``release_own_ids`` once the
-        commit is durable. The job trains after this; its end arrives through ``job_ended``.
-        """
-        return frozenset()
-
-    def release_own_ids(self, ids: frozenset[str]) -> None:
-        """The commit that listed these IDs of ``own_job_data_submitted`` is durable. The default does nothing."""
-        return
-
-    def job_ended(self, outcome: JobOutcome) -> None:
-        """A training job ended and the commit of its end is durable; the default does nothing.
-
-        A stage that hands out tasks reads their results from ``outcome``. A trainer that starts with no running
-        job calls it again for the last job that ended, before any other call of a new stage, so a stage that
-        starts in that process takes it as the end of the last job it may have handed out.
-        """
-        return
-
-    def background_jobs_running(self) -> bool:
-        """Whether the stage's own work runs, so that the trainer polls instead of waiting for a record."""
-        return False
 
     def status(self) -> Mapping[str, Any]:
         """Return JSON-safe state that the pipeline adds to its status."""
