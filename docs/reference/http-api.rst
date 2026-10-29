@@ -50,6 +50,11 @@ Routes
 |                                                                                  | run (weights, request defaults), the named one's  |
 |                                                                                  | stay out; 404 for a component it does not serve   |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/scenarios/{scenario}/artifacts/{artifact_id}/v1/{route}``           | one of the inference routes above, answered and   |
+|                                                                                  | recorded by one artifact of the scenario: a       |
+|                                                                                  | served artifact or an artifact of the active      |
+|                                                                                  | release; 404 for any other artifact               |
++----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /v1/images``, ``/v1/embeddings``,                                         | multimodal call, relayed by the recipe to its     |
 | ``/v1/audio/speech``, ``/v1/decisions``                                          | gateway; not recorded, 501 when it offers none    |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
@@ -88,6 +93,11 @@ Routes
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/scenarios/{scenario}/train-from``                                   | set the artifact a trainer starts its next job or |
 |                                                                                  | step from                                         |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/scenarios/{scenario}/serve``                                        | serve an artifact beside the active release       |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/scenarios/{scenario}/stop-serving``                                 | stop serving an artifact beside the active        |
+|                                                                                  | release                                           |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/scenarios/{scenario}/tasks``                                        | add Harbor tasks to the scenario's imported tasks |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
@@ -1188,6 +1198,10 @@ artifacts}``, **newest first**. Each row is one artifact of one component:
 +-----------------------+------------------------------------------------------+
 | ``activated``         | true when the artifact has been active at some time  |
 +-----------------------+------------------------------------------------------+
+| ``served``            | true when the scenario serves the artifact beside    |
+|                       | its active release (`Serve an artifact beside the    |
+|                       | active release`_)                                    |
++-----------------------+------------------------------------------------------+
 | ``metrics``,          | training rows only: the step's metrics and the       |
 | ``record_progress``   | record high-water mark that the step consumed        |
 +-----------------------+------------------------------------------------------+
@@ -1198,7 +1212,8 @@ artifacts}``, **newest first**. Each row is one artifact of one component:
 The list holds artifacts only. A training step that made no artifact, such
 as a rejected or skipped step, a job submission or a job's end, has no row;
 ``GET /reef/scenarios/{scenario}/commits`` holds its record (see `Record and
-commit history`_). Activations and train-from operations have no rows either.
+commit history`_). Activations, train-from operations and serves have no rows
+either.
 
 Import an artifact
 ~~~~~~~~~~~~~~~~~~
@@ -1391,6 +1406,79 @@ Both routes answer these statuses:
 explains when Reef activates a new artifact automatically. `Go back to an
 older artifact <../user-guide/operate.rst#go-back-to-an-older-artifact>`__
 explains how to go back to an older one for good.
+
+Serve an artifact beside the active release
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The default inference routes answer from the active release. Serve an
+artifact beside the active release to:
+
+- keep an older artifact answering while a newer one is active;
+- try a new artifact before it is active.
+
+.. code:: bash
+
+   curl -sS -X POST -H "Authorization: Bearer $REEF_TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{"artifact_id": "<id>"}' \
+     "$REEF_URL/reef/scenarios/code-repair/serve"
+
+The body and the answer are as for ``activate``. In the answer,
+``release_id`` names the release that serves the artifact:
+
+- In a scenario of one component, it is the release that made the artifact.
+- In a scenario of several components, Reef publishes a release beside the
+  chain: the active release with ``component`` bound to the artifact. The
+  other components stay as they were at the serve, also after a later
+  activation.
+
+A served artifact answers at its own URL. Send an inference call to
+``/reef/scenarios/{scenario}/artifacts/{artifact_id}/v1/{route}``, where
+``{route}`` is ``chat/completions``, ``responses``, ``messages`` or
+``messages/count_tokens``. The call needs no ``x-reef-scenario`` header and
+never creates a scenario. Reef records it like a call to ``/v1/{route}``,
+and the record names the release that answered. The artifacts of the active
+release answer at their URLs too, without a serve.
+
+A serve appends a ``serve`` record, so the artifact stays served after a
+restart. It changes neither the active release, nor the chain tip, nor a
+training start. An activation does not change what is served: serve the
+active artifact first to keep it answering after you activate another one.
+Serving a served artifact changes nothing. Only the active release trains.
+The staleness check of a recipe counts only the versions of the active
+release, so it refuses the records of a served artifact.
+
+``POST /reef/scenarios/{scenario}/stop-serving`` with ``{"artifact_id":
+"<id>"}`` ends the serve and appends a ``stop_serving`` record. It answers
+``{scenario, component, artifact_id, release_id}``. An artifact of the
+active release still answers at its URL afterwards.
+
+The runtime must answer each call from the release that the call names.
+The Tinker runtime does, so a Tinker scenario can serve any of its
+artifacts. A runtime that loads weights into engines answers only from the
+release it has loaded, so Reef refuses a serve there. A scenario whose
+surface loads nothing into a runtime, such as a harness scenario, can serve
+any of its artifacts. A store without a durable commit history also refuses
+a serve.
+
++--------+--------------------------------------------------------------------+
+| Status | Cause                                                              |
++========+====================================================================+
+| 200    | the artifact is served (``serve``) or no longer served beside the  |
+|        | active release (``stop-serving``)                                  |
++--------+--------------------------------------------------------------------+
+| 400    | a malformed body; ``serve``: the artifact has no durable bytes, an |
+|        | unknown ``component`` or a missing one in a scenario of several    |
+|        | components, the runtime answers only from the release it has       |
+|        | loaded, or the store keeps no durable commit history;              |
+|        | ``stop-serving``: the body names a ``component``                   |
++--------+--------------------------------------------------------------------+
+| 404    | unknown scenario or artifact; ``stop-serving``: the scenario does  |
+|        | not serve the artifact beside its active release                   |
++--------+--------------------------------------------------------------------+
+| 409    | a training result waits for its commit; send the request again     |
+|        | after the commit                                                   |
++--------+--------------------------------------------------------------------+
 
 Inactive artifacts
 ~~~~~~~~~~~~~~~~~~

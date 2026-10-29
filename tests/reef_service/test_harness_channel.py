@@ -6,6 +6,8 @@ binary through the real adapter path, and the reads go through the real HTTP app
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import replace
 from pathlib import Path
 from threading import Event
@@ -73,8 +75,15 @@ def channel_dispatcher(
     return dispatcher
 
 
-def app_client(dispatcher: Dispatcher) -> TestClient:
-    return TestClient(TestServer(create_app(dispatcher, inference_handler=EchoInference())))
+@asynccontextmanager
+async def served(dispatcher: Dispatcher) -> AsyncIterator[TestClient]:
+    """A started test client for the real app over ``dispatcher``, closed on exit."""
+    client = TestClient(TestServer(create_app(dispatcher, inference_handler=EchoInference())))
+    await client.start_server()
+    try:
+        yield client
+    finally:
+        await client.close()
 
 
 async def scored_exchange(client: TestClient) -> None:
@@ -123,9 +132,7 @@ async def evaluated_step(client: TestClient) -> dict:
 @pytest.mark.unit
 def test_status_reports_a_committed_step_that_published_no_harness(tmp_path) -> None:
     async def run() -> None:
-        client = app_client(channel_dispatcher(tmp_path, ()))
-        await client.start_server()
-        try:
+        async with served(channel_dispatcher(tmp_path, ())) as client:
             status = await (await client.get("/reef/status")).json()
             assert status["scenarios"]["delivery"]["last_committed_step"] is None
             await scored_exchange(client)
@@ -137,8 +144,6 @@ def test_status_reports_a_committed_step_that_published_no_harness(tmp_path) -> 
             # The empty seed serves nothing until a step publishes a tree.
             response = await client.get("/reef/harness", headers=HEADERS)
             assert response.status == 404 and "holds no harness tree" in await response.text()
-        finally:
-            await client.close()
 
     asyncio.run(run())
 
@@ -146,9 +151,7 @@ def test_status_reports_a_committed_step_that_published_no_harness(tmp_path) -> 
 @pytest.mark.unit
 def test_status_reports_a_committed_rejection(tmp_path) -> None:
     async def run() -> None:
-        client = app_client(channel_dispatcher(tmp_path, (TreePatch(changed_rules("no help\n")),)))
-        await client.start_server()
-        try:
+        async with served(channel_dispatcher(tmp_path, (TreePatch(changed_rules("no help\n")),))) as client:
             await scored_exchange(client)
             scenario = await committed_step(client)
             committed = scenario["last_committed_step"]
@@ -156,8 +159,6 @@ def test_status_reports_a_committed_rejection(tmp_path) -> None:
             assert committed["metrics"]["selected"] is False
             assert committed["metrics"]["selection"]["selected"] is False
             assert (await client.get("/reef/harness", headers=HEADERS)).status == 404
-        finally:
-            await client.close()
 
     asyncio.run(run())
 
@@ -165,9 +166,7 @@ def test_status_reports_a_committed_rejection(tmp_path) -> None:
 @pytest.mark.unit
 def test_adapters_endpoint_lists_bundled_adapters_with_install_pins(tmp_path) -> None:
     async def run() -> None:
-        client = app_client(channel_dispatcher(tmp_path, ()))
-        await client.start_server()
-        try:
+        async with served(channel_dispatcher(tmp_path, ())) as client:
             response = await client.get("/reef/harness/adapters")
             assert response.status == 200
             by_name = {entry["name"]: entry for entry in (await response.json())["adapters"]}
@@ -177,21 +176,26 @@ def test_adapters_endpoint_lists_bundled_adapters_with_install_pins(tmp_path) ->
             assert pi["binary"] == "pi" and pi["trajectory_format"] == "pi-session-jsonl"
             assert pi["install"]["package"].startswith("@")
             assert isinstance(pi["model_bindings"], list) and pi["model_bindings"]
-        finally:
-            await client.close()
 
     asyncio.run(run())
 
 
 @pytest.mark.unit
-def test_the_served_files_are_the_evaluated_tree_rendered_for_the_adapter_and_the_source_is_one_query_away(
-    tmp_path,
-) -> None:
+def test_a_published_step_reaches_the_served_files_the_catalog_and_the_inference_headers(tmp_path) -> None:
+    """One evaluated step: the served files are exactly the evaluated tree rendered for the adapter, the source is
+    one query away, the catalog row repeats the manifest's evaluation, and a resident harness learns of the new head
+    on its next model call, streamed or not."""
+
     async def run() -> None:
-        client = app_client(channel_dispatcher(tmp_path, PATCHES[:1]))
-        await client.start_server()
-        try:
+        async with served(channel_dispatcher(tmp_path, PATCHES[:1])) as client:
+            rows = (await (await client.get("/reef/scenarios/delivery/artifacts")).json())["artifacts"]
+            current = next(row["release_id"] for row in rows if row["active"])
+            body = {"messages": [{"role": "user", "content": "hi"}]}
+            response = await client.post("/v1/chat/completions", headers=HEADERS, json=body)
+            assert response.status == 200 and response.headers["x-reef-release-id"] == current
             manifest = await evaluated_step(client)
+            assert manifest["release_id"] != current
+
             # The served files are exactly the tree the evaluation measured, rendered without a model binding.
             assert manifest["files"] == render_tree(TREE_V1, PI)
             source = await client.get("/reef/harness", params={"form": "source"}, headers=HEADERS)
@@ -200,24 +204,26 @@ def test_the_served_files_are_the_evaluated_tree_rendered_for_the_adapter_and_th
             assert pulled["files"] == dict(TREE_V1.files) and pulled["release_id"] == manifest["release_id"]
             invalid = await client.get("/reef/harness", params={"form": "zip"}, headers=HEADERS)
             assert invalid.status == 400 and "form must be 'rendered' or 'source'" in await invalid.text()
-        finally:
-            await client.close()
 
-    asyncio.run(run())
+            response = await client.get("/reef/harness/releases", headers=HEADERS)
+            assert response.status == 200
+            catalog = await response.json()
+            assert catalog["scenario"] == "delivery"
+            rows = catalog["releases"]
+            # Newest last: the creation release opens the catalog, the published head closes it with the
+            # manifest's evaluation.
+            assert rows[0]["operation"] == "creation"
+            head = rows[-1]
+            assert head["release_id"] == manifest["release_id"] and head["active"] is True
+            assert head["metrics"] == manifest["evaluation"]
+            assert head["metrics"]["selected"] is True and head["metrics"]["wins"] == 1
 
-
-@pytest.mark.unit
-def test_the_install_route_is_gone(tmp_path) -> None:
-    """A client renders or pulls the tree itself: the route that served the wrapper's install script is gone."""
-
-    async def run() -> None:
-        client = app_client(channel_dispatcher(tmp_path, ()))
-        await client.start_server()
-        try:
-            response = await client.get("/reef/harness/install", params={"adapter": "pi"}, headers=HEADERS)
-            assert response.status == 404
-        finally:
-            await client.close()
+            for stream in (False, True):
+                response = await client.post("/v1/chat/completions", headers=HEADERS, json={**body, "stream": stream})
+                assert response.status == 200
+                await response.read()
+                assert response.headers["x-reef-release-id"] == manifest["release_id"]
+                assert response.headers["x-reef-agent-record-id"]
 
     asyncio.run(run())
 
@@ -225,9 +231,7 @@ def test_the_install_route_is_gone(tmp_path) -> None:
 @pytest.mark.unit
 def test_version_addressed_pull_returns_the_superseded_tree(tmp_path) -> None:
     async def run() -> None:
-        client = app_client(channel_dispatcher(tmp_path, PATCHES))
-        await client.start_server()
-        try:
+        async with served(channel_dispatcher(tmp_path, PATCHES)) as client:
             first = await evaluated_step(client)
             second = await evaluated_step(client)
             assert first["release_id"] != second["release_id"]
@@ -241,47 +245,20 @@ def test_version_addressed_pull_returns_the_superseded_tree(tmp_path) -> None:
                 "/reef/harness", params={"release_id": first["release_id"], "form": "source"}, headers=HEADERS
             )
             assert (await source.json())["files"] == dict(TREE_V1.files)
-        finally:
-            await client.close()
 
     asyncio.run(run())
 
 
 @pytest.mark.unit
-def test_unknown_version_is_a_404_naming_the_version(tmp_path) -> None:
+def test_an_unknown_version_is_a_404_naming_it_and_the_install_route_is_gone(tmp_path) -> None:
+    """A client renders or pulls the tree itself: the route that served the wrapper's install script is gone."""
+
     async def run() -> None:
-        client = app_client(channel_dispatcher(tmp_path, ()))
-        await client.start_server()
-        try:
+        async with served(channel_dispatcher(tmp_path, ())) as client:
             response = await client.get("/reef/harness", params={"release_id": "no-such-version"}, headers=HEADERS)
             assert response.status == 404 and "no-such-version" in await response.text()
-        finally:
-            await client.close()
-
-    asyncio.run(run())
-
-
-@pytest.mark.unit
-def test_the_catalog_carries_the_publishing_steps_evaluation_metrics(tmp_path) -> None:
-    async def run() -> None:
-        client = app_client(channel_dispatcher(tmp_path, PATCHES[:1]))
-        await client.start_server()
-        try:
-            manifest = await evaluated_step(client)
-            response = await client.get("/reef/harness/releases", headers=HEADERS)
-            assert response.status == 200
-            catalog = await response.json()
-            assert catalog["scenario"] == "delivery"
-            rows = catalog["releases"]
-            # Newest last: the creation release opens the catalog, the published head closes it with the
-            # manifest's evaluation.
-            assert rows[0]["operation"] == "creation"
-            head = rows[-1]
-            assert head["release_id"] == manifest["release_id"] and head["active"] is True
-            assert head["metrics"] == manifest["evaluation"]
-            assert head["metrics"]["selected"] is True and head["metrics"]["wins"] == 1
-        finally:
-            await client.close()
+            response = await client.get("/reef/harness/install", params={"adapter": "pi"}, headers=HEADERS)
+            assert response.status == 404
 
     asyncio.run(run())
 
@@ -302,50 +279,48 @@ def test_release_reads_stay_responsive_during_evaluation(tmp_path, monkeypatch) 
             assert finish_evaluation.wait(UPDATE_TIMEOUT_S), "evaluation was not released"
             return result
 
-        client = app_client(dispatcher)
-        await client.start_server()
         second_step = None
-        try:
-            first = await evaluated_step(client)
-            monkeypatch.setattr(backend, "evaluate", blocked_evaluate)
-            second_step = asyncio.create_task(evaluated_step(client))
-            assert await asyncio.to_thread(evaluation_started.wait, UPDATE_TIMEOUT_S)
+        async with served(dispatcher) as client:
+            try:
+                first = await evaluated_step(client)
+                monkeypatch.setattr(backend, "evaluate", blocked_evaluate)
+                second_step = asyncio.create_task(evaluated_step(client))
+                assert await asyncio.to_thread(evaluation_started.wait, UPDATE_TIMEOUT_S)
 
-            async def read_release(path: str, release_id: str | None = None) -> dict:
-                params = {} if release_id is None else {"release_id": release_id}
-                response = await client.get(path, params=params, headers=HEADERS)
-                assert response.status == 200
-                return await response.json()
+                async def read_release(path: str, release_id: str | None = None) -> dict:
+                    params = {} if release_id is None else {"release_id": release_id}
+                    response = await client.get(path, params=params, headers=HEADERS)
+                    assert response.status == 200
+                    return await response.json()
 
-            # A resident client keeps seeing the committed tree and its evaluation while the next candidate runs.
-            catalog, current, pinned = await asyncio.wait_for(
-                asyncio.gather(
-                    read_release("/reef/harness/releases"),
-                    read_release("/reef/harness"),
-                    read_release("/reef/harness", first["release_id"]),
-                ),
-                timeout=1.0,
-            )
-            assert current == pinned == first
-            head = catalog["releases"][-1]
-            assert head["active"] is True and head["release_id"] == first["release_id"]
-            assert head["content_id"] == first["content_id"] and head["metrics"] == first["evaluation"]
+                # A resident client keeps seeing the committed tree and its evaluation while the next candidate runs.
+                catalog, current, pinned = await asyncio.wait_for(
+                    asyncio.gather(
+                        read_release("/reef/harness/releases"),
+                        read_release("/reef/harness"),
+                        read_release("/reef/harness", first["release_id"]),
+                    ),
+                    timeout=1.0,
+                )
+                assert current == pinned == first
+                head = catalog["releases"][-1]
+                assert head["active"] is True and head["release_id"] == first["release_id"]
+                assert head["content_id"] == first["content_id"] and head["metrics"] == first["evaluation"]
 
-            finish_evaluation.set()
-            second = await asyncio.wait_for(second_step, UPDATE_TIMEOUT_S)
-            updated = await read_release("/reef/harness/releases")
-            assert len(updated["releases"]) == len(catalog["releases"]) + 1
-            assert updated["releases"][-2]["active"] is False
-            head = updated["releases"][-1]
-            assert head["active"] is True and head["release_id"] == second["release_id"] != first["release_id"]
-            assert head["content_id"] == second["content_id"] and head["metrics"] == second["evaluation"]
-            assert second["files"] == render_tree(TREE_V2, PI)
-            assert await read_release("/reef/harness", first["release_id"]) == first
-        finally:
-            finish_evaluation.set()
-            if second_step is not None:
-                await asyncio.gather(second_step, return_exceptions=True)
-            await client.close()
+                finish_evaluation.set()
+                second = await asyncio.wait_for(second_step, UPDATE_TIMEOUT_S)
+                updated = await read_release("/reef/harness/releases")
+                assert len(updated["releases"]) == len(catalog["releases"]) + 1
+                assert updated["releases"][-2]["active"] is False
+                head = updated["releases"][-1]
+                assert head["active"] is True and head["release_id"] == second["release_id"] != first["release_id"]
+                assert head["content_id"] == second["content_id"] and head["metrics"] == second["evaluation"]
+                assert second["files"] == render_tree(TREE_V2, PI)
+                assert await read_release("/reef/harness", first["release_id"]) == first
+            finally:
+                finish_evaluation.set()
+                if second_step is not None:
+                    await asyncio.gather(second_step, return_exceptions=True)
 
     asyncio.run(run())
 
@@ -356,15 +331,11 @@ def test_crlf_content_survives_the_manifest_byte_exact(tmp_path) -> None:
     crlf = TreePatch(changed_rules("marker win\r\nrules\n"))
 
     async def run() -> None:
-        client = app_client(channel_dispatcher(tmp_path, (crlf,)))
-        await client.start_server()
-        try:
+        async with served(channel_dispatcher(tmp_path, (crlf,))) as client:
             manifest = await evaluated_step(client)
             assert "marker win\r\nrules" in manifest["files"]["pi-agent/AGENTS.md"]
             source = await (await client.get("/reef/harness", params={"form": "source"}, headers=HEADERS)).json()
             assert source["files"]["rules.md"] == "marker win\r\nrules\n"
-        finally:
-            await client.close()
 
     asyncio.run(run())
 
@@ -377,9 +348,7 @@ def test_a_seeded_recipe_serves_a_fresh_scenario_before_any_step(tmp_path) -> No
     dispatcher = channel_dispatcher(tmp_path, (), seed=seed)
 
     async def run() -> None:
-        client = app_client(dispatcher)
-        await client.start_server()
-        try:
+        async with served(dispatcher) as client:
             response = await client.get("/reef/harness", headers=HEADERS)
             assert response.status == 200
             files = (await response.json())["files"]
@@ -390,8 +359,6 @@ def test_a_seeded_recipe_serves_a_fresh_scenario_before_any_step(tmp_path) -> No
             assert "pi-agent/models.json" in files and "reef" not in files["pi-agent/models.json"]
             source = await (await client.get("/reef/harness", params={"form": "source"}, headers=HEADERS)).json()
             assert source["files"] == dict(seed.files)
-        finally:
-            await client.close()
 
     asyncio.run(run())
 
@@ -402,9 +369,7 @@ def test_record_only_traffic_fires_a_step_and_publishes(tmp_path) -> None:
     batch, one step runs on the unscored samples, and the read channel serves the winner."""
 
     async def run() -> None:
-        client = app_client(channel_dispatcher(tmp_path, PATCHES[:1], inference_stages=True, batch_size=2))
-        await client.start_server()
-        try:
+        async with served(channel_dispatcher(tmp_path, PATCHES[:1], inference_stages=True, batch_size=2)) as client:
             for prompt in ("first", "second"):
                 response = await client.post(
                     "/v1/chat/completions", headers=HEADERS, json={"messages": [{"role": "user", "content": prompt}]}
@@ -424,35 +389,6 @@ def test_record_only_traffic_fires_a_step_and_publishes(tmp_path) -> None:
                 if asyncio.get_running_loop().time() >= deadline:
                     pytest.fail("record-driven step did not publish")
                 await asyncio.sleep(UPDATE_POLL_S)
-        finally:
-            await client.close()
-
-    asyncio.run(run())
-
-
-@pytest.mark.unit
-def test_inference_responses_of_a_file_serving_scenario_carry_the_head_release(tmp_path) -> None:
-    """A resident harness learns of a new head on its next model call."""
-
-    async def run() -> None:
-        client = app_client(channel_dispatcher(tmp_path, PATCHES[:1]))
-        await client.start_server()
-        try:
-            rows = (await (await client.get("/reef/scenarios/delivery/artifacts")).json())["artifacts"]
-            current = next(row["release_id"] for row in rows if row["active"])
-            body = {"messages": [{"role": "user", "content": "hi"}]}
-            response = await client.post("/v1/chat/completions", headers=HEADERS, json=body)
-            assert response.status == 200 and response.headers["x-reef-release-id"] == current
-            manifest = await evaluated_step(client)
-            assert manifest["release_id"] != current
-            for stream in (False, True):
-                response = await client.post("/v1/chat/completions", headers=HEADERS, json={**body, "stream": stream})
-                assert response.status == 200
-                await response.read()
-                assert response.headers["x-reef-release-id"] == manifest["release_id"]
-                assert response.headers["x-reef-agent-record-id"]
-        finally:
-            await client.close()
 
     asyncio.run(run())
 
