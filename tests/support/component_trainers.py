@@ -23,6 +23,7 @@ from reef.pipeline_context import PipelineContext
 from reef.recipe import Recipe
 from reef.runtime.jobs import SavedCheckpoint, TrainingJob
 from reef.scenario import Scenario
+from reef.storage.samples import TrainerSamples
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.surface import ComponentSurface, Surface, TextFileTree
 from reef.surface.base import ServingRuntime
@@ -180,6 +181,12 @@ class _TwoTrainerRecipe(Recipe):
         def factory_for(component: str):
             return lambda context: self.pipeline_for(component, context)
 
+        # Each trainer reads the samples as the component that its commits name; the only trainer names none.
+        alone = len(self.backends) + (self.training_component is not None) == 1
+
+        def samples_for(component: str) -> TrainerSamples | None:
+            return None if samples is None else TrainerSamples(samples, "" if alone else component)
+
         trainers = tuple(
             ComponentTrainer(
                 component,
@@ -191,6 +198,7 @@ class _TwoTrainerRecipe(Recipe):
                     algorithm_state=algorithm_states.get(component),
                     experiment_logger=experiment_logger,
                     default_job_samples=1,
+                    samples=samples_for(component),
                 ),
             )
             for component, backend in self.backends.items()
@@ -207,6 +215,7 @@ class _TwoTrainerRecipe(Recipe):
             algorithm_state=algorithm_states.get(WEIGHTS),
             experiment_logger=experiment_logger,
             default_job_samples=1,
+            samples=samples_for(WEIGHTS),
         )
         return (ComponentTrainer(WEIGHTS, weights), *trainers)
 

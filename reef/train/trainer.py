@@ -34,7 +34,7 @@ from reef.observability import ExperimentLogger, NullExperimentLogger
 from reef.observability.operations import OperationMetrics
 from reef.pipeline_context import PipelineContext
 from reef.storage.records import RecordStore
-from reef.storage.samples import SAMPLE_KINDS, SampleKind, SampleStore
+from reef.storage.samples import SAMPLE_KINDS, SampleKind, TrainerSamples
 from reef.storage.tasks import TaskStorage
 from reef.train.backend import CandidateBackend, PreparedStep
 from reef.train.jobs import JobLoop, JobLoopState
@@ -114,7 +114,7 @@ class Trainer:
         experiment_logger: ExperimentLogger | None = None,
         training_mode: str = "auto",
         task_storage: TaskStorage | None = None,
-        samples: SampleStore | None = None,
+        samples: TrainerSamples | None = None,
         job_parameters: Mapping[SampleKind, Mapping[str, Any]] | None = None,
         default_job_samples: int | None = None,
     ) -> Trainer:
@@ -223,12 +223,6 @@ class Trainer:
         self._state = dict(state)
         self._data_offset = 0
         self._data_sequence = 0
-        #: The training samples of the scenario, after ``read_samples``.
-        self.sample_store: SampleStore | None = None
-        #: The component that this trainer's commits name, or None for a scenario's only trainer.
-        self.sample_component: str | None = None
-        #: The sequence of the last sample that the trainer read.
-        self.sample_sequence = 0
         self.consumed_record_ids: set[str] = set()
         self.skipped_record_ids: set[str] = set()
         self._pending: _PendingStep | None = None
@@ -422,28 +416,9 @@ class Trainer:
                 or self._pipeline.holds_job_data(self.job_samples)
             ):
                 return True
-            samples = self.sample_store
-            if (
-                samples is not None
-                and self._pipeline.accepts_trajectories
-                and samples.count(after_sequence=self.sample_sequence, kind="trajectory") > 0
-            ):
+            if self._pipeline.has_unread_samples():
                 return True
             return self._records.count(self.scenario, after_sequence=self._data_sequence) > 0
-
-    def read_samples(self, store: SampleStore, component: str | None) -> None:
-        """Read the training samples of the scenario from ``store``, from the first one.
-
-        The scenario factory calls this when it builds the trainer.
-        ``component`` is the component that this trainer's commits name, or
-        ``None`` for the only trainer of a scenario. The trainer skips a sample
-        that one of its own committed jobs trained, so each trainer of a
-        scenario of several components trains each sample.
-        """
-        with self._lock:
-            self.sample_store = store
-            self.sample_component = component
-            self.sample_sequence = 0
 
     def pipeline_status(self) -> Mapping[str, Any]:
         """Return caller-visible pipeline state under the pipeline's lock."""
@@ -510,31 +485,6 @@ class Trainer:
             self._pipeline.push(item)
 
     def _consume_data(self) -> None:
-        # Uploaded trajectories go first in job data, so the trainer reads them before the records.
-        while self.sample_store is not None and self._pipeline.accepts_trajectories:
-            stored_samples = self.sample_store.page(
-                after_sequence=self.sample_sequence, limit=self._DATA_READ_BATCH_SIZE, kind="trajectory"
-            )
-            if not stored_samples:
-                break
-            for stored in stored_samples:
-                self.sample_sequence = stored.sequence
-                trajectory = stored.sample
-                if not isinstance(trajectory, TrajectorySample) or stored.train_count(self.sample_component) > 0:
-                    continue
-                try:
-                    self._pipeline.push_trajectory(stored.sample_id, trajectory)
-                except ValueError:
-                    # Admission rendered it; a config that changed since, such as a lower max_tokens, can refuse it.
-                    logger.warning(
-                        "uploaded trajectory %s of scenario %s cannot train and is skipped",
-                        stored.sample_id,
-                        self.scenario,
-                        exc_info=True,
-                    )
-                    continue
-                if self.pipeline_ready():
-                    return
         while True:
             items = self._records.replay_page(
                 self.scenario,

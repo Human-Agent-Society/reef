@@ -179,7 +179,7 @@ def test_openclawrl_processor_keeps_single_version_queue_intact() -> None:
     _judged_turns(processor, worker, ["v1", "v1"])
     # All-one-version queue below batch size: nothing is dropped, not ready yet.
     assert not processor.ready(3)
-    assert len(processor.releasable_record_ids()) == 0
+    assert processor.status()["ready_samples"] == 2
 
 
 @pytest.mark.unit

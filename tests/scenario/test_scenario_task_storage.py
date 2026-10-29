@@ -68,5 +68,8 @@ def test_each_composite_component_opens_its_own_task_stores_and_shares_the_sampl
 
         assert second_storage.open("tasks").generations() == ()
         assert session.tasks.open("first/tasks").generation(0) is not None
-        # The scenario's samples, such as its imported tasks, are one store that every component reads.
-        assert first.contexts[-1].samples is session.samples and second.contexts[-1].samples is session.samples
+        # The scenario's samples, such as its imported tasks, are one store that every component reads as itself.
+        first_samples, second_samples = first.contexts[-1].samples, second.contexts[-1].samples
+        assert first_samples is not None and second_samples is not None
+        assert first_samples.store is session.samples and second_samples.store is session.samples
+        assert (first_samples.trainer, second_samples.trainer) == ("first", "second")
