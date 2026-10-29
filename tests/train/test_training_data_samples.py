@@ -413,3 +413,43 @@ def test_external_atif_projection_preserves_images_reasoning_and_tool_results():
     assert payload["messages"][1]["tool_calls"][0]["function"] == {"name": "read", "arguments": '{"path": "a"}'}
     assert payload["messages"][2] == {"role": "tool", "tool_call_id": "read-1", "content": "ok"}
     assert payload["response"]["choices"][0]["message"]["content"] == "Done"
+
+
+@pytest.mark.parametrize(
+    ("part", "reason"),
+    [
+        ({"type": "image"}, "image part needs source.path"),
+        ({"type": "image", "source": {"media_type": "image/png"}}, "image part needs source.path"),
+        ({"type": "image", "source": "data:image/png;base64,AAAA"}, "image part needs source.path"),
+        ("data:image/png;base64,AAAA", "content parts must be objects"),
+        ({"type": "text", "text": None}, "text part needs a string text"),
+        ({"type": "text", "text": 1}, "text part needs a string text"),
+    ],
+)
+@pytest.mark.parametrize("place", ["message", "observation"])
+def test_external_atif_projection_refuses_a_malformed_content_part(part, reason, place):
+    document = dict(atif_item().trajectory)
+    content = [{"type": "text", "text": "Inspect"}, part]
+    first = {"step_id": 1, "source": "user", "message": content}
+    if place == "observation":
+        first = {
+            "step_id": 1,
+            "source": "agent",
+            "message": "",
+            "tool_calls": [{"tool_call_id": "read-1", "function_name": "read", "arguments": {}}],
+            "observation": {"results": [{"source_call_id": "read-1", "content": content}]},
+        }
+    document["steps"] = [first, {"step_id": 2, "source": "agent", "message": "Done"}]
+    with pytest.raises(ValueError, match=reason):
+        recorded_payload(TrajectorySample(document))
+
+
+@pytest.mark.parametrize("observation", ["ok", ["ok"], 1, True])
+def test_external_atif_projection_refuses_an_observation_that_is_not_an_object(observation):
+    document = dict(atif_item().trajectory)
+    document["steps"] = [
+        {"step_id": 1, "source": "user", "message": "Inspect"},
+        {"step_id": 2, "source": "agent", "message": "Done", "observation": observation},
+    ]
+    with pytest.raises(ValueError, match="observation must be an object"):
+        recorded_payload(TrajectorySample(document))
