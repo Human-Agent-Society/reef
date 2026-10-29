@@ -89,7 +89,9 @@ class _TreeRecipe(Recipe):
     def step_backend(self) -> CandidateBackend:
         return _FileBackend(self.label, self.artifact_dir)
 
-    def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None, task_storage=None):
+    def build(
+        self, scenario, records, *, algorithm_state=None, experiment_logger=None, task_storage=None, samples=None
+    ):
         return Trainer.build(
             scenario,
             records,

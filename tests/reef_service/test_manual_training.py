@@ -895,7 +895,9 @@ class SubmitRaisesForInstructionOne(StubTrainingComponent):
 class _InstructionJobRecipe(WeightTrainingRecipe):
     """A weight recipe whose pipeline takes instructions, so each instruction is one training job."""
 
-    def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None, task_storage=None):
+    def build(
+        self, scenario, records, *, algorithm_state=None, experiment_logger=None, task_storage=None, samples=None
+    ):
         component = self.training_component
         return Trainer.build(
             scenario,

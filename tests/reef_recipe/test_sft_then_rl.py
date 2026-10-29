@@ -10,6 +10,7 @@ import pytest
 from tests.support.runtime_stubs import StubTrainingComponent
 from tests.support.task_service_stubs import task_for
 
+from reef.artifact import ArtifactRef
 from reef.core import AgentRecord, RequestType
 from reef.core.job_data import JobData, JobOutcome, TaskSample, TrajectorySample
 from reef.core.reports import TeacherContextReport
@@ -20,8 +21,10 @@ from reef.recipe.sft import SFTRecord2Record
 from reef.recipe.sft_then_rl import SFTThenRLJobData, SFTThenRLJobPlan, SFTThenRLJobSettings, SFTThenRLRecipe
 from reef.record2sample import NoSamples
 from reef.runtime.jobs import TrainingComponent
+from reef.storage.commits import CommitRecord
+from reef.storage.samples import SampleStore
+from reef.storage.scenario import ScenarioStore
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.storage.tasks import IMPORTED_TASK_STORE, TaskStorage
 from reef.train import PipelineContext
 from reef.train.jobs import JobPlanContext, JobRequest
 from reef.train.pipeline import TrainingPipeline
@@ -48,17 +51,37 @@ class RenderingSamples(NoSamples):
         return trajectory
 
 
-def import_tasks(storage: TaskStorage, root: Path, split: str, *names: str) -> None:
-    store = storage.open(IMPORTED_TASK_STORE)
-    for port, name in enumerate(names):
-        directory = write_harbor_task(task_for(name, "record-1", 9000 + port + 10 * len(name)), root / split)
-        store.add_task(directory=directory, split=split)
+def import_tasks(samples: SampleStore, root: Path, split: str, *names: str) -> None:
+    directories = tuple(
+        write_harbor_task(task_for(name, "record-1", 9000 + port + 10 * len(name)), root / split)
+        for port, name in enumerate(names)
+    )
+    samples.add_tasks(directories, "train" if split == "train" else "eval")
+
+
+def commit(session: ScenarioStore, consumed: frozenset[str]) -> None:
+    """Commit the next step, listing ``consumed``, as the trainer does when it submits a job."""
+    history = session.history()
+    step = history[-1].step + 1 if history else 1
+    session.commit_step(
+        expected_step=step - 1,
+        commit=CommitRecord(
+            scenario="support",
+            step=step,
+            artifact_ref=ArtifactRef(f"content:{step}", f"release:{step}", "base"),
+            checkpoint=True,
+            algorithm_state={},
+            high_water_sequence=0,
+            high_water_offset=0,
+            consumed_ids=consumed,
+        ),
+    )
 
 
 def pipeline_for(
-    storage: TaskStorage, *, tasks_per_job: int = 2, job_samples: int = 2, training_mode: str = "auto"
+    samples: SampleStore, *, tasks_per_job: int = 2, job_samples: int = 2, training_mode: str = "auto"
 ) -> TrainingPipeline:
-    context = PipelineContext("support", TeacherContextReport, task_storage=storage, training_mode=training_mode)
+    context = PipelineContext("support", TeacherContextReport, samples=samples, training_mode=training_mode)
     settings = SFTThenRLJobSettings(job_samples=job_samples, tasks_per_job=tasks_per_job)
     return TrainingPipeline(
         context,
@@ -73,10 +96,11 @@ def task_names(data: JobData) -> list[str]:
 
 
 def test_held_trajectories_train_before_the_imported_train_tasks_and_each_task_trains_once(tmp_path: Path) -> None:
-    storage = SQLiteScenarioStorage(tmp_path / "records").open("support").tasks
-    import_tasks(storage, tmp_path / "tasks", "train", "task-a", "task-b", "task-c")
-    import_tasks(storage, tmp_path / "tasks", "eval", "held-out")
-    pipeline = pipeline_for(storage)
+    session = SQLiteScenarioStorage(tmp_path / "records").open("support")
+    samples = session.samples
+    import_tasks(samples, tmp_path / "tasks", "train", "task-a", "task-b", "task-c")
+    import_tasks(samples, tmp_path / "tasks", "eval", "held-out")
+    pipeline = pipeline_for(samples)
     pipeline.push_trajectory("t1", atif("t1"))
     pipeline.push_trajectory("t2", atif("t2"))
 
@@ -89,29 +113,37 @@ def test_held_trajectories_train_before_the_imported_train_tasks_and_each_task_t
     assert task_names(first) == ["task-a", "task-b"]
     assert all(item.task_path.is_dir() for item in first.samples if isinstance(item, TaskSample))
     consumed = pipeline.acknowledge(first.data_id)
-    assert all(identifier.startswith("rollout:support:rollout:") for identifier in consumed) and len(consumed) == 2
+    assert consumed == {"sample:task-a", "sample:task-b"}
+    commit(session, consumed)
     pipeline.release_records(frozenset(consumed))
-    store = storage.open(IMPORTED_TASK_STORE)
-    assert store.trained_task_names() == {"task-a", "task-b"}
+    assert {task.sample_id: task.train_counts for task in samples.tasks(split="train")} == {
+        "task-a": {"": 1},
+        "task-b": {"": 1},
+        "task-c": {},
+    }
     pipeline.job_ended(JobOutcome("job-1", "stub", "finished"))
 
     # A task uploaded later joins the pool; the eval task never trains.
-    import_tasks(storage, tmp_path / "tasks", "train", "task-d")
+    import_tasks(samples, tmp_path / "tasks", "train", "task-d")
     second = pipeline.build_job_data(2)
     assert task_names(second) == ["task-c", "task-d"]
-    pipeline.release_records(frozenset(pipeline.acknowledge(second.data_id)))
-    assert not pipeline_for(storage).ready(2), "a restart pools only the tasks that did not train"
+    consumed = pipeline.acknowledge(second.data_id)
+    commit(session, consumed)
+    pipeline.release_records(frozenset(consumed))
+    assert not pipeline_for(samples).ready(2), "a restart pools only the tasks that did not train"
     pipeline.close()
+    session.close()
 
 
 def test_a_task_whose_submission_did_not_commit_trains_again_after_a_restart(tmp_path: Path) -> None:
-    storage = SQLiteScenarioStorage(tmp_path / "records").open("support").tasks
-    import_tasks(storage, tmp_path / "tasks", "train", "task-a")
-    pipeline = pipeline_for(storage)
+    session = SQLiteScenarioStorage(tmp_path / "records").open("support")
+    import_tasks(session.samples, tmp_path / "tasks", "train", "task-a")
+    pipeline = pipeline_for(session.samples)
     data = pipeline.build_job_data(2)
     pipeline.acknowledge(data.data_id)
-    restarted = pipeline_for(storage)
+    restarted = pipeline_for(session.samples)
     assert task_names(restarted.build_job_data(2)) == ["task-a"]
+    session.close()
 
 
 def instruction(record_id: str) -> AgentRecord:
@@ -124,9 +156,9 @@ def instruction(record_id: str) -> AgentRecord:
 
 
 def test_in_manual_mode_an_imported_task_job_waits_for_an_instruction_and_consumes_it(tmp_path: Path) -> None:
-    storage = SQLiteScenarioStorage(tmp_path / "records").open("support").tasks
-    import_tasks(storage, tmp_path / "tasks", "train", "task-a")
-    pipeline = pipeline_for(storage, training_mode="manual")
+    samples = SQLiteScenarioStorage(tmp_path / "records").open("support").samples
+    import_tasks(samples, tmp_path / "tasks", "train", "task-a")
+    pipeline = pipeline_for(samples, training_mode="manual")
     assert not pipeline.ready(2), "manual mode starts no task job without an instruction"
     pipeline.push(instruction("train-1"))
     data = pipeline.build_job_data(2)

@@ -88,12 +88,18 @@ class WeightRecipe(Recipe):
         return Surface({**weights.components, **create_harness_surface().components})
 
     def build_trainers(
-        self, scenario, records, *, surface, algorithm_states, experiment_logger=None, task_storage=None
+        self, scenario, records, *, surface, algorithm_states, experiment_logger=None, task_storage=None, samples=None
     ):
         return tuple(
             ComponentTrainer(
                 name,
-                self.build(scenario, records, algorithm_state=algorithm_states.get(name), task_storage=task_storage),
+                self.build(
+                    scenario,
+                    records,
+                    algorithm_state=algorithm_states.get(name),
+                    task_storage=task_storage,
+                    samples=samples,
+                ),
             )
             for name in surface.names
         )

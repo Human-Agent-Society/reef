@@ -48,6 +48,7 @@ from reef.storage.commit_history import CommitHistoryScenarioStore
 from reef.storage.migrations import (
     archive_imported_files,
     legacy_model_configs,
+    migrate_imported_tasks,
     migrate_record_storage,
     migrate_uploaded_trajectories,
 )
@@ -201,11 +202,20 @@ class PostgresRecordDatabase:
                 # trained marks and the stage documents of a task store. Version 9 adds artifact_evaluation, the
                 # evaluations that clients ask for. Version 10 replaces uploaded_trajectory with training_sample and
                 # sample_train_count, which counts the committed jobs of each trainer that trained a sample. create_all adds them to an older
-                # schema, and migrate_uploaded_trajectories moves the uploaded trajectories.
+                # schema, migrate_uploaded_trajectories moves the uploaded trajectories, and migrate_imported_tasks
+                # moves the tasks of the imported-tasks task store.
                 metadata.create_all(connection)
                 migrate_record_storage(connection, self.tables.records, self.tables.consumption)
                 migrate_uploaded_trajectories(
                     connection, self.sample_table, self.sample_train_count_table, self.commit_table
+                )
+                migrate_imported_tasks(
+                    connection,
+                    self.sample_table,
+                    self.sample_train_count_table,
+                    self.commit_table,
+                    self.task_tables.published,
+                    self.task_tables.trained,
                 )
                 for index in self.tables.records.indexes:
                     index.create(connection, checkfirst=True)
@@ -382,13 +392,15 @@ class PostgresRecordStore(SQLRecordStore):
         tables = replace(self._database.task_tables, scope={"storage_id": self.storage_id})
         return SQLTaskStorage(self, tables, files, scenario)
 
-    def sample_store(self) -> SQLSampleStore:
-        """Open the training samples of this store generation."""
+    def sample_store(self, files: TaskFileStore, scenario: str) -> SQLSampleStore:
+        """Open the training samples of this store generation, with the task files of ``scenario`` in ``files``."""
         scope = {"storage_id": self.storage_id}
         return SQLSampleStore(
             self,
             ScopedTable(self._database.sample_table, scope=scope),
             ScopedTable(self._database.sample_train_count_table, scope=scope),
+            files,
+            scenario,
         )
 
     def evaluation_store(self) -> SQLEvaluationStore:
@@ -474,7 +486,7 @@ class PostgresScenarioStorage(ScenarioStorage):
                     records,
                     records.commit_history(),
                     tasks=records.task_storage(self.task_files, scenario),
-                    samples=records.sample_store(),
+                    samples=records.sample_store(self.task_files, scenario),
                     evaluations=records.evaluation_store(),
                 )
             except BaseException:
