@@ -59,21 +59,23 @@ class StoredSample:
       task file store. Its ``sample.task_path`` is that directory, and
       ``sample.metadata["task"]`` is ``{"name": sample_id, "files_digest":
       files_digest, "split": split}``.
-    * A task that a trainer made from records (a ``component``) has ``split``
-      ``train`` and ``files_digest`` ``None``; its sample is as the stage made it.
+    * A task that a trainer's stage made (a ``component``), from records or
+      from no record set, has ``split`` ``train`` and ``files_digest``
+      ``None``; its sample is as the stage made it.
     * ``train_counts`` maps strings to positive ints. ``train_counts[c]`` is
       the number of committed jobs of the trainer ``c`` whose commit lists
       ``consumed_sample_id(sample_id)``. ``c`` is the component that the
       commits name, or ``""`` for the only trainer of a scenario, whose
       commits name none. A trainer that is not a key has trained the sample
       0 times. The value keeps its own copy of ``train_counts``.
-    * ``component`` is the trainer that made the sample from records, as a
+    * ``component`` is the trainer whose stage made the sample, as a
       ``train_counts`` key, or ``None`` for a sample that every trainer reads:
       an upload or an imported task.
     * ``group`` is ``None`` or a non-empty string that the samples of one unit
       share, so that they train together. ``record_ids`` is a tuple of
-      distinct non-empty strings: the records that the sample's unit consumed,
-      empty exactly when ``component`` is ``None``.
+      distinct non-empty strings: the records that the sample's unit consumed.
+      It is empty when ``component`` is ``None``, and for a sample that a
+      stage made from no record set (``Record2Sample.made_samples``).
 
     Operations: ``kind`` is ``trajectory`` for a ``TrajectorySample`` and
     ``task`` for a ``TaskSample``. ``train_count(component)`` is
@@ -109,7 +111,7 @@ class StoredSample:
                 raise ValueError("a stored trajectory is in the train split and has no files digest")
         elif isinstance(self.sample, TaskSample) and self.component is not None:
             if self.split != "train" or self.files_digest is not None:
-                raise ValueError("a task made from records is in the train split and has no files digest")
+                raise ValueError("a task that a stage made is in the train split and has no files digest")
         elif isinstance(self.sample, TaskSample):
             if not isinstance(self.files_digest, str) or not self.files_digest:
                 raise ValueError("a stored task needs the files digest of its directory")
@@ -133,9 +135,9 @@ class StoredSample:
             not isinstance(ids, tuple)
             or any(not isinstance(record_id, str) or not record_id for record_id in ids)
             or len(set(ids)) != len(ids)
-            or (not ids) != (self.component is None)
+            or (ids and self.component is None)
         ):
-            raise ValueError("a stored sample's record_ids are distinct record IDs, empty exactly without a component")
+            raise ValueError("a stored sample's record_ids are distinct record IDs, empty without a component")
 
     @property
     def kind(self) -> SampleKind:
@@ -187,6 +189,8 @@ class SampleStore(ABC):
         samples: tuple[tuple[str, Sample], ...],
     ) -> bool:
         """Save the samples of one unit that ``trainer`` made from ``record_ids``, in one transaction, in order.
+
+        ``record_ids`` is empty for samples that a stage made from no record set.
 
         ``trainer`` is a ``train_counts`` key: the component that the trainer's commits name, or ``""`` for the
         only trainer of a scenario. Each sample gets ``component`` ``trainer``, ``group`` ``group`` and

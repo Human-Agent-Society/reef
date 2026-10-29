@@ -858,8 +858,7 @@ Records arrive and the sample store fills in both modes, so a switch from
 ``auto`` to ``manual`` puts the samples that the next automatic job would take
 into the manual buffer. A recipe's ``Sample2Job``
 declares ``supported_training_modes``; an unsupported mode raises
-``NotImplementedError``. A stage that trains only its own job data, such as
-generated tasks, supports only ``auto``. Harness evolution requires a proposer
+``NotImplementedError``. Harness evolution requires a proposer
 that explicitly accepts ``requests`` for ``manual``. Setting ``manual`` on an
 inference-only recipe does not create a training backend.
 
@@ -1389,7 +1388,7 @@ parameter.
              state_dir: ${REEF_STATE_DIR}/generations
      sample2job:
        config:
-         tasks_per_step: 2
+         buffer_size: 2
 
 ``GeneratedTaskRecord2Record`` paces the rounds and holds their source
 sessions. It trains on no report: the recipe trains on the rollouts that the
@@ -1400,7 +1399,7 @@ training component runs, which are not records.
    pipeline.record2record.config.jobs_per_round | 1 | trained jobs after which the next round starts
    pipeline.record2record.config.source_records_per_round | 0 | recorded sessions that each round gives the generator, at most; 0 generates from the description only
    pipeline.record2record.config.source_tag | the ``name=value`` tag that marks a source session: each of its model calls carries the header ``x-reef-tag-<name>: <value>``. Required when ``source_records_per_round`` is above 0.
-   pipeline.record2record.config.refill_tasks | 1 | the next round starts only while fewer saved tasks than this wait to roll out
+   pipeline.record2record.config.refill_tasks | 1 | the next round starts only while fewer saved tasks than this wait to train; a task in a running job does not wait
 
 ``GeneratedTaskSamples`` runs the generations and sends their results to the
 generator:
@@ -1429,13 +1428,15 @@ Set ``eval_fraction`` and ``split_seed`` here rather than in a generator's confi
 The defaults keep every task in train.
 A published task keeps its split. A change of these values applies to the tasks generated after it.
 
-``GeneratedTaskJobData`` hands saved tasks to the training component as one
-task job, whatever Tinker's batch size (``training.options.batch-size``) is,
-so the stage has no ``buffer_size`` and no ``job_samples``:
+The saved train tasks go to the scenario's sample store, as samples
+``generated-tasks/<task name>``, and train from the buffer like every other
+sample. ``GeneratedTaskJobData`` makes one task job of the buffer's tasks,
+whatever Tinker's batch size (``training.options.batch-size``) is:
 
 .. config::
 
-   pipeline.sample2job.config.tasks_per_step | 4 | saved tasks of one task job
+   pipeline.sample2job.config.job_samples | 1 | the fewest saved tasks of one task job
+   pipeline.sample2job.config.buffer_size | 4 | the most saved tasks of one task job; at least ``job_samples``, and ``job_samples`` when it is more than 4
 
 The Tinker component runs a task job's rollouts on Tinker's sampler at the
 job's start weights. The ``rollout`` job parameter configures them:

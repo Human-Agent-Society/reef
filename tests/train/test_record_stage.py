@@ -14,6 +14,7 @@ from tests.train.test_record_stage_job_data_parity import CountingBackend, infer
 from reef.artifact import ArtifactRef
 from reef.core import AgentRecord
 from reef.core.errors import ManualBufferRefused
+from reef.core.job_data import JobOutcome
 from reef.record2record import (
     GroupDecision,
     InferenceRecord2Record,
@@ -638,47 +639,43 @@ def test_the_stage_sizes_are_its_own_or_else_follow_the_context_default() -> Non
         Sample2JobSettings(job_samples=0)
 
 
-class OwnJobData(RecordingJobData):
-    """A batch stage with samples of its own: ``samples`` trains as one batch that consumes ``own:<n>``."""
+class MadeSamples(RecordingSamples):
+    """A sample stage that also makes samples from no record set (``made``) and keeps each job end that it reads."""
 
-    def __init__(self, context: PipelineContext) -> None:
-        super().__init__(context)
-        self.samples: tuple[Sample, ...] | None = None
-        self.batches_done = 0
-        self.released: set[str] = set()
+    def __init__(self) -> None:
+        super().__init__()
+        self.made: tuple[tuple[str, Sample], ...] = ()
+        self.ended: list[JobOutcome] = []
 
-    def own_job_data(self) -> tuple[Sample, ...] | None:
-        return self.samples
+    def made_samples(self) -> tuple[tuple[str, Sample], ...]:
+        made, self.made = self.made, ()
+        return made
 
-    def own_job_data_submitted(self) -> frozenset[str]:
-        self.batches_done += 1
-        self.samples = None
-        return frozenset({f"own:{self.batches_done}"})
-
-    def release_own_ids(self, ids: frozenset[str]) -> None:
-        self.released |= ids
+    def job_ended(self, outcome: JobOutcome) -> None:
+        self.ended.append(outcome)
 
 
 @pytest.mark.unit
-def test_the_task_to_job_stage_own_job_data_trains_alone_and_its_ids_release_after_the_commit() -> None:
+def test_samples_that_a_stage_made_from_no_record_set_are_stored_and_train_from_the_buffer() -> None:
     context = PipelineContext("s")
-    batches = OwnJobData(context)
+    samples = MadeSamples()
     processor = TrainingPipeline(
-        context, record2record=InferenceRecord2Record(), record2sample=RecordingSamples(), sample2job=batches
+        context, record2record=InferenceRecord2Record(), record2sample=samples, sample2job=RecordingJobData(context)
     )
-    assert not processor.ready(4)
-    batches.samples = (TaskSample(Path("a")),)
-    assert processor.ready(4), "an own batch is ready whatever its sample count"
-    built = processor.build_job_data(4)
-    processor.release_job_data(built.data_id)
-    assert batches.batches_done == 0 and processor.ready(4), "a released own batch stays the stage's"
-    built = processor.build_job_data(4)
+    assert not processor.ready(1)
+    samples.made = (("made/a", TaskSample(Path("a"))),)
+    assert processor.ready(1)
+    samples.made = (("made/a", TaskSample(Path("a"))),)
+    assert processor.count_held_samples() == 1, "a sample made again is stored once"
+    (stored,) = processor.store.page()
+    assert (stored.sample_id, stored.component, stored.group, stored.record_ids) == ("made/a", "", None, ())
+    built = processor.build_job_data(1)
     assert [item.task_path for item in built.samples] == [Path("a")]
-    assert processor.acknowledge(built.data_id) == {"own:1"}
-    assert processor.releasable_record_ids() == {"own:1"}
-    processor.release_records(frozenset({"own:1"}))
-    assert batches.released == {"own:1"} and not processor.releasable_record_ids()
-    assert batches.batches_done == 1 and not processor.ready(4)
+    assert processor.acknowledge(built.data_id) == {consumed_sample_id("made/a")}
+    assert not processor.ready(1)
+    outcome = JobOutcome("job", "stub", "finished")
+    processor.job_ended(outcome)
+    assert samples.ended == [outcome], "the job's end goes to the sample stage"
 
 
 @pytest.mark.unit

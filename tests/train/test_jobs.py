@@ -6,7 +6,7 @@ import math
 from pathlib import Path
 
 import pytest
-from tests.support._threshold_processor import ThresholdJobData, threshold_pipeline
+from tests.support._threshold_processor import ThresholdJobData, ThresholdSamples, threshold_pipeline
 from tests.support._trajectories import policy_trajectory
 
 from reef.artifact import Artifact, BaseArtifactSource
@@ -14,6 +14,7 @@ from reef.core import AgentRecord, RequestType
 from reef.core.errors import CommitPending, TrainingStartRefused
 from reef.core.job_data import JobOutcome
 from reef.pipeline_context import PipelineContext
+from reef.record2record import ReportGrouping, ReportRecord2Record
 from reef.runtime.jobs import JobStatus, ReleaseFormat, SavedCheckpoint, TrainingComponent, TrainingJob
 from reef.storage.sqlite import SQLiteRecordStore
 from reef.train.jobs import JobLoop, JobLoopState, RunningJob
@@ -348,11 +349,11 @@ def test_a_running_job_the_component_does_not_know_ends_failed_and_keeps_the_sta
     assert job.start == "/start"
 
 
-class EndedJobs(ThresholdJobData):
-    """Threshold job data that keeps each job outcome the pipeline gives it, in order."""
+class EndedJobs(ThresholdSamples):
+    """Threshold samples that keep each job outcome the pipeline gives them, in order."""
 
-    def __init__(self, context: PipelineContext) -> None:
-        super().__init__(context, None, None)
+    def __init__(self) -> None:
+        super().__init__()
         self.outcomes: list[JobOutcome] = []
 
     def job_ended(self, outcome: JobOutcome) -> None:
@@ -364,8 +365,13 @@ def test_the_pipeline_learns_a_jobs_outcome_exactly_when_the_commit_of_its_end_s
     stages: list[EndedJobs] = []
 
     def pipeline(context: PipelineContext) -> TrainingPipeline:
-        stages.append(EndedJobs(context))
-        return threshold_pipeline(context, sample2job=stages[-1])
+        stages.append(EndedJobs())
+        return TrainingPipeline(
+            context,
+            record2record=ReportRecord2Record(context, ReportGrouping()),
+            record2sample=stages[-1],
+            sample2job=ThresholdJobData(context, None, None),
+        )
 
     trainer = Trainer.build(
         "math", scored_records(), pipeline_factory=pipeline, job_loop=loop_with(component), default_job_samples=1
