@@ -602,6 +602,8 @@ def test_objective_resolution_rejects_a_missing_required_objective_module(monkey
 def test_objective_resolution_rejects_missing_required_hook_registrations(monkeypatch) -> None:
     from reef.train.slime_backend import algorithm as base_module
 
+    # Load the spec before import_module is patched, so only the objective module's import sees the patch.
+    resolve_loss_family("tttd")
     monkeypatch.setattr(importlib, "import_module", lambda _name: ModuleType("empty_objective"))
     monkeypatch.setattr(base_module, "_objective_registry", {})
     with pytest.raises(RuntimeError, match="custom_loss_function_path"):
@@ -645,6 +647,8 @@ def test_objective_resolution_propagates_nested_import_failures(monkeypatch, err
     def broken_objective(_name: str) -> None:
         raise error
 
+    # Load the spec before import_module is patched, so only the objective module's import sees the patch.
+    resolve_loss_family("tttd")
     monkeypatch.setattr(importlib, "import_module", broken_objective)
     with pytest.raises(type(error), match=str(error)):
         resolve_objective_paths(SimpleNamespace(loss_family="tttd"))
