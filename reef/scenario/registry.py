@@ -466,8 +466,9 @@ class ScenarioRegistry:
         """Select the training mode and the activation rule a person stored for the scenario on a newly built
         instance.
 
-        A mode the recipe no longer supports keeps the recipe's default, so the
-        scenario still loads and a person can select another mode. A scenario
+        A mode the recipe no longer supports, or that Reef no longer has (such as
+        ``hybrid``), keeps the recipe's default, so the scenario still loads and
+        a person can select another mode. A scenario
         whose rule is ``evaluated`` without ``artifact_evaluation`` loads with a
         warning: it activates no new artifact. Any other failure closes the
         instance.
@@ -477,7 +478,7 @@ class ScenarioRegistry:
             if settings.training_mode is not None and instance.training_mode != settings.training_mode:
                 try:
                     instance.set_training_mode(settings.training_mode)
-                except NotImplementedError as exc:
+                except (ValueError, NotImplementedError) as exc:
                     logger.warning(
                         "Scenario %r keeps its default training mode: the stored mode %r is not supported (%s)",
                         instance.name,

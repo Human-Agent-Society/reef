@@ -210,15 +210,13 @@ request (i.e. ``POST /reef/train`` requests). ``data.training_mode`` in the reci
 decides which of the two a deployment accepts.
 
 - ``auto`` (the default): steps start from job data of recorded traffic
-  alone. Training requests are ignored.
-- ``manual``: steps start from training requests alone. Ordinary
-  traffic never starts evolution.
-- ``hybrid``: steps start from either, as the tutorial's ``deployment.yaml``
-  sets. Training requests are queued and take precedence, and automatic steps continue
-  between those requests.
+  alone. Training requests are refused.
+- ``manual``: steps start from training requests alone, as the tutorial's
+  ``deployment.yaml`` sets. Each request step also reads the traces that an
+  automatic step would take next. Ordinary traffic never starts evolution.
 
 ``POST /reef/scenarios/{scenario}/update`` switches a running deployment
-between the three.
+between the two.
 
 Trigger of step
 ~~~~~~~~~~~~~~~
@@ -277,23 +275,11 @@ e.g. what fields a request carries, the screens its text passes, and what
 happens to a request whose step fails.
 
 The ``pipeline`` stages trigger no evolution in this mode, but traces are
-still collected while training requests run. However, these traces are never
-used in evolution until ``data.training_mode`` is switched to ``auto`` or
-``hybrid``. The buffer limit still applies: Reef releases the oldest traces
+still collected. A request step does not wait for ``job_samples`` traces. The
+proposer receives the training request and the traces that automatic job data
+would take next: up to ``job_samples`` traces, or none. It uses both to make
+a mutation. The buffer limit still applies: Reef releases the oldest traces
 beyond ``buffer_size``.
-
-``hybrid`` mode
-^^^^^^^^^^^^^^^
-
-In ``hybrid`` mode, either condition starts a step: ``job_samples`` traces
-collected by the ``pipeline`` stages, or a training request received.
-
-When both conditions are met, the training request takes precedence for the
-next step. Reef builds one step that uses both, whether or not
-``job_samples`` is met. The proposer then
-receives the training request and the traces that automatic job data would
-take next. It gets up to ``job_samples`` traces, or none, and uses both
-to make a mutation.
 
 Propose: mutation to the harness tree
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -465,7 +451,7 @@ The evaluation suite consists of the seed tasks specified in
 configure ``evolution.promote_failures: true``, which adds failing traces'
 prompts to the evaluation set permanently. This also means the method's
 rollout scorer must be able to score any arbitrary prompt. A
-request step in ``hybrid`` promotes the failures it carries the same way.
+request step in ``manual`` promotes the failures it carries the same way.
 
 A promoted prompt is real client traffic, so it is screened before it
 becomes a task. A prompt carrying a key-shaped literal meets the tree's own
@@ -853,15 +839,15 @@ Ask for a harness change
 ~~~~~~~~~~~~~~~~~~~~~~~
 
 You can also ask for a harness change in plain words. The tutorial's
-``deployment.yaml`` runs in ``data.training_mode: hybrid``, so an ask needs
+``deployment.yaml`` runs in ``data.training_mode: manual``, so an ask needs
 no mode switch there; a scenario in ``auto`` takes asks after a switch to
-``hybrid`` or ``manual``:
+``manual``:
 
 .. code:: bash
 
    curl -sS -X POST -H "Authorization: Bearer $REEF_TOKEN" \
      -H "Content-Type: application/json" \
-     -d '{"training_mode": "hybrid"}' \
+     -d '{"training_mode": "manual"}' \
      "$REEF_URL/reef/scenarios/code-repair/update"
    reef-pi evolve "run the tests before you report a fix as done"
 

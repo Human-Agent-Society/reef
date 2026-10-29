@@ -63,8 +63,8 @@ def register_scenario_routes(
         payload = await read_object(request)
         if not payload or set(payload) - {"training_mode", "model", "artifact_evaluation", "activation"}:
             raise ValueError("expected training_mode, model, artifact_evaluation or activation settings")
-        if "training_mode" in payload and payload["training_mode"] not in ("auto", "manual", "hybrid"):
-            raise ValueError("expected training_mode 'auto', 'manual' or 'hybrid'")
+        if "training_mode" in payload and payload["training_mode"] not in ("auto", "manual"):
+            raise ValueError("expected training_mode 'auto' or 'manual'")
         name = request.match_info["scenario"]
         result: dict[str, object] = {"scenario": name}
         if "model" in payload:

@@ -990,6 +990,8 @@ class GeneratedTaskJobData(Sample2Job):
 
     #: The tasks wait in the task pool, not in a buffer, and a job trains ``tasks_per_step`` tasks.
     trains_own_job_data_only = True
+    #: The stage starts each task job itself, so no instruction starts one.
+    supported_training_modes = frozenset({"auto"})
 
     @classmethod
     def from_config(

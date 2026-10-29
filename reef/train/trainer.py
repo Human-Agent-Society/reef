@@ -253,7 +253,7 @@ class Trainer:
                 max(0.0, time.time() - oldest[0][1].created_at) if oldest else 0.0
             )
             values["training/reserved_job_data"] = int(self._pending is not None and self._pending.data is not None)
-            values["training/auto_enabled"] = int(self._pipeline.training_mode in {"auto", "hybrid"})
+            values["training/auto_enabled"] = int(self._pipeline.training_mode == "auto")
             pipeline_metrics = {
                 **self._pipeline.status(),
                 "job_samples": self.job_samples,
@@ -565,9 +565,13 @@ class Trainer:
         with self.operations.measure("execution"):
             result: TrainStepResult | None
             ended: JobOutcome | None = None
+            failure = None if data is None or data.request is None else self._pipeline.request_failure(data.request.id)
             if data is None:
                 polled = self.job_loop_required().poll(JobLoopState.from_dict(observed_state))
                 result, ended = (None, None) if polled is None else (polled.result, polled.ended)
+            elif data.request is not None and failure is not None:
+                # Committed without the backend: the failed instruction is consumed alone and the catalog row names why.
+                result = self._skip_failed_instruction(data, data.request, failure)
             elif self._job_loop is None:
                 result = self._execute_backend_step(data, scenario_step)
             else:
@@ -588,11 +592,6 @@ class Trainer:
         backend = self._candidate_backend
         if backend is None:
             raise RuntimeError("cannot execute a training step without a backend")
-        request = data.request
-        error = None if request is None else self._pipeline.request_failure(request.id)
-        if request is not None and error is not None:
-            # Committed without the backend: the failed instruction is consumed alone and the catalog row names why.
-            return self._skip_failed_instruction(data, request, error)
         prepared = backend.prepare_step(data, self._state, scenario_step)
         if not isinstance(prepared, PreparedStep):
             raise TypeError(f"{type(backend).__name__}.prepare_step must return PreparedStep")
