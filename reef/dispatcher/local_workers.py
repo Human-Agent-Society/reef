@@ -93,14 +93,14 @@ class LocalTrainingWorkers:
                 self.start(current.name, component_trainer.component)
 
     def resume(self, current: Scenario) -> None:
-        """Start the worker of each weight trainer of ``current`` that has a job running or records to train.
+        """Start the worker of each weight trainer of ``current``.
 
-        A loaded scenario resumes the job a restart left running, and the
-        records that arrived before it, without waiting for a new record.
+        The worker's first cycle resumes the job a restart left running, trains the records that arrived before
+        the load, and starts the pipeline's own work, such as a round of generated tasks. No record would wake
+        the worker for these.
         """
         for component_trainer in current.trainers:
-            trainer = component_trainer.trainer
-            if trainer.job_loop is not None and (trainer.job_running or trainer.holds_untrained_records()):
+            if component_trainer.trainer.job_loop is not None:
                 self.start(current.name, component_trainer.component)
 
     def remove(self, scenario: str) -> None:
