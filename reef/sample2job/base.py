@@ -78,7 +78,8 @@ class Sample2Job(ABC, Plugin):
     takes every untrained sample. ``max_job_samples`` is None or a
     positive int, the most samples one job's data may hold; None sets no limit.
     ``buffer_size`` is at least ``job_samples``, and ``job_samples`` at most
-    ``max_job_samples``, when both are set. The constructor refuses other
+    ``max_job_samples``, and ``buffer_size`` at most ``max_job_samples``,
+    when both are set. The constructor refuses other
     values with ``PluginConfigError``.
     Purpose: the pipeline is ready when its buffer holds at least
     ``job_samples`` samples. The buffer is the first ``buffer_size`` untrained
@@ -157,6 +158,10 @@ class Sample2Job(ABC, Plugin):
             raise PluginConfigError(
                 f"{stage} holds at most {max_job_samples} samples in one job's data, not job_samples {self.job_samples}"
             )
+        if self.buffer_size is not None and max_job_samples is not None and self.buffer_size > max_job_samples:
+            raise PluginConfigError(
+                f"{stage} holds at most {max_job_samples} samples in one job's data, not buffer_size {self.buffer_size}"
+            )
 
     @classmethod
     def from_config(
@@ -182,17 +187,17 @@ class Sample2Job(ABC, Plugin):
 
     @abstractmethod
     def make_job_data(self, samples: tuple[Sample, ...], data_id: str) -> JobData:
-        """Build one job's data from the samples of the selected record sets, in selection order.
+        """Build one job's data from the samples of the buffer, in store order.
 
         Use ``data_id`` as the ID of the returned value. The pipeline assigns
         it. Automatic job data gets ``<scenario>:data:<number>``. An
         instruction's data gets ``<scenario>:instruction:<request id>``. The
         number counts the job data of this pipeline and starts again when the
         pipeline restarts. It is not a training step.
-        The pipeline tracks consumption by record set, including the samples
-        that the recipe leaves out of the job data. In ``manual`` mode an
-        instruction's data holds the samples that automatic job data would take next: ``job_samples`` of them, or
-        fewer when the stage ``reads_instructions``.
+        The job's commit consumes every sample of ``samples``, including the
+        samples that the recipe leaves out of the job data. In ``manual`` mode an
+        instruction's data holds the samples that automatic job data would take next: the buffer, which holds at
+        least ``job_samples`` samples unless the stage ``reads_instructions``.
         """
 
     def job_parameters(self, data: JobData) -> Mapping[str, Any]:

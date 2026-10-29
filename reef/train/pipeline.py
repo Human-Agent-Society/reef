@@ -14,30 +14,30 @@ stages; it does not subclass the pipeline:
 * the record-to-sample stage (:class:`~reef.record2sample.Record2Sample`) turns each
   record set into samples;
 * the sample-to-job stage (:class:`~reef.sample2job.Sample2Job`) bounds
-  the sample buffer and shapes the samples of the selected record set units into
-  one job's data.
+  the sample buffer and shapes the samples of the buffer into one job's data.
 
 The pipeline owns what is the same for every recipe: it routes records, gives
-each record set's sample result back to its stage, keeps the samples of held
-sets in the buffer, releases the oldest sets when the buffer is over the
-stage's ``buffer_size``, hands out the data of one job at a time until the
+each record set's sample result back to its stage, saves the samples of each
+ready unit to the scenario's sample store, computes the buffer from the store
+(the first ``buffer_size`` untrained samples in store order, and the rest of
+each group that those touch), hands out the data of one job at a time until the
 trainer acknowledges or releases it, and runs the training modes and the
 training instructions. ``ready`` and ``build_job_data`` take a sample count:
 the trainer asks for its stage's ``job_samples``, and a test or a tool may ask
 for another count. Automatic job data holds at least that many samples. It
-takes whole record sets, so it can hold more.
+takes whole groups, so it can hold more.
 
 A client can also upload an ATIF trajectory. It is not a record, so the
 record-to-record stage never sees it; the record-to-sample stage renders it into
 its training sample (``Record2Sample.uploaded_sample``), which counts as one
-sample. Job data takes uploaded trajectories first.
+sample. It waits in the store with the other samples, in store order.
 
 A sample-to-job stage can also make samples itself, from no record, such as
 the generated-task recipe's rollouts. While ``Sample2Job.own_job_data``
 returns samples, the pipeline is ready, and its next job data holds exactly
-those, unless automatic job data is also ready: held samples, such as
+those, unless automatic job data is also ready: the buffer's samples, such as
 uploaded trajectories, train first, so a recipe that trains both trains its
-held samples before its own.
+buffer before its own samples.
 """
 
 from __future__ import annotations
@@ -55,7 +55,7 @@ from reef.core.reports import ReportBase
 from reef.core.training_request import TrainingRequest
 from reef.observability import ExperimentLogger
 from reef.pipeline_context import PipelineContext
-from reef.record2record import NoRecordSets, Record2Record, RecordSet, RecordSetUnit, SampleStatus, UnitDropReason
+from reef.record2record import NoRecordSets, Record2Record, RecordSet, RecordSetUnit, SampleStatus
 from reef.record2record.staleness import producing_runtime_load_ids
 from reef.record2sample import NoSamples, Record2Sample
 from reef.sample2job import NoJobData, Sample2Job
@@ -161,22 +161,24 @@ class InstructionFailure:
     metrics: Mapping[str, Any] = field(default_factory=dict)
 
 
+def grouped(stored: StoredSample, sample: Sample) -> Sample:
+    """``sample`` as job data trains it: a trajectory of a stored group without its own ``group_id`` gets the group."""
+    if isinstance(sample, TrajectorySample) and sample.group_id is None and stored.group is not None:
+        return replace(sample, group_id=stored.group)
+    return sample
+
+
 class TrainingPipeline:
     """Turn a scenario's records into typed job data through a recipe's three stages.
 
     Without stages it is the no-update default: it reads records for audit
     but never becomes ready and never produces job data.
 
-    A held unit holds the samples of its record sets; an uploaded
-    trajectory is one sample. In ``auto``, ``ready(sample_count)`` is True if
-    and only if the held units and uploaded trajectories hold at least
-    ``sample_count`` samples. ``build_job_data(sample_count)`` takes the uploaded
-    trajectories first, then whole units in selection order until the data
-    holds ``sample_count`` samples or the units run out. When ``buffer_size``
-    is set, after it moves record sets, the unreserved units hold at most
-    ``buffer_size`` samples, or are one unit: it releases the oldest ones
-    beyond that and keeps the newest, so a unit larger than the buffer still
-    trains.
+    A ready unit's samples are stored in the scenario's sample store; an uploaded
+    trajectory is one stored sample. In ``auto``, ``ready(sample_count)`` is True if
+    and only if the buffer (``buffer``) holds at least ``sample_count`` samples.
+    ``build_job_data(sample_count)`` takes the samples of the buffer, in store
+    order. Samples beyond the buffer stay in the store for later job data.
 
     The trainer-facing methods (``push``, ``ready``, ``build_job_data``, and
     the others) run under the trainer's lock, whichever thread calls them (the
@@ -277,7 +279,7 @@ class TrainingPipeline:
         return self.context.experiment_logger
 
     def set_training_mode(self, training_mode: str) -> None:
-        """Select future job data while preserving the held units and the reservation."""
+        """Select future job data while preserving the buffer and the handed out job data."""
         if training_mode not in ("auto", "manual"):
             raise ValueError("training_mode must be 'auto' or 'manual'")
         if training_mode not in self.supported_training_modes:
@@ -366,9 +368,12 @@ class TrainingPipeline:
             if result.status is SampleStatus.READY:
                 self.samples[set_id] = result.samples
             self.record2record.settle(record_set, result.status, producing_runtime_load_ids(result.samples))
-        for unit in self.record2record.pool.units():
+        ready_units = self.record2record.pool.units()
+        for unit in ready_units:
             self.store_unit(unit)
         self.forget_ended_sets()
+        if ready_units:
+            self.read_store()
 
     def store_unit(self, unit: RecordSetUnit) -> None:
         """Save the samples of the ready ``unit`` to the sample store, and end the unit in the record stage.
@@ -549,7 +554,7 @@ class TrainingPipeline:
                 self.pending_is_own = True
                 return self.pending
             self.reserved_sample_ids = self.buffer()
-            samples = tuple(self.held[sample_id][1] for sample_id in self.reserved_sample_ids)
+            samples = tuple(grouped(*self.held[sample_id]) for sample_id in self.reserved_sample_ids)
             self.pending = self.job_data_for(samples, request)
         return self.pending
 

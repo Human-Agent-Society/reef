@@ -36,7 +36,7 @@ from reef.record2record import ReportGrouping, ReportRecord2Record
 from reef.runtime.jobs import SavedCheckpoint, TrainingJob
 from reef.storage.commit_history import CommitHistoryError, CommitHistoryScenarioStore
 from reef.storage.commits import CommitRecord, active_artifact_ref
-from reef.storage.samples import SAMPLE_KINDS
+from reef.storage.samples import SAMPLE_KINDS, consumed_sample_id
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.surface import Surface
 from reef.surface.harnesses import create_harness_surface
@@ -524,11 +524,11 @@ def test_each_committed_step_appends_one_atomic_record_and_a_restart_recovers_fr
     submitted, _, finished = records[:3]
     # The submission consumes the batch's records; the later commits of the job consume none.
     assert submitted.algorithm_state["job"] == {"job_id": first_job, "checkpoints_handled": 0}
-    assert submitted.consumed_ids == frozenset({"i1", "r1"})
+    assert submitted.consumed_ids == frozenset({"i1", "r1", consumed_sample_id("r1:0")})
     assert submitted.high_water_sequence == 2
     assert finished.algorithm_state["finished_jobs"] == 1
     assert finished.consumed_ids == frozenset()
-    assert records[3].consumed_ids == frozenset({"i2", "r2"})
+    assert records[3].consumed_ids == frozenset({"i2", "r2", consumed_sample_id("r2:0")})
     assert records[3].high_water_sequence == 4
     # The record's ref is exactly the serving head the scenario advanced to.
     scenario = dispatcher.get_or_create_scenario("math")
@@ -1316,7 +1316,7 @@ def test_no_artifact_commit_appends_a_record_and_survives_a_restart(tmp_path) ->
     assert record.artifact_ref == scenario.repository.require_current_artifact()  # no new artifact published
     assert record.algorithm_state == {"steps": 1, "entries": []}
     assert record.high_water_sequence == 2
-    assert record.consumed_ids == frozenset({"i1", "r1"})
+    assert record.consumed_ids == frozenset({"i1", "r1", consumed_sample_id("r1:0")})
 
     second = build_harness_evolve_dispatcher(None, tmp_path, backend_factory, agent_record_dir=agent_record_dir)
     recovered = second.get_or_create_scenario("skills")

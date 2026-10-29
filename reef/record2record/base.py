@@ -91,10 +91,10 @@ class Record2Record(ABC, Plugin):
     exposing a set, ``form`` rejects it if any inference response reports an
     engine abort. Rejection ends the whole set through the stage's lifecycle,
     including reports that reference an aborted inference. The stage
-    holds the sets that have samples in record set units in its ``pool`` until the
-    pipeline reserves them for job data; the pipeline reserves and consumes
-    through the pool, and the stage ends the consumed units (``consume``). The
-    pool applies the stage's selection policy. The stage never calls the pipeline.
+    holds the sets that have samples in record set units, and puts each ready
+    unit in its ``pool``. The pipeline saves the samples of each unit in the
+    pool to the sample store, removes the unit from the pool, and the stage
+    ends it (``consume``). The stage never calls the pipeline.
 
     The stage also runs the staleness check. No other part of Reef checks how
     far the training data lags behind the weights. The pipeline gives the stage
@@ -129,9 +129,9 @@ class Record2Record(ABC, Plugin):
 
     def __init__(self, selection: SelectionPolicy | None = None, *, max_staleness: int = 0) -> None:
         require_max_staleness(max_staleness)
-        #: How many versions the training data of a held unit may lag behind the served version and still train.
+        #: How many versions the training data of a stored sample may lag behind the served version and still train.
         self.max_staleness = max_staleness
-        #: The held record set units. The pipeline reserves job data from it and consumes the reservation.
+        #: The ready record set units. The pipeline stores the samples of each one and removes it.
         self.pool = RecordSetUnitPool(selection)
         #: Record sets that ended after the sample stage saw them. The pipeline forgets their samples.
         self.ended_set_ids: set[Hashable] = set()

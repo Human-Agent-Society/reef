@@ -34,7 +34,7 @@ from reef.observability import ExperimentLogger, NullExperimentLogger
 from reef.observability.operations import OperationMetrics
 from reef.pipeline_context import PipelineContext
 from reef.storage.records import RecordStore
-from reef.storage.samples import SAMPLE_KINDS, SampleKind, SampleStore, TrainerSamples
+from reef.storage.samples import SAMPLE_KINDS, SampleKind, TrainerSamples
 from reef.storage.tasks import TaskStorage
 from reef.train.backend import CandidateBackend, PreparedStep
 from reef.train.jobs import JobLoop, JobLoopState

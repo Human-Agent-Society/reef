@@ -120,7 +120,7 @@ class SDPOGrouping(ReportGrouping):
 
 
 class SDPORecord2Record(ReportRecord2Record):
-    """SDPO's record stage: one group per sampling step, in step order; a terminal report owns its source.
+    """SDPO's record stage: one group per sampling step; a terminal report owns its source.
 
     Config: ``groups_per_step`` and ``rollouts_per_group``, the grid, and ``max_staleness``. The
     later stages read the grid from ``step_grouping``.

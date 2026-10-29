@@ -67,6 +67,7 @@ from reef.storage.commits import (
     parse_scenario_metadata,
     scenario_metadata_for,
 )
+from reef.storage.samples import consumed_sample_id
 from reef.storage.sqlite import SQLiteRecordStore
 from reef.surface import ComponentSurface, Surface, TextFileTree
 from reef.train import ComponentTrainer, Trainer, TrainStepResult
@@ -210,9 +211,10 @@ def test_component_trainers_take_turns_on_one_release_chain(dispatchers: _Dispat
 
     records = scenario.store.history()
     assert [record.component for record in records] == [HARNESS, WEIGHTS]
-    # A commit retires no row: each trainer consumed the same rows on its own record.
+    # A commit retires no row: each trainer consumed the same rows, and its own sample of them, on its own record.
     assert scenario.records.count("agent") == 2
-    assert records[0].consumed_ids == records[1].consumed_ids == frozenset({"i1", "r1"})
+    assert records[0].consumed_ids == {"i1", "r1", consumed_sample_id(f"{HARNESS}:r1:0")}
+    assert records[1].consumed_ids == {"i1", "r1", consumed_sample_id(f"{WEIGHTS}:r1:0")}
 
     # Each trainer recovers from its own commits.
     reloaded = dispatcher.registry.reload("agent")
@@ -261,7 +263,8 @@ def test_a_weights_job_trainer_and_the_harness_trainer_share_one_release_chain(
         (WEIGHTS, "checkpoint"),
         (WEIGHTS, "finished"),
     ]
-    assert records[0].consumed_ids == records[1].consumed_ids == frozenset({"i1", "r1"})
+    assert records[0].consumed_ids == {"i1", "r1", consumed_sample_id(f"{WEIGHTS}:r1:0")}
+    assert records[1].consumed_ids == {"i1", "r1", consumed_sample_id(f"{HARNESS}:r1:0")}
     assert records[2].consumed_ids == records[3].consumed_ids == frozenset()
     assert {record.training_job_id for record in records if record.component == WEIGHTS} == {job.job_id}
 
@@ -762,8 +765,9 @@ def test_a_harness_commit_that_fails_leaves_its_rows_to_the_harness(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, dispatchers: _Dispatchers
 ) -> None:
     """The harness acknowledges its batch before its record is durable. When that commit fails, the scenario
-    reloads at once, and the weights job submitted after it leaves the harness's rows stored: the rebuilt harness
-    trains them once."""
+    reloads at once, and the weights job submitted after it leaves the harness's rows stored. The harness's sample
+    of them is in the sample store, which consumed the rows for the harness: the rebuilt harness trains the sample
+    once."""
     dispatcher, _ = dispatchers.open(training=WeightsJobComponent(tmp_path / "checkpoints"))
     scenario = _scenario(dispatcher, 1)
     _fail_first_record_of(monkeypatch, scenario, HARNESS)
@@ -778,8 +782,12 @@ def test_a_harness_commit_that_fails_leaves_its_rows_to_the_harness(
     current = dispatcher.registry.get_optional("agent")
     assert current is not None
     history = current.store.history()
-    assert [sorted(record.consumed_ids) for record in history if record.component == HARNESS] == [["i1", "r1"]]
-    assert [sorted(record.consumed_ids) for record in history if record.component == WEIGHTS] == [["i1", "r1"]]
+    assert [sorted(record.consumed_ids) for record in history if record.component == HARNESS] == [
+        [consumed_sample_id(f"{HARNESS}:r1:0")]
+    ]
+    assert [sorted(record.consumed_ids) for record in history if record.component == WEIGHTS] == [
+        ["i1", "r1", consumed_sample_id(f"{WEIGHTS}:r1:0")]
+    ]
 
 
 @pytest.mark.unit
@@ -1028,7 +1036,7 @@ def test_rows_one_trainer_consumed_before_a_restart_still_train_the_other(dispat
     reloaded = dispatcher.registry.reload("agent")
     assert reloaded.prepare_training_step(HARNESS) is None
     assert _commit_step(reloaded, WEIGHTS) is not None
-    assert reloaded.store.history()[-1].consumed_ids == frozenset({"i1", "r1"})
+    assert reloaded.store.history()[-1].consumed_ids == {"i1", "r1", consumed_sample_id(f"{WEIGHTS}:r1:0")}
     assert reloaded.records.count("agent") == 2
 
 

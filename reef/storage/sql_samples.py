@@ -195,9 +195,11 @@ class SQLSampleStore(SampleStore):
         if not samples or any(not isinstance(record_id, str) or not record_id for record_id in record_ids):
             raise ValueError("record samples need one or more samples and non-empty record IDs")
         rows: list[tuple[str, SampleKind, str]] = [
-            (sample_id, "trajectory", sample_content(sample))
-            if isinstance(sample, TrajectorySample)
-            else (sample_id, "task", record_task_content(sample))
+            (
+                (sample_id, "trajectory", sample_content(sample))
+                if isinstance(sample, TrajectorySample)
+                else (sample_id, "task", record_task_content(sample))
+            )
             for sample_id, sample in samples
         ]
         consumed = canonical_json_list(record_ids)
