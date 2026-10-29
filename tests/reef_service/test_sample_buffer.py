@@ -6,7 +6,7 @@ import asyncio
 from dataclasses import replace
 
 from aiohttp.test_utils import TestClient, TestServer
-from tests.reef_service.test_trajectory_upload import HEADERS, TOKEN, UploadRecipe, dispatcher_for, uploaded
+from tests.support.trajectory_uploads import HEADERS, TOKEN, UploadRecipe, dispatcher_for, uploaded
 
 from reef.service.app import create_app
 
