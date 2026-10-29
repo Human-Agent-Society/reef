@@ -10,7 +10,6 @@ import subprocess
 import sys
 import tarfile
 import threading
-import time
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -117,6 +116,7 @@ class Gateway:
 
     def __init__(self) -> None:
         self.release = threading.Event()
+        self.waiting = threading.Event()
         self.arrived = threading.Event()
         gateway = self
 
@@ -143,6 +143,7 @@ class Gateway:
                         gateway.release.wait(10)  # the client reads the first piece before the second exists
                     self.wfile.write(b"0\r\n\r\n")
                 elif self.path == "/wait":
+                    gateway.waiting.set()
                     ok = gateway.arrived.wait(10)
                     data = b"waited" if ok else b"alone"
                     self.send_response(200)
@@ -240,7 +241,7 @@ def test_a_request_inside_the_sandbox_reaches_the_reef_port_and_its_answer_strea
         )
     )
     waiter.start()
-    time.sleep(0.3)
+    assert gateway.waiting.wait(10)
     urllib.request.urlopen(post(f"http://127.0.0.1:{local_port}/arrive", {}), timeout=10).read()
     waiter.join(15)
     assert waited == [b"waited"]
