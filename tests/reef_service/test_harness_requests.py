@@ -105,7 +105,7 @@ def test_an_instruction_needs_an_instruction_mode_and_commits_through_the_train_
         await client.start_server()
         try:
             response = await post_request(client, train_request("run tests first", release_id="rel-3"))
-            assert response.status == 400 and "training_mode='manual' or 'hybrid'" in await response.text()
+            assert response.status == 400 and "training_mode='manual'" in await response.text()
             response = await client.post("/reef/scenarios/agents/update", json={"training_mode": "manual"})
             assert response.status == 200
             response = await post_request(client, train_request("run tests first", release_id="rel-3"))

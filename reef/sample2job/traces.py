@@ -39,12 +39,12 @@ ROLLOUT_ID_PREFIX = "harness-rollout:"
 class TraceJobData(DistillJobData):
     """Put trace samples into job data unmodified; the backends consume them without more processing.
 
-    In ``hybrid`` a queued instruction takes the traces that automatic job
-    data would take next, up to ``job_samples``, so the method reads the
-    request beside them; in ``manual`` it runs alone.
+    In ``manual`` a queued instruction takes the traces that automatic job
+    data would take next, up to ``job_samples`` and possibly none, so the
+    method reads the request beside them.
     """
 
-    supported_training_modes = frozenset({"auto", "manual", "hybrid"})
+    reads_instructions = True
     required_request_types = frozenset(RequestType)
 
 
@@ -126,8 +126,8 @@ class TrainTaskRollouts(TraceJobData):
     the last saved chunk, and a chunk whose end was not saved runs again.
     """
 
-    # A rollout step has no instruction, so a manual scenario, which steps only on one, cannot run the stage.
-    supported_training_modes = frozenset({"auto", "hybrid"})
+    # The stage trains on its own task chunks, and a rollout step has no instruction: it runs in auto only.
+    supported_training_modes = frozenset({"auto"})
     accepts_imported_tasks = True
 
     @classmethod

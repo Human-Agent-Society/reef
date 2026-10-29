@@ -742,10 +742,6 @@ def streams() -> dict[str, tuple[StreamRun, list[Step]]]:
             StreamRun(TRACE_STAGES, training_mode="manual"),
             trace_steps(True),
         ),
-        "trace_hybrid": (
-            StreamRun(TRACE_STAGES, training_mode="hybrid", batch_size=2),
-            trace_steps(True),
-        ),
     }
 
 

@@ -102,9 +102,13 @@ class Sample2Job(ABC, Plugin):
 
     #: The job data type ``make_job_data`` returns; the trainer validates it.
     output_schema: type[JobData] = JobData
-    #: The training modes that the recipe's job data supports. ``manual`` and
-    #: ``hybrid`` make job data for a training instruction.
-    supported_training_modes: frozenset[str] = frozenset({"auto"})
+    #: The training modes that the recipe's job data supports. ``auto`` makes job data when
+    #: ``job_samples`` samples are held; ``manual`` makes it for a queued training instruction.
+    supported_training_modes: frozenset[str] = frozenset({"auto", "manual"})
+    #: Whether the job reads the instruction in its data, as a harness proposer does. In ``manual`` such a stage
+    #: runs an instruction with fewer than ``job_samples`` samples, or none. Another stage takes the instruction as
+    #: a request to train and waits until ``job_samples`` samples are held.
+    reads_instructions: bool = False
     #: The kinds of record that the trainer gives the pipeline.
     required_request_types: frozenset[RequestType] = frozenset({RequestType.INFERENCE, RequestType.REPORT})
     #: Whether the recipe trains on uploaded trajectories. Admission refuses an upload
@@ -195,7 +199,8 @@ class Sample2Job(ABC, Plugin):
         pipeline restarts. It is not a training step.
         The pipeline tracks consumption by record set, including the samples
         that the recipe leaves out of the job data. In ``manual`` mode an
-        instruction's data has no samples.
+        instruction's data holds the samples that automatic job data would take next: ``job_samples`` of them, or
+        fewer when the stage ``reads_instructions``.
         """
 
     # A stage may also make samples itself, from no record, and train them as one job of its own: the
@@ -249,6 +254,9 @@ class Sample2Job(ABC, Plugin):
 
 class NoJobData(Sample2Job):
     """Make no job data: the no-update default. A pipeline with it never becomes ready."""
+
+    #: A pipeline that trains nothing takes no instruction.
+    supported_training_modes = frozenset({"auto"})
 
     @classmethod
     def from_config(

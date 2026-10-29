@@ -445,7 +445,12 @@ def test_trainer_reserves_batch_and_commits_backend_preparation() -> None:
     assert result is not None
     assert trainer.pending_job_data is not None
     # The reserved batch has not been consumed yet, so its sample is still counted as held.
-    assert trainer.pipeline_status() == {"ready_samples": 1, "buffer_size": 4, "job_samples": 1}
+    assert trainer.pipeline_status() == {
+        "ready_samples": 1,
+        "buffer_size": 4,
+        "buffered_requests": 0,
+        "job_samples": 1,
+    }
     assert result.metrics["samples"] == 1
     assert result.artifact is None
     assert trainer.state == {}
@@ -466,7 +471,12 @@ def test_trainer_takes_job_samples_and_buffers_four_jobs_only_with_a_backend() -
     data = trainer.pending_job_data
     assert data is not None and len(data.samples) == 2
     # The trainer stops reading records once it holds one job's data.
-    assert trainer.pipeline_status() == {"ready_samples": 2, "buffer_size": 8, "job_samples": 2}
+    assert trainer.pipeline_status() == {
+        "ready_samples": 2,
+        "buffer_size": 8,
+        "buffered_requests": 0,
+        "job_samples": 2,
+    }
 
     observer = Trainer.build("math", records, pipeline_factory=threshold_pipeline, default_job_samples=2)
     assert observer.pipeline.context.default_job_samples is None

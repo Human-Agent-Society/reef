@@ -403,18 +403,21 @@ Training modes
 ``training_mode`` is an attribute of each pipeline. The recipe passes its
 initial value through ``Trainer.build`` and ``PipelineContext``; it defaults
 to ``auto``. A ``Sample2Job`` declares the modes it supports in
-``supported_training_modes``; the default is ``auto`` only. Record push,
-acknowledgement and buffer release use the same methods and buffers in every
-mode. ``GET /reef/status`` reports ``pending_instructions`` as the
+``supported_training_modes``; the default is ``auto`` and ``manual``. A stage
+that trains only its own job data declares ``auto`` only. Record push,
+acknowledgement and buffer release use the same methods and buffers in both
+modes. ``GET /reef/status`` reports ``pending_instructions`` as the
 pipeline's ``buffered_requests`` plus the instructions still unread in
 storage.
 
 - ``auto`` makes job data when the held units and uploaded trajectories hold
   ``job_samples`` samples.
-- ``manual`` makes job data for a queued TRAIN instruction. The instruction's
-  data has no units, so ``make_job_data`` receives no samples.
-- ``hybrid`` makes job data for either, and a queued instruction goes first.
-  The instruction's data takes the units that automatic job data would.
+- ``manual`` makes job data only for a queued TRAIN instruction. The
+  instruction's data takes the samples that automatic job data would take
+  next, up to ``job_samples``. By default the pipeline waits until
+  ``job_samples`` samples are held. A ``Sample2Job`` that sets
+  ``reads_instructions`` runs the instruction at once, with fewer samples or
+  none; harness evolution sets it, because its proposer reads the instruction.
 
 The pipeline runs the oldest instruction first, one per step. It gives the
 instruction's data the id ``<scenario>:instruction:<request id>`` and attaches
@@ -422,12 +425,12 @@ the instruction to ``JobData.request``. Automatic job data gets the id
 ``<scenario>:data:<number>``. Acknowledgement also consumes the
 instruction. ``make_job_data`` must not call models or perform training.
 
-The trainer gives TRAIN records to the pipeline when ``RequestType.TRAIN`` is
-in the ``Sample2Job``'s ``required_request_types``. The pipeline queues them
-FIFO regardless of the selected mode; ``auto`` leaves the queue for a mode that
-takes it. The pipeline takes records normally in manual mode, so changing to auto
-or hybrid can train on data already collected. In manual mode, as in the other
-modes, the pipeline releases the oldest held units beyond ``buffer_size``.
+When the pipeline supports ``manual``, the trainer gives it TRAIN records
+beside the ``Sample2Job``'s ``required_request_types``. The pipeline queues
+them FIFO regardless of the selected mode; ``auto`` leaves the queue for
+``manual``. The pipeline takes records normally in manual mode, so changing to
+auto can train on data already collected. In both modes the pipeline releases
+the oldest held units beyond ``buffer_size``.
 
 Unsupported modes raise ``NotImplementedError``. An invalid mode name raises
 ``ValueError``.
@@ -435,14 +438,14 @@ Unsupported modes raise ``NotImplementedError``. An invalid mode name raises
 Changing training mode
 ----------------------
 
-``POST /reef/scenarios/{scenario}/update`` selects ``auto``, ``manual`` or
-``hybrid`` on the existing pipeline. The trainer serializes selection with
-record push and reservation. Reserved job data stays unchanged and acknowledgement
-consumes its actual contents, independently of subsequent mode changes.
+``POST /reef/scenarios/{scenario}/update`` selects ``auto`` or ``manual`` on
+the existing pipeline. The trainer serializes selection with record push and
+reservation. Reserved job data stays unchanged and acknowledgement consumes
+its actual contents, independently of subsequent mode changes.
 
-Buffered data and queued instructions stay on the same instance. The selector
-is runtime state: a scenario reload after a failed step keeps the selected
-mode, and a service restart starts from the recipe's configured mode.
+Buffered data and queued instructions stay on the same instance. Reef stores
+the selected mode in the scenario's settings, so a reload or a service restart
+applies it again.
 
 The two feedback paths
 ----------------------

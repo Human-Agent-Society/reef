@@ -68,7 +68,7 @@ jobs:
         with:
           node-version: "22"
       - run: python -m pip install ./third_party/reef-client
-      - run: python -m pip install -e . aiohttp pyyaml huggingface_hub pytest
+      - run: python -m pip install -e . aiohttp pyyaml huggingface_hub pytest pytest-xdist==3.8.0
       - run: npm install --prefix "$RUNNER_TEMP/pi" @earendil-works/pi-coding-agent@0.84.2
       - run: python -m pytest tests/smoke/test_real_pi.py tests/smoke/test_reefine_scripted_trial.py
         env:
@@ -101,7 +101,7 @@ jobs:
         with:
           node-version: "22"
       - run: python -m pip install ./third_party/reef-client
-      - run: python -m pip install -e . aiohttp pyyaml huggingface_hub pytest
+      - run: python -m pip install -e . aiohttp pyyaml huggingface_hub pytest pytest-xdist==3.8.0
       - run: npm install --prefix "$RUNNER_TEMP/codex" @openai/codex@0.158.0
       - run: python -m pytest tests/smoke/test_real_codex.py
         env:
@@ -180,7 +180,7 @@ jobs:
         with:
           node-version: "22"
       - run: python -m pip install ./third_party/reef-client
-      - run: python -m pip install -e . aiohttp pyyaml huggingface_hub pytest
+      - run: python -m pip install -e . aiohttp pyyaml huggingface_hub pytest pytest-xdist==3.8.0
       - run: npm install --prefix "$RUNNER_TEMP/dsh" @deepseek-ai/dsh@0.1.2-alpha.5
       - run: python -m pytest tests/smoke/test_real_dsh.py
         env:
@@ -202,7 +202,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: python -m pip install ./third_party/reef-client
-      - run: python -m pip install -e . aiohttp pyyaml huggingface_hub pytest
+      - run: python -m pip install -e . aiohttp pyyaml huggingface_hub pytest pytest-xdist==3.8.0
       - run: |
           git clone --quiet --depth 1 --branch v2026.8.31 https://github.com/NousResearch/hermes-agent "$RUNNER_TEMP/hermes/src"
           rm -rf "$RUNNER_TEMP/hermes/src/.git"
@@ -232,5 +232,5 @@ jobs:
         with:
           python-version: "3.12"
       - run: python -m pip install ./third_party/reef-client
-      - run: python -m pip install -e . pytest
+      - run: python -m pip install -e . pytest pytest-xdist==3.8.0
       - run: python -m pytest tests/recipes/meta_harness/test_terminus_agent.py -v

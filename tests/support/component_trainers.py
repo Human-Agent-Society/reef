@@ -136,10 +136,10 @@ class JudgedAtOnce:
         return None
 
 
-class HybridThresholdJobData(ThresholdJobData):
-    """The same batches, taking instructions too."""
+class AutoOnlyThresholdJobData(ThresholdJobData):
+    """The same batches, without ``manual``: the stage takes no instruction."""
 
-    supported_training_modes = frozenset({"auto", "manual", "hybrid"})
+    supported_training_modes = frozenset({"auto"})
 
 
 #: The node kind of a held artifact: the test recipe's activation rule does not activate it.
@@ -151,7 +151,7 @@ class _TwoTrainerRecipe(Recipe):
     """A scenario serving weights and a harness tree, each evolved by its own local backend."""
 
     backends: Mapping[str, CandidateBackend]
-    hybrid_components: frozenset[str] = frozenset()
+    auto_only_components: frozenset[str] = frozenset()
 
     def activation_rule(self) -> ActivationRule:
         return AlwaysActivate(frozenset({HELD}))
@@ -170,8 +170,8 @@ class _TwoTrainerRecipe(Recipe):
         )
 
     def pipeline_for(self, component: str, context: PipelineContext) -> TrainingPipeline:
-        if component in self.hybrid_components:
-            return threshold_pipeline(context, sample2job=HybridThresholdJobData(context, None, None))
+        if component in self.auto_only_components:
+            return threshold_pipeline(context, sample2job=AutoOnlyThresholdJobData(context, None, None))
         return threshold_pipeline(context)
 
     def build_trainers(
@@ -318,7 +318,7 @@ def _dispatcher(
     *,
     backends: dict[str, _ComponentBackend] | None = None,
     recipe: Recipe | None = None,
-    hybrid_components: frozenset[str] = frozenset(),
+    auto_only_components: frozenset[str] = frozenset(),
     training: StubTrainingComponent | None = None,
     records_dir: Path | None = None,
     backend_factory: Any = None,
@@ -331,14 +331,14 @@ def _dispatcher(
         backends = {} if backends is None else backends
     elif training is None:
         backends = _local_pair(tmp_path) if backends is None else backends
-        recipe = _TwoTrainerRecipe(backends=backends, hybrid_components=hybrid_components)
+        recipe = _TwoTrainerRecipe(backends=backends, auto_only_components=auto_only_components)
     else:
         # A training component binds the scenario: a process trains one scenario on it. It trains the weights; the
         # harness keeps its local backend.
         backends = {HARNESS: _ComponentBackend(HARNESS, tmp_path / "candidates")} if backends is None else backends
         recipe = _TwoTrainerRecipe(
             backends=backends,
-            hybrid_components=hybrid_components,
+            auto_only_components=auto_only_components,
             runtime=StubInferenceRuntime(),
             training_component=training,
         )

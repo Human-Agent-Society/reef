@@ -159,7 +159,8 @@ measurement of which requests passed the checks.
 ## Behavior and configuration
 
 * `training-mode: manual` runs one step for each accepted instruction on
-  `POST /reef/train`. Use `hybrid` to also learn from failing reports.
+  `POST /reef/train`. Each step also reads the failing reports held for it.
+  Use `auto` to learn from failing reports without instructions.
 * The first tree of a new scenario is the recipe's seed,
   [`seed/`](seed/): one starter skill. The agent, or the served model
   where the host cannot isolate the agent, writes skills, rules, agent

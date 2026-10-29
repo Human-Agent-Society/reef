@@ -239,7 +239,9 @@ class TrainingPipeline:
 
     @property
     def required_request_types(self) -> frozenset[RequestType]:
-        """The kinds of record that the trainer gives the pipeline."""
+        """The kinds of record that the trainer gives the pipeline: the stage's, and instructions in ``manual``."""
+        if "manual" in self.supported_training_modes:
+            return self.sample2job.required_request_types | {RequestType.TRAIN}
         return self.sample2job.required_request_types
 
     @property
@@ -269,8 +271,8 @@ class TrainingPipeline:
 
     def set_training_mode(self, training_mode: str) -> None:
         """Select future job data while preserving the held units and the reservation."""
-        if training_mode not in ("auto", "manual", "hybrid"):
-            raise ValueError("training_mode must be 'auto', 'manual' or 'hybrid'")
+        if training_mode not in ("auto", "manual"):
+            raise ValueError("training_mode must be 'auto' or 'manual'")
         if training_mode not in self.supported_training_modes:
             raise NotImplementedError(
                 f"{type(self.sample2job).__name__} does not implement training_mode={training_mode!r}"
@@ -429,9 +431,8 @@ class TrainingPipeline:
     # --------------------------------------------------------- job data cycle
     #
     # Make job data when the held units and uploaded trajectories hold the trainer's
-    # sample count (auto, hybrid) or an instruction is queued (manual, hybrid), hand
-    # the same data out until it is acknowledged, then end the units and
-    # trajectories it consumed.
+    # sample count (auto) or an instruction is queued (manual), hand the same data
+    # out until it is acknowledged, then end the units and trajectories it consumed.
 
     def advance(self) -> None:
         """Advance background work and settle its results without reserving job data.
@@ -465,10 +466,15 @@ class TrainingPipeline:
         return self.held_data_ready(sample_count)
 
     def held_data_ready(self, sample_count: int | None) -> bool:
-        """Whether the training mode lets held samples and instructions make job data of ``sample_count`` samples."""
-        if self.training_mode == "manual":
-            return bool(self.training_requests)
-        if self.training_mode == "hybrid" and self.training_requests:
+        """Whether the training mode lets held samples and instructions make job data of ``sample_count`` samples.
+
+        ``auto`` needs ``sample_count`` held samples. ``manual`` needs a queued instruction, and the same held
+        samples unless the stage reads instructions (``Sample2Job.reads_instructions``): such a stage runs an
+        instruction with fewer samples or none.
+        """
+        if self.training_mode == "manual" and not self.training_requests:
+            return False
+        if self.training_mode == "manual" and self.sample2job.reads_instructions:
             return True
         return sample_count is not None and self.count_held_samples() >= sample_count
 
@@ -485,16 +491,10 @@ class TrainingPipeline:
                 self.pending = self.sample2job.make_job_data(own, f"{self.scenario}:data:{self.data_number}")
                 self.pending_is_own = True
                 return self.pending
-            # Manual and hybrid run the oldest queued instruction first; auto leaves the queue to a mode that takes it.
-            request = (
-                next(iter(self.training_requests.values()))
-                if self.training_mode != "auto" and self.training_requests
-                else None
-            )
-            # In manual mode an instruction runs alone; in hybrid it takes the samples that automatic job data would.
-            selected_samples = (
-                0 if sample_count is None or (request is not None and self.training_mode == "manual") else sample_count
-            )
+            # Manual runs the oldest queued instruction with the samples that automatic job data would take;
+            # auto leaves the queue to manual.
+            request = next(iter(self.training_requests.values())) if self.training_mode == "manual" else None
+            selected_samples = 0 if sample_count is None else sample_count
             # Uploaded trajectories go first, in upload order. Whole record set units, in selection order, fill
             # the rest of the data until it holds ``selected_samples`` samples.
             self.reserved_trajectory_ids = tuple(self.uploaded_trajectories)[:selected_samples]
@@ -611,7 +611,7 @@ class TrainingPipeline:
             "ready_samples": self.count_held_samples(),
             "buffer_size": self.buffer_size,
         }
-        if self.supported_training_modes & {"manual", "hybrid"}:
+        if "manual" in self.supported_training_modes:
             state["buffered_requests"] = self.buffered_requests()
         return {**state, **self.record2record.status(), **self.record2sample.status(), **self.sample2job.status()}
 

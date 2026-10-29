@@ -105,8 +105,8 @@ class Recipe:
     activation: PluginReference | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        if self.training_mode not in ("auto", "manual", "hybrid"):
-            raise ValueError("training_mode must be 'auto', 'manual' or 'hybrid'")
+        if self.training_mode not in ("auto", "manual"):
+            raise ValueError("training_mode must be 'auto' or 'manual'")
         # The stages' classes fail the deployment here, not the first scenario.
         self.stages()
 
