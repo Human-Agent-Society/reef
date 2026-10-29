@@ -102,13 +102,9 @@ BOXES = [
     ),
     (
         2, "B2", 2, "store", None, "Records",
-        ["each call with its reply, and each report, per scenario;", "a report names its calls by agent_record_id"],
+        ["the raw traces: each call with its reply, and each report;", "a report names its calls by agent_record_id, per scenario"],
     ),
-    (4, "B3", 1, "reef", 4, "Batch", ["the pipeline selects reports", "and makes one job of", "`evolution.batch_size"]),
-    (
-        3, "B3", 1, "reef", None, "Workspace",
-        ["harness/: a copy of the head", "material/: one trace per report,", "its calls, score and feedback", "state/: the method's own files"],
-    ),
+    (3, "B3", 2, "reef", None, "Workspace", []),
     (2, "B3", 1, "reef", 5, "Method", ["`step(context)", "edits the copy; its services:", "models, calls, check, evaluate"]),
     (1, "B3", 1, "reef", 6, "Check", ["`validate_tree", "refuses a file that no part", "takes, or that its format refuses"]),
     (
@@ -131,12 +127,20 @@ BOXES = [
     ),
 ]  # fmt: skip
 
-# reef-client's commands, one per row; a continued description has no command.
+# Rows of a key and its description; a continued description has no key. reef-client's commands:
 CLIENT_COMMANDS = [
     ("connect", "installs the agent at Reef's version, adds its command"),
     ("run", "installs the newest release and starts the agent on it;"),
     ("", "sends back what the session changed, in the background"),
     ("sync", "sends changes and installs the head, without the agent"),
+]
+
+# The workspace's directories.
+WORKSPACE_DIRS = [
+    ("harness/", "a copy of the head; the method edits it"),
+    ("material/traces/", "the raw traces from Records, one per report:"),
+    ("", "its calls in order, its score and its feedback"),
+    ("state/", "the method's own files, kept between steps"),
 ]
 
 # The adapter's sections, one per column: the key, then what it declares.
@@ -244,9 +248,10 @@ def render(theme: str, fonts) -> str:
     for column, row, span, kind, badge, title, lines in BOXES:
         top, height = ROWS[row]
         o.append(card(p, X[column], top, WIDE if span == 2 else COL_W, height, kind, title, lines, badge))
-    for k, (command, description) in enumerate(CLIENT_COMMANDS):
-        o.append(write(X[0] + 18, A2 + 60 + k * 21, command, MONO, p["ink"], mono=True))
-        o.append(write(X[0] + 104, A2 + 60 + k * 21, description, BODY, p["muted"]))
+    for x, y, indent, rows in [(X[0], A2, 86, CLIENT_COMMANDS), (X[3], B3, 142, WORKSPACE_DIRS)]:
+        for k, (key, description) in enumerate(rows):
+            o.append(write(x + 18, y + 60 + k * 21, key, MONO, p["ink"], mono=True))
+            o.append(write(x + 18 + indent, y + 60 + k * 21, description, BODY, p["muted"]))
     o.append(card(p, X[0], B5, X[4] + COL_W - X[0], B5_H, "reef", "Adapter", [], dashed=True))
     o.append(write(X[0] + 104, B5 + 34, "reef/harness/adapters/<agent>/adapter.yaml", MONO, p["ink"], mono=True))
     o.append(
@@ -310,21 +315,18 @@ def render(theme: str, fonts) -> str:
         o.append(path(p, [(x, B2), (x, B1 + B1_H)] if up else [(x, B1 + B1_H), (x, B2)]))
         o.append(note(p, x + 10, B1 + B1_H + 32, s))
 
-    # One training step: batch, workspace, method, check, evaluation, policy, release rule.
-    batch_x = X[4] + 130
-    o.append(path(p, [(X[3] + COL_W, B2 + 48), (batch_x, B2 + 48), (batch_x, B3)]))
-    o.append(note(p, batch_x + 10, BAND_TOP - 12, "reports and"))
-    o.append(note(p, batch_x + 10, BAND_TOP + 6, "their calls"))
-    head_route = [
-        (X[1] + 200, B2 + B2_H),
-        (X[1] + 200, B2 + B2_H + 32),
-        (X[3] + 130, B2 + B2_H + 32),
-        (X[3] + 130, B3),
-    ]
+    # One training step: the workspace gets the head and a batch of raw traces; then method, check, evaluation,
+    # policy, release rule.
+    head_route = [(X[1] + 200, B2 + B2_H), (X[1] + 200, B2 + B2_H + 32), (X[3] + 60, B2 + B2_H + 32), (X[3] + 60, B3)]
     o.append(path(p, head_route))
-    o.append(note(p, X[1] + 214, B2 + B2_H + 25, "the head"))
-    o.extend(path(p, [(X[k], B3 + B3_H // 2), (X[k - 1] + COL_W, B3 + B3_H // 2)]) for k in (4, 3, 2))
-    o.append(note(p, X[4] - GAP // 2, B3 - 10, "the job's traces", "middle"))
+    o.append(note(p, X[1] + 214, B2 + B2_H + 25, "the head, into harness/"))
+    traces_x = X[3] + 220
+    o.append(path(p, [(traces_x, B2 + B2_H), (traces_x, B3)]))
+    o.append(f'<circle cx="{traces_x + 24}" cy="{B2 + B2_H + 23}" r="11" fill="{p["reef"]}"/>')
+    o.append(write(traces_x + 24, B2 + B2_H + 28, "4", 13, p["card"], 600, "middle"))
+    o.append(write(traces_x + 42, B2 + B2_H + 28, "batch: the raw traces, into material/", BODY, p["ink"]))
+    o.append(note(p, traces_x + 42, B2 + B2_H + 47, "evolution.batch_size reports per job", mono=True))
+    o.extend(path(p, [(X[k], B3 + B3_H // 2), (X[k - 1] + COL_W, B3 + B3_H // 2)]) for k in (3, 2))
     check_x, evaluation_x = X[1] + 130, X[2] + 72
     o.append(path(p, [(check_x, B3 + B3_H), (check_x, B4 - 28), (evaluation_x, B4 - 28), (evaluation_x, B4)]))
     o.append(note(p, check_x + 12, B4 - 34, "the candidate"))
