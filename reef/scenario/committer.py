@@ -27,7 +27,7 @@ from reef.core.errors import CommitPending, ReefError
 from reef.observability.base import TrainingExperimentContext
 from reef.observability.commits import CommitExperimentObserver
 from reef.scenario.binding import ScenarioBinding
-from reef.scenario.releases import ScenarioReleases
+from reef.scenario.releases import ScenarioReleases, ServedArtifact
 from reef.storage.commits import (
     SCENARIO_METADATA_KEY,
     CommitOperation,
@@ -380,34 +380,118 @@ class ScenarioCommitter:
             if surface.component_artifact(served, selected.component).artifact_id == selected.artifact_id:
                 return replace(selected, release_id=current_ref.release_id)
             self.require_no_pending_commit("activate an artifact")
-            if surface.single:
-                # The release's own admission check, as at its publication.
-                surface.validate(release)
-                target, recorded_component, components = release, None, None
-            else:
-                staged = self.stage_combination(
-                    self._step + 1, served, selected.component, release.component(selected.component)
-                )
-                manifest = self.release_manifest(staged)
-                # Published beside the chain: the chain tip and the backend head stay.
-                published_ref = self._artifacts.publish(
-                    staged,
-                    expected_parent=self._artifacts.checkpoint,
-                    metadata={**dict(staged.metadata), COMPONENTS_METADATA_KEY: manifest.to_dict()},
-                    advance_heads=False,
-                )
-                target, recorded_component, components = (
-                    self._artifacts.resolve(published_ref),
-                    selected.component,
-                    manifest.artifact_ids(published_ref.release_id),
-                )
+            target = self.release_with(served, selected, release)
             surface.activate(target, self._binding.runtime, previous=served)
             record = self.append_operation_record(
-                "activate", target.ref, component=recorded_component, components=components
+                "activate",
+                target.ref,
+                component=None if surface.single else selected.component,
+                components=self.recorded_components(target, target.ref.release_id),
             )
             self._artifacts.activate(target.ref, expected=current_ref)
             self.advance_to(record.step)
             return replace(selected, release_id=target.ref.release_id)
+
+    def release_with(self, active: Artifact, selected: ComponentArtifact, release: Artifact) -> Artifact:
+        """The release ``active`` with ``selected.component`` bound to the artifact ``selected``.
+
+        ``release`` is the release that made the artifact. With one component,
+        the result is ``release``, after its own admission check, as at its
+        publication. With several, the result is a new release: ``active``
+        with the one component replaced. It is published beside the chain, so
+        the chain tip and the backend head stay.
+        """
+        surface = self._binding.surface
+        if surface.single:
+            surface.validate(release)
+            return release
+        staged = self.stage_combination(
+            self._step + 1, active, selected.component, release.component(selected.component)
+        )
+        published_ref = self._artifacts.publish(
+            staged,
+            expected_parent=self._artifacts.checkpoint,
+            metadata={**dict(staged.metadata), COMPONENTS_METADATA_KEY: self.release_manifest(staged).to_dict()},
+            advance_heads=False,
+        )
+        return self._artifacts.resolve(published_ref)
+
+    def serve(self, artifact_id: str, component: str | None = None) -> ComponentArtifact:
+        """Serve ``artifact_id`` as ``component`` beside the active release; return it with the release that serves it.
+
+        The release that serves it is the active release with the artifact in
+        its component (:meth:`release_with`).
+        Then the ``"serve"`` record lands at the next step. The active
+        release, the chain tip and every training start stay. Serving a
+        served artifact changes nothing. An artifact of the active release can
+        be served too, so that it keeps serving after another activation.
+
+        Raise as :meth:`resolve_artifact` does, and ``CommitPending`` while a
+        training result waits for its commit. Raise ``ReefError`` when the
+        scenario keeps no durable commit history. Raise it also when the
+        runtime answers only from the release that it has loaded
+        (``InferenceRuntime.artifact_model`` is ``None``).
+        """
+        with self._lock, self._publication_lock:
+            if not self._store.durable:
+                raise ReefError(
+                    f"scenario {self._name!r} keeps no durable commit history, so it serves its active release alone"
+                )
+            selected, release = self.resolve_artifact(artifact_id, component)
+            served = self.release_queries.served_beside(self._step, self.component_names()).get(selected.artifact_id)
+            if served is not None:
+                return replace(selected, release_id=served.release.release_id)
+            self.require_no_pending_commit("serve an artifact")
+            surface = self._binding.surface
+            current = Artifact(self._artifacts.current, self._artifacts.repository)
+            loader = surface.loader_component
+            runtime = self._binding.runtime
+            if loader is not None and runtime is not None:
+                # The calls use the artifact's own weights, or the active release's weights for an artifact of
+                # another component. The runtime must answer each call from the release that the call names.
+                source = release if surface.single or selected.component == loader else current
+                if runtime.artifact_model(surface.component_artifact(source, loader)) is None:
+                    raise ReefError(
+                        f"scenario {self._name!r}'s runtime answers only from the release it has loaded, so it "
+                        f"cannot serve artifact {selected.artifact_id!r} beside the active release"
+                    )
+            target = self.release_with(current, selected, release)
+            record = self.append_operation_record(
+                "serve",
+                target.ref,
+                component=None if surface.single else selected.component,
+                components=self.recorded_components(target, target.ref.release_id),
+            )
+            self.advance_to(record.step)
+            return replace(selected, release_id=target.ref.release_id)
+
+    def stop_serving(self, artifact_id: str) -> ServedArtifact:
+        """Stop serving ``artifact_id`` beside the active release; return it with the release that served it.
+
+        The ``"stop_serving"`` record names the release, the component and the
+        manifest of the ``"serve"`` record that it ends. The active release
+        stays, so an artifact that it binds still answers. Raise
+        ``ArtifactNotFound`` when the scenario does not serve ``artifact_id``
+        beside its active release. Raise ``CommitPending`` while a training
+        result waits for its commit.
+        """
+        with self._lock, self._publication_lock:
+            served = self.release_queries.served_beside(self._step, self.component_names()).get(artifact_id)
+            if served is None:
+                raise ArtifactNotFound(
+                    f"scenario {self._name!r} does not serve artifact {artifact_id!r} beside its active release"
+                )
+            self.require_no_pending_commit("stop serving an artifact")
+            if self._binding.surface.single:
+                recorded_component, components = None, None
+            else:
+                recorded_component = served.component
+                components = self.release_queries.manifests(self._step)[served.release.release_id]
+            record = self.append_operation_record(
+                "stop_serving", served.release, component=recorded_component, components=components
+            )
+            self.advance_to(record.step)
+            return served
 
     def train_from(self, artifact_id: str, component: str | None = None) -> ComponentArtifact:
         """Set ``component``'s training start to ``artifact_id``; return the artifact.
@@ -936,11 +1020,12 @@ class ScenarioCommitter:
         components: Mapping[str, str] | None = None,
         metrics: Mapping[str, Any] | None = None,
     ) -> CommitRecord:
-        """Append an ``"activate"``, ``"train_from"`` or ``"import"`` record at the next step; it carries no trainer
-        state.
+        """Append a record that carries no trainer state at the next step: an ``"activate"``, ``"train_from"``,
+        ``"import"``, ``"serve"`` or ``"stop_serving"`` record.
 
-        ``components`` is the manifest of a release that an activation or an import published, and ``component``
-        then names the activated or imported component. ``metrics`` is an import's source.
+        ``components`` is the manifest of a release that an activation, an import or a serve published.
+        ``component`` then names the component that it activated, imported or served. ``metrics`` is an import's
+        source.
         """
         record = CommitRecord(
             scenario=self._name,
