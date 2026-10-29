@@ -17,7 +17,9 @@ The map, one subpackage per job:
     one headless run and its reading: launch on a rendered root through any
     ``reef.sandbox`` executor (``run``), the adapter as the program that
     executor runs and its install (``vendor_install``), the model binding,
-    the trajectory readers, and Harbor task episodes (``tasks``).
+    the trajectory readers, Harbor task episodes that report to Reef
+    (``tasks``), and one adapter's agent playing a Harbor task in the task's
+    container (``harbor_task``).
 ``runners/``
     the programs an adapter's ``binary`` points at when Reef ships them:
     ``native`` (the loop, its graph and the resident ``serve`` form) and
