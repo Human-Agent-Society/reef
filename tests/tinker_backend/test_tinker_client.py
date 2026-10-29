@@ -150,6 +150,8 @@ def client(tmp_path):
     value._sdk = SDK()
     value._model = "Qwen/Qwen3-8B"
     value._config = TinkerConfig(state_dir=str(tmp_path), train_timeout_s=10)
+    value._lora_rank = 32
+    value._seed = 0
     value._api_key = "test-only"
     value._service = Service(value._sdk.events)
     value.base_client = Sampler(value._sdk.events)
@@ -260,7 +262,7 @@ def test_initial_snapshot_and_sampling_use_explicit_immutable_paths(client, samp
 
 def test_a_null_seed_lets_the_service_choose(client):
     # Spindle's multi-LoRA trainer refuses a per-model seed.
-    client._config = replace(client._config, seed=None)
+    client._seed = None
     client.initialize()
     assert ("initialize", client._model, 32, None) in client._sdk.events
 
@@ -327,7 +329,7 @@ def test_remote_model_mismatch_fails_before_training_or_sampling(client, sampler
         "get_weights_info_by_tinker_path",
         lambda _, path: Future(SimpleNamespace(base_model="other/model", is_lora=True, lora_rank=32)),
     )
-    with pytest.raises(ValueError, match="remote Tinker training checkpoint"):
+    with pytest.raises(ValueError, match="tinker://base/state is no rank 32 LoRA of Qwen/Qwen3-8B"):
         client.train(base, [[row]], ImportanceSamplingLoss(), [1e-4], kl_coef=0.0)
     assert not any(event[0] == "forward_backward" for event in client._sdk.events)
     monkeypatch.setattr(Sampler, "get_base_model", lambda _: "other/model")

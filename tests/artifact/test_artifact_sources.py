@@ -308,16 +308,14 @@ def test_a_commit_is_kept_by_reference_and_a_branch_is_copied_at_its_commit(
 
 
 @pytest.mark.unit
-def test_a_reference_is_the_only_file_of_its_artifact(tmp_path: Path) -> None:
+def test_an_artifact_refers_to_a_revision_when_it_holds_the_reference(tmp_path: Path) -> None:
     stored = tmp_path / "stored"
     stored.mkdir()
-    (stored / REFERENCE_FILE).write_text(json.dumps(HuggingFaceRevision("org/model", COMMIT).to_dict()))
-    # The files a repository adds to a materialized release do not hide the reference.
-    (stored / "reef-artifact.json").write_text("{}")
-    assert read_reference(stored) == HuggingFaceRevision("org/model", COMMIT)
-    (stored / "config.json").write_text("{}")
     assert read_reference(stored) is None
-    (stored / "config.json").unlink()
+    (stored / REFERENCE_FILE).write_text(json.dumps(HuggingFaceRevision("org/model", COMMIT).to_dict()))
+    # Files beside it, such as a checkpoint manifest or the repository's own files, describe the artifact.
+    (stored / "tinker-checkpoint.json").write_text("{}")
+    assert read_reference(stored) == HuggingFaceRevision("org/model", COMMIT)
     (stored / REFERENCE_FILE).write_text("not json")
     with pytest.raises(ValueError, match="no JSON object"):
         read_reference(stored)
