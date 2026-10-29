@@ -1,4 +1,4 @@
-"""Read the terminus runner's trials back as a rollout's trajectory.
+"""Read the terminus runner's trials back as a run's trajectory.
 
 The adapter names :func:`read_trials` as its ``sessions`` format, a
 ``module:function`` reference that Reef's trajectory reader resolves.
@@ -10,7 +10,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from reef.harness.rollouts.trajectory import TrajectoryError
+from reef.harness.tasks.trajectory import TrajectoryError
 
 
 def read_trials(path: Path) -> tuple[dict[str, Any], ...]:

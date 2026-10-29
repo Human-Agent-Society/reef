@@ -423,7 +423,7 @@ Harness evolution: worker executor selection
 --------------------------------------------
 
 Harness evolution evaluates external model endpoints, so it does not require
-a local GPU. ``RolloutScorer.execution_requirements()`` declares local worker
+a local GPU. ``TaskScorer.execution_requirements()`` declares local worker
 needs using ``ExecutionRequirements``. Its default is CPU-only. The recipe
 supplies the worker count and resources from ``execution.evolution``. The
 selector chooses ``uni`` for one local worker and ``mp`` for multiple local

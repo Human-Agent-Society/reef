@@ -21,7 +21,7 @@ One step runs in the trainer's three phases:
        the screens a person's items pass.
 ``evaluate``
     Score the sides that the publication policy names with
-    ``HarnessRolloutEvaluator`` (``reef.evaluation.harness``), which reuses
+    ``HarnessTaskEvaluator`` (``reef.evaluation.harness``), which reuses
     the scores the history holds.
 ``settle_step``
     Fold the decision into the state and the history. A selected tree is
@@ -53,12 +53,12 @@ from reef.evaluation.harness import (
     EvaluationTasks,
     HarnessCandidate,
     HarnessCandidateEvaluator,
-    HarnessRolloutEvaluator,
+    HarnessTaskEvaluator,
     History,
-    RolloutRecord,
+    RunRecord,
 )
 from reef.harness.adapters.descriptor import AdapterDescriptor
-from reef.harness.rollouts.model_binding import ModelBindings, ModelBindingsResolver
+from reef.harness.tasks.model_binding import ModelBindings, ModelBindingsResolver
 from reef.harness.tree import HarnessTree, validate_tree
 from reef.harness.tree.checks import clip_record_text, clip_record_value, directive_shaped, secret_shaped
 from reef.train.backend import CandidateBackend, ComponentReleases, PreparedStep
@@ -72,7 +72,7 @@ from reef.train.harness_backend.workspace import StepOutput, Workspace
 from reef.train.types import JobData, TrainStepResult
 
 #: The phases of a running step, in order; only an offline step, which rolls out train tasks, has the first.
-STEP_PHASES = ("rolling out", "proposing", "evaluating")
+STEP_PHASES = ("running tasks", "proposing", "evaluating")
 
 
 @dataclass(frozen=True)
@@ -81,15 +81,15 @@ class StepProgress:
 
     Values: ``request_id`` names the instruction the step answers, ``None``
     for an automatic step. ``phase`` is one of
-    ``STEP_PHASES``: ``"rolling out"`` while an offline step runs the head
+    ``STEP_PHASES``: ``"running tasks"`` while an offline step runs the head
     tree on its train tasks, ``"evaluating"`` while the evaluation's
-    rollouts run, and ``"proposing"`` at any other time from the moment the
+    tasks run, and ``"proposing"`` at any other time from the moment the
     step claims its record directory until a candidate exists.
     ``started_at`` is the step's start in seconds since the epoch.
     ``step_record`` is the step's record directory, which the step claims
     before it reports any progress.
-    ``rollouts_total`` ≥ 0 is the rollout count of the rollouts or of the
-    evaluation once its rollouts are laid out, else ``None``. ``activity``
+    ``runs_total`` ≥ 0 is the run count of the runs or of the
+    evaluation once its runs are laid out, else ``None``. ``activity``
     is what the method did so far, oldest first, each ``{at, kind, text}``
     with ``failed`` on a line that went wrong.
     Purpose: the backend replaces it at each phase change; the request page
@@ -100,7 +100,7 @@ class StepProgress:
     phase: str
     started_at: float
     step_record: str
-    rollouts_total: int | None = None
+    runs_total: int | None = None
     activity: tuple[Mapping[str, Any], ...] = ()
 
     def __post_init__(self) -> None:
@@ -108,9 +108,9 @@ class StepProgress:
             raise ValueError(f"StepProgress.phase must be one of {', '.join(STEP_PHASES)}")
         if not isinstance(self.step_record, str) or not self.step_record:
             raise ValueError("StepProgress.step_record must name the step's record directory")
-        total = self.rollouts_total
+        total = self.runs_total
         if total is not None and (isinstance(total, bool) or not isinstance(total, int) or total < 0):
-            raise ValueError("StepProgress.rollouts_total must be an integer of at least 0 or None")
+            raise ValueError("StepProgress.runs_total must be an integer of at least 0 or None")
 
 
 @dataclass(frozen=True)
@@ -121,7 +121,7 @@ class StepLimits:
     ``max_steps`` caps automatic steps; ``max_failure_streak`` skips
     automatic steps after that many rejections in a row;
     ``max_model_calls_per_step`` caps one step's model calls;
-    ``max_rollouts_per_step`` caps the rollouts the method's
+    ``max_runs_per_step`` caps the runs the method's
     ``services.evaluate`` runs in one step.
     Purpose: ``HarnessEvolutionRecipe`` builds it from ``evolution``; the
     backend reads it in every step.
@@ -130,14 +130,14 @@ class StepLimits:
     max_steps: int = 0
     max_failure_streak: int = 0
     max_model_calls_per_step: int = 0
-    max_rollouts_per_step: int = 0
+    max_runs_per_step: int = 0
 
     def __post_init__(self) -> None:
         for label, value in (
             ("max_steps", self.max_steps),
             ("max_failure_streak", self.max_failure_streak),
             ("max_model_calls_per_step", self.max_model_calls_per_step),
-            ("max_rollouts_per_step", self.max_rollouts_per_step),
+            ("max_runs_per_step", self.max_runs_per_step),
         ):
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ValueError(f"{label} must be an integer of at least 0 (0 turns the limit off)")
@@ -150,7 +150,7 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator):
     that is not Reef's; methods never subclass the backend. ``agent`` is the
     deployment's coding agent, ``None`` when it configured none or the method
     does not run it. ``evaluator`` is ``None`` when the deployment configured
-    no scorer; then no rollout runs. ``task_directories`` says
+    no scorer; then no task runs. ``task_directories`` says
     that the tasks are Harbor task directories.
     Purpose: ``HarnessEvolutionRecipe.build_backend`` makes one per scenario
     component; the trainer runs its steps, and the service reads its step
@@ -164,7 +164,7 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator):
         releases: ComponentReleases,
         method: Method,
         agent: AgentExecution | None,
-        evaluator: HarnessRolloutEvaluator | None,
+        evaluator: HarnessTaskEvaluator | None,
         tasks: EvaluationTasks,
         history: History,
         models: ModelBindings,
@@ -239,14 +239,14 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator):
         """Step ``step``'s candidate, or the skip and its reason; ``step`` is the scenario step it will commit as."""
         # The step's material: the traces of traffic, and on an offline step the train tasks it rolls out.
         samples = tuple(sample for sample in data.samples if isinstance(sample, TrajectorySample))
-        rollout_tasks = tuple(str(sample.task_path) for sample in data.samples if isinstance(sample, TaskSample))
+        train_tasks = tuple(str(sample.task_path) for sample in data.samples if isinstance(sample, TaskSample))
         if self.model_resolver is not None:
             self.models = self.model_resolver.resolve()
             if self.evaluator is not None:
                 self.evaluator.use_models(self.models)
         metrics: dict[str, Any] = {"traces": len(samples)}
-        if rollout_tasks:
-            metrics["rollouts"] = len(rollout_tasks)
+        if train_tasks:
+            metrics["runs"] = len(train_tasks)
         automatic = data.request is None
         if automatic and self.limits.max_steps and step > self.limits.max_steps:
             return skipped(state, metrics, f"step budget of {self.limits.max_steps} exhausted")
@@ -271,7 +271,7 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator):
             started_at=time.time(),
             step_record=str(step_dir),
         )
-        rollouts = self.roll_out(head_tree, rollout_tasks, step) if rollout_tasks else ()
+        task_runs = self.run_train_tasks(head_tree, train_tasks, step) if train_tasks else ()
         workspace = Workspace.create(
             step_dir,
             history_dir=self.history.root,
@@ -280,9 +280,9 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator):
             descriptor=self.descriptor,
             task_directories=self.task_directories,
             tasks=step_tasks.tasks,
-            repeats=0 if self.evaluator is None else self.evaluator.rollout_repeats,
+            repeats=0 if self.evaluator is None else self.evaluator.task_repeats,
             samples=samples,
-            rollouts=rollouts,
+            runs=task_runs,
             request=data.request,
             state_files=state.method_files,
         )
@@ -311,7 +311,7 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator):
 
         The candidate is evaluated on ``evaluation_tasks``. ``state`` is the step's state, and the returned step's
         state carries the method's files from ``state/``. ``calls`` is the step's call record, and ``metrics``
-        gains the method's calls, rollouts and words.
+        gains the method's calls, runs and words.
         """
         services = StepServices(
             workspace=workspace,
@@ -321,7 +321,7 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator):
             head=head.checksum(),
             models=self.models,
             step_calls=calls,
-            max_rollouts=self.limits.max_rollouts_per_step,
+            max_runs=self.limits.max_runs_per_step,
             agent=self.agent,
         )
         try:
@@ -333,7 +333,7 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator):
             metrics["model_calls"] = len(calls.entries)
             metrics["model_seconds"] = round(sum(float(entry.get("seconds", 0.0)) for entry in calls.entries), 3)
             metrics["model_input_tokens"], metrics["model_output_tokens"] = call_tokens(calls.entries)
-            metrics["method_rollouts"] = services.rollouts_run
+            metrics["method_runs"] = services.runs_run
         output = self.read_output(workspace, metrics)
         try:
             state = replace(state, method_files=workspace.state_files())
@@ -383,28 +383,28 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator):
             metrics["method_output_refused"] = dict(output.refused)
         return output
 
-    def roll_out(self, head: HarnessTree, tasks: Sequence[str], step: int) -> tuple[RolloutRecord, ...]:
-        """One rollout record of ``head`` on each of an offline step's train ``tasks``, in task order.
+    def run_train_tasks(self, head: HarnessTree, tasks: Sequence[str], step: int) -> tuple[RunRecord, ...]:
+        """One run record of ``head`` on each of an offline step's train ``tasks``, in task order.
 
-        The rollouts go through the score cache, as an evaluation's do: a rollout of the same tree, task and
+        The runs go through the score cache, as an evaluation's do: a run of the same tree, task and
         evaluation context that the history holds is reused. ``RuntimeError`` without a scorer.
         """
         if self.evaluator is None:
             raise RuntimeError("an offline step rolls out its train tasks, which needs evolution.evaluation.scorer")
         if self.progress is not None:
-            self.progress = replace(self.progress, phase="rolling out", rollouts_total=len(tasks))
-        records = self.evaluator.rollouts(head, tasks, repeats=1, step=step)
+            self.progress = replace(self.progress, phase="running tasks", runs_total=len(tasks))
+        records = self.evaluator.runs(head, tasks, repeats=1, step=step)
         if self.progress is not None:
-            self.progress = replace(self.progress, phase="proposing", rollouts_total=None)
+            self.progress = replace(self.progress, phase="proposing", runs_total=None)
         return records
 
     def evaluate(self, candidate: UpdateCandidate, *, sides: Sequence[str] = EVALUATION_SIDES) -> EvaluationResult:
         harness_candidate = require_harness_candidate(candidate)
         if self.evaluator is None:
-            raise RuntimeError("the deployment configured no evolution.evaluation.scorer, so no rollout can run")
+            raise RuntimeError("the deployment configured no evolution.evaluation.scorer, so no run can run")
         if self.progress is not None:
-            total = self.evaluator.rollout_count(harness_candidate, len(tuple(sides)))
-            self.progress = replace(self.progress, phase="evaluating", rollouts_total=total)
+            total = self.evaluator.run_count(harness_candidate, len(tuple(sides)))
+            self.progress = replace(self.progress, phase="evaluating", runs_total=total)
         return self.evaluator.evaluate(harness_candidate, sides=sides)
 
     def settle_step(self, prepared: PreparedStep, decision: SelectionDecision) -> TrainStepResult:
@@ -412,7 +412,7 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator):
 
         The head the step prepared against is ``prepared.metrics["head_release_id"]``; no activation, new training
         start, import or sync moves it while a step runs. The commit keeps the evaluation's sums, not its score
-        vectors: the history holds every rollout. The metrics gain ``selected`` and ``selection``: the candidate
+        vectors: the history holds every run. The metrics gain ``selected`` and ``selection``: the candidate
         id, the decision's ``selected``, ``policy``, ``reason`` and ``metrics``, and the ``evaluation`` that the
         decision read without its metrics (``evaluator``, ``evaluator_version``, ``metadata``). A rejected
         candidate makes no artifact. A selected one is the result's artifact, and its ``changed_kinds`` are the

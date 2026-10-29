@@ -30,7 +30,7 @@ COMMAND_ROOT = "terminus-commands"
 CONTEXT_ROOT = "terminus/context/"
 ENVIRONMENT_ENV = "REEF_TERMINUS_ENVIRONMENT"
 #: Where the adapter renders. ``terminus-commands`` is a sibling of
-#: ``terminus``, not a child, so the tree is read from the rollout root.
+#: ``terminus``, not a child, so the tree is read from the run root.
 TREE_PREFIXES = ("terminus/", "terminus-commands/")
 #: Written during the run, under the tree but not part of it.
 RUNTIME_PREFIXES = ("terminus/sessions/", "terminus/trials/")
@@ -62,13 +62,13 @@ def extension_source(files: Mapping[str, str]) -> tuple[str, str] | None:
 
 
 def load_tree(root: Path | str) -> dict[str, str]:
-    """Read a rendered tree from the rollout root, keyed as ``render_tree`` keys it.
+    """Read a rendered tree from the run root, keyed as ``render_tree`` keys it.
 
-    ``root`` is the rollout root rather than the ``terminus`` directory,
+    ``root`` is the run root rather than the ``terminus`` directory,
     because ``terminus-commands`` sits beside it; reading one level down would
     drop every command and rekey the rest.
 
-    Only rendered paths are read back. The rollout root also holds the task
+    Only rendered paths are read back. The run root also holds the task
     workspace and, once the run starts, the session and trial directories,
     none of which are the tree under evaluation.
     """

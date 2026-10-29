@@ -1,8 +1,8 @@
-# DeepSeek Harness (dsh), driven headless per rollout.
+# DeepSeek Harness (dsh), driven headless per run.
 #
 # DSH_HOME relocates the whole harness home (the headless and web profiles
 # and their patch layers, sessions, storages, the user AGENTS.md and skills)
-# under the rollout root, and DSH_AGENTS_HOME relocates the second skill
+# under the run root, and DSH_AGENTS_HOME relocates the second skill
 # root, where commands render as user invocable skills (dsh has
 # no other command surface). DSH_TELEMETRY_MODE stops the OTLP session
 # telemetry. The default workspace-write permission runs tools inside the
@@ -12,7 +12,7 @@
 name: dsh
 binary: dsh
 # The vendor's install channel at the pinned version. Harness evolution startup
-# installs it for the rollouts unless evolution.binary names a binary. The pin
+# installs it for the runs unless evolution.binary names a binary. The pin
 # follows the alpha tag: the source line that was mapped and the binary that
 # was measured.
 install:
@@ -43,7 +43,7 @@ sessions: {format: deepseek-session-jsonl, path: dsh/sessions}
 # apiKeyEnv and supplied through the .env file. Each profile's patch carries
 # the route.
 # Reef renders the set matching its model binding's api into evaluation
-# rollouts; the served tree never carries a provider or a key.
+# runs; the served tree never carries a provider or a key.
 model:
   openai:
     - target: primary
@@ -117,10 +117,10 @@ model:
     - target: env
       data:
         REEF_API_KEY: "{api_key}"
-# How the agent runs: one evaluation rollout in a root of its own (the command, and variables
+# How the agent runs: one evaluation run in a root of its own (the command, and variables
 # beside the dirs), and on a person's machine a layer over the person's own configuration.
 run:
-  rollout:
+  task:
     # Two commander layers parse the command line (the launcher, then the
     # headless app); each "--" ends one layer's options, so a task that starts
     # with a dash still reaches the app as its positional.
@@ -136,7 +136,7 @@ config:
     # A patched config replaces the plugin's whole config, so every key
     # the adapter relies on rides along: the session log stays where the
     # bundle put it and uncompressed (the reader cannot parse zstd), and
-    # the LLM title call (one extra model request per rollout) and the
+    # the LLM title call (one extra model request per run) and the
     # telemetry stay off.
     defaults:
       session-persistence-jsonl:
@@ -151,7 +151,7 @@ config:
     # profiles are held to them.
     checks: &patch_checks
       # The session log stays uncompressed (the reader cannot parse zstd),
-      # and the LLM title call (one extra model request per rollout) and
+      # and the LLM title call (one extra model request per run) and
       # the telemetry stay off.
       - key: [session-persistence-jsonl.config.compression, session-title-llm.disabled, session-telemetry-otel.disabled]
         match: IsDefault()

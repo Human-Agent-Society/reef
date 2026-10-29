@@ -12,7 +12,7 @@ recipe:
           mode: full_history
           components: [extension]
           max_candidates: 4
-          max_target_rollouts: 890  # The seed and four candidates, 89 tasks, two repeats.
+          max_target_runs: 890  # The seed and four candidates, 89 tasks, two repeats.
       batch_size: 1  # Each report is one trace batch.
       max_steps: 8  # Invalid or duplicate proposals also consume an attempt.
       executor: sandbox
@@ -32,7 +32,7 @@ recipe:
         policy: compare
         statistic: mean
         repeats: 2
-        rollout_timeout_s: 9000
+        task_timeout_s: 9000
         forbid_residue: true
 inference:
   upstream-url: ${REEF_UPSTREAM_URL}

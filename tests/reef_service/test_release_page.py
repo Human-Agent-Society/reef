@@ -27,7 +27,7 @@ from tests.support.harness_steps import UNCHANGED, harness_recipe
 from reef.core.plugins import PluginReference
 from reef.dispatcher import Dispatcher
 from reef.evaluation.activation import AlwaysActivate
-from reef.harness.rollouts.run import RolloutResult
+from reef.harness.tasks.run import TaskResult
 from reef.harness.tree import HarnessTree, TreePatch
 from reef.service.app import create_app
 from reef.service.page_layout import status_label
@@ -75,7 +75,7 @@ PUBLISHED = {
 }
 
 
-def evaluate(task: str, result: RolloutResult) -> float:
+def evaluate(task: str, result: TaskResult) -> float:
     # Marker count, so a second marker still beats a head that carries one.
     return float(result.trajectory[-1]["rules"].count("marker"))
 
@@ -210,7 +210,7 @@ def test_the_page_for_a_published_step_carries_the_request_the_result_and_the_ch
             "<dt>Candidate score</dt><dd>1.0</dd>" in selection_result
             and "<dt>Current score</dt><dd>0.0</dd>" in selection_result
         )
-        assert "<dt>Rollout failures</dt><dd>0</dd>" in selection_result
+        assert "<dt>Run failures</dt><dd>0</dd>" in selection_result
         assert "nothing to set up" in _section(page, "Setup")
         chain = _section(page, "Chain")
         assert rows[0]["release_id"] in chain and rows[1]["release_id"] in chain
@@ -458,10 +458,10 @@ def test_the_page_module_is_ascii_and_the_builder_escapes_every_angle_bracket() 
             "ties": 1,
             "current_score": 1.0,
             "candidate_score": 3.0,
-            "rollout_failures": 1,
-            "rollouts_run": 3,
-            "rollouts_cached": 3,
-            "method_rollouts": 2,
+            "run_failures": 1,
+            "runs_run": 3,
+            "runs_cached": 3,
+            "method_runs": 2,
             "model_calls": 4,
             "model_seconds": 12.5,
             "model_input_tokens": 1200,
@@ -513,12 +513,12 @@ def test_the_page_module_is_ascii_and_the_builder_escapes_every_angle_bracket() 
     assert "caf&#233;" in page
     assert "<pre>&lt;b&gt;bold&lt;/b&gt;</pre>" in page
     selection_result = _section(page, "Result")
-    assert "<dt>Ties</dt><dd>1</dd>" in selection_result and "<dt>Rollout failures</dt><dd>1</dd>" in selection_result
-    # What the step cost: the rollouts the evaluation ran and reused, the method's own, and its model use.
+    assert "<dt>Ties</dt><dd>1</dd>" in selection_result and "<dt>Run failures</dt><dd>1</dd>" in selection_result
+    # What the step cost: the runs the evaluation ran and reused, the method's own, and its model use.
     for label, value in (
-        ("Rollouts run", "3"),
-        ("Rollouts cached", "3"),
-        ("Method rollouts", "2"),
+        ("Tasks run", "3"),
+        ("Runs cached", "3"),
+        ("Method runs", "2"),
         ("Model calls", "4"),
         ("Model seconds", "12.5"),
         ("Model input tokens", "1200"),
@@ -793,7 +793,7 @@ def test_the_result_lists_the_floor_metrics_and_omits_the_current_score_when_no_
             "floor_score": 1.0,
             "evaluation_sides": ["candidate"],
             "candidate_score": 1.0,
-            "rollout_failures": 0,
+            "run_failures": 0,
             "candidate_agents": {"root": {"turns": 1, "input_tokens": 300, "output_tokens": 20}},
             "selection": {
                 "policy": "floor",
@@ -812,7 +812,7 @@ def test_the_result_lists_the_floor_metrics_and_omits_the_current_score_when_no_
     )
     assert (
         "<dt>Candidate score</dt><dd>1.0</dd>" in selection_result
-        and "<dt>Rollout failures</dt><dd>0</dd>" in selection_result
+        and "<dt>Run failures</dt><dd>0</dd>" in selection_result
     )
     for absent in ("Current score", "Wins", "Losses", "Ties"):
         assert f"<dt>{absent}</dt>" not in selection_result

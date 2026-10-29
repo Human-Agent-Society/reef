@@ -11,14 +11,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
 
 import pytest
-from tests.support._strategies import resolve_method, resolve_rollout_scorer
+from tests.support._strategies import resolve_method, resolve_task_scorer
 from tests.support._trajectories import recorded_trajectory
 from tests.support.harness_service import harness_repository
 
 from reef.artifact import Artifact, InMemoryRepositoryBackend
 from reef.dispatcher import Dispatcher
 from reef.evaluation.harness import ComparePolicy, EvaluationSettings
-from reef.harness.rollouts.model_binding import ModelBinding
+from reef.harness.tasks.model_binding import ModelBinding
 from reef.harness.tree import HarnessTree, TreePatch
 from reef.inference.http import InferenceProxyRuntime
 from reef.inference.model_config import ModelConfig
@@ -121,7 +121,7 @@ def make_recipe(platform, tmp_path):
         method=resolve_method(method),
         evolution=EvolutionSettings(binary=str(binary), state_dir=str(tmp_path / "harness")),
         evaluation=EvaluationSettings(tasks=("test task",)),
-        scorer=resolve_rollout_scorer(judge),
+        scorer=resolve_task_scorer(judge),
         runtime=InferenceProxyRuntime(base_url=managed.base_url, api_key=managed.api_key, model_path=managed.model),
         models={"teacher": managed, "judge": managed},
         seed=HarnessTree({"skills/notes/SKILL.md": "notes\n"}),

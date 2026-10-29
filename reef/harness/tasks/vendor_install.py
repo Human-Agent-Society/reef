@@ -1,6 +1,6 @@
 """Server-side resolution of the harness binary through the vendor's channel.
 
-Reef runs evaluation rollouts with the binary pinned in the adapter
+Reef runs evaluation runs with the binary pinned in the adapter
 descriptor: its ``install`` section names the vendor's channel, the pinned
 version, and where the installed binary lands under the install prefix. This
 module installs the pin there unless it is already installed, with the
@@ -54,7 +54,7 @@ def install_prefix(descriptor: AdapterDescriptor) -> Path:
 
 
 def resolve_binary(descriptor: AdapterDescriptor, *, prefix: Path | None = None) -> str:
-    """The binary an evaluation rollout launches, installing it if needed.
+    """The binary an evaluation run launches, installing it if needed.
 
     An adapter without an ``install`` section resolves to its descriptor's
     bare binary name, left for ``PATH`` to answer. Otherwise the pinned

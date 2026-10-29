@@ -1048,7 +1048,7 @@ class RequestService:
                 "state": result_of(rows[step]),
                 "meaning": None,
                 "started_at": None,
-                "rollouts_total": None,
+                "runs_total": None,
                 "step_record": None,
                 "activity": [],
             }
@@ -1066,7 +1066,7 @@ class RequestService:
             "meaning": STATE_WORDS.get(state),
             # The step's own clock, so a client shows the time in the step and not the time since it asked.
             "started_at": None if mine is None else mine.started_at,
-            "rollouts_total": None if mine is None else mine.rollouts_total,
+            "runs_total": None if mine is None else mine.runs_total,
             "step_record": None if mine is None else mine.step_record,
             # What the method has done so far, oldest first: {at, kind, text, failed?}.
             "activity": [] if mine is None else [dict(line) for line in mine.activity],

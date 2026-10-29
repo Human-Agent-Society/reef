@@ -42,7 +42,7 @@ from reef.train.local_jobs import LocalJobComponent
 from reef.train.tinker_backend.client import TinkerClient
 from reef.train.tinker_backend.config import TinkerConfig, TinkerServiceConfig
 from reef.train.tinker_backend.preparation import prepare_tinker_job
-from reef.train.tinker_backend.rollout import RolloutSettings, TaskJobRollouts, roll_out, task_name
+from reef.train.tinker_backend.rollout import RolloutSettings, TaskJobRollouts, run_train_tasks, task_name
 
 #: The rollouts of a task job, in its job directory.
 ROLLOUTS_FILE = "rollouts.json"
@@ -274,7 +274,7 @@ class TinkerJobComponent(LocalJobComponent, ABC):
         if self._sampler is None:
             raise RuntimeError("this Tinker component has no sampler, so it cannot roll tasks out")
         tasks = tuple(item for item in job.data.samples if isinstance(item, TaskSample))
-        rollouts = roll_out(
+        rollouts = run_train_tasks(
             tasks,
             settings,
             self._sampler,

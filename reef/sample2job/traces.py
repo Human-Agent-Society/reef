@@ -1,7 +1,7 @@
 """Job data of harness evolution: trace samples as they come, and offline runs of the imported train tasks.
 
 ``TraceJobData`` puts the trace samples of the buffer into one job's data.
-``TrainTaskRollouts`` also trains the scenario's imported train tasks: they
+``TrainTaskJobData`` also trains the scenario's imported train tasks: they
 are buffer samples, and the harness backend rolls a job's tasks out on the
 head tree as the step's material. That is offline harness evolution: a step
 needs no traffic, so uploaded train tasks start a run.
@@ -24,7 +24,7 @@ class TraceJobData(DistillJobData):
     required_request_types = frozenset(RequestType)
 
 
-class TrainTaskRollouts(TraceJobData):
+class TrainTaskJobData(TraceJobData):
     """``TraceJobData`` that also trains the scenario's imported train tasks.
 
     Each imported ``train`` task is a buffer sample, in upload order, and
@@ -37,4 +37,4 @@ class TrainTaskRollouts(TraceJobData):
     accepts_imported_tasks = True
 
 
-__all__ = ["TraceJobData", "TrainTaskRollouts"]
+__all__ = ["TraceJobData", "TrainTaskJobData"]

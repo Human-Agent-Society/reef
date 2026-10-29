@@ -54,7 +54,7 @@ from reef.execution.sandbox.task_environment import (
     checked_task_environment,
     task_environment_probes,
 )
-from reef.harness.rollouts.tasks import TaskRollout, TaskRolloutError, TaskRolloutRunner, checked_labels
+from reef.harness.tasks.rollouts import TaskRollout, TaskRolloutError, TaskRolloutRunner, checked_labels
 from reef.record2sample.generator.designer import (
     Designer,
     DesignerError,

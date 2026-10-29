@@ -1,20 +1,20 @@
-# Hermes Agent, driven headless per rollout.
+# Hermes Agent, driven headless per run.
 #
 # HERMES_HOME relocates the whole home (config.yaml, the session snapshots,
 # SOUL.md, skills, plugins, the state store, logs and caches) under the
-# rollout root. `chat -Q --oneshot -q` answers one task on a non TTY and
+# run root. `chat -Q --oneshot -q` answers one task on a non TTY and
 # exits; hermes's own approval policy runs file and terminal tools inside
 # the working directory with no prompt and refuses a command it flags as
 # dangerous with a tool error, so no bypass flag is used (the top level -z
 # one shot would bypass those approvals). The config defaults keep an
-# rollout hermetic and single request: no scanner download, no session
+# run hermetic and single request: no scanner download, no session
 # title call, no background review, and a plain file session snapshot the
 # reader can parse.
 name: hermes
 binary: hermes
 # The vendor's channel is a git checkout installed editable into a venv:
 # PyPI is stale and upstream refuses wheel builds. Harness evolution startup
-# installs it for the rollouts unless evolution.binary names a binary.
+# installs it for the runs unless evolution.binary names a binary.
 install:
   kind: git
   package: hermes-agent
@@ -33,7 +33,7 @@ evolve:
   # Every skill is also a /name command in the interactive CLI, and hermes has
   # no other command surface, so a command is a skill under a second root.
   # The renderer adds that root to skills.external_dirs, beside the home
-  # for a rollout and at the install root for a reef-hermes session.
+  # for a run and at the install root for a reef-hermes session.
   command: hermes-commands/{name}/SKILL.md
   # A hermes plugin: register(ctx) in the package init; the renderer adds
   # the manifest and the config grants.
@@ -52,7 +52,7 @@ sessions: {format: hermes-session-json, path: hermes/sessions}
 # hermes reads the key under model for a loopback or an unknown host, and
 # takes an OpenRouter host for its OpenRouter provider, where only the
 # environment or .env supplies the key; both are written so either kind of
-# endpoint answers. Reef renders this set into evaluation rollouts; the
+# endpoint answers. Reef renders this set into evaluation runs; the
 # served tree never carries a provider or a key. Only the openai dialect is
 # bound; hermes's anthropic_messages api mode was not measured.
 model:
@@ -67,10 +67,10 @@ model:
     - target: env
       data:
         OPENAI_API_KEY: "{api_key}"
-# How the agent runs: one evaluation rollout in a root of its own (the command, and variables
+# How the agent runs: one evaluation run in a root of its own (the command, and variables
 # beside the dirs), and on a person's machine a layer over the person's own configuration.
 run:
-  rollout:
+  task:
     argv: ["chat", "-Q", "--oneshot", "-q", "{prompt}"]
 # The config files the agent reads, with the defaults Reef merges first and the checks the merged
 # file must pass. A tree's config/<target>.json merges into one of them. The defaults and checks
@@ -81,7 +81,7 @@ config:
     defaults:
       # security.tirith_enabled downloads a scanner binary from GitHub at
       # boot, and the scanner blocks a command it cannot resolve;
-      # title_generation is one extra model call per rollout; the memory
+      # title_generation is one extra model call per run; the memory
       # and skill nudges spawn a background review agent, which makes model
       # calls and writes skills into the tree; the curator writes its state
       # into the tree's skills at the first start and later archives and
@@ -101,7 +101,7 @@ config:
       skills:
         creation_nudge_interval: 0
     checks:
-      # Keep a rollout hermetic and single request, with its snapshot readable.
+      # Keep a run hermetic and single request, with its snapshot readable.
       - key: [
           security.tirith_enabled, auxiliary.title_generation.enabled, memory.nudge_interval,
           skills.creation_nudge_interval, curator.enabled, sessions.write_json_snapshots,

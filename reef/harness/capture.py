@@ -1,6 +1,6 @@
 """The capture proxy between a harness and Reef: forward model calls, tag them, keep their receipts.
 
-A harness that runs outside Reef's evaluation, such as a Harbor task rollout
+A harness that runs outside Reef's evaluation, such as a Harbor task run
 or the native serve process, reaches Reef through this proxy. It forwards to
 Reef with ``x-reef-scenario`` and the token, tags every call as
 ``x-reef-tag-<name>``, keeps the receipt each answer carries, and hands the

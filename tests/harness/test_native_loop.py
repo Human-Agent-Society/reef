@@ -28,7 +28,7 @@ from tests.harness.test_native_serve import (
     _typed,
     _wait,
 )
-from tests.support._strategies import resolve_rollout_scorer
+from tests.support._strategies import resolve_task_scorer
 from tests.support._trajectories import recorded_trajectory
 from tests.support.harness_render import NATIVE_SEED_FILES, NATIVE_SEED_TOOLS, native_loop, native_tool, write_rendered
 from tests.support.harness_service import backend_step
@@ -38,18 +38,18 @@ from reef.core.activation import MadeArtifact
 from reef.core.evaluation import RolloutScore
 from reef.core.plugins import PluginReference
 from reef.evaluation.activation import AlwaysActivate
-from reef.evaluation.harness import RolloutEvaluationWorker
+from reef.evaluation.harness import TaskEvaluationWorker
 from reef.execution.sandbox.process import LocalExecutor
 from reef.harness.adapters import get_adapter
-from reef.harness.rollouts.model_binding import ModelBinding, ModelBindings
-from reef.harness.rollouts.run import RolloutResult
-from reef.harness.rollouts.trajectory import stage_path
 from reef.harness.runners.native import LoadError, load_loop, run_loop, serve
 from reef.harness.runners.native.enforce import ToolFailed
 from reef.harness.runners.native.graph import LOOP_LOG_CHARS, TRANSITIONS_PER_STEP
 from reef.harness.runners.native.host import NativeHost
 from reef.harness.runners.native.release_client import ReleaseClient
 from reef.harness.runners.native.selftools import SelfTools, ServeState
+from reef.harness.tasks.model_binding import ModelBinding, ModelBindings
+from reef.harness.tasks.run import TaskResult
+from reef.harness.tasks.trajectory import stage_path
 from reef.harness.tree import HarnessTree, RenderError, TreePatch, render_tree, validate_tree
 from reef.harness.tree.checks import NATIVE_GRAPH_MAX_STEPS, validate_native_loop
 from reef.train.harness_backend.backend import HarnessBackend
@@ -82,7 +82,7 @@ events = [
 
 
 def _write_root(tmp_path: Path, files: dict[str, str]) -> Path:
-    """A rendered native root of ``files``, as the rollout engine lays one out; the native directory inside."""
+    """A rendered native root of ``files``, as the run engine lays one out; the native directory inside."""
     binding = ModelBinding(base_url="http://127.0.0.1:9", model="fake", api_key="dummy")
     write_rendered(tmp_path / "root", HarnessTree(files), NATIVE, binding)
     return tmp_path / "root" / "native"
@@ -971,9 +971,9 @@ def _loop_error_trajectory(loop: str | None) -> tuple[dict[str, Any], ...]:
 
 
 def test_a_loop_error_failure_is_observed_at_stage_loop() -> None:
-    worker = RolloutEvaluationWorker(
+    worker = TaskEvaluationWorker(
         descriptor=get_adapter("native"),
-        scorer=resolve_rollout_scorer(_score),
+        scorer=resolve_task_scorer(_score),
         binary=None,
         timeout=10,
         executor=LocalExecutor(),
@@ -981,7 +981,7 @@ def test_a_loop_error_failure_is_observed_at_stage_loop() -> None:
     )
     observed = {}
     for loop in ("main", None):
-        result = RolloutResult(exit_code=1, stdout="", stderr="", trajectory=_loop_error_trajectory(loop), residue=())
+        result = TaskResult(exit_code=1, stdout="", stderr="", trajectory=_loop_error_trajectory(loop), residue=())
         scored = worker.score_result(result, "task one", ModelBindings(MODEL))
         assert scored.score == RolloutScore.scored(0.0) and scored.failure is not None
         observed[loop] = (scored.failure.stage, scored.failure.cause)

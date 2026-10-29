@@ -28,7 +28,7 @@ from collections.abc import Mapping, Sequence
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, ClassVar
 
-from reef.harness.rollouts.model_binding import ModelBinding
+from reef.harness.tasks.model_binding import ModelBinding
 from reef.inference.provider_protocol import (
     ANTHROPIC_CLIENT_HEADERS,
     ANTHROPIC_PATHS,

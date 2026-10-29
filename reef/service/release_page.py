@@ -10,7 +10,7 @@ first, the creation row being 0: a rejected step publishes nothing and its
 row carries the id of the release it ran on, so only the step names it.
 
 The row readers here serve the request page too: the result, what the
-method said, the rollouts a rejected step missed and an evaluation that
+method said, the runs a rejected step missed and an evaluation that
 could not run, so both pages name one cause the same way. The layout, the
 palette and the status wording come from :mod:`reef.service.page_layout`,
 which the request page draws with too, so a person moving between the two
@@ -31,8 +31,8 @@ from reef.core.requirements import required_by
 from reef.service.page_layout import document, escape, requires_table, stamp, status_label, status_span
 
 #: The evaluation numbers the Result section lists, in this order, when the row carries them: a comparison writes
-#: wins, losses, ties and the pairs it dropped, or the two means; a floor writes passed, failed, the failed rollouts and
-#: floor_score, and evaluation_sides when it ran one side only; a step that ran its method writes the method's rollouts and model use.
+#: wins, losses, ties and the pairs it dropped, or the two means; a floor writes passed, failed, the failed runs and
+#: floor_score, and evaluation_sides when it ran one side only; a step that ran its method writes the method's runs and model use.
 #: ``selected`` is not among them: the result headline above the numbers already says whether the step was published.
 RESULT_FIELDS = (
     "wins",
@@ -48,10 +48,10 @@ RESULT_FIELDS = (
     "evaluation_sides",
     "current_score",
     "candidate_score",
-    "rollout_failures",
-    "rollouts_run",
-    "rollouts_cached",
-    "method_rollouts",
+    "run_failures",
+    "runs_run",
+    "runs_cached",
+    "method_runs",
     "model_calls",
     "model_seconds",
     "model_input_tokens",
@@ -68,15 +68,15 @@ RESULT_LABELS = {
     "current_mean": "Current mean",
     "passed": "Passed",
     "failed": "Failed",
-    "failed_rollouts": "Failed rollouts",
+    "failed_rollouts": "Failed runs",
     "floor_score": "Floor score",
     "evaluation_sides": "Evaluation sides",
     "current_score": "Current score",
     "candidate_score": "Candidate score",
-    "rollout_failures": "Rollout failures",
-    "rollouts_run": "Rollouts run",
-    "rollouts_cached": "Rollouts cached",
-    "method_rollouts": "Method rollouts",
+    "run_failures": "Run failures",
+    "runs_run": "Tasks run",
+    "runs_cached": "Runs cached",
+    "method_runs": "Method runs",
     "model_calls": "Model calls",
     "model_seconds": "Model seconds",
     "model_input_tokens": "Model input tokens",
@@ -103,7 +103,7 @@ def failed_words(metrics: Mapping[str, Any]) -> str:
     there, not before it."""
     if metrics.get("failed_stage") == "evaluating":
         return (
-            "The step failed during its evaluation: the change was proposed and its rollouts ran, but the "
+            "The step failed during its evaluation: the change was proposed and its runs completed, but the "
             "evaluation raised. Nothing was published; see the error below before retrying."
         )
     return RESULT_WORDS["failed"]
@@ -252,44 +252,44 @@ def method_notes(metrics: Mapping[str, Any]) -> str:
     return json.dumps(notes, indent=2, sort_keys=True, ensure_ascii=False)
 
 
-def missed_rollouts(metrics: Mapping[str, Any]) -> list[Mapping[str, Any]]:
-    """The candidate rollouts a step's evaluation names that failed or scored below its floor, from the row's
-    ``candidate_rollouts`` summary (``task``, ``score``, ``failure``, ``reply``); none when the step recorded none.
-    A summary's ``score`` is a number, or ``"failed"`` for a rollout the environment could not run."""
-    rollouts = metrics.get("candidate_rollouts")
-    if not isinstance(rollouts, list):
+def missed_runs(metrics: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    """The candidate runs a step's evaluation names that failed or scored below its floor, from the row's
+    ``candidate_runs`` summary (``task``, ``score``, ``failure``, ``reply``); none when the step recorded none.
+    A summary's ``score`` is a number, or ``"failed"`` for a run the environment could not run."""
+    task_runs = metrics.get("candidate_runs")
+    if not isinstance(task_runs, list):
         return []
     selection = metrics.get("selection")
     decided = selection.get("metrics") if isinstance(selection, Mapping) else None
     floor = decided.get("floor_score") if isinstance(decided, Mapping) else None
     missed = []
-    for rollout in rollouts:
-        if not isinstance(rollout, Mapping):
+    for task_run in task_runs:
+        if not isinstance(task_run, Mapping):
             continue
-        score = rollout.get("score")
+        score = task_run.get("score")
         below = isinstance(floor, (int, float)) and isinstance(score, (int, float)) and score < floor
-        if rollout.get("failure") or not isinstance(score, (int, float)) or below:
-            missed.append(rollout)
+        if task_run.get("failure") or not isinstance(score, (int, float)) or below:
+            missed.append(task_run)
     return missed
 
 
 def unscored_failures(metrics: Mapping[str, Any]) -> list[str]:
-    """Why the evaluation could not run: the distinct failures, when every candidate rollout failed before it was
-    scored (a launch that found no binary, say), so the step judged nothing; none when any rollout was scored or
-    the step recorded no rollouts."""
-    rollouts = metrics.get("candidate_rollouts")
-    if not isinstance(rollouts, list) or not rollouts:
+    """Why the evaluation could not run: the distinct failures, when every candidate run failed before it was
+    scored (a launch that found no binary, say), so the step judged nothing; none when any run was scored or
+    the step recorded no runs."""
+    task_runs = metrics.get("candidate_runs")
+    if not isinstance(task_runs, list) or not task_runs:
         return []
     causes: list[str] = []
-    for rollout in rollouts:
-        # A row from before rollout scores were a value or failed wrote None for a failed rollout.
+    for task_run in task_runs:
+        # A row from before run scores were a value or failed wrote None for a failed run.
         if (
-            not isinstance(rollout, Mapping)
-            or rollout.get("score") not in (FAILED, None)
-            or not rollout.get("failure")
+            not isinstance(task_run, Mapping)
+            or task_run.get("score") not in (FAILED, None)
+            or not task_run.get("failure")
         ):
             return []
-        cause = str(rollout["failure"])
+        cause = str(task_run["failure"])
         if cause not in causes:
             causes.append(cause)
     return causes
@@ -303,10 +303,10 @@ def floor_tasks_note(metrics: Mapping[str, Any]) -> str | None:
         return None
     if selection.get("policy") != "floor":
         return None
-    rollouts = metrics.get("candidate_rollouts")
+    task_runs = metrics.get("candidate_runs")
     tasks: list[str] = []
-    for rollout in rollouts if isinstance(rollouts, list) else ():
-        task = str(rollout.get("task") or "").strip() if isinstance(rollout, Mapping) else ""
+    for task_run in task_runs if isinstance(task_runs, list) else ():
+        task = str(task_run.get("task") or "").strip() if isinstance(task_run, Mapping) else ""
         # A Harbor task directory shows as its name, a prompt as its start.
         name = task.rstrip("/").rsplit("/", 1)[-1] if task.startswith("/") else task
         name = name if len(name) <= 60 else f"{name[:57]}..."
@@ -319,20 +319,20 @@ def floor_tasks_note(metrics: Mapping[str, Any]) -> str | None:
     )
 
 
-def missed_rollout_text(rollout: Mapping[str, Any]) -> str:
-    """One missed rollout in words: the task, then why it failed, or its score and the reply that was graded."""
-    task = str(rollout.get("task") or "").strip()
-    failure = rollout.get("failure")
+def missed_run_text(task_run: Mapping[str, Any]) -> str:
+    """One missed run in words: the task, then why it failed, or its score and the reply that was graded."""
+    task = str(task_run.get("task") or "").strip()
+    failure = task_run.get("failure")
     if failure:
         return f"the task '{task}' failed: {failure}"
-    reply = rollout.get("reply")
-    if rollout.get("transcript_read") is False:
-        graded = "no transcript was read from the rollout's session log, so no reply was graded"
+    reply = task_run.get("reply")
+    if task_run.get("transcript_read") is False:
+        graded = "no transcript was read from the run's session log, so no reply was graded"
     elif reply:
         graded = f"the reply graded was '{str(reply).strip()}'"
     else:
         graded = "no reply was graded"
-    return f"the task '{task}' scored {rollout.get('score')}; {graded}"
+    return f"the task '{task}' scored {task_run.get('score')}; {graded}"
 
 
 def card(name: str, body: str) -> str:
@@ -456,11 +456,11 @@ def result_html(row: Mapping[str, Any], metrics: Mapping[str, Any]) -> str:
     """The Result section: the headline and what it means, then the evaluation's numbers and the step's record."""
     selection_result = result_of(row)
     words = {**RESULT_WORDS, "failed": failed_words(metrics)}
-    # Every candidate rollout failed before a score: the checks judged nothing, so no score stands for the change.
+    # Every candidate run failed before a score: the checks judged nothing, so no score stands for the change.
     unscored = unscored_failures(metrics) if selection_result == "rejected" else []
     if unscored:
         words["rejected"] = (
-            "The evaluation could not run: every candidate rollout failed before it was scored, so nothing judged "
+            "The evaluation could not run: every candidate run failed before it was scored, so nothing judged "
             "the change. The active release did not change."
         )
     summary = (
@@ -493,10 +493,10 @@ def result_html(row: Mapping[str, Any], metrics: Mapping[str, Any]) -> str:
     if unscored:
         details.extend(f"<div><dt>Could not run</dt><dd>{escape(cause)}</dd></div>" for cause in unscored)
     elif selection_result == "rejected":
-        # What the checks saw: each missed rollout's task, and why it failed or the reply that was graded.
+        # What the checks saw: each missed run's task, and why it failed or the reply that was graded.
         details.extend(
-            f"<div><dt>Missed</dt><dd>{escape(missed_rollout_text(rollout))}</dd></div>"
-            for rollout in missed_rollouts(metrics)
+            f"<div><dt>Missed</dt><dd>{escape(missed_run_text(task_run))}</dd></div>"
+            for task_run in missed_runs(metrics)
         )
     if metrics.get("step_record"):
         details.append(f'<div><dt>Step record</dt><dd class="id">{escape(metrics["step_record"])}</dd></div>')
@@ -736,8 +736,8 @@ __all__ = [
     "floor_tasks_note",
     "method_notes",
     "method_summary",
-    "missed_rollout_text",
-    "missed_rollouts",
+    "missed_run_text",
+    "missed_runs",
     "recorded_patch",
     "result_of",
     "served_step",

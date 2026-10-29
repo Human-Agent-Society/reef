@@ -4,21 +4,21 @@ Harness adapters
 .. page::
    :for: developers who connect a new agent to Reef
    :needs: the harness tree and the loop from `Evolve your harness <../user-guide/evolve-your-harness.rst>`__
-   :outcome: an adapter that Reef can render, run in rollouts and Harbor tasks, and install on a person's machine
+   :outcome: an adapter that Reef can render, run in runs and Harbor tasks, and install on a person's machine
 
 An adapter connects a harness tree to one agent. It is one file,
 ``reef/harness/adapters/<name>/adapter.yaml``, and an optional ``render.py``
 for what the file cannot state. For an agent that runs on a person's machine,
 the tree renders as the agent's own plugin in ``plugin/``: an evaluation
-rollout loads that plugin, and a person's machine installs it with the
+run loads that plugin, and a person's machine installs it with the
 agent's own command. Reef renders the same tree with the adapter in three
 places:
 
 .. diagram::
-   :caption: The adapter renders one harness tree three ways: as the whole configuration of an evaluation rollout, inside the container of a Harbor task, and as the agent's plugin on a person's machine.
+   :caption: The adapter renders one harness tree three ways: as the whole configuration of an evaluation run, inside the container of a Harbor task, and as the agent's plugin on a person's machine.
 
-   <img class="fig-light" src="../assets/harness-adapter-modes-light.svg" alt="One adapter.yaml, three ways an agent runs: an evaluation rollout in Reef, a Harbor task in its container, and the agent's plugin on a person's machine">
-   <img class="fig-dark" src="../assets/harness-adapter-modes-dark.svg" alt="One adapter.yaml, three ways an agent runs: an evaluation rollout in Reef, a Harbor task in its container, and the agent's plugin on a person's machine">
+   <img class="fig-light" src="../assets/harness-adapter-modes-light.svg" alt="One adapter.yaml, three ways an agent runs: an evaluation run in Reef, a Harbor task in its container, and the agent's plugin on a person's machine">
+   <img class="fig-dark" src="../assets/harness-adapter-modes-dark.svg" alt="One adapter.yaml, three ways an agent runs: an evaluation run in Reef, a Harbor task in its container, and the agent's plugin on a person's machine">
 
 The adapter file
 ----------------
@@ -43,7 +43,7 @@ pi's ``adapter.yaml``, shortened:
    model:                                   # per API dialect: the config that binds the model
      openai: [{target: models, data: {...}}, {target: agent, data: {...}}]
    run:
-     rollout: {argv: ["--mode", "json", "-p", "{prompt}", "-e", "{root}/plugin"], env: {PI_OFFLINE: "1"}}
+     run: {argv: ["--mode", "json", "-p", "{prompt}", "-e", "{root}/plugin"], env: {PI_OFFLINE: "1"}}
      layer:                                 # a person's machine
        args: [["--model", "reef/{model}"]]
        register: [["install", "{root}/plugin"]]
@@ -73,7 +73,7 @@ pi's ``adapter.yaml``, shortened:
    * - ``model``
      - config templates per dialect (``openai``, ``responses``,
        ``anthropic``), with ``{base_url}``, ``{api_key}`` and ``{model}``
-   * - ``run.rollout``
+   * - ``run.task``
      - the headless command (``{prompt}``, ``{root}``) and its variables
    * - ``run.layer``
      - a person's machine: the agent's own commands that install the plugin
@@ -85,7 +85,7 @@ pi's ``adapter.yaml``, shortened:
    * - ``renderer``
      - ``module:Class`` with the adapter's render steps (`Adapter steps`_)
 
-An agent that isolates its own rollouts, such as the Terminal-Bench
+An agent that isolates its own runs, such as the Terminal-Bench
 campaign's ``terminus``, may also set ``self_isolating``,
 ``execution_validator``, ``host_env``, ``is_root_bind_mounted`` and
 ``is_prompt_task_directory`` (see `descriptor.py
@@ -102,15 +102,15 @@ How Reef runs an agent
    * - Where
      - What Reef does
      - Uses
-   * - Evaluation rollout
+   * - Evaluation run
      - Renders the tree with the model binding into a new root, moves the
-       agent's directories there, runs ``run.rollout`` in an empty
+       agent's directories there, runs ``run.task`` in an empty
        ``workspace/`` with the plugin loaded from ``{root}/plugin``, reads the
        session log, and removes the root.
-     - ``dirs``, ``model``, ``run.rollout``, ``sessions``
+     - ``dirs``, ``model``, ``run.task``, ``sessions``
    * - Harbor task
      - Starts the task's container, installs the pinned agent with npm,
-       copies in the tree, runs ``run.rollout`` with the instruction, and
+       copies in the tree, runs ``run.task`` with the instruction, and
        scores the tests' reward.
      - an npm ``install``
    * - A person's machine
@@ -259,7 +259,7 @@ the target's checks (`Config checks`_). A key that the model binding writes
 never comes from a tree: validation refuses it. The last column says whether
 the adapter has a ``run.layer``, so that ``reef-client`` runs its releases on a
 person's machine (`A person's machine`_). Without one, a release runs only in
-Reef's rollouts.
+Reef's runs.
 
 .. list-table::
    :header-rows: 1
@@ -309,7 +309,7 @@ Reef's rollouts.
 Bundled adapters
 ----------------
 
-At startup, Reef installs the pinned binary for the rollouts unless
+At startup, Reef installs the pinned binary for the runs unless
 ``evolution.binary`` names one. Another package adds an adapter through the
 ``reef.harness_adapters`` entry point, as the Meta-Harness Terminal-Bench
 campaign adds ``terminus`` (`its README
@@ -339,8 +339,8 @@ campaign adds ``terminus`` (`its README
    * - ``codex``
      - npm 0.158.0; ``codex exec --json``
      - A Codex plugin of skills. A tree sets no rules and no config key. An
-       rollout's render writes the plugin into ``CODEX_HOME`` as ``codex
-       plugin add`` does. Rollouts pin ``approval_policy="never"`` and
+       run's render writes the plugin into ``CODEX_HOME`` as ``codex
+       plugin add`` does. Runs pin ``approval_policy="never"`` and
        ``web_search="disabled"``. Only the ``responses`` dialect. On a pin
        change, update ``bundled_models.json`` and
        ``default_instructions.md``.
@@ -498,7 +498,7 @@ no use for.
 
 Templates hold ``{root}``, ``{model}``, ``{base_url}`` and ``{token}``
 (``env`` only, so no command line shows it). Every part in ``evolve`` must
-take effect both in a rollout and through the installed plugin: leave out
+take effect both in a run and through the installed plugin: leave out
 of ``evolve``, or refuse in the checks, what the plugin cannot carry. An
 adapter without ``layer`` does not run on a person's machine.
 
@@ -512,7 +512,7 @@ Connect a new agent
       at first.
    #. Add a ``TrajectoryReader`` with ``@register_trajectory_reader`` when the
       session log has a new format (`trajectory.py
-      <../../reef/harness/rollouts/trajectory.py>`__).
+      <../../reef/harness/tasks/trajectory.py>`__).
    #. Add the name to ``BUILTIN_ADAPTERS``, or register through the
       ``reef.harness_adapters`` entry point.
    #. Add ``render.py`` only for what the file cannot state.
@@ -533,13 +533,13 @@ Then check, in order:
    * - No tree moves the model
      - its route keys in ``tests/harness/test_harness_model_route.py``
    * - The session log reads
-     - a captured session in ``tests/harness/test_harness_rollout.py``
-   * - One real rollout runs
-     - ``run_rollout`` against a real model: exit 0, no residue, a rule in
+     - a captured session in ``tests/harness/test_harness_run.py``
+   * - One real task runs
+     - ``run_task`` against a real model: exit 0, no residue, a rule in
        ``rules.md`` followed
    * - Every part takes effect
      - a real-binary test in ``tests/smoke/``: a marker in each part reaches
-       the model, as a rollout and as the layer
+       the model, as a run and as the layer
    * - The layer works
      - ``BINDINGS`` in ``tests/harness/test_harness_sync.py``, then
        ``reef-client harness connect`` by hand
@@ -614,10 +614,10 @@ and ``step/end``, then ``turn/end`` with its reason (``completed``,
 ``gave_up``, ``max-steps``, ``error`` and others). A tool result over 20,000
 characters goes to ``.reef/tool-output/``.
 
-Rollout and serve modes
+Run and serve modes
 ~~~~~~~~~~~~~~~~~~~~~~~
 
-``reef-native -p`` runs one turn; rollouts use it. ``reef-native serve`` is
+``reef-native -p`` runs one turn; runs use it. ``reef-native serve`` is
 one resident process that follows the scenario's active release (`Serve the harness as
 a resident process
 <../user-guide/evolve-your-harness.rst#serve-the-harness-as-a-resident-process>`__):

@@ -511,7 +511,7 @@ def parsed_labels(pairs: Sequence[str]) -> dict[str, str]:
 def main(argv: Sequence[str] | None = None, *, lab: TaskLab | None = None) -> int:
     """Run a rollout of each task directory, or of one side of a split manifest, and print one JSON line per task as it finishes."""
     parser = argparse.ArgumentParser(
-        prog="python -m reef.harness.rollouts.tasks",
+        prog="python -m reef.harness.tasks.rollouts",
         description="Run a rollout of each Harbor task directory through Reef and report each scored rollout.",
     )
     parser.add_argument("tasks", nargs="*", type=Path, help="task directories; or --manifest with --tasks-root")

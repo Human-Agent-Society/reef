@@ -42,7 +42,7 @@ def texts_of(tree: HarnessTree, layout: TreeLayout, parts: Sequence[str]) -> dic
 
 
 def candidate_tree(served: HarnessTree, texts: Mapping[str, str]) -> HarnessTree:
-    """The served tree with a candidate's texts in place of its own: the tree a candidate's rollouts run.
+    """The served tree with a candidate's texts in place of its own: the tree a candidate's tasks run.
 
     Every other file of the served tree stays. The texts replace files of the
     *served* tree, not of the candidate's parent: a candidate descended from

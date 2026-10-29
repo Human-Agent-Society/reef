@@ -4,7 +4,7 @@ Each step gets one directory, which is kept afterwards as the step record::
 
     harness/      the head tree, which the method edits into the candidate
     material/     what the step learns from, read-only:
-                    traces/<n>/trace.json        one trace (``Trace``): a client's request, or a rollout
+                    traces/<n>/trace.json        one trace (``Trace``): a client's request, or a run
                     traces/<n>/trajectory.json   the ATIF trajectory of a client's request
                     request.json                 the instruction the step answers (instruction steps only)
                     evaluation.json              the step's evaluation tasks and repeats
@@ -38,7 +38,7 @@ from reef.core.requirements import parse_requires
 from reef.core.tasks import task_instruction
 from reef.core.training_request import TrainingRequest
 from reef.core.trajectories import source_record_id
-from reef.evaluation.harness import History, RolloutRecord
+from reef.evaluation.harness import History, RunRecord
 from reef.evaluation.harness.tasks import client_of, prompt_of
 from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.tree import HarnessTree
@@ -58,34 +58,34 @@ HOST_FILE = "host.json"
 SUMMARY_FILE = "summary.md"
 NOTES_FILE = "notes.json"
 REQUIRES_FILE = "requires.json"
-#: Where a trace came from: a client's request (``traffic``), or a rollout the step ran on a train task
-#: (``rollout``).
-TRACE_SOURCES = ("traffic", "rollout")
+#: Where a trace came from: a client's request (``traffic``), or a run the step ran on a train task
+#: (``run``).
+TRACE_SOURCES = ("traffic", "run")
 #: The most bytes ``state/`` may hold: the commit record stores every file of it.
 MAX_STATE_BYTES = 16 * 1024 * 1024
 
 
 @dataclass(frozen=True)
 class Trace:
-    """One trace of a step's material: a request a client sent, as served, or a rollout the step rolled out.
+    """One trace of a step's material: a request a client sent, as served, or a run the step rolled out.
 
     Values: ``source`` is one of ``TRACE_SOURCES``. ``directory`` holds
     ``trace.json``, and for traffic the request's ATIF ``trajectory.json``;
-    a rollout keeps its trajectory files in the history's rollout directory.
+    a run keeps its trajectory files in the history's run directory.
     ``task`` is the last user prompt of the request, ``None`` for a request
-    without one, or what the rollout's harness was asked: the prompt, or the
+    without one, or what the run's harness was asked: the prompt, or the
     instruction of the task directory. ``reply`` is the final
     assistant text, ``None`` when there is none, as for a traffic trace that
     ends on a tool call (one model call in the middle of a run). ``score`` is
     the client's reward or the scorer's score, a finite number, ``None`` when
-    the client gave none or the rollout could not run. ``feedback`` is the
+    the client gave none or the run could not run. ``feedback`` is the
     client's feedback text, ``None`` when the client gave none and for a
-    rollout. ``failure`` is why the rollout failed, ``None`` when it did not
+    run. ``failure`` is why the run failed, ``None`` when it did not
     fail; traffic has none. ``record`` names the agent record of the request,
-    or the history rollout of the rollout. ``client`` is the client's tag,
-    ``"untagged"`` without one and for a rollout.
+    or the history run of the run. ``client`` is the client's tag,
+    ``"untagged"`` without one and for a run.
     Purpose: ``Workspace.create`` writes one per traffic sample and one per
-    rolled-out rollout of the step; ``Workspace.traces`` reads them for a
+    rolled-out run of the step; ``Workspace.traces`` reads them for a
     method.
     """
 
@@ -105,7 +105,7 @@ class Trace:
         if self.score is not None and (isinstance(self.score, bool) or not math.isfinite(self.score)):
             raise ValueError("Trace.score must be a finite number or None")
         if self.source == "traffic" and self.failure is not None:
-            raise ValueError("Trace.failure says why a rollout failed; a traffic trace has none")
+            raise ValueError("Trace.failure says why a run failed; a traffic trace has none")
 
     def to_json(self) -> dict[str, Any]:
         """``trace.json``: every field but ``directory``."""
@@ -114,9 +114,9 @@ class Trace:
         return row
 
     def trajectory(self) -> Mapping[str, Any] | None:
-        """The request's ATIF document, read from ``trajectory.json``; ``None`` for a rollout, whose rollout keeps
-        its trajectory files in the history (``History.rollout_dir(record)``)."""
-        if self.source == "rollout":
+        """The request's ATIF document, read from ``trajectory.json``; ``None`` for a run, whose run keeps
+        its trajectory files in the history (``History.run_dir(record)``)."""
+        if self.source == "run":
             return None
         return json.loads((self.directory / TRAJECTORY_FILE).read_text(encoding="utf-8"))
 
@@ -212,7 +212,7 @@ class Workspace:
         repeats: int,
         task_directories: bool,
         samples: Sequence[TrajectorySample] = (),
-        rollouts: Sequence[RolloutRecord] = (),
+        runs: Sequence[RunRecord] = (),
         request: TrainingRequest | None = None,
         state_files: Mapping[str, str] | None = None,
     ) -> Workspace:
@@ -220,8 +220,8 @@ class Workspace:
 
         ``tree`` goes to ``harness/`` and ``state_files`` (relative path to
         text) to ``state/``. ``material/`` gets one traffic trace per sample,
-        then one rollout trace per rollout of ``rollouts``, the request, the
-        evaluation's ``tasks`` and ``repeats`` (0 when no rollout can run), and
+        then one run trace per run of ``runs``, the request, the
+        evaluation's ``tasks`` and ``repeats`` (0 when no run can run), and
         the host facts. ``task_directories`` says that the tasks are Harbor
         task directories rather than prompts.
         """
@@ -233,8 +233,8 @@ class Workspace:
         material = workspace.material
         for index, sample in enumerate(samples):
             write_traffic_trace(material / TRACES_DIR / str(index), sample)
-        for index, record in enumerate(rollouts, start=len(samples)):
-            write_rollout_trace(material / TRACES_DIR / str(index), record, task_directories)
+        for index, record in enumerate(runs, start=len(samples)):
+            write_run_trace(material / TRACES_DIR / str(index), record, task_directories)
         if request is not None:
             write_json(material / REQUEST_FILE, {"id": request.id, **request.to_dict()})
         write_json(material / EVALUATION_FILE, {"tasks": list(tasks), "repeats": repeats})
@@ -275,7 +275,7 @@ class Workspace:
         return tuple(json.loads((self.material / EVALUATION_FILE).read_text(encoding="utf-8"))["tasks"])
 
     def evaluation_repeats(self) -> int:
-        """The rollouts the evaluation runs per task and tree; 0 when the deployment configured no scorer."""
+        """The runs the evaluation runs per task and tree; 0 when the deployment configured no scorer."""
         return int(json.loads((self.material / EVALUATION_FILE).read_text(encoding="utf-8"))["repeats"])
 
     def host(self) -> Mapping[str, Any]:
@@ -379,8 +379,8 @@ def write_traffic_trace(directory: Path, sample: TrajectorySample) -> None:
     write_json(directory / TRAJECTORY_FILE, dict(sample.trajectory))
 
 
-def write_rollout_trace(directory: Path, record: RolloutRecord, task_directories: bool) -> None:
-    """One rolled-out rollout: ``trace.json`` alone, since the rollout keeps its trajectory files in the history.
+def write_run_trace(directory: Path, record: RunRecord, task_directories: bool) -> None:
+    """One rolled-out run: ``trace.json`` alone, since the run keeps its trajectory files in the history.
 
     The trace's task is what the harness was asked: the prompt itself, or the
     instruction of the task directory when the tasks are ``task_directories``.
@@ -388,13 +388,13 @@ def write_rollout_trace(directory: Path, record: RolloutRecord, task_directories
     task = task_instruction(Path(record.task)) if task_directories else record.task
     trace = Trace(
         directory=directory,
-        source="rollout",
+        source="run",
         task=task,
         reply=record.reply,
         score=record.score.value,
         feedback=None,
         failure=None if record.failure is None else record.failure.cause,
-        record=record.rollout,
+        record=record.run_id,
         client="untagged",
     )
     write_json(directory / TRACE_FILE, trace.to_json())

@@ -1,4 +1,4 @@
-"""Guarantees of the tutorials/evolve-your-harness example, hermetic: the served model is stubbed, rollouts run a
+"""Guarantees of the tutorials/evolve-your-harness example, hermetic: the served model is stubbed, tasks run a
 fake pi binary, and the boot tests read the serve files the way run.sh and ``reef serve`` do.
 
 This file covers what the tutorial owns: its grader, its two methods (``RulesMethod`` on pi, ``NativeMethod`` on the
@@ -27,9 +27,9 @@ from tests.support.harness_steps import COMPONENT, TreeReleases, harness_backend
 from reef.evaluation.activation import AlwaysActivate
 from reef.evaluation.harness import NoEvaluationPolicy
 from reef.harness.adapters import get_adapter
-from reef.harness.rollouts.model_binding import ModelBinding, ModelBindingError, ModelBindings
-from reef.harness.rollouts.run import RolloutResult
-from reef.harness.rollouts.trajectory import final_assistant_text
+from reef.harness.tasks.model_binding import ModelBinding, ModelBindingError, ModelBindings
+from reef.harness.tasks.run import TaskResult
+from reef.harness.tasks.trajectory import final_assistant_text
 from reef.harness.tree import HarnessTree, validate_patch
 from reef.inference.http import InferenceProxyRuntime
 from reef.recipe import load_recipe_config
@@ -106,8 +106,8 @@ def method_backend(tmp_path: Path, method, served: Served, **fields):
     return backend
 
 
-def rollout(trajectory: tuple[dict, ...]) -> RolloutResult:
-    return RolloutResult(exit_code=0, stdout="", stderr="", trajectory=trajectory, residue=())
+def task_run(trajectory: tuple[dict, ...]) -> TaskResult:
+    return TaskResult(exit_code=0, stdout="", stderr="", trajectory=trajectory, residue=())
 
 
 def pi_message(text: str) -> dict:
@@ -124,20 +124,20 @@ def releases_for(recipe: HarnessEvolutionRecipe) -> ComponentReleases:
 def test_evaluate_grades_exact_final_lines_and_anything_else_as_zero(evolution) -> None:
     prefix, answer = next(iter(evolution.ANSWERS.items()))
     task = f"{prefix} the task"
-    assert evolution.evaluate(task, rollout((pi_message(f"Working...\n\n{answer}"),))) == 1.0
-    assert evolution.evaluate(task, rollout(({"role": "assistant", "content": answer},))) == 1.0
-    assert evolution.evaluate(task, rollout((pi_message(f"{answer}!"),))) == 0.0
-    assert evolution.evaluate(task, rollout((pi_message(f"The answer is {answer}"),))) == 0.0
-    assert evolution.evaluate(task, rollout(())) == 0.0
-    assert evolution.evaluate("no such prefix", rollout((pi_message(answer),))) == 0.0
+    assert evolution.evaluate(task, task_run((pi_message(f"Working...\n\n{answer}"),))) == 1.0
+    assert evolution.evaluate(task, task_run(({"role": "assistant", "content": answer},))) == 1.0
+    assert evolution.evaluate(task, task_run((pi_message(f"{answer}!"),))) == 0.0
+    assert evolution.evaluate(task, task_run((pi_message(f"The answer is {answer}"),))) == 0.0
+    assert evolution.evaluate(task, task_run(())) == 0.0
+    assert evolution.evaluate("no such prefix", task_run((pi_message(answer),))) == 0.0
 
 
 def test_the_tutorial_grader_keeps_its_own_answers(evolution) -> None:
     """The tutorial's grader knows the three arithmetic answers its deployments run, and no other task; it reads
     the trajectory through the built-in reader."""
     assert set(evolution.ANSWERS) == {"[sieve]", "[fib]", "[csv]"}
-    assert evolution.evaluate("[health] Run `echo reef-ok`.", rollout((pi_message("reef-ok"),))) == 0.0
-    assert evolution.evaluate("[sieve] count the primes", rollout((pi_message("Sieving...\n\n9592"),))) == 1.0
+    assert evolution.evaluate("[health] Run `echo reef-ok`.", task_run((pi_message("reef-ok"),))) == 0.0
+    assert evolution.evaluate("[sieve] count the primes", task_run((pi_message("Sieving...\n\n9592"),))) == 1.0
     assert final_assistant_text([pi_message("a"), {"role": "user", "content": "b"}]) == "a"
 
 
@@ -508,11 +508,11 @@ def test_native_evaluate_reads_the_last_assistant_message_with_content(native_ev
         "time": 0,
         "data": {"content": "", "tool_calls": [{}], "finish": "x"},
     }
-    assert native_evolution.evaluate(task, rollout((call, native_message("Sieving...\n\n9592")))) == 1.0
+    assert native_evolution.evaluate(task, task_run((call, native_message("Sieving...\n\n9592")))) == 1.0
     # A tool-call message carries no text; the last text answer is the one graded.
-    assert native_evolution.evaluate(task, rollout((native_message("9592"), call))) == 1.0
-    assert native_evolution.evaluate(task, rollout((native_message("The count is 9592"),))) == 0.0
-    assert native_evolution.evaluate(task, rollout(())) == 0.0
+    assert native_evolution.evaluate(task, task_run((native_message("9592"), call))) == 1.0
+    assert native_evolution.evaluate(task, task_run((native_message("The count is 9592"),))) == 0.0
+    assert native_evolution.evaluate(task, task_run(())) == 0.0
 
 
 # -- the replay page ------------------------------------------------------------------------------

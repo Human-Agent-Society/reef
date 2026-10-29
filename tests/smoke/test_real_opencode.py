@@ -1,7 +1,7 @@
 """Smoke of the real opencode binary: every part an evolved tree may hold reaches the model.
 
 The hermetic suites check the rendered files. Here the pinned opencode runs against a stdlib OpenAI-compatible
-stub that records each request, once as a rollout and once as a person's session: the plugin installed with
+stub that records each request, once as a run and once as a person's session: the plugin installed with
 ``opencode plugin -g`` into an empty home, as ``reef-client harness connect`` does. Skipped unless
 REEF_REAL_OPENCODE_BINARY points at an installed opencode (.github/workflows/harness-smoke.yml provides one).
 """
@@ -20,9 +20,9 @@ from tests.support.harness_render import write_layer
 from tests.support.openai_stub import MODEL, StubOpenAI
 
 from reef.harness.adapters import get_adapter
-from reef.harness.rollouts.model_binding import ModelBinding
-from reef.harness.rollouts.run import run_rollout
 from reef.harness.sync import layer_install
+from reef.harness.tasks.model_binding import ModelBinding
+from reef.harness.tasks.run import run_task
 from reef.harness.tree import HarnessTree, render_tree
 
 REAL_OPENCODE = os.environ.get("REEF_REAL_OPENCODE_BINARY", "")
@@ -50,8 +50,8 @@ def person_env(home: Path) -> dict[str, str]:
     return {"HOME": str(home), **{name: str(home / name.lower()) for name in names}}
 
 
-@pytest.mark.parametrize("form", ["rollout", "layer"])
-def test_real_opencode_takes_every_part_of_a_tree_in_an_rollout_and_over_a_persons_own_config(
+@pytest.mark.parametrize("form", ["run", "layer"])
+def test_real_opencode_takes_every_part_of_a_tree_in_an_run_and_over_a_persons_own_config(
     tmp_path: Path, form: str
 ) -> None:
     server = StubOpenAI()
@@ -60,10 +60,10 @@ def test_real_opencode_takes_every_part_of_a_tree_in_an_rollout_and_over_a_perso
     descriptor = get_adapter("opencode")
     binding = ModelBinding(base_url=url, model=MODEL, api_key="dummy")
     try:
-        if form == "rollout":
+        if form == "run":
             files = render_tree(HarnessTree(PARTS), descriptor, binding.config_overlays(descriptor))
             command = replace(descriptor, argv=(*descriptor.argv[:-1], "--command", "ship", "{prompt}"))
-            result = run_rollout(command, files, "now", binary=REAL_OPENCODE, timeout=120.0)
+            result = run_task(command, files, "now", binary=REAL_OPENCODE, timeout=120.0)
             assert result.exit_code == 0, (result.stdout, result.stderr)
         else:
             layer = layer_install(HarnessTree(PARTS), descriptor, binding, url, str(tmp_path / "install"))

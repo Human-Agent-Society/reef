@@ -8,9 +8,9 @@
 # REEF_TERMINUS_SESSION_DIR.
 #
 # The prompt is the task: a Harbor task directory or a registry id, which is
-# what reef-eval resolves. A rollout therefore needs no dataset location in
-# its environment, which run_rollout would not have carried anyway - it hands
-# a rollout only the descriptor's own env and host_env, and {root}/{prompt}
+# what reef-eval resolves. A run therefore needs no dataset location in
+# its environment, which run_task would not have carried anyway - it hands
+# a run only the descriptor's own env and host_env, and {root}/{prompt}
 # are the only substitutions in env and argv.
 #
 # Evolved Python requires Reef's sandbox around this runner and remote E2B
@@ -53,7 +53,7 @@ sessions: {format: "reef_terminus.trajectory:read_trials", path: terminus/sessio
 # model_name stays the served name, the one Harbor looks up in litellm's
 # model table for the context limit Terminus 2 summarizes against.
 # A tree a person runs against Reef itself also needs llm_kwargs.extra_headers
-# {"x-reef-scenario": "<scenario>"}, or Reef answers 400. Evaluation rollouts
+# {"x-reef-scenario": "<scenario>"}, or Reef answers 400. Evaluation runs
 # call the upstream directly and need no header.
 model:
   openai:
@@ -64,15 +64,15 @@ model:
         llm_kwargs:
           api_key: "{api_key}"
           custom_llm_provider: "litellm_proxy"
-# How the agent runs: one evaluation rollout in a root of its own (the command, and variables
+# How the agent runs: one evaluation run in a root of its own (the command, and variables
 # beside the dirs), and on a person's machine a layer over the person's own configuration.
 run:
-  rollout:
+  task:
     argv:
       - --task
       - "{prompt}"
     env:
-      # The rollout root, not the terminus directory: terminus-commands is a
+      # The run root, not the terminus directory: terminus-commands is a
       # sibling of terminus, so the runner reads the tree from one level up.
       REEF_TERMINUS_DIR: "{root}"
       HOME: "{root}/workspace"
@@ -141,7 +141,7 @@ is_prompt_task_directory: true
 # endpoint and context through these variables, else through the current
 # context in its config directory (colima and Docker Desktop set one there),
 # where it also finds the compose plugin. HOME is relocated above, so the
-# rollout keeps the service's own values; {home} is the service's home.
+# run keeps the service's own values; {home} is the service's home.
 host_env:
   DOCKER_HOST: ""
   DOCKER_CONTEXT: ""
@@ -150,8 +150,8 @@ host_env:
 # container, so the root must be on a path Docker shares with the host. On
 # macOS Docker runs in a VM: colima and Docker Desktop share the home
 # directory by default, colima does not share $TMPDIR (/var/folders), and
-# container writes there never reach the host. So on macOS a local rollout
-# makes its root under ~/.reef/rollouts. Linux Docker shares every path, and
+# container writes there never reach the host. So on macOS a local run
+# makes its root under ~/.reef/runs. Linux Docker shares every path, and
 # the root stays in the temp directory there.
 is_root_bind_mounted: true
 # The execution validator permits nesting only with remote task environments.

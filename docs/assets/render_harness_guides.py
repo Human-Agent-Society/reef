@@ -158,9 +158,9 @@ def adapter_modes(theme: str, fonts) -> str:
         MODES_W,
         MODES_H,
         "One adapter.yaml, three ways an agent runs. Reef renders the harness tree with the adapter. For an "
-        "evaluation rollout, the rendered tree is the agent's whole configuration in a fresh root, and run.rollout "
+        "evaluation run, the rendered tree is the agent's whole configuration in a fresh root, and run.task "
         "runs one prompt. For a Harbor task, Reef installs the pinned agent in the task's container, copies the "
-        "rendered tree in, runs run.rollout with the task's instruction, and the task's verifier scores it. On a "
+        "rendered tree in, tasks run.task with the task's instruction, and the task's verifier scores it. On a "
         "person's machine, the agent's own command installs the rendered tree as its plugin, beside the person's own "
         "configuration, the client runs the agent with run.layer, and sends the changed files back.",
         "One adapter.yaml, three ways an agent runs",
@@ -187,13 +187,13 @@ def adapter_modes(theme: str, fonts) -> str:
     modes = [
         (
             "reef",
-            "evaluation rollout, in Reef",
+            "evaluation run, in Reef",
             [
-                ("Rollout root", "the rendered tree, nothing else"),
-                ("Run", "`run.rollout, {prompt} = a prompt"),
+                ("Run root", "the rendered tree, nothing else"),
+                ("Run", "`run.task, {prompt} = a prompt"),
                 ("Trajectory", "read with the sessions reader"),
             ],
-            "`dirs · model · run.rollout · sessions",
+            "`dirs · model · run.task · sessions",
         ),
         (
             "reef",
@@ -201,10 +201,10 @@ def adapter_modes(theme: str, fonts) -> str:
             [
                 ("Task container", "Harbor starts it with Docker"),
                 ("Install", "`npm <package>@<version>"),
-                ("Run", "`run.rollout, {prompt} = instruction"),
+                ("Run", "`run.task, {prompt} = instruction"),
                 ("Verifier", "the task's tests give the score"),
             ],
-            "`install · dirs · model · run.rollout · sessions",
+            "`install · dirs · model · run.task · sessions",
         ),
         (
             "machine",

@@ -15,7 +15,7 @@ from recipes.beta.reefine.scorer import HEALTH_TASK_DIRECTORY, AnswerScorer
 from reef.core.config import config_arguments
 from reef.evaluation.activation import AlwaysActivate, NeverActivate
 from reef.execution.sandbox.process import LocalExecutor
-from reef.harness.rollouts.run import RolloutResult
+from reef.harness.tasks.run import TaskResult
 from reef.harness.tree import HarnessTree
 from reef.inference.http import InferenceProxyRuntime
 from reef.recipe.errors import RecipeConfigError
@@ -116,16 +116,16 @@ def test_on_terminus_the_health_task_runs_as_the_shipped_task_directory(tmp_path
     pi = ReefineRecipe.from_environment({}, config={"evolution": {**section, "adapter": "pi", "agent": None}})
     assert isinstance(pi, ReefineRecipe) and pi.evaluation.tasks[0] == HEALTH
 
-    def ran(rewards: dict[str, float], error: str = "") -> RolloutResult:
+    def ran(rewards: dict[str, float], error: str = "") -> TaskResult:
         row = trial_record(HEALTH_TASK_DIRECTORY, rewards, tmp_path, error)
         events = ({"type": "verifier", **{key: value for key, value in row.items() if key != "steps"}},)
-        return RolloutResult(exit_code=0, stdout="", stderr="", trajectory=events, residue=())
+        return TaskResult(exit_code=0, stdout="", stderr="", trajectory=events, residue=())
 
     scorer = AnswerScorer()
     assert scorer.score(HEALTH_TASK_DIRECTORY, ran({"reward": 1.0})) == 1.0
     assert scorer.score(HEALTH_TASK_DIRECTORY, ran({"reward": 0.0})) == 0.0
     assert scorer.score(HEALTH_TASK_DIRECTORY, ran({}, "the container never built")) == 0.0
-    # The reply's last line is not the score of a task directory: a Harbor rollout has no assistant reply.
+    # The reply's last line is not the score of a task directory: a Harbor run has no assistant reply.
     assert scorer.score("[health] x", ran({"reward": 1.0})) == 0.0
 
 

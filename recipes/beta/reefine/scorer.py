@@ -1,4 +1,4 @@
-"""Reefine's rollout scorer: the serve config's health task, graded by its expected answer.
+"""Reefine's run scorer: the serve config's health task, graded by its expected answer.
 
 The health task checks that a tree still works (the model binding, the tools,
 the extensions load), not that a requested change does. A prompt task scores
@@ -11,9 +11,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from reef.evaluation.harness import RolloutScorer, verifier_reward
-from reef.harness.rollouts.run import RolloutResult
-from reef.harness.rollouts.trajectory import final_assistant_text
+from reef.evaluation.harness import TaskScorer, verifier_reward
+from reef.harness.tasks.run import TaskResult
+from reef.harness.tasks.trajectory import final_assistant_text
 
 #: Expected final answers, keyed by the stable prefix each task starts with (the example serve config's tasks).
 ANSWERS = {
@@ -34,10 +34,10 @@ def grade_text(task: str, text: str | None) -> float:
     return 1.0 if lines and lines[-1] == expected else 0.0
 
 
-class AnswerScorer(RolloutScorer):
-    """Score a rollout of the health task: its verifier's reward for the task directory, else ``grade_text``."""
+class AnswerScorer(TaskScorer):
+    """Score a run of the health task: its verifier's reward for the task directory, else ``grade_text``."""
 
-    def score(self, task: str, result: RolloutResult) -> float:
+    def score(self, task: str, result: TaskResult) -> float:
         if task == HEALTH_TASK_DIRECTORY:
             return verifier_reward(task, result)
         return grade_text(task, final_assistant_text(result.trajectory))

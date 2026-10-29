@@ -49,7 +49,7 @@ from difflib import SequenceMatcher
 from reef.artifact.artifact import Artifact
 from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.adapters.parts import Format, TreeLayout
-from reef.harness.rollouts.model_binding import ModelBinding
+from reef.harness.tasks.model_binding import ModelBinding
 from reef.harness.tree import HarnessTree, render_tree
 from reef.surface.base import ArtifactLayout, ComponentSurface, FileTree, Surface
 from reef.surface.files import TextFileTree

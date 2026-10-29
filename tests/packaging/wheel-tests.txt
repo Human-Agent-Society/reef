@@ -26,7 +26,7 @@ tests/harness/test_program_executor.py
 tests/harness/test_evolution_executor_ray.py
 tests/harness/test_harbor_tasks.py
 tests/harness/test_harness_contracts.py
-tests/harness/test_harness_rollout.py
+tests/harness/test_harness_run.py
 tests/harness/test_harness_evolve_runner.py
 tests/harness/test_harness_model_route.py
 tests/harness/test_harness_read.py

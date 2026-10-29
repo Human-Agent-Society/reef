@@ -21,7 +21,7 @@ from tests.support.harness_steps import COMPONENT, PI_FAKE, TreeReleases, change
 
 from reef.execution.sandbox.process import LocalExecutor, ProgramExecutor, SandboxExecutor, SandboxUnavailable
 from reef.harness.adapters import get_adapter
-from reef.harness.rollouts.vendor_install import (
+from reef.harness.tasks.vendor_install import (
     DEFAULT_PREFIX_ROOT,
     PIN_FILE,
     PREFIX_ENV,
@@ -173,7 +173,7 @@ def test_the_git_kind_records_its_ref_and_reinstalls_when_only_the_ref_moved(tmp
         steps.append(list(command))
         _write_executable(binary, "#!/bin/sh\necho 'Hermes Agent v0.21.0'\n")
 
-    monkeypatch.setattr("reef.harness.rollouts.vendor_install._run", record)
+    monkeypatch.setattr("reef.harness.tasks.vendor_install._run", record)
 
     assert resolve_binary(descriptor, prefix=prefix) == str(binary)
     assert [step[0:2] for step in steps] == [
@@ -205,7 +205,7 @@ def _counting_resolver(monkeypatch, result):
             raise result
         return result
 
-    monkeypatch.setattr("reef.harness.rollouts.vendor_install.resolve_binary", resolve)
+    monkeypatch.setattr("reef.harness.tasks.vendor_install.resolve_binary", resolve)
     return calls
 
 

@@ -76,7 +76,7 @@ Both ways feed the same training step (4 to 8).
      - Offline: learn from uploaded tasks
    * - Traces
      - sessions that people run and score
-     - rollouts of the next train tasks, run on the head
+     - runs of the next train tasks, run on the head
    * - Evaluation tasks
      - prompts in ``evolution.evaluation.tasks``, or none (``policy: none``)
      - the eval split of the uploaded tasks
@@ -85,7 +85,7 @@ Both ways feed the same training step (4 to 8).
      - every adapter with an npm ``install``
    * - Recipes
      - ACE, ReasoningBank, GEPA (AIME example)
-     - GEPA with ``TrainTaskRollouts``, Meta-Harness (Terminal-Bench example)
+     - GEPA with ``TrainTaskJobData``, Meta-Harness (Terminal-Bench example)
 
 Quickstart
 ----------
@@ -143,7 +143,7 @@ Change the deployment's evaluation and add a ``pipeline`` section:
            policy: compare
    pipeline:
      sample2job:
-       module: reef.sample2job.traces:TrainTaskRollouts
+       module: reef.sample2job.traces:TrainTaskJobData
        config: {buffer_size: 4}
 
 Then upload Harbor task directories. The first train task starts the run:
@@ -170,7 +170,7 @@ The example runs the online way without a person:
 ``configs/serve.yaml`` holds the endpoint, the model and the token. Three
 exact-answer tasks go through Reef, and each graded reply is one step. The
 run succeeds when a row of ``/reef/harness/releases`` shows ``selected:
-true``. When both sides score nothing, no rollout gave an answer: vLLM, for
+true``. When both sides score nothing, no run gave an answer: vLLM, for
 example, needs ``--enable-auto-tool-choice --tool-call-parser hermes``. See
 `Troubleshooting <troubleshooting.rst>`__.
 
@@ -266,7 +266,7 @@ The loop
        new state.
      - `Write a harness method <../developer-guide/write-a-harness-method.rst>`__
    * - Evaluation
-     - Rollouts of ``T'`` and ``T`` on the same tasks; the policy selects or
+     - Runs of ``T'`` and ``T`` on the same tasks; the policy selects or
        rejects ``T'``.
      - `Evaluation: the publication policy`_
    * - Release
@@ -297,12 +297,12 @@ trace:
 Offline runs on uploaded tasks
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-``reef.sample2job.traces:TrainTaskRollouts`` makes each step from the train
+``reef.sample2job.traces:TrainTaskJobData`` makes each step from the train
 split of the scenario's imported tasks:
 
 - Each uploaded train task joins the buffer and trains once, in upload
   order. A step of train tasks runs up to ``buffer_size`` of them (default
-  ``job_samples``) on the head, and the method reads those rollouts.
+  ``job_samples``) on the head, and the method reads those runs.
 - A step holds either traces or train tasks, so recorded sessions still
   start their own steps.
 - The eval split is the evaluation's task source. The stage needs a scorer
@@ -317,9 +317,9 @@ Evaluation: the publication policy
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 ``evolution.evaluation`` names the tasks, the ``scorer`` (an
-``RolloutScorer``) and the ``policy``. The tasks come from ``tasks`` (prompts
+``TaskScorer``) and the ``policy``. The tasks come from ``tasks`` (prompts
 or task directories), ``task_manifest`` with ``tasks_root``, or
-``imported_tasks``. A prompt rollout starts in an empty root, so a prompt must
+``imported_tasks``. A prompt run starts in an empty root, so a prompt must
 state the whole problem.
 
 .. list-table::
@@ -336,20 +336,20 @@ state the whole problem.
        head's by more than ``min_margin``
    * - ``floor``
      - the candidate only
-     - every rollout that ran scores at least ``floor_score``, and every task
-       has such a rollout
+     - every run that completed scores at least ``floor_score``, and every task
+       has such a run
    * - ``none``
      - nothing
      - always; it needs no tasks and no scorer
 
-A rollout that gave no answer scores 0. A failed rollout, one that the
+A run that gave no answer scores 0. A failed run, one that the
 environment could not run, counts for neither tree: ``wins`` drops its pair
-and ``mean`` leaves it out. A tie publishes nothing. Reef keeps every scored rollout and reuses it for the same tree,
-task and repeat, so a step usually runs only the candidate's rollouts.
+and ``mean`` leaves it out. A tie publishes nothing. Reef keeps every scored run and reuses it for the same tree,
+task and repeat, so a step usually runs only the candidate's runs.
 `Harness evolution keys <../reference/configuration.rst#harness-evolution-keys>`__
 lists every key.
 
-Running rollouts
+Running runs
 ^^^^^^^^^^^^^^^^
 
 .. list-table::
@@ -357,17 +357,17 @@ Running rollouts
    :widths: 20 80
 
    * - ``evolution.executor``
-     - Where a rollout runs
+     - Where a task runs
    * - ``local`` (default)
      - a plain subprocess, with no isolation; for development
    * - ``sandbox``
      - a bubblewrap jail: read-only base, explicit credentials only, no
        network unless ``evolution.sandbox.egress_hosts`` is set
    * - ``e2b``, ``modal``
-     - one cloud sandbox per rollout (``reef-infra[e2b]`` or
+     - one cloud sandbox per run (``reef-infra[e2b]`` or
        ``reef-infra[modal]``), with outbound internet
 
-``evolution.sandbox.env_from`` lists the only variables a rollout gets. See
+``evolution.sandbox.env_from`` lists the only variables a run gets. See
 `Sandbox environments <../developer-guide/sandboxes.rst>`__.
 
 Task directories
@@ -403,7 +403,7 @@ History
   the method's summary and its cost. ``/reef/harness/releases/<step>/page``
   explains one step.
 - ``<evolution.state_dir>/<scenario>/harness/`` keeps ``history/`` (every
-  tree, rollout and decision; the score cache) and ``steps/<step>/`` (each
+  tree, run and decision; the score cache) and ``steps/<step>/`` (each
   workspace and its model calls). Nothing prunes it, and it holds client
   traffic: protect it.
 
@@ -533,8 +533,8 @@ release and mounts each new one between two steps:
 
 ``--follow pinned`` waits for ``reef-native mount <release_id>`` instead of
 mounting each new active release. The process runs tree code with your privileges, outside
-the evaluation's sandbox. See `Rollout and serve modes
-<../developer-guide/harness-adapters.rst#rollout-and-serve-modes>`__.
+the evaluation's sandbox. See `Run and serve modes
+<../developer-guide/harness-adapters.rst#run-and-serve-modes>`__.
 
 Choose or write a method
 ------------------------

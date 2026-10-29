@@ -1,7 +1,7 @@
 """The native host: the registries the loop reads, filled once from a rendered tree.
 
 The interpreter reads a ``NativeHost`` at every use instead of holding the
-tools, hooks, agents, graphs, loop and prompt it was built with. The rollout
+tools, hooks, agents, graphs, loop and prompt it was built with. The run
 form fills one at boot from the rendered files and never changes it. The
 serve form builds a new host for each tree it mounts and swaps it in between
 two steps, so the next step runs on the new tree.

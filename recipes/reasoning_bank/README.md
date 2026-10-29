@@ -81,7 +81,7 @@ set `evolution.max_model_calls_per_step`, allow two calls per run. A step that r
 
 - The `pipeline` section names the inference stages. Every model call that a client sends through Reef is a
   trace, and no client has to report a score. The judge labels each run.
-- `evolution.evaluation.policy: none` runs no rollouts. Every step whose tree passes validation publishes.
+- `evolution.evaluation.policy: none` runs no task. Every step whose tree passes validation publishes.
 - The served model judges and extracts, as in the paper.
 
 The example serves `qwen3-8b` from `http://127.0.0.1:8000`; edit the `inference` section for another model. Start
@@ -100,7 +100,7 @@ Other setups change one part of the example:
   then a scored run, and its score sets the outcome.
 - For a stronger judge, declare the model under `evolution.models` (`url`, `model`, `api_key_env`) and set
   `judge_model` to its name.
-- With `evaluation.policy: compare` or `floor`, Reef runs rollouts on each new tree before it publishes. The bank
+- With `evaluation.policy: compare` or `floor`, Reef runs tasks on each new tree before it publishes. The bank
   keeps every item that it learned, whether or not the tree was published, and each step proposes the whole bank
   again.
 
@@ -116,7 +116,7 @@ Other setups change one part of the example:
 - **Screening.** The paper keeps every item. Here an item with a credential-shaped literal or an instruction
   override stays out of the bank.
 - **Inputs.** The judge and the extractor read one JSON view of the run: the task, the transcript without the
-  system prompt, the final reply, the feedback and the failure. The run of an offline step (a rollout) has no
+  system prompt, the final reply, the feedback and the failure. The run of an offline step (a run) has no
   transcript in its trace. Past 30,000 characters, the view loses the middle of its transcript. The paper's judge
   for web tasks also reads the final page state.
 - **Prompts.** The prompts are Reef's own and ask for JSON. Reef sends no sampling parameters, and the paper

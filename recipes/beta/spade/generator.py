@@ -47,7 +47,7 @@ from recipes.beta.spade.generation import (
 )
 from reef.core.plugins import PluginConfigError
 from reef.core.tasks import HarborTask
-from reef.harness.rollouts.tasks import rewards_of
+from reef.harness.tasks.rollouts import rewards_of
 from reef.recipe.generated_tasks.generator import (
     FailedTask,
     GeneratedTaskResult,

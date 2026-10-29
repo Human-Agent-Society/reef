@@ -3,14 +3,14 @@
 Each step gives one proposer model the search so far, read from the
 scenario's history: the seed and every tree the method proposed, each with its
 files, its parent, what the proposer said about it, its outcome and its scores
-on the evaluation tasks; excerpts of the rollout records and of the step's
+on the evaluation tasks; excerpts of the run records and of the step's
 traces; and the files the adapter takes. The reply names any candidate as its
 parent and returns one complete tree. The step checks that tree and leaves it
 in ``workspace.harness`` as the candidate. A reply that is invalid, or that
 repeats a tree the history holds, leaves the head unchanged, so the step skips.
 
 A deployment selects with the ``compare`` policy and ``statistic: mean``. The
-incumbent's scores come from the score cache, not from new rollouts, so a
+incumbent's scores come from the score cache, not from new runs, so a
 candidate must beat the mean the incumbent was measured at, as upstream's
 frontier does.
 
@@ -31,7 +31,7 @@ from reef.core.config import config_option
 from reef.core.evaluation import mean_score
 from reef.core.plugins import PluginSettings
 from reef.core.prompts import untrusted_text
-from reef.evaluation.harness import CandidateRecord, History, RolloutRecord
+from reef.evaluation.harness import CandidateRecord, History, RunRecord
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.parts import TreeLayout
 from reef.harness.tree import HarnessTree
@@ -60,7 +60,7 @@ class MetaHarnessSettings(PluginSettings):
     Values: ``mode`` is one of ``MODES``. ``model`` names an
     ``evolution.models`` binding and is never ``served``. ``components`` are
     distinct parts of the adapter's tree, empty for every part.
-    ``max_candidates`` and ``max_target_rollouts`` are budgets ≥ 0, where 0
+    ``max_candidates`` and ``max_target_runs`` are budgets ≥ 0, where 0
     sets no limit. ``max_files`` ≥ 1, ``max_traces`` ≥ 0 and
     ``trace_chars`` ≥ 1 bound one proposal and one prompt.
     Purpose: ``MetaHarness.from_config`` parses it, and the method reads it
@@ -75,8 +75,8 @@ class MetaHarnessSettings(PluginSettings):
         (), help="The parts of the tree a proposal may change; none means every part."
     )
     max_candidates: int = config_option(0, help="The most candidates the method proposes. 0 sets no limit.")
-    max_target_rollouts: int = config_option(
-        0, help="Propose no candidate once the evaluations ran this many rollouts. 0 sets no limit."
+    max_target_runs: int = config_option(
+        0, help="Propose no candidate once the evaluations ran this many runs. 0 sets no limit."
     )
     max_files: int = config_option(32, help="The most files of one proposed tree.")
     max_traces: int = config_option(16, help="The most traces whose record files one prompt shows.")
@@ -93,7 +93,7 @@ class MetaHarnessSettings(PluginSettings):
             raise ValueError("components must not repeat a part")
         for label, value, least in (
             ("max_candidates", self.max_candidates, 0),
-            ("max_target_rollouts", self.max_target_rollouts, 0),
+            ("max_target_runs", self.max_target_runs, 0),
             ("max_files", self.max_files, 1),
             ("max_traces", self.max_traces, 0),
             ("trace_chars", self.trace_chars, 1),
@@ -111,7 +111,7 @@ class Member:
     ``OUTCOMES``: ``served`` when the tree is the head of the step; otherwise
     ``selected`` when a step's decision selected it, ``rejected`` when the
     decisions on it only rejected it, and ``undecided`` when no decision is on
-    it. ``rollouts`` are rollouts of ``tree``: its latest one for each (task,
+    it. ``runs`` are runs of ``tree``: its latest one for each (task,
     repeat) of the evaluation tasks, in task order and then repeat order.
     Purpose: ``search_population`` makes them; the method shows them to the
     proposer model and checks the reply's parent against them, and the
@@ -121,15 +121,15 @@ class Member:
     record: CandidateRecord
     tree: HarnessTree
     outcome: str
-    rollouts: tuple[RolloutRecord, ...]
+    runs: tuple[RunRecord, ...]
 
     def __post_init__(self) -> None:
         if self.tree.checksum() != self.record.tree:
             raise ValueError("Member.tree must be the tree its record names")
         if self.outcome not in OUTCOMES:
             raise ValueError(f"Member.outcome must be one of {', '.join(OUTCOMES)}")
-        if any(rollout.tree != self.record.tree for rollout in self.rollouts):
-            raise ValueError("Member.rollouts must be rollouts of the member's tree")
+        if any(task_run.tree != self.record.tree for task_run in self.runs):
+            raise ValueError("Member.runs must be runs of the member's tree")
 
     @property
     def parent(self) -> str | None:
@@ -140,9 +140,9 @@ class Member:
 
     @property
     def mean_score(self) -> float | None:
-        """The mean score of the ``rollouts`` that did not fail, as ``compare`` counts it (``mean_score``); ``None``
-        before the first rollout, or when every rollout failed."""
-        return mean_score(rollout.score for rollout in self.rollouts)
+        """The mean score of the ``runs`` that did not fail, as ``compare`` counts it (``mean_score``); ``None``
+        before the first run, or when every run failed."""
+        return mean_score(task_run.score for task_run in self.runs)
 
 
 class MetaHarness(Method):
@@ -250,7 +250,7 @@ class MetaHarness(Method):
         workspace.write_output(summary, notes)
 
     def spent_budget(self, history: History, step: int) -> str | None:
-        """The budget the search spent before ``step``: ``max_candidates`` or ``max_target_rollouts``, ``None``
+        """The budget the search spent before ``step``: ``max_candidates`` or ``max_target_runs``, ``None``
         while both last.
 
         The counts read the history's records of the steps before ``step``. An
@@ -263,9 +263,9 @@ class MetaHarness(Method):
         )
         if settings.max_candidates and proposed >= settings.max_candidates:
             return "max_candidates"
-        rollouts = sum(1 for rollout in history.rollouts if rollout.step < step)
-        if settings.max_target_rollouts and rollouts >= settings.max_target_rollouts:
-            return "max_target_rollouts"
+        task_runs = sum(1 for task_run in history.runs if task_run.step < step)
+        if settings.max_target_runs and task_runs >= settings.max_target_runs:
+            return "max_target_runs"
         return None
 
     def checked_tree(
@@ -293,9 +293,9 @@ class MetaHarness(Method):
     ) -> list[dict[str, Any]]:
         """The traces a prompt shows, each with an excerpt of its record files: at most ``max_traces``.
 
-        The step's own traces come first. Then the members' rollouts take
+        The step's own traces come first. Then the members' runs take
         turns: the served member first and the others newest first, and each
-        member gives its lowest scores first, a failed rollout before any
+        member gives its lowest scores first, a failed run before any
         score.
         """
         max_traces = self.settings.max_traces
@@ -303,9 +303,9 @@ class MetaHarness(Method):
             {
                 "source": trace.source,
                 "score": trace.score,
-                # A rollout keeps its trajectory files and its rollout.json in the history, not in the trace.
+                # A run keeps its trajectory files and its run.json in the history, not in the trace.
                 "record": excerpt(
-                    history.rollout_dir(trace.record) if trace.source == "rollout" else trace.directory,
+                    history.run_dir(trace.record) if trace.source == "run" else trace.directory,
                     self.settings.trace_chars,
                 ),
             }
@@ -316,27 +316,27 @@ class MetaHarness(Method):
         turns = itertools.zip_longest(
             *(
                 sorted(
-                    member.rollouts,
-                    key=lambda rollout: (not rollout.score.is_failed, rollout.score.value or 0.0),
+                    member.runs,
+                    key=lambda task_run: (not task_run.score.is_failed, task_run.score.value or 0.0),
                 )
                 for member in (*served, *others)
             )
         )
-        for rollout in itertools.chain.from_iterable(turns):
+        for task_run in itertools.chain.from_iterable(turns):
             if len(shown) >= max_traces:
                 break
-            if rollout is None:
+            if task_run is None:
                 continue
-            failure = None if rollout.failure is None else f"{rollout.failure.stage}: {rollout.failure.cause}"
+            failure = None if task_run.failure is None else f"{task_run.failure.stage}: {task_run.failure.cause}"
             shown.append(
                 {
                     "source": "evaluation",
-                    "candidate_id": rollout.tree,
-                    "task": task_ids[rollout.task],
-                    "repeat": rollout.repeat,
-                    "score": rollout.score.to_json(),
+                    "candidate_id": task_run.tree,
+                    "task": task_ids[task_run.task],
+                    "repeat": task_run.repeat,
+                    "score": task_run.score.to_json(),
                     "failure": None if failure is None else clipped(failure, self.settings.trace_chars),
-                    "record": excerpt(history.rollout_dir(rollout.rollout), self.settings.trace_chars),
+                    "record": excerpt(history.run_dir(task_run.run_id), self.settings.trace_chars),
                 }
             )
         return shown
@@ -353,7 +353,7 @@ def search_population(
     ``step`` are members too. A tree that an earlier attempt of ``step``
     proposed is not: that attempt never committed. Outcomes read the final
     decision of each step before ``step``, the latest one the history holds
-    for it. The rollouts are those on ``tasks``.
+    for it. The runs are those on ``tasks``.
     """
     decisions = {decision.step: decision for decision in history.decisions if decision.step < step}
     order = {task: index for index, task in enumerate(tasks)}
@@ -371,12 +371,12 @@ def search_population(
             outcome = "rejected"
         else:
             outcome = "undecided"
-        latest = {(rollout.task, rollout.repeat): rollout for rollout in history.rollouts_of(record.tree)}
-        rollouts = sorted(
-            (rollout for (task, _), rollout in latest.items() if task in order),
-            key=lambda rollout: (order[rollout.task], rollout.repeat),
+        latest = {(task_run.task, task_run.repeat): task_run for task_run in history.runs_of(record.tree)}
+        task_runs = sorted(
+            (task_run for (task, _), task_run in latest.items() if task in order),
+            key=lambda task_run: (order[task_run.task], task_run.repeat),
         )
-        members.append(Member(record, history.tree(record.tree), outcome, tuple(rollouts)))
+        members.append(Member(record, history.tree(record.tree), outcome, tuple(task_runs)))
     return tuple(members)
 
 
@@ -392,8 +392,8 @@ def uncommitted(record: CandidateRecord, step: int) -> bool:
 def member_json(member: Member, task_ids: Mapping[str, str]) -> dict[str, Any]:
     """What a prompt shows of one member; ``task_ids`` names each evaluation task."""
     scores: dict[str, list[float | str]] = {}
-    for rollout in member.rollouts:
-        scores.setdefault(task_ids[rollout.task], []).append(rollout.score.to_json())
+    for task_run in member.runs:
+        scores.setdefault(task_ids[task_run.task], []).append(task_run.score.to_json())
     return {
         "candidate_id": member.record.tree,
         "parent_id": member.parent,

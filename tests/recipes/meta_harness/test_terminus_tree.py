@@ -18,7 +18,7 @@ from reef_terminus.trajectory import read_trials
 from reef_terminus.tree import ENVIRONMENT_ENV
 
 from reef.harness.adapters import get_adapter
-from reef.harness.rollouts.model_binding import ModelBinding
+from reef.harness.tasks.model_binding import ModelBinding
 from reef.harness.tree import HarnessTree, render_tree
 
 #: The model comes from Reef's binding: a tree cannot set model_name.
@@ -129,7 +129,7 @@ def test_runner_refuses_extension_before_importing_or_executing_it(monkeypatch) 
 @pytest.mark.unit
 @pytest.mark.parametrize("task", [".", "..", "", ".hidden", "we*ird?"])
 def test_a_task_that_cannot_name_a_trial_file_is_refused(task: str) -> None:
-    # The task arrives in the rollout prompt, and a collected task can come from
+    # The task arrives in the run prompt, and a collected task can come from
     # recorded traffic, so it never becomes a path component unchecked.
     with pytest.raises(TerminusTreeError):
         runner.trial_slug(task)
@@ -262,7 +262,7 @@ def test_a_trial_record_carries_the_verifier_rewards(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
-def test_a_rollout_that_never_ran_records_why(tmp_path: Path) -> None:
+def test_a_run_that_never_ran_records_why(tmp_path: Path) -> None:
     # A container that failed to build scores nothing. Without the reason, the
     # trial reads as an agent that failed rather than a run that never happened.
     record = runner.trial_record("hello-world", {}, tmp_path, "docker compose build failed")
@@ -284,7 +284,7 @@ def test_the_written_trial_is_what_the_reader_parses(tmp_path: Path) -> None:
 
 @pytest.mark.unit
 def test_load_tree_reads_both_roots_and_skips_the_run_s_own_output(tmp_path: Path) -> None:
-    # terminus-commands is a sibling of terminus, and the rollout root also
+    # terminus-commands is a sibling of terminus, and the run root also
     # holds the task workspace and, once running, sessions and trials.
     files = _render(tmp_path, {"rules.md": "Be brief.", "commands/summarize.md": "Summarize."})
     for noise in ("workspace/answer.txt", "terminus/sessions/x.json", "terminus/trials/t/trajectory.json"):

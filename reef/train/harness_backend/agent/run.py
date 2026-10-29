@@ -25,13 +25,13 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from reef.core.errors import ReefError
-from reef.evaluation.harness.history import ROLLOUTS_DIR
+from reef.evaluation.harness.history import RUNS_DIR
 from reef.execution.sandbox.environment import download_directory
-from reef.execution.sandbox.process import ProgramExecutor, RolloutLaunchError, RolloutTimeout
+from reef.execution.sandbox.process import ProgramExecutor, ProgramLaunchError, ProgramTimeout
 from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.gateway import AgentGateway, AgentTool
-from reef.harness.rollouts.model_binding import ModelBinding
-from reef.harness.rollouts.run import headless_argv, headless_env, launch_agent, read_session
+from reef.harness.tasks.model_binding import ModelBinding
+from reef.harness.tasks.run import headless_argv, headless_env, launch_agent, read_session
 from reef.harness.tree import HarnessTree, render_tree
 from reef.train.harness_backend.contract import AgentOutcome, Services
 from reef.train.harness_backend.workspace import Workspace
@@ -153,9 +153,9 @@ class EvaluateTool(AgentTool):
 
     name = "evaluate"
     description = (
-        "Score a tree of the step's workspace on tasks, repeats rollouts each. A scored rollout in the history is "
-        "reused; new rollouts spend the step's rollout budget. Answers tree (its checksum) and rollouts: one "
-        "record per rollout with its task, repeat, score (null when it could not run), failure, reply, and "
+        "Score a tree of the step's workspace on tasks, repeats runs each. A scored run in the history is "
+        "reused; new runs spend the step's run budget. Answers tree (its checksum) and runs: one "
+        "record per run with its task, repeat, score (null when it could not run), failure, reply, and "
         "directory (its files, from the workspace)."
     )
     input_schema: ClassVar[Mapping[str, Any]] = {
@@ -185,19 +185,19 @@ class EvaluateTool(AgentTool):
         with self.run.lock:
             tree = self.run.read_tree(arguments)
             records = self.run.services.evaluate(tree, tasks, repeats=repeats)
-        history = self.run.workspace.history_dir / ROLLOUTS_DIR
-        rollouts = [
+        history = self.run.workspace.history_dir / RUNS_DIR
+        task_runs = [
             {
                 "task": record.task,
                 "repeat": record.repeat,
                 "score": record.score.to_json(),
                 "failure": None if record.failure is None else record.failure.cause,
                 "reply": record.reply,
-                "directory": os.path.relpath(history / record.rollout, self.run.workspace.root),
+                "directory": os.path.relpath(history / record.run_id, self.run.workspace.root),
             }
             for record in records
         ]
-        return {"tree": tree.checksum(), "rollouts": rollouts}
+        return {"tree": tree.checksum(), "runs": task_runs}
 
 
 def run_agent(
@@ -249,9 +249,9 @@ def run_agent(
                 # The executor copies the agent's files back, also after a time out.
                 run.session.close()
             outcome = AgentOutcome(process.exit_code, False, None, round(time.monotonic() - started, 1))
-        except RolloutTimeout:
+        except ProgramTimeout:
             outcome = AgentOutcome(None, True, None, round(time.monotonic() - started, 1))
-        except RolloutLaunchError as exc:
+        except ProgramLaunchError as exc:
             outcome = AgentOutcome(None, False, str(exc), round(time.monotonic() - started, 1))
     finally:
         gateway.stop()

@@ -1,8 +1,8 @@
-"""The terminus adapter through ``run_rollout``, the path Reef actually uses.
+"""The terminus adapter through ``run_task``, the path Reef actually uses.
 
 The gap these close: every earlier terminus test drove the runner directly
-with a hand-built environment, so none of them noticed that ``run_rollout``
-hands a rollout only the descriptor's own env. An adapter can pass its unit
+with a hand-built environment, so none of them noticed that ``run_task``
+hands a run only the descriptor's own env. An adapter can pass its unit
 tests and still be unable to start.
 
 A stub binary stands in for ``reef-terminus``: it records the environment and
@@ -24,13 +24,13 @@ from pathlib import Path
 import pytest
 from reef_terminus.runner import SESSION_DIR_ENV, TREE_DIR_ENV, TRIALS_DIR_ENV, trial_record
 
-from reef.execution.sandbox.process import ProcessOutcome, ProgramExecutor, RolloutLaunchError, SandboxExecutor
+from reef.execution.sandbox.process import ProcessOutcome, ProgramExecutor, ProgramLaunchError, SandboxExecutor
 from reef.harness.adapters import get_adapter
-from reef.harness.rollouts.model_binding import ModelBinding
-from reef.harness.rollouts.run import RolloutError, run_rollout
+from reef.harness.tasks.model_binding import ModelBinding
+from reef.harness.tasks.run import TaskRunError, run_task
 from reef.harness.tree import HarnessTree, render_tree
 
-# Stands in for the runner: prove the rollout reaches it with what it needs.
+# Stands in for the runner: prove the run reaches it with what it needs.
 STUB = """#!/usr/bin/env python3
 import json, os, sys
 from pathlib import Path
@@ -40,7 +40,7 @@ sessions = Path(os.environ["{sessions}"])
 Path(os.environ["{trials}"]).mkdir(parents=True, exist_ok=True)
 task = sys.argv[sys.argv.index("--task") + 1]
 
-# What the runner reads back: the tree, from the rollout root.
+# What the runner reads back: the tree, from the run root.
 tree = sorted(
     p.relative_to(root).as_posix()
     for p in Path(root).rglob("*")
@@ -79,7 +79,7 @@ def render(files: Mapping[str, str]) -> dict[str, str]:
 
 @pytest.fixture(autouse=True)
 def home(tmp_path: Path, monkeypatch) -> Path:
-    """On macOS terminus roots its rollouts under the home directory, so every test here gets a home of its own."""
+    """On macOS terminus roots its runs under the home directory, so every test here gets a home of its own."""
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
@@ -96,10 +96,10 @@ def _stub(tmp_path: Path) -> str:
 
 
 @pytest.mark.unit
-def test_a_rollout_reaches_the_runner_with_the_tree_and_leaves_no_residue(tmp_path: Path) -> None:
+def test_a_run_reaches_the_runner_with_the_tree_and_leaves_no_residue(tmp_path: Path) -> None:
     descriptor = get_adapter("terminus")
     files = render(TREE)
-    result = run_rollout(descriptor, files, "hello-world", binary=_stub(tmp_path), timeout=60.0)
+    result = run_task(descriptor, files, "hello-world", binary=_stub(tmp_path), timeout=60.0)
 
     assert result.exit_code == 0, result.stderr
     # The trajectory reader found the trial the runner wrote.
@@ -114,21 +114,21 @@ def test_a_rollout_reaches_the_runner_with_the_tree_and_leaves_no_residue(tmp_pa
         "terminus/config.json",
         "terminus/skills/notes/SKILL.md",
     ]
-    # Harbor's trial tree and the session file are rollout state, not drift.
+    # Harbor's trial tree and the session file are run state, not drift.
     assert result.residue == ()
 
 
 @pytest.mark.unit
-def test_the_rollout_runs_in_the_workspace(tmp_path: Path) -> None:
+def test_the_run_runs_in_the_workspace(tmp_path: Path) -> None:
     descriptor = get_adapter("terminus")
     files = render(TREE)
-    result = run_rollout(descriptor, files, "hello-world", binary=_stub(tmp_path), timeout=60.0)
+    result = run_task(descriptor, files, "hello-world", binary=_stub(tmp_path), timeout=60.0)
     assert Path(result.trajectory[0]["cwd"]).name == "workspace"
 
 
 @pytest.mark.unit
-def test_the_rollout_carries_no_host_environment_beyond_the_descriptor(tmp_path: Path) -> None:
-    # The reason the dataset location cannot be a host variable: run_rollout
+def test_the_run_carries_no_host_environment_beyond_the_descriptor(tmp_path: Path) -> None:
+    # The reason the dataset location cannot be a host variable: run_task
     # keeps only PATH, SYSTEMROOT, TMPDIR and the descriptor's host_env from
     # the parent.
     descriptor = get_adapter("terminus")
@@ -138,9 +138,9 @@ def test_the_rollout_carries_no_host_environment_beyond_the_descriptor(tmp_path:
         f"#!/usr/bin/env python3\nimport os\nopen({str(leaked)!r}, 'w').write(os.environ.get('SECRET', ''))\n"
     )
     binary.chmod(0o755)
-    os.environ["SECRET"] = "must-not-reach-the-rollout"
+    os.environ["SECRET"] = "must-not-reach-the-run"
     try:
-        run_rollout(descriptor, render(TREE), "t", binary=str(binary), timeout=60.0)
+        run_task(descriptor, render(TREE), "t", binary=str(binary), timeout=60.0)
     finally:
         os.environ.pop("SECRET", None)
     assert leaked.read_text() == ""
@@ -148,7 +148,7 @@ def test_the_rollout_carries_no_host_environment_beyond_the_descriptor(tmp_path:
 
 @pytest.mark.unit
 @pytest.mark.parametrize("platform", ["darwin", "linux"])
-def test_the_rollout_root_is_under_the_home_directory_on_macos_only_and_removed(
+def test_the_run_root_is_under_the_home_directory_on_macos_only_and_removed(
     tmp_path: Path, home: Path, monkeypatch, platform: str
 ) -> None:
     # Harbor bind-mounts the trial directory under the root into the task
@@ -157,9 +157,9 @@ def test_the_rollout_root_is_under_the_home_directory_on_macos_only_and_removed(
     # service user there needs no writable home.
     monkeypatch.setattr(sys, "platform", platform)
     descriptor = get_adapter("terminus")
-    result = run_rollout(descriptor, render(TREE), "t", binary=_stub(tmp_path), timeout=60.0)
+    result = run_task(descriptor, render(TREE), "t", binary=_stub(tmp_path), timeout=60.0)
     root = Path(result.trajectory[0]["root"])
-    expected = home / ".reef" / "rollouts" if platform == "darwin" else Path(tempfile.gettempdir())
+    expected = home / ".reef" / "runs" if platform == "darwin" else Path(tempfile.gettempdir())
     assert root.parent == expected
     assert not root.exists()
     assert (home / ".reef").exists() == (platform == "darwin")
@@ -186,23 +186,23 @@ class RecordingSandbox(SandboxExecutor):
         readonly_paths: Sequence[Path] = (),
     ) -> ProcessOutcome:
         self.launched.append((root, dict(env)))
-        raise RolloutLaunchError("recorded, not run")
+        raise ProgramLaunchError("recorded, not run")
 
 
 @pytest.mark.unit
-def test_a_rollout_on_e2b_gets_neither_the_local_docker_context_nor_the_macos_root(
+def test_a_run_on_e2b_gets_neither_the_local_docker_context_nor_the_macos_root(
     tmp_path: Path, home: Path, monkeypatch
 ) -> None:
-    """The service's Docker context and the root under ~/.reef/rollouts serve local Docker, which on macOS shares
-    only the home directory with its VM; a rollout the sandbox runs on E2B gets neither, on macOS too."""
+    """The service's Docker context and the root under ~/.reef/runs serve local Docker, which on macOS shares
+    only the home directory with its VM; a run the sandbox runs on E2B gets neither, on macOS too."""
     monkeypatch.setattr(sys, "platform", "darwin")
     monkeypatch.setenv("DOCKER_HOST", "unix:///var/run/docker.sock")
     descriptor = get_adapter("terminus")
     executor = RecordingSandbox(
         egress_hosts=("api.e2b.dev",), env={"REEF_TERMINUS_ENVIRONMENT": "e2b", "E2B_API_KEY": "key"}
     )
-    with pytest.raises(RolloutError, match="recorded, not run"):
-        run_rollout(descriptor, render(TREE), "task", executor=executor)
+    with pytest.raises(TaskRunError, match="recorded, not run"):
+        run_task(descriptor, render(TREE), "task", executor=executor)
     ((root, env),) = executor.launched
     assert not set(descriptor.host_env) & set(env)
     assert root.parent == Path(tempfile.gettempdir())
@@ -210,12 +210,12 @@ def test_a_rollout_on_e2b_gets_neither_the_local_docker_context_nor_the_macos_ro
 
 
 @pytest.mark.unit
-def test_the_rollout_keeps_the_services_docker_settings(tmp_path: Path, home: Path, monkeypatch) -> None:
+def test_the_run_keeps_the_services_docker_settings(tmp_path: Path, home: Path, monkeypatch) -> None:
     # HOME is relocated, so without these the docker CLI finds neither
     # colima's context nor the compose plugin in the service's ~/.docker.
     descriptor = get_adapter("terminus")
     files = render(TREE)
-    result = run_rollout(descriptor, files, "t", binary=_stub(tmp_path), timeout=60.0)
+    result = run_task(descriptor, files, "t", binary=_stub(tmp_path), timeout=60.0)
     unset = {"DOCKER_HOST": None, "DOCKER_CONTEXT": None}
     assert result.trajectory[0]["docker"] == {**unset, "DOCKER_CONFIG": str(home / ".docker")}
 
@@ -226,7 +226,7 @@ def test_the_rollout_keeps_the_services_docker_settings(tmp_path: Path, home: Pa
     }
     for name, value in service.items():
         monkeypatch.setenv(name, value)
-    result = run_rollout(descriptor, files, "t", binary=_stub(tmp_path), timeout=60.0)
+    result = run_task(descriptor, files, "t", binary=_stub(tmp_path), timeout=60.0)
     assert result.trajectory[0]["docker"] == service
 
 
@@ -246,7 +246,7 @@ def test_an_executor_other_than_the_local_one_gets_no_service_settings(tmp_path:
             return ProcessOutcome(exit_code=0, stdout="", stderr="")
 
     descriptor = get_adapter("terminus")
-    run_rollout(descriptor, render(TREE), "t", executor=RecordingExecutor())
+    run_task(descriptor, render(TREE), "t", executor=RecordingExecutor())
     [(root, env)] = launched
     assert not {"DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG"} & set(env)
     assert root.parent == Path(tempfile.gettempdir())
@@ -254,11 +254,11 @@ def test_an_executor_other_than_the_local_one_gets_no_service_settings(tmp_path:
 
 @pytest.mark.unit
 def test_a_sandboxed_deployment_is_refused_at_the_shared_boundary(tmp_path: Path) -> None:
-    # terminus isolates rollouts in Harbor's container, which cannot nest in
-    # bubblewrap. Every caller of run_rollout is told, not just one backend.
+    # terminus isolates runs in Harbor's container, which cannot nest in
+    # bubblewrap. Every caller of run_task is told, not just one backend.
     descriptor = get_adapter("terminus")
-    with pytest.raises(RolloutError, match=r"cannot run under evolution\.executor: sandbox"):
-        run_rollout(
+    with pytest.raises(TaskRunError, match=r"cannot run under evolution\.executor: sandbox"):
+        run_task(
             descriptor,
             render(TREE),
             "hello-world",
@@ -272,8 +272,8 @@ def test_a_sandboxed_deployment_is_refused_at_the_shared_boundary(tmp_path: Path
 def test_an_extension_cannot_reach_a_local_process(tmp_path: Path) -> None:
     descriptor = get_adapter("terminus")
     files = render({**TREE, "extensions/agent.py": "class Agent: pass\n"})
-    with pytest.raises(RolloutError, match=r"extension requires evolution\.executor: sandbox"):
-        run_rollout(descriptor, files, "hello-world", binary="must-never-be-launched")
+    with pytest.raises(TaskRunError, match=r"extension requires evolution\.executor: sandbox"):
+        run_task(descriptor, files, "hello-world", binary="must-never-be-launched")
 
 
 @pytest.mark.unit
@@ -301,8 +301,8 @@ def test_an_extension_cannot_reach_a_local_process(tmp_path: Path) -> None:
 def test_remote_terminus_requires_explicit_network_and_credentials(egress, credentials, message) -> None:
     descriptor = get_adapter("terminus")
     executor = SandboxExecutor(egress_hosts=egress, env=credentials)
-    with pytest.raises(RolloutError, match=message):
-        run_rollout(descriptor, render(TREE), "task", executor=executor)
+    with pytest.raises(TaskRunError, match=message):
+        run_task(descriptor, render(TREE), "task", executor=executor)
 
 
 TASK = "/tasks/openenv-00012-003-deduction"

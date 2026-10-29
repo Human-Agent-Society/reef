@@ -2,7 +2,7 @@
 
 A fake pi binary that writes its rendered rules into its session, the
 deployment's model binding, a pi seed tree, an in-memory releases reader of
-one component, and a recipe and a backend built over them. Rollouts run the
+one component, and a recipe and a backend built over them. Tasks run the
 fake binary through the real adapter path, so render, launch and the
 trajectory read are the production code. ``evolution_config`` is a
 deployment config for the tests that build a recipe from its config, over
@@ -17,16 +17,16 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Self
 
-from tests.support._strategies import resolve_method, resolve_rollout_scorer
+from tests.support._strategies import resolve_method, resolve_task_scorer
 from tests.support._trajectories import recorded_trajectory
 
 from reef.artifact.artifact import ArtifactNotFound
 from reef.core.job_data import TrajectorySample
 from reef.core.plugins import PluginReference
-from reef.evaluation.harness import EvaluationSettings, History, RolloutScorer, TaskCollector
+from reef.evaluation.harness import EvaluationSettings, History, TaskCollector, TaskScorer
 from reef.harness.adapters import get_adapter
-from reef.harness.rollouts.model_binding import ModelBinding, ModelBindings
-from reef.harness.rollouts.run import RolloutResult
+from reef.harness.tasks.model_binding import ModelBinding, ModelBindings
+from reef.harness.tasks.run import TaskResult
 from reef.harness.tree import HarnessTree
 from reef.inference.http import InferenceProxyRuntime
 from reef.recipe.harness import EvolutionSettings, HarnessEvolutionRecipe
@@ -54,7 +54,7 @@ event = {"type": "agent_end", "prompt": prompt, "rules": rules_path.read_text() 
 (session_dir / "session.jsonl").write_text(json.dumps(event) + "\\n")
 """
 
-#: The deployment's model binding: rendered into rollouts at run time, never into a tree.
+#: The deployment's model binding: rendered into runs at run time, never into a tree.
 MODEL = ModelBinding(base_url="http://localhost:8000", model="qwen3-8b", api_key="dummy")
 
 #: A pi seed: one setting, and rules without the marker.
@@ -83,8 +83,8 @@ def runtime() -> InferenceProxyRuntime:
     return InferenceProxyRuntime(model_path=MODEL.model, base_url=MODEL.base_url, api_key=MODEL.api_key)
 
 
-def marker_score(task: str, result: RolloutResult) -> float:
-    """1.0 when the rollout's rendered rules carry ``marker``."""
+def marker_score(task: str, result: TaskResult) -> float:
+    """1.0 when the run's rendered rules carry ``marker``."""
     return 1.0 if "marker" in result.trajectory[-1]["rules"] else 0.0
 
 
@@ -128,7 +128,7 @@ def harness_recipe(
     """A pi recipe over the fake binary, its state under ``tmp_path``.
 
     ``evaluation`` sets ``EvaluationSettings`` fields beside ``tasks``, and ``evolution`` sets
-    ``EvolutionSettings`` fields. ``worker_executor`` places the rollout workers (``execution.evolution``),
+    ``EvolutionSettings`` fields. ``worker_executor`` places the run workers (``execution.evolution``),
     ``agent`` is the method's coding agent, ``models`` the method's named models, and ``activation`` the
     scenario's activation rule (the ``activation`` section; none is ``always``).
     """
@@ -138,7 +138,7 @@ def harness_recipe(
             **{"binary": str(make_pi_binary(tmp_path)), "state_dir": str(tmp_path / "harness"), **evolution}
         ),
         evaluation=EvaluationSettings(tasks=tasks, **dict(evaluation or {})),
-        scorer=resolve_rollout_scorer(score),
+        scorer=resolve_task_scorer(score),
         seed=seed,
         runtime=runtime(),
         worker_executor=ExecutorSettings() if worker_executor is None else worker_executor,
@@ -187,8 +187,8 @@ class IdleMethod(Method):
         return None
 
 
-class FixedScorer(RolloutScorer):
-    """A scorer that gives every rollout one score.
+class FixedScorer(TaskScorer):
+    """A scorer that gives every run one score.
 
     Values: ``fixed`` is that score, 0.0 unless the config's ``score`` sets it.
     Purpose: ``evolution_config`` names it, for a test that builds a recipe from its config.
@@ -201,7 +201,7 @@ class FixedScorer(RolloutScorer):
     def from_config(cls, config: Mapping[str, Any]) -> Self:
         return cls(float(config.get("score", 0.0)))
 
-    def score(self, task: str, result: RolloutResult) -> float:
+    def score(self, task: str, result: TaskResult) -> float:
         return self.fixed
 
 

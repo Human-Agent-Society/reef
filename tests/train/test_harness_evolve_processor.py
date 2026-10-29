@@ -4,7 +4,7 @@ The trace pipeline pairs reports with their inference records and batches
 every valid scored trace; the evolution backend (``HarnessBackend``)
 consumes the batch. The stages are built from a ``pipeline`` section, as a
 deployment configures them, rather than through any Recipe wrapper.
-``TrainTaskRollouts`` also trains the scenario's imported train tasks, for
+``TrainTaskJobData`` also trains the scenario's imported train tasks, for
 offline steps.
 """
 
@@ -24,7 +24,7 @@ from reef.pipeline_context import PipelineContext
 from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.record2record import InferenceRecord2Record, ReportGrouping, ReportRecord2Record
 from reef.record2sample.traces import InferenceSamples, TraceSamples
-from reef.sample2job.traces import TraceJobData, TrainTaskRollouts
+from reef.sample2job.traces import TraceJobData, TrainTaskJobData
 from reef.storage.samples import TrainerSamples
 from reef.storage.scenario import ScenarioStore
 from reef.storage.sqlite import SQLiteScenarioStorage
@@ -279,7 +279,7 @@ def test_offline_steps_roll_out_each_train_task_once_in_upload_order(tmp_path: P
     import_tasks(session, tmp_path / "tasks", "train", "task-a", "task-b", "task-c")
     import_tasks(session, tmp_path / "tasks", "eval", "held-out")
     context = PipelineContext("offline", samples=TrainerSamples(session.samples), default_job_samples=1)
-    pipeline = TrainingPipeline(context, sample2job=TrainTaskRollouts(context, 2, 1))
+    pipeline = TrainingPipeline(context, sample2job=TrainTaskJobData(context, 2, 1))
     steps = []
     while pipeline.ready(1):
         data = pipeline.build_job_data(1)

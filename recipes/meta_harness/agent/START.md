@@ -6,16 +6,16 @@ or the model.
    - `candidates.jsonl`: one line per tree. `tree` is its checksum, `parent` the tree it branched from, and
      `summary` what its proposer said about it. The latest line of a tree is its record.
    - `trees/<tree>/`: the files of each tree.
-   - `rollouts.jsonl`: one line per rollout, with its `tree`, `task`, `repeat` and `score` (null when it could not
-     run) and its `failure`. `rollouts/<rollout>/` holds what the rollout's harness did.
+   - `runs.jsonl`: one line per run, with its `tree`, `task`, `repeat` and `score` (null when it could not
+     run) and its `failure`. `runs/<run>/` holds what the run's harness did.
    - `decisions.jsonl`: which tree each step published (`selected`) or rejected, and why.
 
-   Compare the trees with the best mean scores to the others, and read the rollouts they fail. Find one reason for
+   Compare the trees with the best mean scores to the others, and read the runs they fail. Find one reason for
    the failures that the harness can fix.
 2. Choose one parent: any tree of the history. Make `harness/` hold exactly its files, then make one change that
    tests your reason. Prefer one reusable mechanism to a list of special cases. `material/host.json` names the
    files the harness may hold.
-3. Check the tree with the `check` tool, and fix every problem it names. When the rollout budget allows, score
+3. Check the tree with the `check` tool, and fix every problem it names. When the run budget allows, score
    the tree with `evaluate` on the tasks of `material/evaluation.json`, and keep the change only when it helps.
    Do not propose a tree that `trees/` already holds.
 4. Write `output/summary.md` in three lines: `Parent: <tree>`, `Hypothesis: <a claim the scores can refute>`, and

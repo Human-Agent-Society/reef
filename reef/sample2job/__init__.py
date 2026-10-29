@@ -19,7 +19,7 @@ and names the class in its ``pipeline_spec()``.
 * ``DistillJobData`` (``distill.py``): samples as they come; the distilling
   recipes and the SFT recipe use it.
 * ``TraceJobData`` (``traces.py``): harness evolution's trace samples as they
-  come, in every training mode, and ``TrainTaskRollouts``: offline harness
+  come, in every training mode, and ``TrainTaskJobData``: offline harness
   evolution, which also trains the scenario's imported train tasks.
 
 Everything numeric about a method, such as advantages and the loss family,

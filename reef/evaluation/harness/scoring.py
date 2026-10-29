@@ -1,9 +1,9 @@
-"""How one harness rollout is scored, and what Reef keeps of a scored rollout.
+"""How one harness run is scored, and what Reef keeps of a scored run.
 
-A deployment names its :class:`RolloutScorer` in ``evolution.evaluation.scorer``.
+A deployment names its :class:`TaskScorer` in ``evolution.evaluation.scorer``.
 :class:`VerifierRewardScorer` scores a Harbor task directory by its verifier's
-reward. :class:`ScoredRollout` is one rollout as the evaluation keeps it, and
-:class:`FailureObservation` is why a rollout failed.
+reward. :class:`ScoredRun` is one run as the evaluation keeps it, and
+:class:`FailureObservation` is why a run failed.
 """
 
 from __future__ import annotations
@@ -17,16 +17,16 @@ from typing import Any
 from reef.core.evaluation import RolloutScore
 from reef.core.plugins import ConfiguredPlugin
 from reef.core.tasks import primary_reward
-from reef.harness.rollouts.model_binding import ModelBindings
-from reef.harness.rollouts.run import RolloutResult
+from reef.harness.tasks.model_binding import ModelBindings
+from reef.harness.tasks.run import TaskResult
 from reef.runtime.executor.requirements import ExecutionRequirements
 
 
-class RolloutScorer(ConfiguredPlugin, ABC):
-    """Base class for scoring one harness-evolution rollout.
+class TaskScorer(ConfiguredPlugin, ABC):
+    """Base class for scoring one harness-evolution run.
 
     Implement:
-        ``score`` — given a task name and its rollout result, return a
+        ``score`` — given a task name and its run result, return a
         float score. Higher is better; non-finite values raise.
     A model-based judge also overrides ``score_with_models``, which receives
     the step's model bindings. ``score`` stays abstract, so a judge
@@ -34,8 +34,8 @@ class RolloutScorer(ConfiguredPlugin, ABC):
     """
 
     @abstractmethod
-    def score(self, task: str, result: RolloutResult) -> float:
-        """Score one rollout result for a task."""
+    def score(self, task: str, result: TaskResult) -> float:
+        """Score one run result for a task."""
 
     def execution_requirements(self) -> ExecutionRequirements:
         """Override when scoring loads a local GPU model or needs cluster placement.
@@ -45,20 +45,20 @@ class RolloutScorer(ConfiguredPlugin, ABC):
         """
         return ExecutionRequirements()
 
-    def score_with_models(self, task: str, result: RolloutResult, models: ModelBindings) -> float:
-        """The score that the evaluation records for one rollout: ``score(task, result)`` unless a judge overrides
+    def score_with_models(self, task: str, result: TaskResult, models: ModelBindings) -> float:
+        """The score that the evaluation records for one run: ``score(task, result)`` unless a judge overrides
         it to call ``models``, the step's bindings."""
         return self.score(task, result)
 
 
-def verifier_reward(task: str, result: RolloutResult) -> float:
-    """The Harbor verifier's reward for a task directory rollout; :class:`VerifierRewardScorer` scores with it.
+def verifier_reward(task: str, result: TaskResult) -> float:
+    """The Harbor verifier's reward for a task directory run; :class:`VerifierRewardScorer` scores with it.
 
-    A task directory rollout's trajectory holds one ``verifier`` row with the task it ran and the rewards
-    its verifier wrote (``reef.harness.rollouts.harbor_task`` writes it, and so may an adapter's own runner);
+    A task directory run's trajectory holds one ``verifier`` row with the task it ran and the rewards
+    its verifier wrote (``reef.harness.tasks.harbor_task`` writes it, and so may an adapter's own runner);
     Harbor's primary reward is the ``reward`` entry, else the sole entry. A failed
-    rollout or a verifier that wrote nothing scores 0 (the evaluation has already marked a rollout whose
-    trial never ran as failed); a rollout that exited without a row scores 0; a row for another task, several
+    run or a verifier that wrote nothing scores 0 (the evaluation has already marked a run whose
+    trial never ran as failed); a run that exited without a row scores 0; a row for another task, several
     rewards without a ``reward`` entry, or a reward that is not a finite number is an error.
     """
     rows = [event for event in result.trajectory if event.get("type") == "verifier"]
@@ -82,22 +82,22 @@ def verifier_reward(task: str, result: RolloutResult) -> float:
     return float(reward)
 
 
-class VerifierRewardScorer(RolloutScorer):
-    """Score a rollout by its Harbor verifier's reward (:func:`verifier_reward`); for a task manifest evaluation."""
+class VerifierRewardScorer(TaskScorer):
+    """Score a run by its Harbor verifier's reward (:func:`verifier_reward`); for a task manifest evaluation."""
 
-    def score(self, task: str, result: RolloutResult) -> float:
+    def score(self, task: str, result: TaskResult) -> float:
         return verifier_reward(task, result)
 
 
 @dataclass(frozen=True)
 class FailureObservation:
-    """Why one rollout failed, as the evaluation saw it.
+    """Why one run failed, as the evaluation saw it.
 
-    Values: ``task`` is the task the rollout ran; ``stage`` names where it
+    Values: ``task`` is the task the run completed; ``stage`` names where it
     failed (``launch``, ``trajectory``, ``residue``, ``trial``, ``graph``,
     ``loop`` or ``exit``); ``cause`` is the error text.
-    Purpose: the evaluation makes one per failed rollout; the history keeps
-    it with the rollout's record.
+    Purpose: the evaluation makes one per failed run; the history keeps
+    it with the run's record.
     """
 
     task: str
@@ -113,30 +113,30 @@ class FailureObservation:
 
 
 @dataclass(frozen=True)
-class ScoredRollout:
-    """One rollout as the evaluation keeps it: its rollout score, why it failed, and what the trajectory showed.
+class ScoredRun:
+    """One run as the evaluation keeps it: its run score, why it failed, and what the trajectory showed.
 
-    Values: ``score`` is a ``RolloutScore``. It is failed when the rollout
+    Values: ``score`` is a ``RolloutScore``. It is failed when the run
     could not launch, its trial never ran or its trajectory could not be read:
     the environment, not the tree, decided it. It is 0 when the tree gave no
     answer: an error ended its turn, or ``forbid_residue`` refused the files it
     left. ``failure`` says why in each of these cases, and is also set for a
-    scored rollout that exited nonzero (stage ``exit``). ``residue`` ≥ 0 counts files the
-    rollout left outside the cleanup whitelist. ``agents`` sums the work of
+    scored run that exited nonzero (stage ``exit``). ``residue`` ≥ 0 counts files the
+    run left outside the cleanup whitelist. ``agents`` sums the work of
     each agent; ``path`` is the root's stage path and end reason, ``None``
     when no trajectory was read. ``reply`` is the final assistant text, the
     reply a text grader reads, ``None`` when the trajectory holds none.
     ``transcript_read`` says whether a session log was found.
     ``record_archive`` is the kept record of a remote worker, as a gzip tar.
-    Purpose: an evaluation worker makes one per rollout; the evaluator
+    Purpose: an evaluation worker makes one per run; the evaluator
     stores it in the history and reads its scores.
     """
 
     def __post_init__(self) -> None:
         if not isinstance(self.score, RolloutScore):
-            raise TypeError("ScoredRollout.score must be a RolloutScore")
+            raise TypeError("ScoredRun.score must be a RolloutScore")
         if self.score.is_failed and self.failure is None:
-            raise ValueError("a failed ScoredRollout must say why it failed")
+            raise ValueError("a failed ScoredRun must say why it failed")
 
     score: RolloutScore
     failure: FailureObservation | None
@@ -148,4 +148,4 @@ class ScoredRollout:
     record_archive: bytes | None = field(default=None, repr=False)
 
 
-__all__ = ["FailureObservation", "RolloutScorer", "ScoredRollout", "VerifierRewardScorer", "verifier_reward"]
+__all__ = ["FailureObservation", "ScoredRun", "TaskScorer", "VerifierRewardScorer", "verifier_reward"]

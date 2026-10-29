@@ -344,7 +344,7 @@ jobs:
               if requirement.marker is None or requirement.marker.evaluate({"extra": ""})
           }
           # harbor and reef-eval are core: reef.execution.sandbox implements Harbor's environment contract, and task
-          # directory rollouts, the task player and the generator play Harbor tasks.
+          # directory runs, the task player and the generator play Harbor tasks.
           expected_core = {
               "aiohttp",
               "alembic",

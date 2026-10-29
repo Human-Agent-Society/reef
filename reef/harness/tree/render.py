@@ -2,7 +2,7 @@
 
 ``render_tree`` is a pure function of a tree, an adapter descriptor and
 optional config overlays, so a candidate and the current tree render the
-same way for a rollout, for an install, and for the files a client pulls.
+same way for a run, for an install, and for the files a client pulls.
 Each config target merges, in order, the descriptor's enforced defaults, the
 tree's ``config/<target>.json`` and the overlays, so an overlay wins every
 key it writes. ``ModelBinding.config_overlays`` makes the overlays that point
@@ -51,7 +51,7 @@ def render_tree(
     *,
     layer: bool = False,
 ) -> dict[str, str]:
-    """The files ``descriptor``'s binary reads for ``tree``, by path relative to the rollout or install root.
+    """The files ``descriptor``'s binary reads for ``tree``, by path relative to the run or install root.
 
     ``overlays`` are ``(config target, data)`` pairs, merged in order after
     the tree's config. A model binding's overlays point the harness at a
@@ -63,8 +63,8 @@ def render_tree(
 
     With ``layer``, the files are for a layer over a person's own
     configuration (``AdapterDescriptor.layer``): no config target starts from
-    its rollout defaults, and the targets' checks do not run. The defaults and
-    checks keep rollouts deterministic, and the tree passed the checks when it
+    its run defaults, and the targets' checks do not run. The defaults and
+    checks keep runs deterministic, and the tree passed the checks when it
     was published. ``reef.harness.sync.layer_install`` makes the layer from
     these files. RenderError when the adapter has no layer.
     """

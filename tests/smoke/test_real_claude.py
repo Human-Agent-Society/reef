@@ -1,7 +1,7 @@
 """Smoke of the real Claude Code binary: every part an evolved tree may hold reaches the model.
 
 The hermetic suites check the rendered files. Here the pinned Claude Code runs against a stdlib Anthropic
-Messages stub that records each request, once as a rollout and once as a person's session: the layer over an
+Messages stub that records each request, once as a run and once as a person's session: the layer over an
 empty own config directory, as ``reef-client harness run`` starts it. Skipped unless REEF_REAL_CLAUDE_BINARY
 points at an installed Claude Code (.github/workflows/harness-smoke.yml provides one).
 """
@@ -20,9 +20,9 @@ import pytest
 from tests.support.harness_render import write_layer
 
 from reef.harness.adapters import get_adapter
-from reef.harness.rollouts.model_binding import ModelBinding
-from reef.harness.rollouts.run import run_rollout
 from reef.harness.sync import layer_install
+from reef.harness.tasks.model_binding import ModelBinding
+from reef.harness.tasks.run import run_task
 from reef.harness.tree import HarnessTree, render_tree
 
 REAL_CLAUDE = os.environ.get("REEF_REAL_CLAUDE_BINARY", "")
@@ -42,7 +42,7 @@ PARTS = {
     "config/hooks.json": json.dumps({"hooks": HOOKS}),
 }
 MARKERS = ("TIDEPOOL-RULES-41", "TIDEPOOL-SKILL-23", "TIDEPOOL-COMMAND-31", "TIDEPOOL-HOOK-37")
-#: The variables a rollout sets so Claude Code makes no network call of its own.
+#: The variables a run sets so Claude Code makes no network call of its own.
 QUIET = {
     "DISABLE_AUTOUPDATER": "1",
     "DISABLE_TELEMETRY": "1",
@@ -93,11 +93,11 @@ class StubHandler(BaseHTTPRequestHandler):
             self.wfile.write(f"event: {event['type']}\ndata: {json.dumps(event)}\n\n".encode())
 
 
-@pytest.mark.parametrize("form", ["rollout", "layer"])
-def test_real_claude_takes_every_part_of_a_tree_in_an_rollout_and_over_a_persons_own_config(
+@pytest.mark.parametrize("form", ["run", "layer"])
+def test_real_claude_takes_every_part_of_a_tree_in_an_run_and_over_a_persons_own_config(
     tmp_path: Path, form: str
 ) -> None:
-    """Every part an evolved tree may hold reaches the model, in a rollout and on a person's machine, where Claude
+    """Every part an evolved tree may hold reaches the model, in a run and on a person's machine, where Claude
     Code loads the person's own config directory, empty here, and the plugin the layer installs. The prompt runs
     the command, which the plugin names reef:ship."""
     server = StubMessages()
@@ -106,9 +106,9 @@ def test_real_claude_takes_every_part_of_a_tree_in_an_rollout_and_over_a_persons
     descriptor = get_adapter("claude")
     binding = ModelBinding(base_url=url, model=MODEL, api_key="dummy", api="anthropic")
     try:
-        if form == "rollout":
+        if form == "run":
             files = render_tree(HarnessTree(PARTS), descriptor, binding.config_overlays(descriptor))
-            result = run_rollout(descriptor, files, "/reef:ship", binary=REAL_CLAUDE, timeout=120.0)
+            result = run_task(descriptor, files, "/reef:ship", binary=REAL_CLAUDE, timeout=120.0)
             assert result.exit_code == 0, (result.stdout, result.stderr)
         else:
             layer = layer_install(HarnessTree(PARTS), descriptor, binding, url, str(tmp_path / "install"))

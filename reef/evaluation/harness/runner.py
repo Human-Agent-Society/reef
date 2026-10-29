@@ -1,7 +1,7 @@
-"""Run and score harness rollouts in a pool of worker processes.
+"""Run and score harness runs in a pool of worker processes.
 
-:class:`RolloutEvaluationWorker` runs one rollout of a rendered tree and
-scores it with the deployment's :class:`RolloutScorer`.
+:class:`TaskEvaluationWorker` runs one run of a rendered tree and
+scores it with the deployment's :class:`TaskScorer`.
 :class:`EvaluationWorkerPool` runs those workers on the executor that
 :func:`evaluation_selection` chooses from ``execution.evolution``. The pool
 returns results in submission order and never runs failed work again.
@@ -21,13 +21,13 @@ from pathlib import Path
 from threading import Lock
 
 from reef.core.evaluation import RolloutScore
-from reef.evaluation.harness.scoring import FailureObservation, RolloutScorer, ScoredRollout
-from reef.execution.sandbox.process import ROLLOUT_OWNER_LEASE, ProgramExecutor
+from reef.evaluation.harness.scoring import FailureObservation, ScoredRun, TaskScorer
+from reef.execution.sandbox.process import RUN_OWNER_LEASE, ProgramExecutor
 from reef.harness.adapters.descriptor import AdapterDescriptor
-from reef.harness.rollouts.harbor_task import run_task_rollout
-from reef.harness.rollouts.model_binding import ModelBindings
-from reef.harness.rollouts.run import RolloutError, RolloutResult, run_rollout
-from reef.harness.rollouts.trajectory import (
+from reef.harness.tasks.harbor_task import run_harbor_task
+from reef.harness.tasks.model_binding import ModelBindings
+from reef.harness.tasks.run import TaskResult, TaskRunError, run_task
+from reef.harness.tasks.trajectory import (
     TrajectoryError,
     agent_work,
     failed_trial_error,
@@ -47,18 +47,18 @@ from reef.runtime.executor.config import (
 from reef.runtime.executor.ray import RayExecutor
 from reef.runtime.executor.requirements import ExecutionRequirements
 
-#: The record file beside one evaluation rollout's kept trajectory.
-RECORD_ROLLOUT_FILE = "rollout.json"
+#: The record file beside one evaluation run's kept trajectory.
+RECORD_RUN_FILE = "run.json"
 
 
 @dataclass(frozen=True)
-class RolloutRun:
-    """One rollout to run: a rendered tree, the task, and the directory that keeps its record.
+class TaskRun:
+    """One run to run: a rendered tree, the task, and the directory that keeps its record.
 
     Values: ``files`` maps each rendered path to its text; ``task`` is the
-    prompt or the task directory the rollout plays; ``record_dir`` is ``None``,
+    prompt or the task directory the run plays; ``record_dir`` is ``None``,
     which keeps no record, or an absent or empty directory that receives the
-    rollout's trajectory files and ``rollout.json``.
+    run's trajectory files and ``run.json``.
     Purpose: the evaluator makes one per ``RolloutRequest`` it runs; the worker
     pool runs it.
     """
@@ -69,24 +69,24 @@ class RolloutRun:
 
 
 @dataclass(repr=False)
-class RolloutEvaluationWorker:
-    """Run and score one rollout in a worker process.
+class TaskEvaluationWorker:
+    """Run and score one run in a worker process.
 
     Values: the adapter ``descriptor``, the deployment's ``scorer``, the
-    installed ``binary`` (``None`` for the adapter's own), the rollout
-    ``timeout`` in seconds, the ``executor`` the rollout runs in, and
-    ``forbid_residue``, which scores a littering rollout 0.
-    ``owner_lease`` marks the rollout's processes as owned by this worker.
+    installed ``binary`` (``None`` for the adapter's own), the run
+    ``timeout`` in seconds, the ``executor`` the task runs in, and
+    ``forbid_residue``, which scores a littering run 0.
+    ``owner_lease`` marks the run's processes as owned by this worker.
     ``transfer_records`` returns the record as an archive, for a worker that
     does not share the driver's file system. ``task_containers`` runs each
     task, a Harbor task directory, in the task's own container
-    (``run_task_rollout``) instead of in ``executor``.
-    Purpose: the worker pool builds one per worker; only rollout and scorer
+    (``run_harbor_task``) instead of in ``executor``.
+    Purpose: the worker pool builds one per worker; only run and scorer
     state crosses the process boundary, never the recipe.
     """
 
     descriptor: AdapterDescriptor
-    scorer: RolloutScorer
+    scorer: TaskScorer
     binary: str | None
     timeout: float
     executor: ProgramExecutor
@@ -98,14 +98,14 @@ class RolloutEvaluationWorker:
     def __post_init__(self) -> None:
         self.executor.preflight()
 
-    def run(self, rollout: RolloutRun, models: ModelBindings) -> ScoredRollout:
-        """The scored rollout; a remote worker keeps the record on its side and returns it as an archive."""
-        if not self.transfer_records or rollout.record_dir is None:
-            return self.run_and_score(rollout.files, rollout.task, rollout.record_dir, models)
+    def run(self, task_run: TaskRun, models: ModelBindings) -> ScoredRun:
+        """The scored run; a remote worker keeps the record on its side and returns it as an archive."""
+        if not self.transfer_records or task_run.record_dir is None:
+            return self.run_and_score(task_run.files, task_run.task, task_run.record_dir, models)
         # A remote worker must not read the driver's path as a local path.
         with tempfile.TemporaryDirectory(prefix="reef-worker-record-") as temporary:
-            record_dir = Path(temporary) / "rollout"
-            scored = self.run_and_score(rollout.files, rollout.task, record_dir, models)
+            record_dir = Path(temporary) / "run"
+            scored = self.run_and_score(task_run.files, task_run.task, record_dir, models)
             buffer = BytesIO()
             with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
                 archive.add(record_dir, arcname=".")
@@ -113,23 +113,23 @@ class RolloutEvaluationWorker:
 
     def run_and_score(
         self, files: Mapping[str, str], task: str, record_dir: Path | None, models: ModelBindings
-    ) -> ScoredRollout:
-        """Score one rollout; a failed score marks a rollout that the environment could not run.
+    ) -> ScoredRun:
+        """Score one run; a failed score marks a run that the environment could not run.
 
         The failure observation keeps the stage and the cause that the
         exception would otherwise discard. A native turn that ended on an
         error scores 0; any other nonzero exit still scores and is observed
         beside the score. ``record_dir`` receives the trajectory files before
-        the rollout root is removed, unless it is ``None``; a copy that fails is
-        not a rollout failure and propagates, so the step stops instead of
+        the run root is removed, unless it is ``None``; a copy that fails is
+        not a run failure and propagates, so the step stops instead of
         scoring a result that a disk error shaped.
         """
-        token = ROLLOUT_OWNER_LEASE.set(self.owner_lease)
+        token = RUN_OWNER_LEASE.set(self.owner_lease)
         try:
             if self.task_containers:
-                result = run_task_rollout(self.descriptor, files, task, timeout=self.timeout, keep_dir=record_dir)
+                result = run_harbor_task(self.descriptor, files, task, timeout=self.timeout, keep_dir=record_dir)
             else:
-                result = run_rollout(
+                result = run_task(
                     self.descriptor,
                     files,
                     task,
@@ -138,32 +138,30 @@ class RolloutEvaluationWorker:
                     executor=self.executor,
                     keep_dir=record_dir,
                 )
-        except RolloutError as error:
-            scored = ScoredRollout(
-                RolloutScore.failed(), FailureObservation(task=task, stage="launch", cause=str(error))
-            )
-            write_rollout_record(record_dir, task, None, scored)
+        except TaskRunError as error:
+            scored = ScoredRun(RolloutScore.failed(), FailureObservation(task=task, stage="launch", cause=str(error)))
+            write_run_record(record_dir, task, None, scored)
             return scored
         except TrajectoryError as error:
-            scored = ScoredRollout(
+            scored = ScoredRun(
                 RolloutScore.failed(), FailureObservation(task=task, stage="trajectory", cause=str(error))
             )
-            write_rollout_record(record_dir, task, None, scored)
+            write_run_record(record_dir, task, None, scored)
             return scored
         finally:
-            ROLLOUT_OWNER_LEASE.reset(token)
+            RUN_OWNER_LEASE.reset(token)
         scored = self.score_result(result, task, models)
-        write_rollout_record(record_dir, task, result, scored)
+        write_run_record(record_dir, task, result, scored)
         return scored
 
-    def score_result(self, result: RolloutResult, task: str, models: ModelBindings) -> ScoredRollout:
-        """The score and the observations of a rollout that ran."""
+    def score_result(self, result: TaskResult, task: str, models: ModelBindings) -> ScoredRun:
+        """The score and the observations of a run that completed."""
         residue = len(result.residue)
         agents = agent_work(result.trajectory)
         path = stage_path(result.trajectory)
         if residue and self.forbid_residue:
             cause = f"{residue} file(s) outside the cleanup whitelist: {result.residue[0]}"
-            return ScoredRollout(
+            return ScoredRun(
                 RolloutScore.scored(0.0),
                 FailureObservation(task=task, stage="residue", cause=cause),
                 residue,
@@ -174,7 +172,7 @@ class RolloutEvaluationWorker:
         if trial_error:
             # The trial never ran (the image did not build, the agent could not
             # start): the environment did not run it, so it counts for neither side.
-            return ScoredRollout(
+            return ScoredRun(
                 RolloutScore.failed(),
                 FailureObservation(task=task, stage="trial", cause=trial_error),
                 residue,
@@ -191,7 +189,7 @@ class RolloutEvaluationWorker:
                 cause = f"agent {path['errored_agent']}: {cause}"
             # A loop turn walks no graph: the failure names the loop when the root's header does.
             stage = "loop" if root_header(result.trajectory).get("loop") else "graph"
-            return ScoredRollout(
+            return ScoredRun(
                 RolloutScore.scored(0.0),
                 FailureObservation(task=task, stage=stage, cause=cause),
                 residue,
@@ -200,12 +198,12 @@ class RolloutEvaluationWorker:
             )
         score = float(self.scorer.score_with_models(task, result, models))
         if not math.isfinite(score):
-            raise ValueError(f"rollout scorer returned a non-finite score {score!r} for task {task!r}")
+            raise ValueError(f"run scorer returned a non-finite score {score!r} for task {task!r}")
         reply = final_assistant_text(result.trajectory)
         if result.exit_code != 0:
             stderr_lines = result.stderr.strip().splitlines()
             cause = f"exit {result.exit_code}: {stderr_lines[-1] if stderr_lines else ''}".strip()
-            return ScoredRollout(
+            return ScoredRun(
                 RolloutScore.scored(score),
                 FailureObservation(task=task, stage="exit", cause=cause),
                 residue,
@@ -215,17 +213,15 @@ class RolloutEvaluationWorker:
             )
         # An empty trajectory is no failure: a grader that reads files scored the run as it stands. The record
         # still says no transcript was read, so a low score that a text grader gave is not blamed on the request.
-        return ScoredRollout(
+        return ScoredRun(
             RolloutScore.scored(score), None, residue, agents, path, reply, transcript_read=bool(result.trajectory)
         )
 
 
-def write_rollout_record(
-    record_dir: Path | None, task: str, result: RolloutResult | None, scored: ScoredRollout
-) -> None:
-    """``rollout.json`` beside the kept trajectory: what the scorer saw, so a result can be derived again.
+def write_run_record(record_dir: Path | None, task: str, result: TaskResult | None, scored: ScoredRun) -> None:
+    """``run.json`` beside the kept trajectory: what the scorer saw, so a result can be derived again.
 
-    A rollout without a record directory keeps no record."""
+    A run without a record directory keeps no record."""
     if record_dir is None:
         return
     record = {
@@ -238,20 +234,20 @@ def write_rollout_record(
         "stderr": None if result is None else clip_record_text(result.stderr),
         "residue": None if result is None else [clip_record_text(str(path)) for path in result.residue],
     }
-    # A rollout that never wrote an event has no trajectory copy, so the directory may not exist yet.
+    # A run that never wrote an event has no trajectory copy, so the directory may not exist yet.
     record_dir.mkdir(parents=True, exist_ok=True)
-    with open(record_dir / RECORD_ROLLOUT_FILE, "x", encoding="utf-8") as handle:
+    with open(record_dir / RECORD_RUN_FILE, "x", encoding="utf-8") as handle:
         handle.write(json.dumps(record, indent=2, default=str) + "\n")
 
 
 class EvaluationWorkerPool:
-    """One lazy, fixed-size group of rollout workers per scenario; it never runs failed work again.
+    """One lazy, fixed-size group of run workers per scenario; it never runs failed work again.
 
     Values: ``selection`` and ``requirements`` choose the executor and its
     worker count; ``worker`` is the worker each slot runs. The executor starts
     on the first call. After a failure that a later call cannot recover from,
     the pool is closed and refuses work.
-    Purpose: the evaluator owns one and runs every rollout through it.
+    Purpose: the evaluator owns one and runs every run through it.
     """
 
     def __init__(self, selection: ExecutorSelection, requirements: ExecutionRequirements, worker: WorkerSpec):
@@ -262,11 +258,11 @@ class EvaluationWorkerPool:
         self.lock = Lock()
         self.closed = False
 
-    def run(self, rollouts: Sequence[RolloutRun], models: ModelBindings) -> list[ScoredRollout]:
-        """Run every rollout and return the scored rollouts in submission order.
+    def run(self, task_runs: Sequence[TaskRun], models: ModelBindings) -> list[ScoredRun]:
+        """Run every run and return the scored runs in submission order.
 
         A batch drains before the next one starts, scorer errors included. The
-        first error of a batch is raised after every rollout of the batch has
+        first error of a batch is raised after every run of the batch has
         finished.
         """
         with self.lock:
@@ -274,7 +270,7 @@ class EvaluationWorkerPool:
                 if self.executor is not None and self.executor.failure is not None:
                     self.executor.check_health()
                 raise RuntimeError("evolution worker pool is closed")
-            if not rollouts:
+            if not task_runs:
                 return []
             if self.executor is None:
                 config = evaluation_executor_config(self.selection, self.requirements, self.worker)
@@ -285,12 +281,12 @@ class EvaluationWorkerPool:
                     raise
             pending = []
             try:
-                for index, rollout in enumerate(rollouts):
+                for index, task_run in enumerate(task_runs):
                     pending.append(
                         self.executor.rpc(
                             index % self.requirements.workers,
                             "run",
-                            args=(rollout, models),
+                            args=(task_run, models),
                             non_block=True,
                         )
                     )
@@ -299,7 +295,7 @@ class EvaluationWorkerPool:
                 self.closed = True
                 self.executor.shutdown()
                 raise
-            results: list[ScoredRollout] = []
+            results: list[ScoredRun] = []
             first_error: Exception | None = None
             try:
                 for future in pending:
@@ -327,12 +323,12 @@ class EvaluationWorkerPool:
 
 
 def evaluation_selection(
-    scorer: RolloutScorer, settings: ExecutorSettings
+    scorer: TaskScorer, settings: ExecutorSettings
 ) -> tuple[ExecutorSelection, ExecutionRequirements]:
-    """The executor and the worker requirements of the rollout pool, from ``execution.evolution`` and the scorer."""
+    """The executor and the worker requirements of the run pool, from ``execution.evolution`` and the scorer."""
     declared = scorer.execution_requirements()
     if not isinstance(declared, ExecutionRequirements):
-        raise TypeError("RolloutScorer.execution_requirements must return ExecutionRequirements")
+        raise TypeError("TaskScorer.execution_requirements must return ExecutionRequirements")
     requirements = worker_requirements(settings, declared)
     gpus = requirements.gpus_per_worker
     configured_gpus = settings.options.get("num_gpus", gpus)
@@ -360,7 +356,7 @@ def evaluation_selection(
 def evaluation_executor_config(
     selection: ExecutorSelection, requirements: ExecutionRequirements, worker: WorkerSpec
 ) -> ExecutorConfig:
-    """The executor configuration of the rollout pool: one copy of ``worker`` per worker slot."""
+    """The executor configuration of the run pool: one copy of ``worker`` per worker slot."""
     backend = Executor.get_class(selection.settings.backend)
     options = dict(selection.settings.options)
     if issubclass(backend, RayExecutor) or (
@@ -385,11 +381,11 @@ def evaluation_executor_config(
 
 
 __all__ = [
-    "RECORD_ROLLOUT_FILE",
+    "RECORD_RUN_FILE",
     "EvaluationWorkerPool",
-    "RolloutEvaluationWorker",
-    "RolloutRun",
+    "TaskEvaluationWorker",
+    "TaskRun",
     "evaluation_executor_config",
     "evaluation_selection",
-    "write_rollout_record",
+    "write_run_record",
 ]

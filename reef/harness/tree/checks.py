@@ -129,7 +129,7 @@ def reject_inline_secret(data: Any, path: str) -> None:
 
     A tree persists verbatim in every git release that holds it. No render path needs a
     credential in the tree - the served model binds through
-    ``reef.upstream_api_key`` and is injected at rollout render, method
+    ``reef.upstream_api_key`` and is injected at run render, method
     models declare ``evolution.models.<name>.api_key_env`` - so a secret
     field here has no consumer and only a leak to persist. The name match
     (singular, plural, string or string list value) detects common inline

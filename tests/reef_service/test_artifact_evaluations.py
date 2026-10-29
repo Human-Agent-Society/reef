@@ -24,8 +24,8 @@ from reef.core.tasks import write_harbor_task
 from reef.dispatcher import Dispatcher
 from reef.evaluation.activation import AlwaysActivate, EvaluatedActivation, NeverActivate, activation_reference
 from reef.harness.adapters import get_adapter
-from reef.harness.rollouts.tasks import RolloutRow, TaskLab
 from reef.harness.sync import create_harness_surface
+from reef.harness.tasks.rollouts import RolloutRow, TaskLab
 from reef.recipe import Recipe
 from reef.runtime.interfaces import InferenceHandler, InferenceRuntime
 from reef.service.app import create_app

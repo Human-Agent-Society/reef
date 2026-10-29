@@ -9,8 +9,8 @@ artifact that training makes serves; ``activation`` holds the built-in rules
 built-in evaluators, selectors and rules.
 
 ``harness`` measures harness candidates by running evaluation rollouts. It
-holds ``HarnessCandidate``, its evaluator ``HarnessRolloutEvaluator``, the
-``RolloutScorer`` contract that a deployment names, the history that is the
+holds ``HarnessCandidate``, its evaluator ``HarnessTaskEvaluator``, the
+``TaskScorer`` contract that a deployment names, the history that is the
 score cache, and the ``compare``, ``floor`` and ``none`` publication policies.
 ``artifact_endpoint`` answers the model calls of an artifact evaluation's
 rollouts from the release that it evaluates.

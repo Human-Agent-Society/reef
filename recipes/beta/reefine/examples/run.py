@@ -47,11 +47,11 @@ from pathlib import Path
 from reef_client import ReefClient, ReefClientError
 
 from recipes.beta.reefine.agent import launch_pi, tool_calls
-from reef.execution.sandbox.process import LocalExecutor, RolloutTimeout
+from reef.execution.sandbox.process import LocalExecutor, ProgramTimeout
 from reef.harness.adapters import get_adapter
-from reef.harness.rollouts.model_binding import ModelBinding
-from reef.harness.rollouts.trajectory import final_assistant_text
-from reef.harness.rollouts.vendor_install import AdapterProgram
+from reef.harness.tasks.model_binding import ModelBinding
+from reef.harness.tasks.trajectory import final_assistant_text
+from reef.harness.tasks.vendor_install import AdapterProgram
 from reef.harness.tree import HarnessTree, render_tree
 from reef.service.release_page import result_of
 
@@ -59,7 +59,7 @@ SERVICE_URL = "http://127.0.0.1:8901"  # deployment.yaml's port
 SCENARIO = "reefine-demo"  # this workload's isolated lane
 TOKEN = os.environ.get("REEF_TOKEN", "reef-local")  # matches deployment.yaml
 MODEL = os.environ.get("REEF_UPSTREAM_MODEL", "gemma4:26b")  # run.sh exports the same default
-# A local model reads the API skill and writes the change, then six pi rollouts score it.
+# A local model reads the API skill and writes the change, then six pi runs score it.
 STEP_TIMEOUT_S = 1800.0
 POLL_S = 5.0
 
@@ -374,7 +374,7 @@ def activate(client, rows, row, run_dir):
 def show(mode, run_dir):
     """One pi session on the installed tree in the mode's workspace; the tool calls in order and the final answer.
 
-    The session runs headless, as a rollout does, over a copy of the installed
+    The session runs headless, as a run does, over a copy of the installed
     files; pi's own session log is the record this driver reads."""
     root = run_dir / "session"
     workspace = root / "workspace"
@@ -395,7 +395,7 @@ def show(mode, run_dir):
             descriptor, binary, executor, files, prompt, {}, root=root, timeout=SHOW_TIMEOUT_S
         )
         exit_code = outcome.exit_code
-    except RolloutTimeout:
+    except ProgramTimeout:
         exit_code, trajectory = None, []
     calls = [f"{call['tool']}({call.get('arguments', call.get('error', ''))[:60]})" for call in tool_calls(trajectory)]
     answer = (final_assistant_text(trajectory) or "").strip()

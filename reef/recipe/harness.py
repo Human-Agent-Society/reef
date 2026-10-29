@@ -44,21 +44,21 @@ from reef.evaluation.harness import (
     EvaluationSettings,
     EvaluationTasks,
     FloorPolicy,
-    HarnessRolloutEvaluator,
+    HarnessTaskEvaluator,
     History,
     NoEvaluationPolicy,
-    RolloutScorer,
     TaskCollector,
+    TaskScorer,
     evaluation_selection,
 )
 from reef.execution.sandbox.config import build_executor
 from reef.execution.sandbox.process import ProgramExecutor
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import AdapterDescriptor, DescriptorError
-from reef.harness.rollouts.harbor_task import can_run_in_task_container
-from reef.harness.rollouts.model_binding import ModelBinding, ModelBindings, ModelBindingsResolver
-from reef.harness.rollouts.vendor_install import AdapterProgram
 from reef.harness.sync import create_harness_surface
+from reef.harness.tasks.harbor_task import can_run_in_task_container
+from reef.harness.tasks.model_binding import ModelBinding, ModelBindings, ModelBindingsResolver
+from reef.harness.tasks.vendor_install import AdapterProgram
 from reef.harness.tree import HarnessTree, validate_tree
 from reef.inference.model_config import ModelConfig
 from reef.observability import ExperimentLogger
@@ -67,7 +67,7 @@ from reef.recipe.errors import RecipeConfigError
 from reef.record2record import ReportRecord2Record
 from reef.record2sample.traces import TraceSamples
 from reef.runtime.executor.config import ExecutorSettings, role_executor_settings
-from reef.sample2job.traces import TraceJobData, TrainTaskRollouts
+from reef.sample2job.traces import TraceJobData, TrainTaskJobData
 from reef.storage.records import RecordStore
 from reef.storage.samples import TrainerSamples
 from reef.storage.tasks import TaskStorage
@@ -99,7 +99,7 @@ class EvolutionSettings(Settings):
     automatic step. Every other count is ≥ 0, where 0 turns its limit off.
     The retired ``publish`` and ``review_kinds`` are refused: the top-level
     ``activation`` section decides whether a kept tree serves.
-    ``executor`` and ``sandbox`` choose where rollouts run
+    ``executor`` and ``sandbox`` choose where tasks run
     (``reef.execution.sandbox.config.build_executor``), and ``agent`` which coding
     agent a method runs and where (``reef.train.harness_backend.agent.settings``),
     ``None`` for none.
@@ -122,9 +122,9 @@ class EvolutionSettings(Settings):
         0, help="Skip automatic steps after this many rejections in a row. 0 sets no limit."
     )
     max_model_calls_per_step: int = config_option(0, help="The most model calls of one step. 0 sets no limit.")
-    max_rollouts_per_step: int = config_option(0, help="The most rollouts a method runs in one step. 0 sets no limit.")
-    executor: str = config_option("local", help="Where rollouts run: local, sandbox or e2b.")
-    sandbox: Mapping[str, Any] | None = config_option(None, help="The sandbox settings of the rollout executor.")
+    max_runs_per_step: int = config_option(0, help="The most runs a method runs in one step. 0 sets no limit.")
+    executor: str = config_option("local", help="Where tasks run: local, sandbox or e2b.")
+    sandbox: Mapping[str, Any] | None = config_option(None, help="The sandbox settings of the run executor.")
     agent: Mapping[str, Any] | None = config_option(
         None, help="The coding agent a method runs: adapter, binary, sandbox and timeout_s."
     )
@@ -140,7 +140,7 @@ class EvolutionSettings(Settings):
             ("max_steps", self.max_steps),
             ("max_failure_streak", self.max_failure_streak),
             ("max_model_calls_per_step", self.max_model_calls_per_step),
-            ("max_rollouts_per_step", self.max_rollouts_per_step),
+            ("max_runs_per_step", self.max_runs_per_step),
         ):
             if value < 0:
                 raise ValueError(f"evolution.{label} must be at least 0 (0 turns the limit off)")
@@ -193,7 +193,7 @@ class ScenarioModels(ModelBindingsResolver):
         runtime = self.config.runtime
         if runtime is None:
             return self.recipe.default_model_bindings(scenario)
-        # The scenario's own model is served by this Reef too, so a rollout reaches it through the same route.
+        # The scenario's own model is served by this Reef too, so a run reaches it through the same route.
         binding = self.recipe.bind_model_metadata(ModelBinding.from_runtime(runtime))
         served = self.recipe.served_through_service(binding, scenario)
         return ModelBindings(served=served, named=dict.fromkeys(self.recipe.models, served))
@@ -204,18 +204,18 @@ class HarnessEvolutionRecipe(Recipe):
     """Harness evolution of one adapter's harness tree by one method.
 
     Values: ``method`` is the deployment's ``Method``. ``evolution`` and
-    ``evaluation`` are the parsed sections. ``scorer`` scores each rollout,
+    ``evaluation`` are the parsed sections. ``scorer`` scores each run,
     and ``collector`` picks the prompts that collection adds: each is the
     plugin that ``evaluation`` names, or the instance that a recipe built in
     Python receives, and ``None`` when there is neither. ``seed`` is the first
     tree of a new scenario. ``models`` and ``model_metadata`` are the parsed
-    ``evolution`` entries. ``executor`` runs the rollouts;
-    ``worker_executor`` places the rollout workers (``execution.evolution``).
+    ``evolution`` entries. ``executor`` runs the runs;
+    ``worker_executor`` places the run workers (``execution.evolution``).
     ``agent`` is ``evolution.agent`` read, ``None`` when no coding agent
     runs; a method that ``runs_agent`` needs one.
     The model under test is the recipe's inference runtime. It reaches the
     method as ``services.models.served``, and the adapter's ``model_binding``
-    templates write it into each evaluation rollout, so neither the seed nor
+    templates write it into each evaluation run, so neither the seed nor
     a kept tree ever carries a provider.
     Purpose: a deployment names it as its recipe; the service builds it once
     from the deployment config, and ``build`` makes each scenario's trainer
@@ -226,7 +226,7 @@ class HarnessEvolutionRecipe(Recipe):
     evolution: EvolutionSettings
     evaluation: EvaluationSettings
     seed: HarnessTree = field(default_factory=lambda: HarnessTree({}))
-    scorer: RolloutScorer | None = None
+    scorer: TaskScorer | None = None
     collector: TaskCollector | None = None
     models: Mapping[str, ModelBinding] = field(default_factory=dict)
     model_metadata: Mapping[str, ModelMetadata] = field(default_factory=dict)
@@ -234,7 +234,7 @@ class HarnessEvolutionRecipe(Recipe):
     worker_executor: ExecutorSettings = field(default_factory=ExecutorSettings)
     agent: AgentSettings | None = None
     model_name: str | None = None
-    #: Where this Reef answers inference: evaluation rollouts sample the release it serves through it.
+    #: Where this Reef answers inference: evaluation runs sample the release it serves through it.
     served_endpoint: ServedEndpoint | None = None
     config_sections: ClassVar[tuple[str, ...]] = ("evolution",)
 
@@ -272,30 +272,30 @@ class HarnessEvolutionRecipe(Recipe):
                 )
             if self.evolution.executor != "local":
                 raise RecipeConfigError(
-                    "Harbor task directories run in their own containers, which are the rollouts' boundary: "
+                    "Harbor task directories run in their own containers, which are the runs' boundary: "
                     "set evolution.executor to local"
                 )
             if offline and self.evaluation.tasks:
                 raise RecipeConfigError(
-                    "offline rollouts play task directories, so the evaluation tasks must be task directories "
+                    "offline runs play task directories, so the evaluation tasks must be task directories "
                     "too: use evaluation.imported_tasks or evaluation.task_manifest instead of evaluation.tasks"
                 )
         if self.evaluation.collect_failures and task_directories:
             raise RecipeConfigError("evaluation.collect_failures adds prompts, and these tasks are task directories")
         if offline and self.scorer is None:
-            # An offline step plays the imported train tasks and scores each rollout.
-            raise RecipeConfigError("offline rollouts score each train task, so they need evaluation.scorer")
+            # An offline step plays the imported train tasks and scores each run.
+            raise RecipeConfigError("offline runs score each train task, so they need evaluation.scorer")
         if self.scorer is not None:
             evaluation_selection(self.scorer, self.worker_executor)
         # A task manifest is read now, so a deployment with an unreadable one refuses to start.
         self.configured_tasks()
 
     def runs_offline(self) -> bool:
-        """Whether the steps roll out the imported train tasks (``TrainTaskRollouts``)."""
-        return issubclass(self.stages().sample2job.plugin_class, TrainTaskRollouts)
+        """Whether the steps roll out the imported train tasks (``TrainTaskJobData``)."""
+        return issubclass(self.stages().sample2job.plugin_class, TrainTaskJobData)
 
     def task_directories(self, descriptor: AdapterDescriptor) -> bool:
-        """Whether the rollouts play Harbor task directories rather than prompts: always for an adapter whose
+        """Whether the runs play Harbor task directories rather than prompts: always for an adapter whose
         command takes a task directory, else when the evaluation reads a task manifest or the imported tasks, or the
         steps roll out the imported train tasks."""
         return (
@@ -364,7 +364,7 @@ class HarnessEvolutionRecipe(Recipe):
             scorer = (
                 None
                 if evaluation.scorer is None
-                else RolloutScorer.from_setting(evaluation.scorer, setting="evolution.evaluation.scorer")
+                else TaskScorer.from_setting(evaluation.scorer, setting="evolution.evaluation.scorer")
             )
             collector = (
                 None
@@ -412,7 +412,7 @@ class HarnessEvolutionRecipe(Recipe):
         """The served model's endpoint.
 
         With the service known and a scenario named, this Reef's own
-        evaluation route for that scenario: a rollout then samples the
+        evaluation route for that scenario: a run then samples the
         release the scenario serves, weights, request defaults and all, and
         its calls are kept by nobody. Otherwise the runtime's own endpoint.
         """
@@ -578,16 +578,16 @@ class HarnessEvolutionRecipe(Recipe):
                 max_steps=self.evolution.max_steps,
                 max_failure_streak=self.evolution.max_failure_streak,
                 max_model_calls_per_step=self.evolution.max_model_calls_per_step,
-                max_rollouts_per_step=self.evolution.max_rollouts_per_step,
+                max_runs_per_step=self.evolution.max_runs_per_step,
             ),
             records=records,
             task_directories=self.task_directories(descriptor),
         )
 
     def build_evaluator(
-        self, descriptor: AdapterDescriptor, models: ModelBindings, history: History, scorer: RolloutScorer
-    ) -> HarnessRolloutEvaluator:
-        """The rollout evaluator: the adapter's binary installed, the worker pool placed, ``scorer`` bound."""
+        self, descriptor: AdapterDescriptor, models: ModelBindings, history: History, scorer: TaskScorer
+    ) -> HarnessTaskEvaluator:
+        """The run evaluator: the adapter's binary installed, the worker pool placed, ``scorer`` bound."""
         executor, binary = self.executor.for_program(AdapterProgram(descriptor), binary=self.evolution.binary)
         executor.preflight()
         selection, requirements = evaluation_selection(scorer, self.worker_executor)
@@ -598,7 +598,7 @@ class HarnessEvolutionRecipe(Recipe):
             scorer_name = f"{type(scorer).__module__}:{type(scorer).__qualname__}@{id(scorer):x}"
         else:
             scorer_name = plugin_name(setting)
-        return HarnessRolloutEvaluator(
+        return HarnessTaskEvaluator(
             descriptor=descriptor,
             scorer=scorer,
             scorer_name=scorer_name,
@@ -613,8 +613,8 @@ class HarnessEvolutionRecipe(Recipe):
                 sort_keys=True,
                 default=str,
             ),
-            rollout_timeout_s=self.evaluation.rollout_timeout_s,
-            rollout_repeats=self.evaluation.repeats,
+            task_timeout_s=self.evaluation.task_timeout_s,
+            task_repeats=self.evaluation.repeats,
             executor=executor,
             forbid_residue=self.evaluation.forbid_residue,
             worker_selection=selection,

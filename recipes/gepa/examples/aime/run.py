@@ -6,9 +6,9 @@ solves is real recorded traffic against the served tree and the method
 reflects on transcripts it actually produced.
 
 One round is one GEPA step: pull the served tree, run the next epoch-shuffled
-minibatch of three training problems as Pi rollouts against it with a model
+minibatch of three training problems as Pi runs against it with a model
 binding pointed back at this service, report each score against the request
-that rollout recorded, and wait. The third report closes the batch
+that run recorded, and wait. The third report closes the batch
 (``evolution.batch_size: 3``), which is what schedules the step where the method
 proposes, the evaluation scores the candidate on the 45 validation problems,
 and a strict mean improvement publishes it. Rounds stop at ``--budget`` metric
@@ -55,11 +55,11 @@ from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.core.records_types import RequestType
 from reef.dispatcher import Dispatcher
 from reef.evaluation.harness import History, evaluation_selection
-from reef.harness import run_rollout
+from reef.harness import run_task
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import AdapterDescriptor
-from reef.harness.rollouts.model_binding import ModelBinding
 from reef.harness.sync import HARNESS_COMPONENT
+from reef.harness.tasks.model_binding import ModelBinding
 from reef.harness.tree import HarnessTree, TreePatch, render_tree
 from reef.inference.http import HttpInferenceHandler, InferenceProxyRuntime, provider_request_headers
 from reef.recipe.config import recipe_config_from_file_layout
@@ -88,12 +88,12 @@ SCENARIO = os.environ.get("REEF_GEPA_SCENARIO", "gepa-aime")
 # the default single-node run is the one the retained record compares against.
 MULTI = os.environ.get("REEF_GEPA_MULTI") == "1"
 COMPONENTS = ["rules", "skill"] if MULTI else ["rules"]
-# The service key the Pi rollouts present. The embedded service does not
+# The service key the Pi runs present. The embedded service does not
 # authenticate; this must never be the provider key, which would land in a
-# rendered models.json inside the rollout root.
+# rendered models.json inside the run root.
 EMBEDDED_KEY = "reef-embedded"
-ROLLOUT_TIMEOUT_S = 600.0
-# Rollouts are independent: the evaluation's validation pass (gepa.yaml's
+RUN_TIMEOUT_S = 600.0
+# Runs are independent: the evaluation's validation pass (gepa.yaml's
 # execution.evolution.workers), the driver's minibatch, and the test passes all run this
 # many at once. It only changes wall time, never sampling or scoring.
 WORKERS = int(os.environ["REEF_GEPA_WORKERS"])
@@ -132,7 +132,7 @@ def load_recipe(
         model_path=os.environ["REEF_MODEL"],
         base_url=aime.OPENAI_BASE_URL,
         api_key=api_key,
-        inference_timeout_s=ROLLOUT_TIMEOUT_S,
+        inference_timeout_s=RUN_TIMEOUT_S,
     )
     recipe = build_recipe(str(sections["implementation"]), config=sections, runtime=runtime)
     if not isinstance(recipe, HarnessEvolutionRecipe) or not isinstance(recipe.method, GEPA):
@@ -176,7 +176,7 @@ def provider_key() -> str:
 
 
 def default_headers_middleware(scenario: str) -> Any:
-    """Pi's requests ride this run's scenario: a rollout knows only an
+    """Pi's requests ride this run's scenario: a run knows only an
     OpenAI-compatible base url and sends no reef headers, so the missing
     scenario header is stamped in before routing."""
 
@@ -222,7 +222,7 @@ class RunService:
             or HttpInferenceHandler(
                 upstream_url,
                 request_headers=provider_request_headers(upstream_key),
-                timeout_s=ROLLOUT_TIMEOUT_S,
+                timeout_s=RUN_TIMEOUT_S,
             ),
         )
         self.app.middlewares.append(default_headers_middleware(scenario))
@@ -242,7 +242,7 @@ class RunService:
     async def serve(self) -> None:
         self.runner = web.AppRunner(self.app)
         await self.runner.setup()
-        # Rollouts run on this host. Port 0 (tests) binds an ephemeral port,
+        # Tasks run on this host. Port 0 (tests) binds an ephemeral port,
         # read back here so the binding can point at it.
         await web.TCPSite(self.runner, host="127.0.0.1", port=self.port).start()
         if not self.port:
@@ -259,8 +259,8 @@ class RunService:
         self.dispatcher.close()
 
     def binding(self) -> ModelBinding:
-        """The endpoint a rollout reaches this service through."""
-        return ModelBinding(self.base_url, os.environ["REEF_MODEL"], api_key=EMBEDDED_KEY, timeout_s=ROLLOUT_TIMEOUT_S)
+        """The endpoint a run reaches this service through."""
+        return ModelBinding(self.base_url, os.environ["REEF_MODEL"], api_key=EMBEDDED_KEY, timeout_s=RUN_TIMEOUT_S)
 
     def committed_state(self) -> HarnessState:
         """The harness backend's state as the latest commit recorded it; the initial state before any."""
@@ -271,7 +271,7 @@ class RunService:
         return HarnessState() if state is None else HarnessState.from_json(state)
 
     def history(self) -> History:
-        """The scenario's harness history (every candidate, rollout and decision) as the latest step left it."""
+        """The scenario's harness history (every candidate, run and decision) as the latest step left it."""
         return History(self.recipe.state_root(self.scenario) / HARNESS_COMPONENT / HISTORY_DIR)
 
     def records(self) -> RecordStore:
@@ -298,7 +298,7 @@ class RunService:
 def find_task_record(records: RecordStore, scenario: str, task_prompt: str, *, after_sequence: int = 0) -> Any | None:
     """The problem's latest recorded request past the floor.
 
-    Rollouts share one scenario and send no session id, so the problem statement
+    Runs share one scenario and send no session id, so the problem statement
     is the discriminator; the floor is the round's start, without which a
     repeated problem would match its own record from an earlier round.
     """
@@ -366,14 +366,14 @@ def pull_tree(client: Any, service: RunService, target: Path) -> dict[str, Any]:
     return manifest
 
 
-def rollout_files(tree: HarnessTree, binding: ModelBinding, descriptor: AdapterDescriptor) -> dict[str, str]:
-    """``tree`` rendered with the transient endpoint: the rollout input the step's evaluation renders."""
+def run_files(tree: HarnessTree, binding: ModelBinding, descriptor: AdapterDescriptor) -> dict[str, str]:
+    """``tree`` rendered with the transient endpoint: the run input the step's evaluation renders."""
     return render_tree(tree, descriptor, binding.config_overlays(descriptor))
 
 
 def solve(files: Mapping[str, str], task: str, binary: str) -> tuple[float, dict[str, Any]]:
-    """One Pi rollout on one problem, scored the way the step's evaluation scores it."""
-    result = run_rollout(get_adapter("pi"), files, task, binary=binary, timeout=ROLLOUT_TIMEOUT_S)
+    """One Pi run on one problem, scored the way the step's evaluation scores it."""
+    result = run_task(get_adapter("pi"), files, task, binary=binary, timeout=RUN_TIMEOUT_S)
     response = aime.final_assistant_text(result.trajectory) or result.stdout
     return aime.evaluate(task, result), {"response": response, "exit_code": result.exit_code}
 
@@ -424,7 +424,7 @@ def search(
         if calls >= budget:
             return
         plan = search_archive.plan(len(trainset), len(validation), 3)
-        files = rollout_files(served, service.binding(), get_adapter("pi"))
+        files = run_files(served, service.binding(), get_adapter("pi"))
         # Records at or below this sequence are earlier rounds' leftovers; a
         # repeated problem must not match its own past session.
         floor = max_sequence(service.records(), service.scenario)
@@ -432,12 +432,12 @@ def search(
         problems = [str(trainset[identifier]["input"]) for identifier in plan["minibatch"]]
         with ThreadPoolExecutor(max_workers=min(WORKERS, len(problems))) as pool:
             scored = [score for score, _ in pool.map(lambda task, files=files: solve(files, task, binary), problems)]
-        # Reports go out only once every rollout of the round has recorded,
+        # Reports go out only once every run of the round has recorded,
         # so the batch never closes on a round that is still in flight.
         for index, (task, score) in enumerate(zip(problems, scored, strict=True)):
             record = find_task_record(service.records(), service.scenario, task, after_sequence=floor)
             if record is None:
-                raise RuntimeError(f"the rollout for training problem {index} recorded no request")
+                raise RuntimeError(f"the run for training problem {index} recorded no request")
             report(
                 service,
                 client,
@@ -458,7 +458,7 @@ def test_passes(
     trees = {"frozen": recipe.seed, "selected": HarnessTree(pull_tree(client, service, WORK / "selected")["files"])}
     scores = {}
     for label, tree in trees.items():
-        rendered = rollout_files(tree, binding, descriptor)
+        rendered = run_files(tree, binding, descriptor)
 
         def one(index: int, task: str, files: Mapping[str, str] = rendered) -> tuple[float, dict[str, Any]]:
             return solve(files, task, binary)
@@ -498,7 +498,7 @@ def main() -> None:
             "seed": args.seed,
             "splits": {"train": len(trainset), "validation": len(valset), "test": len(testset)},
             "dataset_sha256": aime.AIME_DATASET_SHA256,
-            "planned_test_rollouts": 2 * len(testset),
+            "planned_test_runs": 2 * len(testset),
             "workers": WORKERS,
             "work_dir": str(WORK),
         }

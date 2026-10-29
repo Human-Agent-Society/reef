@@ -1,6 +1,6 @@
 """Read-channel guarantees of the harness routes: the release catalog with each step's evaluation metrics,
 version-addressed pulls, served files that are byte for byte the evaluated source tree rendered for the
-adapter, the source form, and the routes the wrapper used that are gone. Hermetic: rollouts run a fake pi
+adapter, the source form, and the routes the wrapper used that are gone. Hermetic: tasks run a fake pi
 binary through the real adapter path, and the reads go through the real HTTP app."""
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ from reef.core.evaluation import EvaluationResult, UpdateCandidate
 from reef.dispatcher import Dispatcher
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import DescriptorError, load_descriptor
-from reef.harness.rollouts.run import RolloutResult
+from reef.harness.tasks.run import TaskResult
 from reef.harness.tree import HarnessTree, TreePatch, render_tree
 from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.service.app import create_app
@@ -41,7 +41,7 @@ UPDATE_TIMEOUT_S = 5.0
 UPDATE_POLL_S = 0.01
 
 
-def evaluate(task: str, result: RolloutResult) -> float:
+def evaluate(task: str, result: TaskResult) -> float:
     return float(result.trajectory[-1]["rules"].count("marker"))
 
 
@@ -426,7 +426,7 @@ def test_descriptor_install_fields_constrain_their_charset(tmp_path, adapter: st
 @pytest.mark.parametrize("path", ["/tmp/state", "../state", "workspace", "workspace/state", "."])
 def test_descriptor_dirs_stay_in_managed_state(tmp_path, path: str) -> None:
     target = descriptor_with(tmp_path, "pi", lambda data: data.__setitem__("dirs", {path: None}))
-    with pytest.raises(DescriptorError, match=r"'dirs'.*rollout root"):
+    with pytest.raises(DescriptorError, match=r"'dirs'.*run root"):
         load_descriptor(target)
 
 

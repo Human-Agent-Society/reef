@@ -10,7 +10,7 @@ import pytest
 import tests
 from tests.support.harness_steps import PI_SEED, harness_backend
 
-from reef.evaluation.harness import HarnessCandidate, RolloutScorer
+from reef.evaluation.harness import HarnessCandidate, TaskScorer
 from reef.runtime.executor import Executor, ExecutorConfig, WorkerSpec
 from reef.runtime.executor.config import executor_settings
 from reef.runtime.executor.requirements import ExecutionRequirements
@@ -18,7 +18,7 @@ from reef.runtime.executor.requirements import ExecutionRequirements
 pytestmark = pytest.mark.skipif(os.environ.get("REEF_TEST_RAY") != "1", reason="opt-in real Ray integration")
 
 
-class GPUScorer(RolloutScorer):
+class GPUScorer(TaskScorer):
     def execution_requirements(self):
         return ExecutionRequirements(gpus_per_worker=1)
 
@@ -72,13 +72,13 @@ def test_evolution_explicit_ray_places_scorer_on_declared_ray_gpu(tmp_path):
         # A second evaluation on another task runs on the same workers.
         second = backend.evaluate(replace(candidate, evaluation_tasks=("two",)))
         assert second.metrics["candidate_scores"] == [{"task": "two", "scores": [1.0]}]
-        assert second.metrics["rollouts_run"] == 2
-        # Each rollout's record comes back from its Ray worker into the history.
+        assert second.metrics["runs_run"] == 2
+        # Each run's record comes back from its Ray worker into the history.
         history = backend.history
-        assert all((history.rollout_dir(record.rollout) / "rollout.json").is_file() for record in history.rollouts)
+        assert all((history.run_dir(record.run_id) / "run.json").is_file() for record in history.runs)
         for evaluation in (result, second):
-            (rollout,) = evaluation.metrics["candidate_rollouts"]
-            assert (history.rollout_dir(rollout["rollout"]) / "session.jsonl").is_file()
+            (task_run,) = evaluation.metrics["candidate_runs"]
+            assert (history.run_dir(task_run["run"]) / "session.jsonl").is_file()
         backend.close()
         # Shutdown is asynchronous in Ray: a following actor must be able to
         # acquire the same GPU, proving that backend.close released its workers.

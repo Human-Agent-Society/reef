@@ -258,7 +258,7 @@ class ReasoningBank(Method):
 def trace_text(trace: Trace) -> str:
     """What the judge and the extractor read of a run, fenced as data.
 
-    It is one JSON object: the task, the transcript without the system prompt (a rollout's trace has none), the
+    It is one JSON object: the task, the transcript without the system prompt (a run's trace has none), the
     final reply, the feedback and the failure, each left out when empty. Past ``MAX_TRACE_CHARS`` characters, the
     text loses its middle.
     """

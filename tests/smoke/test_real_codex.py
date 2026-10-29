@@ -23,10 +23,10 @@ from tests.support.harness_render import write_layer
 
 from reef.core.model_metadata import ModelMetadata
 from reef.harness.adapters import get_adapter
-from reef.harness.rollouts.model_binding import ModelBinding
-from reef.harness.rollouts.run import run_rollout
-from reef.harness.rollouts.trajectory import final_assistant_text
 from reef.harness.sync import layer_install
+from reef.harness.tasks.model_binding import ModelBinding
+from reef.harness.tasks.run import run_task
+from reef.harness.tasks.trajectory import final_assistant_text
 from reef.harness.tree import HarnessTree, render_tree
 
 REAL_CODEX = os.environ.get("REEF_REAL_CODEX_BINARY", "")
@@ -163,7 +163,7 @@ def test_real_codex_renders_runs_collects_and_cleans_up(tmp_path: Path) -> None:
             binding=model_binding(base_url),
         )
         capture = Path(os.environ.get("REEF_REAL_CODEX_SESSION_OUT", tmp_path / "real-codex-session.jsonl"))
-        result = run_rollout(
+        result = run_task(
             get_adapter("codex"),
             files,
             "Reply with exactly the word READY",
@@ -189,11 +189,11 @@ def test_real_codex_renders_runs_collects_and_cleans_up(tmp_path: Path) -> None:
     # skills come from the plugin reef, and a command is a skill there too.
     assert "reef:reef-smoke: Reef smoke skill" in body
     assert "reef:reef-command: Reef smoke command" in body
-    # config.toml sets no approval_policy; the rollout still runs with approval never, so it never waits.
+    # config.toml sets no approval_policy; the run still runs with approval never, so it never waits.
     assert "Approval policy is currently never" in body and "# Escalation Requests" not in body
     assert any(event.get("type") == "session_meta" for event in result.trajectory)
     assert any(event.get("payload", {}).get("type") == "task_complete" for event in result.trajectory)
-    # The grader reads the stub's reply from the rollout the real binary wrote.
+    # The grader reads the stub's reply from the run the real binary wrote.
     assert final_assistant_text(result.trajectory) == "READY"
     assert result.residue == ()
     assert capture.is_file() and capture.stat().st_size > 0
@@ -234,7 +234,7 @@ def test_codex_sends_reasoning_parameters_only_when_supported(reasoning: bool) -
     try:
         binding = replace(model_binding(base_url), metadata=ModelMetadata(640_000, reasoning))
         files = _bound_files(binding=binding)
-        result = run_rollout(get_adapter("codex"), files, "Reply READY", binary=REAL_CODEX, timeout=30.0)
+        result = run_task(get_adapter("codex"), files, "Reply READY", binary=REAL_CODEX, timeout=30.0)
         assert result.exit_code == 0, result.stderr
         assert "fallback metadata" not in result.stdout + result.stderr
         body = json.loads(server.requests[0][2])
@@ -252,10 +252,10 @@ def test_metadata_preserves_codex_unknown_model_instructions() -> None:
     try:
         descriptor = get_adapter("codex")
         binding = ModelBinding(base_url=base_url, model=MODEL, api="responses")
-        before = run_rollout(descriptor, _bound_files(binding=binding), "Reply READY", binary=REAL_CODEX, timeout=30.0)
+        before = run_task(descriptor, _bound_files(binding=binding), "Reply READY", binary=REAL_CODEX, timeout=30.0)
         assert before.exit_code == 0, before.stderr
         assert "fallback metadata" in before.stdout
-        after = run_rollout(
+        after = run_task(
             descriptor, _bound_files(binding=binding.with_metadata()), "Reply READY", binary=REAL_CODEX, timeout=30.0
         )
         assert after.exit_code == 0, after.stderr
@@ -299,7 +299,7 @@ def test_codex_bundled_model_catalog_matches_the_pin() -> None:
     from reef.harness.adapters.codex.render import bundled_model_catalog
 
     descriptor = get_adapter("codex")
-    result = run_rollout(
+    result = run_task(
         replace(descriptor, argv=("debug", "models", "--bundled")),
         render_tree(HarnessTree({}), descriptor),
         "",
@@ -311,7 +311,7 @@ def test_codex_bundled_model_catalog_matches_the_pin() -> None:
 
 
 #: Codex 0.158.0 leaves the sentence on checklists out of gpt-5.5's own prompt, but keeps it from a model catalog,
-#: so a rollout with model metadata on gpt-5.5 sends one sentence more than Codex does.
+#: so a run with model metadata on gpt-5.5 sends one sentence more than Codex does.
 GPT_5_5_KEEPS_A_SENTENCE = pytest.mark.xfail(
     strict=True, reason="Codex drops gpt-5.5's checklist sentence only for its own catalog"
 )
@@ -326,8 +326,8 @@ def test_codex_model_switch_keeps_bundled_instructions_and_tools(model: str) -> 
         descriptor = get_adapter("codex")
         switched = replace(descriptor, argv=(*descriptor.argv, "--model", model))
         binding = ModelBinding(base_url=base_url, model=MODEL, api="responses")
-        before = run_rollout(switched, _bound_files(binding=binding), "Reply READY", binary=REAL_CODEX, timeout=30.0)
-        after = run_rollout(
+        before = run_task(switched, _bound_files(binding=binding), "Reply READY", binary=REAL_CODEX, timeout=30.0)
+        after = run_task(
             switched, _bound_files(binding=binding.with_metadata()), "Reply READY", binary=REAL_CODEX, timeout=30.0
         )
         assert before.exit_code == after.exit_code == 0, (before.stderr, after.stderr)
@@ -355,11 +355,9 @@ def test_codex_native_model_applies_capabilities_and_keeps_instructions(model: s
     try:
         descriptor = get_adapter("codex")
         binding = ModelBinding(base_url=base_url, model=model, api="responses")
-        before = run_rollout(descriptor, _bound_files(binding=binding), "Reply READY", binary=REAL_CODEX, timeout=30.0)
+        before = run_task(descriptor, _bound_files(binding=binding), "Reply READY", binary=REAL_CODEX, timeout=30.0)
         configured = replace(binding, metadata=ModelMetadata(32_000, reasoning))
-        after = run_rollout(
-            descriptor, _bound_files(binding=configured), "Reply READY", binary=REAL_CODEX, timeout=30.0
-        )
+        after = run_task(descriptor, _bound_files(binding=configured), "Reply READY", binary=REAL_CODEX, timeout=30.0)
         assert before.exit_code == after.exit_code == 0, (before.stderr, after.stderr)
         assert "fallback metadata" not in after.stdout + after.stderr
         started = next(
@@ -388,20 +386,20 @@ CODEX_PARTS = {
 }
 
 
-@pytest.mark.parametrize("form", ["rollout", "layer"])
-def test_real_codex_takes_every_part_of_a_tree_in_an_rollout_and_over_a_persons_own_config(
+@pytest.mark.parametrize("form", ["run", "layer"])
+def test_real_codex_takes_every_part_of_a_tree_in_an_run_and_over_a_persons_own_config(
     tmp_path: Path, form: str
 ) -> None:
-    """Every part an evolved tree may hold reaches the model, in a rollout and on a person's machine, where Codex
+    """Every part an evolved tree may hold reaches the model, in a run and on a person's machine, where Codex
     keeps the person's own home, empty here, and takes the skills from the plugin the layer registers.
     Unregistering leaves the person's config without the plugin."""
     server, base_url = _server()
     descriptor = get_adapter("codex")
     binding = ModelBinding(base_url=base_url, model="gpt-6-astra", api_key="reef-smoke-key", api="responses")
     try:
-        if form == "rollout":
+        if form == "run":
             files = _bound_files(CODEX_PARTS, binding=binding)
-            result = run_rollout(descriptor, files, "Reply READY", binary=REAL_CODEX, timeout=120.0)
+            result = run_task(descriptor, files, "Reply READY", binary=REAL_CODEX, timeout=120.0)
             assert result.exit_code == 0, result.stderr
         else:
             own = tmp_path / "own"

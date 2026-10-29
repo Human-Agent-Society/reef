@@ -13,15 +13,15 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
-from reef.evaluation.harness import RolloutEvaluationWorker, RolloutScorer
-from reef.evaluation.harness.runner import RolloutRun
+from reef.evaluation.harness import TaskEvaluationWorker, TaskScorer
+from reef.evaluation.harness.runner import TaskRun
 from reef.execution.sandbox.config import build_executor
 from reef.execution.sandbox.e2b import E2BExecutor
-from reef.execution.sandbox.process import RolloutTimeout
+from reef.execution.sandbox.process import ProgramTimeout
 from reef.harness.adapters import get_adapter
-from reef.harness.rollouts.model_binding import ModelBinding, ModelBindings
-from reef.harness.rollouts.run import run_rollout
-from reef.harness.rollouts.vendor_install import AdapterProgram
+from reef.harness.tasks.model_binding import ModelBinding, ModelBindings
+from reef.harness.tasks.run import run_task
+from reef.harness.tasks.vendor_install import AdapterProgram
 from reef.harness.tree import HarnessTree, render_tree
 
 pytestmark = pytest.mark.skipif(os.environ.get("REEF_TEST_E2B") != "1", reason="opt-in paid E2B/OpenRouter test")
@@ -34,7 +34,7 @@ def bound_files(binding: ModelBinding, adapter: str) -> dict[str, str]:
     return render_tree(HarnessTree({}), descriptor, binding.config_overlays(descriptor))
 
 
-class MarkerScorer(RolloutScorer):
+class MarkerScorer(TaskScorer):
     def score(self, task, result):
         for event in result.trajectory:
             message = event.get("message", event)
@@ -99,7 +99,7 @@ def test_real_agent_rollout_through_generic_executor(adapter, api, model_endpoin
         api=api,
         max_output_tokens=256,
     )
-    result = run_rollout(
+    result = run_task(
         descriptor,
         bound_files(binding, adapter),
         "Reply exactly REEF_E2B_OK. Do not use tools.",
@@ -150,7 +150,7 @@ def test_remote_inputs_are_readonly_and_timeout_retires_children(tmp_path):
         )
         assert outcome.exit_code == 0, outcome.stderr
         assert config.read_text() == "original" and (workspace / "answer.txt").read_text() == "ok"
-        with pytest.raises(RolloutTimeout):
+        with pytest.raises(ProgramTimeout):
             session.launch(
                 ["python3", "-c", "import subprocess,time; subprocess.Popen(['sleep','120']); time.sleep(120)"],
                 root=root,
@@ -178,9 +178,9 @@ def test_the_evaluation_worker_scores_a_real_remote_rollout(model_endpoint, tmp_
     )
     scorer = MarkerScorer()
     task = "Reply exactly REEF_E2B_OK. Do not use tools."
-    worker = RolloutEvaluationWorker(descriptor, scorer, None, 180, executor, True)
+    worker = TaskEvaluationWorker(descriptor, scorer, None, 180, executor, True)
     record_dir = tmp_path / "rollout"
-    scored = worker.run(RolloutRun(bound_files(binding, "pi"), task, record_dir), ModelBindings(binding))
+    scored = worker.run(TaskRun(bound_files(binding, "pi"), task, record_dir), ModelBindings(binding))
     assert scored.score.value == 1.0 and scored.failure is None
     assert scored.reply is not None and "REEF_E2B_OK" in scored.reply
     assert (record_dir / "rollout.json").is_file()

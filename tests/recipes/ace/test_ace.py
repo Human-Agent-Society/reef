@@ -1,4 +1,4 @@
-"""ACE on the workspace protocol: traces grow a playbook in rules.md, with no rollout and no correct answer.
+"""ACE on the workspace protocol: traces grow a playbook in rules.md, with no run and no correct answer.
 
 A queued fake model is the Reflector and the Curator. The first test runs two steps through the real harness
 backend under the ``none`` policy, with no scorer. The other step tests run the method once on a workspace that
@@ -20,7 +20,7 @@ from recipes.ace import ACE, ACESettings
 from reef.core.job_data import TrajectorySample
 from reef.evaluation.harness import EvaluationSettings, NoEvaluationPolicy
 from reef.harness.adapters import get_adapter
-from reef.harness.rollouts.model_binding import ModelBindings
+from reef.harness.tasks.model_binding import ModelBindings
 from reef.harness.tree import HarnessTree, validate_tree
 from reef.recipe import load_recipe_config
 from reef.recipe.harness import EvolutionSettings, HarnessEvolutionRecipe
@@ -94,7 +94,7 @@ def ace_step(
     return workspace, workspace.read_output()
 
 
-def test_two_steps_grow_the_playbook_that_pi_serves_with_no_rollout(tmp_path: Path) -> None:
+def test_two_steps_grow_the_playbook_that_pi_serves_with_no_run(tmp_path: Path) -> None:
     chat = QueueChat(
         reflection(),
         curation(add("Strategies and insights", "Read the failing test before you edit the code.")),
@@ -118,7 +118,7 @@ def test_two_steps_grow_the_playbook_that_pi_serves_with_no_rollout(tmp_path: Pa
         backend.initial_state(),
         NoEvaluationPolicy(),
     )
-    assert first.metrics["selected"] is True and first.metrics["method_rollouts"] == 0
+    assert first.metrics["selected"] is True and first.metrics["method_runs"] == 0
     assert "[BEGIN recorded trace" in chat.prompts[0] and "[user] Fix the failing test." in chat.prompts[0]
     tree = HarnessTree.read(first.artifact.local_path)
     assert validate_tree(tree, PI).passed
@@ -136,7 +136,7 @@ def test_two_steps_grow_the_playbook_that_pi_serves_with_no_rollout(tmp_path: Pa
     assert "### Common mistakes to avoid\n- [ace-00002] helpful=0 harmful=0 :: Do not report a fix" in rules
     saved = json.loads(HarnessState.from_json(second.state).method_files["playbook.json"])
     assert [(bullet["id"], bullet["step"]) for bullet in saved["bullets"]] == [("ace-00001", 1), ("ace-00002", 2)]
-    assert backend.history.rollouts == []
+    assert backend.history.runs == []
 
 
 def test_tags_count_and_the_merge_drops_duplicates_harmful_bullets_and_the_excess(tmp_path: Path) -> None:

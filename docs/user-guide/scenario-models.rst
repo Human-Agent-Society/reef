@@ -61,9 +61,9 @@ new steps. An active step continues with its captured settings; a revoked
 key fails without falling back to another provider.
 
 Use the supplied bindings for every model call. A model-based judge is an
-``RolloutScorer`` that overrides ``score_with_models(task, result, models)``::
+``TaskScorer`` that overrides ``score_with_models(task, result, models)``::
 
-    class Judge(RolloutScorer):
+    class Judge(TaskScorer):
         def score(self, task, result):
             raise ValueError("the judge needs the step's model bindings")
 

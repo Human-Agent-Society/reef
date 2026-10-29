@@ -103,7 +103,7 @@ def test_a_client_install_calls_the_scenario_route_and_the_call_is_recorded(tmp_
             assert manifest["run"]["binary"] == "pi" and manifest["run"]["args"] == ["--model", "reef/qwen3-8b"]
             assert manifest["run"]["register"] == [["install", "/home/a/install/plugin"]]
             assert "plugin/skills/{name}/SKILL.md" in manifest["synced"]
-            # The agent's pinned install, so a client without pi can install the version the rollouts run.
+            # The agent's pinned install, so a client without pi can install the version the tasks run.
             assert manifest["run"]["install"]["package"] == "@earendil-works/pi-coding-agent"
             for missing in ("service_url", "root"):
                 partial = {key: value for key, value in params.items() if key != missing}

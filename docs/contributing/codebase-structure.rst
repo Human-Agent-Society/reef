@@ -99,7 +99,7 @@ import a concrete integration.
 |                         | service that writes, checks, and runs Harbor tasks       |                                            |
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
 | ``reef/evaluation/``    | candidate evaluation: running and scoring evaluation     | making candidates, training loops,         |
-|                         | rollouts, the harness history and its score cache, the   | artifact publication                       |
+|                         | runs, the harness history and its score cache, the       | artifact publication                       |
 |                         | harness publication policies, and the ``evaluation``     |                                            |
 |                         | plugin configuration                                     |                                            |
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
@@ -120,7 +120,7 @@ import a concrete integration.
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
 | ``reef/harness/``       | adapters (the parts of each agent's tree and its         | recipe policy, the release chain           |
 |                         | descriptor), the source tree (patches, validation,       |                                            |
-|                         | rendering), rollouts, runners, trajectories, and the     |                                            |
+|                         | rendering), task runs, runners, trajectories, and the    |                                            |
 |                         | loopback gateway an agent process reaches its model      |                                            |
 |                         | and tools through                                        |                                            |
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
@@ -362,13 +362,13 @@ The extension points those packages expose are in `Python API
     and reads back the tree. ``contract.py`` is the method contract.
     ``agent/`` runs the deployment's coding agent for a method
     (``evolution.agent``, ``AgentMethod``, ``protocol.md``). It starts the
-    agent with ``launch_agent`` in ``reef/harness/rollouts/run.py``, as an
-    evaluation rollout does, and ``reef/harness/gateway.py`` is the
+    agent with ``launch_agent`` in ``reef/harness/tasks/run.py``, as an
+    evaluation run does, and ``reef/harness/gateway.py`` is the
     loopback gateway the agent reaches its model and tools through.
   - Evaluation: ``reef/evaluation/`` holds the contract that every
     candidate passes, weights and trees alike (``evaluate``, then
-    ``decide``). ``reef/evaluation/harness/evaluator.py`` scores trees as
-    rollouts, with the history as the score cache, and ``policy.py``
+    ``decide``). ``reef/evaluation/harness/evaluator.py`` scores trees by
+    running tasks, with the history as the score cache, and ``policy.py``
     decides.
   - Release: the harness backend turns a selected tree into the step's
     release, with the parts it changes (``changed_kinds``). The scenario

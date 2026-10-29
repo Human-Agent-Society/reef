@@ -1,21 +1,21 @@
-"""Rollout lifecycle: render, launch headless, collect, clean up exactly.
+"""Run lifecycle: render, launch headless, collect, clean up exactly.
 
-One rollout is one process of the harness binary inside a throwaway root:
+One run is one process of the harness binary inside a throwaway root:
 the rendered files land under the root, the descriptor's relocation
 environment points the binary's whole configuration at it, the binary runs
 headless in an empty ``workspace/`` working directory, and the trajectory is
 read back before the root is removed. The bundled harnesses re-read their
 whole configuration at process start and accept environment variables that
-relocate their config and session roots, so the inverse of a rollout is
+relocate their config and session roots, so the inverse of a run is
 exactly "delete the root" - no shared state survives.
 
 ``launch_agent`` is the launch itself: write the rendered files, prepare the
-writable directories and run the process. A rollout runs it in a throwaway
+writable directories and run the process. A task runs it in a throwaway
 root; harness evolution runs the deployment's coding agent with it in a
 step's workspace. ``read_session`` reads back the agent's session log.
 
 Cleanup is audited, not assumed: every file found under the root that the
-rollout did not write, is not under ``workspace/`` (the task's own output
+run did not write, is not under ``workspace/`` (the task's own output
 area), and does not match the descriptor's cleanup whitelist is reported as
 ``residue``. The whitelist is where adapter traps live - opencode's boot
 mutates its own config directory (npm install, ``.gitignore``), and both
@@ -41,23 +41,23 @@ from reef.execution.sandbox.process import (
     LocalExecutor,
     ProcessOutcome,
     ProgramExecutor,
-    RolloutLaunchError,
-    RolloutTimeout,
+    ProgramLaunchError,
+    ProgramTimeout,
 )
 from reef.harness.adapters.descriptor import AdapterDescriptor
-from reef.harness.rollouts.trajectory import reader_for
+from reef.harness.tasks.trajectory import reader_for
 
 
-class RolloutError(ReefError):
-    """The rollout could not be launched or torn down."""
+class TaskRunError(ReefError):
+    """The run could not be launched or torn down."""
 
 
 class TrajectoryKeepError(ReefError):
-    """The rollout ran but its trajectory could not be kept, so the step has no record of it."""
+    """The run completed but its trajectory could not be kept, so the step has no record of it."""
 
 
 @dataclass(frozen=True)
-class RolloutResult:
+class TaskResult:
     """One headless invocation's observable outcome."""
 
     exit_code: int
@@ -67,7 +67,7 @@ class RolloutResult:
     residue: tuple[str, ...]
 
 
-def _remove_rollout_root(root: Path) -> None:
+def _remove_run_root(root: Path) -> None:
     """Remove a root, repairing ordinary permission damage once."""
 
     if not root.exists() and not root.is_symlink():
@@ -92,7 +92,7 @@ def _remove_rollout_root(root: Path) -> None:
             repair(root)
             shutil.rmtree(root)
         except OSError as exc:
-            raise RolloutError(f"cannot remove rollout root {root}: {exc}") from exc
+            raise TaskRunError(f"cannot remove run root {root}: {exc}") from exc
 
 
 def _keep_trajectory(source: Path, target: Path) -> None:
@@ -107,7 +107,7 @@ def _keep_trajectory(source: Path, target: Path) -> None:
         # and an existing target is refused so a kept record is never merged over.
         shutil.copytree(source, target, symlinks=True)
     except OSError as exc:
-        raise TrajectoryKeepError(f"cannot keep rollout trajectory under {target}: {exc}") from exc
+        raise TrajectoryKeepError(f"cannot keep run trajectory under {target}: {exc}") from exc
 
 
 def _whitelisted(path: str, patterns: tuple[str, ...]) -> bool:
@@ -135,25 +135,25 @@ def headless_env(descriptor: AdapterDescriptor, root: Path) -> dict[str, str]:
 
 def headless_argv(descriptor: AdapterDescriptor, binary: str, prompt: str, root: Path) -> list[str]:
     """The descriptor's headless invocation of ``binary``, with ``prompt`` in its ``{prompt}`` slots and ``root``,
-    the rollout root, in its ``{root}`` slots, such as the path of the plugin a flag loads."""
+    the run root, in its ``{root}`` slots, such as the path of the plugin a flag loads."""
     return [binary, *(token.replace("{root}", str(root)).replace("{prompt}", prompt) for token in descriptor.argv)]
 
 
 def write_rendered(descriptor: AdapterDescriptor, files: Mapping[str, str], directory: Path, root: str) -> None:
     """Write the rendered ``files`` under ``directory``, with ``{root}`` in each config file as ``root``.
 
-    ``RolloutLaunchError`` for a path that leaves ``directory`` or a file that cannot be written.
+    ``ProgramLaunchError`` for a path that leaves ``directory`` or a file that cannot be written.
     """
     for relative, text in descriptor.place_root(files, root).items():
         relative_path = PurePosixPath(relative)
         if relative_path.is_absolute() or ".." in relative_path.parts:
-            raise RolloutLaunchError(f"render path {relative!r} escapes the rollout root")
+            raise ProgramLaunchError(f"render path {relative!r} escapes the run root")
         target = directory / relative_path
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(text, encoding="utf-8")
         except (OSError, UnicodeEncodeError) as exc:
-            raise RolloutLaunchError(f"cannot write render path {relative!r}: {exc}") from exc
+            raise ProgramLaunchError(f"cannot write render path {relative!r}: {exc}") from exc
 
 
 def launch_agent(
@@ -177,7 +177,7 @@ def launch_agent(
     ``{root}`` as ``home``, and stay read-only; the descriptor's state
     directories under ``home`` (``writable_paths``) and ``writable`` stay
     writable, and ``readonly`` names more paths the process only reads.
-    Raises ``RolloutTimeout`` as the executor does, and ``RolloutLaunchError``
+    Raises ``ProgramTimeout`` as the executor does, and ``ProgramLaunchError``
     when a file cannot be written or the process cannot start.
     """
     write_rendered(descriptor, files, home, str(home))
@@ -187,7 +187,7 @@ def launch_agent(
         for path in state:
             path.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
-        raise RolloutLaunchError(f"cannot prepare writable rollout state: {exc}") from exc
+        raise ProgramLaunchError(f"cannot prepare writable run state: {exc}") from exc
     return execute(
         executor,
         list(argv),
@@ -205,7 +205,7 @@ def read_session(descriptor: AdapterDescriptor, home: Path) -> list[Mapping[str,
     return list(reader_for(descriptor.trajectory_format)(home / descriptor.trajectory_path))
 
 
-def run_rollout(
+def run_task(
     descriptor: AdapterDescriptor,
     files: Mapping[str, str],
     prompt: str,
@@ -214,8 +214,8 @@ def run_rollout(
     timeout: float = 600.0,
     executor: ProgramExecutor | None = None,
     keep_dir: Path | None = None,
-) -> RolloutResult:
-    """Run one headless rollout of ``descriptor``'s harness over ``files``.
+) -> TaskResult:
+    """Run one headless run of ``descriptor``'s harness over ``files``.
 
     ``binary`` overrides the descriptor's binary name (the seam hermetic
     tests drive a fake harness through); ``prompt`` substitutes into the
@@ -225,10 +225,10 @@ def run_rollout(
     same for every executor. Only an executor that runs on the Reef host
     keeps the descriptor's ``host_env`` from the service and, on macOS, makes
     the root of an adapter with ``is_root_bind_mounted`` under
-    ``~/.reef/rollouts`` rather than the temp directory. The rollout root is removed before this returns, success
+    ``~/.reef/runs`` rather than the temp directory. The run root is removed before this returns, success
     or failure; ``keep_dir`` receives a copy of the trajectory directory
     first, so a step record can hold what the root held, and a copy that
-    fails raises ``TrajectoryKeepError`` rather than an ``RolloutError``.
+    fails raises ``TrajectoryKeepError`` rather than an ``TaskRunError``.
     """
     executor = executor or LocalExecutor()
     # Adapters can validate a conditional boundary (for example, remote task
@@ -237,11 +237,11 @@ def run_rollout(
     if descriptor.execution_validator is not None:
         try:
             descriptor.execution_validator(files, executor)
-        except RolloutLaunchError as exc:
-            raise RolloutError(str(exc)) from exc
+        except ProgramLaunchError as exc:
+            raise TaskRunError(str(exc)) from exc
     elif descriptor.self_isolating and not executor.runs_on_host:
-        raise RolloutError(
-            f"adapter {descriptor.name!r} isolates rollouts in its own container, which runs only on the Reef "
+        raise TaskRunError(
+            f"adapter {descriptor.name!r} isolates runs in its own container, which runs only on the Reef "
             "host; use evolution.executor: local and let the adapter's container be the boundary"
         )
     reader = reader_for(descriptor.trajectory_format)  # fail before any disk work
@@ -249,14 +249,14 @@ def run_rollout(
     # directory, so a root the binary bind-mounts from lives under the home there. Linux Docker shares every path,
     # and an executor off the Reef host runs no local container.
     if descriptor.is_root_bind_mounted and executor.runs_on_host and sys.platform == "darwin":
-        parent = Path.home() / ".reef" / "rollouts"
+        parent = Path.home() / ".reef" / "runs"
         try:
             parent.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
-            raise RolloutError(f"cannot create the rollout root directory {parent}: {exc}") from exc
+            raise TaskRunError(f"cannot create the run root directory {parent}: {exc}") from exc
     else:
         parent = None
-    root = Path(tempfile.mkdtemp(prefix=f"reef-rollout-{descriptor.name}-", dir=parent))
+    root = Path(tempfile.mkdtemp(prefix=f"reef-run-{descriptor.name}-", dir=parent))
     try:
         env = headless_env(descriptor, root)
         if executor.runs_on_host:
@@ -271,8 +271,8 @@ def run_rollout(
             outcome = launch_agent(
                 descriptor, executor, argv, files, env, root=root, home=root, cwd=root / "workspace", timeout=timeout
             )
-        except (RolloutLaunchError, RolloutTimeout) as exc:
-            raise RolloutError(str(exc)) from exc
+        except (ProgramLaunchError, ProgramTimeout) as exc:
+            raise TaskRunError(str(exc)) from exc
         trajectory = reader(root / descriptor.trajectory_path)
         written = {str(PurePosixPath(relative)) for relative in files}
         residue = tuple(
@@ -284,7 +284,7 @@ def run_rollout(
                 and not _whitelisted(relative, descriptor.cleanup_whitelist)
             )
         )
-        return RolloutResult(
+        return TaskResult(
             exit_code=outcome.exit_code,
             stdout=outcome.stdout,
             stderr=outcome.stderr,
@@ -296,4 +296,4 @@ def run_rollout(
             if keep_dir is not None:
                 _keep_trajectory(root / descriptor.trajectory_path, keep_dir)
         finally:
-            _remove_rollout_root(root)
+            _remove_run_root(root)

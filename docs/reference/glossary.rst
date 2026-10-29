@@ -358,7 +358,7 @@ Method
 The learning algorithm itself. A recipe is the object that binds one method to a
 scenario; ``HarnessEvolutionRecipe`` is one mechanism running many possible
 methods. Each is a ``Method`` whose ``step`` edits the harness tree in a
-step's workspace, with a scorer when its evaluation runs rollouts.
+step's workspace, with a scorer when its evaluation runs tasks.
 
 Adapter
 -------
@@ -368,19 +368,33 @@ tree with an executable to make a running harness (`Harness adapters
 <../developer-guide/harness-adapters.rst>`__). For weight
 serving, a LoRA/PEFT adapter layered on a frozen base model.
 
+Task
+----
+
+What an agent is asked to do. An instruction task is text that the agent
+reads. A Harbor task is a directory with an instruction, an environment and
+tests that score the result. A harness evaluation scores trees on tasks, and a
+weight training job can train on Harbor tasks.
+
+Run
+---
+
+One run of one task by a harness tree, in one environment. It goes from the
+task's first step to its scored end, and gives one trajectory and one score.
+The score is a value, 0 when the agent gave no answer, or ``failed`` when the
+environment could not run the task. A harness evaluation runs each task
+``evolution.evaluation.repeats`` times on each tree it scores: the ``compare``
+policy on the candidate and the head, ``floor`` on the candidate only. Each
+run uses a throwaway root that holds nothing but the rendered tree, and the
+history keeps every scored run and reuses it.
+
 Rollout
 -------
 
-One run of one task by an agent, a harness and a model, in one environment. It
-goes from the task's first step to its scored end, and gives one trajectory and
-one score. The score is a value, 0 when the agent gave no answer, or
-``failed`` when the environment could not run the rollout. A harness
-evaluation runs each task ``evolution.evaluation.repeats`` times on each tree
-it scores: the ``compare`` policy on the candidate and the head, ``floor`` on
-the candidate only. Each rollout runs in a throwaway root that holds nothing
-but the rendered tree, and the history keeps every scored rollout and reuses
-it. A Tinker task job runs each task ``rollouts_per_task`` times on the job's
-start weights.
+One run of one task by the policy model in weight training or in a checkpoint
+evaluation. It gives one trajectory and one score, as a harness run does. A
+Tinker task job runs each task ``rollouts_per_task`` times on the job's start
+weights.
 
 Patch
 -----
@@ -402,7 +416,7 @@ History
 -------
 
 Every tree that a harness scenario's steps proposed or evaluated, published or
-not, with every rollout and every decision. It is the evaluation's score
+not, with every run and every decision. It is the evaluation's score
 cache, and methods read it.
 
 Publication policy
@@ -411,7 +425,7 @@ Publication policy
 How a harness evaluation decides whether a candidate is published, set in
 ``evolution.evaluation.policy``: ``compare`` publishes a candidate that scores
 better than the head tree (the training start), ``floor`` one whose every
-rollout that ran reaches the floor score, and ``none`` every candidate that
+run that completed reaches the floor score, and ``none`` every candidate that
 passes validation. A published tree serves only when the activation rule
 activates it.
 

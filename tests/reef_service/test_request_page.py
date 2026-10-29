@@ -163,13 +163,13 @@ def test_a_queued_request_reloads_and_says_no_step_has_taken_it() -> None:
 
 
 def test_a_running_request_shows_the_steps_phase_its_elapsed_time_and_its_evaluation_size() -> None:
-    evaluating = StepProgress(RECORD_ID, "evaluating", started_at=900.0, step_record="/work/steps/1", rollouts_total=2)
+    evaluating = StepProgress(RECORD_ID, "evaluating", started_at=900.0, step_record="/work/steps/1", runs_total=2)
     page = request_page(_record(), [CREATION], progress=evaluating, now=1_100.0)
     progress = _section(page, "Progress")
     assert REFRESH in page and '<span class="evaluating">Checking the harness</span>' in progress
-    assert "the evaluation is running the candidate through its rollouts" in progress
+    assert "the evaluation is running the candidate through its runs" in progress
     assert "<dt>Step time</dt><dd>3 min 20 s into the step</dd>" in progress
-    assert "<dt>Evaluation rollouts</dt><dd>2 in the evaluation</dd>" in progress
+    assert "<dt>Evaluation runs</dt><dd>2 in the evaluation</dd>" in progress
     assert '<dt>Step record</dt><dd class="id">/work/steps/1</dd>' in progress
     assert "<dt>Waiting</dt>" not in progress
 
@@ -181,14 +181,14 @@ def test_a_running_request_shows_the_steps_phase_its_elapsed_time_and_its_evalua
         and "the method is making the change" in progress
     )
     assert "<dt>Step time</dt><dd>42 s into the step</dd>" in progress
-    assert "Evaluation rollouts" not in progress
+    assert "Evaluation runs" not in progress
     assert '<dt>Step record</dt><dd class="id">/work/steps/2</dd>' in progress
 
     # Another request's step says nothing about this one, which still waits.
     other = replace(evaluating, request_id="another")
     page = request_page(_record(), [CREATION], progress=other, now=1_100.0)
     assert '<span class="queued">Queued</span>' in page and "<dd>100 s</dd>" in page
-    assert "Evaluation rollouts" not in page
+    assert "Evaluation runs" not in page
     page = request_page(_record(), [CREATION], consumed=True, now=1_100.0)
     assert '<span class="running">In progress</span>' in page and "its row follows" in page and REFRESH in page
 
@@ -254,10 +254,10 @@ def test_an_inactive_request_names_the_activation_and_reads_published_once_it_is
     assert "What changed" in _sections(page) and "activate it</h3>" not in page
 
 
-def test_a_rejected_request_names_the_missed_rollout_on_both_pages() -> None:
+def test_a_rejected_request_names_the_missed_run_on_both_pages() -> None:
     selection = {"reason": "candidate missed the floor on 1 of 1 tasks", "metrics": {"floor_score": 1.0}}
-    rollout = {"task": "[health] echo", "score": 0.0, "failure": "no transcript was read", "reply": None}
-    row = _row(_answered(selected=False, selection=selection, candidate_rollouts=[rollout], patch=PATCH))
+    task_run = {"task": "[health] echo", "score": 0.0, "failure": "no transcript was read", "reply": None}
+    row = _row(_answered(selected=False, selection=selection, candidate_runs=[task_run], patch=PATCH))
     page = request_page(_record(), [CREATION, row], now=1_100.0)
     result = _section(page, "Result")
     assert "the task &#x27;[health] echo&#x27; failed: no transcript was read" in result or (
@@ -269,7 +269,7 @@ def test_a_rejected_request_names_the_missed_rollout_on_both_pages() -> None:
 
 
 def test_an_evaluation_that_never_ran_says_so_on_both_pages_with_no_candidate_score() -> None:
-    """Every candidate rollout failed before a score (the runner was not found): the checks judged nothing, so both
+    """Every candidate run failed before a score (the runner was not found): the checks judged nothing, so both
     pages say the evaluation could not run and quote the cause, and the version page shows no candidate score. Both
     pages say the floor tasks were set before the request and do not test what it asks for."""
     selection = {
@@ -278,9 +278,9 @@ def test_an_evaluation_that_never_ran_says_so_on_both_pages_with_no_candidate_sc
         "metrics": {"floor_score": 1},
     }
     cause = "harness binary reef-native not found"
-    rollout = {"task": "/checkout/tasks/health", "score": None, "failure": cause, "reply": None}
+    task_run = {"task": "/checkout/tasks/health", "score": None, "failure": cause, "reply": None}
     metrics = _answered(
-        selected=False, selection=selection, candidate_rollouts=[rollout], candidate_score=0.0, patch=PATCH
+        selected=False, selection=selection, candidate_runs=[task_run], candidate_score=0.0, patch=PATCH
     )
     row = _row(metrics)
     result = _section(request_page(_record(), [CREATION, row], now=1_100.0), "Result")
@@ -291,7 +291,7 @@ def test_an_evaluation_that_never_ran_says_so_on_both_pages_with_no_candidate_sc
     assert "The evaluation could not run" in version and f"<dt>Could not run</dt><dd>{cause}</dd>" in version
     assert "Candidate score" not in version and "Missed" not in version and note in version
     # A scored miss keeps the checks' own words and its candidate score.
-    scored = _row({**metrics, "candidate_rollouts": [{**rollout, "score": 0.0, "failure": None, "reply": "no"}]})
+    scored = _row({**metrics, "candidate_runs": [{**task_run, "score": 0.0, "failure": None, "reply": "no"}]})
     version = build_release_page(1, [CREATION, scored])
     assert "The evaluation could not run" not in version and "Candidate score" in version
 

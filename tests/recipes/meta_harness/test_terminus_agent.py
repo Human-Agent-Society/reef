@@ -26,7 +26,7 @@ from reef_terminus.runner import AGENT_NAME, agent_spec
 
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.matchers import Each, IsIn, Key
-from reef.harness.rollouts.model_binding import ModelBinding
+from reef.harness.tasks.model_binding import ModelBinding
 from reef.harness.tree import HarnessTree, render_tree
 
 pytest.importorskip("harbor", reason="harbor is not installed")

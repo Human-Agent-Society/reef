@@ -12,7 +12,7 @@ matches ``NAME_PATTERN``, such as a skill's name. A tree path that no part
 matches is refused.
 
 Model endpoints and credentials are never in a tree: the model binding writes
-them when a tree is rendered for a rollout.
+them when a tree is rendered for a run.
 """
 
 from __future__ import annotations

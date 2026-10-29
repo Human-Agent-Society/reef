@@ -57,14 +57,14 @@ from recipes.beta.reefine.trial import trial_script
 from reef.core.prompts import untrusted_text
 from reef.core.training_request import TrainingRequest
 from reef.execution.sandbox.environment import download_directory
-from reef.execution.sandbox.process import ProcessOutcome, ProgramExecutor, RolloutLaunchError, RolloutTimeout
+from reef.execution.sandbox.process import ProcessOutcome, ProgramExecutor, ProgramLaunchError, ProgramTimeout
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.adapters.parts import TreeLayout
 from reef.harness.gateway import AgentTool
-from reef.harness.rollouts.model_binding import ModelBinding
-from reef.harness.rollouts.run import headless_argv, launch_agent, read_session
-from reef.harness.rollouts.trajectory import final_assistant_text
+from reef.harness.tasks.model_binding import ModelBinding
+from reef.harness.tasks.run import headless_argv, launch_agent, read_session
+from reef.harness.tasks.trajectory import final_assistant_text
 from reef.harness.tree import HarnessTree, TreePatch, render_tree
 from reef.train.harness_backend import Services, Workspace
 from reef.train.harness_backend.agent.run import AgentExecution, agent_env
@@ -180,7 +180,7 @@ def launch_pi(
     """
     home = root if home is None else home
     session_env = agent_env(descriptor, binary, home)
-    # An agent and its trials run online: pi's offline switch is for benchmark rollouts.
+    # An agent and its trials run online: pi's offline switch is for benchmark runs.
     session_env.pop("PI_OFFLINE", None)
     argv = headless_argv(descriptor, binary, prompt_text, home)
     if script is not None:
@@ -454,7 +454,7 @@ class AgentRun:
                 return self.record_check(
                     "trial", {**result, "candidate": checksum, "seconds": round(time.monotonic() - started, 1)}
                 )
-        except RolloutTimeout:
+        except ProgramTimeout:
             limit = f"the trial ran past its {timeout:g} s limit"
             self.services.calls.note("trial", f"trial {self.trials}: {limit}", failed=True)
             return self.record_check(
@@ -466,7 +466,7 @@ class AgentRun:
                     "provider_calls": self.gateway.provider_calls_since(before),
                 },
             )
-        except RolloutLaunchError as error:
+        except ProgramLaunchError as error:
             self.services.calls.note("trial", f"trial {self.trials} could not start: {error}", failed=True)
             return self.record_check("trial", {"ran": False, "candidate": checksum, "error": str(error)})
         finally:
@@ -600,9 +600,9 @@ def answer_with_agent(
                     "maxTokens (Reef renders the model binding's max_output_tokens into it)"
                 )
             break
-    except RolloutTimeout:
+    except ProgramTimeout:
         record["timed_out"] = True
-    except RolloutLaunchError as error:
+    except ProgramLaunchError as error:
         services.calls.note("agent", f"the coding agent run failed: {error}", failed=True)
         answer = failed({}, f"the agent run failed: {error}")
     finally:

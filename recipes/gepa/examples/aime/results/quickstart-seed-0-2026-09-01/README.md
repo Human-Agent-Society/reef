@@ -27,7 +27,7 @@ benchmark score.
   calls. Official validation improved from 7/45 (15.56%) to 20/45 (44.44%);
   the replication arm's validation improved from 11/45 (24.44%) to 18/45
   (40.00%).
-- Before search, the 450-rollout baseline check measured 22.00% for the direct
+- Before search, the 450-run baseline check measured 22.00% for the direct
   official path and 20.67% through Reef. The predeclared non-inferiority check
   passed with no failed Reef episodes.
 - The official arm took 15,371.5 seconds and cost an estimated $5.458627. The

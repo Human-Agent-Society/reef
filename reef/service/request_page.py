@@ -30,8 +30,8 @@ from reef.service.release_page import (
     floor_tasks_note,
     method_notes,
     method_summary,
-    missed_rollout_text,
-    missed_rollouts,
+    missed_run_text,
+    missed_runs,
     recorded_patch,
     result_of,
     served_step,
@@ -106,7 +106,7 @@ left:calc(50% + 21px);right:calc(-50% + 15px);top:14px;margin:0}.stage-copy{font
 STATE_WORDS = {
     "queued": "no step has taken the request yet; the trainer runs one step per instruction, oldest first",
     "proposing": "the method is making the change; the activity shows what it has done so far",
-    "evaluating": "the evaluation is running the candidate through its rollouts",
+    "evaluating": "the evaluation is running the candidate through its runs",
     "running": "the step holds the request and reports no phase; its row follows",
 }
 
@@ -151,8 +151,8 @@ def next_action(scenario: str, release_id: str, selection_result: str, requires:
 
 def rejection_text(metrics: Mapping[str, object]) -> str:
     """Why a rejected step published nothing and what the person can do, as one sentence without its subject: the
-    evaluation's cause when no candidate rollout was scored, else the selection's reason and the first missed
-    rollout. A rollout that failed was the harness's run, not the request, so no rephrasing is advised then."""
+    evaluation's cause when no candidate run was scored, else the selection's reason and the first missed
+    run. A run that failed was the harness's run, not the request, so no rephrasing is advised then."""
     unscored = unscored_failures(metrics)
     if unscored:
         return (
@@ -161,16 +161,16 @@ def rejection_text(metrics: Mapping[str, object]) -> str:
         )
     selection = metrics.get("selection")
     reason = (selection.get("reason") if isinstance(selection, Mapping) else None) or "no reason recorded"
-    missed = missed_rollouts(metrics)
+    missed = missed_runs(metrics)
     if not missed:
         return f"did not pass the checks ({reason}). Nothing changed; rephrase or split the request."
-    if any(rollout.get("failure") for rollout in missed):
-        advice = "the rollout failed, so the change itself was not judged"
-    elif any(rollout.get("transcript_read") is False for rollout in missed):
+    if any(task_run.get("failure") for task_run in missed):
+        advice = "the run failed, so the change itself was not judged"
+    elif any(task_run.get("transcript_read") is False for task_run in missed):
         advice = "no transcript was read, so the change itself was not judged"
     else:
         advice = "rephrase or split the request"
-    return f"did not pass the checks ({reason}): {missed_rollout_text(missed[0])}. Nothing changed; {advice}."
+    return f"did not pass the checks ({reason}): {missed_run_text(missed[0])}. Nothing changed; {advice}."
 
 
 def settled_step(rows: Sequence[Mapping[str, object]], record_id: str) -> int | None:
@@ -273,10 +273,8 @@ def progress_html(record: Mapping[str, object], state: str, progress: StepProgre
         lines.append(
             f"<div><dt>Step time</dt><dd>{escape(elapsed(now - progress.started_at))} into the step</dd></div>"
         )
-        if progress.rollouts_total is not None:
-            lines.append(
-                f"<div><dt>Evaluation rollouts</dt><dd>{progress.rollouts_total} in the evaluation</dd></div>"
-            )
+        if progress.runs_total is not None:
+            lines.append(f"<div><dt>Evaluation runs</dt><dd>{progress.runs_total} in the evaluation</dd></div>")
         lines.append(f'<div><dt>Step record</dt><dd class="id">{escape(progress.step_record)}</dd></div>')
     else:
         filed = record.get("created_at")

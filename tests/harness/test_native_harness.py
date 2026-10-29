@@ -1,4 +1,4 @@
-"""The native adapter: a loop inside the tree whose tools and events are files, driven through the real rollout engine.
+"""The native adapter: a loop inside the tree whose tools and events are files, driven through the real run engine.
 
 A stdlib HTTP server plays the served model: it answers by conversation state
 (write a file, then read it back, then answer), so the whole loop, the tool
@@ -19,7 +19,7 @@ from types import ModuleType
 
 import pytest
 from tests.harness.test_native_enforce import PROBE, _ConstantToolRun, require_nested_jail
-from tests.support._strategies import resolve_method, resolve_rollout_scorer
+from tests.support._strategies import resolve_method, resolve_task_scorer
 from tests.support._trajectories import recorded_trajectory
 from tests.support.harness_render import (
     NATIVE_SEED_FILES,
@@ -34,9 +34,6 @@ from tests.support.harness_steps import COMPONENT, TreeReleases
 from reef.evaluation.harness import ComparePolicy, EvaluationSettings, NoEvaluationPolicy
 from reef.execution.sandbox.process import SandboxExecutor
 from reef.harness.adapters import available_adapters, get_adapter
-from reef.harness.rollouts.model_binding import ModelBinding
-from reef.harness.rollouts.run import run_rollout
-from reef.harness.rollouts.trajectory import reader_for
 from reef.harness.runners.native import (
     _DEFAULTS,
     MAX_COMPLETION_TOKENS,
@@ -56,6 +53,9 @@ from reef.harness.runners.native import (
 from reef.harness.runners.native.enforce import BwrapEnforcer
 from reef.harness.runners.native.graph import SEED_GRAPH
 from reef.harness.runners.native.host import NativeHost
+from reef.harness.tasks.model_binding import ModelBinding
+from reef.harness.tasks.run import run_task
+from reef.harness.tasks.trajectory import reader_for
 from reef.harness.tree import HarnessTree, RenderError, TreePatch, render_tree, validate_tree
 from reef.harness.tree.checks import validate_native_agent, validate_native_graph
 from reef.inference.http import InferenceProxyRuntime
@@ -112,7 +112,7 @@ def _call(name, arguments, call_id):
 
 
 class _FakeModel(ThreadingHTTPServer):
-    """Answers /v1/chat/completions by conversation state, so every rollout gets the same script."""
+    """Answers /v1/chat/completions by conversation state, so every run gets the same script."""
 
     def __init__(self) -> None:
         super().__init__(("127.0.0.1", 0), _Handler)
@@ -178,9 +178,9 @@ def fake_model():
 
 
 def _launcher(tmp_path: Path) -> str:
-    """The rollout binary: this interpreter running the native loop, like an installed reef-native.
+    """The run binary: this interpreter running the native loop, like an installed reef-native.
 
-    The child gets no PYTHONPATH from the rollout engine, so the source
+    The child gets no PYTHONPATH from the run engine, so the source
     checkout is put on sys.path the way pytest does for this process."""
     root = Path(__file__).resolve().parents[2]
     path = tmp_path / "reef-native"
@@ -193,7 +193,7 @@ def _launcher(tmp_path: Path) -> str:
 
 
 def rendered(model, files: Mapping[str, str]) -> dict[str, str]:
-    """The tree ``files`` hold, bound to ``model``, as the rollout engine renders it."""
+    """The tree ``files`` hold, bound to ``model``, as the run engine renders it."""
     binding = ModelBinding(base_url=model.base_url, model="fake", api_key="dummy")
     return render_tree(HarnessTree(files), NATIVE, binding.config_overlays(NATIVE))
 
@@ -206,14 +206,14 @@ def write_tree(root: Path, files: Mapping[str, str]) -> Path:
     return root / "native"
 
 
-def _rollout(tmp_path: Path, model, files, prompt="put hello in notes.txt and read it back"):
-    """One rollout of the tree ``files`` hold, bound to ``model``."""
-    return run_rollout(NATIVE, rendered(model, files), prompt, binary=_launcher(tmp_path))
+def _run(tmp_path: Path, model, files, prompt="put hello in notes.txt and read it back"):
+    """One run of the tree ``files`` hold, bound to ``model``."""
+    return run_task(NATIVE, rendered(model, files), prompt, binary=_launcher(tmp_path))
 
 
 @dataclass(frozen=True)
 class LoopTurn:
-    """One turn of the native loop in this process: its exit status and every session event, read as a rollout
+    """One turn of the native loop in this process: its exit status and every session event, read as a run
     reads them."""
 
     exit_code: int
@@ -251,7 +251,7 @@ def native_backend(tmp_path: Path, model, method, score, tasks: tuple[str, ...])
         method=resolve_method(method),
         evolution=EvolutionSettings(adapter="native", binary=_launcher(tmp_path), state_dir=str(tmp_path / "harness")),
         evaluation=EvaluationSettings(tasks=tasks),
-        scorer=resolve_rollout_scorer(score),
+        scorer=resolve_task_scorer(score),
         seed=HarnessTree(NATIVE_SEED_FILES),
         runtime=InferenceProxyRuntime(model_path="fake", base_url=model.base_url, api_key="dummy"),
     )
@@ -459,7 +459,7 @@ def test_tool_results_carry_closed_error_codes_and_validate_arguments(tmp_path: 
 
 
 def test_native_loop_runs_seed_tools_and_logs_everything_the_model_saw(tmp_path: Path, fake_model) -> None:
-    result = _rollout(tmp_path, fake_model, {**NATIVE_SEED_FILES, "rules.md": "Be brief."})
+    result = _run(tmp_path, fake_model, {**NATIVE_SEED_FILES, "rules.md": "Be brief."})
     kinds = [event["type"] for event in result.trajectory]
     # The seed graph reproduces the fixed loop it replaced: without the stage events the sequence is the old one.
     assert [kind for kind in kinds if not kind.startswith("stage/")] == [
@@ -635,7 +635,7 @@ def test_hooks_decide_at_the_first_three_events(tmp_path: Path) -> None:
     assert step_two[-1] == {"role": "user", "content": "Writes are disabled here."}
 
 
-def test_a_module_that_cannot_load_ends_the_rollout_in_error(tmp_path: Path, fake_model) -> None:
+def test_a_module_that_cannot_load_ends_the_run_in_error(tmp_path: Path, fake_model) -> None:
     broken = native_hook("broken", "pre_step", "raise RuntimeError('no')\n")
     result = loop_turn(tmp_path, rendered(fake_model, {**NATIVE_SEED_TOOLS, **broken}))
     assert result.exit_code == 1 and fake_model.requests == []
@@ -1452,18 +1452,18 @@ class _ProbingModel(_FakeModel):
 
 
 @pytest.mark.sandbox
-def test_a_sandboxed_rollout_runs_each_tool_call_in_a_nested_jail(tmp_path: Path) -> None:
+def test_a_sandboxed_run_runs_each_tool_call_in_a_nested_jail(tmp_path: Path) -> None:
     require_nested_jail()
     with _ProbingModel() as model:
         binding = ModelBinding(base_url=model.base_url, model="fake", api_key="dummy")
         probe = native_tool("probe", PROBE, description="probe")
         files = render_tree(HarnessTree({**NATIVE_SEED_TOOLS, **probe}), NATIVE, binding.config_overlays(NATIVE))
-        # The launcher and the checkout live outside the rollout root, so the jail binds them like a base path.
+        # The launcher and the checkout live outside the run root, so the jail binds them like a base path.
         checkout = Path(__file__).resolve().parents[2]
         executor = SandboxExecutor(
             egress_hosts=(model.base_url,), base_paths=(*SandboxExecutor.base_paths, str(tmp_path), str(checkout))
         )
-        result = run_rollout(
+        result = run_task(
             NATIVE, files, "probe, then put hello in notes.txt", binary=_launcher(tmp_path), executor=executor
         )
     assert result.exit_code == 0, result.stderr
@@ -1591,7 +1591,7 @@ def test_native_agent_checks_and_validation_name_what_is_missing() -> None:
 def test_a_subagent_stage_runs_the_agent_in_its_own_session_and_hands_its_text_back(tmp_path: Path) -> None:
     with _TeamModel() as model:
         files = {**NATIVE_SEED_TOOLS, **native_json("graphs", _delegating_graph()), **CHECKER}
-        result = _rollout(tmp_path, model, files, prompt="how many primes are below 100000?")
+        result = _run(tmp_path, model, files, prompt="how many primes are below 100000?")
         headers = [e["data"] for e in result.trajectory if e["type"] == "session"]
         # The agent's file sorts before the root's, so the root's final answer is the trajectory's last text.
         assert [(h["agent"], h["turn"], h.get("parent")) for h in headers] == [
@@ -1605,7 +1605,7 @@ def test_a_subagent_stage_runs_the_agent_in_its_own_session_and_hands_its_text_b
         assert answers == ["verified: the count is 9592", "the count is 9592", "The checker agrees: 9592"]
         # What the parent read: the agent's text as a user message, attributed to it.
         handed = [e["data"] for e in result.trajectory if e["type"] == "user/message"]
-        # The parent's step counter already carries the checker's step: budgets draw from the rollout total.
+        # The parent's step counter already carries the checker's step: budgets draw from the run total.
         assert handed == [
             {
                 "step": 2,
@@ -1631,7 +1631,7 @@ def test_a_subagent_stage_runs_the_agent_in_its_own_session_and_hands_its_text_b
         checker_request = next(r for r in model.requests if "You are the checker" in r["messages"][0]["content"])
         assert [t["function"]["name"] for t in checker_request["tools"]] == ["read_file"]
         # Per agent work, as the verdict will carry it.
-        from reef.harness.rollouts.trajectory import agent_work
+        from reef.harness.tasks.trajectory import agent_work
 
         assert agent_work(result.trajectory) == {
             "checker": {
@@ -1645,7 +1645,7 @@ def test_a_subagent_stage_runs_the_agent_in_its_own_session_and_hands_its_text_b
             "root": {"turns": 1, "steps": 2, "tool_calls": 0, "tool_errors": 0, "input_tokens": 0, "output_tokens": 0},
         }
         session_files = sorted(p.name for p in (tmp_path).rglob("*.jsonl"))
-        assert session_files == []  # the rollout root is gone; the files were read into the trajectory
+        assert session_files == []  # the run root is gone; the files were read into the trajectory
 
 
 def test_then_hands_an_agents_text_down_a_pipeline_and_the_last_text_returns(tmp_path: Path) -> None:
@@ -1750,9 +1750,9 @@ def test_from_root_reads_the_rendered_files(tmp_path: Path) -> None:
         NativeHost.from_root(tmp_path / "root" / "native")
 
 
-def test_a_tool_file_that_cannot_load_ends_the_rollout_naming_the_file(tmp_path: Path, fake_model) -> None:
+def test_a_tool_file_that_cannot_load_ends_the_run_naming_the_file(tmp_path: Path, fake_model) -> None:
     broken = native_tool("broken", "def helper(args, workdir):\n    return 1\n", description="defines no run")
-    result = _rollout(tmp_path, fake_model, {**NATIVE_SEED_TOOLS, **broken})
+    result = _run(tmp_path, fake_model, {**NATIVE_SEED_TOOLS, **broken})
     assert result.exit_code == 1 and [e["type"] for e in result.trajectory] == ["session", "turn/start", "turn/end"]
     error = result.trajectory[-1]["data"]["reason"]["error"]
     assert error == {"code": "LOAD_ERROR", "message": "no top level statement of broken.py binds run(args, workdir)"}
@@ -1845,7 +1845,7 @@ def test_a_tool_whose_top_level_exits_fails_each_call_and_the_turn_ends(tmp_path
         description="exits the interpreter when imported",
     )
     with _ProbeTwiceModel() as model:
-        result = _rollout(tmp_path, model, {**NATIVE_SEED_TOOLS, **probe}, prompt="probe twice")
+        result = _run(tmp_path, model, {**NATIVE_SEED_TOOLS, **probe}, prompt="probe twice")
     # The exit is the tool's error in the loop's own process: the top level ran once, both calls fail alike,
     # and the turn ends the way the model chose.
     assert result.exit_code == 0, result.stderr
@@ -1877,9 +1877,7 @@ def test_a_builtin_tool_runs_in_process_whatever_enforcer_is_named(tmp_path: Pat
     assert denied["error"]["code"] == "SANDBOX_FAILED" and "no module file" in denied["error"]["message"]
 
 
-def test_the_binding_rides_in_the_rollout_render_and_the_published_tree_is_the_source(
-    tmp_path: Path, fake_model
-) -> None:
+def test_the_binding_rides_in_the_run_render_and_the_published_tree_is_the_source(tmp_path: Path, fake_model) -> None:
     brief = TreePatch({"rules.md": "Be brief.\n"})
     backend = native_backend(
         tmp_path,
@@ -1888,8 +1886,8 @@ def test_the_binding_rides_in_the_rollout_render_and_the_published_tree_is_the_s
         lambda task, result: 1.0,
         ("put hello in notes.txt and read it back",),
     )
-    rollout = backend.evaluator.render(HarnessTree(NATIVE_SEED_FILES))
-    assert json.loads(rollout["native/models.json"])["base_url"] == fake_model.base_url
+    task_run = backend.evaluator.render(HarnessTree(NATIVE_SEED_FILES))
+    assert json.loads(task_run["native/models.json"])["base_url"] == fake_model.base_url
     batch = JobData("demo:trace:tree", (recorded_trajectory("a1", {"messages": []}, 0.0),))
     prepared = backend.prepare_step(batch, backend.initial_state(), 0)
     assert prepared.candidate is not None

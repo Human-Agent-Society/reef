@@ -16,14 +16,14 @@ GEPA keeps them. The next step reads the validation and the decision from
 the history and folds them into the archive (``archive_for_step``) before it
 samples the next parent.
 
-The parent's minibatch costs no rollouts when the parent is the served
+The parent's minibatch costs no runs when the parent is the served
 tree: the step's traces are that tree's own run, scores included. Any other
 parent and every child run through ``services.evaluate``. The archive counts
 metric calls the way GEPA does, whatever the cache saves: the seed's
 validation, every parent and child minibatch, and every accepted candidate's
 validation. So a budget means what it means upstream. With
 ``evolution.evaluation.repeats`` above 1, a validation pass costs one call
-per rollout, and a task's validation score is the mean of its repeats.
+per run, and a task's validation score is the mean of its repeats.
 """
 
 from __future__ import annotations
@@ -183,7 +183,7 @@ class GEPA(Method):
             workspace.history(),
             tasks,
             texts_of(head, get_adapter(str(workspace.host()["adapter"])).layout, self.settings.components),
-            # The evaluation's rollouts per task and tree: 0 without a scorer, and GEPA's count needs at least 1.
+            # The evaluation's runs per task and tree: 0 without a scorer, and GEPA's count needs at least 1.
             repeats=max(1, workspace.evaluation_repeats()),
             rng_seed=self.settings.seed,
         )
@@ -244,9 +244,9 @@ class GEPA(Method):
             record["problems"] = list(validation.problems)
             archive.log_proposal(record)
             return f"the child fails validation: {validation.message()}", record
-        rollouts = services.evaluate(child, [example.task for example in minibatch])
-        archive.charge(len(rollouts))
-        child_scores = task_scores([rollout.score.value for rollout in rollouts], repeats=1)
+        task_runs = services.evaluate(child, [example.task for example in minibatch])
+        archive.charge(len(task_runs))
+        child_scores = task_scores([task_run.score.value for task_run in task_runs], repeats=1)
         record["child_scores"] = child_scores
         parent_total, child_total = sum(record["parent_scores"]), sum(child_scores)
         if child_total <= parent_total:
@@ -272,8 +272,8 @@ class GEPA(Method):
     ) -> list[Example]:
         """The parent's run on the tasks of ``traces``, charged as GEPA charges its evaluation of the parent.
 
-        The served parent's run is the traces themselves: free of rollouts,
-        not of budget. Any other parent's tree runs the tasks as rollouts.
+        The served parent's run is the traces themselves: free of runs,
+        not of budget. Any other parent's tree runs the tasks as runs.
         """
         if parent == archive.served:
             archive.charge(len(traces))
@@ -282,16 +282,16 @@ class GEPA(Method):
                 for task, trace in traces
             ]
         tasks = [task for task, _ in traces]
-        rollouts = services.evaluate(candidate_tree(head, archive.candidates[parent].texts), tasks)
-        archive.charge(len(rollouts))
+        task_runs = services.evaluate(candidate_tree(head, archive.candidates[parent].texts), tasks)
+        archive.charge(len(task_runs))
         return [
             Example(
                 task,
-                rollout.reply or "",
-                0.0 if rollout.score.value is None else rollout.score.value,
-                "" if rollout.failure is None else rollout.failure.cause,
+                task_run.reply or "",
+                0.0 if task_run.score.value is None else task_run.score.value,
+                "" if task_run.failure is None else task_run.failure.cause,
             )
-            for task, rollout in zip(tasks, rollouts, strict=True)
+            for task, task_run in zip(tasks, task_runs, strict=True)
         ]
 
     def records(self, minibatch: Sequence[Example]) -> list[dict[str, Any]]:
@@ -321,8 +321,8 @@ def archive_for_step(
     step. The pending candidate's validation pass is the evaluation of the
     step that proposed it: ``history`` holds its scores on ``tasks``, the
     scores of the tree that step served, and the step's decision. The
-    evaluation runs ``repeats`` ≥ 1 rollouts per task and tree, so a task's
-    score is the mean of its repeats, and a failed rollout reads as a zero,
+    evaluation runs ``repeats`` ≥ 1 runs per task and tree, so a task's
+    score is the mean of its repeats, and a failed run reads as a zero,
     never as a gap. A pending candidate whose step reached no decision (the
     backend skipped the step) is dropped.
 
@@ -330,7 +330,7 @@ def archive_for_step(
     tree that does not hold the served candidate's texts moved without the
     method: a first boot, an operator edit or a new training start. It becomes a new
     parentless candidate, never a descendant of the last served one, and it
-    costs GEPA's seed validation, one metric call per rollout:
+    costs GEPA's seed validation, one metric call per run:
     ``len(tasks) * repeats``. A driver that plans an iteration reads the same
     inputs, so it draws the plan the method draws.
     """
@@ -358,7 +358,7 @@ def archive_for_step(
 
 def task_scores(values: Sequence[float | None], *, repeats: int) -> list[float]:
     """One score per task from ``values``, task by task and repeat by repeat: each task's mean over its ``repeats``
-    values, with a failed rollout (``None``) read as zero, never as missing."""
+    values, with a failed run (``None``) read as zero, never as missing."""
     zeroed = [0.0 if value is None else float(value) for value in values]
     return [sum(zeroed[start : start + repeats]) / repeats for start in range(0, len(zeroed), repeats)]
 

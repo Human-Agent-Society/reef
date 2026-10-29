@@ -24,7 +24,7 @@ from tests.support._trajectories import policy_trajectory
 from reef.core import AgentRecord, RequestType
 from reef.core.trajectories import source_record_id
 from reef.execution.jobs import BackgroundJobRunner, BackgroundJobWorker, Failed, JobContext, SupportsReceipt
-from reef.execution.sandbox.process import LocalExecutor, RolloutLaunchError
+from reef.execution.sandbox.process import LocalExecutor, ProgramLaunchError
 from reef.pipeline_context import PipelineContext
 from reef.record2record import JudgingRecord2Record, RecordJudging
 from reef.record2sample import JudgedSamples
@@ -341,7 +341,7 @@ class ProcessJobRunner(BackgroundJobRunner):
         try:
             await asyncio.shield(pending)
         except asyncio.CancelledError:
-            with contextlib.suppress(RolloutLaunchError):
+            with contextlib.suppress(ProgramLaunchError):
                 await pending
             raise
         return SupportsReceipt(job.receipt)

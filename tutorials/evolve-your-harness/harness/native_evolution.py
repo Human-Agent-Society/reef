@@ -124,7 +124,7 @@ def route_through_agent(tree, name):
 
 
 def evaluate(task: str, result) -> float:
-    """Grade the last line of the rollout's final assistant text, 1.0 exact."""
+    """Grade the last line of the run's final assistant text, 1.0 exact."""
     return grade_text(task, final_assistant_text(result.trajectory))
 
 

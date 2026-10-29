@@ -232,9 +232,9 @@ class Archive:
     ) -> None:
         """Fold one evaluated step into the archive: GEPA's validation pass and the update of the served candidate.
 
-        Each score is one task's mean over the ``repeats`` rollouts the
+        Each score is one task's mean over the ``repeats`` runs the
         evaluation ran for it. The pending candidate takes the step's
-        candidate scores and is charged one metric call per rollout,
+        candidate scores and is charged one metric call per run,
         ``len(candidate_scores) * repeats``; a served candidate that has no
         validation yet (the seed, on the first evaluated step) takes the
         served scores, charged when it was seeded. A selected step serves the
@@ -255,7 +255,7 @@ class Archive:
         self.pending_step = None
 
     def charge(self, calls: int) -> None:
-        """Spend ``calls`` of the metric-call budget: one per scored rollout."""
+        """Spend ``calls`` of the metric-call budget: one per scored run."""
         self.metric_calls += calls
 
     # -- GEPA's two rules ----------------------------------------------------

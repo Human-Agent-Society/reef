@@ -78,14 +78,14 @@ the tool only when it scores better than the head:
 
 
    def mean_score(records) -> float:
-       # A failed rollout (score.value None) counts as 0 here.
+       # A failed run (score.value None) counts as 0 here.
        return sum(record.score.value or 0.0 for record in records) / max(len(records), 1)
 
 It uses each piece a method has:
 
 - **Material**: ``workspace.traces()`` and ``workspace.tasks()``.
 - **Services**: a model call, ``check`` before it returns, and ``evaluate``
-  to compare trees. A scored rollout is reused, so the head's scores are
+  to compare trees. A scored run is reused, so the head's scores are
   usually free.
 - **Result**: ``write_tree`` for the candidate, ``write_output`` for what
   the step did.
@@ -147,8 +147,8 @@ step record.
      - read-write
      - what the step did (`What the method says`_)
 
-A ``Trace`` is a client's request (``source`` is ``traffic``) or a rollout
-of an offline step (``rollout``):
+A ``Trace`` is a client's request (``source`` is ``traffic``) or a run
+of an offline step (``run``):
 
 .. list-table::
    :header-rows: 1
@@ -157,7 +157,7 @@ of an offline step (``rollout``):
    * - Field
      - Value
    * - ``task``
-     - the last user prompt, or the rollout's instruction; ``None`` without one
+     - the last user prompt, or the run's instruction; ``None`` without one
    * - ``reply``
      - the final assistant text, else ``None``
    * - ``score``
@@ -165,9 +165,9 @@ of an offline step (``rollout``):
    * - ``feedback``
      - the report's feedback as text, else ``None``
    * - ``failure``
-     - why a rollout failed, else ``None``
+     - why a run failed, else ``None``
    * - ``record``, ``client``
-     - the agent record or rollout id; the client's tag, else ``untagged``
+     - the agent record or run id; the client's tag, else ``untagged``
    * - ``trajectory()``
      - a traffic trace's ATIF trajectory, else ``None``
 
@@ -190,10 +190,10 @@ The services
    * - ``check(tree)``
      - the ``ValidationResult``: ``passed``, ``problems``, ``message()``
    * - ``evaluate(tree, tasks, repeats=1)``
-     - scored ``RolloutRecord`` values (``task``, ``repeat``, ``score``,
+     - scored ``RunRecord`` values (``task``, ``repeat``, ``score``,
        ``reply``, ``failure``), run like the step's evaluation. ``score`` is
        a ``RolloutScore``: ``score.value`` is the scorer's value, or 0 when
-       the tree gave no answer; it is ``None`` for a failed rollout, which the
+       the tree gave no answer; it is ``None`` for a failed run, which the
        environment could not run, and then ``failure`` says why
    * - ``run_agent(prompt, tree=, model=)``
      - one run of the deployment's coding agent (`Run a coding agent`_)
@@ -203,7 +203,7 @@ The services
 - Each model call counts against ``evolution.max_model_calls_per_step`` and
   lands in the step record's ``calls.json``.
 - ``evaluate`` refuses the whole call, and runs nothing, without a scorer,
-  past ``evolution.max_rollouts_per_step`` (reused rollouts are free), for a
+  past ``evolution.max_runs_per_step`` (reused runs are free), for a
   tree that fails ``check`` (``ValueError``), and for one string as ``tasks``
   (``TypeError``).
 
@@ -268,7 +268,7 @@ text, at most 16 MiB together.
 Read the history
 ----------------
 
-``workspace.history()`` holds every tree, rollout and decision, read-only:
+``workspace.history()`` holds every tree, run and decision, read-only:
 
 .. list-table::
    :header-rows: 1
@@ -279,11 +279,11 @@ Read the history
    * - ``candidates``
      - each tree's record by checksum: ``step``, ``origin``, ``parent``,
        ``summary``, ``notes``
-   * - ``rollouts``, ``decisions``
-     - every ``RolloutRecord``; every decision (``step``, ``tree``, ``head``,
+   * - ``runs``, ``decisions``
+     - every ``RunRecord``; every decision (``step``, ``tree``, ``head``,
        ``selected``, ``reason``)
-   * - ``tree(checksum)``, ``rollout_dir(rollout)``
-     - a tree's files; a rollout's trajectory files
+   * - ``tree(checksum)``, ``run_dir(run)``
+     - a tree's files; a run's trajectory files
    * - ``scores(checksum, tasks, repeats=1)``
      - the latest score per task and repeat, ``None`` where none ran or the
        latest failed
@@ -306,24 +306,24 @@ Evaluation
 ``evolution.evaluation`` names the tasks, the scorer and the policy (`the
 publication policy
 <../user-guide/evolve-your-harness.rst#evaluation-the-publication-policy>`__).
-Rollouts that the method already ran through ``services.evaluate`` count:
+Runs that the method already ran through ``services.evaluate`` count:
 the evaluation reuses them.
 
-Score a rollout
+Score a run
 ~~~~~~~~~~~~~~~~
 
-An ``RolloutScorer`` returns a finite score for one finished rollout;
+An ``TaskScorer`` returns a finite score for one finished run;
 higher is better:
 
 .. code:: python
 
-   from reef.evaluation.harness import RolloutScorer
-   from reef.harness.rollouts.trajectory import final_assistant_text
+   from reef.evaluation.harness import TaskScorer
+   from reef.harness.tasks.trajectory import final_assistant_text
 
    EXPECTED = {"[fib]": "2880067194370816120"}
 
 
-   class ExactAnswer(RolloutScorer):
+   class ExactAnswer(TaskScorer):
        def score(self, task, result):
            """1.0 when the final assistant text ends with the task's expected answer."""
            text = final_assistant_text(result.trajectory) or ""

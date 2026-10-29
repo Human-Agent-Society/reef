@@ -6,17 +6,17 @@ decides whether it serves. ``evolution.evaluation.policy`` names one policy:
 ``compare``
     Score the candidate and the head tree on the same (task, repeat) pairs.
     ``statistic: wins`` keeps the candidate when wins minus losses exceed
-    ``min_margin``, by ``compare_scores``: a pair with a failed rollout is
+    ``min_margin``, by ``compare_scores``: a pair with a failed run is
     dropped. ``statistic: mean`` keeps it when its mean exceeds the head's
     mean by more than ``min_margin``, by ``mean_score``: each mean averages
-    the rollouts that did not fail. The head's scores usually come from the
+    the runs that did not fail. The head's scores usually come from the
     score cache.
 ``floor``
     Score the candidate alone; keep it when every task meets ``floor_score``,
-    by ``check_floor``: a failed rollout does not fail its task, but a task
-    whose rollouts all failed does not pass.
+    by ``check_floor``: a failed run does not fail its task, but a task
+    whose runs all failed does not pass.
 ``none``
-    Run no rollout; keep every candidate that passed validation.
+    Run no task; keep every candidate that passed validation.
 """
 
 from __future__ import annotations
@@ -41,8 +41,8 @@ POLICIES = ("compare", "floor", "none")
 STATISTICS = ("wins", "mean")
 
 
-class RolloutPolicy(CandidateEvaluationPlugin, ABC):
-    """A publication policy that decides by the scores of evaluation rollouts.
+class TaskScorePolicy(CandidateEvaluationPlugin, ABC):
+    """A publication policy that decides by the scores of evaluation runs.
 
     Values: ``evaluator`` scores the candidate; ``sides`` are the sides each
     evaluation scores, a non-empty subset of ``EVALUATION_SIDES`` in its order.
@@ -61,7 +61,7 @@ class RolloutPolicy(CandidateEvaluationPlugin, ABC):
         return self.evaluator.evaluate(candidate, sides=self.sides)
 
 
-class ComparePolicy(RolloutPolicy):
+class ComparePolicy(TaskScorePolicy):
     """Keep a candidate that scores better than the head tree on the same tasks.
 
     Values: ``statistic`` is one of ``STATISTICS``; ``min_margin`` ≥ 0 is
@@ -99,31 +99,31 @@ class ComparePolicy(RolloutPolicy):
                 else f"candidate did not exceed its {losses} losses with {wins} wins"
             )
             if comparison.dropped:
-                reason += f"; {comparison.dropped} pairings with a failed rollout were dropped"
+                reason += f"; {comparison.dropped} pairings with a failed run were dropped"
             return SelectionDecision(selected, "compare", reason, evaluation, metrics)
         candidate_mean = mean_score(candidate_scores.rollouts())
         current_mean = mean_score(current_scores.rollouts())
         if candidate_mean is None or current_mean is None:
             side = "candidate" if candidate_mean is None else "current tree"
             return SelectionDecision(
-                False, "compare", f"every rollout of the {side} failed, so it has no mean", evaluation, metrics
+                False, "compare", f"every run of the {side} failed, so it has no mean", evaluation, metrics
             )
         metrics.update({"candidate_mean": candidate_mean, "current_mean": current_mean})
         selected = candidate_mean - current_mean > self.min_margin
         reason = (
             f"candidate scored {candidate_mean:.4f} against {current_mean:.4f} "
-            f"over {len(candidate_scores.rollouts())} rollouts"
+            f"over {len(candidate_scores.rollouts())} runs"
         )
         return SelectionDecision(selected, "compare", reason, evaluation, metrics)
 
 
-class FloorPolicy(RolloutPolicy):
+class FloorPolicy(TaskScorePolicy):
     """Keep a candidate whose every task meets ``floor_score``; the head tree does not run.
 
     Values: ``floor_score`` is a positive finite number.
     Operations: ``decide`` selects exactly when the evaluation scored at least
-    one task and ``check_floor`` fails none: each task has a rollout that did
-    not fail, and every such rollout scores at least ``floor_score``.
+    one task and ``check_floor`` fails none: each task has a run that did
+    not fail, and every such run scores at least ``floor_score``.
     """
 
     sides = ("candidate",)
@@ -160,7 +160,7 @@ class FloorPolicy(RolloutPolicy):
 
 
 class NoEvaluationPolicy(CandidateEvaluationPlugin):
-    """Keep every candidate that passed validation, without running a rollout.
+    """Keep every candidate that passed validation, without running a run.
 
     Purpose: the harness recipe builds it for ``policy: none``; its
     evaluation result holds no scores.
@@ -179,5 +179,5 @@ __all__ = [
     "ComparePolicy",
     "FloorPolicy",
     "NoEvaluationPolicy",
-    "RolloutPolicy",
+    "TaskScorePolicy",
 ]

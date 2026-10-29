@@ -12,7 +12,7 @@ import pytest
 from reef.core.evaluation import RolloutScore, RolloutScores
 from reef.core.job_data import JobData, TaskSample, TrajectorySample
 from reef.core.trajectories import trajectory_reward
-from reef.harness.rollouts.tasks import RolloutRow, TaskLab
+from reef.harness.tasks.rollouts import RolloutRow, TaskLab
 from reef.runtime.interfaces import TrainingMethod
 from reef.runtime.jobs import TrainingJob
 from reef.tinker.checkpoint import TinkerCheckpoint
@@ -21,7 +21,7 @@ from reef.train.tinker_backend import component as component_module
 from reef.train.tinker_backend.client import TinkerClient
 from reef.train.tinker_backend.component import ROLLOUTS_FILE, TinkerTrainingComponent
 from reef.train.tinker_backend.config import TinkerConfig
-from reef.train.tinker_backend.rollout import RolloutSettings, SamplerEndpoint, TaskJobRollouts, roll_out
+from reef.train.tinker_backend.rollout import RolloutSettings, SamplerEndpoint, TaskJobRollouts, run_train_tasks
 
 MODEL = "Qwen/Qwen3-8B"
 ROLLOUT = {"rollouts_per_task": 2, "concurrency": 2}
@@ -82,7 +82,7 @@ def test_a_rollout_samples_each_task_on_the_start_sampler_and_groups_its_samples
     tasks = (harbor_task(tmp_path, "add"), harbor_task(tmp_path, "sort"), harbor_task(tmp_path, "broken"))
     sampler = Sampler()
 
-    rollouts = roll_out(
+    rollouts = run_train_tasks(
         tasks,
         RolloutSettings.from_parameters({"rollout": ROLLOUT}),
         sampler,
@@ -223,7 +223,7 @@ def test_a_task_job_trains_its_rollouts_and_a_resumed_job_trains_the_same_ones(t
         calls.append((tuple(task.task_path.name for task in tasks), sampler_path))
         return grouped(tmp_path)
 
-    monkeypatch.setattr(component_module, "roll_out", fake_roll_out)
+    monkeypatch.setattr(component_module, "run_train_tasks", fake_roll_out)
     client = Client()
     component = TinkerTrainingComponent(
         MODEL, TinkerConfig(state_dir=str(tmp_path / "state")), client, sampler=Sampler()

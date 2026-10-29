@@ -32,7 +32,7 @@ from reef.evaluation.harness import (
     FloorPolicy,
     HarnessCandidateEvaluator,
     NoEvaluationPolicy,
-    RolloutPolicy,
+    TaskScorePolicy,
 )
 from reef.train.backend import CandidateBackend
 
@@ -87,8 +87,8 @@ def test_built_ins_explicitly_implement_their_public_contracts() -> None:
         assert callable(mixin.decide)
         assert mixin.__abstractmethods__ == frozenset({"evaluate"})
     assert BackendEvaluateMixin.__abstractmethods__ == frozenset({"decide"})
-    # The harness rollout policies share their measurement, and each one decides.
-    assert RolloutPolicy.__abstractmethods__ == frozenset({"decide"})
+    # The harness run policies share their measurement, and each one decides.
+    assert TaskScorePolicy.__abstractmethods__ == frozenset({"decide"})
     with pytest.raises(TypeError, match="abstract"):
         AlwaysSelectMixin()  # type: ignore[abstract]
 
@@ -152,7 +152,7 @@ def test_the_backend_always_select_plugin_measures_through_the_backend() -> None
 
 
 def task_scores(*tasks: float | tuple[float | None, ...] | None) -> list[dict[str, object]]:
-    """``RolloutScores`` JSON, one task per value: a score, ``None`` for a failed rollout, or a tuple of runs."""
+    """``RolloutScores`` JSON, one task per value: a score, ``None`` for a failed run, or a tuple of runs."""
     rows = []
     for index, runs in enumerate(tasks):
         values = runs if isinstance(runs, tuple) else (runs,)
@@ -173,7 +173,7 @@ class PairedScores(HarnessCandidateEvaluator):
 
 
 def test_the_compare_policy_decides_by_wins_or_by_the_mean_score() -> None:
-    # One win, and one pair whose candidate rollout failed: the failed pair is dropped, not lost.
+    # One win, and one pair whose candidate run failed: the failed pair is dropped, not lost.
     evaluator = PairedScores(task_scores(1.0, None), task_scores(0.4, 0.4))
     candidate = UpdateCandidate("job-7")
     wins = ComparePolicy(evaluator)
@@ -188,11 +188,11 @@ def test_the_compare_policy_decides_by_wins_or_by_the_mean_score() -> None:
         "ties": 0,
         "dropped": 1,
     }
-    assert decision.reason == "candidate won 1 task pairings and lost 0; 1 pairings with a failed rollout were dropped"
+    assert decision.reason == "candidate won 1 task pairings and lost 0; 1 pairings with a failed run were dropped"
     margin = ComparePolicy(evaluator, min_margin=1)
     assert margin.decide(candidate, margin.evaluate(candidate)).selected is False
 
-    # The mean averages the rollouts that ran; a failed rollout does not count as 0.
+    # The mean averages the runs that completed; a failed run does not count as 0.
     mean = ComparePolicy(evaluator, statistic="mean")
     decision = mean.decide(candidate, mean.evaluate(candidate))
     assert decision.selected is True
@@ -201,7 +201,7 @@ def test_the_compare_policy_decides_by_wins_or_by_the_mean_score() -> None:
     for min_margin, selected in ((0.5, True), (0.7, False)):
         policy = ComparePolicy(evaluator, statistic="mean", min_margin=min_margin)
         assert policy.decide(candidate, policy.evaluate(candidate)).selected is selected
-    # A rollout that ran but gave no answer scores 0, which is a loss and lowers the mean.
+    # A run that completed but gave no answer scores 0, which is a loss and lowers the mean.
     unanswered = PairedScores(task_scores(1.0, 0.0), task_scores(0.4, 0.4))
     assert ComparePolicy(unanswered).decide(candidate, unanswered.evaluate(candidate)).metrics["losses"] == 1
     policy = ComparePolicy(unanswered, statistic="mean", min_margin=0.2)
@@ -213,7 +213,7 @@ def test_the_compare_policy_refuses_unpaired_scores_and_publishes_nothing_unscor
     unscored = ComparePolicy(PairedScores([], []), statistic="mean")
     decision = unscored.decide(candidate, unscored.evaluate(candidate))
     assert decision.selected is False and decision.reason == "no evaluation task was scored"
-    # Every candidate rollout failed: no pair is left to compare.
+    # Every candidate run failed: no pair is left to compare.
     failed = PairedScores(task_scores(None, None), task_scores(0.4, 0.4))
     for statistic in ("wins", "mean"):
         policy = ComparePolicy(failed, statistic=statistic)
@@ -242,13 +242,13 @@ def test_the_floor_policy_scores_the_candidate_alone_and_selects_when_every_task
     assert met.metrics == {"passed": 2, "failed": 0, "failed_rollouts": 0, "floor_score": 1.0}
     assert met.reason == "candidate met the floor on all 2 tasks"
 
-    # A rollout that gave no answer scores 0 and misses the floor.
+    # A run that gave no answer scores 0 and misses the floor.
     missed = decide(task_scores(1.0, 0.5, 0.0))
     assert not missed.selected
     assert missed.metrics == {"passed": 1, "failed": 2, "failed_rollouts": 0, "floor_score": 1.0}
     assert missed.reason == "candidate missed the floor on 2 of 3 tasks"
 
-    # A failed rollout fails no task, but a task whose rollouts all failed does not pass.
+    # A failed run fails no task, but a task whose runs all failed does not pass.
     partly = decide(task_scores((1.0, None)))
     assert partly.selected and partly.metrics["failed_rollouts"] == 1
     unrun = decide(task_scores((1.0, 1.0), (None, None)))

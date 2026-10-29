@@ -270,7 +270,7 @@ Run Harbor tasks and report
 
 .. code-block:: bash
 
-   python -m reef.harness.rollouts.tasks \
+   python -m reef.harness.tasks.rollouts \
      --reef-url http://127.0.0.1:8900 --scenario my-agent --model qwen3.8:27b \
      --manifest tasks/manifest.json --tasks-root tasks --side train
 

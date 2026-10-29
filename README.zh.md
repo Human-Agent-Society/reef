@@ -196,7 +196,7 @@ reef.post(
 
 用模型 API（而非 GPU），根据打分反馈进化编码 agent 的 skills 和 rules。
 
-Harness 部署服务的是 `reef.recipe.harness:HarnessEvolutionRecipe`。该 recipe 把 agent 的 harness 保存为一个文本文件 tree。每一步，method 根据该步的 trace 修改这个 tree 的副本，评估在候选版本上运行真实的 agent rollout，胜出的候选版本发布为任何客户端都能拉取的 release。[Harness 进化教程](tutorials/evolve-your-harness/README.md)在 pi 上运行最小的完整循环。它需要一个 OpenAI 兼容端点，以及供 pi 使用的 Node.js 和 npm。在 Reef checkout 和已激活的 Python 环境中：
+Harness 部署服务的是 `reef.recipe.harness:HarnessEvolutionRecipe`。该 recipe 把 agent 的 harness 保存为一个文本文件 tree。每一步，method 根据该步的 trace 修改这个 tree 的副本，评估用候选版本让真实的 agent 运行任务，胜出的候选版本发布为任何客户端都能拉取的 release。[Harness 进化教程](tutorials/evolve-your-harness/README.md)在 pi 上运行最小的完整循环。它需要一个 OpenAI 兼容端点，以及供 pi 使用的 Node.js 和 npm。在 Reef checkout 和已激活的 Python 环境中：
 
 ```bash
 cd tutorials/evolve-your-harness

@@ -25,7 +25,7 @@ from reef.core.config import config_option
 from reef.core.plugins import PluginSettings
 from reef.core.prompts import untrusted_text
 from reef.core.trajectories import atif_messages
-from reef.harness.rollouts.model_binding import ModelBinding
+from reef.harness.tasks.model_binding import ModelBinding
 from reef.harness.tree import TreePatch
 from reef.harness.tree.checks import directive_shaped, secret_shaped
 from reef.train.harness_backend import Method, StepContext, Trace
@@ -416,7 +416,7 @@ def trace_text(trace: Trace) -> str:
     """What the Reflector reads of ``trace``.
 
     The text starts with the trace's score, feedback and failure, each when the trace has one. Then it has the
-    conversation without the system prompt: one line per message, and one line per tool call. A rollout, whose
+    conversation without the system prompt: one line per message, and one line per tool call. A run, whose
     trace has no trajectory, shows its task and its reply instead. A text longer than ``TRACE_CHARS`` keeps its
     first and its last ``TRACE_CHARS // 2`` characters.
     """

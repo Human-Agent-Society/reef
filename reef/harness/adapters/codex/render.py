@@ -9,7 +9,7 @@ frontmatter.
 A release is the plugin ``reef`` in ``plugin/``, in the local marketplace
 ``reef`` at the root. Codex loads skills only from a plugin it installed,
 and it reads the plugin from a copy in its cache. So ``finalize_render``
-writes the plugin's manifest and the marketplace, and, for a rollout, what
+writes the plugin's manifest and the marketplace, and, for a run, what
 ``codex plugin add`` writes: the copy under ``CODEX_HOME`` and the two
 config entries. ``layer_files`` leaves those out, and the config files too:
 a person's machine installs the plugin with ``codex plugin add``, and Codex
@@ -142,7 +142,7 @@ class CodexAdapterRenderer(AdapterRenderer):
         plugin = {"name": "reef", "version": "0.0.0", "description": "The skills of a Reef harness release"}
         files[MARKETPLACE] = json.dumps(marketplace, indent=2) + "\n"
         files[PLUGIN + ".codex-plugin/plugin.json"] = json.dumps(plugin, indent=2) + "\n"
-        # What codex plugin marketplace add and codex plugin add write, so a rollout loads the plugin.
+        # What codex plugin marketplace add and codex plugin add write, so a run loads the plugin.
         for path, text in list(files.items()):
             if path.startswith(PLUGIN):
                 files[PLUGIN_CACHE + path.removeprefix(PLUGIN)] = text

@@ -1,5 +1,5 @@
 # Reef's own coding agent: a Python loop inside this tree, driven headless per
-# rollout, whose tools are the tree's native tool files and whose loop events
+# run, whose tools are the tree's native tool files and whose loop events
 # reach its native hook files. REEF_NATIVE_DIR relocates the whole rendered
 # native directory, so nothing is read from the working directory.
 name: native
@@ -32,10 +32,10 @@ model:
         base_url: "{base_url}"
         api_key: "{api_key}"
         model: "{model}"
-# How the agent runs: one evaluation rollout in a root of its own (the command, and variables
+# How the agent runs: one evaluation run in a root of its own (the command, and variables
 # beside the dirs), and on a person's machine a layer over the person's own configuration.
 run:
-  rollout:
+  task:
     argv: ["-p", "{prompt}"]
 # The config files the agent reads, with the defaults Reef merges first and the checks the merged
 # file must pass. A tree's config/<target>.json merges into one of them. The defaults and checks

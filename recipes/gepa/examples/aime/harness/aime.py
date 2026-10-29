@@ -3,8 +3,8 @@
 Everything the method needs to know about AIME lives here, and nothing here
 knows about GEPA beyond its ``Feedback`` hook: ``gepa.yaml`` names the scorer
 as ``evolution.evaluation.scorer`` and the feedback as the method's
-``feedback``, and Reef calls them with a task prompt and a rollout result.
-The answer table is keyed by the prompt text because that is all a rollout
+``feedback``, and Reef calls them with a task prompt and a run result.
+The answer table is keyed by the prompt text because that is all a run
 carries - ``evolution.evaluation.tasks`` is a list of strings - so the splits
 are loaded once and indexed by problem statement.
 
@@ -28,8 +28,8 @@ from dataclasses import dataclass, field
 from typing import Any, TypedDict, cast
 
 from recipes.gepa import Feedback
-from reef.evaluation.harness import RolloutScorer
-from reef.harness.rollouts.run import RolloutResult
+from reef.evaluation.harness import TaskScorer
+from reef.harness.tasks.run import TaskResult
 
 # The Pi release the retained record ran and the example still targets; run.py
 # refuses any other binary version before it spends anything.
@@ -76,12 +76,12 @@ CONTEXTS: dict[str, dict[str, str]] = {}
 
 
 @dataclass(frozen=True)
-class AIMEScorer(Feedback, RolloutScorer):
+class AIMEScorer(Feedback, TaskScorer):
     """A pickleable snapshot, independent of any worker's module globals.
 
     The driver registry is only an input at recipe construction time. Later
     registrations do not change a running campaign's scoring or feedback.
-    These labels belong to the scorer, never to a rollout's prompt/files.
+    These labels belong to the scorer, never to a run's prompt/files.
     """
 
     answers: dict[str, str] = field(repr=False)
@@ -94,17 +94,17 @@ class AIMEScorer(Feedback, RolloutScorer):
     def answer_for(self, task: str) -> str:
         return _answer_for(self.answers, task)
 
-    def score(self, task: str, result: RolloutResult) -> float:
+    def score(self, task: str, result: TaskResult) -> float:
         return _evaluate(self.answers, task, result)
 
     def feedback(self, task: str, output: str, score: float) -> str:
         return _feedback(self.answers, self.contexts, task, output, score)
 
 
-class AIMEAnswerScorer(RolloutScorer):
+class AIMEAnswerScorer(TaskScorer):
     """:func:`evaluate` over the splits registered in this process; ``evolution.evaluation.scorer`` names it."""
 
-    def score(self, task: str, result: RolloutResult) -> float:
+    def score(self, task: str, result: TaskResult) -> float:
         return _evaluate(ANSWERS, task, result)
 
 
@@ -159,7 +159,7 @@ def dataset_sha256(trainset, valset, testset) -> str:
 
 
 def register(*splits: Sequence[Mapping[str, Any]]) -> None:
-    """Index every split by problem statement, the only key a rollout carries."""
+    """Index every split by problem statement, the only key a run carries."""
     for split in splits:
         for example in split:
             ANSWERS[str(example["input"])] = str(example["answer"])
@@ -180,17 +180,17 @@ def _answer_for(answers: Mapping[str, str], task: str) -> str:
         raise RuntimeError(f"no AIME answer is registered for this task: {task[:120]!r}") from None
 
 
-def evaluate(task: str, result: RolloutResult) -> float:
-    """The quickstart's containment score over one Pi rollout.
+def evaluate(task: str, result: TaskResult) -> float:
+    """The quickstart's containment score over one Pi run.
 
-    A dirty rollout - a non-zero exit or a file the adapter did not declare -
+    A dirty run - a non-zero exit or a file the adapter did not declare -
     scores zero rather than being read for an answer, so a broken harness can
     never be selected on the strength of stdout it happened to leave behind.
     """
     return _evaluate(ANSWERS, task, result)
 
 
-def _evaluate(answers: Mapping[str, str], task: str, result: RolloutResult) -> float:
+def _evaluate(answers: Mapping[str, str], task: str, result: TaskResult) -> float:
     if result.exit_code != 0 or result.residue:
         return 0.0
     response = final_assistant_text(result.trajectory) or result.stdout

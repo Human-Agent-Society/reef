@@ -24,11 +24,11 @@ from recipes.beta.reefine.multimodal import PRESETS, MultimodalProvider
 from recipes.beta.reefine.trial import trial_script
 from reef.core.training_request import TrainingRequest
 from reef.execution.sandbox.e2b import E2BSession
-from reef.execution.sandbox.process import LocalExecutor, ProcessOutcome, RolloutTimeout, SandboxExecutor
+from reef.execution.sandbox.process import LocalExecutor, ProcessOutcome, ProgramTimeout, SandboxExecutor
 from reef.execution.sandbox.remote import pack
 from reef.harness.adapters import get_adapter
 from reef.harness.gateway import reply_tool_calls, tool_summary
-from reef.harness.rollouts.model_binding import ModelBinding, ModelBindings
+from reef.harness.tasks.model_binding import ModelBinding, ModelBindings
 from reef.harness.tree import TreePatch
 from reef.train.harness_backend import Services, StepContext, Workspace
 from reef.train.harness_backend.agent.run import AgentExecution
@@ -159,7 +159,7 @@ FAKE_PI = textwrap.dedent(
     assert "PI_OFFLINE" not in os.environ, "an agent or a trial runs online"
     assert pathlib.Path(sys.argv[sys.argv.index("-e") + 1], "{tools}").exists() == (
         "REEF_AGENT_URL" in os.environ)
-    # The rollout environment is minimal, so the test sets the mode in a file beside the binary.
+    # The run environment is minimal, so the test sets the mode in a file beside the binary.
     mode_file = pathlib.Path(sys.argv[0]).with_name("mode")
     mode = mode_file.read_text() if mode_file.exists() else ""
     if "REEF_AGENT_URL" in os.environ:
@@ -289,7 +289,7 @@ def test_a_run_past_its_limit_keeps_its_tree_and_progress_without_publishing(tmp
         assert "pi.getActiveTools()" in reference and "**replaces**" in reference
         (workspace / "rules.md").write_text("Unfinished candidate")
         (root / "output" / "progress.md").write_text("API confirmed; tool isolation remains unchecked.")
-        raise RolloutTimeout("deadline")
+        raise ProgramTimeout("deadline")
 
     monkeypatch.setattr(reefine_agent, "launch_pi", launch)
     workspace, services = agent_step(tmp_path, ModelBindings(served=ModelBinding(base_url="http://unused", model="m")))
@@ -424,7 +424,7 @@ def test_a_trial_reserves_finish_time_and_records_the_exact_candidate(tmp_path, 
 
     def launch(*args, timeout, **kwargs):
         timeouts.append(timeout)
-        raise RolloutTimeout("trial deadline")
+        raise ProgramTimeout("trial deadline")
 
     monkeypatch.setattr(reefine_agent, "launch_pi", launch)
     run, gateway = gateway_run(tmp_path, timeout_s=100)

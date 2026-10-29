@@ -2,7 +2,7 @@
 
 Opt-in: this runs a Docker container and spends real model calls, so it is
 gated on a task and a model rather than a stub. Everything cheaper — that the
-rollout reaches the runner with its tree (``test_terminus_rollout.py``) and
+run reaches the runner with its tree (``test_terminus_run.py``) and
 that Harbor accepts what the runner builds (``test_terminus_agent.py``) —
 runs in CI.
 
@@ -23,7 +23,7 @@ from reef_terminus.trajectory import read_trials
 from tests.support.harness_render import write_rendered
 
 from reef.harness.adapters import get_adapter
-from reef.harness.rollouts.model_binding import ModelBinding
+from reef.harness.tasks.model_binding import ModelBinding
 from reef.harness.tree import HarnessTree
 
 MODEL = os.environ.get("REEF_REAL_TERMINUS_MODEL", "")
@@ -38,7 +38,7 @@ pytestmark = pytest.mark.skipif(
 
 def test_real_terminus_runs_a_task_and_reports_a_verifier_reward(tmp_path: Path, monkeypatch) -> None:
     descriptor = get_adapter("terminus")
-    # The model comes through Reef's binding, as in every rollout: a tree may not name a model or an endpoint.
+    # The model comes through Reef's binding, as in every run: a tree may not name a model or an endpoint.
     binding = ModelBinding(
         base_url=BASE_URL.removesuffix("/v1"), model=MODEL, api_key=os.environ.get("OPENAI_API_KEY") or None
     )
@@ -65,7 +65,7 @@ def test_real_terminus_runs_a_task_and_reports_a_verifier_reward(tmp_path: Path,
     events = read_trials(sessions)
     assert events and events[0]["type"] == "verifier"
     # The verifier has to have run. Accepting an empty reward here would let
-    # this pass on a rollout whose container never built.
+    # this pass on a run whose container never built.
     assert not events[0]["error"], events[0]["error"]
     assert events[0]["rewards"], "the verifier scored nothing"
     assert exit_code == 0

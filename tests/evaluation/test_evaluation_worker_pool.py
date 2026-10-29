@@ -9,7 +9,7 @@ import pytest
 from tests.support.harness_steps import COMPONENT, TreeReleases, harness_recipe
 
 from reef.core.evaluation import PolicyHarness, PolicyModel, RolloutRequest
-from reef.evaluation.harness import EvaluationWorkerPool, RolloutScorer, evaluation_selection
+from reef.evaluation.harness import EvaluationWorkerPool, TaskScorer, evaluation_selection
 from reef.runtime.executor import ExecutorFailedError, WorkerSpec
 from reef.runtime.executor.config import ExecutorSettings
 from reef.storage.sqlite import SQLiteRecordStore
@@ -18,8 +18,8 @@ from reef.train.backend import ComponentReleases
 from reef.train.trainer import Trainer
 
 
-def rollout_requests(evaluator, *pairings):
-    """One rollout request for each ``(files, task)``, on the evaluator's adapter and served model."""
+def run_requests(evaluator, *pairings):
+    """One run request for each ``(files, task)``, on the evaluator's adapter and served model."""
     return [
         RolloutRequest(PolicyHarness(evaluator.descriptor.name, files), evaluator.served_model, task)
         for files, task in pairings
@@ -27,13 +27,13 @@ def rollout_requests(evaluator, *pairings):
 
 
 class StatefulWorker:
-    """Counts its calls; each rollout is a ``(value, delay)`` pair, and the models are not read."""
+    """Counts its calls; each run is a ``(value, delay)`` pair, and the models are not read."""
 
     def __init__(self):
         self.calls = 0
 
-    def run(self, rollout, models):
-        value, delay = rollout
+    def run(self, task_run, models):
+        value, delay = task_run
         time.sleep(delay)
         self.calls += 1
         if value == "bad":
@@ -43,7 +43,7 @@ class StatefulWorker:
         return os.getpid(), self.calls, value
 
 
-class Scorer(RolloutScorer):
+class Scorer(TaskScorer):
     def score(self, task, result):
         return 1.0
 
@@ -98,20 +98,20 @@ def test_unused_pool_close_does_not_launch_workers():
         pool.run([("never", 0)], None)
 
 
-class IsolationScorer(RolloutScorer):
+class IsolationScorer(TaskScorer):
     def __init__(self):
         self.calls = 0
 
     def score(self, task, result):
         row = result.trajectory[-1]
         if Path(row["workspace"]).exists() or row["rules"] != task:
-            raise ValueError("rollout files leaked or were not cleaned")
+            raise ValueError("run files leaked or were not cleaned")
         self.calls += 1
         return float(self.calls)
 
 
 @pytest.mark.parametrize("executor_backend, workers", [("uni", 1), ("mp", 2)])
-def test_backend_reuses_scorers_but_isolates_real_rollout_files(tmp_path, executor_backend, workers):
+def test_backend_reuses_scorers_but_isolates_real_run_files(tmp_path, executor_backend, workers):
     binary = tmp_path / "isolation-pi"
     roots = tmp_path / "roots"
     binary.write_text(
@@ -145,7 +145,7 @@ def test_backend_reuses_scorers_but_isolates_real_rollout_files(tmp_path, execut
     )
     try:
         for cycle in range(2):
-            requests = rollout_requests(
+            requests = run_requests(
                 backend.evaluator,
                 ({"pi-agent/AGENTS.md": "candidate"}, "candidate"),
                 ({"pi-agent/AGENTS.md": "current"}, "current"),
@@ -169,4 +169,4 @@ def test_backend_reuses_scorers_but_isolates_real_rollout_files(tmp_path, execut
     trainer.close()
     assert pool.closed
     with pytest.raises(RuntimeError, match="closed"):
-        backend.evaluator.run_rollouts(rollout_requests(backend.evaluator, ({}, "current")))
+        backend.evaluator.run_rollouts(run_requests(backend.evaluator, ({}, "current")))

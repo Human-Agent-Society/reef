@@ -11,7 +11,7 @@ from recipes.beta.reefine.agent import launch_pi
 from reef.execution.sandbox.config import build_executor
 from reef.execution.sandbox.e2b import E2BExecutor
 from reef.harness.adapters import get_adapter
-from reef.harness.rollouts.vendor_install import AdapterProgram
+from reef.harness.tasks.vendor_install import AdapterProgram
 
 pytestmark = pytest.mark.skipif(os.environ.get("REEF_TEST_E2B") != "1", reason="opt-in paid E2B/OpenRouter test")
 

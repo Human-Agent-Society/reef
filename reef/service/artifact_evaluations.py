@@ -42,7 +42,7 @@ from reef.core.evaluation import (
 from reef.core.job_data import TaskSample
 from reef.dispatcher import Dispatcher
 from reef.evaluation.artifact_endpoint import ArtifactEndpoint
-from reef.harness.rollouts.tasks import DEFAULT_AGENT, TaskLab, TaskRolloutRunner
+from reef.harness.tasks.rollouts import DEFAULT_AGENT, TaskLab, TaskRolloutRunner
 from reef.scenario.scenario import Scenario
 from reef.storage.commits import CommitRecord
 from reef.storage.evaluations import EvaluationStateConflict, EvaluationStore, StoredEvaluation

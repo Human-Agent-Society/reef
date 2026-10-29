@@ -32,7 +32,7 @@ Start with Recipe and add only what the method actually needs.
 +---------------------------------------------+--------------------------------------------------+------------------------------+
 | deliver a new artifact medium               | `Surface <#surface>`__                           | only a new evolution medium  |
 +---------------------------------------------+--------------------------------------------------+------------------------------+
-| evolve a harness tree and score a rollout   | `Harness method <#harness-method>`__             | harness-evolution methods    |
+| evolve a harness tree and score a task run  | `Harness method <#harness-method>`__             | harness-evolution methods    |
 +---------------------------------------------+--------------------------------------------------+------------------------------+
 | evaluate a produced candidate               | `Candidate evaluation <#candidate-evaluation>`__ | optional, any recipe         |
 +---------------------------------------------+--------------------------------------------------+------------------------------+
@@ -145,7 +145,7 @@ for every scenario in a deployment.
    │   ├── TTTDRecipe                                       recipes.tttd.recipe
    │   ├── SDFTRecipe                                       recipes.sdft.recipe
    │   └── OpenClawRLRecipe                                 recipes.openclawrl.recipe
-   └── HarnessEvolutionRecipe   harness tree + rollouts  reef.recipe.harness
+   └── HarnessEvolutionRecipe   harness tree + task runs reef.recipe.harness
        └── ReefineRecipe (beta)                           recipes.beta.reefine
 
 A harness method is a ``Method`` that ``HarnessEvolutionRecipe`` runs, not a
@@ -1509,7 +1509,7 @@ skipped or fails.
 
 .. code:: python
 
-   from reef.evaluation.harness import RolloutScorer, History, TaskCollector
+   from reef.evaluation.harness import TaskScorer, History, TaskCollector
    from reef.harness.adapters import get_adapter
    from reef.harness.adapters.parts import Format, Part, TreeLayout
    from reef.harness.tree import HarnessTree, TreePatch
@@ -1520,7 +1520,7 @@ skipped or fails.
    class MyMethod(Method):
        def step(self, context: StepContext) -> None: ...
 
-   class MyScorer(RolloutScorer):
+   class MyScorer(TaskScorer):
        def score(self, task, result) -> float: ...
 
 .. list-table::
@@ -1551,7 +1551,7 @@ skipped or fails.
        paths ``harness``, ``material``, ``state``, ``scratch`` and ``output``;
        ``tree()``, ``write_tree(tree)``, ``traces()``, ``request()`` (a
        ``TrainingRequest`` or ``None``), ``tasks()``,
-       ``evaluation_repeats()`` (the rollouts per task and tree, 0 when the
+       ``evaluation_repeats()`` (the runs per task and tree, 0 when the
        deployment configured no scorer), ``host()`` (the host facts of
        ``material/host.json``: ``adapter``, ``parts``, ``config_targets`` and
        ``tasks_are_directories``), ``history()`` and ``state_files()`` (every
@@ -1572,10 +1572,10 @@ skipped or fails.
        (``part``, and ``name``, the name in the part's ``{name}``, ``""`` for
        a part without one), or ``None`` when no part takes the path
    * - ``Trace``
-     - ``directory``, ``source`` (``traffic`` or ``rollout``), ``task``,
+     - ``directory``, ``source`` (``traffic`` or ``run``), ``task``,
        ``reply``, ``score``, ``feedback``, ``failure``, ``record`` and
        ``client``; ``trajectory()`` reads the ATIF trajectory of a traffic
-       trace, and returns ``None`` for a rollout, whose rollout files the
+       trace, and returns ``None`` for a run, whose run files the
        history keeps
    * - ``Services.models``
      - a ``ModelBindings``: ``served`` and every ``evolution.models`` entry;
@@ -1592,11 +1592,11 @@ skipped or fails.
      - the ``ValidationResult`` of ``tree`` for the adapter: ``passed``,
        ``problems`` and ``message()``
    * - ``Services.evaluate(tree, tasks, *, repeats=1)``
-     - ``repeats`` ``RolloutRecord`` values per task of the list ``tasks``
+     - ``repeats`` ``RunRecord`` values per task of the list ``tasks``
        (a single string is refused), task by task; reuses the scored
-       rollouts the history holds; ``RuntimeError`` without a scorer, or
-       when the call needs more rollouts than
-       ``evolution.max_rollouts_per_step`` leaves, and then no rollout runs;
+       runs the history holds; ``RuntimeError`` without a scorer, or
+       when the call needs more runs than
+       ``evolution.max_runs_per_step`` leaves, and then no task runs;
        ``ValueError`` for a tree that fails ``check``
    * - ``Services.run_agent(prompt, *, tree, model)``
      - one run of the deployment's coding agent in the workspace, its own
@@ -1610,25 +1610,25 @@ skipped or fails.
        ``timed_out``, ``error`` (why it could not start) and ``seconds``;
        ``succeeded`` is an exit with status 0
    * - ``History``
-     - ``candidates`` (``CandidateRecord`` by tree checksum), ``rollouts``
+     - ``candidates`` (``CandidateRecord`` by tree checksum), ``runs``
        and ``decisions`` in file order; ``tree(checksum)``,
-       ``rollouts_of(checksum)``, ``scores(checksum, tasks, *, repeats=1)``,
-       ``decision(step)`` and ``rollout_dir(rollout)``
+       ``runs_of(checksum)``, ``scores(checksum, tasks, *, repeats=1)``,
+       ``decision(step)`` and ``run_dir(run)``
    * - ``CandidateRecord``
      - ``tree``, ``step``, ``origin`` (``seed``, ``method``, ``proposal`` or
        ``release``), ``parent``, ``summary`` and ``notes``
-   * - ``RolloutRecord``
-     - ``rollout``, ``tree``, ``task``, ``task_key``, ``repeat``,
+   * - ``RunRecord``
+     - ``run``, ``tree``, ``task``, ``task_key``, ``repeat``,
        ``context``, ``step``, ``score`` (a ``RolloutScore``: a finite value, or
-       failed when the environment could not run the rollout), ``failure``,
+       failed when the environment could not run the task), ``failure``,
        ``reply``, ``residue``, ``agents``, ``path`` and ``transcript_read``
    * - ``DecisionRecord``
      - ``step``, ``tree`` (the candidate's checksum), ``head`` (the checksum
        of the head tree that the step started from), ``selected``
        (published; the activation rule decides whether it serves),
        ``policy`` and ``reason``
-   * - ``RolloutScorer.score(task, result)``
-     - a finite float for one finished rollout, higher is better; ``result``
+   * - ``TaskScorer.score(task, result)``
+     - a finite float for one finished run, higher is better; ``result``
        holds ``exit_code``, ``stdout``, ``stderr``, the parsed
        ``trajectory`` and ``residue``. The evaluation calls
        ``score_with_models(task, result, models)``, whose default calls
@@ -1643,10 +1643,10 @@ skipped or fails.
      - holds ``candidate_scores`` and ``current_scores`` under
        ``policy: compare`` and ``policy: floor``: ``RolloutScores``
        (``reef.core.evaluation``) in JSON, one entry per task in task order
-       with the scores of its rollouts in run order, each a number or
+       with the scores of its runs in run order, each a number or
        ``"failed"``; read them with ``RolloutScores.from_json``.
        ``current_scores`` is empty under ``floor``, which runs the candidate
-       alone. Under ``policy: none``, which runs no rollout, it holds no
+       alone. Under ``policy: none``, which runs no task, it holds no
        score
 
 ``reef.evaluation.harness`` holds the publication policies that

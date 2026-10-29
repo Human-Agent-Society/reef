@@ -753,7 +753,7 @@ The HTTP service reads these fields from the ``recipe``, ``reef``,
    recipe.implementation | recipe | the recipe this deployment serves
    reef.host | 127.0.0.1 | bind address
    reef.port | 8900 | bind port
-   reef.served-url | | the URL a composite recipe's own evaluation calls (rollouts and the method's calls to the served model) reach this service at; the default is loopback on the bind port, so set it when rollouts run on another host. A recipe of one component calls its runtime's endpoint directly and ignores it
+   reef.served-url | | the URL a composite recipe's own evaluation calls (runs and the method's calls to the served model) reach this service at; the default is loopback on the bind port, so set it when tasks run on another host. A recipe of one component calls its runtime's endpoint directly and ignores it
    reef.console-origins | [] | exact browser console origins allowed to access the HTTP service; disabled by default
    reef.token | the bearer token the service accepts. Use ``tokens: [...]`` to accept several while rotating.
    reef.allow-unauthenticated | false | when true, serve without a token on a ``reef.host`` that other machines can reach. When false, Reef does not start on such an address without a token. A loopback address, such as ``127.0.0.1``, ``::1`` or ``localhost``, needs no token
@@ -1096,7 +1096,7 @@ Reef refuses ``batch_size`` and ``batch_policy`` directly under
 
 To evolve offline, on the train split of the scenario's imported tasks
 instead of on traffic, set
-``pipeline.sample2job.module: reef.sample2job.traces:TrainTaskRollouts``. Each
+``pipeline.sample2job.module: reef.sample2job.traces:TrainTaskJobData``. Each
 uploaded train task then joins the buffer and trains once, in upload order. A
 step holds either traces or train tasks; a step of train tasks rolls out up to
 ``pipeline.sample2job.config.buffer_size`` of them (default ``job_samples``) on
@@ -1112,14 +1112,14 @@ that plays task directories (an npm ``install``) and
    evolution.binary | a path to the harness binary; unset, backend construction installs the adapter's pinned version through the vendor's channel under ``$REEF_HARNESS_PREFIX`` (default ``~/.local/share/reef-harness``)
    evolution.models | {} | the method's own models by name, which it calls as ``services.models[name]``: ``url``, ``model``, optional ``api`` (default ``openai``) and ``timeout_s``, with the credential as a literal ``api_key`` or an ``api_key_env`` variable name; the name ``served`` is refused, since it is the model under test
    evolution.model_metadata | {} | optional map of exact model names to ``{context_window: <positive token count>, reasoning: <boolean>}``; Codex uses these values before provider discovery
-   evolution.state_dir | .reef/harness | the directory of each scenario's harness state; a relative path resolves against the Reef process's working directory. ``<state_dir>/<scenario>/<component>/``, where ``<component>`` is the release component the recipe evolves (``harness`` for ``HarnessEvolutionRecipe``, the component's own name in a composite recipe), holds ``history/``, every candidate, rollout and decision, which is the score cache; and ``steps/``, one step record per step (the workspace with its ``output/``, and ``calls.json``; ``<step>`` is the scenario step, and a retried step lands in ``<step>-2``). Nothing prunes it. A directory that cannot be created refuses to load the scenario
+   evolution.state_dir | .reef/harness | the directory of each scenario's harness state; a relative path resolves against the Reef process's working directory. ``<state_dir>/<scenario>/<component>/``, where ``<component>`` is the release component the recipe evolves (``harness`` for ``HarnessEvolutionRecipe``, the component's own name in a composite recipe), holds ``history/``, every candidate, run and decision, which is the score cache; and ``steps/``, one step record per step (the workspace with its ``output/``, and ``calls.json``; ``<step>`` is the scenario step, and a retried step lands in ``<step>-2``). Nothing prunes it. A directory that cannot be created refuses to load the scenario
    evolution.max_steps | 0 | skip automatic evolve steps once the scenario's step number passes this; the scenario numbers every commit, activations, train-from operations, imports and syncs included; 0 disables the limit; an instruction from ``POST /reef/train`` still runs past it
    evolution.max_failure_streak | 0 | stop automatic evolve steps after this many consecutive rejected steps, instruction steps included; 0 disables the limit; an instruction from ``POST /reef/train`` still runs while the breaker is open
    evolution.max_model_calls_per_step | 0 | cap the method's model calls in one step, through ``services.models`` or ``services.calls``; a call past the cap raises ``RuntimeError``; 0 disables the limit
-   evolution.max_rollouts_per_step | 0 | cap the rollouts that the method's ``services.evaluate`` runs in one step; reused rollouts and the evaluation's own rollouts do not count; 0 disables the limit
-   evolution.executor | local | ``local`` runs rollouts as a plain subprocess; ``sandbox`` uses a local bubblewrap jail; ``e2b`` and ``modal`` create a cloud sandbox per rollout and check provider access, image, binary and namespace support at startup. A cloud sandbox uses remote binaries; Terminus retains its own Harbor execution
+   evolution.max_runs_per_step | 0 | cap the runs that the method's ``services.evaluate`` runs in one step; reused runs and the evaluation's own runs do not count; 0 disables the limit
+   evolution.executor | local | ``local`` runs tasks as a plain subprocess; ``sandbox`` uses a local bubblewrap jail; ``e2b`` and ``modal`` create a cloud sandbox per run and check provider access, image, binary and namespace support at startup. A cloud sandbox uses remote binaries; Terminus retains its own Harbor execution
    execution.evolution.workers | 1 | fixed worker-group size; CPU auto selects ``uni`` for one and ``mp`` for multiple
-   execution.evolution.backend | auto | worker placement, independent of the ``local/sandbox`` rollout isolation policy; ``local`` retains shared-memory callbacks
+   execution.evolution.backend | auto | worker placement, independent of the ``local/sandbox`` run isolation policy; ``local`` retains shared-memory callbacks
    execution.evolution.resources | | ``cpus_per_worker`` and ``gpus_per_worker``; omitted values retain component defaults; GPUs select Ray under ``auto`` and cannot reduce declared GPU needs
    evolution.sandbox | | for ``sandbox``: ``egress_hosts`` and ``limits`` (``cpu_seconds``, ``memory_bytes``, ``processes``, ``file_bytes``); for ``e2b``: ``e2b_api_key_env`` (default ``E2B_API_KEY``), optional ``e2b_api_key``, ``e2b_template`` and ``forward_ports`` (explicit worker-loopback TCP ports). for ``modal``: optional ``modal_app`` (default ``reef-sandboxes``), ``modal_image``, ``modal_cpu``, ``modal_memory_mb`` and ``forward_ports``, with Modal's credentials from ``MODAL_TOKEN_ID``/``MODAL_TOKEN_SECRET`` or ``~/.modal.toml``. The cloud sandboxes reject nonempty ``egress_hosts``/``limits``; image resources and outbound internet apply. All accept ``env_from``
    evolution.agent | | the coding agent that a method which runs one, such as ``reef.train.harness_backend:AgentMethod``, runs in its steps (``services.run_agent``); unset, no agent runs, and such a method is refused at startup
@@ -1145,40 +1145,40 @@ one task source: ``tasks``, ``task_manifest`` with ``tasks_root``, or
 
 .. config::
 
-   evolution.evaluation.tasks | the evaluation tasks: rollout prompts, or task directories for an adapter whose prompt is a task directory (``is_prompt_task_directory``)
+   evolution.evaluation.tasks | the evaluation tasks: run prompts, or task directories for an adapter whose prompt is a task directory (``is_prompt_task_directory``)
    evolution.evaluation.task_manifest | a split manifest written by ``reef.core.tasks``; its eval split names the evaluation's tasks as directories under ``evolution.evaluation.tasks_root``, each passed to the adapter as its path. Each task runs in its own container, and the adapter needs an npm ``install`` (`Task directories <../user-guide/evolve-your-harness.rst#task-directories>`__); startup refuses a manifest that names no eval task
    evolution.evaluation.tasks_root | the directory the manifest's task names live under; set together with ``task_manifest``
    evolution.evaluation.imported_tasks | false; true makes each step evaluate on the task directories of the eval split of the scenario's imported tasks as the step reads them, so tasks that the scenario gets later join the next step. The scenario then takes train task uploads (``POST /reef/scenarios/{scenario}/tasks``). The same adapter rule as ``task_manifest``
-   evolution.evaluation.scorer | a ``RolloutScorer`` class, in the same form as ``evolution.method``; ``reef.evaluation.harness:VerifierRewardScorer`` scores a task directory rollout by its Harbor verifier's reward
-   evolution.evaluation.policy | compare | the publication policy: ``compare`` scores the candidate and the current tree (the training start) on the same tasks and repeats; ``floor`` scores the candidate alone and publishes it when every task has a rollout that ran and every rollout that ran scores at least ``floor_score``; ``none`` runs no rollout and publishes every candidate that passes validation
-   evolution.evaluation.statistic | wins | what ``compare`` compares. ``wins`` publishes when the candidate's wins minus losses over the (task, repeat) pairs exceed ``min_margin``. ``mean`` publishes when the candidate's mean score exceeds the current tree's by more than ``min_margin``. A rollout that gave no answer scores 0. A rollout that the environment could not run (a failed rollout) drops its pair under ``wins`` and is left out of the mean under ``mean``
+   evolution.evaluation.scorer | a ``TaskScorer`` class, in the same form as ``evolution.method``; ``reef.evaluation.harness:VerifierRewardScorer`` scores a task directory run by its Harbor verifier's reward
+   evolution.evaluation.policy | compare | the publication policy: ``compare`` scores the candidate and the current tree (the training start) on the same tasks and repeats; ``floor`` scores the candidate alone and publishes it when every task has a run that completed and every run that completed scores at least ``floor_score``; ``none`` runs no task and publishes every candidate that passes validation
+   evolution.evaluation.statistic | wins | what ``compare`` compares. ``wins`` publishes when the candidate's wins minus losses over the (task, repeat) pairs exceed ``min_margin``. ``mean`` publishes when the candidate's mean score exceeds the current tree's by more than ``min_margin``. A run that gave no answer scores 0. A run that the environment could not run (a failed run) drops its pair under ``wins`` and is left out of the mean under ``mean``
    evolution.evaluation.min_margin | 0 | the margin a ``compare`` candidate must exceed: in wins minus losses, or in mean score; at least 0
-   evolution.evaluation.floor_score | 1.0 | the score every rollout that ran must reach under ``floor``; a failed rollout fails no task, but a task whose rollouts all failed does not pass; positive
-   evolution.evaluation.repeats | 1 | the rollouts per task and tree; each repeat is scored, and compared, on its own
-   evolution.evaluation.rollout_timeout_s | 600 | seconds one evaluation rollout may run
+   evolution.evaluation.floor_score | 1.0 | the score every run that completed must reach under ``floor``; a failed run fails no task, but a task whose runs all failed does not pass; positive
+   evolution.evaluation.repeats | 1 | the runs per task and tree; each repeat is scored, and compared, on its own
+   evolution.evaluation.task_timeout_s | 600 | seconds one evaluation run may take
    evolution.evaluation.agent_host | host.docker.internal | the address at which an agent in a task's container reaches Reef; Reef puts it in place of a loopback host (``127.0.0.1``, ``localhost``, ``::1`` or ``0.0.0.0``) of the served model's base URL, and keeps the port and the path; another host stays. Docker Desktop and colima resolve the default. On Linux, name an address of the host that the container reaches, such as the Docker bridge gateway, and make Reef listen there
-   evolution.evaluation.forbid_residue | false | when true, a rollout leaving files outside the cleanup whitelist scores 0, as a rollout that gave no answer
+   evolution.evaluation.forbid_residue | false | when true, a run leaving files outside the cleanup whitelist scores 0, as a run that gave no answer
    evolution.evaluation.collect_failures | false | when true, prompts of each step's traces become permanent evaluation tasks, so no later candidate can win while it brings a collected failure back; the seed tasks stay the floor. Refused when the evaluation tasks are task directories
    evolution.evaluation.collector | | optional ``TaskCollector`` class, in the same form as ``evolution.method``, only with ``collect_failures``; its ``collect(samples)`` chooses which trace prompts to collect; without it every trace's user prompt is collected, and the caps and the credential and directive screens still apply
    evolution.evaluation.max_collected_tasks | 50 | the cap on collected tasks; admission stops there so the suite is bounded; 0 collects none
    evolution.evaluation.max_collected_per_client | 5 | the cap on collected tasks from one tagged client (its ``x-reef-tag-client``, else session, tag); untagged traffic has no identity to count under and meets only ``max_collected_tasks``; 0 disables the cap
 
-The evaluation context is what a rollout's score depends on besides the
+The evaluation context is what a run's score depends on besides the
 tree and the task: the served model and the named models of
 ``evolution.models``; the adapter, its version and ``evolution.binary``; the
-scorer setting; ``rollout_timeout_s`` and ``forbid_residue``; and the rollout
+scorer setting; ``task_timeout_s`` and ``forbid_residue``; and the run
 executor, ``evolution.executor`` and ``evolution.sandbox``. The history
-reuses a scored rollout only in the context it ran in, and never reuses a
-failed rollout.
+reuses a scored run only in the context it ran in, and never reuses a
+failed run.
 
 The beta Reefine recipe runs its agent on pi with ``evolution.agent``, adds
 ``evolution.agent.trial_timeout_s``, and reads ``evolution.multimodal``. Its
 `README <../../recipes/beta/reefine/README.md>`__ documents them.
 
-The served model's binding is merged in when a rollout renders the tree; it
+The served model's binding is merged in when a run renders the tree; it
 never enters a published tree. The seed is the baseline the first candidate
 is measured against. The step records hold the method's raw model traffic and
-the clients' traces, and the history holds every evaluation rollout's session
+the clients' traces, and the history holds every evaluation run's session
 log, so treat ``evolution.state_dir`` like the commit history.
 
 The ``inference`` section

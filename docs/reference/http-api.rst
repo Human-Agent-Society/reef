@@ -44,11 +44,11 @@ Routes
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/scenarios/{scenario}/evaluation/v1/{route}``                        | one of the inference routes above, served for     |
 |                                                                                  | the named scenario and kept by nobody: what a     |
-|                                                                                  | recipe's evaluation rollouts call; a flat         |
+|                                                                                  | recipe's evaluation runs call; a flat             |
 |                                                                                  | release's request hooks stay out, since the       |
-|                                                                                  | rollout runs a candidate of it. It serves a       |
+|                                                                                  | run uses a candidate of it. It serves a           |
 |                                                                                  | scenario loaded in this process and never creates |
-|                                                                                  | one: 404 for a scenario deleted under its rollout |
+|                                                                                  | one: 404 for a scenario deleted under its run     |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/scenarios/{scenario}/components/{component}/evaluation/v1/{route}`` | the same for a candidate of one component of a    |
 |                                                                                  | composed release: every other component's hooks   |
@@ -989,7 +989,7 @@ A composite recipe's evaluation calls come through these routes; a recipe of
 one component calls its runtime's endpoint directly, as before composites.
 The evaluation calls do not present a service token. When auth is configured,
 the service issues a random token at startup that opens the evaluation routes
-alone, and hands it to the recipe. The rollouts, which run candidate code, and
+alone, and hands it to the recipe. The evaluation runs, which run candidate code, and
 the method's calls to the served model use it: they can sample the active
 release but reach no other route. A restart issues a new one.
 
@@ -1195,7 +1195,7 @@ Use ``?release_id=`` to request a specific catalog release, in either form.
 An unknown or unrestorable release returns HTTP 404.
 
 Catalog and manifest reads do not wait for an evolve step's method or
-evaluation rollouts: they continue serving the existing releases while a
+evaluation runs: they continue serving the existing releases while a
 candidate is being prepared. Reads still serialize with publication and
 activation so a manifest's artifact and evaluation metrics come from the same
 release: reads do not interleave with a change of the active release and its
@@ -1677,7 +1677,7 @@ JSON (``Cache-Control: no-store``) for a client that polls:
   settled row's result, ``failed`` included;
 - ``meaning``: the words the page prints beside the state, ``null`` once
   settled;
-- while a step holds the request: ``started_at``, ``rollouts_total``,
+- while a step holds the request: ``started_at``, ``runs_total``,
   ``step_record`` and ``activity``, the activity lines oldest first, each
   ``{at, kind, text}`` with ``failed: true`` on a failed line. ``kind`` is
   ``model`` for a model call, ``evaluate`` for the method's rollouts, or a
@@ -1721,7 +1721,7 @@ Add ``?path=calls.json`` (or another inventory path, such as ``output/notes.json
 or ``material/traces/0/trace.json``) to read
 ``{"status": "retained", "path": "...", "text": "..."}``. The service does not
 interpret model replies or agent events. A console can render those persisted
-formats without changing their learning semantics. The evaluation rollouts
+formats without changing their learning semantics. The evaluation runs
 are in the scenario's history, not in the step directory, so this route does
 not serve them.
 
@@ -1736,7 +1736,7 @@ returns ``status: not_recorded``, and an absent directory returns
 reads use ``Cache-Control: no-store``.
 
 ``calls.json`` holds the recorded messages and replies of the method's model
-calls. A rollout's native session log, in the history, retains request
+calls. A run's native session log, in the history, retains request
 headers, assistant messages and tool events; reconstructed inputs are not
 exact provider request bodies. It does not retain provider response IDs, and a
 compaction event may prevent complete input reconstruction. Reads neither copy

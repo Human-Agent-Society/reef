@@ -33,11 +33,11 @@ from recipes.beta.autoenvscaling.sources import SESSION_BUDGET_CHARS, SessionSou
 from recipes.beta.reefine.agent import launch_pi, rendered_files
 from reef.core.prompts import untrusted_text
 from reef.execution.sandbox.environment import download_directory
-from reef.execution.sandbox.process import ProgramExecutor, RolloutLaunchError, RolloutTimeout
+from reef.execution.sandbox.process import ProgramExecutor, ProgramLaunchError, ProgramTimeout
 from reef.harness.adapters import get_adapter
 from reef.harness.gateway import AgentGateway, AgentTool, refuse, relay
-from reef.harness.rollouts.model_binding import ModelBinding
-from reef.harness.rollouts.vendor_install import AdapterProgram
+from reef.harness.tasks.model_binding import ModelBinding
+from reef.harness.tasks.vendor_install import AdapterProgram
 from reef.harness.tree import HarnessTree
 from reef.inference.provider_protocol import ANTHROPIC_CLIENT_HEADERS, response_events
 from reef.record2sample.generator.designer import (
@@ -588,10 +588,10 @@ class AgentAuthor(TaskAuthor):
                 timeout=self.timeout_seconds,
             )
             ended = f"exited {outcome.exit_code}"
-        except RolloutTimeout:
+        except ProgramTimeout:
             # The sandbox copied the workspace back: the task stands as the agent left it.
             trajectory = []
-        except RolloutLaunchError as exc:
+        except ProgramLaunchError as exc:
             if stop.is_set():
                 raise AuthorError("the agent's run was stopped") from exc
             raise AuthorError(f"the agent could not run: {exc}") from exc
@@ -600,7 +600,7 @@ class AgentAuthor(TaskAuthor):
             if session is not None:
                 try:
                     session.close()
-                except RolloutLaunchError as exc:
+                except ProgramLaunchError as exc:
                     logger.warning(
                         "the AutoEnvScaling agent's sandbox did not stop; its provider timeout applies: %s", exc
                     )

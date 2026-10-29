@@ -1,6 +1,6 @@
 # Harness evolution quickstart
 
-This example is the smallest full run of the harness evolution mechanism: the agent harness configuration is a tree of text files, each evolve step's method changes that tree, and a change that wins the evaluation publishes as a release any client can pull. The method is the tutorial's own `RulesMethod` (`harness/plugins.py`), a short example of the method protocol: one call to the served model reads the step's failing traces and rewrites `rules.md`. The scorer grades real headless rollouts on a small fixed task set by exact final answer, so a change only publishes when it makes previously failing tasks pass their rollouts.
+This example is the smallest full run of the harness evolution mechanism: the agent harness configuration is a tree of text files, each evolve step's method changes that tree, and a change that wins the evaluation publishes as a release any client can pull. The method is the tutorial's own `RulesMethod` (`harness/plugins.py`), a short example of the method protocol: one call to the served model reads the step's failing traces and rewrites `rules.md`. The scorer grades real headless runs on a small fixed task set by exact final answer, so a change only publishes when it makes previously failing tasks pass their runs.
 
 ## Directory layout
 
@@ -11,7 +11,7 @@ evolve-your-harness/
                  the same pass cell by cell, with the service managed as a
                  subprocess from the notebook
   run.sh         copies the recipe config out of the serve file, starts
-                 reef serve, waits for /healthz, runs run.py
+                 reef serve, waits for /healthz, tasks run.py
   run.py         the loop, written out: record -> report -> evolve -> pull
   configs/
     serve.yaml   the stack (reef service) plus the harness evolution recipe
@@ -68,7 +68,7 @@ You also need an OpenAI-compatible endpoint for the model under test, and for th
 
 Every run ends by writing `work/replay.html`: the release chain with each step's result and the files its patch changed, the loop graph replayed from a session's events, the session event log and the process timeline. Open it in a browser; `python3 run.py replay` rebuilds it from `work/` at any time.
 
-serve.yaml carries the endpoint (`inference.upstream-url: http://127.0.0.1:8000`, no /v1 suffix) and the model (`inference.upstream-model: qwen3-8b`) as literals; edit them there to point at your own. The recipe takes its model from that same `inference` section, so the method's model call, the evolve rollouts and served traffic all use the one name, and run.py's `MODEL` must match; a name the endpoint does not serve fails the method's model call, and the step is skipped with a `method_summary` that names the failure. The one value serve.yaml does not hold is the provider key: `export REEF_UPSTREAM_API_KEY=...` if your endpoint needs one.
+serve.yaml carries the endpoint (`inference.upstream-url: http://127.0.0.1:8000`, no /v1 suffix) and the model (`inference.upstream-model: qwen3-8b`) as literals; edit them there to point at your own. The recipe takes its model from that same `inference` section, so the method's model call, the evolve runs and served traffic all use the one name, and run.py's `MODEL` must match; a name the endpoint does not serve fails the method's model call, and the step is skipped with a `method_summary` that names the failure. The one value serve.yaml does not hold is the provider key: `export REEF_UPSTREAM_API_KEY=...` if your endpoint needs one.
 
 ## The method
 
@@ -93,9 +93,9 @@ The YAML only needs the worker count; `backend: auto` and resource requests
 can be omitted. Local workers are not pinned or limited to one CPU core.
 
 The worker/scorer pool is reused across evaluations and released when its
-scenario closes. Each rollout still starts a separate harness process in a
+scenario closes. Each run still starts a separate harness process in a
 fresh temporary directory. This is a fixed-size pool, not autoscaling.
-`evolution.executor` is a separate rollout-isolation option (`local` or
+`evolution.executor` is a separate run-isolation option (`local` or
 `sandbox`), not a worker backend selector.
 
 The demo's materializer also preserves optional top-level `execution` and
@@ -157,9 +157,9 @@ Pick a model that fails at least one task. A model that passes all three tasks s
 
 ## What one run does
 
-1. `run.sh` copies serve.yaml's recipe sections into `work/recipes/harness_evolve.yaml` and starts Reef. The recipe boots with the seed tree `seeds/pi`: a starter `rules.md`. The endpoint and the model live only in serve.yaml's `inference` section (`upstream-url`, `upstream-api-key`, `upstream-model`); Reef hands them to the method as the served model binding and renders them into each evaluation rollout, so neither the method nor the published tree ever names them.
-2. `run.py` sends each of the three exact-answer coding tasks once through reef inference; reef serves the reply and records the exchange. The reply is graded the same way the evaluation grades rollouts, and the score is reported against the receipt.
-3. Every valid scored report trains, passing ones included, and `evolution.batch_size: 1` makes each report one evolve step: `RulesMethod` sends the step's failing traces, each with its task, reply, score and feedback, and the current `rules.md` to the same model through `services.models.served`, which answers with the new rules; the candidate and current trees each run one rollout per task; the change publishes only when the candidate wins more task pairings than it loses (`evolution.evaluation.policy: compare`). A passing report still gets a step, but that step has no failing trace, so the method leaves the tree and the step skips: a passing run is not a run that batched nothing.
+1. `run.sh` copies serve.yaml's recipe sections into `work/recipes/harness_evolve.yaml` and starts Reef. The recipe boots with the seed tree `seeds/pi`: a starter `rules.md`. The endpoint and the model live only in serve.yaml's `inference` section (`upstream-url`, `upstream-api-key`, `upstream-model`); Reef hands them to the method as the served model binding and renders them into each evaluation run, so neither the method nor the published tree ever names them.
+2. `run.py` sends each of the three exact-answer coding tasks once through reef inference; reef serves the reply and records the exchange. The reply is graded the same way the evaluation grades runs, and the score is reported against the receipt.
+3. Every valid scored report trains, passing ones included, and `evolution.batch_size: 1` makes each report one evolve step: `RulesMethod` sends the step's failing traces, each with its task, reply, score and feedback, and the current `rules.md` to the same model through `services.models.served`, which answers with the new rules; the candidate and current trees each run one run per task; the change publishes only when the candidate wins more task pairings than it loses (`evolution.evaluation.policy: compare`). A passing report still gets a step, but that step has no failing trace, so the method leaves the tree and the step skips: a passing run is not a run that batched nothing.
 4. `run.py` waits for the results of the steps its reports triggered, then pulls `GET /reef/harness` and prints the release, its evaluation metrics and the files the step changed. A client that writes the pulled files where pi reads them, with pi's model bound to Reef, runs the learned rules.
 
 ## Native variant
@@ -176,4 +176,4 @@ The recorded pass is identical, so the two variants are comparable on the same t
 ## Known limitations
 
 - `run.py` waits for the result of every step its reports triggered, then reads the active release once: a step still pending at the deadline is reported as pending and its result lands in the commit history, not in the run's output.
-- vllm serves Qwen3-8B for pi only with `--enable-auto-tool-choice --tool-call-parser hermes`; without them it answers pi's `tool_choice: "auto"` requests with a 400, every rollout fails, and every evaluation ties.
+- vllm serves Qwen3-8B for pi only with `--enable-auto-tool-choice --tool-call-parser hermes`; without them it answers pi's `tool_choice: "auto"` requests with a 400, every run fails, and every evaluation ties.

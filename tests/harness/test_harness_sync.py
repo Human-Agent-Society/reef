@@ -7,8 +7,8 @@ import json
 import pytest
 
 from reef.harness.adapters import available_adapters, get_adapter
-from reef.harness.rollouts.model_binding import ModelBinding
 from reef.harness.sync import TOKEN_PLACEHOLDER, TreeMerge, import_files, layer_install, merge_lines, merge_trees
+from reef.harness.tasks.model_binding import ModelBinding
 from reef.harness.tree import HarnessTree, render_tree
 
 SKILL = "---\nname: fix\ndescription: Fix the failing test first.\n---\n\nRun the tests, then fix.\n"
@@ -130,5 +130,5 @@ def test_a_layer_installs_the_release_as_the_agents_plugin_with_the_token_off_th
         assert layer.env["OPENCODE_CONFIG"] == "/home/a/install/opencode/opencode.json"
     if adapter == "pi":
         assert "plugin/extensions/reef-provider/index.ts" in layer.files
-    # The rollout defaults stay in rollouts: a layer never opens every permission of the person's agent.
+    # The run defaults stay in runs: a layer never opens every permission of the person's agent.
     assert "permission" not in "".join(layer.files.values())

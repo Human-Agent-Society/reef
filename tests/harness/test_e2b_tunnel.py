@@ -20,7 +20,7 @@ from unittest.mock import Mock
 import pytest
 
 from reef.execution.sandbox.e2b import E2BExecutor, E2BSession, template_alias
-from reef.execution.sandbox.process import ProcessOutcome, RolloutLaunchError, RolloutTimeout, SandboxUnavailable
+from reef.execution.sandbox.process import ProcessOutcome, ProgramLaunchError, ProgramTimeout, SandboxUnavailable
 from reef.execution.sandbox.relay import Relay
 from reef.execution.sandbox.remote import RELAY_SCRIPT, TunnelPump, pack, remote_command, remote_root, unpack
 
@@ -51,7 +51,7 @@ def test_command_disconnect_reconnects_without_starting_the_command_again(tmp_pa
         outcome = session.launch(["pi"], root=tmp_path, workspace=tmp_path, env={}, timeout=60)
         assert outcome == ProcessOutcome(0, "complete output", "")
     else:
-        with pytest.raises(RolloutLaunchError, match="connection"):
+        with pytest.raises(ProgramLaunchError, match="connection"):
             session.launch(["pi"], root=tmp_path, workspace=tmp_path, env={}, timeout=60)
         sandbox.commands.kill.assert_called_once_with(42)
     sandbox.commands.run.assert_called_once()
@@ -77,7 +77,7 @@ def test_command_timeout_kills_the_process_before_copying_its_files(tmp_path, mo
         sandbox.commands.kill.assert_called_once_with(42)
 
     monkeypatch.setattr(session, "pull", pull)
-    with pytest.raises(RolloutTimeout):
+    with pytest.raises(ProgramTimeout):
         session.launch(["pi"], root=tmp_path, workspace=tmp_path, env={}, timeout=60)
     sandbox.commands.connect.assert_not_called()
 
@@ -98,7 +98,7 @@ def test_reconnecting_does_not_extend_the_command_deadline(tmp_path, monkeypatch
     session = E2BSession(sandbox)
     monkeypatch.setattr(session, "push", lambda root: None)
     monkeypatch.setattr(session, "pull", lambda root: None)
-    with pytest.raises(RolloutTimeout):
+    with pytest.raises(ProgramTimeout):
         session.launch(["pi"], root=tmp_path, workspace=tmp_path, env={}, timeout=60)
     sandbox.commands.connect.assert_not_called()
     sandbox.commands.kill.assert_called_once_with(42)
@@ -387,7 +387,7 @@ def test_a_root_crosses_as_it_is_and_the_command_names_its_sandbox_path(tmp_path
         "PI_CODING_AGENT_DIR": "/home/user/reef/reef-agent-abc/pi-agent",
         "REEF_TOKEN": "t",
     }
-    assert template_alias("pi", "0.84.2") == "reef-pi-0-84-2-rollouts-v1"
+    assert template_alias("pi", "0.84.2") == "reef-pi-0-84-2-runs-v1"
 
 
 @pytest.mark.unit

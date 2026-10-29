@@ -49,7 +49,7 @@ THEMES = {
 COL_W, GAP, BOX_H = 220, 40, 76
 X = [56 + k * (COL_W + GAP) for k in range(5)]
 WIDE = 2 * COL_W + GAP
-# The workspace stops short of the last column's right edge, so the tasks reach the rollouts beside it.
+# The workspace stops short of the last column's right edge, so the tasks reach the runs beside it.
 WORKSPACE_W = X[4] + 150 - X[3]
 
 # Each row's top: A on the person's machine, B in Reef.
@@ -83,8 +83,8 @@ BOXES = [
     (3, "B3", WORKSPACE_W, "reef", None, "Workspace", "`harness/ · material/traces/ · state/"),
     (2, "B3", COL_W, "reef", 5, "Method", "`step(context)"),
     (1, "B3", COL_W, "reef", 6, "Check", "`validate_tree"),
-    (2, "B4", WIDE, "reef", 7, "Evaluation", "runs each task as a rollout, scores it"),
-    (4, "B4", COL_W, "reef", None, "Rollouts", "`run.rollout"),
+    (2, "B4", WIDE, "reef", 7, "Evaluation", "runs each task as a run, scores it"),
+    (4, "B4", COL_W, "reef", None, "Runs", "`run.task"),
     (1, "B4", COL_W, "reef", None, "Policy", "compare or floor"),
     (0, "B4", COL_W, "reef", 8, "Activation rule", "serve or hold"),
 ]
@@ -172,7 +172,7 @@ def render(theme: str, fonts) -> str:
             f"evaluation test the candidate, a selected candidate is a new release, and the activation rule serves it or holds it for a person. "
             f"After a session, the client sends the changed files back, and Reef merges them onto the active release. "
             f"An offline deployment gets its traces from uploaded Harbor tasks instead: the train tasks run on the "
-            f'head as rollouts, and the eval tasks score the candidates.">'
+            f'head as runs, and the eval tasks score the candidates.">'
         ),
         f"<style>\n{faces}</style>",
         write(40, 44, "Harness evolution: what runs where", 24, p["ink"], 600),
@@ -212,7 +212,7 @@ def render(theme: str, fonts) -> str:
         write(
             X[0] + 18,
             B5 + 57,
-            "evolve · dirs · sessions · model · run.rollout · run.layer",
+            "evolve · dirs · sessions · model · run.task · run.layer",
             MONO,
             p["muted"],
             mono=True,
@@ -260,12 +260,12 @@ def render(theme: str, fonts) -> str:
     o.append(path(p, [(traces_x, B2 + BOX_H), (traces_x, B3)]))
     o.append(badge(p, traces_x + 26, route_y - 2, 4, "reef"))
     o.append(write(traces_x + 46, route_y + 3, "online: a batch of raw traces", BODY, p["ink"]))
-    # Offline: the tasks run as rollouts, and the train tasks' rollouts are the workspace's traces.
-    tasks_x, rollouts_x = X[4] + 190, X[4] + 60
+    # Offline: the tasks run as runs, and the train tasks' runs are the workspace's traces.
+    tasks_x, runs_x = X[4] + 190, X[4] + 60
     o.append(path(p, [(tasks_x, B2 + BOX_H), (tasks_x, B4)]))
     o.append(write(tasks_x - 8, B4 - 22, "tasks", MONO, p["muted"], anchor="end", mono=True))
-    o.append(path(p, [(rollouts_x, B4), (rollouts_x, B3 + BOX_H)]))
-    o.append(write(rollouts_x - 12, B4 - 22, "offline: train-task rollouts", BODY, p["ink"], anchor="end"))
+    o.append(path(p, [(runs_x, B4), (runs_x, B3 + BOX_H)]))
+    o.append(write(runs_x - 12, B4 - 22, "offline: train-task runs", BODY, p["ink"], anchor="end"))
     o.extend(path(p, [(X[k], B3 + BOX_H // 2), (X[k - 1] + COL_W, B3 + BOX_H // 2)]) for k in (3, 2))
     check_x, evaluation_x, elbow_y = X[1] + 110, X[2] + 60, B4 - 28
     o.append(path(p, [(check_x, B3 + BOX_H), (check_x, elbow_y), (evaluation_x, elbow_y), (evaluation_x, B4)]))
@@ -286,7 +286,7 @@ def render(theme: str, fonts) -> str:
             X[0] + MODE_W + GAP,
             "reef",
             "Offline: learn from uploaded tasks",
-            "the train tasks' rollouts are the traces",
+            "the train tasks' runs are the traces",
         )
     )
 

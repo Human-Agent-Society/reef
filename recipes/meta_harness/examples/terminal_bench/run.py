@@ -19,7 +19,7 @@ from recipes.meta_harness.method import search_population
 from reef.artifact import GitLFSRepositoryBackend
 from reef.core import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher
-from reef.harness import run_rollout
+from reef.harness import run_task
 from reef.harness.adapters import get_adapter
 from reef.harness.tree import HarnessTree, render_tree
 from reef.inference.http import InferenceProxyRuntime
@@ -38,7 +38,7 @@ SEED = HERE / "seed"
 
 
 def configuration(tasks: tuple[str, ...], iterations: int | None, repeats: int | None) -> dict[str, Any]:
-    """Fill the stack's dataset and keep the evaluation rollout budget consistent with it."""
+    """Fill the stack's dataset and keep the evaluation run budget consistent with it."""
     sections = recipe_config_from_file_layout(load_config(HERE / "terminal_bench.yaml"))
     evolution = sections["evolution"]
     evaluation = evolution["evaluation"]
@@ -51,7 +51,7 @@ def configuration(tasks: tuple[str, ...], iterations: int | None, repeats: int |
         method["max_candidates"] = iterations
         evolution["max_steps"] = 2 * iterations
     # The cache keeps the incumbent's scores: the seed runs once, then each candidate once.
-    method["max_target_rollouts"] = len(tasks) * evaluation["repeats"] * (method["max_candidates"] + 1)
+    method["max_target_runs"] = len(tasks) * evaluation["repeats"] * (method["max_candidates"] + 1)
     return sections
 
 
@@ -73,7 +73,7 @@ def load_recipe(sections: Mapping[str, Any], directory: Path) -> HarnessEvolutio
         model_path=os.environ["REEF_MODEL"],
         base_url=os.environ["REEF_UPSTREAM_URL"],
         api_key=os.environ.get("REEF_UPSTREAM_API_KEY") or None,
-        inference_timeout_s=config["evolution"]["evaluation"]["rollout_timeout_s"],
+        inference_timeout_s=config["evolution"]["evaluation"]["task_timeout_s"],
     )
     recipe = build_recipe(config["implementation"], config=config, runtime=runtime)
     if not isinstance(recipe, HarnessEvolutionRecipe) or not isinstance(recipe.method, MetaHarness):
@@ -116,45 +116,45 @@ def served_tree(scenario: Scenario) -> HarnessTree:
     return HarnessTree(component_files(scenario.surface, artifact, scenario.surface.files_component or "harness"))
 
 
-def record_rollout(scenario: Scenario, recipe: HarnessEvolutionRecipe) -> None:
-    """Record one real served-harness rollout and its verifier feedback.
+def record_run(scenario: Scenario, recipe: HarnessEvolutionRecipe) -> None:
+    """Record one real served-harness run and its verifier feedback.
 
     Stable ids let a restart finish an interrupted report without rerunning an
-    already recorded rollout. The next task is a function of the committed step.
+    already recorded run. The next task is a function of the committed step.
     """
     if recipe.scorer is None:
-        raise ValueError("the example scores its rollouts with evolution.evaluation.scorer, which is not set")
+        raise ValueError("the example scores its runs with evolution.evaluation.scorer, which is not set")
     step = scenario.scenario_step
     tasks = recipe.configured_tasks()
     task = tasks[step % len(tasks)]
-    inference_id = f"terminal-bench-rollout-{step}"
+    inference_id = f"terminal-bench-run-{step}"
     inference = scenario.records.get(scenario.name, inference_id)
     if inference is None:
         descriptor = get_adapter(recipe.evolution.adapter)
         tree = served_tree(scenario)
         files = render_tree(tree, descriptor, recipe.model_binding().config_overlays(descriptor))
-        result = run_rollout(
+        result = run_task(
             descriptor,
             files,
             task,
             binary=recipe.evolution.binary,
-            timeout=recipe.evaluation.rollout_timeout_s,
+            timeout=recipe.evaluation.task_timeout_s,
             executor=recipe.executor,
         )
         littered = recipe.evaluation.forbid_residue and bool(result.residue)
         score = 0.0 if littered else float(recipe.scorer.score(task, result))
         if not math.isfinite(score):
-            raise ValueError("rollout scorer returned a non-finite score")
+            raise ValueError("run scorer returned a non-finite score")
         inference = scenario.records.append(
             AgentRecord.create(
                 scenario=scenario.name,
                 agent_record_id=inference_id,
                 request_type=RequestType.INFERENCE,
                 payload={
-                    "source": "terminus_rollout",
+                    "source": "terminus_run",
                     "task": task,
                     "tree": dict(tree.files),
-                    "rollout": dataclasses.asdict(result),
+                    "run": dataclasses.asdict(result),
                     "score": score,
                 },
             )
@@ -188,13 +188,13 @@ def write_summary(scenario: Scenario, recipe: HarnessEvolutionRecipe, directory:
         "step": committed.step,
         "served_id": head,
         "generated_candidates": sum(member.record.origin == "method" for member in members),
-        "evaluation_rollouts": sum(rollout.step < step for rollout in history.rollouts),
+        "evaluation_runs": sum(task_run.step < step for task_run in history.runs),
         "candidates": [
             {
                 "id": member.record.tree,
                 "parent_id": member.parent,
                 "outcome": member.outcome,
-                "scores": [rollout.score.to_json() for rollout in member.rollouts],
+                "scores": [task_run.score.to_json() for task_run in member.runs],
                 "mean": member.mean_score,
             }
             for member in members
@@ -215,23 +215,21 @@ def search(scenario: Scenario, recipe: HarnessEvolutionRecipe, directory: Path) 
     history = harness_backend(scenario).history
     summary = write_summary(scenario, recipe, directory)
     while scenario.scenario_step < recipe.evolution.max_steps:
-        # The method's own budget check, before a rollout is spent on a step that would propose nothing.
+        # The method's own budget check, before a run is spent on a step that would propose nothing.
         if method.spent_budget(history, scenario.scenario_step + 1) is not None:
             break
         # A previous process may have recorded the report but not committed its
-        # step. Let Reef replay it before spending on another rollout.
+        # step. Let Reef replay it before spending on another run.
         result = scenario.prepare_training_step()
         if result is None:
-            record_rollout(scenario, recipe)
+            record_run(scenario, recipe)
             result = scenario.prepare_training_step()
         if result is None:
-            raise RuntimeError("the recorded rollout did not produce a training step")
+            raise RuntimeError("the recorded run did not produce a training step")
         scenario.commit(result)
         summary = write_summary(scenario, recipe, directory)
         print(
-            json.dumps(
-                {key: summary[key] for key in ("step", "generated_candidates", "evaluation_rollouts", "served_id")}
-            )
+            json.dumps({key: summary[key] for key in ("step", "generated_candidates", "evaluation_runs", "served_id")})
         )
     return summary
 
@@ -269,8 +267,8 @@ def main() -> None:
                 "tasks": len(tasks),
                 "repeats": evolution["evaluation"]["repeats"],
                 "candidate_limit": method["max_candidates"],
-                "evaluation_rollout_limit": method["max_target_rollouts"],
-                "rollout_limit": evolution["max_steps"],
+                "evaluation_run_limit": method["max_target_runs"],
+                "run_limit": evolution["max_steps"],
                 "seed_files": sorted(files),
             },
             indent=2,

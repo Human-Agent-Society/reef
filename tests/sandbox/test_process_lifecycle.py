@@ -158,7 +158,7 @@ def test_execution_contract_controls_different_owners(tmp_path: Path) -> None:
     from reef.execution.jobs import JobContext
     from reef.execution.lifecycle import Execution
     from reef.execution.sandbox.environment import ExecutorEnvironment, ProgramExecution
-    from reef.execution.sandbox.process import LocalExecutor, RolloutLaunchError
+    from reef.execution.sandbox.process import LocalExecutor, ProgramLaunchError
 
     context = JobContext()
     program = ProgramExecution(ExecutorEnvironment(LocalExecutor(), root=tmp_path, workspace=tmp_path), ["true"])
@@ -174,5 +174,5 @@ def test_execution_contract_controls_different_owners(tmp_path: Path) -> None:
     for execution in executions:
         assert execution.wait_closed(0)
         assert execution.wait_closed(None)
-    with pytest.raises(RolloutLaunchError, match="stopped"):
+    with pytest.raises(ProgramLaunchError, match="stopped"):
         program.run()

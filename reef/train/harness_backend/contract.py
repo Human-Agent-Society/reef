@@ -20,9 +20,9 @@ from dataclasses import dataclass
 from typing import Any, ClassVar
 
 from reef.core.plugins import ConfiguredPlugin
-from reef.evaluation.harness import RolloutRecord
+from reef.evaluation.harness import RunRecord
 from reef.harness.gateway import ModelCalls
-from reef.harness.rollouts.model_binding import ModelBindings
+from reef.harness.tasks.model_binding import ModelBindings
 from reef.harness.tree import HarnessTree, ValidationResult
 from reef.train.harness_backend.workspace import Workspace
 
@@ -93,16 +93,16 @@ class Services(ABC):
         """Every problem ``tree`` has for the adapter; a candidate with problems is not evaluated."""
 
     @abstractmethod
-    def evaluate(self, tree: HarnessTree, tasks: Sequence[str], *, repeats: int = 1) -> tuple[RolloutRecord, ...]:
-        """The records of ``repeats`` rollouts of ``tree`` on each task, task by task.
+    def evaluate(self, tree: HarnessTree, tasks: Sequence[str], *, repeats: int = 1) -> tuple[RunRecord, ...]:
+        """The records of ``repeats`` runs of ``tree`` on each task, task by task.
 
-        The rollouts run like the step's evaluation: the same rendering, worker
+        The tasks run like the step's evaluation: the same rendering, worker
         pool and scorer. A record's score is a ``RolloutScore``: failed when the
-        environment could not run the rollout, 0 when the tree gave no answer.
-        A rollout in the history that did not fail is reused, so asking again
+        environment could not run the run, 0 when the tree gave no answer.
+        A run in the history that did not fail is reused, so asking again
         costs nothing; ask for more repeats to get new samples. Raise
         ``RuntimeError`` when the deployment configured no scorer, or when the
-        call needs more rollouts than the step's budget has left; the whole
+        call needs more runs than the step's budget has left; the whole
         call is refused. Raise ``ValueError`` when ``tree`` fails ``check``, and
         ``TypeError`` when ``tasks`` is one string. A refused call adds nothing
         to the history.

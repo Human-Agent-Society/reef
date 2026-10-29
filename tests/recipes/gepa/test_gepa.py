@@ -2,10 +2,10 @@
 
 No reflection model is reached: a fake binding answers. A step runs through
 the phases the trainer runs (``backend_step``), decided by the ``compare``
-policy on the mean as a GEPA deployment decides it. Its rollouts run a fake
+policy on the mean as a GEPA deployment decides it. Its tasks run a fake
 pi binary through the real adapter path: the binary answers with the rules it
 was given, and a prompt that holds ``CRASH`` leaves a session that cannot be
-read, so that rollout has no score. The scorer prefers rules with the marker.
+read, so that run has no score. The scorer prefers rules with the marker.
 """
 
 from __future__ import annotations
@@ -28,10 +28,10 @@ from recipes.gepa.method import ARCHIVE_FILE, archive_for_step
 from reef.core.evaluation import RolloutScore
 from reef.core.job_data import TrajectorySample
 from reef.core.plugins import PluginConfigError
-from reef.evaluation.harness import ComparePolicy, DecisionRecord, FailureObservation, History, RolloutRecord
+from reef.evaluation.harness import ComparePolicy, DecisionRecord, FailureObservation, History, RunRecord
 from reef.harness.adapters import get_adapter
-from reef.harness.rollouts.model_binding import ModelBinding, ModelBindings
-from reef.harness.rollouts.run import RolloutResult
+from reef.harness.tasks.model_binding import ModelBinding, ModelBindings
+from reef.harness.tasks.run import TaskResult
 from reef.harness.tree import HarnessTree
 from reef.train.backend import ComponentReleases
 from reef.train.harness_backend.backend import HarnessBackend
@@ -69,7 +69,7 @@ event = {"type": "message", "role": "assistant", "content": rules}
 )
 
 
-def score_rules(task: str, result: RolloutResult) -> float:
+def score_rules(task: str, result: TaskResult) -> float:
     """1.0 when the tree that ran carried the marker."""
     return 1.0 if MARKER in result.trajectory[-1]["content"] else 0.0
 
@@ -305,14 +305,14 @@ def test_settling_a_step_records_both_sides_and_serves_a_selected_candidate() ->
     )
 
 
-def test_with_repeats_a_tasks_validation_is_the_mean_of_its_rollouts_and_each_rollout_is_charged(
+def test_with_repeats_a_tasks_validation_is_the_mean_of_its_runs_and_each_run_is_charged(
     tmp_path: Path,
 ) -> None:
-    """Two rollouts per task and tree: a task's validation score is their mean, with a rollout that could not run
-    as a zero, and the seed's and the candidate's validation passes each cost one metric call per rollout."""
+    """Two runs per task and tree: a task's validation score is their mean, with a run that could not run
+    as a zero, and the seed's and the candidate's validation passes each cost one metric call per run."""
     seed, child = HarnessTree({"rules.md": SEED_TEXT}), HarnessTree({"rules.md": REFLECTED})
     history = History.open(tmp_path / "history")
-    # The scores task by task and repeat by repeat; one rollout of the child could not run.
+    # The scores task by task and repeat by repeat; one run of the child could not run.
     for tree, parent, values in ((seed, None, (0.0, 0.0, 1.0, 1.0)), (child, seed, (1.0, 0.0, None, 1.0))):
         if parent is None:
             history.add_candidate(tree, step=1, origin="seed")
@@ -321,18 +321,16 @@ def test_with_repeats_a_tasks_validation_is_the_mean_of_its_rollouts_and_each_ro
         runs = [(task, repeat) for task in TASKS for repeat in range(2)]
         for (task, repeat), score in zip(runs, values, strict=True):
             failure = None if score is not None else FailureObservation(task, "launch", "the binary is missing")
-            rollout, _ = history.new_rollout()
-            record = RolloutRecord(
-                rollout, tree.checksum(), task, task, repeat, "ctx", 1, RolloutScore(score), failure
-            )
-            history.add_rollout(record)
+            task_run, _ = history.new_run()
+            record = RunRecord(task_run, tree.checksum(), task, task, repeat, "ctx", 1, RolloutScore(score), failure)
+            history.add_run(record)
     history.add_decision(DecisionRecord(1, child.checksum(), seed.checksum(), True, "compare", "a higher mean"))
 
     seeded = archive_for_step(None, history, TASKS, seed.files, repeats=2)
     seeded.add(child.files, 0, [1.0], step=1)
     settled = archive_for_step(json.dumps(seeded.to_state()), history, TASKS, child.files, repeats=2)
     assert (settled.candidates[1].val_scores, settled.candidates[0].val_scores) == ([0.5, 0.5], [0.0, 1.0])
-    # Each validation pass ran 2 tasks with 2 rollouts each: the seed's, then the candidate's.
+    # Each validation pass ran 2 tasks with 2 runs each: the seed's, then the candidate's.
     assert (seeded.metric_calls, settled.metric_calls, settled.served) == (4, 8, 1)
 
 
@@ -395,7 +393,7 @@ def test_a_step_reflects_on_the_served_trees_traces_and_the_next_step_settles_it
     first = step(backend, 1, backend.initial_state(), sample("a1", 0.0))
 
     # The served tree's traces are the parent's minibatch, graded by the feedback hook: only the child ran.
-    assert first.metrics["method_rollouts"] == 1
+    assert first.metrics["method_runs"] == 1
     (prompt,) = reflector.prompts
     assert f"## Inputs\n{TASK}" in prompt and "## Generated Outputs\n4" in prompt
     assert "## Feedback\nThis response scored 0.000." in prompt
@@ -439,8 +437,8 @@ def test_a_parent_that_never_served_runs_on_the_minibatch(tmp_path: Path) -> Non
     backend, _ = gepa_backend(tmp_path, RULES_ONLY, reflector=reflector)
     result = step(backend, 1, committed(committed_parent()), sample("a1", 0.0))
 
-    # No traffic was served from candidate 1, so its run is a rollout, and the child's another.
-    assert result.metrics["method_rollouts"] == 2
+    # No traffic was served from candidate 1, so its run is a run, and the child's another.
+    assert result.metrics["method_runs"] == 2
     (prompt,) = reflector.prompts
     assert "```\nParent rules.\n```" in prompt and "## Generated Outputs\nParent rules." in prompt
     notes = result.metrics["method_notes"]
@@ -460,21 +458,21 @@ def test_a_child_that_does_not_beat_its_parent_is_rejected(tmp_path: Path) -> No
     assert (archive.rejections, archive.steps, archive.pending, len(archive.candidates)) == (1, 1, None, 1)
 
 
-def test_a_child_that_fails_validation_ends_the_iteration_without_an_rollout(tmp_path: Path) -> None:
+def test_a_child_that_fails_validation_ends_the_iteration_without_an_run(tmp_path: Path) -> None:
     # A reflection that writes a credential-shaped literal makes a tree that Reef never evaluates or publishes.
     reply = "```\nAnswer briefly with the key sk-" + "a" * 24 + "\n```"
     backend, _ = gepa_backend(tmp_path, RULES_ONLY, reflector=FakeChat(reply))
     result = step(backend, 1, backend.initial_state(), sample("a1", 0.0))
 
     assert result.metrics["skipped"] == "the method left the head tree unchanged"
-    assert result.metrics["method_rollouts"] == 0 and "inline credential" in result.metrics["method_summary"]
+    assert result.metrics["method_runs"] == 0 and "inline credential" in result.metrics["method_summary"]
     notes = result.metrics["method_notes"]
     assert (notes["accepted"], notes["child_scores"], len(notes["problems"])) == (False, None, 1)
     # No child ran, so GEPA spent no iteration on it.
     assert (archive_of(result).steps, archive_of(result).rejections) == (0, 0)
 
 
-def test_an_rollout_that_cannot_run_scores_zero_and_its_error_is_the_feedback(tmp_path: Path) -> None:
+def test_an_run_that_cannot_run_scores_zero_and_its_error_is_the_feedback(tmp_path: Path) -> None:
     reflector = FakeChat()
     backend, _ = gepa_backend(tmp_path, RULES_ONLY, reflector=reflector)
     result = step(backend, 1, committed(committed_parent()), sample("a1", 0.0, prompt=f"CRASH {TASK}"))
@@ -486,7 +484,7 @@ def test_an_rollout_that_cannot_run_scores_zero_and_its_error_is_the_feedback(tm
     assert (notes["parent_scores"], notes["child_scores"], notes["accepted"]) == ([0.0], [0.0], False)
 
 
-def test_a_spent_budget_stops_the_search_before_any_rollout_or_model_call(tmp_path: Path) -> None:
+def test_a_spent_budget_stops_the_search_before_any_run_or_model_call(tmp_path: Path) -> None:
     reflector = FakeChat()
     backend, _ = gepa_backend(tmp_path, GEPASettings(components=("rules",), max_metric_calls=150), reflector=reflector)
     spent = Archive()
@@ -498,7 +496,7 @@ def test_a_spent_budget_stops_the_search_before_any_rollout_or_model_call(tmp_pa
         "stopped": "the budget of 150 metric calls is spent",
         "metric_calls": 150,
     }
-    assert (result.metrics["method_rollouts"], reflector.prompts) == (0, [])
+    assert (result.metrics["method_runs"], reflector.prompts) == (0, [])
 
 
 @pytest.mark.parametrize(("perfect_score", "reflections"), [(1.0, 0), (2.0, 1)])
