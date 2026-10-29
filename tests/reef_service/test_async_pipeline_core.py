@@ -374,8 +374,7 @@ def test_experiment_provider_observes_the_generic_commit_boundary(start_dispatch
     assert event.context.recipe == "test_policy"
     assert event.context.backend == "stub"
     assert event.context.backend_config == {
-        "job_plan": "fixed",
-        "parameters": {"method": {"objective": "sft"}},
+        "job_parameters": {kind: {"method": {"objective": "sft"}} for kind in ("trajectory", "task")},
     }
     assert event.context.source_artifact_ref.release_id == produced.parent_release_id
     assert event.produced_artifact_ref == produced

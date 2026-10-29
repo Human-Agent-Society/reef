@@ -36,13 +36,14 @@ from reef.record2record import ReportGrouping, ReportRecord2Record
 from reef.runtime.jobs import SavedCheckpoint, TrainingJob
 from reef.storage.commit_history import CommitHistoryError, CommitHistoryScenarioStore
 from reef.storage.commits import CommitRecord, active_artifact_ref
+from reef.storage.samples import SAMPLE_KINDS
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.surface import Surface
 from reef.surface.harnesses import create_harness_surface
 from reef.train import CandidateBackend, PreparedStep, Trainer, TrainStepResult
 from reef.train.cordis_backend import CordisBackend
 from reef.train.cordis_backend.processor import TraceJobData, TraceSamples
-from reef.train.jobs import FixedJobPlan, JobLoop, JobLoopState, JobRequest
+from reef.train.jobs import JobLoop, JobLoopState
 from reef.train.pipeline import TrainingPipeline
 
 
@@ -586,11 +587,8 @@ class ProtectAllPolicyRecipe(TestPolicyRecipe):
             scenario,
             records,
             pipeline_factory=ProtectAllPipeline,
-            job_loop=JobLoop(
-                component,
-                FixedJobPlan(JobRequest({"method": {"objective": "sft"}})),
-                scenario=scenario,
-            ),
+            job_loop=JobLoop(component, scenario=scenario),
+            job_parameters={kind: {"method": {"objective": "sft"}} for kind in SAMPLE_KINDS},
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
             default_job_samples=1,

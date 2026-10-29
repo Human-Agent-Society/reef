@@ -32,7 +32,7 @@ from reef.storage.scenario import ScenarioSettings
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train.backend import PreparedStep
 from reef.train.cordis_backend.processor import InferenceSamples
-from reef.train.jobs import FixedJobPlan, JobLoop, JobRequest
+from reef.train.jobs import JobLoop
 from reef.train.pipeline import TrainingPipeline
 from reef.train.trainer import Trainer
 from reef.train.types import JobData, Sample
@@ -903,11 +903,7 @@ class _InstructionJobRecipe(WeightTrainingRecipe):
             scenario,
             records,
             pipeline_factory=threshold_pipeline,
-            job_loop=JobLoop(
-                component,
-                FixedJobPlan(JobRequest()),
-                scenario=scenario,
-            ),
+            job_loop=JobLoop(component, scenario=scenario),
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
             training_mode=self.training_mode,
@@ -975,7 +971,7 @@ def test_a_job_trainer_skips_a_failed_instruction_instead_of_submitting_it_again
         "s",
         records,
         pipeline_factory=threshold_pipeline,
-        job_loop=JobLoop(component, FixedJobPlan(JobRequest()), scenario="s"),
+        job_loop=JobLoop(component, scenario="s"),
         training_mode="manual",
         default_job_samples=1,
     )
