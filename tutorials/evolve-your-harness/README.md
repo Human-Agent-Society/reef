@@ -127,7 +127,7 @@ Defaults: port `8901`, no Reef access token unless `REEF_TOKEN` is set, state
 under `work/deployment/`. Use `--reef.port` and `--reef.token` to override the
 port and access token. The `run.sh` demo keeps its separate configuration and state.
 
-`data.training_mode` has two values. `deployment.yaml` sets `manual`: a person asks for a change with `POST /reef/train` (the [manual training API](https://reefinfra.ai/docs/reference/http-api/)), and each ask runs one step that reads the ask beside the failures held for it. No step starts without an ask. `serve.yaml` and `serve-native.yaml` stay `auto`, the default: the `./run.sh` demo is failure driven, nobody asks there, and an ask is refused. `POST /reef/scenarios/{scenario}/update` switches a running deployment between the two.
+`data.training_mode` has two values. `deployment.yaml` sets `manual`: a person asks for a change with `POST /reef/train` (the [manual training API](https://reefinfra.ai/docs/reference/http-api/)), and each ask runs one step that reads the ask beside the traces in the manual buffer. New failures do not join that buffer by themselves: add the ones a step should read with `POST /reef/scenarios/{scenario}/buffer/insert` ([Choose the samples that train](../../docs/reference/http-api.rst#choose-the-samples-that-train)). No step starts without an ask. `serve.yaml` and `serve-native.yaml` stay `auto`, the default: the `./run.sh` demo is failure driven, nobody asks there, and an ask is refused. `POST /reef/scenarios/{scenario}/update` switches a running deployment between the two.
 
 Install a harness from this service and submit feedback as shown in the
 [root README](../../README.md#harness-evolving-deployment). Adapt `deployment.yaml`'s

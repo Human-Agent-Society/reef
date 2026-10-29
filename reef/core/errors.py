@@ -37,5 +37,9 @@ class CommitPending(ReefError):
     """A training result waits for its scenario commit, so an activation or a new training start must wait too."""
 
 
+class ManualBufferRefused(ReefError):
+    """A client asked to change a trainer's buffer by hand while it trains in automatic mode."""
+
+
 class TrainingStartRefused(ReefError):
     """A trainer cannot start training from the artifact it was given; nothing changed."""

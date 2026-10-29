@@ -231,6 +231,26 @@ class SampleStore(ABC):
     def count(self, *, after_sequence: int = 0, kind: SampleKind | None = None, trainer: str | None = None) -> int:
         """Return the number of stored samples after ``after_sequence`` that ``page`` would read with the filters."""
 
+    @abstractmethod
+    def get(self, sample_ids: tuple[str, ...]) -> tuple[StoredSample, ...]:
+        """The stored samples of ``sample_ids`` that the store holds, in arrival order."""
+
+    @abstractmethod
+    def manual_buffer(self, trainer: str) -> tuple[str, ...]:
+        """The IDs of the samples in the manual buffer of ``trainer`` (a ``train_counts`` key), in arrival order."""
+
+    @abstractmethod
+    def insert_into_buffer(self, trainer: str, sample_ids: tuple[str, ...]) -> None:
+        """Add ``sample_ids`` to the manual buffer of ``trainer``, in one transaction; a held ID stays held.
+
+        The caller checks that each ID names a stored sample that ``trainer`` can train. A commit of ``trainer``
+        removes from its manual buffer the samples that it consumed, in the commit's transaction.
+        """
+
+    @abstractmethod
+    def remove_from_buffer(self, trainer: str, sample_ids: tuple[str, ...]) -> None:
+        """Remove ``sample_ids`` from the manual buffer of ``trainer``, in one transaction; an absent ID is skipped."""
+
     def tasks(self, split: SplitName | None = None) -> tuple[StoredSample, ...]:
         """Every stored task, in arrival order; only ``split``'s if given."""
         found: list[StoredSample] = []
@@ -252,6 +272,9 @@ class MemorySampleStore(SampleStore):
 
     def __init__(self) -> None:
         self.rows: list[StoredSample] = []
+        #: The manual buffer of each trainer. No commit removes trained samples from it: the pipeline leaves out
+        #: the samples that it trained in this process.
+        self.buffers: dict[str, set[str]] = {}
 
     def stored(self, sample_id: str) -> StoredSample | None:
         return next((row for row in self.rows if row.sample_id == sample_id), None)
@@ -316,6 +339,19 @@ class MemorySampleStore(SampleStore):
     def count(self, *, after_sequence: int = 0, kind: SampleKind | None = None, trainer: str | None = None) -> int:
         return len(self.page(after_sequence=after_sequence, limit=len(self.rows) + 1, kind=kind, trainer=trainer))
 
+    def get(self, sample_ids: tuple[str, ...]) -> tuple[StoredSample, ...]:
+        return tuple(row for row in self.rows if row.sample_id in sample_ids)
+
+    def manual_buffer(self, trainer: str) -> tuple[str, ...]:
+        held = self.buffers.get(trainer, set())
+        return tuple(row.sample_id for row in self.rows if row.sample_id in held)
+
+    def insert_into_buffer(self, trainer: str, sample_ids: tuple[str, ...]) -> None:
+        self.buffers.setdefault(trainer, set()).update(sample_ids)
+
+    def remove_from_buffer(self, trainer: str, sample_ids: tuple[str, ...]) -> None:
+        self.buffers.get(trainer, set()).difference_update(sample_ids)
+
 
 @dataclass(frozen=True)
 class TrainerSamples:
@@ -325,7 +361,8 @@ class TrainerSamples:
     component that its commits name or ``""`` for the only trainer of a scenario. Operations pass ``trainer``
     to the store: ``page`` and ``count`` read the samples that the trainer reads (its own and those of no
     component), ``add_record_samples`` saves its own, ``consumed_record_ids`` reads the records that its samples
-    consumed, and ``tasks`` reads every task. Purpose: ``Recipe.build_trainers`` makes one for each trainer; the
+    consumed, ``tasks`` reads every task, and ``manual_buffer``, ``insert_into_buffer`` and ``remove_from_buffer``
+    read and change its manual buffer. Purpose: ``Recipe.build_trainers`` makes one for each trainer; the
     trainer's pipeline (``PipelineContext.samples``) and its stages read it.
     """
 
@@ -356,6 +393,18 @@ class TrainerSamples:
 
     def tasks(self, split: SplitName | None = None) -> tuple[StoredSample, ...]:
         return self.store.tasks(split)
+
+    def get(self, sample_ids: tuple[str, ...]) -> tuple[StoredSample, ...]:
+        return self.store.get(sample_ids)
+
+    def manual_buffer(self) -> tuple[str, ...]:
+        return self.store.manual_buffer(self.trainer)
+
+    def insert_into_buffer(self, sample_ids: tuple[str, ...]) -> None:
+        self.store.insert_into_buffer(self.trainer, sample_ids)
+
+    def remove_from_buffer(self, sample_ids: tuple[str, ...]) -> None:
+        self.store.remove_from_buffer(self.trainer, sample_ids)
 
 
 __all__ = [
