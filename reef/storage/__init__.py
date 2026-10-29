@@ -12,7 +12,7 @@ injects it into scenario coordination. Records, commits, generated tasks and
 scenario settings all go through that service.
 
 ``sql_records`` implements shared SQLAlchemy record operations. ``sql_tasks``,
-``sql_trajectories`` and ``sql_commits`` define the task, trajectory and commit
+``sql_samples`` and ``sql_commits`` define the task, training sample and commit
 tables and implement their operations in the same database. ``sqlite``
 supplies SQLite connections, schema upgrades, and file retention. ``postgres``
 supplies PostgreSQL tables, a shared connection pool, and SQL retention.

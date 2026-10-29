@@ -26,8 +26,8 @@ from reef.runtime.interfaces import UpstreamStatusError
 from reef.service.artifact_evaluations import EvaluationLimitReached
 from reef.service.request_service import InferenceRetryTimeout
 from reef.storage.records import RecordConflict
+from reef.storage.samples import SampleConflict
 from reef.storage.tasks import TaskConflict
-from reef.storage.trajectories import TrajectoryConflict
 from reef.surface.weights import RuntimeLoadMismatch
 
 logger = logging.getLogger(__name__)
@@ -42,7 +42,7 @@ ERROR_STATUS_TABLE: tuple[tuple[type[Exception], type[web.HTTPError]], ...] = (
     (CommitPending, web.HTTPConflict),
     (ReleaseNotRestorable, web.HTTPBadRequest),
     (RecordConflict, web.HTTPConflict),
-    (TrajectoryConflict, web.HTTPConflict),
+    (SampleConflict, web.HTTPConflict),
     (TaskConflict, web.HTTPConflict),
     (EvaluationLimitReached, web.HTTPTooManyRequests),
     (RuntimeLoadMismatch, web.HTTPConflict),
