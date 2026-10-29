@@ -241,10 +241,12 @@ from the scenario's sample store, in the same way in every training mode:
    trajectories (see `Uploaded trajectories <#uploaded-trajectories>`__).
    They are in store order: units in the order they became ready, and
    uploads in upload order, interleaved by arrival. The samples of job data
-   that the pipeline handed out are not in the buffer. Imported Harbor tasks
-   are not in the buffer either: an evaluation runs them.
+   that the pipeline handed out are not in the buffer. Imported ``train`` tasks
+   are in it when the sample-to-job stage sets ``accepts_imported_tasks``;
+   imported ``eval`` tasks never are, since an evaluation runs them.
 2. It keeps the samples of one kind, trajectory or task: the kind of the first
-   sample.
+   sample. In ``auto`` a kind that the recipe gives no job parameters does not
+   count; such samples train only for an instruction that gives them.
 3. It leaves out each stale sample that the trainer made from records (see
    `Staleness <#staleness>`__), and every other sample of its group. An
    uploaded trajectory is never stale.
