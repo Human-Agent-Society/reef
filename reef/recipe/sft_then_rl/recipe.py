@@ -11,9 +11,9 @@ from reef.recipe.errors import RecipeConfigError
 from reef.recipe.generated_tasks.objective import TaskGroupObjective
 from reef.recipe.sft.processor import SFTRecord2Record, SFTSamples
 from reef.recipe.sft.recipe import SFTRecipe
-from reef.recipe.sft_then_rl.processor import SFTThenRLJobData, SFTThenRLJobPlan
+from reef.recipe.sft_then_rl.processor import SFTThenRLJobData
 from reef.runtime.interfaces import TrainingMethod
-from reef.train.jobs import JobPlan, JobRequest
+from reef.storage.samples import SampleKind
 from reef.train.pipeline import PipelineSpec
 
 
@@ -62,7 +62,8 @@ class SFTThenRLRecipe(SFTRecipe):
     def pipeline_spec(cls) -> PipelineSpec:
         return PipelineSpec(record2record=SFTRecord2Record, record2sample=SFTSamples, sample2job=SFTThenRLJobData)
 
-    def job_plan(self) -> JobPlan:
+    def parameters_by_kind(self) -> Mapping[SampleKind, Mapping[str, Any]]:
+        """SFT jobs of trajectories, with ``job_parameters``; RL task jobs, with ``task_job_parameters``."""
         sft = {**(self.job_parameters or {}), "method": TrainingMethod(type(self).training_spec().objective).to_dict()}
         rl = {**(self.task_job_parameters or {}), "method": TrainingMethod(TaskGroupObjective.name).to_dict()}
-        return SFTThenRLJobPlan(JobRequest(sft), JobRequest(rl))
+        return {"trajectory": sft, "task": rl}

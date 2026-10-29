@@ -882,13 +882,14 @@ logs one warning.
 
    recipe.config.training_mode | auto | ``auto`` starts a job when ``job_samples`` samples are held; ``manual`` starts a job only for a ``POST /reef/train`` instruction
 
-``recipe.config.job_parameters`` is an object that a weight recipe's default
-job plan sends with every job, beside ``method``. The training component
+``recipe.config.job_parameters`` is an object that a weight recipe sends with
+every job, beside ``method``. The training component
 reads it: for example ``scheduling`` (`Step scheduling
 <python-api.rst#training-objective>`__) or ``save_interval``. The component
 refuses a parameter that it does not take, and the job is not submitted. The
 recipe refuses a ``method`` key, because the recipe's objective is the
-method. A recipe with its own ``job_plan`` does not read the setting.
+method. A recipe that overrides ``parameters_by_kind`` decides where the setting
+goes; SFT-then-RL sends it with its SFT jobs.
 
 .. code:: yaml
 

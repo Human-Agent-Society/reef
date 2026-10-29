@@ -101,23 +101,6 @@ class ReefMegatronTrainRayActor(MegatronTrainRayActor):
             self.initialized_loss_families.add(loss_family)
         self.args.reef_learning_rate_schedule_state = worker_switch["learning_rate_schedule_state"]
 
-    def reset_training_state(self) -> None:
-        """Drop the optimizer's state and restart the learning-rate scheduler at step 0; the weights stay.
-
-        Each inner optimizer of a chained optimizer, and each data-parallel
-        rank's shard of a distributed one, clears its own state (Adam's moments
-        and step counts); the optimizer builds a new state at its next step.
-        """
-        from megatron.core.optimizer import ChainedOptimizer
-
-        optimizers = (
-            self.optimizer.chained_optimizers if isinstance(self.optimizer, ChainedOptimizer) else [self.optimizer]
-        )
-        for optimizer in optimizers:
-            optimizer.optimizer.state.clear()
-        if self.opt_param_scheduler is not None:
-            self.opt_param_scheduler.num_steps = 0
-
     def parallel_layout(self) -> dict[str, Any]:
         """Return this rank's training parallel layout, which the component's batch split reads.
 

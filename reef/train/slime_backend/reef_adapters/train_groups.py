@@ -163,10 +163,6 @@ class SlimeTrainGroup:
             for rank in range(self._world_size)
         ]
 
-    def reset_training_state(self) -> None:
-        """Clear every rank's optimizer state and restart its learning-rate scheduler; the weights stay."""
-        self.executor.collective_rpc("reset_training_state", timeout=self.train_timeout_s)
-
     def save_model(self, rollout_id, force_sync=False):
         return self.executor.collective_rpc(
             "save_model",

@@ -204,7 +204,8 @@ class LearningRateSchedule:
 class TrainingMethod:
     """The objective one training job trains with, and the learning-rate schedule it selects.
 
-    A recipe's job plan selects one for every job (``reef.train.jobs``); the
+    A recipe selects one for every job, by the kind of the job's samples
+    (``WeightTrainingRecipe.parameters_by_kind``); the
     job carries it to the training component beside the job data, and the job's payload
     records it, so it is part of the job's identity and stays fixed across the
     job's retries. ``objective`` is a registered objective name or a dotted

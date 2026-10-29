@@ -110,7 +110,7 @@ class WorkerTrainingSettings:
 
 @dataclass(frozen=True)
 class SlimeStart:
-    """What a job continues from: the weights' rollout, the objective's state, the schedule, and whether it is fresh.
+    """What a job continues from: the weights' rollout, the objective's state, and the schedule.
 
     ``rollout_id`` is the non-negative rollout whose checkpoint holds the
     weights, or ``None`` for the weights the workers loaded when they first
@@ -119,20 +119,15 @@ class SlimeStart:
     is; it is ``None`` exactly when the state is empty. A job continues that
     state only when it trains the same objective; another objective starts
     with an empty state. ``schedule_state`` is the learning-rate schedule's
-    progress, or ``None`` for Slime's configured scheduler. ``fresh`` is True
-    for a start whose weights still carry training state that a job from it
-    first clears: the workers' optimizer state and their scheduler's
-    progress. A fresh start has an empty objective state and no schedule
-    progress; ``fresh_start`` makes one. A start
-    directory keeps the value in ``start.json``; ``record_rollout`` and
-    ``fresh_start`` write it, and ``check_job`` and ``run`` read it.
+    progress, or ``None`` for Slime's configured scheduler. A start
+    directory keeps the value in ``start.json``; ``record_rollout`` writes
+    it, and ``check_job`` and ``run`` read it.
     """
 
     rollout_id: int | None
     objective: str | None
     algorithm_state: Mapping[str, Any]
     schedule_state: LearningRateScheduleState | None
-    fresh: bool = False
 
     def __post_init__(self) -> None:
         if self.rollout_id is not None and (
@@ -141,10 +136,6 @@ class SlimeStart:
             raise ValueError("SlimeStart.rollout_id must be a non-negative int or None")
         check_objective_state(self.objective, self.algorithm_state, "SlimeStart")
         check_schedule_state(self.schedule_state, "SlimeStart.schedule_state")
-        if not isinstance(self.fresh, bool):
-            raise TypeError("SlimeStart.fresh must be a bool")
-        if self.fresh and (self.algorithm_state or self.schedule_state is not None):
-            raise ValueError("a fresh SlimeStart has no objective state and no schedule progress")
 
     def write(self, directory: Path) -> None:
         write_json(
@@ -154,7 +145,6 @@ class SlimeStart:
                 "objective": self.objective,
                 "algorithm_state": dict(self.algorithm_state),
                 "schedule_state": None if self.schedule_state is None else self.schedule_state.to_dict(),
-                "fresh": self.fresh,
             },
         )
 
@@ -170,7 +160,6 @@ class SlimeStart:
             value["objective"],
             value["algorithm_state"],
             None if schedule is None else LearningRateScheduleState.from_dict(schedule),
-            value["fresh"],
         )
 
     def state_for(self, objective: str) -> Mapping[str, Any]:
@@ -187,8 +176,6 @@ class SlimeRound:
     up to the end of the rollout, a positive int. ``schedule_state`` is the learning-rate
     schedule's progress before the rollout and ``next_schedule`` after it:
     both are ``None`` (Slime's configured scheduler), or both are set.
-    ``fresh`` is True while the workers still hold the training state that
-    the job's fresh start drops; the rollout clears it before its first step.
     ``objective`` and ``algorithm_state`` are the
     objective state that the rollout's start records, with the same
     condition as in ``SlimeStart``: the job's next state on its last rollout,
@@ -200,7 +187,6 @@ class SlimeRound:
     step: int
     schedule_state: LearningRateScheduleState | None
     next_schedule: LearningRateScheduleState | None
-    fresh: bool
     objective: str | None
     algorithm_state: Mapping[str, Any]
 
@@ -213,8 +199,6 @@ class SlimeRound:
         check_schedule_state(self.next_schedule, "SlimeRound.next_schedule")
         if (self.schedule_state is None) != (self.next_schedule is None):
             raise ValueError("SlimeRound has a schedule before and after the rollout, or neither")
-        if not isinstance(self.fresh, bool):
-            raise TypeError("SlimeRound.fresh must be a bool")
         check_objective_state(self.objective, self.algorithm_state, "SlimeRound")
 
 
@@ -236,14 +220,11 @@ class SlimeTrainingComponent(LocalJobComponent):
 
     The workers hold one set of weights, so the component accepts only a job
     whose start names the weights the workers hold: the latest saved
-    rollout's start or a fresh start of it, or, until the workers save their
-    first rollout, a ``None`` start or a fresh start of it, which name the
-    weights the workers loaded at startup. ``submit`` checks the start, and
+    rollout's start, or, until the workers save their first rollout, a
+    ``None`` start, which names the weights the workers loaded at startup. ``submit`` checks the start, and
     ``run`` checks it again, since a job queued behind another job runs after
     that job moved the workers on. The component refuses every release as a
-    start, and it trains the jobs of one scenario. ``fresh_start`` keeps the
-    weights and drops the training state: the optimizer state, the
-    scheduler's progress and the objective's state.
+    start, and it trains the jobs of one scenario.
 
     ``args`` are the arguments the workers started with; ``storage`` bounds
     the paired checkpoints on disk, and has a critic root exactly when a
@@ -360,13 +341,6 @@ class SlimeTrainingComponent(LocalJobComponent):
             "into its workers"
         )
 
-    def fresh_start(self, start: str) -> str:
-        """A start of the weights ``start`` names, with no training state; ``check_job`` checks the workers hold them."""
-        rollout_id = SlimeStart.read(Path(start)).rollout_id
-        directory = self.starts_root / ("fresh_startup" if rollout_id is None else f"fresh_rollout_{rollout_id}")
-        SlimeStart(rollout_id, None, {}, None, fresh=True).write(directory)
-        return str(directory)
-
     def check_job(self, job: TrainingJob) -> None:
         if any(isinstance(item, TaskSample) for item in job.data.samples):
             raise ValueError("Slime trains trajectories; it does not roll tasks out (task jobs) yet")
@@ -449,8 +423,6 @@ class SlimeTrainingComponent(LocalJobComponent):
         interval = job.parameters.get("save_interval") or step_count
         done = saved[-1].step if saved else 0
         runs = [(first, min(first + interval, step_count)) for first in range(done, step_count, interval)]
-        # Until the job saves its first rollout, the workers hold the start's training state: a fresh job resets it.
-        fresh = start.fresh and not saved
         metrics: dict[str, Any] = dict(prepared.metrics)
         for first, last in runs:
             if self.stopping(directory):
@@ -463,7 +435,7 @@ class SlimeTrainingComponent(LocalJobComponent):
             # Optimizer steps advance only a recipe-selected schedule.
             next_schedule = None if schedule_state is None else schedule_state.advanced(last - first)
             training = (algorithm, slime_payload_steps(payload, first, last))
-            rollout = SlimeRound(self.next_rollout_id, last, schedule_state, next_schedule, fresh, objective, state)
+            rollout = SlimeRound(self.next_rollout_id, last, schedule_state, next_schedule, objective, state)
             started = read_json(directory / ROLLOUT_FILE)
             if started is not None and started["step"] == last and started["rollout_id"] < self.next_rollout_id:
                 # A restart stopped the job after Megatron saved this rollout, which the workers loaded again.
@@ -478,7 +450,6 @@ class SlimeTrainingComponent(LocalJobComponent):
                 write_json(directory / ROLLOUT_FILE, {"rollout_id": rollout.rollout_id, "step": last})
                 schedule_state = self.train_and_save(job, directory, rollout, training)
                 metrics["rollout_id"] = rollout.rollout_id
-            fresh = False
         return metrics
 
     def train_and_save(
@@ -511,11 +482,6 @@ class SlimeTrainingComponent(LocalJobComponent):
                 # The job fails; its data was consumed when Reef submitted it.
                 raise RuntimeError(f"checkpoint storage is full: {'; '.join(storage_plan['reasons'])}")
             saved_schedule = rollout.schedule_state
-            if rollout.fresh:
-                # The weights stay; the optimizer state and the scheduler's progress start again.
-                for group in (self.group, self.critic_group):
-                    if group is not None:
-                        group.reset_training_state()
             algorithm_metrics = algorithm.prepare_rollout(rollout_data)
             worker_settings = WorkerTrainingSettings(algorithm.loss_family, rollout.schedule_state)
             if worker_settings != self.worker_settings:
@@ -569,8 +535,7 @@ class SlimeTrainingComponent(LocalJobComponent):
     ) -> None:
         """Record the saved ``rollout`` as the job's checkpoint at ``rollout.step`` and as the next start.
 
-        The start records ``schedule_state`` and the rollout's objective state. It is not fresh: the rollout
-        trained, which cleared the workers' training state when the rollout was fresh.
+        The start records ``schedule_state`` and the rollout's objective state.
         """
         hf = Path(self.args.save_hf.format(rollout_id=rollout.rollout_id))
         if hf.is_symlink() or not hf.is_dir():
