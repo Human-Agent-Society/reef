@@ -110,6 +110,19 @@ def _settings(**overrides) -> ServiceConfig:
     return ServiceConfig(**values)
 
 
+@pytest.fixture
+def stub_repository(monkeypatch):
+    """Build no Git LFS repository: every scenario's backend is a placeholder."""
+    monkeypatch.setattr(
+        GitLFSRepositoryBackendFactory, "from_config", lambda *args, **kwargs: lambda scenario: object()
+    )
+
+
+def build(tmp_path: Path, **overrides) -> Dispatcher:
+    """``deploy.build_dispatcher`` of ``_settings(**overrides)``, with its records under ``tmp_path``."""
+    return deploy.build_dispatcher(_settings(agent_record_dir=str(tmp_path / "agent-record"), **overrides), environ={})
+
+
 @pytest.mark.unit
 def test_service_config_exposes_shared_batch_controls() -> None:
     args = deploy.service_config_from_mapping({"reef": {"recipe": OPENCLAWRL_RECIPE, "batch_size": 4}})
@@ -153,6 +166,8 @@ def test_service_config_preserves_the_activation_section() -> None:
     args = deploy.service_config_from_mapping({"reef": {"recipe": SAO_RECIPE}, "activation": activation})
 
     assert args.activation_settings == activation
+    with pytest.raises(ValueError, match="activation must be an object"):
+        deploy.service_config_from_mapping({"reef": {"recipe": SAO_RECIPE}, "activation": "never"})
 
 
 @pytest.mark.unit
@@ -166,12 +181,6 @@ def test_service_config_reads_the_pipeline_section() -> None:
     assert args.pipeline_settings == section
     with pytest.raises(ValueError, match="pipeline must be an object"):
         deploy.service_config_from_mapping({"reef": {"recipe": SAO_RECIPE}, "pipeline": "generated"})
-
-
-@pytest.mark.unit
-def test_service_config_rejects_non_object_activation_section() -> None:
-    with pytest.raises(ValueError, match="activation must be an object"):
-        deploy.service_config_from_mapping({"reef": {"recipe": SAO_RECIPE}, "activation": "never"})
 
 
 @pytest.mark.unit
@@ -237,34 +246,20 @@ def test_cookbook_configs_launch_internal_service_from_reef_settings(
 @pytest.mark.unit
 @pytest.mark.parametrize(
     "relative_path",
-    [
-        # example-owned stacks (the openclawrl config lives with its example,
-        # like recipes/tttd/examples/tttd/serve.yaml)
-        _example_owned("recipes/openclawrl/examples/openclawrl/serve.yaml"),
-    ],
-)
-def test_cookbook_training_configs_leave_max_staleness_unset(relative_path, monkeypatch) -> None:
-    monkeypatch.setenv("REEF_TOKEN", "test-token")
-    from tests.support.config_helpers import load_deployment
-
-    config = load_deployment(deploy.PROJECT_ROOT / relative_path)
-
-    assert "max_staleness" not in config["reef"]
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    "relative_path",
+    # example-owned stacks (the openclawrl config lives with its example, like recipes/tttd/examples/tttd/serve.yaml)
     (_example_owned("recipes/openclawrl/examples/openclawrl/serve.yaml"),),
 )
-def test_training_configs_make_checkpoint_budget_mandatory(relative_path, monkeypatch) -> None:
+def test_training_configs_leave_max_staleness_unset_and_make_checkpoint_budget_mandatory(
+    relative_path, monkeypatch
+) -> None:
     monkeypatch.setenv("REEF_TOKEN", "test-token")
     from tests.support.config_helpers import load_deployment
 
-    config = load_deployment(deploy.PROJECT_ROOT / relative_path)
-    retention = config["training"]["checkpoint_retention"]
     from reef.runtime.executor.arguments import native_arguments
 
+    config = load_deployment(deploy.PROJECT_ROOT / relative_path)
+    assert "max_staleness" not in config["reef"]
+    retention = config["training"]["checkpoint_retention"]
     command = " ".join(native_arguments(config["reef"]["training_backend_options"]))
 
     assert retention["max_storage_fraction"] == 0.8
@@ -306,45 +301,15 @@ def test_build_dispatcher_builds_the_training_component_and_injects_selected_rec
 
 
 @pytest.mark.unit
-def test_build_dispatcher_loads_recipe_for_inference_service(monkeypatch, tmp_path) -> None:
-    monkeypatch.setattr(
-        GitLFSRepositoryBackendFactory,
-        "from_config",
-        lambda *args, **kwargs: lambda scenario: object(),
-    )
-
-    dispatcher = deploy.build_dispatcher(
-        _settings(
-            recipe="recipe",
-            agent_record_dir=str(tmp_path / "agent-record"),
-        )
-    )
-
-    assert dispatcher.recipe.name == "recipe"
+@pytest.mark.parametrize("recipe", ["recipe", "reef.recipe.base:Recipe"], ids=["preset", "dotted-reference"])
+def test_build_dispatcher_loads_recipe_for_inference_service_under_the_recipe_name(
+    stub_repository, tmp_path, recipe
+) -> None:
+    assert build(tmp_path, recipe=recipe).recipe.name == "recipe"
 
 
 @pytest.mark.unit
-def test_build_dispatcher_uses_the_recipe_name_for_a_dotted_reference(monkeypatch, tmp_path) -> None:
-    monkeypatch.setattr(
-        GitLFSRepositoryBackendFactory,
-        "from_config",
-        lambda *args, **kwargs: lambda scenario: object(),
-    )
-    selected = "reef.recipe.base:Recipe"
-
-    dispatcher = deploy.build_dispatcher(
-        _settings(
-            recipe=selected,
-            agent_record_dir=str(tmp_path / "agent-record"),
-        ),
-        environ={},
-    )
-
-    assert dispatcher.recipe.name == "recipe"
-
-
-@pytest.mark.unit
-def test_build_dispatcher_passes_recipe_settings_to_a_dotted_reference(monkeypatch, tmp_path) -> None:
+def test_build_dispatcher_passes_recipe_settings_to_a_dotted_reference(stub_repository, monkeypatch, tmp_path) -> None:
     module = tmp_path / "demo_evolution.py"
     module.write_text(
         "from reef.evaluation.harness import RolloutScorer\n"
@@ -355,27 +320,14 @@ def test_build_dispatcher_passes_recipe_settings_to_a_dotted_reference(monkeypat
         "    def score(self, task, result):\n        return 0.0\n"
     )
     monkeypatch.syspath_prepend(str(tmp_path))
-    monkeypatch.setattr(
-        GitLFSRepositoryBackendFactory,
-        "from_config",
-        lambda *args, **kwargs: lambda scenario: object(),
-    )
+    evolution = {
+        "propose": "demo_evolution:Propose",
+        "evaluate": "demo_evolution:Evaluate",
+        "tasks": ["task one"],
+        "adapter": "pi",
+    }
 
-    dispatcher = deploy.build_dispatcher(
-        _settings(
-            recipe="reef.recipe.cordis:CordisRecipe",
-            recipe_settings={
-                "evolution": {
-                    "propose": "demo_evolution:Propose",
-                    "evaluate": "demo_evolution:Evaluate",
-                    "tasks": ["task one"],
-                    "adapter": "pi",
-                }
-            },
-            agent_record_dir=str(tmp_path / "agent-record"),
-        ),
-        environ={},
-    )
+    dispatcher = build(tmp_path, recipe="reef.recipe.cordis:CordisRecipe", recipe_settings={"evolution": evolution})
 
     recipe = dispatcher.recipe
     assert recipe.adapter == "pi"
@@ -383,40 +335,18 @@ def test_build_dispatcher_passes_recipe_settings_to_a_dotted_reference(monkeypat
 
 
 @pytest.mark.unit
-def test_build_dispatcher_applies_common_recipe_controls(monkeypatch, tmp_path) -> None:
-    captured = {}
-
-    def factory(config, *, context):
-        return lambda scenario: object()
-
-    monkeypatch.setattr(GitLFSRepositoryBackendFactory, "from_config", factory)
-    dispatcher = deploy.build_dispatcher(
-        _settings(
-            recipe=OPENCLAWRL_RECIPE,
-            pipeline_settings={"sample2job": {"config": {"buffer_size": 4}}},
-            agent_record_dir=str(tmp_path / "agent-record"),
-        ),
-        environ={},
+def test_build_dispatcher_applies_common_recipe_controls(stub_repository, tmp_path) -> None:
+    dispatcher = build(
+        tmp_path, recipe=OPENCLAWRL_RECIPE, pipeline_settings={"sample2job": {"config": {"buffer_size": 4}}}
     )
-    recipe = dispatcher.recipe
-    captured["buffer_size"] = recipe.build_pipeline(PipelineContext("s")).buffer_size
-
-    assert captured == {"buffer_size": 4}
+    assert dispatcher.recipe.build_pipeline(PipelineContext("s")).buffer_size == 4
 
 
 @pytest.mark.unit
-def test_a_sample2job_batch_size_is_an_unknown_stage_key(monkeypatch, tmp_path) -> None:
+def test_a_sample2job_batch_size_is_an_unknown_stage_key(stub_repository, tmp_path) -> None:
     # The training backend owns the batch size; the stage config has no batch_size key and no fallback.
-    monkeypatch.setattr(
-        GitLFSRepositoryBackendFactory, "from_config", lambda *args, **kwargs: lambda scenario: object()
-    )
-    dispatcher = deploy.build_dispatcher(
-        _settings(
-            recipe=OPENCLAWRL_RECIPE,
-            pipeline_settings={"sample2job": {"config": {"batch_size": 4}}},
-            agent_record_dir=str(tmp_path / "agent-record"),
-        ),
-        environ={},
+    dispatcher = build(
+        tmp_path, recipe=OPENCLAWRL_RECIPE, pipeline_settings={"sample2job": {"config": {"batch_size": 4}}}
     )
     # Stage configs are checked when a scenario builds its pipeline.
     with pytest.raises(RecipeConfigError, match="unknown config fields: batch_size"):
@@ -437,46 +367,21 @@ def test_a_sample2job_batch_size_is_an_unknown_stage_key(monkeypatch, tmp_path) 
     ],
 )
 def test_build_dispatcher_hands_the_activation_section_to_the_recipe(
-    monkeypatch, tmp_path, recipe, activation, rule_type
+    stub_repository, tmp_path, recipe, activation, rule_type
 ) -> None:
-    monkeypatch.setattr(
-        GitLFSRepositoryBackendFactory,
-        "from_config",
-        lambda *args, **kwargs: lambda scenario: object(),
+    assert isinstance(
+        build(tmp_path, recipe=recipe, activation_settings=activation).recipe.activation_rule(), rule_type
     )
-
-    dispatcher = deploy.build_dispatcher(
-        _settings(recipe=recipe, activation_settings=activation, agent_record_dir=str(tmp_path / "agent-record"))
-    )
-
-    assert isinstance(dispatcher.recipe.activation_rule(), rule_type)
 
 
 @pytest.mark.unit
-def test_build_dispatcher_refuses_an_activation_section_for_a_preset(monkeypatch, tmp_path) -> None:
-    monkeypatch.setattr(
-        GitLFSRepositoryBackendFactory,
-        "from_config",
-        lambda *args, **kwargs: lambda scenario: object(),
-    )
-
+def test_build_dispatcher_refuses_an_activation_section_for_a_preset(stub_repository, tmp_path) -> None:
     with pytest.raises(ValueError, match="set its pipeline and activation sections in the preset file"):
-        deploy.build_dispatcher(
-            _settings(
-                recipe="recipe",
-                activation_settings={"module": "never"},
-                agent_record_dir=str(tmp_path / "agent-record"),
-            )
-        )
+        build(tmp_path, recipe="recipe", activation_settings={"module": "never"})
 
 
 @pytest.mark.unit
-def test_build_dispatcher_hands_the_pipeline_section_to_the_recipe(monkeypatch, tmp_path) -> None:
-    monkeypatch.setattr(
-        GitLFSRepositoryBackendFactory,
-        "from_config",
-        lambda *args, **kwargs: lambda scenario: object(),
-    )
+def test_build_dispatcher_hands_the_pipeline_section_to_the_recipe(stub_repository, tmp_path) -> None:
     generator = {"module": "tests.reef_recipe.test_generated_tasks:ScriptedGenerator", "config": {"count": 1}}
     pipeline = {
         "record2record": {"module": "reef.recipe.generated_tasks:GeneratedTaskRecord2Record", "config": {}},
@@ -486,12 +391,11 @@ def test_build_dispatcher_hands_the_pipeline_section_to_the_recipe(monkeypatch, 
         },
     }
 
-    settings = _settings(
-        recipe=GENERATED_TASK_RECIPE, pipeline_settings=pipeline, agent_record_dir=str(tmp_path / "ar")
-    )
     # The recipe trains task jobs, so its jobs carry the training component's rollout settings.
     recipe_settings = {"job_parameters": {"rollout": {"rollouts_per_task": 2}}}
-    dispatcher = deploy.build_dispatcher(dataclasses.replace(settings, recipe_settings=recipe_settings))
+    dispatcher = build(
+        tmp_path, recipe=GENERATED_TASK_RECIPE, pipeline_settings=pipeline, recipe_settings=recipe_settings
+    )
 
     stages = dispatcher.recipe.pipeline_stages
     # A stage the section leaves out is the recipe's own, with no config.
@@ -516,68 +420,23 @@ def test_build_dispatcher_hands_the_pipeline_section_to_the_recipe(monkeypatch, 
     ],
 )
 def test_build_dispatcher_rejects_a_pipeline_section_it_cannot_use(
-    monkeypatch, tmp_path, recipe, error, message
+    stub_repository, tmp_path, recipe, error, message
 ) -> None:
-    monkeypatch.setattr(
-        GitLFSRepositoryBackendFactory,
-        "from_config",
-        lambda *args, **kwargs: lambda scenario: object(),
-    )
-
+    pipeline = {"record2sample": {"module": "tests.reef_recipe.test_generated_tasks:ScriptedGenerator"}}
     with pytest.raises(error, match=message):
-        deploy.build_dispatcher(
-            _settings(
-                recipe=recipe,
-                pipeline_settings={
-                    "record2sample": {"module": "tests.reef_recipe.test_generated_tasks:ScriptedGenerator"}
-                },
-                agent_record_dir=str(tmp_path / "agent-record"),
-            ),
-        )
+        build(tmp_path, recipe=recipe, pipeline_settings=pipeline)
 
 
 @pytest.mark.unit
-def test_build_dispatcher_rejects_recipe_settings_nothing_consumes(monkeypatch, tmp_path) -> None:
-    """A recipe-shaped reef.* key no config field consumes must fail the boot loudly:
-    the alternative is a deployment silently running on recipe defaults."""
-    from reef.recipe import RecipeConfigError
-
-    monkeypatch.setattr(
-        GitLFSRepositoryBackendFactory,
-        "from_config",
-        lambda *args, **kwargs: lambda scenario: object(),
-    )
-
-    with pytest.raises(RecipeConfigError, match=r"OpenClawRLRecipe does not consume reef\.groups_per_step") as excinfo:
-        deploy.build_dispatcher(
-            _settings(
-                recipe=OPENCLAWRL_RECIPE,
-                recipe_settings={"groups_per_step": 4},
-                agent_record_dir=str(tmp_path / "agent-record"),
-            ),
-            environ={},
-        )
+@pytest.mark.parametrize("key", ["groups_per_step", "batch_size"])
+def test_build_dispatcher_rejects_recipe_settings_nothing_consumes(stub_repository, tmp_path, key) -> None:
+    """A recipe-shaped reef.* key no config field consumes must fail the boot loudly: the alternative is a
+    deployment silently running on recipe defaults. A stage setting such as batch_size belongs under its pipeline
+    key, not under reef.*."""
+    with pytest.raises(RecipeConfigError, match=rf"OpenClawRLRecipe does not consume reef\.{key}") as excinfo:
+        build(tmp_path, recipe=OPENCLAWRL_RECIPE, recipe_settings={key: 4})
     # The error lists what the recipe would consume.
     assert "reef.training_mode" in str(excinfo.value)
-
-
-@pytest.mark.unit
-def test_build_dispatcher_refuses_a_stage_setting_with_its_pipeline_key(monkeypatch, tmp_path) -> None:
-    monkeypatch.setattr(
-        GitLFSRepositoryBackendFactory,
-        "from_config",
-        lambda *args, **kwargs: lambda scenario: object(),
-    )
-
-    with pytest.raises(RecipeConfigError, match="does not consume"):
-        deploy.build_dispatcher(
-            _settings(
-                recipe=OPENCLAWRL_RECIPE,
-                recipe_settings={"batch_size": 4},
-                agent_record_dir=str(tmp_path / "agent-record"),
-            ),
-            environ={},
-        )
 
 
 @pytest.mark.unit
@@ -607,23 +466,11 @@ def test_slime_runtime_config_carries_the_ray_cluster_and_serving_the_configured
 
 
 @pytest.mark.unit
-def test_build_dispatcher_treats_sao_as_training_recipe(monkeypatch, tmp_path) -> None:
+def test_build_dispatcher_treats_sao_as_training_recipe(stub_repository, tmp_path) -> None:
     # A training recipe must route through the training-backend branch, not
     # the inference loader; SAORecipe requires an injected TrainingComponent and
     # would otherwise raise RecipeConfigError at load time.
-    monkeypatch.setattr(
-        GitLFSRepositoryBackendFactory,
-        "from_config",
-        lambda *args, **kwargs: lambda scenario: object(),
-    )
-
-    dispatcher = deploy.build_dispatcher(
-        _settings(
-            recipe=SAO_RECIPE,
-            agent_record_dir=str(tmp_path / "agent-record"),
-        ),
-        environ={},
-    )
+    dispatcher = build(tmp_path, recipe=SAO_RECIPE)
 
     assert dispatcher.recipe.name == "sao"
     # The training backend built the component (the inference branch builds none).
@@ -632,23 +479,9 @@ def test_build_dispatcher_treats_sao_as_training_recipe(monkeypatch, tmp_path) -
 
 
 @pytest.mark.unit
-def test_build_dispatcher_gives_max_staleness_to_the_record_stage_only(monkeypatch, tmp_path) -> None:
-    from reef.pipeline_context import PipelineContext
-
-    monkeypatch.setattr(
-        GitLFSRepositoryBackendFactory,
-        "from_config",
-        lambda *args, **kwargs: lambda scenario: object(),
-    )
-
-    dispatcher = deploy.build_dispatcher(
-        _settings(
-            recipe=OPENCLAWRL_RECIPE,
-            pipeline_settings={"record2record": {"config": {"max_staleness": 2}}},
-            agent_record_dir=str(tmp_path / "agent-record"),
-        ),
-        environ={},
-    )
+def test_build_dispatcher_gives_max_staleness_to_the_record_stage_only(stub_repository, tmp_path) -> None:
+    pipeline = {"record2record": {"config": {"max_staleness": 2}}}
+    dispatcher = build(tmp_path, recipe=OPENCLAWRL_RECIPE, pipeline_settings=pipeline)
 
     # The window belongs to the record-to-record stage; the training component never receives it.
     assert "max_staleness" not in dispatcher.recipe.training_component.config
@@ -656,18 +489,9 @@ def test_build_dispatcher_gives_max_staleness_to_the_record_stage_only(monkeypat
 
 
 @pytest.mark.unit
-def test_build_dispatcher_requires_the_model_path(monkeypatch) -> None:
-    monkeypatch.setattr(
-        GitLFSRepositoryBackendFactory,
-        "from_config",
-        lambda *args, **kwargs: lambda scenario: object(),
-    )
-
+def test_build_dispatcher_requires_the_model_path(stub_repository, tmp_path) -> None:
     with pytest.raises(ValueError, match=r"reef\.model_path is required"):
-        deploy.build_dispatcher(
-            _settings(model_path=""),
-            environ={},
-        )
+        build(tmp_path, model_path="")
 
 
 class HeldJobComponent(StubTrainingComponent):
@@ -735,9 +559,7 @@ def test_status_reports_the_running_job_the_finished_jobs_and_the_served_adapter
         pytest.fail(f"status did not reach {finished_jobs} finished jobs: {block}")
 
     async def run() -> None:
-        client = TestClient(TestServer(create_app(dispatcher)))
-        await client.start_server()
-        try:
+        async with TestClient(TestServer(create_app(dispatcher))) as client:
             dispatcher.get_or_create_scenario("math")
             idle = await math_status(client)
             assert (idle["training_job"], idle["finished_jobs"]) == (None, 0)
@@ -757,8 +579,6 @@ def test_status_reports_the_running_job_the_finished_jobs_and_the_served_adapter
                 assert finished["adapter_runtime_load_id"] == "adapter:math:w1"
             else:
                 assert "adapter_runtime_load_id" not in finished
-        finally:
-            await client.close()
 
     try:
         asyncio.run(run())
@@ -767,20 +587,10 @@ def test_status_reports_the_running_job_the_finished_jobs_and_the_served_adapter
 
 
 def test_service_tokens_merge_token_and_tokens_and_drop_empties() -> None:
-    config = {
-        "reef": {
-            "recipe": "openclawrl",
-            "token": "alice",
-            "tokens": ["bob", "", "alice", "  carol  "],
-        }
-    }
+    config = {"reef": {"recipe": "openclawrl", "token": "alice", "tokens": ["bob", "", "alice", "  carol  "]}}
     assert deploy.service_config_from_mapping(config).tokens == ("alice", "bob", "carol")
-
-
-def test_service_tokens_rejects_non_list() -> None:
-    config = {"reef": {"recipe": "openclawrl", "tokens": "alice,bob"}}
     with pytest.raises(ValueError, match=r"reef\.tokens must be a list"):
-        deploy.service_config_from_mapping(config)
+        deploy.service_config_from_mapping({"reef": {"recipe": "openclawrl", "tokens": "alice,bob"}})
 
 
 def test_reef_token_is_service_owned_and_never_reaches_the_recipe() -> None:
@@ -977,15 +787,28 @@ def test_stack_shutdown_refuses_a_reused_process_group_id(tmp_path: Path, monkey
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("returncode", [0, 1])
-def test_stack_treats_any_unexpected_child_exit_as_failure(tmp_path: Path, returncode: int) -> None:
+@pytest.mark.parametrize(
+    ("returncode", "signal_during_poll", "exit_code"),
+    [
+        # Any unexpected child exit is a failure.
+        (0, False, 1),
+        (1, False, 1),
+        # A signal that arrives after the watchdog began its polling pass, before shutdown made the child exit.
+        (-signal.SIGTERM, True, 0),
+    ],
+)
+def test_the_watchdog_fails_on_an_unexpected_child_exit_only(
+    tmp_path: Path, returncode: int, signal_during_poll: bool, exit_code: int
+) -> None:
+    from reef.runtime.executor.uniproc import UniProcExecutor
     from reef.service.deploy.orchestrator import _Stack
 
     stack = _Stack({}, [{"name": "service"}], tmp_path, 60, tmp_path / "serve.yaml")
-    from reef.runtime.executor.uniproc import UniProcExecutor
 
     class Worker:
         def status(self):
+            if signal_during_poll:
+                stack._stopping.set()
             return {"service": returncode}
 
         def read_log(self, *args):
@@ -995,31 +818,7 @@ def test_stack_treats_any_unexpected_child_exit_as_failure(tmp_path: Path, retur
 
     stack._watchdog()
 
-    assert stack.exit_code == 1
-
-
-@pytest.mark.unit
-def test_watchdog_does_not_reclassify_a_signal_driven_child_exit(tmp_path: Path) -> None:
-    from reef.service.deploy.orchestrator import _Stack
-
-    stack = _Stack({}, [{"name": "service"}], tmp_path, 60, tmp_path / "serve.yaml")
-    # Simulate a signal arriving after the watchdog began its polling pass but
-    # before shutdown made the child exit.
-    from reef.runtime.executor.uniproc import UniProcExecutor
-
-    class Worker:
-        def status(self):
-            stack._stopping.set()
-            return {"service": -signal.SIGTERM}
-
-        def read_log(self, *args):
-            return "", 0
-
-    stack._executors["service"] = UniProcExecutor.from_workers([Worker()])
-
-    stack._watchdog()
-
-    assert stack.exit_code == 0
+    assert stack.exit_code == exit_code
 
 
 @pytest.mark.unit
