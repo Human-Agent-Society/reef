@@ -1,4 +1,4 @@
-"""A sample-to-job stage gives each job the parameters of its samples' kind."""
+"""A sample-to-job stage gives each job the parameters of its samples' kind, and its instruction's over them."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import pytest
 
 from reef.core.job_data import JobData, TaskSample, TrajectorySample
 from reef.core.plugins import PluginConfigError
+from reef.core.training_request import TrainingRequest
 from reef.pipeline_context import PipelineContext
 from reef.sample2job import DistillJobData
 
@@ -27,6 +28,20 @@ def test_a_job_gets_the_parameters_of_its_samples_kind() -> None:
     # A harness step's data can hold no sample; it takes no parameters.
     assert jobs.job_parameters(JobData("s:3")) == {}
     assert jobs.experiment_config() == {"job_parameters": parameters}
+
+
+def instruction(**parameters: object) -> TrainingRequest:
+    payload = {"text": "train", "session": "s", "release_id": "r", "parameters": parameters}
+    return TrainingRequest.from_dict(payload, request_id="train-1")
+
+
+def test_an_instructions_parameters_go_over_the_parameters_of_its_kind() -> None:
+    jobs = stage({"trajectory": {"method": {"objective": "sft"}, "learning_rate": 1e-5}})
+    data = JobData("s:instruction:train-1", (TRAJECTORY,), request=instruction(learning_rate=2e-5, batch_size=8))
+    assert jobs.job_parameters(data) == {"method": {"objective": "sft"}, "learning_rate": 2e-5, "batch_size": 8}
+    # A kind that the recipe gives no parameters trains with the instruction's alone.
+    rl = {"method": {"objective": "task_group"}, "rollout": {"rollouts_per_task": 4}}
+    assert jobs.job_parameters(JobData("s:instruction:train-1", (TASK,), request=instruction(**rl))) == rl
 
 
 def test_mixed_kinds_and_a_kind_without_parameters_are_refused() -> None:
