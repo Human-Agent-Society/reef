@@ -25,6 +25,7 @@ from reef.core import AgentRecord, RequestType
 from reef.core.evaluation import EvaluationResult, UpdateCandidate
 from reef.core.trajectories import recorded_payload
 from reef.dispatcher import Dispatcher
+from reef.execution.sandbox.process import LocalExecutor
 from reef.harness.adapters import get_adapter
 from reef.harness.rollouts.model_binding import ModelBinding, ModelBindings
 from reef.harness.rollouts.run import RolloutError, RolloutResult
@@ -32,7 +33,6 @@ from reef.harness.tree.mutations import Mutation
 from reef.inference.http import InferenceProxyRuntime
 from reef.recipe import RecipeConfigError
 from reef.recipe.registry import build_recipe
-from reef.sandbox.process import LocalExecutor
 from reef.storage.commit_history import CommitHistoryScenarioStore
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train.trainer import Trainer
