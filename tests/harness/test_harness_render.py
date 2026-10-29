@@ -51,30 +51,17 @@ NODES = [
 ]
 
 
+def edited_descriptor(tmp_path: Path, adapter: str, **fields: object) -> Path:
+    """A copy of ``adapter``'s bundled descriptor.yaml under ``tmp_path`` with ``fields`` set."""
+    data = yaml.safe_load((Path(reef.harness.adapters.__file__).parent / adapter / "descriptor.yaml").read_text())
+    target = tmp_path / "descriptor.yaml"
+    target.write_text(yaml.safe_dump({**data, **fields}), encoding="utf-8")
+    return target
+
+
 def golden_tree(adapter: str) -> dict[str, str]:
     root = GOLDENS / adapter
     return {path.relative_to(root).as_posix(): path.read_text() for path in sorted(root.rglob("*")) if path.is_file()}
-
-
-def test_pi_render_matches_the_golden_tree() -> None:
-    # pi keeps every model call on the binding, so the provider and model choice in NODES are swapped for a setting.
-    nodes = [("config", {"data": {"defaultThinkingLevel": "off"}}), *(node for node in NODES if node[0] != "config")]
-    assert render_composition(nodes, get_adapter("pi")) == golden_tree("pi")
-
-
-def test_opencode_render_matches_the_golden_tree() -> None:
-    nodes = [node for node in NODES if node[1].get("target") != "models"]
-    assert render_composition(nodes, get_adapter("opencode")) == golden_tree("opencode")
-
-
-def test_claude_render_matches_the_golden_tree() -> None:
-    nodes = [node for node in NODES if node[1].get("target") != "models"]
-    assert render_composition(nodes, get_adapter("claude")) == golden_tree("claude")
-
-
-def test_codex_render_matches_the_golden_tree() -> None:
-    nodes = [node for node in NODES if node[0] != "config" and node[0] != "code_extension"]
-    assert render_composition(nodes, get_adapter("codex")) == golden_tree("codex")
 
 
 def test_codex_binding_uses_the_responses_api() -> None:
@@ -189,10 +176,6 @@ def _terminus_nodes():
     return [*nodes, ("config", {"data": {"max_turns": 40}})]
 
 
-def test_terminus_render_matches_the_golden_tree() -> None:
-    assert render_composition(_terminus_nodes(), get_adapter("terminus")) == golden_tree("terminus")
-
-
 def test_terminus_folds_agent_commands_into_a_second_skill_root() -> None:
     files = render_composition(_terminus_nodes(), get_adapter("terminus"))
     # Both roots carry a SKILL.md, and the quirk synthesized frontmatter on each.
@@ -250,10 +233,6 @@ def _dsh_nodes():
     # dsh's config target is keyed by plugin id, so the pi shaped config nodes are swapped for one of its own.
     nodes = [node for node in NODES if node[0] != "config"]
     return [("config", {"data": {"agent-loop": {"config": {"maxSteps": 40}}}}), *nodes]
-
-
-def test_dsh_render_matches_the_golden_tree() -> None:
-    assert render_composition(_dsh_nodes(), get_adapter("dsh")) == golden_tree("dsh")
 
 
 def test_dsh_quirks_emit_the_patch_layer_the_env_file_and_skill_frontmatter() -> None:
@@ -465,8 +444,26 @@ def _hermes_nodes():
     ]
 
 
-def test_hermes_render_matches_the_golden_tree() -> None:
-    assert render_composition(_hermes_nodes(), get_adapter("hermes")) == golden_tree("hermes")
+@pytest.mark.parametrize(
+    ("adapter", "nodes"),
+    [
+        # pi keeps every model call on the binding, so the provider and model choice in NODES are swapped for a
+        # setting.
+        (
+            "pi",
+            [("config", {"data": {"defaultThinkingLevel": "off"}}), *(node for node in NODES if node[0] != "config")],
+        ),
+        ("opencode", [node for node in NODES if node[1].get("target") != "models"]),
+        ("claude", [node for node in NODES if node[1].get("target") != "models"]),
+        ("codex", [node for node in NODES if node[0] not in ("config", "code_extension")]),
+        ("terminus", _terminus_nodes()),
+        ("dsh", _dsh_nodes()),
+        ("hermes", _hermes_nodes()),
+    ],
+    ids=["pi", "opencode", "claude", "codex", "terminus", "dsh", "hermes"],
+)
+def test_render_matches_the_golden_tree(adapter: str, nodes: list[tuple[str, dict]]) -> None:
+    assert render_composition(nodes, get_adapter(adapter)) == golden_tree(adapter)
 
 
 def test_hermes_quirks_emit_the_config_the_plugin_grants_and_skill_frontmatter() -> None:
@@ -1096,12 +1093,8 @@ def test_claude_descriptor_names_its_version_flags_and_turns_its_own_updater_off
 @pytest.mark.parametrize("key", ["client_args", "client_version_args"])
 @pytest.mark.parametrize("value", ["--settings", [1], [""]])
 def test_descriptor_client_argument_lists_are_lists_of_strings(tmp_path, key: str, value: object) -> None:
-    data = yaml.safe_load((Path(reef.harness.adapters.__file__).parent / "claude" / "descriptor.yaml").read_text())
-    data[key] = value
-    target = tmp_path / "descriptor.yaml"
-    target.write_text(yaml.safe_dump(data), encoding="utf-8")
     with pytest.raises(DescriptorError, match=f"'{key}'"):
-        load_descriptor(target)
+        load_descriptor(edited_descriptor(tmp_path, "claude", **{key: value}))
 
 
 def test_adapter_renderer_steps_run_in_order_on_their_own_files() -> None:
@@ -1187,12 +1180,8 @@ def test_a_quirks_module_must_define_one_adapter_renderer(tmp_path, monkeypatch)
         "class SecondRenderer(AdapterRenderer):\n    pass\n"
     )
     monkeypatch.syspath_prepend(str(tmp_path))
-    data = yaml.safe_load((Path(reef.harness.adapters.__file__).parent / "native" / "descriptor.yaml").read_text())
-    data["quirks"] = module_name
-    target = tmp_path / "descriptor.yaml"
-    target.write_text(yaml.safe_dump(data), encoding="utf-8")
     with pytest.raises(DescriptorError, match="more than one AdapterRenderer subclass: FirstRenderer, SecondRenderer"):
-        load_descriptor(target)
+        load_descriptor(edited_descriptor(tmp_path, "native", quirks=module_name))
 
 
 def test_bundled_descriptors_keep_the_state_their_resume_and_setup_read() -> None:
@@ -1240,12 +1229,8 @@ def test_bundled_descriptors_keep_the_state_their_resume_and_setup_read() -> Non
 )
 def test_descriptor_client_state_is_a_known_kind_below_the_composition(tmp_path, entry, message: str) -> None:
     """The wrapper links only the composition into its temp copy, so state elsewhere would never reach the binary."""
-    data = yaml.safe_load((Path(reef.harness.adapters.__file__).parent / "pi" / "descriptor.yaml").read_text())
-    data["client_state"] = [entry]
-    target = tmp_path / "descriptor.yaml"
-    target.write_text(yaml.safe_dump(data), encoding="utf-8")
     with pytest.raises(DescriptorError, match=message):
-        load_descriptor(target)
+        load_descriptor(edited_descriptor(tmp_path, "pi", client_state=[entry]))
 
 
 @pytest.mark.parametrize(
@@ -1258,12 +1243,8 @@ def test_descriptor_client_state_is_a_known_kind_below_the_composition(tmp_path,
     ],
 )
 def test_descriptor_host_env_and_root_placement_are_validated(tmp_path, field: str, value, message: str) -> None:
-    data = yaml.safe_load((Path(reef.harness.adapters.__file__).parent / "pi" / "descriptor.yaml").read_text())
-    data[field] = value
-    target = tmp_path / "descriptor.yaml"
-    target.write_text(yaml.safe_dump(data), encoding="utf-8")
     with pytest.raises(DescriptorError, match=message):
-        load_descriptor(target)
+        load_descriptor(edited_descriptor(tmp_path, "pi", **{field: value}))
 
 
 def test_only_terminus_keeps_host_environment_or_has_a_bind_mounted_root() -> None:
