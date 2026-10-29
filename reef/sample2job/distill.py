@@ -13,7 +13,7 @@ from reef.sample2job.base import Sample2Job, Sample2JobSettings
 
 
 class DistillJobData(Sample2Job):
-    """Put the samples into one job's data as they come, in selection order."""
+    """Put the samples into one job's data as they come, in store order."""
 
     @classmethod
     def from_config(

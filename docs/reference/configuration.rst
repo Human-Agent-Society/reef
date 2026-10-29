@@ -839,15 +839,18 @@ the runtime under ``recipe.runtime``. Harness settings live in
 ``recipe.config.training_mode`` is shared by all recipes and defaults to ``auto``.
 It has two values:
 
-- ``auto``: a job starts when the held data reaches ``job_samples`` samples.
+- ``auto``: a job starts when the `buffer
+  <../developer-guide/processors.rst#the-buffer>`__ holds ``job_samples``
+  samples: the untrained samples that the next job takes.
   ``POST /reef/train`` is refused.
 - ``manual``: a job starts only for a ``POST /reef/train`` instruction. The
-  instruction's job takes the samples that automatic job data would take next,
-  up to ``job_samples``. A weight recipe waits until ``job_samples`` samples are
-  held, then trains them; the instruction text goes into the commit's
+  instruction's job takes the samples that automatic job data would take next:
+  the samples of the buffer. A weight recipe waits until the buffer holds
+  ``job_samples`` samples, then trains them; the instruction text goes into the commit's
   ``training_request`` metrics. Harness evolution runs the instruction at once:
-  the proposer gets the instruction and up to ``job_samples`` traces (by default
-  ``evolution.batch_size``), possibly none. The traces are scored traces, or
+  the proposer gets the instruction and up to ``buffer_size`` traces (by
+  default ``job_samples``, which defaults to ``evolution.batch_size``),
+  possibly none. The traces are scored traces, or
   unscored records when the ``pipeline`` section names the inference stages.
   An RL task job of ``sft-then-rl``'s imported tasks also starts only for an
   instruction.
@@ -873,10 +876,9 @@ to select another mode at runtime. This changes subsequent job data; reserved
 job data completes under its original mode. Reef stores the selected mode in
 the scenario's settings, so reloads and restarts apply it again, and it takes
 precedence over the configured mode. A stored mode that the recipe does not
-support keeps the configured mode and logs a warning. In every mode the held
-record sets keep at most ``pipeline.sample2job.config.buffer_size`` samples. As
-records arrive, the pipeline releases the oldest sets beyond that limit and
-logs one warning.
+support keeps the configured mode and logs a warning. In every mode, the
+samples of ready record sets wait in the scenario's sample store until a job
+trains them.
 
 .. config::
 
@@ -1317,10 +1319,10 @@ job is one optimizer step:
        config:
          job_samples: ${training.config.global_batch_size}
 
-The two values can differ. Job data takes whole record sets until it holds at
-least ``job_samples``, so it can hold more: a group of rollouts is one unit,
-and a job with more samples than the batch size trains more than one
-optimizer step. A job with fewer samples than the batch size trains one
+The two values can differ. Job data takes up to ``buffer_size`` samples and
+the rest of each group that those samples touch, so it can hold more than
+``job_samples``: a group of rollouts trains in one job, and a job with more
+samples than the batch size trains more than one optimizer step. A job with fewer samples than the batch size trains one
 partial step. The ``remainder`` field of a job's optional ``scheduling``
 parameter decides what happens to a shorter last step; by default, the
 component trains it as a smaller step. See `Job size
@@ -1332,7 +1334,7 @@ and ``buffer_size``. A recipe's page lists the other keys of its stage.
 .. config::
 
    pipeline.sample2job.config.job_samples | required for weight recipes; ``evolution.batch_size`` for harness evolution | the fewest samples of one job, a positive int; at most the stage's grid for TTTD and SDPO
-   pipeline.sample2job.config.buffer_size | four times ``job_samples`` | the most samples that wait for a job; at least ``job_samples``. Beyond it, the pipeline releases the oldest record sets, in every training mode; it keeps the newest one, so a record set larger than the buffer still trains. Uploaded trajectories do not count toward it.
+   pipeline.sample2job.config.buffer_size | ``job_samples`` | the most samples that one job takes from the buffer, beside the rest of a group that those samples touch; at least ``job_samples``. Uploaded trajectories count toward it. Samples beyond it wait in the sample store for later jobs.
 
 Reef checks each stage when it loads the recipe config, before a scenario
 starts: it imports a named class, rejects functions and abstract classes, and
@@ -1720,8 +1722,9 @@ The following names are relative to ``operations/``:
    * - ``processor/unreserved_candidates``, ``processor/reserved_candidates``
      - Computed-feedback candidates outside or inside the reserved job data.
    * - ``processor/ready_samples``, ``processor/job_samples``, ``processor/buffer_size``
-     - Samples that job data can take now, samples that automatic job data
-       needs, and the most samples that the held record sets keep.
+     - Samples that job data can take now (the buffer), samples that
+       automatic job data needs, and the most samples that one job takes
+       from the buffer.
    * - ``processor/buffered_requests``
      - Explicit training instructions already buffered by the processor.
    * - ``training/reserved_job_data``

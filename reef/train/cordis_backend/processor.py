@@ -76,7 +76,7 @@ class TraceJobData(DistillJobData):
     """Put trace tasks into job data unmodified; the backends consume them without more processing.
 
     In ``manual`` a queued instruction takes the traces that automatic job
-    data would take next, up to ``job_samples`` and possibly none, so the
+    data would take next, up to ``buffer_size`` and possibly none, so the
     proposer reads the request beside them.
     """
 

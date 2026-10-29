@@ -117,8 +117,9 @@ class CoralJobData(Sample2Job):
     """Complete CORAL sibling groups, one job's data: the siblings of one parent are one relative-reward group.
 
     The record stage decides when a group is complete (``group_size`` in
-    ``pipeline.record2record.config``). Job data takes whole groups until it
-    holds ``job_samples``. Config: ``buffer_size`` and ``job_samples``.
+    ``pipeline.record2record.config``); a group is fixed when it is first ready, and later siblings form a new
+    group. Job data takes up to ``buffer_size`` samples and the rest of each group that those touch. Config:
+    ``buffer_size`` and ``job_samples``.
     """
 
     @classmethod
@@ -136,9 +137,10 @@ class CoralJobData(Sample2Job):
 
     def make_job_data(self, items: tuple[Sample, ...], data_id: str) -> JobData:
         data = JobData(data_id, items)
+        # The pipeline names each stored group (``group_id``); a parent's later siblings form another group.
         groups: dict[str, list[TrajectorySample]] = {}
         for sample in trajectories(data):
-            groups.setdefault(str(sample.metadata["coral"]["group"]), []).append(sample)
+            groups.setdefault(coral_group_id(sample), []).append(sample)
         for parent, group in groups.items():
             rewards = tuple(trajectory_reward(sample) for sample in group)
             if all(reward == rewards[0] for reward in rewards[1:]):
@@ -156,5 +158,10 @@ class CoralJobData(Sample2Job):
             )
         return replace(
             data,
-            samples=tuple(replace(item, group_id=str(item.metadata["coral"]["group"])) for item in trajectories(data)),
+            samples=tuple(replace(item, group_id=coral_group_id(item)) for item in trajectories(data)),
         )
+
+
+def coral_group_id(sample: TrajectorySample) -> str:
+    """The comparison group of ``sample``: the group that the pipeline stored it in, else its parent."""
+    return sample.group_id if sample.group_id is not None else str(sample.metadata["coral"]["group"])

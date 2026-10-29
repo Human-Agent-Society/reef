@@ -409,11 +409,12 @@ def test_periodic_metrics_report_backlog_during_training_without_status_reads(st
     assert sample["training/execution/elapsed_seconds"] >= 0
     assert sample["records/oldest_unread_age_seconds"] >= 0
     assert sample["training/reserved_job_data"] == 1
+    # A ready report leaves the record stage when its sample is stored, so the reserved job data holds none.
     assert sample["processor/unreserved_reports"] == 0
-    assert sample["processor/reserved_reports"] == 1
-    # The pipeline status is exported too; the default buffer holds the data of four jobs.
+    assert sample["processor/reserved_reports"] == 0
+    # The pipeline status is exported too; the default buffer holds the data of one job.
     assert "processor/ready_samples" in sample
-    assert (sample["processor/job_samples"], sample["processor/buffer_size"]) == (1, 4)
+    assert (sample["processor/job_samples"], sample["processor/buffer_size"]) == (1, 1)
     assert not tracker.events
     component.release.set()
     _wait_for_jobs(dispatcher, 2)
