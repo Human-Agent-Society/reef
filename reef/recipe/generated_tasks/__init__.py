@@ -13,8 +13,9 @@ generator's method:
 - ``processor``: the three stages. ``GeneratedTaskRecord2Record`` holds the
   source sessions and starts each task-generation round when it is due;
   ``GeneratedTaskSamples`` runs the rounds (generate, validate, send the results
-  back); and ``GeneratedTaskJobData`` hands the saved tasks to the training
-  component as task jobs, which the component rolls out on its own sampler.
+  back), and hands the saved train tasks to the sample store; and
+  ``GeneratedTaskJobData`` makes task jobs of the buffer's tasks, which the
+  training component rolls out on its own sampler.
 - ``results``: each train task's first rollout result and the generations
   delivered to the generator, kept in the task store's documents.
 - ``objective``: group relative advantages per task group on Tinker's

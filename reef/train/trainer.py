@@ -127,8 +127,7 @@ class Trainer:
         deployment sets the size. The trainer's ``job_samples`` is the
         sample-to-job stage's ``job_samples``, which is ``default_job_samples``
         unless the stage config sets it; the stage checks its own size rules.
-        A trainer that trains with no ``job_samples``, through a stage that
-        trains more than its own job data, is a ``PluginConfigError``.
+        A trainer that trains with no ``job_samples`` is a ``PluginConfigError``.
         ``job_parameters`` is the parameters of each job of ``job_loop``, by
         the kind of its samples (``PipelineContext.job_parameters``); the
         pipeline's stage gives them with each job's data. ``None`` gives
@@ -158,7 +157,7 @@ class Trainer:
             pipeline.close()
             raise ValueError("pipeline_factory must preserve the requested training_mode")
         stage = pipeline.sample2job
-        if trains and stage.job_samples is None and not stage.trains_own_job_data_only:
+        if trains and stage.job_samples is None:
             pipeline.close()
             raise PluginConfigError(
                 f"{type(stage).__name__} has no job_samples: set pipeline.sample2job.config.job_samples, "
@@ -217,8 +216,7 @@ class Trainer:
         else:
             self._candidate_evaluator = BackendAlwaysSelectPlugin(candidate_backend)
         #: The fewest samples one job trains: automatic job data holds at least this many. None when the
-        #: trainer trains nothing (it reads every record and is never ready) and when its stage trains only
-        #: its own job data.
+        #: trainer trains nothing (it reads every record and is never ready).
         self.job_samples = pipeline.sample2job.job_samples if self.trains else None
         self._state = dict(state)
         self._data_offset = 0

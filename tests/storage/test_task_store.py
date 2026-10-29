@@ -231,13 +231,6 @@ def test_documents_are_written_once_and_trained_marks_name_published_train_tasks
         store.write_document(key="", document="x")
     assert session.tasks.open("other").documents() == {}
 
-    store.mark_trained(task_names=("alpha",))
-    store.mark_trained(task_names=("alpha",))
-    assert store.trained_task_names() == {"alpha"}
-    with pytest.raises(TaskStoreError, match="not a published train task"):
-        store.mark_trained(task_names=("beta",))
-    assert session.tasks.open("other").trained_task_names() == frozenset()
-
 
 def test_store_names_are_separate(session, tmp_path):
     alpha = session.tasks.open("alpha")
@@ -276,7 +269,6 @@ def test_tasks_survive_a_restart_and_archive_retires_them(open_durable_storage, 
         store.publish_task(generation=0, index=0, split="train")
         added = store.add_task(directory=binary_task(sources, "image-task"), split="eval")
         store.write_document(key="rollout/alpha", document="saved")
-        store.mark_trained(task_names=("alpha",))
 
     with closing(open_durable_storage()) as storage:
         with closing(storage.open("math")) as session:
@@ -288,11 +280,11 @@ def test_tasks_survive_a_restart_and_archive_retires_them(open_durable_storage, 
             assert read_harbor_task(store.path(published.files_digest)) == generated("alpha")
             assert restored == added
             assert (store.path(restored.files_digest) / "environment" / "image.png").read_bytes() == bytes(range(256))
-            assert store.documents() == {"rollout/alpha": "saved"} and store.trained_task_names() == {"alpha"}
+            assert store.documents() == {"rollout/alpha": "saved"}
         storage.archive("math")
         with closing(storage.open("math")) as session:
             store = session.tasks.open("tasks")
-            assert store.generations() == () and store.trained_task_names() == frozenset() and store.documents() == {}
+            assert store.generations() == () and store.documents() == {}
             with pytest.raises(TaskStoreError, match="no files"):
                 store.path(published.files_digest)
 

@@ -40,8 +40,8 @@ class TaskTables:
     candidate, with the digest of its task files and its outcome.
     ``published`` holds one row for each published task name, with its
     position in publication order and the digest of its task files.
-    ``trained`` holds one row for each task that trained, and ``documents``
-    one row for each document key with its document text.
+    ``trained`` holds the trained marks that task stores kept before the sample store counted training; only
+    ``migrate_imported_tasks`` reads them. ``documents`` holds one row for each document key with its text.
     """
 
     generations: Table
@@ -280,19 +280,6 @@ class SQLTaskStore(TaskStore):
                 select(documents.c.document_key, documents.c.document).where(self.matching(documents))
             )
             return {row.document_key: row.document for row in rows}
-
-    def mark_trained(self, *, task_names: tuple[str, ...]) -> None:
-        with self.records._transaction(write=True) as connection:
-            for name in task_names:
-                published = self.published_tasks(connection, task_name=name)
-                if not published or published[0].split != "train":
-                    raise TaskStoreError(f"task {name!r} is not a published train task")
-                self.records._insert_if_absent(connection, self.tables.trained, {**self.key, "task_name": name})
-
-    def trained_task_names(self) -> frozenset[str]:
-        trained = self.tables.trained
-        with self.records._transaction(write=False) as connection:
-            return frozenset(connection.execute(select(trained.c.task_name).where(self.matching(trained))).scalars())
 
     def publish(self, connection: Connection, name: str, digest: str, split: SplitName) -> StoredTask:
         """Record ``name`` as published with the files ``digest`` to ``split``, and return the published task.
