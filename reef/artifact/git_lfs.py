@@ -684,12 +684,16 @@ class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
         The second process then reads the base of the first.
         """
         base = self._workspace.ls_remote("refs/reef/base")
-        if base is None:
-            if self._workspace.has_refs():
+        if base is None and self._workspace.has_refs():
+            # Another constructor can import the base after the first read.
+            # Refuse only when the base is still missing.
+            base = self._workspace.ls_remote("refs/reef/base")
+            if base is None:
                 raise ArtifactSourceError(
                     f"artifact repository {self.repository} has releases but no base artifact; "
                     "an older Reef made it, so create the artifact repository again"
                 )
+        if base is None:
             base = self._push_base(source)
         recorded = self._manifest.read(base).get("source")
         if not isinstance(recorded, Mapping) or recorded.get("kind") != "import":
