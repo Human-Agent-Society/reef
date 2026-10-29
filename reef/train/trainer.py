@@ -389,7 +389,9 @@ class Trainer:
     def job_data_ready(self) -> bool:
         """Whether reserved or buildable job data is waiting; a pending job commit holds no job data."""
         with self._lock:
-            return (self._pending is not None and self._pending.data is not None) or self.pipeline_ready()
+            if self._pending is not None and self._pending.data is not None:
+                return True
+            return self.trains and self._pipeline.holds_job_data(self.job_samples)
 
     def holds_untrained_records(self) -> bool:
         """Whether this trainer has records that its backend would still train on.
@@ -402,7 +404,11 @@ class Trainer:
         if not self.trains:
             return False
         with self._lock:
-            if self._pending is not None or self._pipeline.background_jobs_running() or self.pipeline_ready():
+            if (
+                self._pending is not None
+                or self._pipeline.background_jobs_running()
+                or self._pipeline.holds_job_data(self.job_samples)
+            ):
                 return True
             trajectories = self.trajectory_store
             if (
@@ -439,7 +445,12 @@ class Trainer:
             }
 
     def pipeline_ready(self) -> bool:
-        """Whether the pipeline holds the next job's data; the caller holds the lock. A trainer that trains nothing is never ready."""
+        """Advance the pipeline and return whether it holds the next job's data; the caller holds the lock.
+
+        Only the worker's cycle advances the pipeline, so a finished background job stays running until that cycle
+        collects it, and the worker polls until then. Queries from other threads use ``holds_job_data``. A trainer
+        that trains nothing is never ready.
+        """
         return self.trains and self._pipeline.ready(self.job_samples)
 
     def _build_validated_job_data(self) -> JobData:
