@@ -98,7 +98,9 @@ def test_root_attempts_group_together():
     processor.push(_attempt_report("r2", "i2", 0.2, commit="c-b", parent=None))
     assert processor.ready(2)
     batch = processor.build_job_data(2)
-    assert {item.group_id for item in batch.samples} == {ROOT_GROUP}
+    # The stored group names the attempts that trained together: the root's first group starts at r1.
+    assert {item.group_id for item in batch.samples} == {"r1"}
+    assert {item.metadata["coral"]["group"] for item in batch.samples} == {ROOT_GROUP}
 
 
 def test_groups_do_not_mix_across_parents():
@@ -111,7 +113,7 @@ def test_groups_do_not_mix_across_parents():
     assert not processor.ready(2)
 
 
-def test_a_batch_holds_complete_sibling_groups_each_grouped_by_its_own_parent():
+def test_a_batch_holds_complete_sibling_groups_each_grouped_by_its_stored_group():
     processor = _processor(group_size=2)
     for index in range(4):
         processor.push(_inference(f"i{index}", [1, 2], [1], [-0.1]))
@@ -124,8 +126,8 @@ def test_a_batch_holds_complete_sibling_groups_each_grouped_by_its_own_parent():
 
     groups = trajectory_groups(processor.build_job_data(4))
     assert [[(sample.group_id, trajectory_reward(sample)) for sample in group] for group in groups] == [
-        [("p0", 0.1), ("p0", 0.2)],
-        [("p1", 0.3), ("p1", 0.4)],
+        [("r0", 0.1), ("r0", 0.2)],
+        [("r2", 0.3), ("r2", 0.4)],
     ]
 
 

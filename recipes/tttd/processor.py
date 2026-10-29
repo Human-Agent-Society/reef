@@ -119,7 +119,7 @@ class TTTDGrouping(ReportGrouping):
 
 
 class TTTDRecord2Record(ReportRecord2Record):
-    """TTTD's record stage: one group per step, in step order; a terminal report owns its sources.
+    """TTTD's record stage: one group per step; a terminal report owns its sources.
 
     Config: ``groups_per_step`` and ``rollouts_per_group``, the step grid, and ``max_staleness``.
     The later stages read the grid from this stage.

@@ -126,8 +126,8 @@ def test_sao_recipe_defaults_are_reef_side_only() -> None:
         SAOSamples,
         SAOJobData,
     )
-    # Without a configured buffer_size the buffer holds the data of four jobs.
-    assert recipe.build_pipeline(PipelineContext("math", default_job_samples=128)).buffer_size == 512
+    # Without a configured buffer_size the buffer holds the data of one job.
+    assert recipe.build_pipeline(PipelineContext("math", default_job_samples=128)).buffer_size == 128
 
 
 @pytest.mark.unit
@@ -297,7 +297,9 @@ def test_backend_rejects_rollout_that_trains_a_non_action_token() -> None:
     prepared = prepare_slime_job(batch, TrainingMethod("sao"), {}, StepScheduling(), step_size=1)
     with pytest.raises(ValueError):
         to_slime_rollout_data(prepared.payload)
-    assert processor.releasable_record_ids().isdisjoint({"i1", "r1"})
+    # The job data trains nothing until it is acknowledged: released, the next job data holds the same sample.
+    processor.release_job_data(batch.data_id)
+    assert processor.build_job_data(1).samples == batch.samples
 
 
 @pytest.mark.unit
@@ -310,7 +312,9 @@ def test_backend_rejects_rollout_with_logprob_length_mismatch() -> None:
     prepared = prepare_slime_job(batch, TrainingMethod("sao"), {}, StepScheduling(), step_size=1)
     with pytest.raises(ValueError):
         to_slime_rollout_data(prepared.payload)
-    assert processor.releasable_record_ids().isdisjoint({"i1", "r1"})
+    # The job data trains nothing until it is acknowledged: released, the next job data holds the same sample.
+    processor.release_job_data(batch.data_id)
+    assert processor.build_job_data(1).samples == batch.samples
 
 
 @pytest.mark.unit
@@ -332,7 +336,9 @@ def test_malformed_training_data_is_preserved_until_backend_validation() -> None
     prepared = prepare_slime_job(batch, TrainingMethod("sao"), {}, StepScheduling(), step_size=1)
     with pytest.raises(ValueError):
         to_slime_rollout_data(prepared.payload)
-    assert processor.releasable_record_ids().isdisjoint({"i1", "r1"})
+    # The job data trains nothing until it is acknowledged: released, the next job data holds the same sample.
+    processor.release_job_data(batch.data_id)
+    assert processor.build_job_data(1).samples == batch.samples
 
 
 @pytest.mark.unit

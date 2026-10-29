@@ -125,8 +125,8 @@ class Proposer(ConfiguredPlugin, ABC):
     ``requests`` contains exactly one mapping with ``id``, ``text``,
     ``session``, ``release_id``, ``requires`` and ``untrusted=True``. It is the
     instruction that owns this step; ``samples`` is what automatic job data would take next, up to
-    ``job_samples`` (by default ``evolution.batch_size``) and possibly none (scored traces, or unscored records
-    when the ``pipeline`` section names the inference stages). A proposer that takes
+    ``buffer_size`` (by default ``job_samples``, which defaults to ``evolution.batch_size``) and possibly none
+    (scored traces, or unscored records when the ``pipeline`` section names the inference stages). A proposer that takes
     instructions sets ``reads_requests``. It generates mutations against the current tree, then the
     same evaluation and publication policy used by automatic evolution apply.
 

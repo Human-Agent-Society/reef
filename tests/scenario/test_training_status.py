@@ -12,6 +12,8 @@ from __future__ import annotations
 import tempfile
 import time
 from collections.abc import Mapping
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Event, Thread
@@ -81,6 +83,7 @@ def registry_double(scenario: SimpleNamespace) -> SimpleNamespace:
         get_optional=lambda name: scenario if name == "s" else None,
         loaded_scenarios=lambda: (scenario,),
         preload_errors={},
+        lock_for=lambda name: nullcontext(True),
     )
 
 
@@ -374,5 +377,38 @@ def test_a_status_read_leaves_a_finished_step_to_the_worker_which_trains_its_job
         dispatcher.get_or_create_scenario("generated", allow_implicit_creation=True)
         assert_trains_the_generated_task(training_component)
         assert read_ready == [False]
+    finally:
+        dispatcher.close()
+
+
+def test_status_keeps_the_scenario_open_until_its_storage_reads_finish(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dispatcher = background_step_dispatcher(tmp_path)[0]
+    current = dispatcher.get_or_create_scenario("generated", allow_implicit_creation=True)
+    artifact_status = current.artifact_status
+    reload_attempts: list[bool] = []
+
+    def reload_if_unlocked() -> None:
+        with dispatcher.registry.lock_for("generated", blocking=False) as acquired:
+            reload_attempts.append(acquired)
+            if acquired:
+                dispatcher.registry.reload("generated")
+
+    def read_artifacts() -> dict[str, object]:
+        # A recovery thread tries to replace and close the instance between status reads.
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            pool.submit(reload_if_unlocked).result(timeout=5)
+        return artifact_status()
+
+    monkeypatch.setattr(current, "artifact_status", read_artifacts)
+    try:
+        status = dispatcher.build_training_status()
+        assert status["error"] is None
+        assert "generated" in status["scenarios"]
+        assert reload_attempts == [False]
+        reload_if_unlocked()
+        assert reload_attempts == [False, True]
+        assert dispatcher.build_training_status()["error"] is None
     finally:
         dispatcher.close()

@@ -209,7 +209,7 @@ def test_postgres_moves_the_uploaded_trajectories_of_schema_version_9_with_their
     with engine.connect() as connection:
         assert not inspect(connection).has_table("uploaded_trajectory", schema=schema)
         version = Table("schema_version", MetaData(schema=schema), autoload_with=connection)
-        assert connection.execute(select(version.c.version)).scalars().all() == [10]
+        assert connection.execute(select(version.c.version)).scalars().all() == [11]
     engine.dispose()
 
 
@@ -266,3 +266,43 @@ def test_a_start_moves_the_imported_tasks_of_the_old_task_store_with_their_train
         (held,) = session.samples.tasks(split="eval")
         assert isinstance(held.sample, TaskSample) and (held.sample.task_path / "instruction.md").is_file()
         assert session.tasks.open("imported-tasks").tasks() == ()
+
+
+def test_record_samples_belong_to_their_trainer_and_consume_their_records(storage):
+    with closing(storage.open("math")) as session:
+        samples = session.samples
+        samples.add_trajectories((("upload", trajectory("u")),))
+        grid = (("a:r1:0", trajectory("a1")), ("a:r2:0", trajectory("a2")))
+        assert samples.add_record_samples("a", "a:r1", ("r1", "i1", "r2"), grid)
+        assert not samples.add_record_samples("a", "a:r1", ("r1", "i1", "r2"), grid), "a retry changes nothing"
+        samples.add_record_samples("b", None, ("r3",), (("b:r3:0", trajectory("b")),))
+        with pytest.raises(SampleConflict, match="other content"):
+            samples.add_record_samples("a", "a:r1", ("r1",), (("a:r1:0", trajectory("other")),))
+        with pytest.raises(ValueError, match="one or more samples"):
+            samples.add_record_samples("a", None, ("r9",), ())
+
+        assert [item.sample_id for item in samples.page(trainer="a")] == ["upload", "a:r1:0", "a:r2:0"]
+        assert [item.sample_id for item in samples.page(trainer="b")] == ["upload", "b:r3:0"]
+        assert samples.count(trainer="a") == 3 and samples.count() == 4
+        (_, first, _) = samples.page(trainer="a")
+        assert (first.component, first.group, first.record_ids) == ("a", "a:r1", ("i1", "r1", "r2"))
+        assert samples.page()[0].component is None and samples.page()[0].record_ids == ()
+        assert samples.consumed_record_ids("a") == {"r1", "i1", "r2"}
+        assert samples.consumed_record_ids("b") == {"r3"} and samples.consumed_record_ids("") == frozenset()
+
+
+def test_sqlite_adds_the_record_sample_columns_to_an_older_sample_table(tmp_path):
+    with closing(SQLiteScenarioStorage(tmp_path)) as storage, closing(storage.open("math")) as session:
+        session.samples.add_trajectories((("t1", trajectory("a")),))
+    (database,) = tmp_path.glob("*.sqlite3")
+    engine = create_engine(f"sqlite:///{database}")
+    with engine.begin() as connection:
+        for column in ("component", "group_key", "record_ids_json"):
+            connection.exec_driver_sql(f"ALTER TABLE training_sample DROP COLUMN {column}")
+    engine.dispose()
+
+    with closing(SQLiteScenarioStorage(tmp_path)) as storage, closing(storage.open("math")) as session:
+        (stored,) = session.samples.page()
+        assert (stored.sample_id, stored.component, stored.group, stored.record_ids) == ("t1", None, None, ())
+        session.samples.add_record_samples("", None, ("r1",), (("r1:0", trajectory("b")),))
+        assert session.samples.consumed_record_ids("") == {"r1"}

@@ -54,7 +54,7 @@ from reef.harness.tree.nodes import NODE_KINDS, RESERVED_ENTRY_IDS, clip_record_
 from reef.harness.tree.render import render_composition, tree_files
 from reef.runtime.executor import Executor
 from reef.runtime.executor.config import ExecutorSettings
-from reef.storage.samples import SampleStore
+from reef.storage.samples import TrainerSamples
 from reef.surface.files import entries_file, read_entries
 from reef.train.backend import CandidateBackend, PreparedStep
 from reef.train.cordis_backend.contracts import ProposalValidator, StepProgress, StepProgressReader, StepRecords
@@ -337,7 +337,7 @@ def _budgeted_bindings(models: ModelBindings, calls: _StepCalls) -> ModelBinding
     )
 
 
-def eval_task_paths(samples: SampleStore) -> tuple[str, ...]:
+def eval_task_paths(samples: TrainerSamples) -> tuple[str, ...]:
     """Return the local directory of each task in the eval split of ``samples``, in arrival order."""
     return tuple(
         str(stored.sample.task_path) for stored in samples.tasks(split="eval") if isinstance(stored.sample, TaskSample)
@@ -401,7 +401,7 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         agent_executor: ProgramExecutor | None = None,
         agent_timeout_s: float = 1800.0,
         agent_trial_timeout_s: float = 300.0,
-        eval_samples: SampleStore | None = None,
+        eval_samples: TrainerSamples | None = None,
     ) -> None:
         if not tasks:
             raise ValueError("harness evolution requires a non-empty task set")

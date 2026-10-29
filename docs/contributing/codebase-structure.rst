@@ -87,7 +87,7 @@ import a concrete integration.
 |                         | pipeline, job data types, training components            | configuration parsing                      |
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
 | ``reef/record2record/`` | which records Reef uses and in what order: report        | sample and job data assembly, record       |
-|                         | grouping, judging, eligibility checks, selection order   | storage, task generation                   |
+|                         | grouping, judging, eligibility checks, staleness check   | storage, task generation                   |
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
 | ``reef/record2sample/`` | turning a record set into samples (``Record2Sample``,    | which records train, job data shape,       |
 |                         | ``ReportSamples``, ``JudgedSamples``), and the generator | training loops                             |
@@ -97,8 +97,8 @@ import a concrete integration.
 |                         | rollouts, built-in selection policies, and the           | artifact publication                       |
 |                         | ``evaluation`` plugin configuration                      |                                            |
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
-| ``reef/sample2job/``    | shaping the samples of the selected record set units     | which records train, the training loop,    |
-|                         | into one job's data (``Sample2Job``)                     | step signals                               |
+| ``reef/sample2job/``    | shaping the samples of the buffer into one job's         | which records train, the training loop,    |
+|                         | data (``Sample2Job``), and the job size                  | step signals                               |
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
 | ``reef/runtime/``       | backend-neutral contracts: training components,          | concrete inference and training            |
 |                         | inference runtimes, saved-weight serving, executors      | integrations                               |

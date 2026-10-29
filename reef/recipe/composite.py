@@ -50,7 +50,7 @@ from reef.recipe.registry import build_recipe, recipe_class_for
 from reef.runtime.interfaces import InferenceRuntime
 from reef.runtime.jobs import TrainingComponent
 from reef.storage.records import RecordStore
-from reef.storage.samples import SampleStore
+from reef.storage.samples import SampleStore, TrainerSamples
 from reef.storage.tasks import TaskStorage, TaskStore
 from reef.surface.base import ComponentSurface, HarnessInfo, Surface
 from reef.train.trainer import ComponentTrainer
@@ -319,7 +319,7 @@ class CompositeRecipe(Recipe):
                 algorithm_state=algorithm_states.get(component),
                 experiment_logger=experiment_logger,
                 task_storage=None if task_storage is None else ComponentTaskStorage(task_storage, component),
-                samples=samples,
+                samples=None if samples is None else TrainerSamples(samples, component),
             )
             # Ingress admits what any component accepts; each trainer then releases the reports shaped for another.
             trainer.admit_reports_of(self.report_type)

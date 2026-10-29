@@ -28,10 +28,10 @@ The three stages
   that trains directly, or a ``TaskSample`` (a Harbor task) that an algorithm
   rolls out. Job data may mix both.
 - The **sample-to-job stage** (``Sample2Job``, ``reef.sample2job``)
-  shapes the samples of the selected record set units into one ``JobData``. Grouped
+  shapes the samples of the buffer into one ``JobData``. Grouped
   recipes set ``group_id`` on each member. The stage also sets
   ``job_samples``, the fewest samples of one job, and ``buffer_size``, the
-  most samples that wait for a job (see `Job size <#job-size>`__).
+  most samples that one job takes from the buffer (see `Job size <#job-size>`__).
 
 The pipeline moves values through the stages with the same two operations,
 ``push`` and ``pull``. The last stage is a function:
@@ -106,17 +106,22 @@ the pipeline pushes. Its status settles all records of the set together:
 - ``READY``: one or more samples. The records wait in one record set unit.
 - ``SKIPPED``: no sample. The stage ends the records.
 
-A unit is what one job's data takes all of or none of. A unit is a record set
-unit or one uploaded trajectory (see `Uploaded trajectories
-<#uploaded-trajectories>`__). The pipeline counts units in samples: a record
-set unit counts the samples of its record sets, and an uploaded trajectory
-counts one.
-
 A record set unit (``RecordSetUnit``) holds one or more record sets that must
 train in the same job. A report by itself is a unit of one record set. A
 ready group is a unit of the record sets of all its reports. The record stage
-holds these units in its pool. Consuming a unit writes the IDs of all its
-records to the commit.
+puts a unit in its pool when the unit is ready.
+
+When a unit is ready, the pipeline saves the unit's samples to the scenario's
+sample store in one transaction (``TrainerSamples.add_record_samples``). The
+transaction also saves the IDs of the unit's records, so it consumes the
+records at once. The record stage then ends the unit. Sample ``i`` of record
+set ``s`` gets the ID ``<trainer>:<s>:<i>``, or ``<s>:<i>`` for the only
+trainer of a scenario. The samples of a unit with more than one sample share
+a group in the store, so they train in the same job.
+
+A restart never makes stored samples again: recovery skips the records of
+every sample that the trainer stored. Thus a nondeterministic stage, such as
+a judge, does not run a second time on the same records.
 
 The pipeline
 ------------
@@ -131,28 +136,27 @@ The trainer calls it on its own thread, under its lock; no call may block:
   formed, pushes each one to the record-to-sample stage, pulls the results
   that are ready, and gives each result back to the record stage
   (``settle``). A set without a result waits, and its records stay held (see
-  `Slow record-to-sample work <#slow-record-to-sample-work>`__).
+  `Slow record-to-sample work <#slow-record-to-sample-work>`__). Last, it
+  saves the samples of each unit that became ready to the sample store.
 - ``advance()``: advance the record stage's background work, move and settle
-  record sets, and apply buffer and staleness limits. It needs no sample
-  count and reserves no job data. Pending job data keeps its reservation while
-  new results enter the buffer. Call it on the same serialized path as
-  other pipeline operations; it does not make the pipeline thread-safe.
+  record sets, and read the samples that were stored since the last call. It
+  needs no sample count and reserves no job data. Call it on the same
+  serialized path as other pipeline operations; it does not make the pipeline
+  thread-safe.
 - ``ready(sample_count)``: call ``advance()`` and check whether job data of
   ``sample_count`` samples is available. The trainer passes ``job_samples``.
-  With ``sample_count`` None, held samples never make the pipeline ready.
-- ``build_job_data(sample_count)``: reserve whole record set units from the record
-  stage, in its selection order, until the data holds at least
-  ``sample_count`` samples,
-  and give their samples to ``make_job_data``. Uploaded trajectories come first
-  (see `Uploaded trajectories <#uploaded-trajectories>`__). The trainer
-  validates the job data against ``output_schema``. The same job data stays
-  reserved until it is acknowledged or released.
+  With ``sample_count`` None, the buffer never makes the pipeline ready.
+- ``build_job_data(sample_count)``: give the samples of the buffer (see `The
+  buffer <#the-buffer>`__) to ``make_job_data``, in store order, and reserve
+  them. The trainer validates the job data against ``output_schema``. The
+  same job data stays reserved until it is acknowledged or released
+  (``release_job_data``). Released samples stay in the buffer.
 - ``acknowledge(data_id)``: the commit that submits the job consumed that job
-  data. The pipeline consumes the reservation from the record stage's pool,
-  and the stage ends the units and returns the IDs of the records that they
-  consumed. The commit record persists these IDs, so recovery never pushes
-  them again. A job that later fails does not give its records back: they
-  never train again.
+  data. The pipeline returns ``sample:<sample id>`` for each sample of the
+  data, and the instruction's ID in ``manual``. The commit lists these IDs.
+  In the same transaction, the sample store adds one to the train count of
+  each listed sample for the commit's trainer. A job that later fails does
+  not give its samples back: they never train again for that trainer.
 
 A sample-to-job stage can also make samples from no record and train them as
 job data of its own. The pipeline drives this through the stage's optional
@@ -161,9 +165,9 @@ hooks, whose defaults make no such samples:
 - ``advance()``: start or take in the stage's own work. The pipeline calls it
   in each ``advance()``.
 - ``own_job_data()``: return the samples that train now, or ``None``. While it
-  returns samples, the pipeline is ready and its next job data holds exactly
-  these samples, whatever their count. The pipeline asks before it selects
-  record sets.
+  returns samples, the pipeline is ready. Its next job data holds exactly
+  these samples, whatever their count, unless the buffer also makes job data
+  ready: the buffer's samples train first.
 - ``own_job_data_submitted()``: the commit that submits a job of the stage's
   own job data is being prepared. Return the IDs that the commit lists for it.
   The pipeline gives them to ``release_own_ids(ids)`` once the commit is
@@ -179,54 +183,11 @@ hooks, whose defaults make no such samples:
 
 A stage that trains only its own job data sets the class attribute
 ``trains_own_job_data_only``. It takes no ``buffer_size`` and no
-``job_samples``, and held samples never make its pipeline ready.
+``job_samples``, and the buffer never makes its pipeline ready.
 
 Released own job data stays the stage's, and the next ``build_job_data`` builds
 it again. The generated-task recipe rolls its saved tasks out this way (see
 `Task generation contract <#task-generation-contract>`__).
-
-Job size
---------
-
-Reef submits one training job for each job's data. ``job_samples`` is the
-fewest samples that one job trains, a positive int. The deployment sets it in
-``pipeline.sample2job.config.job_samples``. The training component then cuts the
-job's data into optimizer batches by its own batch size: Slime's
-``--global-batch-size`` or Tinker's ``batch_size``.
-
-- A weight recipe has no default ``job_samples``. A deployment without it
-  fails the recipe build with ``RecipeConfigError``. Usually, set it to the
-  component's batch size, so that one job is one optimizer step.
-- Harness evolution uses ``evolution.batch_size`` when the stage config sets
-  no ``job_samples``.
-- A stage whose job data is one fixed unit, such as the TTTD and SDPO grid,
-  passes ``max_job_samples`` to ``Sample2Job.__init__``. The stage refuses a
-  larger ``job_samples`` with ``PluginConfigError``.
-
-The pipeline is ready when it holds at least ``job_samples`` samples. It takes
-whole units, so one job's data can hold more. Thus ``job_samples`` and the
-component's batch size can differ:
-
-- A unit packs several samples, for example a group of rollouts. The job's
-  data then holds more samples than ``job_samples``, and the component trains
-  more than one optimizer step.
-- A job's data that is smaller than the component's batch size trains as one
-  partial step.
-
-The ``remainder`` field of the job's optional ``scheduling`` parameter
-decides what happens to a shorter last step. With ``packing_length`` in the
-same parameter, a step trains batch-size packs of tokens, not batch-size
-samples. ``job_samples`` still counts samples, so the job's packs seldom fill
-whole steps. Set ``job_samples`` to the samples of many steps.
-
-The held units are a buffer of at most ``buffer_size`` samples. The
-``Sample2Job`` sets it, and refuses one smaller than ``job_samples``. Without a ``buffer_size`` setting, it holds the data of four
-jobs: four times ``job_samples``. After each move of
-record sets, in every training mode, the pipeline releases the oldest
-unreserved units while their samples are more than ``buffer_size``. It
-keeps the newest unit, so a unit larger than the buffer still trains. The
-record stage ends a released unit (``drop_held_unit``), and the pipeline logs
-one warning. Uploaded trajectories do not count toward the buffer.
 
 The pipeline also merges the record and sample stages' ``status()`` and metrics.
 ``background_jobs_running()`` is true while a set waits for its result or the
@@ -246,8 +207,71 @@ report shaped for another component instead of failing it. The pipeline
 passes such changes to the record stage as its updated ``PipelineContext``
 (``context_changed``).
 
-``status()`` reports ``ready_samples`` (the samples of the held record set
-units and uploaded trajectories) and ``buffer_size``; the trainer adds
+Job size
+--------
+
+Reef submits one training job for each job's data. ``job_samples`` is the
+fewest samples that one job trains, a positive int. The deployment sets it in
+``pipeline.sample2job.config.job_samples``. The training component then cuts the
+job's data into optimizer batches by its own batch size: Slime's
+``--global-batch-size`` or Tinker's ``batch_size``.
+
+- A weight recipe has no default ``job_samples``. A deployment without it
+  fails the recipe build with ``RecipeConfigError``. Usually, set it to the
+  component's batch size, so that one job is one optimizer step.
+- Harness evolution uses ``evolution.batch_size`` when the stage config sets
+  no ``job_samples``.
+- A stage whose job data is one fixed unit, such as the TTTD and SDPO grid,
+  passes ``max_job_samples`` to ``Sample2Job.__init__``. The stage refuses a
+  larger ``job_samples`` with ``PluginConfigError``.
+
+The pipeline is ready when the buffer holds at least ``job_samples`` samples.
+The buffer takes whole groups, so one job's data can hold more. Thus
+``job_samples`` and the component's batch size can differ:
+
+- A unit packs several samples, for example a group of rollouts. The job's
+  data can then hold more samples than ``job_samples``, and the component trains
+  more than one optimizer step.
+- A job's data that is smaller than the component's batch size trains as one
+  partial step.
+
+The ``remainder`` field of the job's optional ``scheduling`` parameter
+decides what happens to a shorter last step. With ``packing_length`` in the
+same parameter, a step trains batch-size packs of tokens, not batch-size
+samples. ``job_samples`` still counts samples, so the job's packs seldom fill
+whole steps. Set ``job_samples`` to the samples of many steps.
+
+The buffer
+~~~~~~~~~~
+
+The buffer is the samples that the next job takes. The pipeline computes it
+from the scenario's sample store, in the same way in every training mode:
+
+1. It takes the stored samples that the trainer reads and did not train yet:
+   the samples that the trainer made from records, and the uploaded
+   trajectories (see `Uploaded trajectories <#uploaded-trajectories>`__).
+   They are in store order: units in the order they became ready, and
+   uploads in upload order, interleaved by arrival. The samples of job data
+   that the pipeline handed out are not in the buffer. Imported Harbor tasks
+   are not in the buffer either; a stage that trains them reads them as its
+   own job data.
+2. It keeps the samples of one kind, trajectory or task: the kind of the first
+   sample.
+3. It leaves out each stale sample that the trainer made from records (see
+   `Staleness <#staleness>`__), and every other sample of its group. An
+   uploaded trajectory is never stale.
+4. It takes the first ``buffer_size`` samples that remain, and the rest of
+   each group that those samples touch.
+
+Thus ``buffer_size`` is the most samples that one job takes from the
+buffer, beside the rest of a group. The ``Sample2Job`` sets it, and refuses one
+smaller than ``job_samples``. Without a ``buffer_size`` setting, it is
+``job_samples``. The pipeline never releases or drops a sample: samples
+beyond the buffer wait in the store for later jobs, and a stale sample stays
+in the store untrained.
+
+``status()`` reports ``ready_samples`` (the samples of the buffer) and
+``buffer_size``; the trainer adds
 ``job_samples``. A stage adds an entry only when a terminal outcome cannot become job data and an
 external runner must stop waiting (TTTD reports a complete mixed-artifact
 step as an invariant failure).
@@ -273,8 +297,8 @@ Uploaded trajectories
 
 A client can upload complete ATIF trajectories to ``POST /reef/trajectories``
 (see the `HTTP API <../reference/http-api.rst#upload-trajectories>`__). An
-uploaded trajectory is not a record. Reef keeps it in the scenario's trajectory
-store, and the trainer gives it to the pipeline with ``push_trajectory``.
+uploaded trajectory is not a record. Reef keeps it in the scenario's sample
+store, and the pipeline reads it from there.
 
 A recipe takes uploads when its ``Sample2Job`` sets ``accepts_trajectories``
 to True. The default is False. Admission refuses an upload with 400 when no
@@ -292,12 +316,12 @@ trajectory that admission accepted but that no longer renders, for example
 after ``max_tokens`` was lowered, is skipped with a warning and stays
 unconsumed.
 
-An uploaded trajectory does not go to the record stage. The pipeline holds
-its sample until job data takes it. Job data takes uploaded trajectories first, in upload
-order, and then record set units. Each uploaded trajectory is one unit
-and counts as one sample. It does not count toward ``buffer_size``. In ``manual`` mode, an instruction's data takes no units. In a scenario
+An uploaded trajectory does not go to the record stage. In the store, it is a
+sample like the samples that the trainer makes from records: it waits in the
+buffer in store order, and it counts as one sample toward ``job_samples`` and
+``buffer_size`` (see `The buffer <#the-buffer>`__). In a scenario
 of several components, each trainer that accepts uploaded trajectories trains
-on them. Acknowledgement consumes all units of the job data. The commit lists
+on them. The commit lists
 each uploaded trajectory as ``sample:<trajectory_id>``, and the scenario's
 sample store adds one to the trajectory's train count for the commit's trainer
 in the same transaction. Thus a rebuilt trainer does not read again a
@@ -314,14 +338,14 @@ The record-to-record stage
 1. The stage reads each record (``push``) and forms record sets (``form``).
    The pipeline pulls them (``pull``).
 2. The record-to-sample stage makes samples from each record set.
-3. The stage holds the record sets that train in record set units in its
-   ``pool``, places reports in their groups, and drops units that can no
-   longer train. The selection policy orders the pool.
-4. ``build_job_data`` reserves units from the pool. ``acknowledge`` consumes the
-   reservation, and the stage ends the consumed units (``consume``).
+3. The stage holds the record sets that train in record set units, places
+   reports in their groups, and ends units that can no longer train. It puts
+   each ready unit in its ``pool``.
+4. The pipeline saves the samples of each unit in the pool to the sample
+   store, and the stage ends the unit (``consume``).
 
-A record that the stage ends, for example a report in a taken slot or a unit
-that is too stale, appears in ``releasable_record_ids()``. The next commit
+A record that the stage ends, for example a report in a taken slot, appears
+in ``releasable_record_ids()``. The next commit
 names it, so the record never trains after a restart.
 
 Before exposing a record set to the sample stage, ``Record2Record.form`` checks
@@ -356,8 +380,11 @@ The check has these steps:
 1. When the scenario reserves job data, it gives the pipeline the runtime load
    ID that serves its committed release (``observe_serving_runtime_load_id``).
    The stage keeps these versions, oldest first.
-2. Before each job's data, the stage ends every held unit that has data more than
-   ``max_staleness`` versions behind the current version (``drop_stale_units``).
+2. Each time the pipeline computes the buffer, it asks the record stage
+   whether each sample that the trainer made from records has data more than
+   ``max_staleness`` versions behind the current version
+   (``Record2Record.is_stale``). The buffer leaves out a stale sample and
+   every other sample of its group. The sample stays in the store untrained.
 
 The lag counts only the versions of this scenario. A publication of another
 scenario on a shared engine does not age the data. These rules also apply:
@@ -374,15 +401,9 @@ backend's ``training.options``, not in the record stage. No built-in backend
 has one now.
 
 Two stages do not take ``max_staleness``. ``NoRecordSets`` holds no unit.
-``SFTRecord2Record`` never drops a unit as stale, because an SFT target is
-fixed text, not sampled tokens. Both refuse the key.
-
-A stage that holds groups overrides ``drop_held_unit(unit, *, reason)`` to
-end a whole group. ``ReportRecord2Record`` does this for a ready group.
-The caller supplies ``UnitDropReason.BUFFER_LIMIT`` for buffer eviction or
-``UnitDropReason.STALE`` for the serving-version check. Overrides must accept
-the reason; it lets a stage distinguish the two outcomes without inspecting
-already-released records. Neither outcome confirms training.
+``SFTRecord2Record`` never finds a sample stale (its ``is_stale`` returns
+False), because an SFT target is fixed text, not sampled tokens. Both refuse
+the key.
 
 .. list-table::
    :header-rows: 1
@@ -408,17 +429,16 @@ initial value through ``Trainer.build`` and ``PipelineContext``; it defaults
 to ``auto``. A ``Sample2Job`` declares the modes it supports in
 ``supported_training_modes``; the default is ``auto`` and ``manual``. A stage
 that trains only its own job data declares ``auto`` only. Record push,
-acknowledgement and buffer release use the same methods and buffers in both
-modes. ``GET /reef/status`` reports ``pending_instructions`` as the
+sample storage and acknowledgement use the same methods and the same buffer
+in both modes. ``GET /reef/status`` reports ``pending_instructions`` as the
 pipeline's ``buffered_requests`` plus the instructions still unread in
 storage.
 
-- ``auto`` makes job data when the held units and uploaded trajectories hold
-  ``job_samples`` samples.
+- ``auto`` makes job data when the buffer holds ``job_samples`` samples.
 - ``manual`` makes job data only for a queued TRAIN instruction. The
   instruction's data takes the samples that automatic job data would take
-  next, up to ``job_samples``. By default the pipeline waits until
-  ``job_samples`` samples are held. A ``Sample2Job`` that sets
+  next: the samples of the buffer. By default the pipeline waits until the
+  buffer holds ``job_samples`` samples. A ``Sample2Job`` that sets
   ``reads_instructions`` runs the instruction at once, with fewer samples or
   none; harness evolution sets it, because its proposer reads the instruction.
   A stage's own job data, such as the imported tasks of ``sft-then-rl``, also
@@ -434,8 +454,7 @@ When the pipeline supports ``manual``, the trainer gives it TRAIN records
 beside the ``Sample2Job``'s ``required_request_types``. The pipeline queues
 them FIFO regardless of the selected mode; ``auto`` leaves the queue for
 ``manual``. The pipeline takes records normally in manual mode, so changing to
-auto can train on data already collected. In both modes the pipeline releases
-the oldest held units beyond ``buffer_size``.
+auto can train on data already collected.
 
 Unsupported modes raise ``NotImplementedError``. An invalid mode name raises
 ``ValueError``.
@@ -481,13 +500,13 @@ A reported-feedback recipe writes:
   directly. Use ``context.require_score()`` when the method needs a reward.
   The stage attaches the source and report ids to the returned item.
 - ``make_job_data(samples, data_id)`` on a ``Sample2Job`` subclass: assemble
-  the flat tuple of selected samples into job data with the ID ``data_id``.
-  The pipeline tracks consumption by record set unit, including samples that the
-  recipe removes from training.
+  the flat tuple of the buffer's samples into job data with the ID ``data_id``.
+  The job's commit consumes every sample of the tuple, including samples that
+  the recipe removes from training.
 
 A report that ends after it was a record set owns its referenced inference
 records outright. ``exclusive_sources`` gives the same ownership to a report
-that ends before, and ``ordered_groups`` selects ready groups in key order.
+that ends before.
 The grouping runs on the trainer thread and reads only records:
 
 - ``is_training_report(report)`` when another role's reports share the
@@ -510,8 +529,10 @@ cannot train, as Distill does for a teacher sequence that is too long. The
 stage releases the report.
 
 The stage handles report-id deduplication, group-slot retries, consumption,
-and retention. Job data is ready in automatic mode after the held units hold
-``job_samples`` samples; a unit is one report or one complete group. A report that
+and retention. Job data is ready in automatic mode after the buffer holds
+``job_samples`` samples; a unit is one report or one complete group. A group
+is fixed when it is first ready: the pipeline stores its samples, and later
+reports for the same group key form a new group. A report that
 references an inference of another report ends without training, whether the
 other report waits or already trained.
 
@@ -530,7 +551,8 @@ for tracked records that time out. The recipe's record stage is a
 ``JudgingRecord2Record`` with the judging and the worker that runs
 ``judge``. Its record-to-sample stage is a ``JudgedSamples`` with
 ``make_sample(record, judgment)``, and its ``Sample2Job`` supplies
-``make_job_data``. The stage holds judged records until job data uses them.
+``make_job_data``. The stage holds judged records until their unit is
+ready; the pipeline then stores their samples.
 
 Task generation contract
 ------------------------
@@ -709,13 +731,14 @@ A record's path to a job
 
    report -> record2record: validate references, filter -> record set
        -> record2sample: make_sample -> Sample -> record2record: group -> record set unit
-       -> sample2job: make_job_data -> job data -> acknowledge
+       -> sample store -> buffer -> sample2job: make_job_data -> job data -> acknowledge
 
    computed record -> record2record: observe/track -> dispatch -> async judge -> judged set
        -> record2sample: make_sample -> Sample -> record2record: record set unit
-       -> sample2job: make_job_data -> job data -> acknowledge
+       -> sample store -> buffer -> sample2job: make_job_data -> job data -> acknowledge
 
-   uploaded trajectory -> TrajectorySample -> sample2job: make_job_data -> job data -> acknowledge
+   uploaded trajectory -> sample store -> record2sample: uploaded_sample -> TrajectorySample
+       -> buffer -> sample2job: make_job_data -> job data -> acknowledge
 
 Where the stages live
 ---------------------

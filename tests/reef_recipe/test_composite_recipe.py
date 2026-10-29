@@ -32,6 +32,7 @@ from reef.recipe.config import recipe_config_from_file_layout
 from reef.runtime.interfaces import InferenceHandler
 from reef.service.app import create_app
 from reef.service.request_service import RequestService
+from reef.storage.samples import consumed_sample_id
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.surface import Surface, TextFileTree, create_config_surface, create_harness_surface
 from reef.surface.config import CONFIG_FILE, ConfigInferenceHooks, ConfigValidator
@@ -102,6 +103,7 @@ class _TreeRecipe(Recipe):
             experiment_logger=experiment_logger,
             training_mode=self.training_mode,
             default_job_samples=1,
+            samples=samples,
         )
 
 
@@ -411,8 +413,9 @@ def test_composite_scenario_serves_config_defaults_and_reports_components(tmp_pa
         rows = scenario.releases()
         assert rows[0]["component"] == "harness"
         assert "component" not in rows[1]
-        # The config component runs no step: the one commit is the harness's, naming the rows it consumed.
-        assert scenario.store.history()[-1].consumed_ids == frozenset({"i1", "r1"})
+        # The config component runs no step: the one commit is the harness's, naming the rows it consumed and the
+        # harness's sample of them.
+        assert scenario.store.history()[-1].consumed_ids == {"i1", "r1", consumed_sample_id("harness:r1:0")}
         status = dispatcher.build_training_status()["scenarios"]["agent"]
         assert status["components"]["harness"]["last_committed_step"]["step"] == 1
         assert status["components"]["config"]["last_committed_step"] is None

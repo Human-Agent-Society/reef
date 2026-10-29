@@ -257,10 +257,10 @@ traffic alone trains, unscored, for methods that judge for themselves.
      record2sample:
        module: reef.train.cordis_backend.processor:InferenceSamples
 
-Reef holds the traces that wait for a step in a buffer. The buffer keeps at
-most ``pipeline.sample2job.config.buffer_size`` traces (default four times
-``job_samples``). When more traces arrive, Reef releases the oldest ones. This
-limit applies in every mode.
+Reef keeps the traces that wait for a step in the scenario's sample store. A
+step takes the oldest waiting traces: at most
+``pipeline.sample2job.config.buffer_size`` traces (default ``job_samples``).
+Later traces wait for the next steps. This applies in every mode.
 
 Under ``auto`` mode, training requests are rejected.
 
@@ -277,9 +277,8 @@ happens to a request whose step fails.
 The ``pipeline`` stages trigger no evolution in this mode, but traces are
 still collected. A request step does not wait for ``job_samples`` traces. The
 proposer receives the training request and the traces that automatic job data
-would take next: up to ``job_samples`` traces, or none. It uses both to make
-a mutation. The buffer limit still applies: Reef releases the oldest traces
-beyond ``buffer_size``.
+would take next: up to ``buffer_size`` traces, or none. It uses both to make
+a mutation.
 
 Propose: mutation to the harness tree
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

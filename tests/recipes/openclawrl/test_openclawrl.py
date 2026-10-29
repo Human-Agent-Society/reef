@@ -208,7 +208,7 @@ def test_untrainable_verdicts_and_bad_tensors_are_terminal() -> None:
 
 
 @pytest.mark.unit
-def test_candidates_behind_the_serving_version_drop_from_pending_candidates() -> None:
+def test_candidates_behind_the_serving_version_leave_the_buffer() -> None:
     worker = FakeWorker()
     processor = _processor(worker=worker)
     processor.observe_serving_runtime_load_id("v1")
@@ -219,9 +219,9 @@ def test_candidates_behind_the_serving_version_drop_from_pending_candidates() ->
     processor.push(_turn("cont2", _successor(Q2, "ok")))
     worker.push(TurnJudgment("old", score=1.0, teacher_cands=ANCHOR))
     worker.push(TurnJudgment("new", score=1.0, teacher_cands=ANCHOR))
-    assert not processor.ready(2)  # the stale candidate was dropped, 1 < 2
-    assert "old" in processor.releasable_record_ids()
-    assert "new" not in processor.releasable_record_ids()
+    assert not processor.ready(2)  # the stale candidate is not in the buffer, 1 < 2
+    assert {"old", "new"} <= processor.releasable_record_ids()
+    assert [source_record_id(sample) for sample in processor.build_job_data(1).samples] == ["new"]
 
 
 @pytest.mark.unit
@@ -393,11 +393,11 @@ def test_the_pipeline_section_configures_the_stages() -> None:
 
 
 @pytest.mark.unit
-def test_the_default_stages_are_correlate_only_and_buffer_four_jobs() -> None:
+def test_the_default_stages_are_correlate_only_and_buffer_one_job() -> None:
     built = openclawrl_recipe().build_pipeline(PipelineContext("s", default_job_samples=16))
     assert isinstance(built.record2record, OpenClawRLRecord2Record)
     assert built.record2record.openclawrl_judging.prm is None and built.record2record.worker is None
-    assert built.buffer_size == 64
+    assert built.buffer_size == 16
     assert isinstance(built.sample2job, OpenClawRLJobData) and built.sample2job.record_path is None
     built.close()
 
