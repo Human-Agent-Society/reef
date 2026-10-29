@@ -22,8 +22,7 @@ from typing import Any, Self
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.reports import ReportBase, ReportValidationError, validate_report_payload
 from reef.pipeline_context import PipelineContext
-from reef.record2record.base import Record2Record, Record2RecordSettings, UnitDropReason
-from reef.record2record.selection import ArrivalOrder, GroupKeyOrder
+from reef.record2record.base import Record2Record, Record2RecordSettings
 from reef.record2record.sets import RecordSet, RecordSetUnit
 
 logger = logging.getLogger(__name__)
@@ -214,8 +213,6 @@ class ReportRecord2Record(Record2Record):
     live report and the inference records that it references.
 
     * ``exclusive_sources``: a report that ends owns its referenced inference records outright.
-    * ``ordered_groups``: order the pool by group key. Job data takes samples in store order, so it does not change
-      the order of training.
     * ``max_staleness``: the staleness limit of ``Record2Record``.
 
     Config: ``Record2RecordSettings``.
@@ -227,10 +224,9 @@ class ReportRecord2Record(Record2Record):
         grouping: ReportGrouping,
         *,
         exclusive_sources: bool = False,
-        ordered_groups: bool = False,
         max_staleness: int = 0,
     ) -> None:
-        super().__init__(GroupKeyOrder() if ordered_groups else ArrivalOrder(), max_staleness=max_staleness)
+        super().__init__(max_staleness=max_staleness)
         self.scenario = context.scenario
         self.report_type = context.report_type
         self.admitted_report_type = context.admitted_report_type
@@ -388,28 +384,7 @@ class ReportRecord2Record(Record2Record):
             self.end_report(entry.context.report)
         group.entries = {}
 
-    # ------------------------------------------------------- held unit limit
-
-    def drop_held_unit(self, unit: RecordSetUnit, *, reason: UnitDropReason) -> None:
-        self.release_set(report_units((unit,))[0])
-
-    def release_set(self, report_set: ReportSet) -> None:
-        """Release a whole held group or singleton. Its reports own every source that they reference."""
-        if report_set.group_key is not None:
-            self.discard_group(report_set.group_key)
-        else:
-            self.pool.remove(report_set.unit_id)
-        for entry in report_set.entries:
-            self.end_report(entry.context.report)
-            self.owned_sources.update(entry.context.references)
-
     # ------------------------------------------------------------ consumption
-
-    def reserved_report_ids(self) -> set[str]:
-        """Return the IDs of the reports in the reserved job data."""
-        return {
-            entry.report_id for report_set in report_units(self.pool.reserved_units()) for entry in report_set.entries
-        }
 
     def consume(self, units: tuple[RecordSetUnit, ...]) -> frozenset[str]:
         trained_reports: set[str] = set()
@@ -422,7 +397,7 @@ class ReportRecord2Record(Record2Record):
             self.ended_set_ids.add(entry.report_id)
             if entry.group_key is None:
                 continue
-            # A reserved group that was discarded after its reservation has no slots left to free.
+            # A group that was discarded has no slots left to free.
             group = self.groups.get(entry.group_key)
             if group is not None and not group.discarded:
                 group.entries.pop(entry.slot, None)
@@ -469,14 +444,10 @@ class ReportRecord2Record(Record2Record):
         return self.grouping.status()
 
     def operational_metrics(self) -> Mapping[str, float | int]:
-        """Unconsumed reports, excluding the reserved job data."""
-        reserved = self.reserved_report_ids()
-        waiting = [
-            state.record for record_id, state in self.reports.items() if state.live and record_id not in reserved
-        ]
+        """The live reports, which wait for their group or for the store."""
+        waiting = [state.record for state in self.reports.values() if state.live]
         return {
-            "unreserved_reports": len(waiting),
-            "reserved_reports": len(reserved),
+            "waiting_reports": len(waiting),
             "oldest_report_wait_seconds": (
                 max(0.0, time.time() - min(report.created_at for report in waiting)) if waiting else 0.0
             ),

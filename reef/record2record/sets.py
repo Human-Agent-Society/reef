@@ -82,10 +82,10 @@ class RecordSetUnit(ABC):
 
     @abstractmethod
     def record_sets(self) -> tuple[RecordSet, ...]:
-        """Return the record sets of the unit, in selection order."""
+        """Return the record sets of the unit, in the order that their samples train."""
 
     def set_ids(self) -> tuple[Hashable, ...]:
-        """Return the IDs of the record sets of the unit, in selection order."""
+        """Return the IDs of the record sets of the unit, in the order of ``record_sets``."""
         return tuple(record_set.set_id for record_set in self.record_sets())
 
     def consumed_ids(self) -> frozenset[str]:

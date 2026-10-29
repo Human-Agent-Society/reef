@@ -19,7 +19,6 @@ from reef.core.plugins import NoSettings, Plugin, PluginConfigError, PluginSetti
 from reef.core.records_types import AgentRecord, RequestType
 from reef.pipeline_context import PipelineContext
 from reef.record2record.pool import RecordSetUnitPool
-from reef.record2record.selection import SelectionPolicy
 from reef.record2record.sets import RecordSet, RecordSetUnit, SingleRecordSet, SingleSetUnit
 from reef.record2record.staleness import ServedVersions, is_stale, producing_runtime_load_ids
 from reef.runtime.interfaces import inference_aborted
@@ -32,19 +31,6 @@ class SampleStatus(Enum):
     READY = "ready"
     #: The set has no sample and cannot train. The stage ends its records.
     SKIPPED = "skipped"
-
-
-class UnitDropReason(Enum):
-    """Why an unreserved unit ends without training.
-
-    Values are BUFFER_LIMIT (the sample buffer exceeded its limit) and STALE
-    (the unit failed the serving-version check). The pipeline and record
-    stage pass these values to ``drop_held_unit`` so stages can distinguish
-    capacity eviction from obsolete training data. Neither value confirms training.
-    """
-
-    BUFFER_LIMIT = "buffer_limit"
-    STALE = "stale"
 
 
 def require_max_staleness(value: object) -> None:
@@ -127,12 +113,12 @@ class Record2Record(ABC, Plugin):
         """
         raise PluginConfigError(f"{cls.__name__} cannot be built from a deployment file: it has no from_config")
 
-    def __init__(self, selection: SelectionPolicy | None = None, *, max_staleness: int = 0) -> None:
+    def __init__(self, *, max_staleness: int = 0) -> None:
         require_max_staleness(max_staleness)
         #: How many versions the training data of a stored sample may lag behind the served version and still train.
         self.max_staleness = max_staleness
         #: The ready record set units. The pipeline stores the samples of each one and removes it.
-        self.pool = RecordSetUnitPool(selection)
+        self.pool = RecordSetUnitPool()
         #: Record sets that ended after the sample stage saw them. The pipeline forgets their samples.
         self.ended_set_ids: set[Hashable] = set()
         #: Records that ended and that no live set references, until their release.
@@ -236,16 +222,6 @@ class Record2Record(ABC, Plugin):
         them, such as fixed SFT targets, returns False.
         """
         return is_stale(producing_runtime_load_ids(samples), self.served_versions.versions, self.max_staleness)
-
-    def drop_held_unit(self, unit: RecordSetUnit, *, reason: UnitDropReason) -> None:
-        """End an unreserved unit without training for the given reason.
-
-        A stage that holds groups overrides this operation to end the whole
-        group. The reason does not change the default record cleanup.
-        """
-        self.pool.remove(unit.unit_id)
-        for record_set in unit.record_sets():
-            self.reject(record_set)
 
     def consume(self, units: tuple[RecordSetUnit, ...]) -> frozenset[str]:
         """End the units that acknowledged job data trained on, and return their keys."""

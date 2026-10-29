@@ -134,7 +134,6 @@ class TTTDRecord2Record(ReportRecord2Record):
             context,
             TTTDGrouping(settings.groups_per_step, settings.rollouts_per_group),
             exclusive_sources=True,
-            ordered_groups=True,
             max_staleness=settings.max_staleness,
         )
 
