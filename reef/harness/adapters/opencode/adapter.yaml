@@ -20,83 +20,29 @@ install:
   version: "1.18.18"
   binary_path: "node_modules/.bin/opencode"
 renderer: reef.harness.adapters.opencode.render:OpencodeAdapterRenderer
-# The harness tree opencode takes. A method writes each part at its path;
-# Reef checks the file as its format and renders it to its renders path,
-# inside the opencode configuration directory of an episode or of an install.
-# A tree file that no part takes is refused.
-# When a person and Reef both change a file, its part's merge decides: lines merges
-# the lines each changed, and file, the default, refuses.
-parts:
-  rules:
-    path: rules.md
-    format: text
-    merge: lines
-    renders: opencode/AGENTS.md
-    holds: the instructions opencode reads at the start of every session
-  skill:
-    path: skills/{name}/SKILL.md
-    format: skill
-    merge: lines
-    renders: opencode/skill/{name}/SKILL.md
-    holds: an Agent Skill, which opencode loads when its description fits the task
-  command:
-    path: commands/{name}.md
-    format: command
-    merge: lines
-    renders: opencode/command/{name}.md
-    holds: a prompt template that a person runs as /name
-  extension:
-    path: extensions/{name}.ts
-    format: code
-    renders: opencode/plugin/{name}.ts
-    holds: a TypeScript plugin that opencode loads in its process
-  config:
-    path: config/{name}.json
-    format: config
-    holds: a JSON object merged into opencode/opencode.json (primary)
-# How Reef runs the agent for one evaluation episode, in an episode root of its own: the
-# command, and the variables that point the agent's configuration at that root.
-episode:
-  argv: ["run", "--format", "json", "--auto", "{prompt}"]
-  env:
-    OPENCODE_CONFIG_DIR: "{root}/opencode"
-    XDG_CONFIG_HOME: "{root}/xdg-config"
-    XDG_DATA_HOME: "{root}/xdg-data"
-    XDG_CACHE_HOME: "{root}/xdg-cache"
-    XDG_STATE_HOME: "{root}/xdg-state"
-    npm_config_cache: "{root}/xdg-cache/npm"
-# How a person's machine runs opencode on a release: the person's own ~/.config/opencode stays,
-# and OPENCODE_CONFIG_DIR adds the install's config, skills, commands and plugins over it; on a
-# key or name both define, the release's wins. That directory's AGENTS.md takes the place of
-# the person's, so the inline config reads the person's back as an instruction file.
-layer:
-  env:
-    OPENCODE_CONFIG_DIR: "{root}/opencode"
-    OPENCODE_CONFIG_CONTENT: '{"instructions": ["~/.config/opencode/AGENTS.md"]}'
-# The config files the harness reads: the defaults Reef merges first, and the checks the merged
-# file must pass. A tree's config part (see parts) merges into one of them.
-config:
-  primary:
-    path: "opencode/opencode.json"
-    defaults:
-      autoupdate: false
-      share: "disabled"
-      enabled_providers: ["reef"]
-      permission:
-        "*": "allow"
-    checks:
-      # Keep a benchmark episode hermetic and on the binding's provider only.
-      - key: [autoupdate, share, enabled_providers]
-        match: IsDefault()
-      # Each of these chooses a model beyond the binding.
-      - key: [small_model, disabled_providers, agent.*.model, mode.*.model, command.*.model]
-        match: IsAbsent()
-        reason: Reef's model binding chooses the model
+# What Reef may evolve: each kind of file, at the path where opencode reads it. A config/<target>.json
+# of the tree merges into that config file (config, below).
+evolve:
+  rules: opencode/AGENTS.md
+  skill: opencode/skill/{name}/SKILL.md
+  command: opencode/command/{name}.md
+  extension: opencode/plugin/{name}.ts
+# The agent's directories under the root, each with the variable that moves it there. What the agent writes
+# in them is its state, never residue, and a sandbox keeps them writable.
+dirs:
+  opencode: OPENCODE_CONFIG_DIR
+  xdg-config: XDG_CONFIG_HOME
+  xdg-data: XDG_DATA_HOME
+  xdg-cache: XDG_CACHE_HOME
+  xdg-state: XDG_STATE_HOME
+  xdg-cache/npm: npm_config_cache
+# opencode keeps its sessions in opencode.db in its data directory.
+sessions: {format: opencode-session-sqlite, path: xdg-data/opencode}
 # How to point opencode at a model endpoint, per API dialect (its
 # custom-provider config shape). Reef renders the set matching its model
 # binding's api into evaluation episodes; the served tree never carries a
 # provider.
-model_binding:
+model:
   openai:
     - target: primary
       data:
@@ -121,20 +67,36 @@ model_binding:
             models:
               "{model}": {}
         model: "reef/{model}"
-# opencode keeps its sessions in opencode.db in its data directory.
-trajectory:
-  format: opencode-session-sqlite
-  path: "xdg-data/opencode"
-cleanup_whitelist:
-  - "xdg-data/**"
-  - "xdg-cache/**"
-  - "xdg-state/**"
-  - "xdg-config/**"
-  # opencode's boot writes a .gitignore and npm-installs @opencode-ai/plugin with a node_modules tree and
-  # lockfiles beside the rendered config. It also adds a $schema key to a config file that lacks one, an edit
-  # in place that the residue scan does not see. Episode state, not residue.
-  - "opencode/.gitignore"
-  - "opencode/package.json"
-  - "opencode/package-lock.json"
-  - "opencode/bun.lock"
-  - "opencode/node_modules/**"
+# How the agent runs: one evaluation episode in a root of its own (the command, and variables
+# beside the dirs), and on a person's machine a layer over the person's own configuration.
+run:
+  episode:
+    argv: ["run", "--format", "json", "--auto", "{prompt}"]
+  # How a person's machine runs opencode on a release: the person's own ~/.config/opencode stays,
+  # and OPENCODE_CONFIG_DIR adds the install's config, skills, commands and plugins over it; on a
+  # key or name both define, the release's wins. That directory's AGENTS.md takes the place of
+  # the person's, so the inline config reads the person's back as an instruction file.
+  layer:
+    env:
+      OPENCODE_CONFIG_DIR: "{root}/opencode"
+      OPENCODE_CONFIG_CONTENT: '{"instructions": ["~/.config/opencode/AGENTS.md"]}'
+# The config files the agent reads, with the defaults Reef merges first and the checks the merged
+# file must pass. A tree's config/<target>.json merges into one of them. The defaults and checks
+# are optional: a new adapter can start with the paths alone.
+config:
+  primary:
+    path: "opencode/opencode.json"
+    defaults:
+      autoupdate: false
+      share: "disabled"
+      enabled_providers: ["reef"]
+      permission:
+        "*": "allow"
+    checks:
+      # Keep a benchmark episode hermetic and on the binding's provider only.
+      - key: [autoupdate, share, enabled_providers]
+        match: IsDefault()
+      # Each of these chooses a model beyond the binding.
+      - key: [small_model, disabled_providers, agent.*.model, mode.*.model, command.*.model]
+        match: IsAbsent()
+        reason: Reef's model binding chooses the model

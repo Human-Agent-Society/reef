@@ -64,7 +64,11 @@ def channel_dispatcher(
     )
     recipe = replace(
         harness_recipe(
-            tmp_path, lambda workspace, services: next(candidates, None), seed=seed, score=evaluate, batch_size=batch_size
+            tmp_path,
+            lambda workspace, services: next(candidates, None),
+            seed=seed,
+            score=evaluate,
+            batch_size=batch_size,
         ),
         pipeline_stages=PipelineConfig.from_setting(stages, spec=HarnessEvolutionRecipe.pipeline_spec(), environ={}),
     )
@@ -484,9 +488,9 @@ def test_descriptor_install_fields_constrain_their_charset(tmp_path, adapter: st
 
 @pytest.mark.unit
 @pytest.mark.parametrize("path", ["/tmp/state", "../state", "workspace", "workspace/state", "."])
-def test_descriptor_writable_paths_stay_in_managed_state(tmp_path, path: str) -> None:
-    target = descriptor_with(tmp_path, "pi", lambda data: data.__setitem__("writable_paths", [path]))
-    with pytest.raises(DescriptorError, match=r"writable_paths.*episode root"):
+def test_descriptor_dirs_stay_in_managed_state(tmp_path, path: str) -> None:
+    target = descriptor_with(tmp_path, "pi", lambda data: data.__setitem__("dirs", {path: None}))
+    with pytest.raises(DescriptorError, match=r"'dirs'.*episode root"):
         load_descriptor(target)
 
 
@@ -500,6 +504,6 @@ def test_descriptor_writable_paths_stay_in_managed_state(tmp_path, path: str) ->
     ],
 )
 def test_a_descriptor_layer_keeps_the_token_off_the_command_line(tmp_path, layer, message: str) -> None:
-    target = descriptor_with(tmp_path, "pi", lambda data: data.__setitem__("layer", layer))
+    target = descriptor_with(tmp_path, "pi", lambda data: data["run"].__setitem__("layer", layer))
     with pytest.raises(DescriptorError, match=re.escape(message)):
         load_descriptor(target)

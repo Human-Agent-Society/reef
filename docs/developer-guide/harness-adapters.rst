@@ -2,14 +2,20 @@ Harness adapters
 ================
 
 An adapter connects a harness tree to one agent. One file,
-``reef/harness/adapters/<name>/adapter.yaml``, declares it. Its ``parts``
-section lists the parts of the tree: the tree paths a method writes, such as
-``rules.md`` and ``skills/<name>/SKILL.md`` (see `The harness tree
-<../user-guide/evolve-your-harness.rst#the-harness-tree>`__), and the agent's
-own path for each. The other sections declare the rest: the config targets,
-how to run the agent on the rendered files and the served model, and how to
-read its trajectory. A ``render.py`` beside it holds the render steps that
-the file cannot state.
+``reef/harness/adapters/<name>/adapter.yaml``, declares four things:
+
+- ``evolve``: what Reef may evolve, each kind of file at the path where the
+  agent reads it, such as ``rules`` at ``claude/CLAUDE.md`` (see `Tree
+  parts`_).
+- ``dirs`` and ``sessions``: the agent's directories, the variables that move
+  them, and where it writes its session log.
+- ``model``: how Reef points the agent at a model.
+- ``run``: how the agent runs for an evaluation episode, and as a layer on a
+  person's machine.
+
+An optional ``config`` section adds the defaults and checks of the agent's
+config files. A ``render.py`` beside the file holds the render steps that it
+cannot state.
 
 This page is for developers. It describes the file, the rendering rules
 every adapter shares, what differs for each bundled agent, the contract of
@@ -51,84 +57,81 @@ episodes, unless ``evolution.binary`` names one.
 Tree parts
 ~~~~~~~~~~
 
-The adapter decides which parts a harness tree may hold. The ``parts``
-section of its ``adapter.yaml`` declares them.
-`reef/harness/adapters/parts.py <../../reef/harness/adapters/parts.py>`__
-checks it when ``load_descriptor`` loads the file. This is pi's ``parts``
-section:
+The ``evolve`` section decides which parts a harness tree may hold: each
+kind of file that the agent reads, and where the agent reads it. This is
+pi's:
 
 .. code-block:: yaml
 
-   parts:
-     rules:
-       path: rules.md
-       format: text
-       renders: pi-agent/AGENTS.md
-       holds: the instructions pi reads at the start of every session
-     skill:
-       path: skills/{name}/SKILL.md
-       format: skill
-       renders: pi-agent/skills/{name}/SKILL.md
-       holds: an Agent Skill, which pi loads when its description fits the task
-     command:
-       path: commands/{name}.md
-       format: command
-       renders: pi-agent/prompts/{name}.md
-       holds: a prompt template that a person runs as /name
-     extension:
-       path: extensions/{name}.ts
-       format: code
-       renders: pi-agent/extensions/{name}.ts
-       holds: a TypeScript extension that pi loads in its process
-     config:
-       path: config/{name}.json
-       format: config
-       holds: a JSON object merged into pi-agent/settings.json (primary) or pi-agent/models.json (models)
+   evolve:
+     rules: pi-agent/AGENTS.md
+     skill: pi-agent/skills/{name}/SKILL.md
+     command: pi-agent/prompts/{name}.md
+     extension: pi-agent/extensions/{name}.ts
 
-Each entry under ``parts`` maps a part name to these fields:
+A render path is relative to the episode or install root. ``{name}`` stands
+for one name, such as a skill's name: a letter or digit, then letters,
+digits, ``.``, ``_`` or ``-``. The kind gives the rest of the part
+(``KINDS`` in `reef/harness/adapters/parts.py
+<../../reef/harness/adapters/parts.py>`__):
 
 .. list-table::
    :header-rows: 1
 
-   * - Field
-     - Value
-   * - ``path``
-     - Required. The tree path that a method writes, relative to the tree
-       root. ``{name}`` stands for one name, such as a skill's name: a letter
-       or digit, then letters, digits, ``.``, ``_`` or ``-``. A path holds
-       ``{name}`` at most once, inside one path segment.
-   * - ``format``
-     - Required. What Reef checks the file as, and which render step
-       processes it (see `Formats`_).
-   * - ``renders``
-     - Where the agent reads the file, relative to the episode or install
-       root. It holds ``{name}`` exactly when ``path`` does. Every part
-       except the ``config`` part requires it. The ``config`` part has no
-       ``renders``: its ``{name}`` names a config target of the descriptor,
-       and its file merges into that target.
-   * - ``holds``
-     - Required. One line that says what the file holds. A method reads it
-       in ``material/host.json``.
-   * - ``review``
-     - Optional, ``false`` by default. With ``true``, every selected change
-       to the part waits for a person, whatever ``evolution.review_parts``
-       names, and ``harness_try`` refuses to mount it. Native's
-       ``native_loop`` part sets it.
-   * - ``merge``
-     - Optional, ``file`` by default. How a file that a person and Reef
-       both changed since the person's installed release merges:
-       ``lines`` takes each side's changed lines and refuses only lines
-       both changed; ``file`` refuses. The bundled adapters that run on a
-       person's machine merge their text parts (rules, skills, commands,
-       memory) by ``lines``.
+   * - Kind
+     - Tree path
+     - Format
+     - Merge
+   * - ``rules``
+     - ``rules.md``
+     - ``text``
+     - ``lines``
+   * - ``skill``
+     - ``skills/{name}/SKILL.md``
+     - ``skill``
+     - ``lines``
+   * - ``command``
+     - ``commands/{name}.md``
+     - ``command``
+     - ``lines``
+   * - ``memory``
+     - ``memory/{name}.md``
+     - ``text``
+     - ``lines``
+   * - ``extension``
+     - ``extensions/{name}`` and the suffix of the render path
+     - ``code``
+     - ``file``
+   * - ``native_tool``, ``native_hook``, ``native_graph``, ``native_agent``,
+       ``native_loop``
+     - ``native/tools/{name}.py`` and so on (see `Native runner`_)
+     - the kind's name
+     - ``file``
 
-``load_descriptor`` refuses a ``parts`` section that breaks one of these rules:
+Every adapter also has the ``config`` part: ``config/<target>.json`` merges
+into the config file of that target (see `Descriptor fields`_).
 
-- A part name is a lowercase letter, then lowercase letters, digits or
-  ``_``.
-- A part has no field that the table does not list.
-- A tree has at most one ``config`` part, and its path holds ``{name}``.
-- No tree path is a path of two parts.
+- **Merge** says how a file that a person and Reef both changed since the
+  person's installed release merges: ``lines`` takes each side's changed
+  lines and refuses only lines both changed; ``file`` refuses.
+- **Review**: a selected change to ``native_loop`` always waits for a person,
+  whatever ``evolution.review_parts`` names, and ``harness_try`` refuses to
+  mount it.
+- **Holds**: each part has one line that says what the file holds, such as
+  "the instructions pi reads at the start of every session". A method reads
+  it in ``material/host.json``.
+
+Where a kind's default does not fit, an entry is an object of ``renders``
+and ``format`` or ``holds``. Codex has no command directory, so its commands
+render as skills:
+
+.. code-block:: yaml
+
+   command: {renders: codex/skills/{name}/SKILL.md, format: skill}
+
+``load_descriptor`` refuses an ``evolve`` section that lists a kind it does
+not know, an entry with another key, a render path that does not hold
+``{name}`` exactly when the tree path does, or two parts at one tree path.
 
 Validation refuses a tree file at a path that no part takes. Its message
 names the file and lists the paths the adapter's tree takes. Other settings
@@ -262,75 +265,74 @@ and edit them.
 Descriptor fields
 ~~~~~~~~~~~~~~~~~
 
-The other sections of ``adapter.yaml`` describe how Reef renders, starts,
-and reads an agent.
+Besides ``evolve``, ``adapter.yaml`` says where the agent keeps its files,
+how it reaches a model, and how it runs.
 `reef/harness/adapters/descriptor.py
 <../../reef/harness/adapters/descriptor.py>`__ validates the file at load,
-and refuses a key it does not know. The fields are:
+and refuses a key it does not know.
 
 - ``name`` identifies the adapter, and ``binary`` is the executable.
-- ``episode`` says how Reef runs the agent for one evaluation episode.
-  ``argv`` runs one headless prompt; Reef substitutes ``{prompt}`` in it.
-  ``env`` points the agent's state into the episode root, substituting
-  ``{root}``. It also turns off what would make an episode
-  non-deterministic, such as the binary's own updater.
-- ``config`` maps each config target's name to the file's root-relative
-  ``path``, its ``defaults``, and its ``checks`` (see `Config checks`_). A
-  ``primary`` target is required. A file of the tree's ``config`` part
-  merges into the target its name names. A config value can name a path
-  under the root as ``{root}/...``. The program that writes the rendered
-  files replaces ``{root}`` with the directory that holds the render roots:
-  the episode root, or a client's install.
-- ``trajectory`` gives the session log's ``path`` and reader ``format``.
-- ``layer`` (optional) says how a person's machine runs the agent with a
-  release over the person's own configuration, which stays as it is. It
-  has two fields, as ``episode`` does: ``args``, groups
-  of arguments added to the binary's own, such as ``["--plugin-dir",
-  "{root}/claude"]``, and ``env``, variables such as ``OPENCODE_CONFIG_DIR``.
-  Templates hold ``{root}`` (the install), ``{model}`` and ``{base_url}``
-  (the model binding's), ``{token}`` (in ``env`` only, so no command line
-  shows it), and ``{file:<render path>}``, that file's text as a JSON
-  string; a group whose file is empty is left out. Use the agent's own way
-  to add configuration, such as a plugin directory or an extra config
-  directory. Without ``layer``, the adapter does not run on a person's
-  machine (see `Use a published tree
-  <../user-guide/evolve-your-harness.rst#use-a-published-tree>`__).
-- ``install`` pins the vendor install: ``kind`` (``npm``, or ``git`` for an
+  ``install`` pins the vendor install: ``kind`` (``npm``, or ``git`` for an
   editable virtual environment), ``package``, ``version`` (as ``--version``
   reports it), and ``binary_path`` below the install prefix. A ``git``
   install also names ``repository`` and ``ref``.
-- ``model_binding`` holds config templates for each supported API dialect
+- ``dirs`` maps each of the agent's directories under the root to the
+  variable that moves it there, or to ``null`` for a directory that the agent
+  writes without one. For an episode, Reef sets each variable to
+  ``{root}/<directory>``. What the agent writes in these directories is its
+  state: a hosted sandbox keeps them writable, the rendered files inside
+  stay read-only, and no file there counts as residue. Any other file that
+  an episode leaves outside ``workspace/`` is residue.
+- ``sessions`` gives the session log's ``path`` and reader ``format``.
+- ``model`` holds config templates for each supported API dialect
   (``openai``, ``responses``, or ``anthropic``). Each template names a config
   ``target`` and its ``data``. Reef merges the matching templates after the
   tree when it renders an evaluation episode, and substitutes
   ``{base_url}``, ``{api_key}``, and ``{model}`` in their string values.
-- ``host_env`` (optional) lists service variables that an episode under the
-  local executor keeps, each with a default for when the service has none.
-  ``{home}`` is the service's home directory, and an empty default leaves
-  the variable unset. Otherwise the local executor passes only ``PATH``,
-  ``SYSTEMROOT``, ``TMPDIR``, and ``CUDA_VISIBLE_DEVICES``.
-- ``is_root_bind_mounted`` (optional) is ``true`` when the binary
-  bind-mounts paths below the episode root into a container. On macOS the
-  local executor then makes the root under ``~/.reef/episodes``, which
-  Docker's VM shares, instead of the temp directory.
-- ``writable_paths`` lists state directories that a hosted sandbox makes
-  writable. Rendered inputs within them stay read-only.
-- ``self_isolating`` (optional) is ``true`` when the adapter runs episodes in
-  its own container. Reef then refuses to nest it in its jail, unless its
-  ``execution_validator`` accepts the configuration.
-- ``is_prompt_task_directory`` (optional) is ``true`` when ``{prompt}``
-  names a Harbor task directory instead of text the model reads.
-- ``cleanup_whitelist`` lists the paths the agent may write during boot or a
-  run. Reef reports any other new file as residue. ``dir/**`` allows a whole
-  subtree. Any other entry is a glob against the root-relative path, so name
-  a single file with its full path, such as ``pi-agent/auth.json``. A bare
-  directory name matches nothing below it.
+- ``run.episode`` runs one headless prompt: ``argv``, where Reef substitutes
+  ``{prompt}``, and ``env``, the variables beside those of ``dirs``, such as
+  switches that turn off the binary's own updater.
+- ``run.layer`` (optional) says how a person's machine runs the agent with a
+  release over the person's own configuration, which stays as it is. It
+  has two fields: ``args``, groups of arguments added to the binary's own,
+  such as ``["--plugin-dir", "{root}/claude"]``, and ``env``, variables such
+  as ``OPENCODE_CONFIG_DIR``. Templates hold ``{root}`` (the install),
+  ``{model}`` and ``{base_url}`` (the model binding's), ``{token}`` (in
+  ``env`` only, so no command line shows it), and ``{file:<render path>}``,
+  that file's text as a JSON string; a group whose file is empty is left
+  out. Use the agent's own way to add configuration, such as a plugin
+  directory or an extra config directory. Without ``layer``, the adapter does
+  not run on a person's machine (see `Use a published tree
+  <../user-guide/evolve-your-harness.rst#use-a-published-tree>`__).
+- ``config`` maps each config target's name to the file's root-relative
+  ``path``, and optionally its ``defaults`` and its ``checks`` (see `Config
+  checks`_). A ``primary`` target is required. A config value can name a path
+  under the root as ``{root}/...``. The program that writes the rendered
+  files replaces ``{root}`` with the directory that holds the render roots:
+  the episode root, or a client's install.
 - ``renderer`` (optional) names the class with the adapter's own render
   steps, ``package.module:ClassName``, the form a deployment names a method
   in (see `Adapter steps`_). Each bundled adapter keeps it in ``render.py``.
-- ``execution_validator`` (optional) names an ``ExecutionValidator`` class in
-  the same form. Reef builds it with no arguments, and calls it with the
+
+An agent that runs its episodes in a container of its own, as ``terminus``
+does, may also set:
+
+- ``self_isolating``: ``true`` makes Reef refuse to nest the agent in its
+  jail, unless its ``execution_validator`` accepts the configuration.
+- ``execution_validator``: an ``ExecutionValidator`` class in the same form
+  as ``renderer``. Reef builds it with no arguments, and calls it with the
   rendered tree and the executor before launch.
+- ``host_env``: service variables that an episode under the local executor
+  keeps, each with a default for when the service has none. ``{home}`` is
+  the service's home directory, and an empty default leaves the variable
+  unset. Otherwise the local executor passes only ``PATH``, ``SYSTEMROOT``,
+  ``TMPDIR``, and ``CUDA_VISIBLE_DEVICES``.
+- ``is_root_bind_mounted``: ``true`` when the binary bind-mounts paths below
+  the episode root into a container. On macOS the local executor then makes
+  the root under ``~/.reef/episodes``, which Docker's VM shares, instead of
+  the temp directory.
+- ``is_prompt_task_directory``: ``true`` when ``{prompt}`` names a Harbor task
+  directory instead of text the model reads.
 
 Config checks
 ^^^^^^^^^^^^^
@@ -830,7 +832,7 @@ Native runner
 
 ``reef-native`` is Reef's own agent loop. It reads ``native/`` from the
 rendered tree: ``RULES.md``, ``skills/``, ``models.json``, and the five
-native parts below. Native's ``parts`` section has no ``command`` or
+native parts below. Native's ``evolve`` section has no ``command`` or
 ``extension`` part, because the loop does not read them; validation refuses
 a file under ``commands/`` or ``extensions/`` as not a path of the native
 harness tree. Its binding fields in ``models.json`` (``api``, ``base_url``,
@@ -999,7 +1001,7 @@ from ``run_turn`` (``SystemExit`` included), ends the turn with
 unable to run. Code that never calls ``ctx`` is bounded only by the
 episode wall clock.
 
-Loop code runs with the loop process's privileges. Native's ``parts`` section
+Loop code runs with the loop process's privileges. Native's ``evolve`` section
 therefore marks the ``native_loop`` part ``review: true``: a change that
 creates, changes, or removes a loop always waits for review, whatever
 ``evolution.review_parts`` says, and ``harness_try`` refuses to mount it.
@@ -1086,30 +1088,27 @@ run one at a time:
 Connect a new agent
 ~~~~~~~~~~~~~~~~~~~
 
-To connect an agent that has no adapter yet, write an ``adapter.yaml`` with
-its ``parts`` (see `Tree parts`_) and the other fields (see `Descriptor
-fields`_):
+To connect an agent that has no adapter yet, write its ``adapter.yaml`` in
+this order (see `Tree parts`_ and `Descriptor fields`_):
 
 .. steps::
 
-   #. The files it reads rules, skills, commands and extensions from become
-      ``parts``: each part's tree path, format, render path, and what it
-      holds.
-   #. The file it reads configuration from becomes a ``config`` target,
-      with defaults and checks that keep an episode self-contained and the
-      model on Reef.
-   #. The command line that runs one prompt headless becomes ``binary`` and
-      ``episode.argv``, and ``episode.env`` relocates its state into the
-      episode root.
-   #. The path and format of its session log become ``trajectory``. A new
-      format subclasses ``TrajectoryReader``
-      (`reef/harness/episodes/trajectory.py
+   #. ``evolve``: the files it reads rules, skills, commands and extensions
+      from, each under its kind.
+   #. ``dirs``: its configuration and state directories, and the variables
+      that move them into the episode root.
+   #. ``sessions``: the path and format of its session log. A new format
+      subclasses ``TrajectoryReader`` (`reef/harness/episodes/trajectory.py
       <../../reef/harness/episodes/trajectory.py>`__) and registers with
       ``@register_trajectory_reader``.
-   #. The files its first boot creates go in ``cleanup_whitelist``, so a
-      fresh episode root counts as clean.
-   #. ``model_binding`` writes the endpoint, model, and credential for each
-      dialect the agent supports.
+   #. ``model``: the endpoint, model, and credential it reads, for each
+      dialect it supports.
+   #. ``run``: the command line that runs one prompt headless
+      (``run.episode``), and, for a person's machine, the arguments that add
+      a release to the person's own configuration (``run.layer``).
+   #. ``config``: the file it reads configuration from, with the paths
+      alone at first. Add defaults and checks that keep an episode
+      self-contained and the model on Reef as you learn which keys matter.
 
 Add a ``renderer`` only for what the declaration cannot state. The
 bundled adapters under `reef/harness/adapters/

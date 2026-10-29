@@ -222,7 +222,7 @@ def test_native_adapter_is_bundled_and_renders_tool_files_as_written() -> None:
     assert "native" in available_adapters()
     assert NATIVE.binary == "reef-native" and NATIVE.trajectory_format == "native-jsonl"
     # The session directory is the one path the sandbox opens, so the loop can write its log inside the jail.
-    assert NATIVE.writable_paths == ("native/sessions",) and NATIVE.trajectory_path == "native/sessions"
+    assert NATIVE.writable_paths == ("native", "native/sessions") and NATIVE.trajectory_path == "native/sessions"
     files = render_tree(HarnessTree({"rules.md": "Be brief.", **TOOL, **HOOK}), NATIVE)
     module = files["native/tools/shout.py"]
     assert module == TOOL["native/tools/shout.py"]

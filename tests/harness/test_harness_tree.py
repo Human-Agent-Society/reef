@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from reef.harness.adapters import BUILTIN_ADAPTERS, get_adapter
-from reef.harness.adapters.parts import Format, Part, TreeLayout, TreeLayoutError, parse_tree_layout
+from reef.harness.adapters.parts import Format, Part, TreeLayout, TreeLayoutError, layout_from_evolve
 from reef.harness.tree import HarnessTree, TreePatch, ValidationResult, validate_patch, validate_tree
 from reef.harness.tree.tree import normalized_path
 
@@ -158,23 +158,36 @@ def test_a_part_of_one_name_has_one_tree_path_on_every_bundled_adapter() -> None
 
 
 @pytest.mark.parametrize(
-    ("entry", "problem"),
+    ("evolve", "problem"),
     [
-        ({"path": "a.md", "format": "text", "holds": "x"}, "renders exactly when its format is not config"),
-        ({"path": "a.md", "format": "config", "holds": "x"}, "needs {name} in its path"),
-        ({"path": "a/{name}.md", "format": "text", "renders": "a.md", "holds": "x"}, "renders {name} exactly"),
-        ({"path": "../a.md", "format": "text", "renders": "a.md", "holds": "x"}, "normal relative path"),
-        ({"path": "a.md", "format": "prose", "renders": "a.md", "holds": "x"}, "format must be one of"),
-        ({"path": "a.md", "format": "text", "renders": "a.md", "holds": ""}, "needs holds"),
-        (
-            {"path": "a.md", "format": "text", "renders": "a.md", "holds": "x", "limit": 1},
-            "takes renders, review and merge",
-        ),
+        ({"notes": "a.md"}, "'notes', which is not a kind"),
+        ({"skill": "skills/SKILL.md"}, "renders {name} exactly"),
+        ({"rules": "../AGENTS.md"}, "normal relative path"),
+        ({"rules": {"renders": "AGENTS.md", "format": "prose"}}, "format must be one of"),
+        ({"rules": {"renders": "AGENTS.md", "limit": 1}}, "takes a render path, or an object of renders"),
+        ({}, "evolve must map kinds of file"),
     ],
 )
-def test_the_parts_section_refuses_a_malformed_part(entry: dict, problem: str) -> None:
+def test_evolve_refuses_an_unknown_kind_and_a_malformed_entry(evolve: dict, problem: str) -> None:
     with pytest.raises(TreeLayoutError, match=re.escape(problem)):
-        parse_tree_layout({"notes": entry})
+        layout_from_evolve(evolve, {"primary": "settings.json"}, "agent")
+
+
+def test_a_kind_gives_the_tree_path_the_format_and_the_merge() -> None:
+    layout = layout_from_evolve(
+        {"rules": "agent/AGENTS.md", "extension": "agent/plugins/{name}/index.js"},
+        {"primary": "agent/s.json"},
+        "agent",
+    )
+    rules, extension, config = layout.parts["rules"], layout.parts["extension"], layout.parts["config"]
+    assert (rules.path, rules.format, rules.merge) == ("rules.md", Format.TEXT, "lines")
+    # An extension's tree path takes the suffix of the file the agent loads; code merges by file.
+    assert (extension.path, extension.format, extension.merge) == ("extensions/{name}.js", Format.CODE, "file")
+    assert (config.path, config.renders, config.holds) == (
+        "config/{name}.json",
+        None,
+        "a JSON object merged into agent/s.json (primary)",
+    )
 
 
 def test_a_layout_refuses_two_parts_that_take_one_path_and_a_second_config_part() -> None:

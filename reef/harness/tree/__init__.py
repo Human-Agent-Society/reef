@@ -13,8 +13,8 @@
     adapter's binary reads, for an episode or for a client.
 
 The paths a tree may hold for one adapter, and what each one is, are the
-adapter's parts (``reef.harness.adapters.parts``), declared in the ``parts``
-of its ``adapter.yaml``.
+adapter's parts (``reef.harness.adapters.parts``), declared in the ``evolve``
+section of its ``adapter.yaml``.
 """
 
 from reef.harness.tree.render import RenderError, render_tree

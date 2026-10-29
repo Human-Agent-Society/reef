@@ -23,51 +23,58 @@ install:
   ref: "v2026.8.31"
   binary_path: "venv/bin/hermes"
 renderer: reef.harness.adapters.hermes.render:HermesAdapterRenderer
-# The harness tree Hermes Agent takes. A method writes each part at its path;
-# Reef checks the file as its format and renders it to its renders path,
-# inside the hermes home of an episode or of an install. A tree file that no
-# part takes is refused.
-parts:
+# What Reef may evolve: each kind of file, at the path where hermes reads it. A config/<target>.json
+# of the tree merges into that config file (config, below).
+evolve:
   # hermes reads one home level rules file, SOUL.md; AGENTS.md is project
   # scoped and read from the working directory chain, never from the home.
-  rules:
-    path: rules.md
-    format: text
-    renders: hermes/SOUL.md
-    holds: the instructions hermes reads at the start of every session
-  skill:
-    path: skills/{name}/SKILL.md
-    format: skill
-    renders: hermes/skills/{name}/SKILL.md
-    holds: an Agent Skill, which hermes loads when its description fits the task
+  rules: hermes/SOUL.md
+  skill: hermes/skills/{name}/SKILL.md
   # Every skill is also a /name command in the interactive CLI, and hermes has
   # no other command surface, so a command is a skill under a second root.
   # The renderer adds that root to skills.external_dirs, beside the home
   # for an episode and at the install root for a reef-hermes session.
-  command:
-    path: commands/{name}.md
-    format: command
-    renders: hermes-commands/{name}/SKILL.md
-    holds: a prompt template that a person runs as /name, rendered as a skill under a second root
+  command: hermes-commands/{name}/SKILL.md
   # A hermes plugin: register(ctx) in the package init; the renderer adds
   # the manifest and the config grants.
-  extension:
-    path: extensions/{name}.py
-    format: code
-    renders: hermes/plugins/{name}/__init__.py
-    holds: a Python plugin package that hermes loads in its process
-  config:
-    path: config/{name}.json
-    format: config
-    holds: a JSON object merged into hermes/config.yaml (primary) or hermes/.env (env)
-# How Reef runs the agent for one evaluation episode, in an episode root of its own: the
-# command, and the variables that point the agent's configuration at that root.
-episode:
-  argv: ["chat", "-Q", "--oneshot", "-q", "{prompt}"]
-  env:
-    HERMES_HOME: "{root}/hermes"
-# The config files the harness reads: the defaults Reef merges first, and the checks the merged
-# file must pass. A tree's config part (see parts) merges into one of them.
+  extension: hermes/plugins/{name}/__init__.py
+# The agent's directories under the root, each with the variable that moves it there. What the agent writes
+# in them is its state, never residue, and a sandbox keeps them writable.
+dirs:
+  hermes: HERMES_HOME
+  .cache/uv: null
+  .cache/pip: null
+  .local: null
+  .rustup: null
+sessions: {format: hermes-session-json, path: hermes/sessions}
+# How to point hermes at a model endpoint: a custom provider with its key in
+# config.yaml, and the same key as OPENAI_API_KEY in the home's .env file.
+# hermes reads the key under model for a loopback or an unknown host, and
+# takes an OpenRouter host for its OpenRouter provider, where only the
+# environment or .env supplies the key; both are written so either kind of
+# endpoint answers. Reef renders this set into evaluation episodes; the
+# served tree never carries a provider or a key. Only the openai dialect is
+# bound; hermes's anthropic_messages api mode was not measured.
+model:
+  openai:
+    - target: primary
+      data:
+        model:
+          provider: custom
+          default: "{model}"
+          base_url: "{base_url}/v1"
+          api_key: "{api_key}"
+    - target: env
+      data:
+        OPENAI_API_KEY: "{api_key}"
+# How the agent runs: one evaluation episode in a root of its own (the command, and variables
+# beside the dirs), and on a person's machine a layer over the person's own configuration.
+run:
+  episode:
+    argv: ["chat", "-Q", "--oneshot", "-q", "{prompt}"]
+# The config files the agent reads, with the defaults Reef merges first and the checks the merged
+# file must pass. A tree's config/<target>.json merges into one of them. The defaults and checks
+# are optional: a new adapter can start with the paths alone.
 config:
   primary:
     path: "hermes/config.yaml"
@@ -172,69 +179,3 @@ config:
   env:
     path: "hermes/.env"
     defaults: {}
-# How to point hermes at a model endpoint: a custom provider with its key in
-# config.yaml, and the same key as OPENAI_API_KEY in the home's .env file.
-# hermes reads the key under model for a loopback or an unknown host, and
-# takes an OpenRouter host for its OpenRouter provider, where only the
-# environment or .env supplies the key; both are written so either kind of
-# endpoint answers. Reef renders this set into evaluation episodes; the
-# served tree never carries a provider or a key. Only the openai dialect is
-# bound; hermes's anthropic_messages api mode was not measured.
-model_binding:
-  openai:
-    - target: primary
-      data:
-        model:
-          provider: custom
-          default: "{model}"
-          base_url: "{base_url}/v1"
-          api_key: "{api_key}"
-    - target: env
-      data:
-        OPENAI_API_KEY: "{api_key}"
-trajectory:
-  # One JSON snapshot per session under sessions/, rewritten after every
-  # persistence point, read by the hermes-session-json reader.
-  format: hermes-session-json
-  path: "hermes/sessions"
-cleanup_whitelist:
-  - "hermes/state.db"
-  - "hermes/state.db*"
-  # hermes records each provider key it finds in its environment in the
-  # credential pool, as a fingerprint and never the key, and locks the file.
-  - "hermes/auth.json"
-  - "hermes/auth.lock"
-  # hermes writes its default rules file when the tree has no rules.
-  - "hermes/SOUL.md"
-  # hermes rewrites the bundled skill manifest at every start and counts each
-  # skill load in skills/.usage.json under a lock file; no config key turns
-  # either off.
-  - "hermes/skills/.bundled_manifest"
-  - "hermes/skills/.usage.json*"
-  - "hermes/logs/**"
-  - "hermes/cache/**"
-  - "hermes/runtime/**"
-  - "hermes/memories/**"
-  - "hermes/skills/autonomous-ai-agents/**"
-  - "hermes/.skills_prompt_snapshot.json"
-  - "hermes/.update_check"
-  # The first boot of a fresh venv repairs its dependencies through uv or pip
-  # under HOME, which Reef points at the root; on a host with rustup (the CI
-  # runner) its settings file appeared there after a run as well.
-  - ".cache/uv/**"
-  - ".cache/pip/**"
-  - ".local/**"
-  - ".rustup/**"
-  # hermes's boot scaffolds the home on every start: state directories, the
-  # runtime and cache files, lock files beside the state store, and the seed
-  # skill it always writes. Episode state, not residue.
-  - "hermes/cron/**"
-  - "hermes/sessions/**"
-  - "hermes/pairing/**"
-  - "hermes/hooks/**"
-  - "hermes/image_cache/**"
-  - "hermes/audio_cache/**"
-  - "hermes/sandboxes/**"
-  - "hermes/terminal-sessions/**"
-  - "hermes/bin/**"
-  - "hermes/models_dev_cache.json*"

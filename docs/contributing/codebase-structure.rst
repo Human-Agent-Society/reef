@@ -364,7 +364,7 @@ The extension points those packages expose are in `Python API
     none. The scenario committer publishes it.
   - Sync: ``reef/harness/sync.py`` moves a tree between Reef and a person's
     machine, in both directions: the release as a layer over the person's
-    own configuration (the ``layer`` of the adapter's ``adapter.yaml``),
+    own configuration (``run.layer`` of the adapter's ``adapter.yaml``),
     and the person's changes merged back (the ``merge`` of each part in its
     ``parts``). The client half is ``reef_client.harness``.
 - Does it decide which records train, or in which groups? Put it in
@@ -421,7 +421,7 @@ The harness method contract is in the ``reef/train/harness_backend/``
 package docstring, and `Write a harness method
 <../developer-guide/write-a-harness-method.rst>`__ explains it.
 ``reef/harness/adapters/parts.py`` defines the parts a harness tree may hold,
-and each adapter declares its own parts in the ``parts`` section of its
+and each adapter declares its own parts in the ``evolve`` section of its
 ``adapter.yaml``, such as ``reef/harness/adapters/pi/adapter.yaml``.
 `Harness adapters <../developer-guide/harness-adapters.rst>`__ explains the
 file.

@@ -1,32 +1,34 @@
 """Declarative adapter descriptors: how one harness renders, runs, and cleans.
 
-An ``AdapterDescriptor`` is loaded from an adapter's ``adapter.yaml``, and
-states everything the shared engines need to drive one harness binary:
+An ``AdapterDescriptor`` is loaded from an adapter's ``adapter.yaml``, which
+declares four things and, optionally, the checks of the agent's config files:
 
-- ``layout``: the parts of the harness tree the adapter takes, from the
-  ``parts`` section (``reef.harness.adapters.parts``): each part's tree path, format
-  and render path. A tree file that no part takes is refused by validation
-  and at render, never dropped.
-- ``config_targets``: named JSON config files (``config:``) with their
-  enforced defaults (a ``primary`` target is required; the tree's config part
-  merges into a target) and their checks (a key of the merged config and the
-  matcher every value there must match; see
+- ``evolve``: what Reef may evolve. Each kind of file
+  (``reef.harness.adapters.parts.KINDS``) maps to the path where the agent
+  reads it; the kind gives the tree path, the format and the merge. With the
+  ``config`` kind it makes ``layout``. A tree file that no part takes is
+  refused by validation and at render, never dropped.
+- ``dirs``: the agent's directories under the root, each with the variable
+  that moves it there, or none. They make the relocation ``env``, the
+  ``writable_paths`` that a hosted sandbox opens (rendered files inside stay
+  read-only), and the ``cleanup_whitelist``: what the agent writes there is
+  its state, and any other file it leaves behind is residue. ``sessions``
+  names the session log's path and reader (``trajectory_format``).
+- ``model``: per API dialect, the config templates that point the agent at a
+  model endpoint (``model_binding``).
+- ``run``: ``episode``, the headless invocation (``{prompt}`` substituted
+  per episode) and the variables beside the relocation ones, and ``layer``,
+  how a person's machine runs the agent (``AdapterLayer``).
+- ``config`` (optional checks): named JSON config files with their enforced
+  defaults (a ``primary`` target is required) and their checks (a key of the
+  merged config and the matcher every value there must match; see
   :mod:`reef.harness.adapters.matchers`). A default may name a path under the
   root as ``{root}/...``; the program that writes the rendered files puts the
   root there (``AdapterDescriptor.place_root``).
-- ``argv``/``env``, the ``episode`` section: the headless invocation
-  (``{prompt}`` substituted per episode) and the relocation environment
-  (``{root}`` substituted per episode) that points the binary's whole
-  configuration at the episode root.
-- ``trajectory``: which session-log reader applies and where it reads.
-- ``cleanup_whitelist``: root-relative patterns for files the harness
-  legitimately creates (session storage, boot mutations); anything else
-  left behind is reported as residue.
-- ``writable_paths``: root-relative state directories that a hosted sandbox
-  makes writable while keeping the rendered files inside them read-only.
 - ``install`` (optional): the vendor's install channel for the binary at a
-  pinned version, which Reef installs on the host that runs the episodes;
-  Reef never hosts or proxies binary bytes.
+  pinned version, which Reef installs on the host that runs the episodes,
+  and a client installs on a person's machine that lacks the agent; Reef
+  never hosts or proxies binary bytes.
 - ``self_isolating`` (optional): the adapter runs episodes inside its own
   container, so nesting in Reef's jail is refused unless its
   ``execution_validator`` accepts the configuration (such as a remote task
@@ -63,7 +65,7 @@ import yaml
 from reef.core.errors import ReefError
 from reef.core.plugins import Plugin, PluginConfigError, PluginReference
 from reef.harness.adapters.matchers import KeyDefault, Matcher, parse_matcher, select
-from reef.harness.adapters.parts import TreeLayout, TreeLayoutError, parse_tree_layout
+from reef.harness.adapters.parts import TreeLayout, TreeLayoutError, layout_from_evolve
 from reef.sandbox.process import EpisodeExecutor
 
 
@@ -184,14 +186,12 @@ ADAPTER_KEYS = frozenset(
         "install",
         "renderer",
         "execution_validator",
-        "parts",
-        "episode",
-        "layer",
+        "evolve",
+        "dirs",
+        "sessions",
+        "model",
+        "run",
         "config",
-        "model_binding",
-        "trajectory",
-        "writable_paths",
-        "cleanup_whitelist",
         "host_env",
         "self_isolating",
         "is_prompt_task_directory",
@@ -283,7 +283,7 @@ class AdapterLayer:
     values. Templates hold ``{root}`` (the install), ``{model}`` and ``{base_url}`` (the binding's), ``{token}``
     (only in ``env``: a command line is visible to other processes) and ``{file:<render path>}`` (that file's text
     as a JSON string; a group whose file is empty is left out).
-    Purpose: ``load_descriptor`` parses the ``layer`` section; ``reef.harness.sync.layer_install`` fills it in.
+    Purpose: ``load_descriptor`` parses ``run.layer``; ``reef.harness.sync.layer_install`` fills it in.
     """
 
     args: tuple[tuple[str, ...], ...] = ()
@@ -385,20 +385,36 @@ def load_descriptor(path: Path) -> AdapterDescriptor:
         raise DescriptorError(f"{where} has unknown keys: {', '.join(unknown)}")
     config_targets = _parse_config_targets(data.get("config"), where)
     try:
-        layout = parse_tree_layout(data.get("parts"))
+        layout = layout_from_evolve(
+            data.get("evolve"), {target: config.path for target, config in config_targets.items()}, name
+        )
     except TreeLayoutError as exc:
         raise DescriptorError(f"{where}: {exc}") from exc
-    trajectory = data.get("trajectory")
-    if not isinstance(trajectory, Mapping):
-        raise DescriptorError(f"{where} requires a 'trajectory' object")
-    episode = data.get("episode")
-    if not isinstance(episode, Mapping) or not set(episode) <= {"argv", "env"}:
-        raise DescriptorError(f"{where} requires an 'episode' object of argv and env")
-    env = episode.get("env", {})
-    if not isinstance(env, Mapping) or not all(
-        isinstance(key, str) and isinstance(value, str) for key, value in env.items()
+    sessions = data.get("sessions")
+    if not isinstance(sessions, Mapping):
+        raise DescriptorError(f"{where} requires 'sessions': the session log's path and format")
+    dirs = data.get("dirs", {})
+    if not isinstance(dirs, Mapping) or not all(
+        variable is None or (isinstance(variable, str) and variable.isidentifier()) for variable in dirs.values()
     ):
-        raise DescriptorError(f"{where} episode 'env' must map strings to strings")
+        raise DescriptorError(f"{where} 'dirs' must map directories to the variable that moves each, or null")
+    state = _relative_paths([str(directory) for directory in dirs], f"{where} 'dirs'")
+    run = data.get("run")
+    if not isinstance(run, Mapping) or not set(run) <= {"episode", "layer"}:
+        raise DescriptorError(f"{where} requires 'run': its episode, and optionally its layer")
+    episode = run.get("episode")
+    if not isinstance(episode, Mapping) or not set(episode) <= {"argv", "env"}:
+        raise DescriptorError(f"{where} run 'episode' must be an object of argv and env")
+    flags = episode.get("env", {})
+    if not isinstance(flags, Mapping) or not all(
+        isinstance(key, str) and isinstance(value, str) for key, value in flags.items()
+    ):
+        raise DescriptorError(f"{where} run episode 'env' must map strings to strings")
+    env = {str(variable): f"{{root}}/{directory}" for directory, variable in dirs.items() if variable}
+    moved = sorted(set(env) & set(flags))
+    if moved:
+        raise DescriptorError(f"{where} run episode 'env' sets variables that 'dirs' sets: {', '.join(moved)}")
+    env.update(flags)
     host_env = data.get("host_env", {})
     if not isinstance(host_env, Mapping) or not all(
         isinstance(key, str) and key.isidentifier() and isinstance(value, str) for key, value in host_env.items()
@@ -409,8 +425,6 @@ def load_descriptor(path: Path) -> AdapterDescriptor:
         raise DescriptorError(
             f"{where} 'host_env' names variables the episode 'env' already sets: {', '.join(overlap)}"
         )
-    whitelist = _str_list(data.get("cleanup_whitelist", []), f"{where} 'cleanup_whitelist'")
-    writable_paths = _relative_paths(data.get("writable_paths", []), f"{where} 'writable_paths'")
     self_isolating = data.get("self_isolating", False)
     if not isinstance(self_isolating, bool):
         raise DescriptorError(f"{where} 'self_isolating' must be a boolean")
@@ -432,19 +446,19 @@ def load_descriptor(path: Path) -> AdapterDescriptor:
             _reference(data["execution_validator"], ExecutionValidator, setting)
         )
         execution_validator = validator_class()
-    model_binding = _parse_model_binding(data.get("model_binding"), config_targets, where)
-    layer = _parse_layer(data.get("layer"), where)
+    model_binding = _parse_model_binding(data.get("model"), config_targets, where)
+    layer = _parse_layer(run.get("layer"), where)
     return AdapterDescriptor(
         name=name,
         binary=_require_str(data, "binary", where),
-        argv=_str_list(episode.get("argv"), f"{where} episode 'argv'"),
-        env=dict(env),
+        argv=_str_list(episode.get("argv"), f"{where} run episode 'argv'"),
+        env=env,
         config_targets=config_targets,
         layout=layout,
-        trajectory_format=_require_str(trajectory, "format", f"{where} trajectory"),
-        trajectory_path=_require_str(trajectory, "path", f"{where} trajectory"),
-        cleanup_whitelist=whitelist,
-        writable_paths=writable_paths,
+        trajectory_format=_require_str(sessions, "format", f"{where} sessions"),
+        trajectory_path=_require_str(sessions, "path", f"{where} sessions"),
+        cleanup_whitelist=tuple(f"{directory}/**" for directory in state),
+        writable_paths=state,
         renderer=renderer,
         install=_parse_install(data.get("install"), where),
         self_isolating=self_isolating,
@@ -458,16 +472,16 @@ def load_descriptor(path: Path) -> AdapterDescriptor:
 
 
 def _parse_layer(raw: Any, where: str) -> AdapterLayer | None:
-    """The ``layer`` section, or ``None`` without one; DescriptorError names the first malformed field."""
+    """``run.layer``, or ``None`` without one; DescriptorError names the first malformed field."""
     if raw is None:
         return None
     if not isinstance(raw, Mapping) or not set(raw) <= {"args", "env"}:
-        raise DescriptorError(f"{where} 'layer' must be an object of args and env")
+        raise DescriptorError(f"{where} run 'layer' must be an object of args and env")
     args, env = raw.get("args", []), raw.get("env", {})
     if not isinstance(args, list) or not all(isinstance(group, list) for group in args):
-        raise DescriptorError(f"{where} layer 'args' must be a list of argument groups")
+        raise DescriptorError(f"{where} run layer 'args' must be a list of argument groups")
     if not isinstance(env, Mapping) or not all(isinstance(k, str) and isinstance(v, str) for k, v in env.items()):
-        raise DescriptorError(f"{where} layer 'env' must map strings to strings")
+        raise DescriptorError(f"{where} run layer 'env' must map strings to strings")
     try:
         return AdapterLayer(args=tuple(tuple(group) for group in args), env=dict(env))
     except DescriptorError as exc:
@@ -541,12 +555,10 @@ def _parse_model_binding(
     if isinstance(raw, list):
         raw = {"openai": raw}
     if not isinstance(raw, Mapping) or not raw:
-        raise DescriptorError(
-            f"{where} 'model_binding' must map an api (openai, responses, anthropic) to config templates"
-        )
+        raise DescriptorError(f"{where} 'model' must map an api (openai, responses, anthropic) to config templates")
     parsed: dict[str, tuple[Mapping[str, Any], ...]] = {}
     for api, templates in raw.items():
-        label = f"{where} model_binding.{api}"
+        label = f"{where} model.{api}"
         if not isinstance(templates, list) or not templates:
             raise DescriptorError(f"{label} must be a non-empty list of config templates")
         parsed_templates: list[Mapping[str, Any]] = []

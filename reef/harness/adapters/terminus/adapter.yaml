@@ -19,54 +19,66 @@ name: terminus
 binary: reef-terminus
 renderer: reef.harness.adapters.terminus.render:TerminusAdapterRenderer
 execution_validator: reef.harness.adapters.terminus.execution:TerminusExecutionValidator
-# The harness tree Terminus 2 takes. A method writes each part at its path;
-# Reef checks the file as its format and renders it to its renders path,
-# inside the episode root the Reef-owned Harbor runner reads. A tree file that
-# no part takes is refused.
-parts:
+# What Reef may evolve: each kind of file, at the path where terminus reads it. A config/<target>.json
+# of the tree merges into that config file (config, below).
+evolve:
   rules:
-    path: rules.md
-    format: text
     renders: terminus/AGENTS.md
     holds: the instructions Harbor appends to each task's instruction
-  skill:
-    path: skills/{name}/SKILL.md
-    format: skill
-    renders: terminus/skills/{name}/SKILL.md
-    holds: an Agent Skill, which Terminus 2 loads when its description fits the task
+  skill: terminus/skills/{name}/SKILL.md
   # Terminus 2 has no slash-command surface, so a command is a skill in a
   # second root. Harbor loads both roots and keeps its progressive skill
   # loading, so a command is discovered rather than pasted into the prompt.
-  command:
-    path: commands/{name}.md
-    format: command
-    renders: terminus-commands/{name}/SKILL.md
-    holds: a prompt template, rendered as a skill under a second root
+  command: terminus-commands/{name}/SKILL.md
   # One module exporting Agent(Terminus2), imported only inside Reef's jail.
   extension:
-    path: extensions/{name}.py
-    format: code
     renders: terminus/context/{name}.py
     holds: a Python module defining class Agent, a subclass of Harbor's Terminus2
-  config:
-    path: config/{name}.json
-    format: config
-    holds: a JSON object merged into terminus/config.json (primary), the Terminus 2 constructor arguments
-# How Reef runs the agent for one evaluation episode, in an episode root of its own: the
-# command, and the variables that point the agent's configuration at that root.
-episode:
-  argv:
-    - --task
-    - "{prompt}"
-  env:
-    # The episode root, not the terminus directory: terminus-commands is a
-    # sibling of terminus, so the runner reads the tree from one level up.
-    REEF_TERMINUS_DIR: "{root}"
-    REEF_TERMINUS_SESSION_DIR: "{root}/terminus/sessions"
-    REEF_TERMINUS_TRIALS_DIR: "{root}/terminus/trials"
-    HOME: "{root}/workspace"
-# The config files the harness reads: the defaults Reef merges first, and the checks the merged
-# file must pass. A tree's config part (see parts) merges into one of them.
+# The agent's directories under the root, each with the variable that moves it there. What the agent writes
+# in them is its state, never residue, and a sandbox keeps them writable.
+dirs:
+  terminus/sessions: REEF_TERMINUS_SESSION_DIR
+  terminus/trials: REEF_TERMINUS_TRIALS_DIR
+sessions: {format: terminus-atif-json, path: terminus/sessions}
+# Terminus 2 reaches the model through litellm, so the binding is the provider
+# base URL, key, and model name. The served tree never carries a provider.
+# litellm_proxy sends the model to api_base as it is named whatever vendor
+# prefix it carries, and puts the tree's call arguments into the request
+# body: reasoning_effort, the thinking budget, and llm_call_kwargs such as
+# provider or top_k. Without a provider a bare "qwen/qwen3-coder" has no
+# litellm route, and "deepseek/..." goes to litellm's DeepSeek client without
+# its vendor prefix. custom_openai keeps the name too, but drops
+# reasoning_effort and thinking, and fails on each argument the OpenAI SDK
+# does not take.
+# model_name stays the served name, the one Harbor looks up in litellm's
+# model table for the context limit Terminus 2 summarizes against.
+# A tree a person runs against Reef itself also needs llm_kwargs.extra_headers
+# {"x-reef-scenario": "<scenario>"}, or Reef answers 400. Evaluation episodes
+# call the upstream directly and need no header.
+model:
+  openai:
+    - target: primary
+      data:
+        model_name: "{model}"
+        api_base: "{base_url}/v1"
+        llm_kwargs:
+          api_key: "{api_key}"
+          custom_llm_provider: "litellm_proxy"
+# How the agent runs: one evaluation episode in a root of its own (the command, and variables
+# beside the dirs), and on a person's machine a layer over the person's own configuration.
+run:
+  episode:
+    argv:
+      - --task
+      - "{prompt}"
+    env:
+      # The episode root, not the terminus directory: terminus-commands is a
+      # sibling of terminus, so the runner reads the tree from one level up.
+      REEF_TERMINUS_DIR: "{root}"
+      HOME: "{root}/workspace"
+# The config files the agent reads, with the defaults Reef merges first and the checks the merged
+# file must pass. A tree's config/<target>.json merges into one of them. The defaults and checks
+# are optional: a new adapter can start with the paths alone.
 config:
   primary:
     path: "terminus/config.json"
@@ -124,41 +136,6 @@ config:
       - key: llm_call_kwargs.extra_body
         match: Not(Contains(Key(IsIn(["model", "models"]))))
         reason: Reef's model binding chooses the endpoint, the credential and the model
-# Terminus 2 reaches the model through litellm, so the binding is the provider
-# base URL, key, and model name. The served tree never carries a provider.
-# litellm_proxy sends the model to api_base as it is named whatever vendor
-# prefix it carries, and puts the tree's call arguments into the request
-# body: reasoning_effort, the thinking budget, and llm_call_kwargs such as
-# provider or top_k. Without a provider a bare "qwen/qwen3-coder" has no
-# litellm route, and "deepseek/..." goes to litellm's DeepSeek client without
-# its vendor prefix. custom_openai keeps the name too, but drops
-# reasoning_effort and thinking, and fails on each argument the OpenAI SDK
-# does not take.
-# model_name stays the served name, the one Harbor looks up in litellm's
-# model table for the context limit Terminus 2 summarizes against.
-# A tree a person runs against Reef itself also needs llm_kwargs.extra_headers
-# {"x-reef-scenario": "<scenario>"}, or Reef answers 400. Evaluation episodes
-# call the upstream directly and need no header.
-model_binding:
-  openai:
-    - target: primary
-      data:
-        model_name: "{model}"
-        api_base: "{base_url}/v1"
-        llm_kwargs:
-          api_key: "{api_key}"
-          custom_llm_provider: "litellm_proxy"
-trajectory:
-  format: terminus-atif-json
-  path: "terminus/sessions"
-writable_paths:
-  - "terminus/sessions"
-  - "terminus/trials"
-cleanup_whitelist:
-  - "terminus/sessions/**"
-  # Harbor writes its trial tree here: logs, the container's outputs, and the
-  # ATIF trajectory the runner reads back.
-  - "terminus/trials/**"
 is_prompt_task_directory: true
 # Harbor drives the task container with the docker CLI, which finds its
 # endpoint and context through these variables, else through the current

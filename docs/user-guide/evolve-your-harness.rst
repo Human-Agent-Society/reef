@@ -30,7 +30,7 @@ A harness tree is one directory of text files: the mutable, versioned part of
 one harness. Each release holds one tree, and each step changes it with a
 patch: paths mapped to their new text, or to ``null`` for a removal.
 
-Each adapter declares the parts of the tree it takes in the ``parts`` section
+Each adapter declares the parts of the tree it takes in the ``evolve`` section
 of its ``adapter.yaml`` (for example `reef/harness/adapters/pi/adapter.yaml
 <../../reef/harness/adapters/pi/adapter.yaml>`__). A part names a tree path, the
 format Reef checks the file as, and the path where the agent reads it. The
@@ -93,7 +93,7 @@ With ``native``, the method can change the agent's tools, its hooks, its
 control flow, and the loop itself, not only the text around a vendor binary.
 The adapter guide's `Tree parts
 <../developer-guide/harness-adapters.rst#tree-parts>`__ describes the
-``parts`` section, and its `Render paths
+``evolve`` section, and its `Render paths
 <../developer-guide/harness-adapters.rst#render-paths>`__ gives where each
 adapter writes each part.
 
@@ -558,7 +558,7 @@ make a person approve such changes, hold them as pending releases:
   ``deployment.yaml``, publishes rules and config at once while code waits.
   Startup refuses a name that is not a part of the adapter's tree.
 - A win that touches a part marked ``review: true`` in the adapter's
-  ``parts`` always waits. Native's ``native_loop`` is one.
+  ``evolve`` section always waits. Native's ``native_loop`` is one.
 
 A pending release has ``pending: true`` in ``GET /reef/harness/releases`` and
 is served to no client. The loop keeps evolving from it, so promoting the
@@ -643,7 +643,7 @@ To write your own method and scorer, read `Write a harness method
 Connect a different agent
 -------------------------
 
-An adapter is one file, ``adapter.yaml``. Its ``parts`` declare what the agent
+An adapter is one file, ``adapter.yaml``. Its ``evolve`` section declares what the agent
 takes and where each part is written; its other sections declare how the
 binary is launched and how a model binds to it. To connect an agent
 that has no adapter yet, read `Harness adapters

@@ -1,14 +1,15 @@
 """The parts of a harness tree: the paths a tree may hold for one adapter, and what each one is.
 
-An adapter declares its tree in the ``parts`` section of its ``adapter.yaml``. Each
-part names the tree path a method writes (``path``), what Reef checks the
-file as (``format``), where the adapter's harness reads it (``renders``),
-what the file holds (``holds``), whether a change to it always waits for
-a person (``review``), and how a person's change to it merges with Reef's
-(``merge``). A ``{name}`` in a path is one name that matches
-``NAME_PATTERN``, such as a skill's name; a config part's name is one of the
-descriptor's config targets, and its file merges into that target. A tree
-path that no part matches is refused.
+An adapter lists what Reef may evolve in the ``evolve`` section of its
+``adapter.yaml``: each kind of file (``KINDS``), at the path where the agent
+reads it. The kind decides the rest of the part: the tree path a method
+writes (``path``), what Reef checks the file as (``format``), what the file
+holds (``holds``), whether a change to it always waits for a person
+(``review``), and how a person's change to it merges with Reef's (``merge``).
+Every adapter also takes the ``config`` kind: ``config/<target>.json`` merges
+into the config file of that target. A ``{name}`` in a path is one name that
+matches ``NAME_PATTERN``, such as a skill's name. A tree path that no part
+matches is refused.
 
 Model endpoints and credentials are never in a tree: the model binding writes
 them when a tree is rendered for an episode.
@@ -54,7 +55,8 @@ NAME_PATTERN = r"[A-Za-z0-9][A-Za-z0-9._-]*"
 #: The names of parts.
 PART_NAME_PATTERN = r"[a-z][a-z0-9_]*"
 PLACEHOLDER = "{name}"
-PART_KEYS = frozenset({"path", "format", "renders", "holds", "review", "merge"})
+#: The keys of an ``evolve`` entry in its long form; the short form is the render path alone.
+EVOLVE_KEYS = frozenset({"renders", "format", "holds"})
 #: How a file that a person and Reef both changed merges (``reef.harness.sync.merge_trees``): ``file`` refuses, and
 #: ``lines`` merges the lines each side changed, refusing only where both changed the same lines.
 MERGE_MODES = ("file", "lines")
@@ -78,7 +80,7 @@ class Part:
     people. ``review`` is True when a change to the part always waits for a
     person, whatever the deployment's ``evolution.review_parts`` says.
     ``merge`` is one of ``MERGE_MODES``.
-    Purpose: ``parse_tree_layout`` makes one per entry of an adapter's ``parts``;
+    Purpose: ``layout_from_evolve`` makes one per kind an adapter's ``evolve`` lists, and one for ``config``;
     validation, rendering and the host facts a method reads use it.
     """
 
@@ -236,38 +238,119 @@ def template_pattern(template: str) -> re.Pattern[str]:
     return re.compile(re.escape(before) + f"(?P<name>{NAME_PATTERN})" + re.escape(after))
 
 
-def parse_tree_layout(raw: object) -> TreeLayout:
-    """Check one ``parts`` section: a mapping of part names to their ``path``, ``format``, ``renders`` (absent for
-    a config part), ``holds``, and optional ``review`` and ``merge``."""
+@dataclass(frozen=True)
+class Kind:
+    """One kind of file that an adapter may let Reef evolve.
+
+    Values: ``path`` is the tree path template; an ``extension``'s is ``extensions/{name}`` and takes the suffix
+    of its render path. ``format`` is what Reef checks the file as, ``merge`` one of ``MERGE_MODES``, and
+    ``review`` whether a change to it always waits for a person. ``holds`` says what the file holds; ``{agent}``
+    in it is the adapter's name.
+    Purpose: ``KINDS`` defines each kind once; ``layout_from_evolve`` makes a ``Part`` of each kind an adapter
+    lists.
+    """
+
+    path: str
+    format: Format
+    holds: str
+    merge: str = "file"
+    review: bool = False
+
+
+#: The kinds an adapter's ``evolve`` may list. Text kinds merge by line; code merges by file.
+KINDS: Mapping[str, Kind] = {
+    "rules": Kind("rules.md", Format.TEXT, "the instructions {agent} reads at the start of every session", "lines"),
+    "skill": Kind(
+        "skills/{name}/SKILL.md",
+        Format.SKILL,
+        "an Agent Skill, which {agent} loads when its description fits the task",
+        "lines",
+    ),
+    "command": Kind("commands/{name}.md", Format.COMMAND, "a prompt template that a person runs as /name", "lines"),
+    "memory": Kind(
+        "memory/{name}.md",
+        Format.TEXT,
+        "a note of {agent}'s automatic memory, or MEMORY.md, the index it reads at the start of every session",
+        "lines",
+    ),
+    "extension": Kind("extensions/{name}", Format.CODE, "code that {agent} loads in its process"),
+    "native_tool": Kind(
+        "native/tools/{name}.py",
+        Format.NATIVE_TOOL,
+        "a tool of the loop: run(args, workdir), then NAME, DESCRIPTION, PARAMETERS and CAPABILITIES",
+    ),
+    "native_hook": Kind(
+        "native/hooks/{name}.py",
+        Format.NATIVE_HOOK,
+        "a listener at one event of the loop: listen(payload, next), then NAME and EVENT",
+    ),
+    "native_graph": Kind(
+        "native/graphs/{name}.json",
+        Format.NATIVE_GRAPH,
+        "the loop's control flow, as stages and the transitions between them",
+    ),
+    "native_agent": Kind(
+        "native/agents/{name}.json",
+        Format.NATIVE_AGENT,
+        "one agent the loop delegates to, with its graph, tools and skills",
+    ),
+    "native_loop": Kind(
+        "native/loops/{name}.py",
+        Format.NATIVE_LOOP,
+        "the loop itself as code: run_turn(ctx), which runs the root turn in place of the graph",
+        review=True,
+    ),
+}
+
+
+def layout_from_evolve(raw: object, config_paths: Mapping[str, str], agent: str) -> TreeLayout:
+    """The layout of an ``evolve`` section, plus the ``config`` part: ``config/<target>.json`` merges into the
+    config file ``config_paths[target]``.
+
+    ``raw`` maps each kind of ``KINDS`` to its render path, or to an object with ``renders`` and, where the kind's
+    default does not fit, ``format`` or ``holds``. ``agent`` names the adapter in the default ``holds``.
+    """
     if not isinstance(raw, Mapping) or not raw:
-        raise TreeLayoutError("parts must be a mapping of part names to parts")
+        raise TreeLayoutError("evolve must map kinds of file to the paths where the agent reads them")
     parts: dict[str, Part] = {}
     for name, entry in raw.items():
-        if not isinstance(entry, Mapping) or not {"path", "format", "holds"} <= set(entry) <= PART_KEYS:
-            raise TreeLayoutError(
-                f"part {name!r} needs path, format and holds, and takes renders, review and merge besides"
-            )
+        kind = KINDS.get(str(name))
+        if kind is None:
+            raise TreeLayoutError(f"evolve lists {name!r}, which is not a kind: {', '.join(KINDS)}")
+        if isinstance(entry, str):
+            entry = {"renders": entry}
+        if not isinstance(entry, Mapping) or "renders" not in entry or not set(entry) <= EVOLVE_KEYS:
+            raise TreeLayoutError(f"evolve {name!r} takes a render path, or an object of renders, format and holds")
+        renders = entry["renders"]
+        if not isinstance(renders, str):
+            raise TreeLayoutError(f"evolve {name!r} renders must be a path")
         try:
-            format = Format(entry["format"])
+            format = Format(entry.get("format", kind.format))
         except ValueError as exc:
-            known = ", ".join(item.value for item in Format)
-            raise TreeLayoutError(f"part {name!r} format must be one of {known}") from exc
-        review = entry.get("review", False)
-        if not isinstance(review, bool):
-            raise TreeLayoutError(f"part {name!r} review must be true or false")
-        parts[str(name)] = Part(
-            str(name), entry["path"], format, entry.get("renders"), entry["holds"], review, entry.get("merge", "file")
+            raise TreeLayoutError(
+                f"evolve {name!r} format must be one of {', '.join(f.value for f in Format)}"
+            ) from exc
+        path = kind.path + PurePosixPath(renders).suffix if name == "extension" else kind.path
+        holds = entry.get("holds", kind.holds.replace("{agent}", agent))
+        parts[str(name)] = Part(str(name), path, format, renders, holds, kind.review, kind.merge)
+    if config_paths:
+        files = [f"{path} ({target})" for target, path in config_paths.items()]
+        merged = files[0] if len(files) == 1 else f"{', '.join(files[:-1])} or {files[-1]}"
+        parts["config"] = Part(
+            "config", "config/{name}.json", Format.CONFIG, None, f"a JSON object merged into {merged}"
         )
     return TreeLayout(parts)
 
 
 __all__ = [
+    "KINDS",
     "MERGE_MODES",
     "NAME_PATTERN",
     "Format",
+    "Kind",
     "Part",
     "TreeLayout",
     "TreeLayoutError",
     "TreeLocation",
-    "parse_tree_layout",
+    "layout_from_evolve",
 ]

@@ -15,91 +15,25 @@ install:
   version: "0.84.2"
   binary_path: "node_modules/.bin/pi"
 renderer: reef.harness.adapters.pi.render:PiAdapterRenderer
-# The harness tree pi takes. A method writes each part at its path; Reef checks
-# the file as its format and renders it to its renders path, inside the pi
-# configuration directory of an episode or of an install. A tree file that no
-# part takes is refused.
-# When a person and Reef both change a file, its part's merge decides: lines merges
-# the lines each changed, and file, the default, refuses.
-parts:
-  rules:
-    path: rules.md
-    format: text
-    merge: lines
-    renders: pi-agent/AGENTS.md
-    holds: the instructions pi reads at the start of every session
-  skill:
-    path: skills/{name}/SKILL.md
-    format: skill
-    merge: lines
-    renders: pi-agent/skills/{name}/SKILL.md
-    holds: an Agent Skill, which pi loads when its description fits the task
-  command:
-    path: commands/{name}.md
-    format: command
-    merge: lines
-    renders: pi-agent/prompts/{name}.md
-    holds: a prompt template that a person runs as /name
-  extension:
-    path: extensions/{name}.ts
-    format: code
-    renders: pi-agent/extensions/{name}.ts
-    holds: a TypeScript extension that pi loads in its process
-  config:
-    path: config/{name}.json
-    format: config
-    holds: a JSON object merged into pi-agent/settings.json (primary) or pi-agent/models.json (models)
-# How Reef runs the agent for one evaluation episode, in an episode root of its own: the
-# command, and the variables that point the agent's configuration at that root.
-episode:
-  argv: ["--mode", "json", "-p", "{prompt}"]
-  env:
-    PI_CODING_AGENT_DIR: "{root}/pi-agent"
-    PI_CODING_AGENT_SESSION_DIR: "{root}/sessions"
-    PI_OFFLINE: "1"
-    PI_SKIP_VERSION_CHECK: "1"
-# How a person's machine runs pi on a release: the person's own ~/.pi/agent stays, and the
-# release loads over it. -e loads the install's skills, prompts and extensions, and on a name
-# both define the release's wins. The rules follow the person's AGENTS.md. pi reads models.json
-# only from its own directory, so an extension the render adds registers the release's
-# providers. pi still writes the person's settings.json when the person changes the model.
-layer:
-  args:
-    - ["-e", "{root}/pi-agent"]
-    - ["--append-system-prompt", "{root}/pi-agent/AGENTS.md"]
-    - ["--model", "reef/{model}"]
-# The config files the harness reads: the defaults Reef merges first, and the checks the merged
-# file must pass. A tree's config part (see parts) merges into one of them.
-config:
-  primary:
-    path: "pi-agent/settings.json"
-    defaults: {}
-    checks:
-      # They choose the models a run may use or send every call through
-      # another host.
-      - key: [enabledModels, httpProxy]
-        match: IsAbsent()
-        reason: Reef's model binding chooses the endpoint and the model
-  models:
-    path: "pi-agent/models.json"
-    defaults: {}
-    # The binding writes the provider reef and selects it with
-    # defaultProvider and defaultModel in settings.json. Another provider,
-    # with its own baseUrl or pi's built in one with a new endpoint, is the
-    # tree choosing where calls go.
-    checks:
-      - key: providers
-        match: Each(Key(Eq("reef")))
-        reason: Reef's model binding chooses the provider, the endpoint, the credential and the model
-      - key: providers.reef
-        match: Each(Key(IsIn(["api", "apiKey", "baseUrl", "models"])))
-        reason: Reef's model binding chooses the provider, the endpoint, the credential and the model
+# What Reef may evolve: each kind of file, at the path where pi reads it. A config/<target>.json
+# of the tree merges into that config file (config, below).
+evolve:
+  rules: pi-agent/AGENTS.md
+  skill: pi-agent/skills/{name}/SKILL.md
+  command: pi-agent/prompts/{name}.md
+  extension: pi-agent/extensions/{name}.ts
+# The agent's directories under the root, each with the variable that moves it there. What the agent writes
+# in them is its state, never residue, and a sandbox keeps them writable.
+dirs:
+  pi-agent: PI_CODING_AGENT_DIR
+  sessions: PI_CODING_AGENT_SESSION_DIR
+sessions: {format: pi-session-jsonl, path: sessions}
 # How to point pi at a model endpoint, per API dialect. Reef renders the set
 # matching its model binding's api into evaluation episodes; the served tree
 # never carries a provider. maxTokens is Reef's reply budget rather than pi's
 # own default of 16384: a reasoning model spends that on its reasoning and
 # answers with no text, which ends the turn with nothing written.
-model_binding:
+model:
   openai:
     - target: models
       data:
@@ -145,18 +79,48 @@ model_binding:
       data:
         defaultModel: "reef/{model}"
         defaultProvider: reef
-trajectory:
-  format: pi-session-jsonl
-  path: "sessions"
-writable_paths:
-  - "sessions"
-  - "pi-agent"
-cleanup_whitelist:
-  - "sessions/**"
-  # pi's boot persists a credential store and a model-registry store beside
-  # the rendered config (observed on the real 0.84.2 binary; the smoke test
-  # in tests/smoke/test_real_pi.py guards this): episode state, not residue.
-  - "pi-agent/auth.json"
-  - "pi-agent/models-store.json"
-  # pi writes its trust decisions beside the rendered files, even in an offline run.
-  - "pi-agent/trust.json"
+# How the agent runs: one evaluation episode in a root of its own (the command, and variables
+# beside the dirs), and on a person's machine a layer over the person's own configuration.
+run:
+  episode:
+    argv: ["--mode", "json", "-p", "{prompt}"]
+    env:
+      PI_OFFLINE: "1"
+      PI_SKIP_VERSION_CHECK: "1"
+  # How a person's machine runs pi on a release: the person's own ~/.pi/agent stays, and the
+  # release loads over it. -e loads the install's skills, prompts and extensions, and on a name
+  # both define the release's wins. The rules follow the person's AGENTS.md. pi reads models.json
+  # only from its own directory, so an extension the render adds registers the release's
+  # providers. pi still writes the person's settings.json when the person changes the model.
+  layer:
+    args:
+      - ["-e", "{root}/pi-agent"]
+      - ["--append-system-prompt", "{root}/pi-agent/AGENTS.md"]
+      - ["--model", "reef/{model}"]
+# The config files the agent reads, with the defaults Reef merges first and the checks the merged
+# file must pass. A tree's config/<target>.json merges into one of them. The defaults and checks
+# are optional: a new adapter can start with the paths alone.
+config:
+  primary:
+    path: "pi-agent/settings.json"
+    defaults: {}
+    checks:
+      # They choose the models a run may use or send every call through
+      # another host.
+      - key: [enabledModels, httpProxy]
+        match: IsAbsent()
+        reason: Reef's model binding chooses the endpoint and the model
+  models:
+    path: "pi-agent/models.json"
+    defaults: {}
+    # The binding writes the provider reef and selects it with
+    # defaultProvider and defaultModel in settings.json. Another provider,
+    # with its own baseUrl or pi's built in one with a new endpoint, is the
+    # tree choosing where calls go.
+    checks:
+      - key: providers
+        match: Each(Key(Eq("reef")))
+        reason: Reef's model binding chooses the provider, the endpoint, the credential and the model
+      - key: providers.reef
+        match: Each(Key(IsIn(["api", "apiKey", "baseUrl", "models"])))
+        reason: Reef's model binding chooses the provider, the endpoint, the credential and the model

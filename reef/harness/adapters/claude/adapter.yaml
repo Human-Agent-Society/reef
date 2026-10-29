@@ -23,74 +23,61 @@ install:
   version: "2.1.257"
   binary_path: "node_modules/.bin/claude"
 renderer: reef.harness.adapters.claude.render:ClaudeAdapterRenderer
-# The harness tree Claude Code takes. A method writes each part at its path;
-# Reef checks the file as its format and renders it to its renders path,
-# inside the Claude Code configuration directory of an episode or of an
-# install. A tree file that no part takes is refused. When a person and Reef both
-# change a file, its part's merge decides: lines merges the lines each changed, and file,
-# the default, refuses.
-parts:
-  rules:
-    path: rules.md
-    format: text
-    merge: lines
-    renders: claude/CLAUDE.md
-    holds: the instructions Claude Code reads at the start of every session
-  skill:
-    path: skills/{name}/SKILL.md
-    format: skill
-    merge: lines
-    renders: claude/skills/{name}/SKILL.md
-    holds: an Agent Skill, which Claude Code loads when its description fits the task
-  command:
-    path: commands/{name}.md
-    format: command
-    merge: lines
-    renders: claude/commands/{name}.md
-    holds: a prompt template that a person runs as /name
+# What Reef may evolve: each kind of file, at the path where claude reads it. A config/<target>.json
+# of the tree merges into that config file (config, below).
+evolve:
+  rules: claude/CLAUDE.md
+  skill: claude/skills/{name}/SKILL.md
+  command: claude/commands/{name}.md
   # The descriptor points autoMemoryDirectory at claude/memory, so the notes
   # Claude Code writes for itself across sessions are files of the tree: a
   # client syncs them, and a method may read and edit them.
-  memory:
-    path: memory/{name}.md
-    format: text
-    merge: lines
-    renders: claude/memory/{name}.md
-    holds: a note of Claude Code's automatic memory, or MEMORY.md, the index it reads at the start of every session
+  memory: claude/memory/{name}.md
   # Claude Code's code surface is a plugin: a directory with an entry file.
   # The part renders that entry file; activating it still needs a marketplace
   # or settings reference, so skills, commands and rules carry the harness.
-  extension:
-    path: extensions/{name}.js
-    format: code
-    renders: claude/plugins/{name}/index.js
-    holds: the entry file of a Claude Code plugin
-  config:
-    path: config/{name}.json
-    format: config
-    holds: a JSON object merged into claude/settings.json (primary)
-# How Reef runs the agent for one evaluation episode, in an episode root of its own: the
-# command, and the variables that point the agent's configuration at that root.
-episode:
-  argv: ["-p", "{prompt}", "--output-format", "json", "--permission-mode", "auto"]
-  env:
-    CLAUDE_CONFIG_DIR: "{root}/claude"
-    DISABLE_AUTOUPDATER: "1"
-    DISABLE_UPDATES: "1"
-    DISABLE_TELEMETRY: "1"
-    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
-# How a person's machine runs Claude Code on a release: the person's own ~/.claude stays, and
-# the release loads over it. The install's claude/ is a plugin, so its skills and commands
-# load as reef:<name> beside the person's own; its rules follow the person's CLAUDE.md; its
-# settings, which bind the model and point automatic memory at the memory part, win over the
-# person's.
-layer:
-  args:
-    - ["--plugin-dir", "{root}/claude"]
-    - ["--settings", "{root}/claude/settings.json"]
-    - ["--append-system-prompt-file", "{root}/claude/CLAUDE.md"]
-# The config files the harness reads: the defaults Reef merges first, and the checks the merged
-# file must pass. A tree's config part (see parts) merges into one of them.
+  extension: claude/plugins/{name}/index.js
+# The agent's directories under the root, each with the variable that moves it there. What the agent writes
+# in them is its state, never residue, and a sandbox keeps them writable.
+dirs:
+  claude: CLAUDE_CONFIG_DIR
+sessions: {format: claude-session-jsonl, path: claude/projects}
+# How to point Claude Code at a model endpoint. Claude Code speaks the
+# Anthropic Messages API natively, so only the anthropic dialect is bound:
+# settings.json's `env` block redirects the client at Reef's endpoint, which
+# is Anthropic-compatible at {base_url}/v1/messages. Reef appends this set
+# when it runs evaluation episodes; the served tree never carries a provider.
+model:
+  anthropic:
+    - target: primary
+      data:
+        env:
+          ANTHROPIC_BASE_URL: "{base_url}"
+          ANTHROPIC_AUTH_TOKEN: "{api_key}"
+          ANTHROPIC_MODEL: "{model}"
+# How the agent runs: one evaluation episode in a root of its own (the command, and variables
+# beside the dirs), and on a person's machine a layer over the person's own configuration.
+run:
+  episode:
+    argv: ["-p", "{prompt}", "--output-format", "json", "--permission-mode", "auto"]
+    env:
+      DISABLE_AUTOUPDATER: "1"
+      DISABLE_UPDATES: "1"
+      DISABLE_TELEMETRY: "1"
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+  # How a person's machine runs Claude Code on a release: the person's own ~/.claude stays, and
+  # the release loads over it. The install's claude/ is a plugin, so its skills and commands
+  # load as reef:<name> beside the person's own; its rules follow the person's CLAUDE.md; its
+  # settings, which bind the model and point automatic memory at the memory part, win over the
+  # person's.
+  layer:
+    args:
+      - ["--plugin-dir", "{root}/claude"]
+      - ["--settings", "{root}/claude/settings.json"]
+      - ["--append-system-prompt-file", "{root}/claude/CLAUDE.md"]
+# The config files the agent reads, with the defaults Reef merges first and the checks the merged
+# file must pass. A tree's config/<target>.json merges into one of them. The defaults and checks
+# are optional: a new adapter can start with the paths alone.
 config:
   primary:
     path: "claude/settings.json"
@@ -155,35 +142,3 @@ config:
             Value(ParseJson(AllOf(IsObject(), Not(Contains(Key(IsIn(["model", "models"])))))))
           ))
         reason: Reef's model binding chooses the model, so CLAUDE_CODE_EXTRA_BODY must be a JSON object without model or models
-# How to point Claude Code at a model endpoint. Claude Code speaks the
-# Anthropic Messages API natively, so only the anthropic dialect is bound:
-# settings.json's `env` block redirects the client at Reef's endpoint, which
-# is Anthropic-compatible at {base_url}/v1/messages. Reef appends this set
-# when it runs evaluation episodes; the served tree never carries a provider.
-model_binding:
-  anthropic:
-    - target: primary
-      data:
-        env:
-          ANTHROPIC_BASE_URL: "{base_url}"
-          ANTHROPIC_AUTH_TOKEN: "{api_key}"
-          ANTHROPIC_MODEL: "{model}"
-trajectory:
-  # Claude Code writes one JSONL transcript per session under
-  # CLAUDE_CONFIG_DIR/projects/<cwd-slug>/<session-id>.jsonl, one event per
-  # line — the same shape pi uses, read by the claude-session-jsonl reader.
-  format: claude-session-jsonl
-  path: "claude/projects"
-cleanup_whitelist:
-  - "claude/projects/**"
-  - "claude/memory/**"
-  # Claude Code's boot persists local state beside the rendered config:
-  # a top-level state file, feature-gate cache, per-session todo lists, and
-  # captured shell snapshots. Episode state, not residue.
-  - "claude/.claude.json"
-  - "claude/statsig/**"
-  - "claude/todos/**"
-  - "claude/shell-snapshots/**"
-  - "claude/statsig"
-  - "claude/todos"
-  - "claude/shell-snapshots"

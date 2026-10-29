@@ -8,10 +8,10 @@ The map, one subpackage per job:
     (``render``).
 ``adapters/``
     one directory per agent, the mapping only: an ``adapter.yaml`` (schema in
-    ``descriptor``) whose ``parts`` say which parts a tree of the agent holds
-    and where each lands (schema in ``parts``), and whose other sections say
-    how its binary runs headless and binds a model, and a ``render.py`` with
-    its own render steps. pi, opencode, claude, codex, dsh, hermes, and the two
+    ``descriptor``) that says what Reef may evolve and where the agent reads
+    each file (kinds in ``parts``), where the agent keeps its directories,
+    how it binds a model, and how it runs; and a ``render.py`` with its own
+    render steps. pi, opencode, claude, codex, dsh, hermes, and the two
     programs Reef ships, native and terminus.
 ``episodes/``
     one headless run and its reading: launch on a rendered root through any
