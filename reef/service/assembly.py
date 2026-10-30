@@ -40,10 +40,12 @@ from reef.service.deploy.service_config import ServiceConfig, service_owned_keys
 from reef.service.deploy.serving import serving_runtime_config
 from reef.service.deploy.training import training_deployment_for
 from reef.service.task_import import TaskImport, TaskImportingScenarioStorage
+from reef.storage.data import DataStore
 from reef.storage.observer import ObservedScenarioStorage
 from reef.storage.postgres import PostgresScenarioStorage
 from reef.storage.records import RecordRetention
 from reef.storage.scenario import ScenarioStorage
+from reef.storage.sql_data import PostgresDataStore, SQLiteDataStore
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.tasks import LocalTaskFileStore, TaskFileStore
 
@@ -271,6 +273,28 @@ def default_served_url(host: str, port: int) -> str:
     return f"http://[{bound}]:{port}" if literal.version == 6 else f"http://{bound}:{port}"
 
 
+def build_data_store(settings: ServiceConfig, task_files: TaskFileStore) -> DataStore:
+    """The data store that ``storage.data_store`` names, sharing ``task_files`` without owning it.
+
+    Unset follows ``storage.record_backend``: ``postgres`` uses ``storage.record_database_url`` and the schema
+    ``reef_data``, and ``sqlite`` or a plugin record backend uses ``sqlite``, in ``<agent_record_dir>/data``.
+    """
+    directory = Path(settings.agent_record_dir)
+    choice = settings.data_store
+    if choice is None:
+        choice = "postgres" if settings.record_backend == "postgres" else "sqlite"
+    if choice == "postgres":
+        return PostgresDataStore(
+            _require_non_empty(settings.record_database_url, "reef.record_database_url"), task_files
+        )
+    if choice == "sqlite":
+        return SQLiteDataStore(directory / "data", task_files)
+    reference = DataStore.reference(choice, setting="storage.data_store")
+    return DataStore.referenced_class(reference).from_config(
+        reference.config, directory=directory, task_files=task_files
+    )
+
+
 def build_dispatcher(
     settings: ServiceConfig,
     *,
@@ -302,6 +326,7 @@ def build_dispatcher(
         recipe = recipe.with_served_endpoint(ServedEndpoint(url=served_url, token=evaluation_token))
     experiment_tracker = None
     scenario_storage: ScenarioStorage | None = None
+    data_store: DataStore | None = None
     try:
         record_directory = Path(settings.agent_record_dir)
         task_file_directory = Path(settings.task_file_dir)
@@ -332,6 +357,7 @@ def build_dispatcher(
             # The storage owns the task file store after it exists. Until then, this code closes it.
             task_files.close()
             raise
+        data_store = build_data_store(settings, task_files)
         if settings.task_import_manifest is not None and settings.task_import_tasks_root is not None:
             scenario_storage = TaskImportingScenarioStorage(
                 scenario_storage,
@@ -375,6 +401,7 @@ def build_dispatcher(
             backend_factory,
             local_artifact_dir=Path(settings.artifact_cache_dir) / "staged",
             scenario_storage=scenario_storage,
+            data_store=data_store,
             allow_implicit_creation=settings.allow_implicit_scenario_creation,
             experiment_tracker=experiment_tracker,
             hold_local_cycles=hold_local_cycles and calls_service,
@@ -388,6 +415,10 @@ def build_dispatcher(
             ),
         )
     except BaseException:
+        # The data store first: the scenario storage closes the task file store that it shares.
+        if data_store is not None:
+            with suppress(Exception):
+                data_store.close()
         if scenario_storage is not None:
             with suppress(Exception):
                 scenario_storage.close()

@@ -32,6 +32,7 @@ from reef.scenario.committer import ComponentArtifact
 from reef.scenario.registry import ScenarioLifecycle, ScenarioRegistry
 from reef.scenario.releases import ServedArtifact
 from reef.scenario.scenario import Scenario
+from reef.storage.data import DataStore
 from reef.storage.records import RecordRetention
 from reef.storage.samples import StoredSample
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage
@@ -78,6 +79,7 @@ class Dispatcher(ScenarioLifecycle):
         allow_implicit_creation: bool = True,
         experiment_tracker: ExperimentTracker | None = None,
         scenario_storage: ScenarioStorage,
+        data_store: DataStore | None = None,
         hold_local_cycles: bool = False,
         scenario_idle_unload_seconds: float | None = None,
         scenario_admission: ScenarioAdmission | None = None,
@@ -91,12 +93,17 @@ class Dispatcher(ScenarioLifecycle):
 
         ``scenario_admission``: decides whether a scenario is created or
         loaded. The default admits all scenarios.
+
+        ``data_store``: the deployment's data store (RFC #1028). The dispatcher
+        closes it before the scenario storage, which owns the task file store
+        that the data store shares.
         """
         if scenario_idle_unload_seconds is not None and scenario_idle_unload_seconds <= 0:
             raise ValueError("scenario_idle_unload_seconds must be positive")
         #: The deployment's recipe, before any scenario's own model settings.
         self.recipe = recipe
         self.storage = scenario_storage
+        self.data_store = data_store
         self.record_retention_lock = Lock()
         self.experiment_tracker = experiment_tracker if experiment_tracker is not None else NullExperimentTracker()
         self.registry = ScenarioRegistry(
@@ -641,6 +648,11 @@ class Dispatcher(ScenarioLifecycle):
             # finds a closed store.
             try:
                 scenario.close()
+            except BaseException as exc:
+                errors.append(exc)
+        if self.data_store is not None:
+            try:
+                self.data_store.close()
             except BaseException as exc:
                 errors.append(exc)
         try:
