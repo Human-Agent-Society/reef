@@ -152,8 +152,8 @@ def test_openclawrl_isolates_external_models_from_reef_training():
     assert compose["reef"]["depends_on"] == {"prm": {"condition": "service_healthy"}}
     flags = slime_flags(config)
     training_gpus = int(flags.get("actor-num-nodes", "1")) * int(flags["actor-num-gpus-per-node"])
-    # Slime starts no engine; the inference section sizes the serving engines.
-    assert flags["rollout-num-gpus"] == "0"
+    # Slime's trajectory jobs start no engine; the inference section sizes the serving engines.
+    assert "rollout-num-gpus" not in flags
     rollout_gpus = int(config["reef"]["inference_num_gpus"])
     assert (training_gpus, rollout_gpus, int(flags["num-gpus-per-node"])) == (4, 1, 5)
     assert training_gpus + rollout_gpus == len(pools["reef"])

@@ -21,6 +21,8 @@ class SlimeArguments(Namespace):
     colocate: bool
     offload_train: bool
     offload_rollout: bool
+    # The GPUs of a job's rollout engines; 0 for a job that starts none.
+    rollout_num_gpus: int
     megatron_lora_rank: int
     megatron_lora_alpha: int | None
     megatron_lora_target_modules: list[str] | None
