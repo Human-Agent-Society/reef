@@ -1,8 +1,9 @@
 """The tasks each harness step evaluates on.
 
 A step evaluates the candidate and the current tree on the same tasks: the
-seed tasks (``evolution.tasks``), or the eval split of a task store as the
-step reads it, then the prompts promoted from failing traffic. Promotion is
+seed tasks (``evolution.tasks``), or the eval split of the scenario's
+imported tasks as the step reads it, then the prompts promoted from failing
+traffic. Promotion is
 off by default. When it is on, the method's ``Promoter`` picks the prompts
 (every trace's user prompt without one), and Reef screens out credentials and
 instruction overrides, skips duplicates, and caps the total and each tagged
@@ -14,10 +15,10 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
-from reef.core.job_data import TrajectorySample
+from reef.core.job_data import TaskSample, TrajectorySample
 from reef.core.trajectories import recorded_payload, source_record_id
 from reef.harness.tree.checks import directive_shaped, secret_shaped
-from reef.storage.tasks import TaskStore
+from reef.storage.samples import TrainerSamples
 from reef.train.harness_backend.contract import Promoter, SampleSource
 from reef.train.harness_backend.manifest import FailureManifest
 from reef.train.harness_backend.state import HarnessState
@@ -77,8 +78,8 @@ class StepTasks:
 class EvaluationTasks:
     """The source of every step's evaluation tasks.
 
-    ``seed_tasks`` are ``evolution.tasks``; with ``task_store`` set, each step
-    reads the store's eval split instead. With ``promote_failures``, a step
+    ``seed_tasks`` are ``evolution.tasks``; with ``eval_samples`` set, each step
+    reads the eval split of the imported tasks in that sample store instead. With ``promote_failures``, a step
     promotes up to ``max_promoted`` prompts in total and ``max_promoted_per_client``
     per tagged client, chosen by ``promoter`` (every trace's prompt without one).
     """
@@ -87,28 +88,32 @@ class EvaluationTasks:
         self,
         *,
         seed_tasks: tuple[str, ...],
-        task_store: TaskStore | None = None,
+        eval_samples: TrainerSamples | None = None,
         promote_failures: bool = False,
         promoter: Promoter | None = None,
         max_promoted: int = 50,
         max_promoted_per_client: int = 5,
     ) -> None:
-        if not seed_tasks and task_store is None:
+        if not seed_tasks and eval_samples is None:
             raise ValueError("harness evolution requires a non-empty task set")
         if max_promoted < 0 or max_promoted_per_client < 0:
             raise ValueError("max_promoted_tasks and max_promoted_per_client must be at least 0")
         self.seed_tasks = seed_tasks
-        self.task_store = task_store
+        self.eval_samples = eval_samples
         self.promote_failures = promote_failures
         self.promoter = promoter
         self.max_promoted = max_promoted
         self.max_promoted_per_client = max_promoted_per_client
 
     def seed(self) -> tuple[str, ...]:
-        """The seed tasks as of now: the store's eval split when a store is set, in publication order."""
-        if self.task_store is None:
+        """The seed tasks as of now: with ``eval_samples``, the eval split of its imported tasks, in arrival order."""
+        if self.eval_samples is None:
             return self.seed_tasks
-        return tuple(str(self.task_store.path(task.files_digest)) for task in self.task_store.tasks(split="eval"))
+        return tuple(
+            str(stored.sample.task_path)
+            for stored in self.eval_samples.imported_tasks(split="eval")
+            if isinstance(stored.sample, TaskSample)
+        )
 
     def for_step(
         self, samples: tuple[TrajectorySample, ...], state: HarnessState, manifest: FailureManifest | None

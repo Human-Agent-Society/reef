@@ -72,7 +72,14 @@ class Serve:
     runtime_load_id: str
 
 
-Step = AgentRecord | Serve | str
+@dataclass(frozen=True)
+class Insert:
+    """A client inserts the stored samples ``sample_ids`` into the trainer's manual buffer at this step."""
+
+    sample_ids: tuple[str, ...]
+
+
+Step = AgentRecord | Serve | Insert | str
 
 
 # ------------------------------------------------------------------- the driver
@@ -204,6 +211,8 @@ class StreamRun:
                 elif isinstance(step, Serve):
                     self.serving_runtime_load_id = step.runtime_load_id
                     trainer.pipeline.observe_serving_runtime_load_id(step.runtime_load_id)
+                elif isinstance(step, Insert):
+                    trainer.change_buffer(step.sample_ids, insert=True)
                 elif step == CYCLE:
                     self.drain(trainer)
                 elif step == RELOAD:
@@ -338,7 +347,7 @@ class SlotGroupRecord2Record(ReportRecord2Record):
 
 
 class OrderedMixRecord2Record(ReportRecord2Record):
-    """Reports with a ``metadata.group`` form groups that batch in key order after singletons."""
+    """Reports with a ``metadata.group`` form groups; job data takes their samples in store order, not key order."""
 
     @classmethod
     def from_config(
@@ -349,7 +358,6 @@ class OrderedMixRecord2Record(ReportRecord2Record):
             context,
             AnyGroupReady(),
             exclusive_sources=True,
-            ordered_groups=True,
             max_staleness=settings.max_staleness,
         )
 
@@ -700,7 +708,17 @@ def trace_steps(mode_requests: bool) -> list[Step]:
     for index in range(6):
         steps += scored("c", index, float(index))
     if mode_requests:
-        steps += [instruction("train-1"), CYCLE, *scored("c", 6), instruction("train-2")]
+        # The samples join the manual buffer only by a client's insert; each instruction trains the one inserted
+        # sample, and the other stored samples wait.
+        steps += [
+            CYCLE,
+            Insert(("r-c-0:0",)),
+            instruction("train-1"),
+            CYCLE,
+            *scored("c", 6),
+            Insert(("r-c-1:0",)),
+            instruction("train-2"),
+        ]
     return steps
 
 
@@ -719,7 +737,7 @@ def streams() -> dict[str, tuple[StreamRun, list[Step]]]:
             StreamRun(SLOT_GROUP_STAGES),
             slot_steps(),
         ),
-        "ordered_groups": (
+        "keyed_groups": (
             StreamRun(ORDERED_MIX_STAGES, batch_size=3),
             ordered_steps(),
         ),
@@ -740,10 +758,6 @@ def streams() -> dict[str, tuple[StreamRun, list[Step]]]:
         ),
         "trace_manual_cap": (
             StreamRun(TRACE_STAGES, training_mode="manual"),
-            trace_steps(True),
-        ),
-        "trace_hybrid": (
-            StreamRun(TRACE_STAGES, training_mode="hybrid", batch_size=2),
             trace_steps(True),
         ),
     }

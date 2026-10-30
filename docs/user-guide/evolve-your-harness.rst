@@ -202,15 +202,13 @@ request (i.e. ``POST /reef/train`` requests). ``data.training_mode`` in the reci
 decides which of the two a deployment accepts.
 
 - ``auto`` (the default): steps start from job data of recorded traffic
-  alone. Training requests are ignored.
-- ``manual``: steps start from training requests alone. Ordinary
-  traffic never starts evolution.
-- ``hybrid``: steps start from either, as the tutorial's ``deployment.yaml``
-  sets. Training requests are queued and take precedence, and automatic steps continue
-  between those requests.
+  alone. Training requests are refused.
+- ``manual``: steps start from training requests alone, as the tutorial's
+  ``deployment.yaml`` sets. Each request step also reads the traces of the
+  manual buffer, which a client fills. Ordinary traffic never starts evolution.
 
 ``POST /reef/scenarios/{scenario}/update`` switches a running deployment
-between the three.
+between the two.
 
 Trigger of step
 ~~~~~~~~~~~~~~~
@@ -250,10 +248,10 @@ traffic alone trains, unscored, for methods that judge for themselves.
      record2sample:
        module: reef.record2sample.traces:InferenceSamples
 
-Reef holds the traces that wait for a step in a buffer. The buffer keeps at
-most ``pipeline.sample2job.config.buffer_size`` traces (default four times
-``job_samples``). When more traces arrive, Reef releases the oldest ones. This
-limit applies in every mode.
+Reef keeps the traces that wait for a step in the scenario's sample store. An
+automatic step takes the oldest waiting traces: at most
+``pipeline.sample2job.config.buffer_size`` traces (default ``job_samples``).
+Later traces wait for the next steps.
 
 Under ``auto`` mode, training requests are rejected.
 
@@ -268,23 +266,15 @@ e.g. what fields a request carries, the screens its text passes, and what
 happens to a request whose step fails.
 
 The ``pipeline`` stages trigger no evolution in this mode, but traces are
-still collected while training requests run. However, these traces are never
-used in evolution until ``data.training_mode`` is switched to ``auto`` or
-``hybrid``. The buffer limit still applies: Reef releases the oldest traces
-beyond ``buffer_size``.
-
-``hybrid`` mode
-^^^^^^^^^^^^^^^
-
-In ``hybrid`` mode, either condition starts a step: ``job_samples`` traces
-collected by the ``pipeline`` stages, or a training request received.
-
-When both conditions are met, the training request takes precedence for the
-next step. Reef builds one step that uses both, whether or not
-``job_samples`` is met. The proposer then
-receives the training request and the traces that automatic job data would
-take next. It gets up to ``job_samples`` traces, or none, and uses both
-to make a patch.
+still collected in the sample store. A request step does not wait for
+``job_samples`` traces. The proposer receives the training request and the
+traces of the manual buffer, or none. New traces do not join the manual buffer
+by themselves: a client lists them (``GET /reef/scenarios/{scenario}/samples``)
+and adds the ones that the step should read (`Choose the samples that train
+<../reference/http-api.rst#choose-the-samples-that-train>`__). A switch from
+``auto`` to ``manual`` starts the manual buffer with the traces that the next
+automatic step would take. The proposer uses the request and the traces to
+make a patch.
 
 Propose: a patch to the head tree
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -457,7 +447,8 @@ The evaluation suite consists of the seed tasks specified in
 configure ``evolution.promote_failures: true``, which adds failing traces'
 prompts to the evaluation set permanently. This also means the method's
 rollout scorer must be able to score any arbitrary prompt. A
-request step in ``hybrid`` promotes the failures it carries the same way.
+request step in ``manual`` promotes the failures of its manual buffer the same
+way.
 
 A promoted prompt is real client traffic, so it is screened before it
 becomes a task. A prompt carrying a key-shaped literal meets the tree's own
@@ -769,14 +760,14 @@ Ask for a harness change
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
 You can also ask for a harness change in plain words. A scenario in ``manual``
-or ``hybrid`` takes training requests; the tutorial's ``deployment.yaml``
-runs in ``hybrid``, and a scenario in ``auto`` takes them after a switch:
+takes training requests; the tutorial's ``deployment.yaml`` runs in
+``manual``, and a scenario in ``auto`` takes them after a switch:
 
 .. code:: bash
 
    curl -sS -X POST -H "Authorization: Bearer $REEF_TOKEN" \
      -H "Content-Type: application/json" \
-     -d '{"training_mode": "hybrid"}' \
+     -d '{"training_mode": "manual"}' \
      "$REEF_URL/reef/scenarios/code-repair/update"
    curl -sS -X POST -H "Authorization: Bearer $REEF_TOKEN" \
      -H "x-reef-scenario: code-repair" -H "Content-Type: application/json" \

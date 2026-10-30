@@ -19,9 +19,9 @@ from reef.core.errors import ReefError
 from reef.storage.commits import RECORD_KIND, CommitHistoryError, CommitRecord
 from reef.storage.evaluations import EvaluationStore
 from reef.storage.records import RecordStore
+from reef.storage.samples import SampleStore
 from reef.storage.scenario import ScenarioStore, ScenarioStoreConflict
 from reef.storage.tasks import TaskStorage
-from reef.storage.trajectories import TrajectoryStore
 
 
 def same_commit(left: CommitRecord, right: CommitRecord) -> bool:
@@ -93,10 +93,10 @@ class CommitHistory(ABC):
 
 
 class CommitHistoryScenarioStore(ScenarioStore):
-    """One open session of a scenario: its records, task stores, uploaded trajectories, evaluations and commits.
+    """One open session of a scenario: its records, task stores, training samples, evaluations and commits.
 
     Values: ``scenario`` is a non-empty name. ``records``, ``tasks``,
-    ``trajectories``, ``evaluations`` and ``commit_history`` hold that
+    ``samples``, ``evaluations`` and ``commit_history`` hold that
     scenario's state; the bundled storages keep all five in one database. Every record in the
     history names ``scenario``; a read that finds another name raises
     ``ReefError``. ``initial_step`` is a non-negative step for an existing
@@ -116,7 +116,7 @@ class CommitHistoryScenarioStore(ScenarioStore):
         commit_history: CommitHistory,
         *,
         tasks: TaskStorage,
-        trajectories: TrajectoryStore,
+        samples: SampleStore,
         evaluations: EvaluationStore,
         initial_step: int = 0,
     ) -> None:
@@ -127,7 +127,7 @@ class CommitHistoryScenarioStore(ScenarioStore):
         self._scenario = scenario
         self._records = records
         self._tasks = tasks
-        self._trajectories = trajectories
+        self._samples = samples
         self._evaluations = evaluations
         self._commit_history = commit_history
         self._initial_step = initial_step
@@ -153,10 +153,10 @@ class CommitHistoryScenarioStore(ScenarioStore):
             return self._tasks
 
     @property
-    def trajectories(self) -> TrajectoryStore:
+    def samples(self) -> SampleStore:
         with self._lock:
             self._ensure_open()
-            return self._trajectories
+            return self._samples
 
     @property
     def evaluations(self) -> EvaluationStore:

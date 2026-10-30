@@ -61,6 +61,7 @@ from reef.record2sample.traces import TraceSamples
 from reef.runtime.executor.config import ExecutorSettings, role_executor_settings
 from reef.sample2job.traces import TraceJobData
 from reef.storage.records import RecordStore
+from reef.storage.samples import TrainerSamples
 from reef.storage.tasks import TaskStorage
 from reef.surface.base import ArtifactLayout, Surface
 from reef.train.backend import ComponentReleases
@@ -234,7 +235,8 @@ class HarnessEvolutionRecipe(Recipe):
     holding the first tree (see ``reef.harness.tree.layout``), which becomes
     the base release of a new scenario; ``tasks``, the prompts each step
     evaluates (or ``task_manifest`` with ``tasks_root``, or
-    ``eval_task_store``, whose eval split each step reads); ``propose``,
+    ``eval_imported_tasks``, true to evaluate each step on the eval split of
+    the scenario's imported tasks as the step reads it); ``propose``,
     ``evaluate``, ``selection`` and ``promote``, which replace the method's
     ``evolution_spec()`` parts. The other keys tune the rollouts
     (``binary``, ``rollout_timeout_s``, ``rollout_repeats``,
@@ -257,8 +259,8 @@ class HarnessEvolutionRecipe(Recipe):
     propose: Proposer
     score_rollout: RolloutScorer
     tasks: tuple[str, ...]
-    #: A task store whose eval split each step evaluates on, in place of ``tasks``.
-    eval_task_store: str | None = None
+    #: Whether each step evaluates on the eval split of the scenario's imported tasks, in place of ``tasks``.
+    eval_imported_tasks: bool = False
     adapter: str = "pi"
     binary: str | None = None
     rollout_timeout_s: float = 600.0
@@ -330,8 +332,8 @@ class HarnessEvolutionRecipe(Recipe):
             raise ValueError("harness evolution requires a Proposer")
         if not isinstance(self.score_rollout, RolloutScorer):
             raise ValueError("harness evolution requires a RolloutScorer")
-        if not self.tasks and self.eval_task_store is None:
-            raise ValueError("harness evolution requires tasks or an eval task store")
+        if not self.tasks and not self.eval_imported_tasks:
+            raise ValueError("harness evolution requires tasks or eval_imported_tasks")
         evaluation_selection(self.score_rollout, self.worker_executor)
         if self.rollout_timeout_s <= 0:
             raise ValueError("rollout_timeout_s must be positive")
@@ -372,16 +374,21 @@ class HarnessEvolutionRecipe(Recipe):
         tasks = evolution.get("tasks")
         manifest_path = evolution.get("task_manifest")
         tasks_root = evolution.get("tasks_root")
-        eval_task_store = evolution.get("eval_task_store")
-        if eval_task_store is not None:
+        if "eval_task_store" in evolution:
+            raise RecipeConfigError(
+                "evolution.eval_task_store is gone: imported tasks are in the scenario's sample store; "
+                "set evolution.eval_imported_tasks: true"
+            )
+        eval_imported_tasks = evolution.get("eval_imported_tasks", False)
+        if not isinstance(eval_imported_tasks, bool):
+            raise RecipeConfigError("evolution.eval_imported_tasks must be true or false")
+        if eval_imported_tasks:
             if tasks is not None or manifest_path is not None or tasks_root is not None:
                 raise RecipeConfigError(
-                    "evolution.eval_task_store cannot be set with evolution.tasks or evolution.task_manifest"
+                    "evolution.eval_imported_tasks cannot be set with evolution.tasks or evolution.task_manifest"
                 )
-            if not isinstance(eval_task_store, str) or not eval_task_store:
-                raise RecipeConfigError("evolution.eval_task_store must be the name of a task store")
-            require_task_directories(evolution, "eval_task_store")
-            # The tasks are the store's eval split, which build reads from the scenario session.
+            require_task_directories(evolution, "eval_imported_tasks")
+            # The tasks are the eval split of the imported tasks, which build reads from the scenario session.
             tasks = []
         elif manifest_path is not None:
             if tasks is not None:
@@ -410,7 +417,7 @@ class HarnessEvolutionRecipe(Recipe):
         elif not isinstance(tasks, Sequence) or isinstance(tasks, str) or not tasks:
             raise RecipeConfigError(
                 "evolution.tasks must be a non-empty list of prompts, or set evolution.task_manifest with "
-                "evolution.tasks_root, or evolution.eval_task_store"
+                "evolution.tasks_root, or evolution.eval_imported_tasks"
             )
         binary = evolution.get("binary")
         if binary is not None and (not isinstance(binary, str) or not binary):
@@ -558,7 +565,7 @@ class HarnessEvolutionRecipe(Recipe):
             "score_rollout": scorer,
             "worker_executor": worker_executor,
             "tasks": tuple(str(task) for task in tasks),
-            "eval_task_store": eval_task_store,
+            "eval_imported_tasks": eval_imported_tasks,
             "adapter": adapter,
             "binary": binary,
             "rollout_timeout_s": float(timeout),
@@ -695,10 +702,11 @@ class HarnessEvolutionRecipe(Recipe):
         experiment_logger: ExperimentLogger | None = None,
         task_storage: TaskStorage | None = None,
         releases: ComponentReleases | None = None,
+        samples: TrainerSamples | None = None,
     ) -> Trainer:
         if releases is None:
             raise RecipeConfigError("harness evolution reads its head tree from the scenario's committed releases")
-        backend = self.build_backend(scenario, releases, task_storage)
+        backend = self.build_backend(scenario, releases, samples)
         if self.training_mode != "auto" and not self.propose.reads_requests:
             raise RecipeConfigError(
                 f"harness evolution in training_mode={self.training_mode!r} requires a proposer "
@@ -718,11 +726,12 @@ class HarnessEvolutionRecipe(Recipe):
             experiment_logger=experiment_logger,
             training_mode=self.training_mode,
             task_storage=task_storage,
+            samples=samples,
             default_job_samples=self.batch_size,
         )
 
     def build_backend(
-        self, scenario: str, releases: ComponentReleases, task_storage: TaskStorage | None
+        self, scenario: str, releases: ComponentReleases, samples: TrainerSamples | None
     ) -> HarnessBackend:
         """The scenario's backend: the binary installed, the evaluator, the tasks, the inbox and the record."""
         descriptor = get_adapter(self.adapter)
@@ -743,14 +752,14 @@ class HarnessEvolutionRecipe(Recipe):
             worker_selection=selection,
             worker_requirements=requirements,
         )
-        task_store = None
-        if self.eval_task_store is not None:
-            if task_storage is None:
-                raise RecipeConfigError("evolution.eval_task_store needs the task storage of a scenario session")
-            task_store = task_storage.open(self.eval_task_store)
+        eval_samples = None
+        if self.eval_imported_tasks:
+            if samples is None:
+                raise RecipeConfigError("evolution.eval_imported_tasks needs the sample store of a scenario session")
             # A step evaluates the eval split as it reads it then; an empty split would evaluate nothing at all.
-            if not task_store.tasks(split="eval"):
-                raise RecipeConfigError(f"the eval split of task store {self.eval_task_store!r} holds no task")
+            if not samples.imported_tasks(split="eval"):
+                raise RecipeConfigError("the eval split of the scenario's imported tasks holds no task")
+            eval_samples = samples
         agent = None
         if self.agent_executor is not None:
             agent_executor, agent_binary = self.agent_executor.for_program(program, binary=self.binary)
@@ -765,7 +774,7 @@ class HarnessEvolutionRecipe(Recipe):
             evaluator=evaluator,
             tasks=EvaluationTasks(
                 seed_tasks=self.tasks,
-                task_store=task_store,
+                eval_samples=eval_samples,
                 promote_failures=self.promote_failures,
                 promoter=self.promote,
                 max_promoted=self.max_promoted_tasks,

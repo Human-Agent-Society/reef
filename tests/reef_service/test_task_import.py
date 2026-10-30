@@ -9,14 +9,15 @@ from pathlib import Path
 import pytest
 from tests.support.task_service_stubs import task_for
 
+from reef.core.job_data import TaskSample
 from reef.core.tasks import write_harbor_task
 from reef.core.tasks.split import TaskSplit, TaskSplitError, write_split_manifest
 from reef.service.assembly import build_dispatcher
 from reef.service.deploy.deployment_config import translate_layout
 from reef.service.deploy.service_config import ServiceConfig, normalize_service_config, service_config_from_mapping
 from reef.service.task_import import TaskImport, TaskImportError, TaskImportingScenarioStorage
+from reef.storage.samples import SampleConflict
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.storage.tasks import IMPORTED_TASK_STORE, TaskConflict
 
 IMAGE = bytes(range(256))
 
@@ -36,10 +37,10 @@ def manifest(path: Path, train: tuple[str, ...], eval_: tuple[str, ...]) -> Path
 
 def imported(storage: TaskImportingScenarioStorage) -> list[tuple[str, str]]:
     with closing(storage.open("math")) as session:
-        return [(task.name, task.split) for task in session.tasks.open(IMPORTED_TASK_STORE).tasks()]
+        return [(task.sample_id, task.split) for task in session.samples.imported_tasks()]
 
 
-def test_each_open_imports_the_manifest_into_imported_tasks(tmp_path: Path) -> None:
+def test_each_open_imports_the_manifest_into_the_sample_store(tmp_path: Path) -> None:
     root = tmp_path / "tasks"
     for port, name in enumerate(("b-task", "a-task", "c-task")):
         harbor_task(root, name, 9000 + port)
@@ -48,9 +49,9 @@ def test_each_open_imports_the_manifest_into_imported_tasks(tmp_path: Path) -> N
     with closing(TaskImportingScenarioStorage(SQLiteScenarioStorage(tmp_path / "records"), task_import)) as storage:
         assert imported(storage) == [("a-task", "train"), ("b-task", "train"), ("c-task", "eval")]
         with closing(storage.open("math")) as session:
-            store = session.tasks.open(IMPORTED_TASK_STORE)
-            (evaluated,) = store.tasks(split="eval")
-            assert (store.path(evaluated.files_digest) / "environment" / "image.png").read_bytes() == IMAGE
+            (evaluated,) = session.samples.imported_tasks(split="eval")
+            assert isinstance(evaluated.sample, TaskSample)
+            assert (evaluated.sample.task_path / "environment" / "image.png").read_bytes() == IMAGE
 
         # The next open imports what the operator added and leaves the published tasks as they are.
         harbor_task(root, "d-task", 9010)
@@ -72,11 +73,11 @@ def test_a_task_that_changed_or_cannot_load_stops_the_open(tmp_path: Path) -> No
         instruction = root / "a-task" / "instruction.md"
         original = instruction.read_text()
         instruction.write_text("Solve another problem.\n")
-        with pytest.raises(TaskConflict, match="other files"):
+        with pytest.raises(SampleConflict, match="other content"):
             storage.open("math")
         instruction.write_text(original)
         manifest(path, (), ("a-task",))
-        with pytest.raises(TaskConflict, match="published to train, not eval"):
+        with pytest.raises(SampleConflict, match="stored in train, not eval"):
             storage.open("math")
 
         manifest(path, ("a-task", "missing-task"), ())
@@ -114,8 +115,8 @@ def test_the_deployment_imports_its_tasks_into_each_scenario(tmp_path: Path) -> 
     )
     dispatcher = build_dispatcher(settings)
     try:
-        store = dispatcher.get_or_create_scenario("math").store.tasks.open(IMPORTED_TASK_STORE)
-        assert [(task.name, task.split) for task in store.tasks()] == [("a-task", "eval")]
+        samples = dispatcher.get_or_create_scenario("math").store.samples
+        assert [(task.sample_id, task.split) for task in samples.imported_tasks()] == [("a-task", "eval")]
     finally:
         dispatcher.close()
 

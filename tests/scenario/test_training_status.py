@@ -20,7 +20,7 @@ from typing import Literal
 
 import pytest
 from tests.support._policy_recipe import TestPolicyRecipe
-from tests.support._threshold_processor import ThresholdJobData, threshold_pipeline
+from tests.support._threshold_processor import ThresholdJobData
 from tests.support.runtime_stubs import StubTrainingComponent, runtime_bindings
 
 from reef.artifact.memory import InMemoryRepositoryBackend
@@ -31,11 +31,15 @@ from reef.dispatcher.local_workers import POLL_SECONDS, LocalBackendWorker, Loca
 from reef.observability import ExperimentLogger
 from reef.pipeline_context import PipelineContext
 from reef.recipe import Recipe
+from reef.record2record import InferenceRecord2Record
+from reef.record2sample import NoSamples
 from reef.storage.records import RecordStore
+from reef.storage.samples import SampleStore
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.tasks import TaskStorage
 from reef.train.backend import ComponentReleases
-from reef.train.jobs import FixedJobPlan, JobLoop, JobLoopState, JobRequest, RunningJob
+from reef.train.jobs import JobLoop, JobLoopState, RunningJob
+from reef.train.pipeline import TrainingPipeline
 from reef.train.trainer import Trainer
 from reef.train.types import Sample
 
@@ -155,7 +159,7 @@ def test_status_reports_the_running_job_and_the_finished_jobs_of_a_job_trainer()
     running = JobLoopState(
         "stub:base", job=RunningJob("job-3", checkpoints_handled=1), finished_jobs=2, last_job=finished
     )
-    loop = JobLoop(StubTrainingComponent(), FixedJobPlan(JobRequest()), scenario="s")
+    loop = JobLoop(StubTrainingComponent(), scenario="s")
     dispatcher = bound_dispatcher(scenario_double(job_loop=loop, state=running.to_dict()))
 
     status = dispatcher.build_training_status()["scenarios"]["s"]
@@ -247,42 +251,57 @@ def test_a_worker_with_running_background_jobs_polls_on_a_bounded_interval() -> 
     assert timeout is not None and timeout > 0
 
 
-class BackgroundStepJobData(ThresholdJobData):
-    """Make one job's data from no record, as the rounds of generated tasks do.
+class BackgroundStep(InferenceRecord2Record):
+    """Run one step from no record, as the rounds of generated tasks do.
 
-    The first look starts a step. The step runs until a look after ``finished`` is set; that look ends it, and
-    the step's one task is the next job's data.
+    The first look starts the step. The step runs until a look after ``finished`` is set; that look ends it, and
+    ``StepSamples`` makes the step's one task.
     """
 
-    def __init__(self, context: PipelineContext, finished: Event) -> None:
-        super().__init__(context, None, None)
+    def __init__(self, finished: Event) -> None:
+        super().__init__()
         self.finished = finished
         self.step: Literal["not started", "running", "ended"] = "not started"
-        self.samples: tuple[Sample, ...] | None = None
 
-    def advance(self) -> None:
+    def advance(self, now: float) -> None:
+        super().advance(now)
         if self.step == "not started":
             self.step = "running"
         elif self.step == "running" and self.finished.is_set():
             self.step = "ended"
-            self.samples = (TaskSample(Path("generated-task")),)
 
     def background_jobs_running(self) -> bool:
         return self.step == "running"
 
-    def own_job_data(self) -> tuple[Sample, ...] | None:
-        return self.samples
 
-    def own_job_data_submitted(self) -> frozenset[str]:
-        self.samples = None
-        return frozenset({"own:1"})
+class StepSamples(NoSamples):
+    """Make the task of the ``BackgroundStep`` once it ended, from no record set."""
+
+    def __init__(self, step: BackgroundStep) -> None:
+        self.background_step = step
+        self.made = False
+
+    def made_samples(self) -> tuple[tuple[str, Sample], ...]:
+        if self.made or self.background_step.step != "ended":
+            return ()
+        self.made = True
+        return (("generated-task", TaskSample(Path("generated-task"))),)
 
 
 @dataclass(frozen=True, kw_only=True)
 class BackgroundStepRecipe(TestPolicyRecipe):
-    """A weights recipe whose job data is ``BackgroundStepJobData``'s; ``step_finished`` ends its step."""
+    """A weights recipe that trains the task of a ``BackgroundStep``; ``step_finished`` ends the step."""
 
     step_finished: Event = field(default_factory=Event, compare=False)
+
+    def background_pipeline(self, context: PipelineContext) -> TrainingPipeline:
+        step = BackgroundStep(self.step_finished)
+        return TrainingPipeline(
+            context,
+            record2record=step,
+            record2sample=StepSamples(step),
+            sample2job=ThresholdJobData(context, None, None),
+        )
 
     def build(
         self,
@@ -293,14 +312,13 @@ class BackgroundStepRecipe(TestPolicyRecipe):
         experiment_logger: ExperimentLogger | None = None,
         task_storage: TaskStorage | None = None,
         releases: ComponentReleases | None = None,
+        samples: SampleStore | None = None,
     ) -> Trainer:
         return Trainer.build(
             scenario,
             records,
-            pipeline_factory=lambda context: threshold_pipeline(
-                context, sample2job=BackgroundStepJobData(context, self.step_finished)
-            ),
-            job_loop=JobLoop(self.training_component, FixedJobPlan(JobRequest()), scenario=scenario),
+            pipeline_factory=lambda context: self.background_pipeline(context),
+            job_loop=JobLoop(self.training_component, scenario=scenario),
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
             default_job_samples=1,
