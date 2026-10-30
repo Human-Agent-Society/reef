@@ -9,7 +9,9 @@ import tarfile
 import threading
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from types import SimpleNamespace
 
 import pytest
 from aiohttp import web
@@ -18,19 +20,21 @@ from reef.artifact import Artifact
 from reef.core.errors import ReefError
 from reef.core.weight_layout import ADAPTER_DIR
 from reef.inference.remote import server as server_module
-from reef.inference.remote.config import CONTROL_PROTOCOL, RemoteInferenceSettings
+from reef.inference.remote.config import CONTROL_PROTOCOL, SHARED_GPU_CONTROL_CAPABILITY, RemoteInferenceSettings
 from reef.inference.remote.runtime import RemoteServingRuntimeFactory
 from reef.inference.remote.server import RemoteInferenceServer
 from reef.inference.remote.service import RemoteControl, RemoteInferenceBackend, RemoteInferenceService
 from reef.inference.sglang.chat import SGLangInferenceHandler
 from reef.runtime.deployment import (
+    BorrowedGpuResources,
     InferenceConnection,
     InferenceService,
     RuntimeConfigError,
     RuntimeRegistry,
     runtime_factory_for,
 )
-from reef.runtime.interfaces import InferenceBackend, WeightFiles
+from reef.runtime.executor.placement import GpuBundles
+from reef.runtime.interfaces import MemoryManagedInferenceBackend, WeightFiles
 from reef.runtime.jobs import ReleaseFormat
 from reef.runtime.serving import AdapterServingRuntime, FullWeightServingRuntime
 from reef.surface.adapter import adapter_name
@@ -82,7 +86,7 @@ def engine_app() -> web.Application:
     return app
 
 
-class FakeEngines(InferenceBackend):
+class FakeEngines(MemoryManagedInferenceBackend):
     def __init__(self, engine_url: str, events: list):
         self.engine_url = engine_url
         self.events = events
@@ -104,6 +108,12 @@ class FakeEngines(InferenceBackend):
 
     def resume(self):
         self.events.append("resume")
+
+    def release_memory(self):
+        self.events.append("release-memory")
+
+    def resume_memory(self):
+        self.events.append("resume-memory")
 
     def recover(self):
         self.events.append("recover")
@@ -199,6 +209,180 @@ def started_service(url: str) -> RemoteInferenceService:
     connection = service.start(None)
     assert connection == InferenceConnection(CONTROL_PROTOCOL, None)
     return service
+
+
+@pytest.fixture
+def shared_resources(monkeypatch):
+    group = SimpleNamespace(id=SimpleNamespace(hex=lambda: "shared-group"))
+    resources = BorrowedGpuResources(GpuBundles(group, [2, 3], [0, 1]))
+
+    def attach(cls, config):
+        assert config == resources.to_config()
+        return resources
+
+    monkeypatch.setattr(BorrowedGpuResources, "from_config", classmethod(attach))
+    monkeypatch.setattr(BorrowedGpuResources, "node_width", lambda self, tp: 2)
+    return resources
+
+
+def test_shared_client_refuses_an_old_component_before_allocating_engines(shared_resources, monkeypatch):
+    calls = []
+
+    def legacy(self, method, route, **kwargs):
+        calls.append((method, route))
+        return {"ok": True, "engines": False, "instance": "legacy"}
+
+    monkeypatch.setattr(RemoteControl, "call", legacy)
+    service = RemoteInferenceService(
+        RemoteInferenceSettings(url="http://component"),
+        engine="sglang",
+        num_gpus=2,
+        engine_config={},
+        control_token=CONTROL_TOKEN,
+    )
+    with pytest.raises(RuntimeError, match="does not support shared GPU memory"):
+        service.start(shared_resources)
+    service.close()
+    assert calls == [("GET", "health")]
+
+
+@pytest.mark.parametrize("failure", [None, "release-memory", "resume-memory"])
+def test_remote_handoff_preserves_ownership_and_blocks_requests_until_restored(
+    component, server, shared_resources, monkeypatch, failure
+):
+    url, events, _, services = component
+    service = RemoteInferenceService(
+        RemoteInferenceSettings(url=url),
+        engine="sglang",
+        num_gpus=2,
+        control_token=CONTROL_TOKEN,
+        engine_config={
+            "model_path": "model",
+            "gpus_per_engine": 2,
+            "gpus_per_node": 2,
+            "options": {"enable_memory_saver": True, "enable_weights_cpu_backup": True},
+        },
+    )
+    backend = service.backend(service.start(shared_resources))
+    assert server.resources is shared_resources
+    assert service.control.engine_instance == server.engine_instance
+    backend.resume()
+    payload = json.dumps({"input_ids": [1]}).encode()
+
+    def generate():
+        request = urllib.request.Request(
+            url + "/generate",
+            data=payload,
+            headers={"Authorization": f"Bearer {INFERENCE_TOKEN}", "Content-Type": "application/json"},
+        )
+        return urllib.request.urlopen(request, timeout=10)
+
+    with generate() as response:
+        assert response.status == 200
+    backend.pause()
+    with pytest.raises(urllib.error.HTTPError) as paused:
+        generate()
+    assert paused.value.code == 503
+    if failure:
+
+        def fail():
+            raise TimeoutError("one engine did not acknowledge")
+
+        monkeypatch.setattr(services[-1].engines, failure.replace("-", "_"), fail)
+    if failure == "release-memory":
+        with pytest.raises(RuntimeError, match="acknowledge"):
+            backend.release_memory()
+    else:
+        backend.release_memory()
+        assert server.memory_state == "released"
+        with pytest.raises(RuntimeError, match="released"):
+            backend.resume()
+        if failure == "resume-memory":
+            with pytest.raises(RuntimeError, match="acknowledge"):
+                backend.resume_memory()
+        else:
+            backend.resume_memory()
+            backend.resume()
+            with generate() as response:
+                assert response.status == 200
+    if failure:
+        assert server.memory_state == "failed"
+        with pytest.raises(RuntimeError, match="failed"):
+            backend.resume()
+        with pytest.raises(urllib.error.HTTPError):
+            generate()
+    expected_instance = server.engine_instance
+    server.engine_instance = "replacement"
+    with pytest.raises(RuntimeError, match="changed"):
+        backend.runtime_load_ids()
+    with pytest.raises(RuntimeError, match="changed"):
+        service.control.call("DELETE", "engines")
+    assert server.resources is shared_resources
+    server.engine_instance = expected_instance
+    service.close()
+    assert "release" not in events
+
+
+def test_shared_pause_waits_for_the_entire_forwarded_response(component, server, shared_resources, monkeypatch):
+    url, events, _, _ = component
+    service = RemoteInferenceService(
+        RemoteInferenceSettings(url=url),
+        engine="sglang",
+        num_gpus=2,
+        control_token=CONTROL_TOKEN,
+        engine_config={
+            "model_path": "model",
+            "gpus_per_engine": 2,
+            "gpus_per_node": 2,
+            "options": {"enable_memory_saver": True, "enable_weights_cpu_backup": True},
+        },
+    )
+    backend = service.backend(service.start(shared_resources))
+    backend.resume()
+    entered, release, draining = threading.Event(), threading.Event(), threading.Event()
+    original_wait = server.drained.wait
+
+    async def wait_for_stream():
+        draining.set()
+        await original_wait()
+
+    async def stream(request):
+        response = web.StreamResponse()
+        await response.prepare(request)
+        await response.write(b"first")
+        entered.set()
+        if not await asyncio.to_thread(release.wait, 10):
+            raise TimeoutError("test did not release the response stream")
+        await response.write(b"last")
+        await response.write_eof()
+        return response
+
+    def read_stream():
+        request = urllib.request.Request(url + "/stream", headers={"Authorization": f"Bearer {INFERENCE_TOKEN}"})
+        with urllib.request.urlopen(request, timeout=15) as response:
+            return response.read()
+
+    monkeypatch.setattr(server, "forward_request", stream)
+    monkeypatch.setattr(server.drained, "wait", wait_for_stream)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        reading = pool.submit(read_stream)
+        try:
+            assert entered.wait(10)
+            pausing = pool.submit(backend.pause)
+            assert draining.wait(10)
+            assert not pausing.done() and server.memory_state == "draining"
+            with pytest.raises(urllib.error.HTTPError) as rejected:
+                read_stream()
+            assert rejected.value.code == 503
+            assert [event for event in events if event in ("pause", "resume")][-1] == "resume"
+        finally:
+            release.set()
+        assert reading.result(10) == b"firstlast"
+        pausing.result(10)
+    assert server.active_requests == 0 and server.memory_state == "paused"
+    backend.release_memory()
+    assert events[-2:] == ["pause", "release-memory"]
+    service.close()
 
 
 def test_service_starts_engines_and_publishes_weight_files_through_the_component(component, tmp_path):
@@ -312,10 +496,24 @@ def test_health_reports_busy_engines_as_healthy_while_they_load_weights(componen
 def test_health_reports_the_component_process_and_whether_engines_run(component, server):
     url, _, _, _ = component
     control = RemoteControl(url, CONTROL_TOKEN)
-    assert control.call("GET", "health") == {"ok": True, "instance": server.instance_id, "engines": False}
+    assert control.call("GET", "health") == {
+        "ok": True,
+        "instance": server.instance_id,
+        "engines": False,
+        "engine_instance": None,
+        "memory_state": "stopped",
+        "capabilities": [SHARED_GPU_CONTROL_CAPABILITY],
+    }
     service = started_service(url)
     assert service.instance == server.instance_id
-    assert control.call("GET", "health") == {"ok": True, "instance": server.instance_id, "engines": True}
+    assert control.call("GET", "health") == {
+        "ok": True,
+        "instance": server.instance_id,
+        "engines": True,
+        "engine_instance": server.engine_instance,
+        "memory_state": "resident",
+        "capabilities": [SHARED_GPU_CONTROL_CAPABILITY],
+    }
     assert not service.engines_lost()
     control.call("DELETE", "engines")
     # The component stopped the engines: the service has lost them although the process is the same.
@@ -551,3 +749,45 @@ def test_the_serving_runtime_reloads_its_release_into_the_engines_of_a_restarted
     assert (layout, loaded, contents) == ("full", version, {"config.json": "{}"})
     assert services[1].engines.versions == [version] and events[-1] == "resume"
     runtime.shutdown()
+
+
+def test_shared_runtime_recovers_a_restarted_remote_component_on_the_same_reservation(
+    component, server, shared_resources, tmp_path
+):
+    from reef.inference.sglang.colocate import build_colocated_serving
+
+    url, events, _, services = component
+    runtime = build_colocated_serving(
+        shared_resources,
+        ReleaseFormat("full"),
+        {
+            "remote": {"url": url},
+            "num_gpus": 2,
+            "tensor_parallel_size": 2,
+            "options": {},
+            "adapter_capacity": 1,
+            "executor": "ray",
+            "executor_options": {},
+            "inference_timeout_s": 30,
+            "inference_handler_config": {},
+        },
+        model_path="model",
+        environ=TOKENS,
+    )
+    weights = tmp_path / "hf"
+    weights.mkdir()
+    (weights / "config.json").write_text("{}")
+    published = runtime.activate_checkpoint(Artifact.local(weights))
+    previous_instance = server.engine_instance
+    restart(server)
+    runtime.recover_engines()
+    assert server.engine_instance != previous_instance
+    assert server.resources is shared_resources
+    assert len(services) == 2 and services[-1].engines.versions == [published]
+    assert runtime.current_runtime_load_id() == published
+    assert runtime.inference_admission_status["open"] and server.memory_state == "resident"
+    with runtime.training_phase():
+        assert server.memory_state == "released"
+    assert services[-1].engines.versions == [published]
+    runtime.shutdown()
+    assert "release" not in events

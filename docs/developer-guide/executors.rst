@@ -223,12 +223,24 @@ Slime integration
 HTTP service's process. It owns one Ray session, the training GPUs it
 reserves there, and Slime's actor (and critic) workers. By default, serving
 uses a separate inference component. With ``training.colocate: true``, the
-Slime deployment builds local SGLang on the same single-node reservation.
+Slime deployment lends the actor reservation to local or remote SGLang.
+The reservation can span multiple nodes. Inference can borrow a subset.
 It drains inference before each training operation and restores serving after
 native train offload. The same handoff wraps the existing full-weight and
 adapter serving runtimes. Native SGLang grouping permits several engines
 when inference TP is smaller than the shared GPU count. File-based
 checkpoint publication remains unchanged.
+
+Custom serving factories receive ``InferenceResources`` through
+``RuntimeFactory.build_with_resources``. They must return a
+``SharedGpuInferenceRuntime`` before pending jobs start.
+``MemoryManagedInferenceBackend`` defines all-engine memory release and
+restoration. ``BorrowedGpuResources`` never releases its owner's reservation.
+Its serialized form identifies a live placement group in the same Ray cluster.
+The remote component binds control calls to one engine instance and rejects
+requests while shared GPU memory is unavailable. This prevents an old client
+from releasing or stopping replacement engines.
+
 The component still refuses ``--colocate``, ``--offload-rollout`` and
 ``--keep-lora-base-resident``. Its workers keep running between jobs, so it
 also refuses ``--release-train``.
@@ -251,8 +263,20 @@ keeps metrics in ``results.jsonl``. It requests every engine and compares
 tokens and log probabilities before and after each handoff. With LoRA, the
 second handoff preserves a trained adapter. Set ``SMOKE_LORA_RANK=0`` for
 full weights, or ``SMOKE_INFERENCE_TP=2`` for one engine on two GPUs.
+Set ``SMOKE_PREFIX_SHARING=1`` to check cache clearing across updates.
+Set ``SMOKE_INFERENCE_GPUS=1`` with inference TP one to check a GPU subset.
+Set ``SMOKE_NODES=2`` for a Ray cluster with two nodes and one GPU per node.
+Set ``SMOKE_RESTART=1`` to restart both runtimes between training jobs.
+For remote inference, set ``SMOKE_REMOTE_URL`` and both remote token variables.
+Start that component on the same Ray cluster before this check.
 This small-model check tests the handoff
 and publication path; it does not measure large-model memory capacity.
+
+For the HTTP path, run ``python -m tests.slime_backend.colocate_http_smoke``
+with the same environment and a fresh output directory. This check requires
+two GPUs: one shared by student training and serving, and one for the teacher.
+It uses the OPD recipe to check receipts, feedback references, two training
+updates, and publication through Reef's HTTP API.
 
 A job trains its data as Slime rollouts (a ``rollout_id`` is Slime's unit of
 training). Without the job parameter ``save_interval``, the job is one

@@ -35,7 +35,10 @@ def generate(serving, url, prompt, scenario):
         payload["lora_path"] = adapter_name(scenario, version)
     handle = asyncio.run(serving.acquire_inference())
     try:
-        response = requests.post(url + "/generate", json=payload, timeout=120)
+        headers = {}
+        if url == os.environ.get("SMOKE_REMOTE_URL"):
+            headers["Authorization"] = "Bearer " + os.environ["REEF_REMOTE_INFERENCE_TOKEN"]
+        response = requests.post(url + "/generate", json=payload, headers=headers, timeout=120)
         response.raise_for_status()
         pairs = response.json()["meta_info"]["output_token_logprobs"]
         assert pairs
@@ -46,9 +49,10 @@ def generate(serving, url, prompt, scenario):
 
 def same_generation(before, after):
     assert [pair[1] for pair in before] == [pair[1] for pair in after]
+    difference = max(abs(left[0] - right[0]) for left, right in zip(before, after, strict=True))
     assert all(
         math.isclose(left[0], right[0], rel_tol=1e-4, abs_tol=1e-4) for left, right in zip(before, after, strict=True)
-    )
+    ), f"maximum logprob difference: {difference}"
 
 
 def main() -> None:
@@ -57,15 +61,20 @@ def main() -> None:
     run.mkdir(parents=True, exist_ok=True)
     model = os.environ["MODEL_DIR"]
     gpus = int(os.environ.get("SMOKE_GPUS", "2"))
+    nodes = int(os.environ.get("SMOKE_NODES", "1"))
     inference_tp = int(os.environ.get("SMOKE_INFERENCE_TP", str(gpus)))
+    inference_gpus = int(os.environ.get("SMOKE_INFERENCE_GPUS", str(gpus)))
+    prefix_sharing = os.environ.get("SMOKE_PREFIX_SHARING", "0") == "1"
     lora_rank = int(os.environ.get("SMOKE_LORA_RANK", "0"))
     scenario = "smoke"
     raw = {
         "recipe": {"implementation": "recipes.sao.recipe:SAORecipe"},
         "inference": {
             "model-path": model,
-            "num-gpus": gpus,
+            "num-gpus": inference_gpus,
             "tensor-parallel-size": inference_tp,
+            "prefix-sharing": prefix_sharing,
+            "handler-factory": "reef.inference.sglang.chat.SGLangInferenceHandler",
             "timeout-s": 600,
             "options": {
                 "mem-fraction-static": 0.3,
@@ -91,9 +100,9 @@ def main() -> None:
                 "global-batch-size": 2,
                 "rollout-batch-size": 2,
                 "micro-batch-size": 1,
-                "actor-num-nodes": 1,
-                "actor-num-gpus-per-node": gpus,
-                "num-gpus-per-node": gpus,
+                "actor-num-nodes": nodes,
+                "actor-num-gpus-per-node": gpus // nodes,
+                "num-gpus-per-node": gpus // nodes,
                 "tensor-model-parallel-size": gpus,
                 "pipeline-model-parallel-size": 1,
                 "seq-length": 2048,
@@ -126,6 +135,9 @@ def main() -> None:
             },
         },
     }
+    remote_url = os.environ.get("SMOKE_REMOTE_URL")
+    if remote_url:
+        raw["inference"]["remote"] = {"url": remote_url}
     if lora_rank:
         raw["training"]["options"].update(
             {"megatron-lora-rank": lora_rank, "megatron-lora-alpha": lora_rank, "lr": 1e-4}
@@ -140,13 +152,28 @@ def main() -> None:
         assert int(ray.cluster_resources()["GPU"]) == gpus
         assert component.resources.inference_placement == component.resources.placement_groups["actor"]
         tokenizer = AutoTokenizer.from_pretrained(model)
-        workers = requests.get(serving.base_url + "/workers", timeout=30)
+        headers = {"Authorization": "Bearer " + os.environ["REEF_REMOTE_INFERENCE_TOKEN"]} if remote_url else {}
+        workers = requests.get(serving.base_url + "/workers", headers=headers, timeout=30)
         workers.raise_for_status()
         urls = [worker["url"] for worker in workers.json()["workers"]]
-        assert len(set(urls)) == gpus // inference_tp, urls
+        assert len(set(urls)) == inference_gpus // inference_tp, urls
         print(f"COLOCATE_ENGINES urls={urls} lora_rank={lora_rank}", flush=True)
         start = component.base_start
+        checkpoint = None
+        after_engines = []
+        prompt = []
         for step in range(2):
+            if step and os.environ.get("SMOKE_RESTART") == "1":
+                assert checkpoint is not None
+                close_runtimes(component, serving)
+                component, serving = connect_training_component(settings, model_path=model, loss_family="sao")
+                serving.activate_checkpoint(Artifact.local(Path(checkpoint.release_path)), scenario=scenario)
+                workers = requests.get(serving.base_url + "/workers", headers=headers, timeout=30)
+                workers.raise_for_status()
+                urls = [worker["url"] for worker in workers.json()["workers"]]
+                for url in urls:
+                    same_generation(after_engines[0], generate(serving, url, prompt, scenario))
+                print("COLOCATE_RESTART_PASS", flush=True)
             version = serving.serving_adapter_runtime_load_id(scenario) or serving.current_runtime_load_id()
             samples = []
             for index in range(2):
@@ -169,9 +196,15 @@ def main() -> None:
                         action_mask=[1] * len(pairs),
                     )
                 )
+            if prefix_sharing:
+                # Compare identical cache states: a warm prefix uses different
+                # prefill shapes than a cleared cache, even before any training.
+                serving.memory_backend.pause()
+                serving.memory_backend.resume()
             before_engines = [generate(serving, url, prompt, scenario) for url in urls]
             for before in before_engines:
-                same_generation(pairs, before)
+                same_generation(before_engines[0], before)
+                assert [pair[1] for pair in pairs] == [pair[1] for pair in before]
             job = TrainingJob(
                 f"shared-smoke-{step}",
                 component.name,
@@ -200,7 +233,11 @@ def main() -> None:
             # publication with the same request sampled before training.
             for url, before in zip(urls, before_engines, strict=True):
                 same_generation(before, generate(serving, url, prompt, scenario))
-            same_generation(pairs, generate(serving, serving.base_url, prompt, scenario))
+            routed = generate(serving, serving.base_url, prompt, scenario)
+            if not prefix_sharing:
+                same_generation(pairs, routed)
+            else:
+                assert [pair[1] for pair in routed] == [pair[1] for pair in before_engines[0]]
             published = serving.activate_checkpoint(Artifact.local(Path(checkpoint.release_path)), scenario=scenario)
             after_engines = [generate(serving, url, prompt, scenario) for url in urls]
             for after in after_engines[1:]:
@@ -218,6 +255,11 @@ def main() -> None:
                         {
                             "step": step,
                             "inference_tp": inference_tp,
+                            "nodes": nodes,
+                            "remote": bool(remote_url),
+                            "restarted": step > 0 and os.environ.get("SMOKE_RESTART") == "1",
+                            "inference_gpus": inference_gpus,
+                            "prefix_sharing": prefix_sharing,
                             "engines": len(urls),
                             "lora_rank": lora_rank,
                             "previous_version": version,

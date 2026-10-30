@@ -129,7 +129,7 @@ def _load_train_actor(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.mark.unit
-def test_full_weight_save_delegates_without_reopening_slimes_timer(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_full_weight_save_delegates_without_reopening_slimes_timer(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     # Slime times its own save_model. A full-weight save delegates to it, so
     # the adapter must not hold a timer of the same name open across the call:
     # Slime's Timer is a singleton and asserts "Timer save_model already
@@ -140,11 +140,13 @@ def test_full_weight_save_delegates_without_reopening_slimes_timer(monkeypatch: 
 
     def base_save_model(self, rollout_id, force_sync=False):
         with _StubTimer().context("save_model"):
+            assert (tmp_path / "hf" / str(rollout_id)).is_dir()
             saved.append((rollout_id, force_sync))
 
     monkeypatch.setattr(base, "save_model", base_save_model, raising=False)
     actor = object.__new__(module.ReefMegatronTrainRayActor)
-    actor.args = object()
+    actor.args = types.SimpleNamespace(save_hf=str(tmp_path / "hf" / "{rollout_id}"), debug_rollout_only=False)
+    actor.role = "actor"
 
     actor.save_model(7, force_sync=True)
 

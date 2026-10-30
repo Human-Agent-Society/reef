@@ -145,7 +145,7 @@ def assemble_training_services(config: dict[str, Any]) -> None:
         if not settings.inference_remote and not settings.training_colocate:
             component = local_inference_component(config, settings)
             settings = service_config_from_mapping(config)
-        if not settings.training_colocate:
+        if settings.inference_remote:
             # Every later reader gets the validated section, with underscore keys and defaults filled in. The
             # component loads the model as the file names it: a later download replaces reef.model_path on this host.
             remote = RemoteInferenceSettings.from_mapping(settings.inference_remote)

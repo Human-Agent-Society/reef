@@ -18,7 +18,11 @@ from reef.inference.sglang.colocate import (
 )
 from reef.inference.sglang.executor import SGLangExecutor
 from reef.inference.sglang.service import SGLangInferenceService
+from reef.runtime.deployment import BorrowedGpuResources
+from reef.runtime.executor.placement import GpuBundles
 from reef.service.deploy.orchestrator import resolve_deployment_config
+from reef.service.deploy.service_config import service_config_from_mapping
+from reef.service.deploy.serving import serving_runtime_config
 from reef.train.slime_backend.component import SlimeTrainingComponent
 from reef.train.slime_backend.launch import SlimeDeployment
 
@@ -114,28 +118,50 @@ def test_training_waits_for_active_request_and_blocks_new_requests(serving):
 
 @pytest.mark.parametrize("inference_tp", [1, 2])
 @pytest.mark.parametrize("lora_rank", [0, 8])
-@pytest.mark.parametrize("actor_width", [2, "${training.config.gpus}"])
-def test_shared_config_starts_no_separate_inference_component(tmp_path, actor_width, inference_tp, lora_rank):
+@pytest.mark.parametrize("actor_width", [2, 4, "${training.config.gpus}"])
+@pytest.mark.parametrize("nodes", [1, 2])
+@pytest.mark.parametrize("remote", [False, True])
+def test_shared_config_starts_no_separate_inference_component(
+    tmp_path, actor_width, inference_tp, lora_rank, nodes, remote
+):
     raw = {
         "recipe": {"implementation": "recipes.sao.recipe:SAORecipe"},
-        "inference": {"model-path": "/models/demo", "num-gpus": 2, "tensor-parallel-size": inference_tp},
+        "inference": {
+            "model-path": "/models/demo",
+            "num-gpus": 2,
+            "tensor-parallel-size": inference_tp,
+            "prefix-sharing": True,
+            "handler-factory": "reef.inference.sglang.chat.SGLangInferenceHandler",
+            "handler-config": {"tool_call_parser": "qwen25", "rollout_continuation": True},
+        },
         "training": {
             "backend": "slime",
             "colocate": True,
             "ray-address": "ray://head:10001",
-            "config": {"gpus": 2},
+            "config": {"gpus": 4},
             "options": {
                 "global-batch-size": 4,
-                "actor-num-nodes": 1,
+                "actor-num-nodes": nodes,
                 "actor-num-gpus-per-node": actor_width,
                 "megatron-lora-rank": lora_rank,
             },
         },
     }
+    if remote:
+        raw["inference"]["remote"] = {"url": "http://component:8000/"}
     config, _ = resolve_deployment_config(raw, None, tmp_path / "serve.yaml")
     assert [service["name"] for service in config["services"]] == ["reef"]
     assert config["reef"]["training_backend_options"]["offload-train"] is True
-    assert not config["reef"].get("inference_remote")
+    if remote:
+        assert config["reef"]["inference_remote"]["url"] == "http://component:8000"
+    else:
+        assert not config["reef"].get("inference_remote")
+    from reef.runtime.jobs import ReleaseFormat
+
+    serving = serving_runtime_config(service_config_from_mapping(config), SlimeDeployment(), ReleaseFormat("full"))
+    assert serving["inference_handler_factory"] is SGLangInferenceHandler
+    assert serving["prefix_sharing"] is True
+    assert serving["inference_handler_config"] == raw["inference"]["handler-config"]
 
 
 def test_shared_serving_binds_before_recovered_jobs_start(monkeypatch, serving):
@@ -168,31 +194,68 @@ def test_shared_serving_binds_before_recovered_jobs_start(monkeypatch, serving):
     assert events == ["serving-started", "jobs-started"]
 
 
+def test_custom_serving_without_handoff_contract_is_closed_before_jobs_start(monkeypatch):
+    from reef.runtime.deployment import RuntimeConfigError, RuntimeRegistry
+    from reef.runtime.interfaces import InferenceRuntime
+
+    component = MagicMock(spec=SlimeTrainingComponent)
+    component.colocate = True
+    component.resources = object()
+    unsupported = MagicMock(spec=InferenceRuntime)
+    build = MagicMock(return_value=unsupported)
+    monkeypatch.setattr(RuntimeRegistry, "build", build)
+    with pytest.raises(RuntimeConfigError, match="shared GPU serving runtime"):
+        SlimeDeployment().build_serving(component, {"type": "custom"}, model_path="model")
+    assert build.call_args.kwargs["resources"] is component.resources
+    unsupported.shutdown.assert_called_once()
+    component.start_jobs.assert_not_called()
+
+
+def test_custom_shared_serving_factory_preserves_its_config(tmp_path):
+    from reef.runtime.jobs import ReleaseFormat
+
+    factory = "reef.inference.sglang.colocate:ColocatedServingFactory"
+    raw = {
+        "recipe": {"implementation": "recipes.sao.recipe:SAORecipe"},
+        "inference": {"model-path": "/model", "serving": factory, "serving-config": {"options": {"custom": 1}}},
+        "training": {"colocate": True, "options": {"global-batch-size": 2}},
+    }
+    resolved, _ = resolve_deployment_config(raw, None, tmp_path / "serve.yaml")
+    config = serving_runtime_config(service_config_from_mapping(resolved), SlimeDeployment(), ReleaseFormat("full"))
+    assert config == {"type": factory, "options": {"custom": 1}, "release_format": ReleaseFormat("full").to_dict()}
+    assert [service["name"] for service in resolved["services"]] == ["reef"]
+
+
 @pytest.mark.parametrize("adapter", [False, True])
-def test_shared_serving_uses_the_native_sglang_executor(monkeypatch, adapter):
+@pytest.mark.parametrize("prefix_sharing", [False, True])
+def test_shared_serving_uses_the_native_sglang_executor(monkeypatch, adapter, prefix_sharing):
     from reef.runtime.deployment import InferenceResources
     from reef.runtime.jobs import ReleaseFormat
 
     resources = MagicMock(spec=InferenceResources)
+    resources.inference_placement = GpuBundles(object(), [2, 3], [0, 1])
     backend = MagicMock(spec=SGLangInferenceBackend)
     backend.inference_url.return_value = "http://127.0.0.1:12345"
 
     def start(service, borrowed):
-        assert borrowed is resources
+        assert borrowed.inference_placement == resources.inference_placement.slice(0, 1)
         assert service.config.executor is SGLangExecutor
         assert service.config.options["enable_memory_saver"] is True
         assert service.config.options["enable_weights_cpu_backup"] is True
-        assert service.config.pause_mode == "in_place"
+        assert service.config.pause_mode == ("retract" if prefix_sharing else "in_place")
+        assert service.config.options["disable_radix_cache"] is not prefix_sharing
         if adapter:
             assert service.config.options["enable_lora"] is True
             assert service.config.options["max_lora_rank"] == 8
             assert service.config.options["max_loaded_loras"] == 2
 
     monkeypatch.setattr("reef.inference.sglang.deployment.require_lora_tensor_request_schema", lambda: None)
+    monkeypatch.setattr(BorrowedGpuResources, "node_width", lambda self, tp: 1)
+    monkeypatch.setattr("reef.inference.sglang.config.adapter_scoped_prefix_cache_supported", lambda: True)
     monkeypatch.setattr("reef.inference.sglang.deployment.require_lora_distributed_request_schema", lambda: None)
     monkeypatch.setattr(SGLangInferenceService, "start", start)
     monkeypatch.setattr(SGLangInferenceService, "backend", lambda self, connection: backend)
-    monkeypatch.setattr(SGLangInferenceHandler, "from_config", lambda *args, **kwargs: MagicMock())
+    custom_handler = MagicMock()
     runtime = build_colocated_serving(
         resources,
         ReleaseFormat("adapter", 8, ("q_proj", "v_proj")) if adapter else ReleaseFormat("full"),
@@ -204,11 +267,15 @@ def test_shared_serving_uses_the_native_sglang_executor(monkeypatch, adapter):
             "executor_options": {},
             "inference_timeout_s": 1,
             "inference_handler_config": {},
+            "inference_handler_factory": custom_handler,
             "adapter_capacity": 2,
+            "prefix_sharing": prefix_sharing,
         },
         model_path="model",
         environ={},
     )
+    custom_handler.from_config.assert_called_once_with("http://127.0.0.1:12345", model_path="model", timeout_s=1)
+    assert runtime.inference_handler is custom_handler.from_config.return_value
     runtime.shutdown()
 
 

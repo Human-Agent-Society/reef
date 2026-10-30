@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from reef.inference.engine_control import CONTROL_TIMEOUT_S, EngineInferenceBackend
+from reef.runtime.interfaces import MemoryManagedInferenceBackend
 
 
-class SGLangInferenceBackend(EngineInferenceBackend):
+class SGLangInferenceBackend(EngineInferenceBackend, MemoryManagedInferenceBackend):
     """Translate the serving runtimes' engine operations to SGLang's native control vocabulary."""
 
     engine_name = "SGLang"

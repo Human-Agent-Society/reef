@@ -212,28 +212,25 @@ class SlimeDeployment(TrainingDeployment):
         global_batch_size(expand_option_references(config, {"global-batch-size": options.get("global-batch-size")}))
         refuse_serving_options(options)
         if settings["training_colocate"]:
-            if settings["inference_backend"] != "sglang" or settings["inference_remote"]:
-                raise DeployConfigError("training.colocate requires local SGLang inference")
-            if settings["inference_serving"] not in (None, "engines"):
-                raise DeployConfigError("training.colocate requires inference.serving: engines")
-            if settings["teacher_model_path"] or settings["inference_handler_factory"]:
-                raise DeployConfigError("training.colocate does not support teachers or custom inference handlers")
-            if settings["inference_prefix_sharing"]:
-                raise DeployConfigError("training.colocate requires inference.prefix-sharing: false")
+            managed_serving = settings["inference_serving"] in (None, "engines")
+            if settings["inference_serving"] in ("none", "trainer") or settings["inference_backend"] == "none":
+                raise DeployConfigError("training.colocate requires a serving runtime that shares GPU resources")
+            if managed_serving and settings["inference_backend"] != "sglang":
+                raise DeployConfigError("training.colocate requires SGLang inference or a shared serving factory")
             shared_options = expand_option_references(config, options)
             dimensions: dict[str, int] = {}
             for name, default in (("actor-num-nodes", 1), ("actor-num-gpus-per-node", 1)):
                 value = shared_options.get(name, default)
                 if isinstance(value, str) and value.strip().isdigit():
                     value = int(value)
-                if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-                    raise DeployConfigError(f"training.options.{name} must be a non-negative integer")
+                if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                    raise DeployConfigError(f"training.options.{name} must be a positive integer")
                 dimensions[name] = value
             nodes = dimensions["actor-num-nodes"]
             width = dimensions["actor-num-gpus-per-node"]
-            if nodes != 1 or settings["inference_num_gpus"] != width:
+            if managed_serving and settings["inference_num_gpus"] > nodes * width:
                 raise DeployConfigError(
-                    "training.colocate requires one node and inference.num-gpus equal to actor-num-gpus-per-node"
+                    "training.colocate requires inference.num-gpus no greater than the total actor GPU count"
                 )
             if shared_options.get("release-train"):
                 raise DeployConfigError("training.colocate requires persistent training workers")

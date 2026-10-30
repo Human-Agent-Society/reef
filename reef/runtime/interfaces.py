@@ -709,6 +709,23 @@ class InferenceBackend(ABC):
         """Remove the adapter ``name`` from every engine; raise when an engine may still hold it."""
 
 
+class MemoryManagedInferenceBackend(InferenceBackend):
+    """An inference backend that can lend its GPUs while preserving the served weights.
+
+    Calls operate on every engine and return only after all engines acknowledge.
+    The caller drains requests and pauses generation before releasing memory.
+    After restoration, generation stays paused until ``resume`` succeeds.
+    """
+
+    @abstractmethod
+    def release_memory(self) -> None:
+        """Release inference GPU storage; raise if any engine's state is uncertain."""
+
+    @abstractmethod
+    def resume_memory(self) -> None:
+        """Restore the incumbent weights and empty inference caches on every engine."""
+
+
 class AdapterEngine(ABC):
     """Engine-side adapter operations the residency manager drives.
 

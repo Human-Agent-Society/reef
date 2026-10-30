@@ -167,6 +167,11 @@ class ReefMegatronTrainRayActor(MegatronTrainRayActor):
         # below never delegates, which is why only non-LoRA runs hit it. Time
         # that branch explicitly instead.
         if not megatron_lora_enabled(self.args):
+            if self.args.save_hf is not None and self.role == "actor" and not self.args.debug_rollout_only:
+                # Native export writes shards from each node. Create the directory
+                # on every writer's host so an NFS negative lookup cannot outlive
+                # rank zero's preparation of the same shared directory.
+                Path(self.args.save_hf.format(rollout_id=rollout_id)).mkdir(parents=True, exist_ok=True)
             super().save_model(rollout_id, force_sync=force_sync)
             return
         with Timer().context("save_model"):

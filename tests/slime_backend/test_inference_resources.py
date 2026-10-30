@@ -55,9 +55,9 @@ def ray_session(monkeypatch):
     return session
 
 
-def component_resources(*, use_critic=False, colocate=False):
+def component_resources(*, use_critic=False, colocate=False, nodes=1):
     args = SlimeArguments(
-        actor_num_nodes=1,
+        actor_num_nodes=nodes,
         actor_num_gpus_per_node=2,
         use_critic=use_critic,
     )
@@ -103,12 +103,13 @@ def test_the_component_connects_once_reserves_its_training_gpus_and_releases_the
     assert owned.placement_groups == {}
 
 
-def test_shared_inference_borrows_training_bundles_on_one_node(ray_session):
-    owned = component_resources(use_critic=True, colocate=True)
+@pytest.mark.parametrize("nodes", [1, 2])
+def test_shared_inference_borrows_training_bundles(ray_session, nodes):
+    owned = component_resources(use_critic=True, colocate=True, nodes=nodes)
     owned.start()
-    assert ray_session.single_node
+    assert ray_session.single_node is (nodes == 1)
     assert owned.inference_placement == owned.placement_groups["actor"] == owned.placement_groups["critic"]
-    assert ray_session.layout.total == 2
+    assert ray_session.layout.total == 2 * nodes
     owned.close()
     assert ray_session.events == ["connect", "reserve", "release", "disconnect"]
 

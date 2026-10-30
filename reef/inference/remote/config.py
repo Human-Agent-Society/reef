@@ -12,6 +12,7 @@ from urllib.parse import urlsplit
 CONTROL_PROTOCOL = "reef-remote-control-v1"
 #: Every control route is under this path. Any other path is an inference request for the engines.
 CONTROL_PATH = "/reef/control/v1"
+SHARED_GPU_CONTROL_CAPABILITY = "shared-gpu-memory-v1"
 DEFAULT_CONTROL_TOKEN_ENV = "REEF_REMOTE_CONTROL_TOKEN"
 DEFAULT_INFERENCE_TOKEN_ENV = "REEF_REMOTE_INFERENCE_TOKEN"
 

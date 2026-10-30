@@ -11,10 +11,16 @@ import urllib.request
 from collections.abc import Mapping, Sequence
 from typing import Any, BinaryIO
 from urllib.parse import quote, urlencode
+from uuid import uuid4
 
-from reef.inference.remote.config import CONTROL_PATH, CONTROL_PROTOCOL, RemoteInferenceSettings
-from reef.runtime.deployment import DeploymentResources, InferenceConnection, InferenceService
-from reef.runtime.interfaces import InferenceBackend, WeightFiles
+from reef.inference.remote.config import (
+    CONTROL_PATH,
+    CONTROL_PROTOCOL,
+    SHARED_GPU_CONTROL_CAPABILITY,
+    RemoteInferenceSettings,
+)
+from reef.runtime.deployment import BorrowedGpuResources, DeploymentResources, InferenceConnection, InferenceService
+from reef.runtime.interfaces import InferenceBackend, MemoryManagedInferenceBackend, WeightFiles
 
 #: Bound on one control call other than an engine start; a full-weight upload legitimately takes hours.
 CONTROL_TIMEOUT_S = 14_400
@@ -28,7 +34,9 @@ class RemoteControl:
     call sends one request under ``CONTROL_PATH`` and returns the decoded JSON
     answer; an HTTP error or an unreachable component raises ``RuntimeError``
     with the component's message. Values hold only strings, so they cross
-    process boundaries to Reef's serving runtime.
+    process boundaries to Reef's serving runtime. ``engine_instance`` is None
+    for independent engines, or the nonempty ID of one shared engine start.
+    Bound calls carry that ID so stale clients cannot change replacement engines.
     """
 
     def __init__(self, url: str, token: str) -> None:
@@ -36,6 +44,7 @@ class RemoteControl:
             raise ValueError("a remote control client needs the component URL and its control token")
         self.url = url.rstrip("/")
         self.token = token
+        self.engine_instance: str | None = None
 
     def call(
         self,
@@ -57,7 +66,10 @@ class RemoteControl:
         elif payload is not None:
             body = json.dumps(payload).encode()
             headers["Content-Type"] = "application/json"
-        suffix = f"?{urlencode(query)}" if query else ""
+        parameters = dict(query or {})
+        if self.engine_instance is not None:
+            parameters["engine_instance"] = self.engine_instance
+        suffix = f"?{urlencode(parameters)}" if parameters else ""
         request = urllib.request.Request(
             f"{self.url}{CONTROL_PATH}/{route}{suffix}", data=body, headers=headers, method=method
         )
@@ -71,7 +83,7 @@ class RemoteControl:
             raise RuntimeError(f"remote inference component at {self.url} is unreachable: {exc.reason}") from exc
 
 
-class RemoteInferenceBackend(InferenceBackend):
+class RemoteInferenceBackend(MemoryManagedInferenceBackend):
     """Receiver operations of a remote component, called over its control routes.
 
     ``load_weight_files`` packs the directory into a tar file on the control
@@ -111,6 +123,12 @@ class RemoteInferenceBackend(InferenceBackend):
 
     def resume(self) -> None:
         self.control.call("POST", "resume")
+
+    def release_memory(self) -> None:
+        self.control.call("POST", "release-memory")
+
+    def resume_memory(self) -> None:
+        self.control.call("POST", "resume-memory")
 
     def recover(self) -> int:
         if self.service.engines_lost():
@@ -185,27 +203,44 @@ class RemoteInferenceService(InferenceService):
         self.started = False
         self.closed = False
         self.instance: str | None = None
+        self.shared_allocation: dict[str, Any] | None = None
 
     def start(self, resources: DeploymentResources | None = None) -> InferenceConnection:
-        """Start the engines; ``resources`` are unused, since the component reserves its own GPUs."""
+        """Start engines, optionally borrowing GPU bundles from the same Ray cluster."""
         if self.started or self.closed:
             raise RuntimeError("inference service can only be started once")
-        self.started = True
+        if resources is not None:
+            if not isinstance(resources, BorrowedGpuResources):
+                raise ValueError("remote shared inference requires a borrowed Ray GPU allocation")
+            self.shared_allocation = resources.to_config()
         self.restart_engines()
         return InferenceConnection(self.connection_protocol, None)
 
     def restart_engines(self) -> int:
         """Start the engines on the component, replacing any it runs; return the number of engines."""
+        payload = {"backend": self.engine, "config": self.engine_config, "num_gpus": self.num_gpus}
+        if self.shared_allocation is not None:
+            health = self.control.call("GET", "health", timeout_s=HEALTH_TIMEOUT_S)
+            if not isinstance(health, Mapping) or SHARED_GPU_CONTROL_CAPABILITY not in health.get("capabilities", []):
+                raise RuntimeError("remote component does not support shared GPU memory; upgrade it before starting")
+            payload["shared_allocation"] = self.shared_allocation
+            self.control.engine_instance = uuid4().hex
+            payload["engine_instance"] = self.control.engine_instance
+        self.started = True
         answer = self.control.call(
             "PUT",
             "engines",
-            payload={"backend": self.engine, "config": self.engine_config, "num_gpus": self.num_gpus},
+            payload=payload,
             timeout_s=self.settings.startup_timeout_s,
         )
         instance = answer.get("instance") if isinstance(answer, Mapping) else None
         if not isinstance(instance, str) or not instance:
             raise RuntimeError(f"remote inference started engines without naming its process: {answer!r}")
         self.instance = instance
+        if self.shared_allocation is not None:
+            engine_instance = answer.get("engine_instance")
+            if engine_instance != self.control.engine_instance:
+                raise RuntimeError("remote component does not acknowledge shared GPU ownership")
         return max(1, self.num_gpus // int(self.engine_config.get("gpus_per_engine") or self.num_gpus))
 
     def engines_lost(self) -> bool:
@@ -215,6 +250,12 @@ class RemoteInferenceService(InferenceService):
         answer = self.control.call("GET", "health", timeout_s=HEALTH_TIMEOUT_S)
         if not isinstance(answer, Mapping) or not isinstance(answer.get("engines"), bool):
             raise RuntimeError(f"remote inference returned an invalid health report: {answer!r}")
+        if (
+            self.shared_allocation is not None
+            and answer["engines"]
+            and answer.get("engine_instance") != self.control.engine_instance
+        ):
+            raise RuntimeError("shared inference engines changed ownership; restart the deployment")
         return answer.get("instance") != self.instance or not answer["engines"]
 
     def backend(self, connection: InferenceConnection) -> InferenceBackend:

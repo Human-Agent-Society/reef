@@ -200,7 +200,8 @@ def test_endpoint_identity_must_match_validated_model(actual, teacher_path):
         engine_teacher(teacher_path).validate_model()
 
 
-def test_teacher_public_config_resolves_to_owned_dependency(tmp_path):
+@pytest.mark.parametrize("colocate", [False, True])
+def test_teacher_public_config_resolves_to_owned_dependency(tmp_path, colocate):
     from reef.service.deploy.orchestrator import resolve_deployment_config
 
     config, _ = resolve_deployment_config(
@@ -210,6 +211,7 @@ def test_teacher_public_config_resolves_to_owned_dependency(tmp_path):
             "recipe": {"implementation": "recipes.opd.recipe:OPDRecipe"},
             "training": {
                 "backend": "slime",
+                "colocate": colocate,
                 "options": {"opd-teacher": "separate", "opd-top-k": 1, "global-batch-size": 1},
             },
         },
@@ -223,6 +225,7 @@ def test_teacher_public_config_resolves_to_owned_dependency(tmp_path):
     assert services["distill-teacher"]["resources"]["num_gpus"] == 2
     assert services["distill-teacher"]["endpoint"] == "http://{host}:30123"
     assert config["reef"]["teacher_model_path"] == "/teacher"
+    assert ("inference" in services) is not colocate
 
 
 def test_unsupported_training_backend_rejects_teacher():

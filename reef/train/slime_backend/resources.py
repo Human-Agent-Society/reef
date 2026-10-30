@@ -71,7 +71,9 @@ class SlimeDeploymentResources(InferenceResources):
         runtime_env["worker_process_setup_hook"] = "reef.runtime.executor.process_guard.install"
         ray.init(address=self.ray_address, namespace=self.namespace, runtime_env=runtime_env)
         self._nodes = [node["NodeID"] for node in ray.nodes() if node["Alive"]]
-        self._reservation = reserve_model_gpus(model_gpu_layout(self.args), single_node=self.colocate)
+        self._reservation = reserve_model_gpus(
+            model_gpu_layout(self.args), single_node=self.colocate and int(self.args.actor_num_nodes) == 1
+        )
         self.placement_groups = {
             "actor": self._reservation.training,
             "critic": self._reservation.training if self.args.use_critic else None,
@@ -79,7 +81,7 @@ class SlimeDeploymentResources(InferenceResources):
 
     @property
     def inference_placement(self) -> GpuBundles | None:
-        """Borrow the training bundles only in the single-node shared deployment."""
+        """Borrow the ordered training bundles in a shared deployment."""
         if self.colocate and self._reservation is not None:
             return self._reservation.training
         return None

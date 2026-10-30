@@ -16,11 +16,13 @@ import os
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from itertools import groupby
 from typing import Any
 
 from reef.core.config import config_arguments, parse_config_values
 from reef.core.errors import ReefError
 from reef.runtime.executor import Executor
+from reef.runtime.executor.placement import GpuBundles
 from reef.runtime.interfaces import InferenceBackend, InferenceRuntime
 from reef.runtime.jobs import TrainingComponent
 
@@ -46,6 +48,121 @@ class InferenceResources(DeploymentResources):
     @abstractmethod
     def inference_placement(self) -> Any:
         """Return the borrowed placement handle understood by the selected backend."""
+
+
+class BorrowedGpuResources(InferenceResources):
+    """A nonempty selection of GPU bundles whose reservation belongs to another component.
+
+    ``bundles`` supplies equally sized bundle-index and device-ID lists.
+    Starting and closing this view never acquires or releases its reservation.
+    The owner must keep that reservation alive until every borrower stops.
+    """
+
+    def __init__(self, bundles: GpuBundles) -> None:
+        if not bundles.bundle_indices or len(bundles.bundle_indices) != len(bundles.gpu_ids):
+            raise ValueError("borrowed GPU bundles need matching nonempty bundle and device lists")
+        if any(
+            isinstance(value, bool) or not isinstance(value, int) or value < 0
+            for value in (*bundles.bundle_indices, *bundles.gpu_ids)
+        ):
+            raise ValueError("borrowed GPU indices must be non-negative integers")
+        if len(set(bundles.bundle_indices)) != len(bundles.bundle_indices):
+            raise ValueError("borrowed GPU bundle indices must be unique")
+        self.bundles = bundles
+
+    @property
+    def inference_placement(self) -> GpuBundles:
+        return self.bundles
+
+    def start(self) -> None:
+        return
+
+    def close(self) -> None:
+        return
+
+    def to_config(self) -> dict[str, Any]:
+        """Name this live reservation for a borrower connected to the same Ray cluster."""
+        return {
+            "placement_group_id": self.bundles.group.id.hex(),
+            "bundle_indices": list(self.bundles.bundle_indices),
+            "gpu_ids": list(self.bundles.gpu_ids),
+        }
+
+    @classmethod
+    def from_config(cls, config: Mapping[str, Any]) -> BorrowedGpuResources:
+        """Resolve a shared reservation by ID; never create or take ownership of a placement group."""
+        import ray
+        from ray.util.placement_group import PlacementGroup
+
+        if set(config) != {"placement_group_id", "bundle_indices", "gpu_ids"}:
+            raise ValueError("shared GPU allocation needs placement_group_id, bundle_indices and gpu_ids")
+        identifier, indices, devices = config["placement_group_id"], config["bundle_indices"], config["gpu_ids"]
+        if not isinstance(identifier, str) or not isinstance(indices, list) or not isinstance(devices, list):
+            raise ValueError("shared GPU allocation needs a string ID and integer lists")
+        try:
+            group = PlacementGroup(ray.PlacementGroupID.from_hex(identifier))
+        except (ValueError, TypeError) as exc:
+            raise ValueError("invalid shared placement group ID") from exc
+        resources = cls(GpuBundles(group, indices, devices))
+        resources.node_width(1)
+        return resources
+
+    def node_width(self, tensor_parallel_size: int) -> int:
+        """The GPUs per node in each engine's selected bundles, verified against Ray's live placement.
+
+        Engines must have the same node width, contiguous devices within each
+        node, and no repeated node segment. A cross-node engine uses equally
+        sized segments. This avoids interpreting two nodes' device IDs as GPUs
+        on one host. A lost or foreign-cluster reservation is an error.
+        """
+        from ray.util.placement_group import placement_group_table
+
+        if (
+            isinstance(tensor_parallel_size, bool)
+            or not isinstance(tensor_parallel_size, int)
+            or tensor_parallel_size <= 0
+            or len(self.bundles.gpu_ids) % tensor_parallel_size
+        ):
+            raise ValueError("shared inference TP must divide the selected GPU count")
+        table = placement_group_table(self.bundles.group)
+        if not table or table.get("state") != "CREATED":
+            raise ValueError("shared GPU reservation is not live in this Ray cluster")
+        nodes = {int(index): node for index, node in table["bundles_to_node_id"].items()}
+        if any(index not in nodes or not nodes[index] for index in self.bundles.bundle_indices):
+            raise ValueError("shared GPU allocation refers to unplaced bundles")
+        selected = [
+            (nodes[index], device)
+            for index, device in zip(self.bundles.bundle_indices, self.bundles.gpu_ids, strict=True)
+        ]
+        if len(set(selected)) != len(selected):
+            raise ValueError("shared GPU allocation repeats a physical device")
+        widths: set[int] = set()
+        for offset in range(0, len(selected), tensor_parallel_size):
+            segments = [
+                (node, [device for _, device in values])
+                for node, values in groupby(
+                    selected[offset : offset + tensor_parallel_size], key=lambda value: value[0]
+                )
+            ]
+            if len({node for node, _ in segments}) != len(segments):
+                raise ValueError("an inference engine cannot revisit a node in its GPU ordering")
+            for _, devices in segments:
+                if devices != list(range(devices[0], devices[0] + len(devices))):
+                    raise ValueError("shared inference needs contiguous GPUs within each node")
+                widths.add(len(devices))
+        if len(widths) != 1:
+            raise ValueError("shared inference engines need equal GPU counts on their participating nodes")
+        return widths.pop()
+
+
+def select_inference_resources(resources: InferenceResources, num_gpus: int) -> BorrowedGpuResources:
+    """Borrow the first ``num_gpus`` ordered GPU bundles from an existing Ray reservation."""
+    if isinstance(num_gpus, bool) or not isinstance(num_gpus, int) or num_gpus <= 0:
+        raise ValueError("shared inference needs a positive integer GPU count")
+    placement = resources.inference_placement
+    if not isinstance(placement, GpuBundles) or len(placement.bundle_indices) < num_gpus:
+        raise ValueError("shared inference exceeds its available Ray GPU reservation")
+    return BorrowedGpuResources(placement.slice(0, num_gpus))
 
 
 @dataclass(frozen=True)

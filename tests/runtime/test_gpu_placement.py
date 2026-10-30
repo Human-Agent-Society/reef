@@ -1,10 +1,12 @@
 """Reef reserves GPUs in one placement group and slices them into training and inference bundles."""
 
+import importlib
 import sys
 from types import ModuleType, SimpleNamespace
 
 import pytest
 
+from reef.runtime.deployment import BorrowedGpuResources, select_inference_resources
 from reef.runtime.executor.placement import GpuBundles, ModelGpuLayout, ModelGpuReservation, reserve_model_gpus
 
 
@@ -39,6 +41,47 @@ def test_layout_rejects_impossible_shapes():
         ModelGpuReservation(GpuBundles(None, [0], [0]), ModelGpuLayout(2, 2))
 
 
+def test_inference_can_borrow_a_subset_without_releasing_the_training_reservation():
+    group = SimpleNamespace(id="training")
+    owner = BorrowedGpuResources(GpuBundles(group, [5, 2, 4, 3], [0, 1, 2, 3]))
+    selected = select_inference_resources(owner, 2)
+    selected.start()
+    assert selected.inference_placement == GpuBundles(group, [5, 2], [0, 1])
+    selected.close()
+    assert owner.inference_placement == GpuBundles(group, [5, 2, 4, 3], [0, 1, 2, 3])
+    for size in (0, -1, True, 1.5, 5):
+        with pytest.raises(ValueError):
+            select_inference_resources(owner, size)
+
+
+@pytest.mark.parametrize(
+    ("nodes", "devices", "tp", "width"),
+    [
+        (["a", "a", "b", "b"], [2, 3, 0, 1], 1, 1),
+        (["a", "a", "b", "b"], [2, 3, 0, 1], 2, 2),
+        (["a", "a", "b", "b"], [2, 3, 0, 1], 4, 2),
+        (["a", "b"], [0, 0], 2, 1),
+        (["a", "a", "a", "b"], [0, 1, 2, 0], 4, None),
+        (["a", "b", "a", "b"], [0, 0, 1, 1], 4, None),
+        (["a", "a"], [0, 2], 2, None),
+    ],
+)
+def test_shared_engine_topology_uses_real_node_boundaries(monkeypatch, nodes, devices, tp, width):
+    table = {"state": "CREATED", "bundles_to_node_id": dict(enumerate(nodes))}
+    monkeypatch.setattr(
+        importlib.import_module("ray.util.placement_group"), "placement_group_table", lambda group: table
+    )
+    resources = BorrowedGpuResources(GpuBundles(object(), list(range(len(nodes))), devices))
+    if width is None:
+        with pytest.raises(ValueError):
+            resources.node_width(tp)
+    else:
+        assert resources.node_width(tp) == width
+    table["state"] = "REMOVED"
+    with pytest.raises(ValueError, match="not live"):
+        resources.node_width(1)
+
+
 @pytest.mark.unit
 def test_release_returns_the_group_once(monkeypatch):
     released = []
@@ -66,6 +109,13 @@ def test_real_ray_reservation_orders_bundles_by_node_and_device(monkeypatch):
             assert training.gpu_ids == [0, 1] and inference.gpu_ids == [2, 3]
             assert set(training.bundle_indices).isdisjoint(inference.bundle_indices)
             assert training.group is inference.group
+            borrowed = BorrowedGpuResources(training)
+            assert borrowed.node_width(2) == 2
+            attached = BorrowedGpuResources.from_config(borrowed.to_config())
+            assert attached.bundles.group.id == training.group.id
+            assert attached.bundles.bundle_indices == training.bundle_indices
+            attached.close()
+            assert borrowed.node_width(2) == 2
         finally:
             reservation.release()
         serving = reserve_model_gpus(ModelGpuLayout(training_gpus=0, inference_gpus=2), wait_log_interval_s=1)

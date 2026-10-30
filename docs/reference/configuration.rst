@@ -272,14 +272,18 @@ managed path yet. Reef binds ``training.options.hf-checkpoint`` to
 explicit ``training.options.global-batch-size``, the samples in one optimizer
 step: Slime cuts each job's data into optimizer batches of that size.
 
-Set ``training.colocate: true`` to share Slime's training GPUs with local
-SGLang. This option supports full weights and LoRA on one node. Set
-``inference.num-gpus`` equal to ``training.options.actor-num-gpus-per-node``.
-The inference TP size must divide this GPU count. For example, four GPUs
-with inference TP two run two engines; inference TP four runs one engine.
-Training TP is independent of inference TP. Actor and critic workers use
-Slime's native train offload; Reef enables SGLang's memory saver and CPU
-weight backup. Reserve host memory for the served model's weight copy.
+Set ``training.colocate: true`` to share Slime's training GPUs with SGLang.
+This option supports full weights and LoRA, on one or more nodes.
+``inference.num-gpus`` can use all or part of the actor GPU reservation.
+The inference TP size must divide this count. For example, four inference
+GPUs with TP two run two engines. Training TP is independent of inference TP.
+Each engine needs contiguous GPU IDs within each node and the same GPU count
+on every participating node. Reef checks the actual Ray placement before launch.
+
+Actor and critic workers use Slime's native train offload. Reef enables
+SGLang's memory saver and CPU weight backup. Reserve host memory for the
+served model's weight copy. Models and checkpoint directories must be
+accessible from every participating node.
 
 Before each train-and-save operation, Reef stops admitting requests and waits
 for active requests to finish. It then releases inference memory. After
@@ -295,8 +299,28 @@ currently served adapter before publication of a candidate. SGLang adapter
 buffers outside the native memory-saver regions remain on the GPU during
 training; reserve memory for those buffers as well as the training model.
 
-Shared mode refuses remote inference, custom handlers, teachers and
-prefix sharing. Use the default separate deployment for these configurations.
+Shared mode accepts the existing ``inference.handler-factory`` and
+``inference.handler-config`` options. A ``teacher`` still reserves separate
+GPUs. Those GPUs are additional to the actor reservation.
+``inference.prefix-sharing: true`` enables the native prefix cache.
+Each pause clears that cache before memory release or weight publication.
+LoRA prefix sharing requires SGLang's adapter-scoped cache support.
+
+For remote inference, set ``inference.remote`` as usual. Start that component
+with ``--ray-address`` pointing to the training component's Ray cluster.
+The remote component borrows the existing GPU reservation. It does not reserve
+another set of GPUs. Its upload directory must be accessible from the engine
+nodes. Both components must support the shared-memory control operations.
+The remote component rejects inference requests during a handoff. Requests
+through Reef wait at its admission queue. An interrupted or failed handoff
+requires deployment restart.
+
+A custom ``inference.serving`` factory must implement
+``RuntimeFactory.build_with_resources`` and return a
+``SharedGpuInferenceRuntime``. Its ``training_phase`` must drain requests,
+release inference memory, and restore the served release before reopening
+admission. Reef binds this runtime before it resumes pending training jobs.
+
 This option does not enable Slime's own rollout manager or task execution.
 Reef still supplies captured trajectories to bounded training jobs.
 
@@ -1206,7 +1230,7 @@ Read by the weight-training stack. See `Evolve your model
 .. config::
 
    training.backend | slime | built-in (slime or tinker), installed entry-point name, or dotted TrainingDeployment class
-   training.colocate | false | share Slime training GPUs with local SGLang; single-node full weights or LoRA; Tinker refuses ``true``
+   training.colocate | false | share Slime training GPUs with SGLang; full weights or LoRA, local or same-cluster remote inference; Tinker refuses ``true``
    training.ready-timeout | 3600 | startup deadline of the services the training backend adds, such as the inference component and the teacher engine; Slime, and every deployment that Reef's engines serve, also raise ``reef.ready-timeout`` to at least this value
    training.config.num_gpus | example-specific GPU count passed to Slime's model topology flags; does not set the Ray cluster's capacity
    training.config.global_batch_size | samples in one optimizer step, passed to Slime as ``--global-batch-size``. The examples also pass it to ``pipeline.sample2job.config.job_samples``, so one job is one optimizer step. Reef reads ``training.options.global-batch-size`` itself and refuses a Slime deployment without it, even when ``num-steps-per-rollout`` could derive it.
