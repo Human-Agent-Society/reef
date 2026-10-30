@@ -16,6 +16,7 @@ import yaml
 
 from reef.core.config import ConfigArgument
 from reef.core.errors import DeployConfigError
+from reef.execution.workers import SERVICE_COMPONENTS
 from reef.runtime.executor.arguments import normalize_native_options
 from reef.service.deploy.deployment_config import (
     RECIPE_SECTION_PATHS,
@@ -265,6 +266,21 @@ def build_serve_parser(
         default=None,
         metavar="[PROVIDER/]MODEL",
         help="The upstream model; a known provider prefix (ollama, openai) fills the URL and the key.",
+    )
+    parser.add_argument(
+        "--component",
+        default=None,
+        choices=SERVICE_COMPONENTS,
+        help=(
+            "Run one service of the deployment in this process, on the shared store: control, inference, samples, "
+            "training or evaluation. Without it, one process runs all of them."
+        ),
+    )
+    parser.add_argument(
+        "--control-url",
+        default=None,
+        metavar="URL",
+        help="The control service's URL, which --component evaluation calls for candidates.",
     )
     parser.add_argument(
         "--print-config",

@@ -465,6 +465,36 @@ def _config_source(config_path: Path | None) -> str:
     return f"config: {config_path}"
 
 
+def _run_component(
+    config_path: str | None, overrides: dict[str, str] | None, component: str, control_url: str | None
+) -> int:
+    """Run the one service ``component`` of the deployment in this process, until a signal stops it.
+
+    The process starts no other child: the inference engines, the other services and the shared store run on
+    their own.
+    """
+    resolved_config_path = Path(config_path).expanduser().resolve() if config_path else Path.cwd() / "<command line>"
+    config = (
+        load_config(resolved_config_path, interpolate_env=False) if config_path else command_line_config(os.environ)
+    )
+    _log(_config_source(resolved_config_path if config_path else None))
+    normalized_config, _ = resolve_deployment_config(config, overrides, resolved_config_path)
+    if local_model_required(normalized_config):
+        resolve_model_paths(normalized_config)
+    settings = service_config_from_mapping(normalized_config)
+    from aiohttp import web
+
+    from reef.service.components import build_component_app
+
+    _log(f"service: {component}")
+    try:
+        app = build_component_app(component, settings, control_url=control_url)
+    except ValueError as exc:
+        raise DeployConfigError(str(exc)) from exc
+    web.run_app(app, host=settings.host, port=settings.port)
+    return 0
+
+
 def _run_orchestrator(
     config_path: str | None, overrides: dict[str, str] | None = None, *, print_config: bool = False
 ) -> int:
@@ -643,7 +673,10 @@ def main(argv: Sequence[str] | None = None) -> None:
         config_path = _resolve_config(args.config, args.recipe)
         if args.recipe:
             _prepare_profile(args.recipe, args.model, os.environ, overrides)
-        exit_code = _run_orchestrator(config_path, overrides, print_config=args.print_config)
+        if args.component is not None and not args.print_config:
+            exit_code = _run_component(config_path, overrides, args.component, args.control_url)
+        else:
+            exit_code = _run_orchestrator(config_path, overrides, print_config=args.print_config)
     except InvalidOverrideError as exc:
         parser.error(str(exc))
     sys.exit(exit_code)

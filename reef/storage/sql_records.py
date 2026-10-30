@@ -554,6 +554,13 @@ class SQLRecordStore(RecordStore):
         with self._transaction(write=False) as connection:
             return int(connection.execute(statement).scalar_one())
 
+    def last_sequence(self, scenario: str) -> int:
+        statement = select(func.max(self._tables.records.c.sequence)).where(
+            self._tables.condition(self._tables.records), self._tables.records.c.scenario == scenario
+        )
+        with self._transaction(write=False) as connection:
+            return int(connection.execute(statement).scalar_one() or 0)
+
     def get_for_audit(self, scenario: str, agent_record_id: str) -> StoredRecord | None:
         """Read a retained record with its append sequence."""
         with self._transaction(write=False) as connection:

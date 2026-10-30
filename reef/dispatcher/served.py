@@ -3,7 +3,8 @@
 The active control instance (the holder of the control lease) runs one ``ServedModelsPublisher``. Each round, it
 writes the ``ServedArtifact`` of each loaded scenario's active artifact under ``ScenarioModel(scenario, ACTIVE)``,
 when the scenario's runtime reaches the artifact from outside the process (``InferenceRuntime.served_artifact``).
-When a round replaces or removes a row, the old value keeps serving for ``stop_delay_seconds`` (a
+The artifact is the active ``artifact_id`` of the component that the runtime serves: the weight trainer's
+component, or the scenario's only component. When a round replaces or removes a row, the old value keeps serving for ``stop_delay_seconds`` (a
 ``ScheduledStop``): a request that read the old row before the change ends on it. A standby instance only tries to
 take the lease.
 """
@@ -82,7 +83,13 @@ class ServedModelsPublisher(ServiceWorker):
         current = self.registry.get_loaded(scenario)
         if current is None or current.runtime is None:
             return {}
-        artifact_id = current.current_artifact_ref().release_id
+        status = current.artifact_status()
+        # The runtime serves the weights: the component of the weight trainer, or the only component.
+        weights = [item.component for item in current.trainers if item.trainer.job_loop is not None]
+        names = weights or (list(status) if len(status) == 1 else [])
+        artifact_id = status[names[0]]["active"] if names else None
+        if artifact_id is None:
+            return {}
         served = current.runtime.served_artifact(artifact_id, scenario)
         return {} if served is None else {ACTIVE: served}
 

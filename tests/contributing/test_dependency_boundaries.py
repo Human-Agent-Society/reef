@@ -190,6 +190,7 @@ def test_dispatcher_does_not_select_a_record_backend() -> None:
                 "reef.storage.samples",
                 "reef.storage.scenario",
                 "reef.storage.tasks",
+                "reef.storage.work_queue",
             )
         )
         for target in _imports_of(imported, "reef.storage")

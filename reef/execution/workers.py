@@ -11,6 +11,20 @@ import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
+#: The services of a deployment. ``reef serve --component NAME`` runs one in a process; the one-process layout runs
+#: all of them in one process, on the same interfaces.
+SERVICE_COMPONENTS = ("control", "inference", "samples", "training", "evaluation")
+
+
+def service_components(names: object) -> frozenset[str]:
+    """``names`` as a set of service names; raise ``ValueError`` for an empty set or an unknown name."""
+    if isinstance(names, str) or not isinstance(names, (set, frozenset, tuple, list)) or not names:
+        raise ValueError(f"name one or more services of {SERVICE_COMPONENTS}")
+    unknown = sorted(str(name) for name in names if name not in SERVICE_COMPONENTS)
+    if unknown:
+        raise ValueError(f"unknown services {unknown}; the services are {SERVICE_COMPONENTS}")
+    return frozenset(names)
+
 
 class ServiceWorker(ABC):
     """A worker that a service runs in the background until it stops.
@@ -66,4 +80,9 @@ class ServiceWorkers:
             worker.stop()
 
 
-__all__ = ["ServiceWorker", "ServiceWorkers"]
+__all__ = [
+    "SERVICE_COMPONENTS",
+    "ServiceWorker",
+    "ServiceWorkers",
+    "service_components",
+]

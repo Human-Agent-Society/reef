@@ -22,6 +22,8 @@ from aiohttp import web
 from reef.artifact.repository import ConfigurableRepositoryBackendFactory, RepositoryBackendContext
 from reef.artifact.sources import ArtifactSources
 from reef.dispatcher import Dispatcher
+from reef.evaluation.rollout_worker import ServiceCandidateEndpoints
+from reef.execution.workers import SERVICE_COMPONENTS, ServiceWorkers
 from reef.inference.http import InferenceProxyRuntime
 from reef.observability import build_experiment_tracker, build_record_observer
 from reef.recipe import Recipe, WeightTrainingRecipe
@@ -33,26 +35,25 @@ from reef.runtime.deployment import RuntimeRegistry, build_training_component, c
 from reef.runtime.interfaces import InferenceHandler, InferenceRuntime
 from reef.runtime.jobs import TrainingComponent
 from reef.scenario.admission import ScenarioAdmission, ScenarioLimits
-from reef.execution.workers import ServiceWorkers
-from reef.service.coordination import ServiceSetup
-from reef.storage.coordination import instance_id
-from reef.storage.sql_coordination import open_coordination
-from reef.train.job_queue import JobQueueComponent, TrainingJobWorker
 from reef.service.app import InferenceRetryPolicy, create_app
 from reef.service.artifact_evaluations import ArtifactEvaluations, NewArtifacts
 from reef.service.artifact_imports import ArtifactImports
+from reef.service.coordination import ServiceSetup
 from reef.service.deploy.service_config import ServiceConfig, service_owned_keys
 from reef.service.deploy.serving import serving_runtime_config
 from reef.service.deploy.training import training_deployment_for
 from reef.service.task_import import DataScenarioStorage, TaskImport
+from reef.storage.coordination import instance_id
 from reef.storage.data import DataStore
 from reef.storage.observer import ObservedScenarioStorage
 from reef.storage.postgres import PostgresScenarioStorage
 from reef.storage.records import RecordRetention
 from reef.storage.scenario import ScenarioStorage
+from reef.storage.sql_coordination import open_coordination
 from reef.storage.sql_data import PostgresDataStore, SQLiteDataStore
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.tasks import LocalTaskFileStore, TaskFileStore
+from reef.train.job_queue import JobQueueComponent, TrainingJobWorker
 
 
 def _training_recipe_type(name: str) -> type[WeightTrainingRecipe] | None:
@@ -98,7 +99,8 @@ def connect_training_component(
     ``release_format`` (``reef.service.deploy.serving``).
 
     With ``services``, the recipe gets a ``JobQueueComponent``: its jobs go through the jobs queue. When this
-    process runs the training service, a ``TrainingJobWorker`` runs them on the component.
+    process runs the training service (``training`` in ``services.components``), a ``TrainingJobWorker`` runs them
+    on the component.
     """
     backend = training_deployment_for(settings.training_backend)
     component = build_training_component(
@@ -114,7 +116,7 @@ def connect_training_component(
     if services is None:
         return component, serving
     queue = services.coordination.work_queue
-    if services.runs_training:
+    if "training" in services.components:
         services.workers.add(TrainingJobWorker(component, queue, worker_id=instance_id("training")))
         return JobQueueComponent(component, queue), serving
     return JobQueueComponent(component, queue, owns_component=True), serving
@@ -313,6 +315,68 @@ def build_data_store(settings: ServiceConfig, task_files: TaskFileStore) -> Data
     )
 
 
+def build_training_service(settings: ServiceConfig, *, environ: Mapping[str, str] | None = None) -> ServiceSetup:
+    """The training service alone: the recipe's training component and the ``TrainingJobWorker`` that runs the jobs
+    of the jobs queue on it.
+
+    The caller starts and stops the returned ``workers``, which close the component, and then closes
+    ``coordination``. Raise ``ValueError`` when the recipe trains no weights, since such a deployment has no jobs.
+    """
+    env = os.environ if environ is None else environ
+    services = ServiceSetup(
+        open_coordination(
+            settings.record_backend,
+            agent_record_dir=settings.agent_record_dir,
+            record_database_url=settings.record_database_url,
+        ),
+        ServiceWorkers(),
+        frozenset({"training"}),
+    )
+    try:
+        recipe = _serving_recipe(_require_non_empty(settings.recipe, "reef.recipe"), settings, env, services)
+        # The training service serves nothing: control owns the serving runtime.
+        close_runtimes(None, recipe.runtime)
+        if not services.workers.workers:
+            raise ValueError(f"recipe {settings.recipe!r} trains no weights, so it has no training service")
+    except BaseException:
+        services.workers.stop()
+        services.coordination.close()
+        raise
+    return services
+
+
+def open_scenario_storage(settings: ServiceConfig) -> tuple[ScenarioStorage, TaskFileStore]:
+    """The deployment's scenario storage (``storage.record_backend``) and its task file store, which it owns."""
+    record_directory = Path(settings.agent_record_dir)
+    task_file_directory = Path(settings.task_file_dir)
+    task_files: TaskFileStore
+    if settings.task_file_backend == "local":
+        task_files = LocalTaskFileStore(task_file_directory)
+    else:
+        reference = TaskFileStore.reference(settings.task_file_backend, setting="storage.task_file_backend")
+        store_class = TaskFileStore.referenced_class(reference)
+        task_files = store_class.from_config(reference.config, directory=task_file_directory)
+    try:
+        if settings.record_backend == "postgres":
+            storage: ScenarioStorage = PostgresScenarioStorage(
+                _require_non_empty(settings.record_database_url, "reef.record_database_url"),
+                record_directory,
+                schema=settings.record_database_schema,
+                task_files=task_files,
+            )
+        elif settings.record_backend == "sqlite":
+            storage = SQLiteScenarioStorage(record_directory, task_files=task_files)
+        else:
+            reference = ScenarioStorage.reference(settings.record_backend, setting="storage.record_backend")
+            storage_class = ScenarioStorage.referenced_class(reference)
+            storage = storage_class.from_config(reference.config, directory=record_directory, task_files=task_files)
+    except BaseException:
+        # The storage owns the task file store after it exists. Until then, this code closes it.
+        task_files.close()
+        raise
+    return storage, task_files
+
+
 def build_dispatcher(
     settings: ServiceConfig,
     *,
@@ -320,6 +384,7 @@ def build_dispatcher(
     hold_local_cycles: bool = False,
     evaluation_token: str | None = None,
     new_artifacts: NewArtifacts | None = None,
+    components: frozenset[str] = frozenset(SERVICE_COMPONENTS),
 ) -> Dispatcher:
     """Build the dispatcher of a service.
 
@@ -333,6 +398,9 @@ def build_dispatcher(
     ``hold_local_cycles`` holds its local cycles until the service answers. A
     recipe of one component calls its runtime's endpoint directly, as it did
     before composites, and neither applies to it.
+
+    ``components`` names the services that this process runs (``SERVICE_COMPONENTS``); the default is all of them,
+    the one-process layout.
     """
     selected_recipe = _require_non_empty(settings.recipe, "reef.recipe")
     env = os.environ if environ is None else environ
@@ -343,6 +411,7 @@ def build_dispatcher(
             record_database_url=settings.record_database_url,
         ),
         ServiceWorkers(),
+        components,
     )
     try:
         recipe = _serving_recipe(selected_recipe, settings, env, services)
@@ -359,35 +428,7 @@ def build_dispatcher(
     scenario_storage: ScenarioStorage | None = None
     data_store: DataStore | None = None
     try:
-        record_directory = Path(settings.agent_record_dir)
-        task_file_directory = Path(settings.task_file_dir)
-        task_files: TaskFileStore
-        if settings.task_file_backend == "local":
-            task_files = LocalTaskFileStore(task_file_directory)
-        else:
-            reference = TaskFileStore.reference(settings.task_file_backend, setting="storage.task_file_backend")
-            store_class = TaskFileStore.referenced_class(reference)
-            task_files = store_class.from_config(reference.config, directory=task_file_directory)
-        try:
-            if settings.record_backend == "postgres":
-                scenario_storage = PostgresScenarioStorage(
-                    _require_non_empty(settings.record_database_url, "reef.record_database_url"),
-                    record_directory,
-                    schema=settings.record_database_schema,
-                    task_files=task_files,
-                )
-            elif settings.record_backend == "sqlite":
-                scenario_storage = SQLiteScenarioStorage(record_directory, task_files=task_files)
-            else:
-                reference = ScenarioStorage.reference(settings.record_backend, setting="storage.record_backend")
-                storage_class = ScenarioStorage.referenced_class(reference)
-                scenario_storage = storage_class.from_config(
-                    reference.config, directory=record_directory, task_files=task_files
-                )
-        except BaseException:
-            # The storage owns the task file store after it exists. Until then, this code closes it.
-            task_files.close()
-            raise
+        scenario_storage, task_files = open_scenario_storage(settings)
         data_store = build_data_store(settings, task_files)
         task_import = (
             TaskImport(Path(settings.task_import_manifest), Path(settings.task_import_tasks_root))
@@ -448,6 +489,7 @@ def build_dispatcher(
             ),
             coordination=services.coordination,
             workers=services.workers,
+            components=components,
         )
         services.workers.start()
         return dispatcher
@@ -473,6 +515,7 @@ def build_app(
     *,
     environ: Mapping[str, str] | None = None,
     inference_handler: InferenceHandler | None = None,
+    components: frozenset[str] = frozenset(SERVICE_COMPONENTS),
 ) -> web.Application:
     """Build the complete HTTP service from settings: dispatcher, retention, retries, tokens and cleanup.
 
@@ -481,6 +524,10 @@ def build_app(
     inference request; the caller owns it and releases it after the app stops.
     An embedding application adds its middleware and routes to the returned
     app before startup and reaches the dispatcher with ``get_dispatcher(app)``.
+
+    ``components`` names the services that this process runs besides ``control``. Without ``evaluation``, the
+    evaluation service runs in another process: control serves each candidate beside the active artifact, and the
+    evaluation workers call it at this service's candidate route.
     """
     record_retention = RecordRetention(max_bytes=settings.agent_record_retention_max_bytes)
     retry_policy = InferenceRetryPolicy(
@@ -500,6 +547,18 @@ def build_app(
         hold_local_cycles=True,
         evaluation_token=evaluation_token,
         new_artifacts=new_artifacts,
+        components=components,
+    )
+    served_url = settings.served_url or default_served_url(settings.host, settings.port)
+    evaluations = (
+        ArtifactEvaluations(dispatcher, new_artifacts=new_artifacts)
+        if "evaluation" in components
+        else ArtifactEvaluations(
+            dispatcher,
+            new_artifacts=new_artifacts,
+            endpoints=ServiceCandidateEndpoints(served_url, None),
+            local_workers=0,
+        )
     )
     # No tokens (e.g. REEF_TOKEN="" in the environment) means no auth,
     # not auth with the empty string.
@@ -514,7 +573,7 @@ def build_app(
             close_dispatcher=True,
             record_retention=record_retention,
             open_local_cycles_at=default_served_url(settings.host, settings.port),
-            evaluations=ArtifactEvaluations(dispatcher, new_artifacts=new_artifacts),
+            evaluations=evaluations,
             artifact_imports=ArtifactImports(
                 ArtifactSources.from_setting(settings.artifact_sources),
                 Path(settings.artifact_cache_dir) / "imports",

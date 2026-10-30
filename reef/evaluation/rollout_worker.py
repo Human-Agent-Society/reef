@@ -133,9 +133,9 @@ def evaluation_item_id(evaluation_id: str) -> str:
     return f"{EVALUATION_KIND}:{evaluation_id}"
 
 
-def candidate_url(inference_url: str, scenario: str, artifact_id: str) -> str:
-    """The inference service's unrecorded URL of one artifact of a scenario, for evaluation rollouts."""
-    return f"{inference_url.rstrip('/')}/reef/scenarios/{scenario}/artifacts/{artifact_id}/evaluation"
+def candidate_url(service_url: str, scenario: str, artifact_id: str) -> str:
+    """The unrecorded URL of one artifact of a scenario on the Reef service at ``service_url``, for rollouts."""
+    return f"{service_url.rstrip('/')}/reef/scenarios/{scenario}/artifacts/{artifact_id}/evaluation"
 
 
 @dataclass(frozen=True)
@@ -165,10 +165,15 @@ class CandidateEndpoints(ABC):
 
 
 class ServiceCandidateEndpoints(CandidateEndpoints):
-    """The inference service's unrecorded URL of the candidate, opened with the evaluation token."""
+    """The candidate's unrecorded URL on the Reef service at ``service_url``, opened with ``token``.
 
-    def __init__(self, inference_url: str, token: str | None) -> None:
-        self.inference_url = inference_url
+    Control serves a candidate beside the active artifact (``serves_beside``) and answers at its candidate route,
+    so the evaluation workers of another process reach it there. ``token`` is a token that the service accepts on
+    that route, or None for a service without tokens.
+    """
+
+    def __init__(self, service_url: str, token: str | None) -> None:
+        self.service_url = service_url
         self.token = token
 
     @property
@@ -177,7 +182,7 @@ class ServiceCandidateEndpoints(CandidateEndpoints):
 
     @contextmanager
     def open(self, rollout: EvaluationRollout) -> Iterator[CandidateEndpoint]:
-        yield CandidateEndpoint(candidate_url(self.inference_url, rollout.scenario, rollout.artifact_id), self.token)
+        yield CandidateEndpoint(candidate_url(self.service_url, rollout.scenario, rollout.artifact_id), self.token)
 
 
 class EvaluationRolloutWorker(ServiceWorker):

@@ -63,6 +63,7 @@ from reef.storage.data import (
     task_partition,
 )
 from reef.storage.postgres import postgres_url, validate_postgres_schema
+from reef.storage.sqlite import enable_wal
 from reef.storage.tasks import TaskFileStore
 
 
@@ -293,9 +294,13 @@ class SQLiteDataStore(SQLDataStore):
         self.lock = RLock()
         self.connection: Connection | None = self.engine.connect()
         if database != ":memory:":
-            self.connection.exec_driver_sql("PRAGMA journal_mode = WAL")
-        metadata.create_all(self.connection)
-        self.connection.commit()
+            # The services of one host open the same file at once; the first switches it to WAL.
+            enable_wal(self.connection, database, timeout_seconds=30.0, retry_seconds=0.01)
+            self.connection.commit()
+        with self.connection.begin():
+            # Serialize the table creation of concurrent openers.
+            self.connection.exec_driver_sql("BEGIN IMMEDIATE")
+            metadata.create_all(self.connection)
 
     @classmethod
     def from_config(cls, config: Mapping[str, Any], *, directory: Path, task_files: TaskFileStore) -> Self:
@@ -311,6 +316,9 @@ class SQLiteDataStore(SQLDataStore):
             if self.connection is None:
                 raise ReefError("the data store is closed")
             with self.connection.begin():
+                # Another process can hold the file: take the write lock now, within the busy timeout, so a read
+                # never has to upgrade to a write, which SQLite refuses at once under contention.
+                self.connection.exec_driver_sql("BEGIN IMMEDIATE")
                 yield self.connection
 
     def insert_new_item(self, connection: Connection, values: Mapping[str, Any]) -> bool:

@@ -57,6 +57,7 @@ from reef.storage.control_lease import ControlLease, ControlLeaseState
 from reef.storage.coordination import Coordination, CoordinationResource
 from reef.storage.postgres import postgres_url, validate_postgres_schema
 from reef.storage.served_models import ControlLeaseConflict, ServedModelsWriter
+from reef.storage.sqlite import enable_wal
 from reef.storage.work_queue import (
     FINAL_STATES,
     HELD_STATES,
@@ -162,8 +163,9 @@ class CoordinationDatabase(CoordinationResource):
 
     @abstractmethod
     @contextmanager
-    def connection(self) -> Iterator[Connection]:
-        """One transaction: commit when the block ends, roll back when it raises."""
+    def connection(self, *, write: bool = False) -> Iterator[Connection]:
+        """One transaction: commit when the block ends, roll back when it raises. ``write`` says that the
+        transaction writes, so a database without row locks takes its write lock at the start."""
 
     @property
     @abstractmethod
@@ -173,7 +175,7 @@ class CoordinationDatabase(CoordinationResource):
     @contextmanager
     def write(self) -> Iterator[tuple[Connection, SequenceCounter]]:
         """A write transaction that holds the change counter until it ends."""
-        with self.connection() as connection:
+        with self.connection(write=True) as connection:
             query = select(self.tables.sequence.c.value).where(self.tables.sequence.c.id == 1)
             if self.locks_rows:
                 query = query.with_for_update()
@@ -232,9 +234,12 @@ class SQLiteCoordinationDatabase(CoordinationDatabase):
         self.lock = RLock()
         self.open: Connection | None = self.engine.connect()
         if database != ":memory:":
-            self.open.exec_driver_sql("PRAGMA journal_mode = WAL")
+            # Several processes of one host open the same file at once; the first switches it to WAL.
+            enable_wal(self.open, database, timeout_seconds=30.0, retry_seconds=0.01)
             self.open.commit()
         with self.open.begin():
+            # Serialize the table creation of concurrent openers.
+            self.open.exec_driver_sql("BEGIN IMMEDIATE")
             self.create(self.open, metadata)
 
     @property
@@ -242,11 +247,15 @@ class SQLiteCoordinationDatabase(CoordinationDatabase):
         return False
 
     @contextmanager
-    def connection(self) -> Iterator[Connection]:
+    def connection(self, *, write: bool = False) -> Iterator[Connection]:
         with self.lock:
             if self.open is None:
                 raise ReefError("the coordination database is closed")
             with self.open.begin():
+                if write:
+                    # Another process can hold the file: take the write lock now, within the busy timeout, so a
+                    # read never has to upgrade to a write, which SQLite refuses at once under contention.
+                    self.open.exec_driver_sql("BEGIN IMMEDIATE")
                 yield self.open
 
     def close(self) -> None:
@@ -292,7 +301,7 @@ class PostgresCoordinationDatabase(CoordinationDatabase):
         return True
 
     @contextmanager
-    def connection(self) -> Iterator[Connection]:
+    def connection(self, *, write: bool = False) -> Iterator[Connection]:
         if self.engine is None:
             raise ReefError("the coordination database is closed")
         with self.engine.begin() as connection:

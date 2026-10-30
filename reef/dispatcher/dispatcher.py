@@ -27,7 +27,8 @@ from reef.dispatcher.record_item_copier import RecordItemCopier
 from reef.dispatcher.samples import LocalSampleProducers
 from reef.dispatcher.served import CACHE_SECONDS, ServedModelsPublisher
 from reef.dispatcher.status import TrainingStatus
-from reef.execution.workers import ServiceWorkers
+from reef.dispatcher.store_changes import StoreChanges, StoreChangesWatcher
+from reef.execution.workers import SERVICE_COMPONENTS, ServiceWorkers, service_components
 from reef.observability import ExperimentTracker, NullExperimentTracker
 from reef.recipe.base import Recipe
 from reef.record2sample.service import SamplesWorker, request_selection
@@ -58,7 +59,7 @@ class BackgroundThreads:
     idle_unload_thread: Thread | None = None
 
 
-class Dispatcher(ScenarioLifecycle):
+class Dispatcher(ScenarioLifecycle, StoreChanges):
     """Coordinate scenario creation, inference state, training, and model commits.
 
     A process trains the weights of one scenario on the deployment's
@@ -92,6 +93,7 @@ class Dispatcher(ScenarioLifecycle):
         scenario_admission: ScenarioAdmission | None = None,
         coordination: Coordination | None = None,
         workers: ServiceWorkers | None = None,
+        components: frozenset[str] = frozenset(SERVICE_COMPONENTS),
     ) -> None:
         """``hold_local_cycles``: run no local cycle until :meth:`open_local_cycles`.
         Use it when the recipe calls this same service. The service does not
@@ -106,6 +108,11 @@ class Dispatcher(ScenarioLifecycle):
         ``coordination`` and ``workers``: the coordination store and the background workers of the services
         that this process runs. ``close`` stops the workers first and closes the store last.
 
+        ``components``: the services that this process runs (``SERVICE_COMPONENTS``). With ``control``, the
+        dispatcher writes ``served_models``, watches the shared store, and runs the trainers' local workers, which
+        add the training jobs. With ``samples``, it runs the samples worker; without ``control``, that worker loads
+        each scenario on demand and leaves the jobs to control.
+
         ``data_store``: the deployment's data store (RFC #1028). Each accepted
         inference and report becomes a record item in it
         (``RecordItemCopier``). The dispatcher closes it before the scenario
@@ -117,6 +124,10 @@ class Dispatcher(ScenarioLifecycle):
         self.coordination = coordination
         #: The background workers of the services that this process runs; the dispatcher stops them first.
         self.workers = workers if workers is not None else ServiceWorkers()
+        #: The services that this process runs.
+        self.components = service_components(components)
+        #: Whether this process runs control: the trainers' local workers, ``served_models`` and the store watcher.
+        self.runs_control = "control" in self.components
         #: The work queue of the samples service, or None when trainers make their own samples.
         self.samples_queue = None if coordination is None else coordination.work_queue
         #: The deployment's recipe, before any scenario's own model settings.
@@ -138,7 +149,7 @@ class Dispatcher(ScenarioLifecycle):
         self.errors = TrainingErrors()
         self.background_threads = BackgroundThreads()
         self.local_workers = LocalTrainingWorkers(self.registry, self.errors, held=hold_local_cycles)
-        if coordination is not None:
+        if coordination is not None and self.runs_control:
             runtime = recipe.runtime
             request_timeout_seconds = 300.0 if runtime is None else runtime.inference_timeout_s
             self.workers.add(
@@ -149,11 +160,12 @@ class Dispatcher(ScenarioLifecycle):
                     stop_delay_seconds=CACHE_SECONDS + request_timeout_seconds,
                 )
             )
-        if self.samples_queue is not None:
+            self.workers.add(StoreChangesWatcher(self.registry, coordination.work_queue, self))
+        if self.samples_queue is not None and "samples" in self.components:
             self.workers.add(
                 SamplesWorker(
                     self.samples_queue,
-                    LocalSampleProducers(self.registry, self.local_workers),
+                    LocalSampleProducers(self.registry, self.local_workers if self.runs_control else None),
                     worker_id=instance_id("samples"),
                 )
             )
@@ -267,7 +279,10 @@ class Dispatcher(ScenarioLifecycle):
         if self.samples_queue is not None:
             for component_trainer in instance.trainers:
                 component_trainer.trainer.use_samples_service()
-            self.request_samples(instance)
+        if not self.runs_control:
+            # Another process runs control: this one loaded the scenario only to make its samples.
+            return
+        self.request_samples(instance)
         self.local_workers.resume(instance)
         if self.record_items is not None:
             self.record_items.wake(instance.name)
@@ -654,6 +669,18 @@ class Dispatcher(ScenarioLifecycle):
         for component_trainer in current.trainers:
             if not component_trainer.trainer.trains:
                 current.prepare_training_step(component_trainer.component)
+
+    def records_added(self, current: Scenario) -> None:
+        """Another process appended records to ``current``: ask for their samples and copy them to record items."""
+        if self.record_items is not None:
+            self.record_items.wake(current.name)
+        self.request_samples(current)
+
+    def samples_added(self, scenario: str) -> None:
+        """The samples service stored samples of ``scenario``: its local workers build the next job from them."""
+        current = self.registry.get_loaded(scenario)
+        if current is not None:
+            self.local_workers.wake(current)
 
     def request_samples(self, current: Scenario) -> None:
         """Ask the samples service for a selection of the new records of each trainer of ``current`` that trains."""

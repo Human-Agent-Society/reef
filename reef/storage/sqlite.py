@@ -108,6 +108,39 @@ logger = logging.getLogger(__name__)
 _TABLES = RecordTables(_AGENT_RECORD, _CONSUMED_RECORD, CONSUMPTION_RECEIPTS, RECORD_EVICTION, _SCENARIO_SETTING)
 
 
+def enable_wal(connection: Connection, database: str, *, timeout_seconds: float, retry_seconds: float) -> None:
+    """Switch the SQLite ``database`` of ``connection`` to WAL, waiting out a concurrent opener.
+
+    SQLite takes an exclusive lock to change the journal mode and answers
+    SQLITE_BUSY immediately instead of running the busy handler, so the
+    connection timeout does not cover this statement. Openers that race to
+    upgrade a database still in rollback mode therefore have to retry: the
+    first one converts it and the rest read back ``wal`` on a later attempt.
+    A database already in WAL answers on the first try, so the steady state
+    costs nothing. Raise ``ReefError`` when the switch does not happen within ``timeout_seconds``.
+    """
+    deadline = time.monotonic() + timeout_seconds
+    observed = None
+    while True:
+        # A contended switch shows up either way: as SQLITE_BUSY, or as the
+        # unchanged mode read back, which SQLite returns instead of raising.
+        try:
+            row = connection.exec_driver_sql("PRAGMA journal_mode = WAL").fetchone()
+        except OperationalError as exc:
+            if "locked" not in str(exc.orig) and "busy" not in str(exc.orig):
+                raise
+        else:
+            observed = None if row is None else str(row[0]).lower()
+            if observed == "wal":
+                return
+        if time.monotonic() >= deadline:
+            raise ReefError(
+                f"could not switch {database} to WAL within {timeout_seconds:g}s; "
+                f"another connection held the database (journal mode is {observed or 'unknown'})"
+            )
+        time.sleep(retry_seconds)
+
+
 class SQLiteRecordStore(SQLRecordStore):
     """Store scenario records in append order.
 
@@ -152,36 +185,13 @@ class SQLiteRecordStore(SQLRecordStore):
         return self._database
 
     def _enable_wal(self) -> None:
-        """Switch the database to WAL, waiting out a concurrent opener.
-
-        SQLite takes an exclusive lock to change the journal mode and answers
-        SQLITE_BUSY immediately instead of running the busy handler, so the
-        connection timeout does not cover this statement. Openers that race to
-        upgrade a database still in rollback mode therefore have to retry: the
-        first one converts it and the rest read back ``wal`` on a later attempt.
-        A database already in WAL answers on the first try, so the steady state
-        costs nothing.
-        """
-        deadline = time.monotonic() + self._WAL_SWITCH_TIMEOUT
-        observed = None
-        while True:
-            # A contended switch shows up either way: as SQLITE_BUSY, or as the
-            # unchanged mode read back, which SQLite returns instead of raising.
-            try:
-                row = self._connection.exec_driver_sql("PRAGMA journal_mode = WAL").fetchone()
-            except OperationalError as exc:
-                if "locked" not in str(exc.orig) and "busy" not in str(exc.orig):
-                    raise
-            else:
-                observed = None if row is None else str(row[0]).lower()
-                if observed == "wal":
-                    return
-            if time.monotonic() >= deadline:
-                raise ReefError(
-                    f"could not switch {self._database} to WAL within {self._WAL_SWITCH_TIMEOUT:g}s; "
-                    f"another connection held the database (journal mode is {observed or 'unknown'})"
-                )
-            time.sleep(self._WAL_RETRY_INTERVAL)
+        """Switch the database to WAL, waiting out a concurrent opener (``enable_wal``)."""
+        enable_wal(
+            self._connection,
+            self._database,
+            timeout_seconds=self._WAL_SWITCH_TIMEOUT,
+            retry_seconds=self._WAL_RETRY_INTERVAL,
+        )
 
     def _initialize(self) -> None:
         with self._lock:

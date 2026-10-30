@@ -54,12 +54,12 @@ def test_a_rollout_item_round_trips_and_names_its_place_in_the_evaluation():
 
 
 @pytest.mark.unit
-def test_the_inference_service_serves_the_candidate_unrecorded_beside_the_active_artifact():
-    endpoints = ServiceCandidateEndpoints("http://inference:8000/", "rollout-token")
+def test_control_serves_the_candidate_beside_the_active_artifact_at_its_unrecorded_route():
+    endpoints = ServiceCandidateEndpoints("http://control:8000/", "rollout-token")
     assert endpoints.serves_beside
     with endpoints.open(rollout()) as endpoint:
         assert endpoint == CandidateEndpoint(
-            "http://inference:8000/reef/scenarios/s/artifacts/artifact-1/evaluation", "rollout-token"
+            "http://control:8000/reef/scenarios/s/artifacts/artifact-1/evaluation", "rollout-token"
         )
 
 

@@ -101,26 +101,37 @@ class ServedModelsCache:
 
 
 class ArtifactRefs:
-    """The ``ArtifactRef`` of each artifact that a replica serves, read once from the scenario's commit history."""
+    """The release of each artifact that a replica serves, read once from the scenario's commit history.
+
+    The release of ``artifact_id`` is the newest committed release that binds it: one whose manifest
+    (``CommitRecord.components``) names it, or, with one component, the release whose ``release_id`` it is. An
+    artifact that no commit binds, such as the artifact that a scenario started from, has no release here, and its
+    records carry no ``artifact_ref``.
+    """
 
     def __init__(self, storage: ScenarioStorage) -> None:
         self.storage = storage
-        self.known: dict[tuple[str, str], ArtifactRef] = {}
+        self.known: dict[tuple[str, str], ArtifactRef | None] = {}
 
-    def ref(self, scenario: str, artifact_id: str) -> ArtifactRef:
+    def ref(self, scenario: str, artifact_id: str) -> ArtifactRef | None:
         key = (scenario, artifact_id)
-        found = self.known.get(key)
-        if found is not None:
-            return found
+        if key in self.known:
+            return self.known[key]
         store = self.storage.open(scenario)
         try:
-            for commit in reversed(store.history()):
-                if commit.artifact_ref.release_id == artifact_id:
-                    self.known[key] = commit.artifact_ref
-                    return commit.artifact_ref
+            history = store.history()
         finally:
             store.close()
-        raise NotServed(f"scenario {scenario!r} has no artifact {artifact_id!r} in its commit history")
+        found = next(
+            (
+                commit.artifact_ref
+                for commit in reversed(history)
+                if artifact_id in (commit.components or {}).values() or commit.artifact_ref.release_id == artifact_id
+            ),
+            None,
+        )
+        self.known[key] = found
+        return found
 
 
 @dataclass
@@ -139,7 +150,7 @@ class InferenceReplica:
         self.refs = ArtifactRefs(self.storage)
 
     def record(
-        self, parsed: RequestHeaders, payload: Mapping[str, Any], response: Mapping[str, Any], ref: ArtifactRef
+        self, parsed: RequestHeaders, payload: Mapping[str, Any], response: Mapping[str, Any], ref: ArtifactRef | None
     ) -> str:
         """Append the record of one answered request, in the form that the in-process path writes."""
         item = AgentRecord.create(
@@ -180,7 +191,7 @@ class InferenceReplica:
             handler = HttpInferenceHandler(served.url, timeout_s=self.timeout_seconds, error_label=served.url)
             body = {**payload, "model": served.model_name}
             try:
-                response = await handler.inference(Artifact(ref, None), path, body)
+                response = await handler.inference(upstream_artifact(served, ref), path, body)
             except UpstreamStatusError as exc:
                 raise web.HTTPBadGateway(text=str(exc)) from exc
             if response.get("model") in (None, served.model_name):
@@ -205,12 +216,12 @@ class InferenceReplica:
         parsed: RequestHeaders,
         payload: Mapping[str, Any],
         served: ServedArtifact,
-        ref: ArtifactRef,
+        ref: ArtifactRef | None,
     ) -> web.StreamResponse:
         handler = HttpInferenceHandler(served.url, timeout_s=self.timeout_seconds, error_label=served.url)
         try:
             upstream = await handler.inference_stream(
-                Artifact(ref, None), path, {**payload, "model": served.model_name}
+                upstream_artifact(served, ref), path, {**payload, "model": served.model_name}
             )
         except UpstreamStatusError as exc:
             raise web.HTTPBadGateway(text=str(exc)) from exc
@@ -233,6 +244,11 @@ class InferenceReplica:
             except Exception:
                 logger.exception("could not append the record of a stream of %s", parsed.scenario)
         return response
+
+
+def upstream_artifact(served: ServedArtifact, ref: ArtifactRef | None) -> Artifact:
+    """The artifact that the engine handler gets for its request headers: the release, or the artifact by its ID."""
+    return Artifact(ref or ArtifactRef(served.artifact_id, served.artifact_id, None), None)
 
 
 def build_inference_app(

@@ -6,7 +6,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from reef.core.artifact_ref import ArtifactRef
 from reef.core.served_models import ACTIVE, ScenarioModel, ServedArtifact
 from reef.dispatcher.served import CACHE_SECONDS, ServedModelsPublisher
 from reef.storage.control_lease import MemoryControlLease
@@ -35,7 +34,8 @@ class Registry:
         self.scenario = SimpleNamespace(
             name="math",
             runtime=runtime,
-            current_artifact_ref=lambda: ArtifactRef("content", runtime.release, None),
+            trainers=(),
+            artifact_status=lambda: {"weights": {"active": runtime.release, "training_start": None}},
         )
 
     def loaded_scenarios(self) -> tuple[SimpleNamespace, ...]:
