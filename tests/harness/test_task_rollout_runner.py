@@ -494,6 +494,8 @@ def test_run_rollouts_refuses_a_directory_without_task_toml_before_any_build(
 def test_the_reef_eval_lab_builds_with_an_install_only_trial_of_the_nop_agent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # The source suite installs no reef-eval; the installed-wheel suite has it.
+    pytest.importorskip("reef_eval")
     import reef_eval.lab
     from harbor.models.trial.config import TaskConfig, TrialConfig
     from reef_eval.types import EpisodeResult, EpisodeSpec
