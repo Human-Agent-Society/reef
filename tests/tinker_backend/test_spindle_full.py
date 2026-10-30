@@ -356,6 +356,7 @@ def test_the_export_commits_exactly_the_checkpoints_weights_and_the_bases_tokeni
     base.mkdir()
     (base / "tokenizer.json").write_text("{}")
     (base / "config.json").write_text('{"base": true}')
+    (base / "generation_config.json").write_text('{"eos_token_id": [1, 8]}')
     uploads = []
 
     class Hub:
@@ -367,16 +368,27 @@ def test_the_export_commits_exactly_the_checkpoints_weights_and_the_bases_tokeni
             assert (
                 Path(folder_path) / "config.json"
             ).read_text() == "{}", "the checkpoint's config replaces the base's"
+            assert (Path(folder_path) / "generation_config.json").read_text() == '{"eos_token_id": [1, 8]}'
             return SimpleNamespace(oid="c" * 40)
 
     monkeypatch.setattr("huggingface_hub.HfApi", Hub)
-    monkeypatch.setattr("huggingface_hub.snapshot_download", lambda repo, revision, allow_patterns: str(base))
+    patterns = []
+
+    def snapshot_download(repo, revision, allow_patterns):
+        patterns.extend(allow_patterns)
+        return str(base)
+
+    monkeypatch.setattr("huggingface_hub.snapshot_download", snapshot_download)
     upload = checkpoint_upload()
     commit = upload(
         str(tmp_path / "volume"), "step-2/model-7", RELEASES, MODEL, COMMIT, "tinker://model-7/weights/step-2"
     )
     assert commit == "c" * 40
-    # The training state stays behind, and the commit replaces every file of the previous one.
-    assert uploads == [(RELEASES, ["config.json", "model.safetensors", "tokenizer.json"], ["*"])]
+    # The training state stays behind, the base's generation config comes along since Spindle saves none, and the
+    # commit replaces every file of the previous one.
+    assert "generation_config.json" in patterns
+    assert uploads == [
+        (RELEASES, ["config.json", "generation_config.json", "model.safetensors", "tokenizer.json"], ["*"])
+    ]
     with pytest.raises(FileNotFoundError, match="holds no Hugging Face weights"):
         upload(str(tmp_path / "volume"), "step-3/model-7", RELEASES, MODEL, COMMIT, "tinker://model-7/weights/step-3")
