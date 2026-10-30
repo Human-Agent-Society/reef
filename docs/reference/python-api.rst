@@ -612,11 +612,11 @@ gives to ``Recipe.build_trainers`` as ``samples`` and every component reads
 from ``PipelineContext.samples``.
 
 The service takes a task upload (``POST /reef/scenarios/{scenario}/tasks``)
-only when a trainer of the scenario reads imported tasks
-(``Trainer.accepts_imported_tasks``). A sample-to-job stage that reads them
-sets the class attribute ``accepts_imported_tasks``. A recipe whose trainer
-reads them outside its pipeline, as a harness evaluation on their eval split
-does, passes ``reads_imported_tasks=True`` to ``Trainer.build``.
+to the ``train`` split only when a trainer of the scenario trains imported
+tasks (``Trainer.accepts_imported_tasks``). A sample-to-job stage that trains
+them sets the class attribute ``accepts_imported_tasks``. An upload to the
+``eval`` split is open to every recipe, because an evaluation runs those
+tasks.
 
 A store holds generations. A generation holds its source record ids and its
 candidates. ``save_candidates`` saves a copy of each candidate task directory

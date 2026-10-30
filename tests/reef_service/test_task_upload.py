@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import io
 import tarfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pytest
@@ -162,29 +162,36 @@ def test_a_train_upload_needs_a_recipe_that_reads_imported_tasks_and_an_eval_upl
         dispatcher.close()
 
 
-@pytest.mark.parametrize(
-    ("evaluation", "published"),
-    [({"tasks": [], "imported_tasks": True}, ["held-out"]), ({}, [])],
-    ids=["evaluation-reads-imported-tasks", "nothing-reads-them"],
-)
-def test_a_harness_scenario_takes_a_train_upload_when_it_reads_imported_tasks(
-    tmp_path: Path, evaluation: dict, published: list[str]
-) -> None:
-    """Harness evolution's default job data reads no imported task: only an evaluation on them takes a train upload.
+OFFLINE_STAGE = {"pipeline": {"sample2job": {"module": "reef.sample2job.traces:TrainTaskJobData"}}}
 
-    An eval upload is open to every recipe, because an artifact evaluation runs it."""
-    config = evolution_config(evaluation=evaluation, state_dir=str(tmp_path / "state"))
-    dispatcher = dispatcher_for(
-        tmp_path, HarnessEvolutionRecipe.from_environment({}, config=config, runtime=runtime())
-    )
+
+@pytest.mark.parametrize(
+    ("pipeline", "published"),
+    [(OFFLINE_STAGE, ["task-a"]), ({}, [])],
+    ids=["offline-runs", "traces-only"],
+)
+def test_a_harness_scenario_takes_a_train_upload_when_its_stage_trains_imported_tasks(
+    tmp_path: Path, pipeline: dict, published: list[str]
+) -> None:
+    """Only the offline stage trains imported tasks, so only it takes a train upload, even when the evaluation reads
+    the imported eval split. An eval upload is open to every recipe, because an evaluation runs it."""
+    evaluation = {"tasks": [], "imported_tasks": True}
+    config = {**evolution_config(evaluation=evaluation, state_dir=str(tmp_path / "state")), **pipeline}
+    # In manual mode no train task starts a step while the test runs.
+    recipe = HarnessEvolutionRecipe.from_environment({}, config=config, runtime=runtime())
+    dispatcher = dispatcher_for(tmp_path, replace(recipe, training_mode="manual"))
 
     async def run() -> None:
         async with TestClient(TestServer(create_app(dispatcher, tokens=TOKEN))) as client:
-            body = archive(tmp_path, "held-out")
-            response = await client.post("/reef/scenarios/s/tasks?split=train", headers=GZIP, data=body)
+            response = await client.post(
+                "/reef/scenarios/s/tasks?split=train", headers=GZIP, data=archive(tmp_path, "task-a")
+            )
             assert response.status == (200 if published else 400), await response.text()
+            held_out = archive(tmp_path, "held-out", port=9100)
+            assert (await client.post("/reef/scenarios/s/tasks?split=eval", headers=GZIP, data=held_out)).status == 200
             samples = dispatcher.get_or_create_scenario("s").store.samples
             assert [task.sample_id for task in samples.imported_tasks(split="train")] == published
+            assert [task.sample_id for task in samples.imported_tasks(split="eval")] == ["held-out"]
 
     try:
         asyncio.run(run())

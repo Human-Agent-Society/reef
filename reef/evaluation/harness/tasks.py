@@ -90,19 +90,18 @@ class StepTasks:
 class EvaluationTasks:
     """The source of every step's evaluation tasks.
 
-    ``seed_tasks`` are the configured tasks; with ``samples`` set, each step
-    reads the eval split of the scenario's imported tasks in those samples
-    instead. With ``collect_failures``, a
-    step collects up to ``max_collected`` prompts in total and
-    ``max_collected_per_client`` per tagged client, chosen by ``collector``
-    (every trace's prompt without one).
+    ``seed_tasks`` are the configured tasks; with ``eval_samples`` set, each
+    step reads the eval split of the imported tasks in that sample store
+    instead. With ``collect_failures``, a step collects up to
+    ``max_collected`` prompts in total and ``max_collected_per_client`` per
+    tagged client, chosen by ``collector`` (every trace's prompt without one).
     """
 
     def __init__(
         self,
         *,
         seed_tasks: tuple[str, ...],
-        samples: TrainerSamples | None = None,
+        eval_samples: TrainerSamples | None = None,
         collect_failures: bool = False,
         collector: TaskCollector | None = None,
         max_collected: int = 50,
@@ -111,19 +110,19 @@ class EvaluationTasks:
         if max_collected < 0 or max_collected_per_client < 0:
             raise ValueError("max_collected_tasks and max_collected_per_client must be at least 0")
         self.seed_tasks = seed_tasks
-        self.samples = samples
+        self.eval_samples = eval_samples
         self.collect_failures = collect_failures
         self.collector = collector
         self.max_collected = max_collected
         self.max_collected_per_client = max_collected_per_client
 
     def seed(self) -> tuple[str, ...]:
-        """The seed tasks as of now: the eval split of the imported tasks when they are set, in arrival order."""
-        if self.samples is None:
+        """The seed tasks as of now: with ``eval_samples``, the eval split of its imported tasks, in arrival order."""
+        if self.eval_samples is None:
             return self.seed_tasks
         return tuple(
             str(stored.sample.task_path)
-            for stored in self.samples.imported_tasks(split="eval")
+            for stored in self.eval_samples.imported_tasks(split="eval")
             if isinstance(stored.sample, TaskSample)
         )
 

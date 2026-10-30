@@ -292,6 +292,8 @@ class Recipe:
         the scenario session, and ``samples`` is its sample store. Each trainer
         gives them to its pipeline; a trainer reads the samples as
         ``TrainerSamples`` of its key (``""`` for the only trainer).
+        ``releases`` reads the scenario's committed releases; each trainer
+        reads those of its own component.
         """
         if len(surface.names) > 1:
             raise RecipeConfigError(

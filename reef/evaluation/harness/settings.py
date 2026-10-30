@@ -27,7 +27,8 @@ class EvaluationSettings(Settings):
     """The parsed ``evolution.evaluation`` section of a harness evolution deployment.
 
     Values: at most one task source is set: ``tasks`` (instructions or task
-    directories), ``task_manifest`` with ``tasks_root``, or ``imported_tasks``;
+    directories), ``task_manifest`` with ``tasks_root``, or ``imported_tasks``
+    (the eval split of the scenario's imported tasks, as each step reads it);
     one is required unless ``policy`` is ``none``. ``scorer`` and ``collector``
     are plugin settings (a ``package.module:Class`` reference, or a mapping
     with ``module`` and ``config``); the recipe requires a scorer unless

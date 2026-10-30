@@ -25,13 +25,17 @@ class TraceJobData(DistillJobData):
 
 
 class TrainTaskJobData(TraceJobData):
-    """``TraceJobData`` that also trains the scenario's imported train tasks.
+    """``TraceJobData`` that also trains the scenario's imported train tasks: offline harness evolution.
 
-    Each imported ``train`` task is a buffer sample, in upload order, and
-    trains once. One job's data holds samples of one kind, so a step either
-    reads traces or rolls out up to ``buffer_size`` train tasks on the head
-    tree. A deployment names the class in ``pipeline.sample2job`` for offline
-    harness evolution.
+    Values: as ``TraceJobData``, and the stage accepts imported tasks
+    (``accepts_imported_tasks``). Each imported ``train`` task is a buffer
+    sample, in upload order. One job's data holds samples of one kind, so a
+    step either reads traces or rolls out train tasks; ``job_samples`` and
+    ``buffer_size`` set how many tasks one step rolls out. The sample store
+    counts how many jobs held each task, and ``auto`` trains a task once.
+    Purpose: a deployment names the class in ``pipeline.sample2job`` for an
+    offline run. The harness backend rolls a job's tasks out on the head tree
+    before the method runs, and the method reads the runs as traces.
     """
 
     accepts_imported_tasks = True

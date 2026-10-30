@@ -116,7 +116,6 @@ class Trainer:
         samples: TrainerSamples | None = None,
         job_parameters: Mapping[SampleKind, Mapping[str, Any]] | None = None,
         default_job_samples: int | None = None,
-        reads_imported_tasks: bool = False,
     ) -> Trainer:
         """Build a trainer and its pipeline.
 
@@ -132,9 +131,7 @@ class Trainer:
         the kind of its samples (``PipelineContext.job_parameters``); the
         pipeline's stage gives them with each job's data. ``None`` gives
         every kind empty parameters, so the training component's defaults
-        apply. ``reads_imported_tasks`` is the recipe's declaration that the
-        trainer reads the scenario's imported tasks outside its pipeline, as a
-        harness evaluation on their eval split does (see ``accepts_imported_tasks``).
+        apply.
         """
         if candidate_backend is None and candidate_evaluator is not None:
             raise ValueError("candidate evaluation requires a candidate backend; a job loop holds its own")
@@ -182,7 +179,6 @@ class Trainer:
                 candidate_evaluator=candidate_evaluator,
                 job_loop=job_loop,
                 state=initial_state,
-                reads_imported_tasks=reads_imported_tasks,
             )
         except BaseException:
             pipeline.close()
@@ -204,7 +200,6 @@ class Trainer:
         candidate_evaluator: CandidateEvaluationPlugin | None,
         state: Mapping[str, Any],
         job_loop: JobLoop | None = None,
-        reads_imported_tasks: bool = False,
     ) -> None:
         if candidate_backend is not None and job_loop is not None:
             raise ValueError("a trainer trains through a job loop or a candidate backend, not both")
@@ -213,8 +208,6 @@ class Trainer:
         self._pipeline = pipeline
         self._candidate_backend = candidate_backend
         self._job_loop = job_loop
-        #: The recipe's declaration that the trainer reads the scenario's imported tasks outside its pipeline.
-        self.reads_imported_tasks = reads_imported_tasks
         if candidate_backend is None:
             self._candidate_evaluator = None
         elif candidate_evaluator is not None:
@@ -319,12 +312,11 @@ class Trainer:
 
     @property
     def accepts_imported_tasks(self) -> bool:
-        """Whether the trainer reads the scenario's imported tasks (its sample store's tasks).
-
-        It reads them through its pipeline (``TrainingPipeline.accepts_imported_tasks``) or outside it
-        (``reads_imported_tasks``). Admission refuses a task upload when no trainer of the scenario accepts them.
+        """Whether the trainer's pipeline trains the scenario's imported train tasks
+        (``TrainingPipeline.accepts_imported_tasks``). Admission refuses a train-split task upload when no trainer
+        of the scenario accepts them.
         """
-        return self._pipeline.accepts_imported_tasks or self.reads_imported_tasks
+        return self._pipeline.accepts_imported_tasks
 
     def admit_reports_of(self, report_type: type[ReportBase] | None) -> None:
         """Name the contract the scenario's ingress admits, when several trainers share one scenario."""

@@ -71,6 +71,7 @@ from reef.recipe.registry import recipe_class_for
 from reef.runtime.executor.config import ExecutorSettings
 from reef.sample2job.traces import TrainTaskJobData
 from reef.service.app import create_app
+from reef.storage.samples import TrainerSamples
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train.backend import ComponentReleases
 from reef.train.harness_backend.backend import HarnessBackend
@@ -397,13 +398,13 @@ def test_each_step_evaluates_on_the_eval_split_of_the_imported_tasks_as_the_step
     root = tmp_path / "tasks"
     with closing(SQLiteScenarioStorage(None)) as storage, closing(storage.open("s")) as session:
         samples = session.samples
-        backend = built.build_backend("s", releases_for(built), samples)
+        backend = built.build_backend("s", releases_for(built), TrainerSamples(samples))
         batch = JobData("s:1", (recorded_trajectory("a1", {"messages": []}, 0.0),))
 
         def task_count() -> int:
             return backend.prepare_step(batch, backend.initial_state(), 0).metrics["evaluation_task_count"]
 
-        # The store opens empty; a task it gets after the build is in the next step's list, and a train task is not.
+        # The sample store opens empty; a task it gets after the build is in the next step's list, and a train task is not.
         assert task_count() == 0
         (first,) = samples.add_tasks((write_task(root, "held-1"),), "eval")
         samples.add_tasks((write_task(root, "train-1"),), "train")
@@ -413,6 +414,9 @@ def test_each_step_evaluates_on_the_eval_split_of_the_imported_tasks_as_the_step
         assert backend.tasks.seed() == tuple(str(task.sample.task_path) for task in (first, second))
         with pytest.raises(RecipeConfigError, match="needs the sample store"):
             built.build_backend("s", releases_for(built), None)
+    retired = {"tasks": [], "task_store": "imported-tasks"}
+    with pytest.raises(RecipeConfigError, match=r"evolution\.evaluation\.task_store is gone: .*imported_tasks: true"):
+        from_config(evolution_config(evaluation=retired), runtime=runtime())
 
 
 def test_offline_runs_need_task_directories_to_evaluate_on_and_a_scorer() -> None:

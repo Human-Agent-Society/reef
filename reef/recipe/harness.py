@@ -354,10 +354,16 @@ class HarnessEvolutionRecipe(Recipe):
                         f"evolution.{retired} is gone: the activation section decides whether a kept tree serves "
                         "(activation: {module: always, config: {review_kinds: [...]}}, or module: never)"
                     )
+            evaluation_section = section.get("evaluation", {})
+            if isinstance(evaluation_section, Mapping) and "task_store" in evaluation_section:
+                raise ValueError(
+                    "evolution.evaluation.task_store is gone: imported tasks are in the scenario's sample store; "
+                    "set evolution.evaluation.imported_tasks: true"
+                )
             evolution = EvolutionSettings.from_config(
                 {key: value for key, value in section.items() if key != "evaluation"}, setting="evolution"
             )
-            evaluation = EvaluationSettings.from_config(section.get("evaluation", {}), setting="evolution.evaluation")
+            evaluation = EvaluationSettings.from_config(evaluation_section, setting="evolution.evaluation")
             if evolution.method is None:
                 raise ValueError("evolution.method must name the Method that evolves the tree")
             method = Method.from_setting(evolution.method, setting="evolution.method")
@@ -524,8 +530,6 @@ class HarnessEvolutionRecipe(Recipe):
             task_storage=task_storage,
             samples=samples,
             default_job_samples=self.batch_size,
-            # An evaluation on the eval split of the imported tasks reads them, so the scenario takes task uploads.
-            reads_imported_tasks=self.evaluation.imported_tasks,
         )
 
     def build_policy(self, backend: HarnessBackend) -> CandidateEvaluationPlugin:
@@ -563,7 +567,7 @@ class HarnessEvolutionRecipe(Recipe):
             evaluator=evaluator,
             tasks=EvaluationTasks(
                 seed_tasks=self.configured_tasks(),
-                samples=samples if self.evaluation.imported_tasks else None,
+                eval_samples=samples if self.evaluation.imported_tasks else None,
                 collect_failures=self.evaluation.collect_failures,
                 collector=self.collector,
                 max_collected=self.evaluation.max_collected_tasks,
