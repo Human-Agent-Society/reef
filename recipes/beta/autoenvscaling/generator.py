@@ -1172,6 +1172,7 @@ class AutoEnvScalingGenerator(TaskGenerator):
                     next_seed += 1
                     continue
                 proposal = slot.proposal
+                is_outage = False
                 try:
                     task = await authors[index]
                 except ProposalRefused as exc:
@@ -1182,7 +1183,8 @@ class AutoEnvScalingGenerator(TaskGenerator):
                     # An outage must not pass for the author's failure: it ends the generation, and the report names
                     # it. So does a task that held the token, which may have left the sandbox.
                     error = f"the author could not rebuild {proposal.source_record_id}: {exc}"
-                    stage = STAGE_CREDENTIAL if isinstance(exc, CredentialHeld) else STAGE_OUTAGE
+                    is_outage = not isinstance(exc, CredentialHeld)
+                    stage = STAGE_OUTAGE if is_outage else STAGE_CREDENTIAL
                     refused.append(replace(proposal, stage=stage, refusal=error))
                 else:
                     pending[task.name] = replace(
@@ -1191,12 +1193,13 @@ class AutoEnvScalingGenerator(TaskGenerator):
                         task_name=task.name,
                     )
                     tasks.append(task)
-                # The session or the parent is taken; a restart continues with the next one. A cancelled run takes
-                # none, so a parent whose variant was cancelled keeps its slot. Otherwise each parent gets one
-                # variant slot, whatever becomes of the variant.
+                # The session is taken; a restart continues with the next one. So is the parent, unless its author's
+                # run was cancelled or ended on an outage, neither of them the variant's failure: the parent keeps its
+                # slot for the next generation. Otherwise each parent gets one variant slot, whatever becomes of the
+                # variant.
                 if slot.variant is None:
                     self.save_cursor(replace(self.cursor, next_position=proposal.position + 1))
-                else:
+                elif not is_outage:
                     parent_name = slot.variant.parent
                     self.parents = [
                         replace(kept, varied=kept.varied or kept.name == parent_name) for kept in self.parents
