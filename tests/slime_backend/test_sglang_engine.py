@@ -449,8 +449,8 @@ def test_native_sglang_plugin_is_explicitly_gated(monkeypatch: pytest.MonkeyPatc
 @pytest.mark.unit
 def test_scheduler_stamps_tokens_before_cross_process_delivery(monkeypatch: pytest.MonkeyPatch) -> None:
     current_args = types.SimpleNamespace(weight_version="engine:6")
-    server_args = types.ModuleType("sglang.srt.server_args")
-    server_args.get_global_server_args = lambda: current_args  # type: ignore[attr-defined]
+    runtime_context = types.ModuleType("sglang.srt.runtime_context")
+    runtime_context.get_serving = lambda: current_args  # type: ignore[attr-defined]
 
     scheduler_module = types.ModuleType("sglang.srt.managers.scheduler")
 
@@ -464,6 +464,9 @@ def test_scheduler_stamps_tokens_before_cross_process_delivery(monkeypatch: pyte
 
         def set_internal_state(self, request):
             return types.SimpleNamespace(updated=True, server_args=dict(request.server_args))
+
+        def record_weight_version_change(self, new_version):
+            current_args.weight_version = new_version
 
     scheduler_module.Scheduler = Scheduler  # type: ignore[attr-defined]
     components = types.ModuleType("sglang.srt.managers.scheduler_components")
@@ -516,20 +519,25 @@ def test_scheduler_stamps_tokens_before_cross_process_delivery(monkeypatch: pyte
 
         def update_weights_from_disk(self, recv_req):
             self.calls.append(("disk", recv_req.weight_version))
+            return self.recorded(recv_req)
+
+        def recorded(self, recv_req):
+            # SGLang's updater records the version on the scheduler after a successful load.
+            current_args.weight_version = recv_req.weight_version
             return UpdateResult()
 
         def update_weights_from_distributed(self, recv_req):
             assert self._weight_update_in_progress, "requires an open begin_weight_update session"
             self.calls.append(("distributed", recv_req.weight_version))
-            return UpdateResult()
+            return self.recorded(recv_req)
 
         def update_weights_from_tensor(self, recv_req):
             assert self._weight_update_in_progress, "requires an open begin_weight_update session"
             self.calls.append(("tensor", recv_req.weight_version))
-            return UpdateResult()
+            return self.recorded(recv_req)
 
     weight_updater.SchedulerWeightUpdaterManager = SchedulerWeightUpdaterManager  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "sglang.srt.server_args", server_args)
+    monkeypatch.setitem(sys.modules, "sglang.srt.runtime_context", runtime_context)
     monkeypatch.setitem(sys.modules, "sglang.srt.managers.scheduler", scheduler_module)
     monkeypatch.setitem(sys.modules, "sglang.srt.managers.scheduler_components", components)
     monkeypatch.setitem(sys.modules, "sglang.srt.managers.io_struct", io_struct)

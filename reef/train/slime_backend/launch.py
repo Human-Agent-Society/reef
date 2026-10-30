@@ -24,6 +24,7 @@ from reef.runtime.deployment import RuntimeConfigError, TrainingComponentFactory
 from reef.runtime.executor.arguments import MANAGED_ENGINE_OPTIONS, native_arguments, normalize_native_options
 from reef.runtime.executor.config import role_executor_settings, select_executor
 from reef.runtime.jobs import TrainingComponent
+from reef.train.algos.registry import loss_family_refs
 from reef.train.deployment import TrainingDeployment
 
 
@@ -228,10 +229,12 @@ class SlimeComponentFactory(TrainingComponentFactory):
             raise RuntimeConfigError("Slime trains on a Ray cluster: set training.ray-address or RAY_ADDRESS")
         # SlimeSettings checks that the timeout is positive.
         train_timeout_s = config["train_timeout_s"]
+        loss_family = config["loss_family"]
         return SlimeTrainingComponent(
             SlimeSettings(
-                arguments=tuple(slime_arguments(settings, loss_family=config["loss_family"], environ=environ)),
-                loss_family=config["loss_family"],
+                arguments=tuple(slime_arguments(settings, loss_family=loss_family, environ=environ)),
+                # A job's driver is a new process, whose registry holds no family a recipe registered by name.
+                loss_family=loss_family_refs().get(loss_family, loss_family),
                 recipe=config["recipe"],
                 execution=config["execution"],
                 ray_address=ray_address,

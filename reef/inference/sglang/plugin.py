@@ -24,7 +24,7 @@ def install_scheduler_runtime_load_id_tracking() -> None:
     """Stamp each decoded token with the weight head that produced it."""
     from sglang.srt.managers.scheduler import Scheduler
     from sglang.srt.managers.scheduler_components.output_streamer import _GenerationStreamAccumulator
-    from sglang.srt.server_args import get_global_server_args
+    from sglang.srt.runtime_context import get_serving
 
     _install_runtime_load_id_updates()
     if getattr(_GenerationStreamAccumulator, "_reef_token_runtime_load_ids_installed", False):
@@ -33,9 +33,9 @@ def install_scheduler_runtime_load_id_tracking() -> None:
     original_accept = _GenerationStreamAccumulator.accept
 
     def current_runtime_load_id() -> str | None:
-        # SGLang's ServerArgs spells the runtime-load-ID "weight_version";
-        # the attribute name is SGLang's, not Reef's.
-        version = getattr(get_global_server_args(), "weight_version", None)
+        # SGLang's serving configuration spells the runtime-load-ID
+        # "weight_version"; the attribute name is SGLang's, not Reef's.
+        version = get_serving().weight_version
         return str(version) if version is not None and str(version) else None
 
     def accept_with_runtime_load_id(self: Any, *, req: Any):
@@ -85,7 +85,7 @@ def install_scheduler_runtime_load_id_tracking() -> None:
             if not isinstance(version, str) or not version:
                 result.updated = False
             else:
-                get_global_server_args().weight_version = version
+                self.record_weight_version_change(version)
                 result.server_args["weight_version"] = version
         return result
 
@@ -144,7 +144,7 @@ def _install_runtime_load_id_updates() -> None:
     """
     from sglang.srt.managers.io_struct import UpdateWeightFromDiskReqOutput
     from sglang.srt.managers.scheduler_components.weight_updater import SchedulerWeightUpdaterManager
-    from sglang.srt.server_args import get_global_server_args
+    from sglang.srt.runtime_context import get_serving
 
     if getattr(SchedulerWeightUpdaterManager, "_reef_runtime_load_id_updates_installed", False):
         return
@@ -154,15 +154,13 @@ def _install_runtime_load_id_updates() -> None:
     original_tensor = SchedulerWeightUpdaterManager.update_weights_from_tensor
 
     def commit_version(recv_req: Any, result: Any) -> Any:
-        # Weight-update requests and ServerArgs both use SGLang's field name
-        # "weight_version" for what Reef calls the runtime-load-ID.
+        # Weight-update requests use SGLang's field name "weight_version" for
+        # what Reef calls the runtime-load-ID. SGLang's updater records it on
+        # the scheduler after a successful load; Reef refuses an empty one.
         version = getattr(recv_req, "weight_version", None)
-        if getattr(result, "success", False) and version is not None:
-            if not isinstance(version, str) or not version:
-                result.success = False
-                result.message = "weight_version must be a non-empty string"
-            else:
-                get_global_server_args().weight_version = version
+        if getattr(result, "success", False) and version is not None and (not isinstance(version, str) or not version):
+            result.success = False
+            result.message = "weight_version must be a non-empty string"
         return result
 
     @wraps(original_disk)
@@ -170,7 +168,7 @@ def _install_runtime_load_id_updates() -> None:
         if getattr(recv_req, "load_format", None) == "delta" and getattr(recv_req, "weight_version", None) is not None:
             try:
                 incoming = RuntimeLoadId.parse(recv_req.weight_version)
-                current = RuntimeLoadId.parse(get_global_server_args().weight_version)
+                current = RuntimeLoadId.parse(get_serving().weight_version)
             except (TypeError, ValueError):
                 return UpdateWeightFromDiskReqOutput(
                     success=False,

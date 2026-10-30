@@ -4,7 +4,7 @@ On-policy distillation from a separate frozen teacher as a Reef weight-training 
 
 - Method: [Thinking Machines Lab, On-Policy Distillation](https://thinkingmachines.ai/blog/on-policy-distillation/).
 - Reference implementation: the [tinker-cookbook distillation recipe](https://github.com/thinking-machines-lab/tinker-cookbook/tree/dfe4d77e8e8c/tinker_cookbook/recipes/distillation) at `dfe4d77e8e8c`. The Reef implementation configures the Slime backend's distillation base (`reef/train/slime_backend/distill/`) and makes no Tinker API calls.
-- Pins: `slime` pinned to `THUDM/slime@41014d1f29e201137fdffce737bb8bac65bc5219` (via `pyproject.toml` `dependency-groups.runtime`).
+- Pins: `slime` pinned to `THUDM/slime@540ea919e45b8b929198abce008a103be9cfc779` (via `pyproject.toml` `dependency-groups.runtime`).
 - Claim scope: the [math example](examples/math/README.md) distils Qwen3-32B into a Qwen3-8B OpenThoughts3-SFT student through the teacher engine and raises AIME'24 accuracy from 41.0% to about 50%.
 
 ## Layout

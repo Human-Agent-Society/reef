@@ -64,7 +64,6 @@ training:
     rollout-batch-size: "${pipeline.record2record.config.groups_per_step}"
     n-samples-per-prompt: "${pipeline.record2record.config.rollouts_per_group}"
     global-batch-size: "8"
-    disable-rollout-global-dataset: true
     actor-num-nodes: "1"
     actor-num-gpus-per-node: "${training.config.num_gpus}"
     num-gpus-per-node: "4"
