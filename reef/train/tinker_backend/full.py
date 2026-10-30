@@ -76,10 +76,14 @@ class SpindleFullTrainingComponent(TinkerJobComponent):
         (directory / REFERENCE_FILE).write_text(json.dumps(revision.to_dict()) + "\n", encoding="utf-8")
 
     def prepare_base(self) -> None:
-        reference = self._base / REFERENCE_FILE
-        if not reference.exists():
+        """Write the reference to the configured base when ``base/`` holds no reference or another one.
+
+        The base start is a function of ``base`` alone, so it follows the configuration. A scenario whose repository
+        was made from another base still does not open: its base artifact's inputs differ (``BaseArtifactSource``).
+        """
+        if read_reference(self._base) != self._revision:
             self._base.mkdir(parents=True, exist_ok=True)
-            reference.write_text(json.dumps(self._revision.to_dict()) + "\n", encoding="utf-8")
+            (self._base / REFERENCE_FILE).write_text(json.dumps(self._revision.to_dict()) + "\n", encoding="utf-8")
 
     def validated(self, checkpoint: TinkerCheckpoint) -> TinkerCheckpoint:
         checkpoint.check_compatible(self._model, service=self._config.base_url)
