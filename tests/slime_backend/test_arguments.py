@@ -131,14 +131,28 @@ def component_args(**overrides):
         "offload_rollout": False,
         "release_train": False,
         "megatron_lora_rank": 0,
+        "rollout_num_gpus": 0,
+        "actor_num_nodes": 1,
+        "actor_num_gpus_per_node": 4,
         **overrides,
     }
     return SlimeArguments(**values)
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("overrides", [{}, {"megatron_lora_rank": 32}, {"offload_train": True}])
-def test_slime_args_accept_a_training_only_run(overrides) -> None:
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {},
+        {"megatron_lora_rank": 32},
+        {"offload_train": True},
+        # The component's own rollout engines: on GPUs of their own, or on some or all of the training GPUs.
+        {"rollout_num_gpus": 2},
+        {"colocate": True, "offload_train": True, "offload_rollout": True, "rollout_num_gpus": 4},
+        {"colocate": True, "offload_train": True, "offload_rollout": True, "rollout_num_gpus": 2},
+    ],
+)
+def test_slime_args_accept_a_run_the_training_component_can_run(overrides) -> None:
     from reef.train.slime_backend.reef_adapters.preflight import validate_slime_args
 
     validate_slime_args(component_args(**overrides), None)
@@ -148,14 +162,13 @@ def test_slime_args_accept_a_training_only_run(overrides) -> None:
 @pytest.mark.parametrize(
     ("overrides", "refusal"),
     [
-        # Training and serving never share GPUs, so nothing hands GPU memory over between them.
-        ({"colocate": True, "offload_train": True, "offload_rollout": True}, "remove --colocate"),
-        ({"offload_rollout": True}, "remove --offload-rollout"),
+        # Reef's LoRA adapters are not wired into Slime's weight transfer to its engines.
+        ({"rollout_num_gpus": 2, "megatron_lora_rank": 32}, "remove --megatron-lora-rank"),
         ({"debug_train_only": True}, "--debug-train-only"),
         ({"debug_rollout_only": True}, "--debug-rollout-only"),
         ({"num_rollout": 0}, "positive --num-rollout"),
         ({"save_hf": "/tmp/hf/checkpoint"}, "{rollout_id}"),
-        # The workers keep running between jobs, so nothing releases and recreates them.
+        # The workers keep running through a job, so nothing releases and recreates them.
         ({"release_train": True}, "remove --release-train"),
     ],
 )

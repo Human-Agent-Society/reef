@@ -17,11 +17,12 @@ from reef.runtime.interfaces import TrainingMethod
 from reef.runtime.jobs import TrainingJob
 from reef.tinker.checkpoint import TinkerCheckpoint
 from reef.tinker.sampling import SampleResult, TinkerSampler
+from reef.train.task_rollouts import ChatEndpoint, RolloutSettings, TaskJobRollouts, roll_out
 from reef.train.tinker_backend import component as component_module
 from reef.train.tinker_backend.client import TinkerClient
 from reef.train.tinker_backend.component import ROLLOUTS_FILE, TinkerTrainingComponent
 from reef.train.tinker_backend.config import TinkerConfig
-from reef.train.tinker_backend.rollout import RolloutSettings, SamplerEndpoint, TaskJobRollouts, roll_out
+from reef.train.tinker_backend.rollout import SamplerChat
 
 MODEL = "Qwen/Qwen3-8B"
 ROLLOUT = {"rollouts_per_task": 2, "concurrency": 2}
@@ -85,11 +86,10 @@ def test_a_rollout_samples_each_task_on_the_start_sampler_and_groups_its_samples
     rollouts = roll_out(
         tasks,
         RolloutSettings.from_parameters({"rollout": ROLLOUT}),
-        sampler,
-        "tinker://start/sampler",
+        SamplerChat(sampler, "tinker://start/sampler", model=MODEL, runtime_load_id="tinker:start"),
         model=MODEL,
-        runtime_load_id="tinker:start",
         work_dir=tmp_path / "work",
+        model_adapter="tinker://start/sampler",
         lab=AgentLab({"add": 1.0, "sort": 0.0}, failing=frozenset({"broken"})),
     )
 
@@ -110,8 +110,8 @@ def test_a_rollout_samples_each_task_on_the_start_sampler_and_groups_its_samples
 
 
 @pytest.mark.unit
-def test_the_sampler_endpoint_refuses_a_request_that_tinker_cannot_serve():
-    with SamplerEndpoint(Sampler(), None, model=MODEL, runtime_load_id="tinker:base") as endpoint:
+def test_the_sampler_chat_refuses_a_request_that_tinker_cannot_serve():
+    with ChatEndpoint(SamplerChat(Sampler(), None, model=MODEL, runtime_load_id="tinker:base")) as endpoint:
         body = json.dumps({"messages": [{"role": "user", "content": "hi"}], "tools": [{"type": "function"}]})
         request = urllib.request.Request(f"{endpoint.url}/v1/chat/completions", data=body.encode(), method="POST")
         with pytest.raises(urllib.error.HTTPError) as refused:
@@ -120,7 +120,7 @@ def test_the_sampler_endpoint_refuses_a_request_that_tinker_cannot_serve():
 
 
 @pytest.mark.unit
-def test_the_sampler_endpoint_answers_a_bad_request_and_a_sampler_failure_with_their_status():
+def test_the_sampler_chat_answers_a_bad_request_and_a_sampler_failure_with_their_status():
     class Failing(Sampler):
         def sample(self, sampler_path, prompt, params):
             raise ValueError("Tinker returned non-finite sampled log probabilities")
@@ -134,7 +134,7 @@ def test_the_sampler_endpoint_answers_a_bad_request_and_a_sampler_failure_with_t
             return error.code, error.read().decode()
 
     chat = json.dumps({"messages": [{"role": "user", "content": "hi"}]}).encode()
-    with SamplerEndpoint(Failing(), None, model=MODEL, runtime_load_id="tinker:base") as endpoint:
+    with ChatEndpoint(SamplerChat(Failing(), None, model=MODEL, runtime_load_id="tinker:base")) as endpoint:
         assert post(endpoint.url, b"{not json")[0] == 400
         status, body = post(endpoint.url, chat)
     assert status == 502 and "non-finite" in body
@@ -219,8 +219,8 @@ def test_a_task_job_trains_its_rollouts_and_a_resumed_job_trains_the_same_ones(t
 
     calls = []
 
-    def fake_roll_out(tasks, settings, sampler, sampler_path, **options):
-        calls.append((tuple(task.task_path.name for task in tasks), sampler_path))
+    def fake_roll_out(tasks, settings, chat, **options):
+        calls.append((tuple(task.task_path.name for task in tasks), chat.sampler_path))
         return grouped(tmp_path)
 
     monkeypatch.setattr(component_module, "roll_out", fake_roll_out)

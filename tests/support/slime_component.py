@@ -1,4 +1,4 @@
-"""Fakes of the Slime training component's worker groups and storage, for CPU tests of ``SlimeTrainingComponent``."""
+"""Fakes of the Slime job runner's worker groups and storage, for CPU tests of ``SlimeJobRunner``."""
 
 from __future__ import annotations
 
@@ -52,6 +52,9 @@ class FakeTrainGroup:
 
     def async_pop_metrics(self):
         return list(self.rank_metrics)
+
+    def set_rollout_manager(self, rollout_manager: Any) -> None:
+        self.events.append(f"set_rollout_manager:{rollout_manager}")
 
     def save_model(self, rollout_id: int, force_sync: bool = False) -> None:
         self.saved.append((rollout_id, force_sync))
