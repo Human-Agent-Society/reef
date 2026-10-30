@@ -1,8 +1,10 @@
-"""Reef-owned Ray session and training GPU reservation for the Slime training component.
+"""The Ray session and GPU reservation of one Slime job's driver.
 
-Reef reserves the training GPUs itself from the parsed Slime topology; the
-actor and critic groups borrow their bundles from that one reservation. The
-serving engines reserve their own GPUs on the inference component.
+Slime places the job itself (``create_placement_groups``): one placement group
+of the GPUs its arguments name, which the actor, the critic and Slime's
+rollout engines share as Slime splits them (with ``--colocate`` the engines
+take training GPUs). The reservation lasts for the driver; the serving engines
+reserve their own GPUs on the inference component.
 """
 
 from __future__ import annotations
@@ -13,20 +15,13 @@ from uuid import uuid4
 import ray
 
 from reef.runtime.deployment import DeploymentResources
-from reef.runtime.executor.placement import GpuBundles, ModelGpuLayout, ModelGpuReservation, reserve_model_gpus
+from reef.runtime.executor.placement import GpuBundles
 from reef.runtime.executor.process_guard import DEPLOYMENT_ENV, retire
 from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
 
 
-def model_gpu_layout(args: SlimeArguments) -> ModelGpuLayout:
-    """The training GPUs from Slime's parsed topology flags: actor nodes times GPUs per node."""
-    return ModelGpuLayout(
-        training_gpus=int(args.actor_num_nodes) * int(args.actor_num_gpus_per_node), inference_gpus=0
-    )
-
-
 class SlimeDeploymentResources(DeploymentResources):
-    """Own one Ray client session and the training GPU reservation."""
+    """Own one Ray client session and the job's placement group, which Slime makes and splits."""
 
     def __init__(
         self,
@@ -40,9 +35,10 @@ class SlimeDeploymentResources(DeploymentResources):
         self.ray_address = ray_address
         self.namespace = namespace
         self.runtime_env = runtime_env
-        #: Slime's view of the reservation: the actor and critic groups share the training bundles.
+        #: Slime's split of the placement group: ``actor``, ``critic`` (None without a critic) and ``rollout``
+        #: (no bundles without rollout engines).
         self.placement_groups: dict[str, GpuBundles | None] = {}
-        self._reservation: ModelGpuReservation | None = None
+        self._group: Any = None
         self._started = False
         self._closed = False
         self._owns_session = False
@@ -61,10 +57,12 @@ class SlimeDeploymentResources(DeploymentResources):
         runtime_env["worker_process_setup_hook"] = "reef.runtime.executor.process_guard.install"
         ray.init(address=self.ray_address, namespace=self.namespace, runtime_env=runtime_env)
         self._nodes = [node["NodeID"] for node in ray.nodes() if node["Alive"]]
-        self._reservation = reserve_model_gpus(model_gpu_layout(self.args))
+        from slime.ray.placement_group import create_placement_groups
+
+        groups = create_placement_groups(self.args)
+        self._group = groups["actor"][0]
         self.placement_groups = {
-            "actor": self._reservation.training,
-            "critic": self._reservation.training if self.args.use_critic else None,
+            role: None if bundles is None else GpuBundles(*bundles) for role, bundles in groups.items()
         }
 
     def close(self) -> None:
@@ -73,9 +71,9 @@ class SlimeDeploymentResources(DeploymentResources):
         self._closed = True
         errors = []
         try:
-            if self._reservation is not None:
+            if self._group is not None:
                 try:
-                    self._reservation.release()
+                    ray.util.remove_placement_group(self._group)
                 except Exception as exc:
                     errors.append(exc)
         finally:
