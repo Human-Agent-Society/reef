@@ -38,7 +38,9 @@ class DatasetJobData(Sample2Job):
         return cls(context)
 
     def __init__(self, context: PipelineContext) -> None:
-        super().__init__(context, None, None)
+        # The trainer requires a job size; this stage makes a job per instruction, in manual only, so the
+        # size never makes data ready (an empty buffer holds no sample).
+        super().__init__(context, None, 1)
 
     def make_job_data(self, samples: tuple[Sample, ...], data_id: str) -> JobData:
         return JobData(data_id, ())
