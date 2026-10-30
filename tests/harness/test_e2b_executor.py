@@ -13,7 +13,7 @@ import pytest
 from reef.execution.sandbox.config import build_executor
 from reef.execution.sandbox.e2b import E2BExecutor, E2BSession
 from reef.execution.sandbox.process import RolloutLaunchError, SandboxUnavailable
-from reef.execution.sandbox.remote import launch_environment, protected_command, remote_root, unpack
+from reef.execution.sandbox.remote import protected_command, remote_root, unpack
 from reef.harness.adapters import get_adapter
 from reef.harness.rollouts.run import run_rollout
 from reef.harness.rollouts.vendor_install import AdapterProgram
@@ -178,7 +178,7 @@ def test_session_applies_the_deployment_environment_over_the_callers(tmp_path, m
     try:
         session.launch(["pi"], root=tmp_path, workspace=tmp_path, env={"SETTING": "caller", "OTHER": "x"}, timeout=10)
         envs = sandbox.commands.run.call_args.kwargs["envs"]
-        assert envs["REEF_PROCESS_ENV_SETTING"] == "deployment" and envs["REEF_PROCESS_ENV_OTHER"] == "x"
+        assert envs["SETTING"] == "deployment" and envs["OTHER"] == "x"
     finally:
         session.close()
 
@@ -205,9 +205,6 @@ def test_protected_command_keeps_secret_values_out_of_argv(tmp_path, shell):
     environment = {
         "HOME": "/private/agent home",
         "CLAUDE_CODE_OAUTH_TOKEN": SECRET,
-        "PWD": "/task/original",
-        "SHLVL": "42",
-        "IFS": "custom separators",
         "SETTING": "quotes '\" $HOME $(false)\nsecond line",
         "EMPTY": "",
     }
@@ -222,7 +219,7 @@ def test_protected_command_keeps_secret_values_out_of_argv(tmp_path, shell):
     assert SECRET not in command
     subprocess.run(
         [shell, "-c", command],
-        env={"PATH": f"{fake}:/usr/bin:/bin", **launch_environment(environment)},
+        env={"PATH": f"{fake}:/usr/bin:/bin", **environment},
         check=True,
         timeout=30,
     )
@@ -254,14 +251,11 @@ def test_e2b_sends_all_environment_values_as_process_env(tmp_path, monkeypatch):
         )
         command = sandbox.commands.run.call_args.args[0]
         envs = sandbox.commands.run.call_args.kwargs["envs"]
-        assert (
-            SECRET not in command
-            and '--setenv CLAUDE_CODE_OAUTH_TOKEN "$REEF_PROCESS_ENV_CLAUDE_CODE_OAUTH_TOKEN"' in command
-        )
+        assert SECRET not in command and '--setenv CLAUDE_CODE_OAUTH_TOKEN "$CLAUDE_CODE_OAUTH_TOKEN"' in command
         assert envs == {
-            "REEF_PROCESS_ENV_SETTING": "deployment",
-            "REEF_PROCESS_ENV_OTHER": "x",
-            "REEF_PROCESS_ENV_CLAUDE_CODE_OAUTH_TOKEN": SECRET,
+            "SETTING": "deployment",
+            "OTHER": "x",
+            "CLAUDE_CODE_OAUTH_TOKEN": SECRET,
         }
     finally:
         session.close()

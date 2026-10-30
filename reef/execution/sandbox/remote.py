@@ -100,15 +100,6 @@ def remote_command(argv: Sequence[str], env: Mapping[str, str], root: Path) -> t
     return shlex.join(args), envs
 
 
-def launch_environment(env: Mapping[str, str]) -> dict[str, str]:
-    """Encode environment names for the shell that launches bubblewrap.
-
-    ``protected_command`` restores each original name inside the jail. The prefix
-    prevents the wrapper shell from changing values such as PWD, SHLVL, and IFS.
-    """
-    return {f"REEF_PROCESS_ENV_{name}": value for name, value in env.items()}
-
-
 def protected_command(
     command: str,
     env: Mapping[str, str],
@@ -122,9 +113,10 @@ def protected_command(
     The PID namespace retires tool children when the command is stopped. Bubblewrap
     also prevents privilege escalation, so sudo cannot undo the read-only mounts.
 
-    Environment values arrive through ``launch_environment`` in the provider process environment. The shell's
+    Environment values arrive through the provider process environment. The shell's
     builtin ``printf`` passes them to bubblewrap through its ``--args`` descriptor,
     after ``--clearenv``. Only variable names appear in the command line.
+    Variables managed by the shell, such as PWD, follow the shell's normal behavior.
     """
     for name in env:
         if not name.isascii() or not name.isidentifier():
@@ -170,7 +162,7 @@ def protected_command(
     )
     if not forwarded_names:
         return f"exec {shlex.join(arguments)}"
-    values = " ".join(f'--setenv {name} "$REEF_PROCESS_ENV_{name}"' for name in forwarded_names)
+    values = " ".join(f'--setenv {name} "${name}"' for name in forwarded_names)
     return f"printf '%s\\000' {values} | exec {shlex.join(arguments)} 3<&0 </dev/null"
 
 
@@ -636,7 +628,6 @@ __all__ = [
     "RemoteSession",
     "TunnelPump",
     "deployment_owner",
-    "launch_environment",
     "pack",
     "probe_command",
     "protected_command",

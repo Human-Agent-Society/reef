@@ -32,7 +32,6 @@ from reef.execution.sandbox.remote import (
     RemoteExecutor,
     RemoteSession,
     check_options,
-    launch_environment,
     parse_env_from,
     parse_forward_ports,
     probe_command,
@@ -274,9 +273,7 @@ class E2BSession(RemoteSession):
         try:
             self.push(root)
             deadline = time.monotonic() + timeout
-            process = self.sandbox.commands.run(
-                command, envs=launch_environment(envs), cwd=cwd, timeout=timeout, background=True
-            )
+            process = self.sandbox.commands.run(command, envs=envs, cwd=cwd, timeout=timeout, background=True)
             process_id = process.pid
             for attempt in range(3):
                 try:

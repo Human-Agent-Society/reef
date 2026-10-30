@@ -34,7 +34,6 @@ from reef.execution.sandbox.remote import (
     RemoteExecutor,
     RemoteSession,
     check_options,
-    launch_environment,
     parse_env_from,
     parse_forward_ports,
     probe_command,
@@ -269,7 +268,7 @@ class ModalSession(RemoteSession):
                 "-c",
                 limited,
                 workdir=cwd,
-                env=launch_environment(envs),
+                env=envs,
                 timeout=seconds + KILL_AFTER_S + 30,
             )
             process.wait()
