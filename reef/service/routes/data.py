@@ -11,6 +11,7 @@ from pathlib import Path
 
 from aiohttp import web
 
+from reef.service.auth import signed_download_url
 from reef.service.data import (
     create_items,
     create_task_items,
@@ -20,6 +21,7 @@ from reef.service.data import (
     read_item,
     update_items,
 )
+from reef.service.data_transfer import TRANSFER_KINDS, item_archive, start_transfer, transfer_status
 from reef.service.request_service import RequestService
 from reef.service.routes.payload import read_object
 from reef.service.tasks import MAX_UNPACKED_BYTES
@@ -40,8 +42,50 @@ def query_int(request: web.Request, name: str, default: int) -> int:
         raise web.HTTPBadRequest(text=f"{name} must be an integer") from None
 
 
+def download_seconds(request: web.Request) -> int:
+    """The life of a signed download URL that ``request`` asks for: ``expires_in`` seconds, one hour by default."""
+    return query_int(request, "expires_in", 3600)
+
+
 def register_data_routes(app: web.Application, *, request_service: RequestService) -> None:
     dispatcher = request_service.dispatcher
+
+    async def start(request: web.Request) -> web.Response:
+        body = await read_object(request)
+        segment = request.match_info["transfer"]
+        status = await asyncio.to_thread(start_transfer, dispatcher, request.match_info["owner"], segment, body)
+        return web.json_response(status, status=202)
+
+    async def transfer(request: web.Request) -> web.Response:
+        status = await asyncio.to_thread(
+            transfer_status,
+            dispatcher,
+            request.match_info["owner"],
+            request.match_info["transfer"],
+            request.match_info["transfer_id"],
+        )
+        return web.json_response(status, headers={"Cache-Control": "no-store"})
+
+    async def archive(request: web.Request) -> web.StreamResponse:
+        """A task's files as tar.gz, or another item's content as JSON; with ``signed=1``, a signed URL of it."""
+        if request.query.get("signed") == "1":
+            url, expires_at = signed_download_url(request, "", download_seconds(request))
+            return web.json_response({"url": url, "expires_at": expires_at})
+        with tempfile.TemporaryDirectory(prefix="reef-item-archive-") as work:
+            file, media_type = await asyncio.to_thread(
+                item_archive, dispatcher, request.match_info["owner"], request.match_info["item_id"], Path(work)
+            )
+            response = web.StreamResponse(
+                headers={"Content-Type": media_type, "Content-Disposition": f'attachment; filename="{file.name}"'}
+            )
+            response.content_length = file.stat().st_size
+            await response.prepare(request)
+            # The file goes out in chunks, then the directory is removed.
+            with file.open("rb") as source:
+                while chunk := await asyncio.to_thread(source.read, CHUNK_BYTES):
+                    await response.write(chunk)
+            await response.write_eof()
+        return response
 
     async def create(request: web.Request) -> web.Response:
         body = await read_object(request.clone(client_max_size=MAX_CREATE_BYTES))
@@ -99,13 +143,18 @@ def register_data_routes(app: web.Application, *, request_service: RequestServic
         return web.json_response(receipt)
 
     base = "/reef/namespaces/{owner}/data"
+    transfers = "{transfer:" + "|".join(TRANSFER_KINDS) + "}"
     app.router.add_post(base, create)
     app.router.add_get(base, query)
     app.router.add_post(f"{base}/tasks", create_tasks)
     app.router.add_post(f"{base}/metadata", update)
+    # These come before the item routes, whose ID takes the rest of the path.
+    app.router.add_post(f"{base}/{transfers}", start)
+    app.router.add_get(f"{base}/{transfers}/{{transfer_id}}", transfer)
+    app.router.add_get(base + "/{item_id:.+}/archive", archive)
     # An item ID can hold '/', so the route takes the rest of the path.
     app.router.add_get(base + "/{item_id:.+}", read)
     app.router.add_delete(base + "/{item_id:.+}", delete)
 
 
-__all__ = ["register_data_routes"]
+__all__ = ["download_seconds", "register_data_routes"]

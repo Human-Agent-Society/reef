@@ -38,6 +38,7 @@ from reef.service.app import create_app
 from reef.service.artifact_evaluations import ArtifactEvaluations, LocalCandidateEndpoints, NewArtifacts
 from reef.service.artifact_imports import ArtifactImports
 from reef.service.data_service import DataWorker
+from reef.service.data_transfer import ArchiveWriters
 from reef.service.deploy.service_config import ServiceConfig, service_owned_keys
 from reef.service.deploy.serving import serving_runtime_config
 from reef.service.deploy.training import training_deployment_for
@@ -453,10 +454,9 @@ def build_dispatcher(
         if "data" in components and data_store is not None:
             dispatcher.workers.add(
                 DataWorker(
-                    coordination.work_queue,
-                    record_storage,
-                    data_store,
-                    coordination.marks,
+                    dispatcher,
+                    ArtifactSources.from_setting(settings.artifact_sources),
+                    ArchiveWriters(),
                     worker_id=instance_id("data"),
                 )
             )

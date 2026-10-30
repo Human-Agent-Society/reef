@@ -9,12 +9,14 @@ from typing import Any
 
 from reef.artifact import InMemoryRepositoryBackend
 from reef.artifact.repository import RepositoryBackendFactory
+from reef.artifact.sources import ArtifactSources
 from reef.core.evaluation import EvaluationResult, SelectionDecision, UpdateCandidate
 from reef.dispatcher import Dispatcher
 from reef.recipe import Recipe
 from reef.record2sample import NoSamples
 from reef.sample2job import Sample2Job
 from reef.service.data_service import DataWorker
+from reef.service.data_transfer import ArchiveWriters
 from reef.service.task_import import DataScenarioStorage
 from reef.storage.sql_data import SQLiteDataStore
 from reef.storage.sqlite import SQLiteScenarioStorage
@@ -138,6 +140,6 @@ def dispatcher_for(tmp_path: Path, recipe: Recipe, factory: RepositoryBackendFac
     )
     # The data service copies the records to record items, as assembly runs it.
     dispatcher.workers.add(
-        DataWorker(dispatcher.queue, storage, data, dispatcher.coordination.marks, worker_id="data-test")
+        DataWorker(dispatcher, ArtifactSources.from_setting(()), ArchiveWriters(), worker_id="data-test")
     )
     return dispatcher

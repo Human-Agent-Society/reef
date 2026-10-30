@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import re
 import secrets
+import time
 from collections.abc import Iterable
 from urllib.parse import urlencode
 
@@ -64,6 +65,41 @@ def page_query(request: web.Request, scenario: str) -> str:
     return urlencode({"scenario": scenario, **key})
 
 
+#: What a download signature's HMAC covers before the path, so a signature is good for nothing but one download.
+DOWNLOAD_SIGNATURE_CONTEXT = b"reef-download\n"
+#: The most seconds that a signed download URL stays valid.
+MAX_DOWNLOAD_URL_SECONDS = 24 * 3600
+
+#: The downloads that a signed URL opens, matched on the raw path: a data item's archive and an artifact's files.
+DOWNLOAD_ROUTES = re.compile(r"^/reef/(namespaces/[^/]+/data/.+/archive|scenarios/[^/]+/artifacts/[^/]+/files)$")
+
+
+def download_signature(digest: bytes, raw_path: str, file_path: str, expires_at: int) -> str:
+    """The signature of a download of ``raw_path`` (and ``file_path`` within it, or "") until ``expires_at``, keyed
+    by the digest of an accepted token, as hex. It opens that one download until then, and the token cannot be read
+    back from it."""
+    message = f"{raw_path}\n{file_path}\n{expires_at}".encode()
+    return hmac.new(digest, DOWNLOAD_SIGNATURE_CONTEXT + message, hashlib.sha256).hexdigest()
+
+
+def signed_download_url(request: web.Request, file_path: str, expires_in_seconds: int) -> tuple[str, int]:
+    """The signed URL of the download that ``request`` asks for, and when it expires, for a request that
+    presented a service token. A service without tokens needs no signature, so its URL carries none.
+
+    The URL is the request's raw path with ``path`` (when ``file_path`` is not empty), ``expires`` and
+    ``signature``. Raise ``ValueError`` for an ``expires_in_seconds`` outside 1 to ``MAX_DOWNLOAD_URL_SECONDS``.
+    """
+    if not 1 <= expires_in_seconds <= MAX_DOWNLOAD_URL_SECONDS:
+        raise ValueError(f"expires_in must be 1 to {MAX_DOWNLOAD_URL_SECONDS} seconds")
+    expires_at = int(time.time()) + expires_in_seconds
+    raw_path = request.rel_url.raw_path
+    query: dict[str, str] = {"path": file_path} if file_path else {}
+    digest = request.get(TOKEN_DIGEST)
+    if digest is not None:
+        query.update(expires=str(expires_at), signature=download_signature(digest, raw_path, file_path, expires_at))
+    return (f"{raw_path}?{urlencode(query)}" if query else raw_path), expires_at
+
+
 #: The harness pages a person opens by a link: the only routes that read a credential from the query string.
 PAGE_ROUTES = re.compile(r"^/reef/harness/(requests/[^/]+|releases/\d{1,9})/page$")
 
@@ -95,6 +131,12 @@ def create_authentication_middleware(
     and any request that carries the header, is judged by the header alone. A
     request with no Authorization header may present the token in
     ``x-api-key`` instead, the header the Anthropic dialect's clients send.
+
+    A download (``DOWNLOAD_ROUTES``) also opens on a GET with no Authorization
+    header that carries ``expires`` in the future and the ``signature`` of
+    its raw path, ``path`` query and ``expires`` for an accepted token
+    (``download_signature``): a signed URL that a browser or another service
+    fetches without the token (``signed_download_url``).
 
     ``evaluation_tokens`` open the evaluation routes (``EVALUATION_ROUTES``)
     only, on POST. The service hands one to the recipe for its evaluation
@@ -143,8 +185,28 @@ def create_authentication_middleware(
             matched |= secrets.compare_digest(presented, page_key_for_digest(digest, scenario).encode("utf-8"))
         return matched
 
+    def _signature_opens(request: web.Request) -> bool:
+        """Whether a download GET with no Authorization header carries a valid, unexpired signature."""
+        raw_path = request.rel_url.raw_path
+        if "Authorization" in request.headers or request.method != "GET" or not DOWNLOAD_ROUTES.match(raw_path):
+            return False
+        signature = request.query.get("signature") or ""
+        try:
+            expires_at = int(request.query.get("expires", ""))
+        except ValueError:
+            return False
+        if not signature or expires_at < time.time():
+            return False
+        presented = signature.encode("utf-8")
+        file_path = request.query.get("path", "")
+        matched = False
+        for digest in accepted:
+            expected = download_signature(digest, raw_path, file_path, expires_at)
+            matched |= secrets.compare_digest(presented, expected.encode("utf-8"))
+        return matched
+
     def _authorized(request: web.Request) -> bool:
-        if _page_key_opens(request):
+        if _page_key_opens(request) or _signature_opens(request):
             return True
         credential = _presented(request)
         if credential is None:
@@ -173,11 +235,15 @@ def create_authentication_middleware(
 
 
 __all__ = [
+    "DOWNLOAD_ROUTES",
     "EVALUATION_ROUTES",
+    "MAX_DOWNLOAD_URL_SECONDS",
     "PAGE_KEY_CONTEXT",
     "PAGE_ROUTES",
     "create_authentication_middleware",
+    "download_signature",
     "normalize_tokens",
     "page_key_for_digest",
     "page_query",
+    "signed_download_url",
 ]

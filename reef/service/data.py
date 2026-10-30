@@ -100,12 +100,12 @@ def new_use(item_id: str, kind: str, content: Mapping[str, Any] | None, split: s
     return Use(item_id, trajectory, kind == "task" and split == "train")
 
 
-def sync_touched(dispatcher: Dispatcher, owner: str, scenarios: Iterable[str]) -> bool:
+def sync_touched(dispatcher: Dispatcher, owner: str, scenarios: Iterable[str], *, wait: bool = True) -> bool:
     """Ask control to sync each scenario in ``scenarios`` with the items of ``owner``; return whether every sync
-    ended within ``SYNC_WAIT_SECONDS``."""
+    ended, within ``SYNC_WAIT_SECONDS`` when ``wait``, or at once otherwise."""
     queue = dispatcher.queue
     pending = {request_data_sync(queue, owner, scenario).id for scenario in sorted(set(scenarios))}
-    deadline = time.monotonic() + SYNC_WAIT_SECONDS
+    deadline = time.monotonic() + (SYNC_WAIT_SECONDS if wait else 0.0)
     while pending:
         # A sync item that is gone or final has ended.
         pending = {
@@ -132,12 +132,12 @@ def check_uses(dispatcher: Dispatcher, owner: str, uses: Mapping[str, list[Use]]
         dispatcher.check_use(scenario, trajectories, any(use.train_task for use in scenario_uses))
 
 
-def create_items(dispatcher: Dispatcher, owner: str, body: Mapping[str, Any]) -> dict[str, Any]:
+def create_items(dispatcher: Dispatcher, owner: str, body: Mapping[str, Any], *, wait: bool = True) -> dict[str, Any]:
     """Create trajectory and record items from ``{"items": [{"id", "content", "metadata"}]}``; return them.
 
     1 to ``MAX_ITEMS_PER_CREATE`` items. A trajectory's content must be an ATIF document. A record's content and ID
     must be what ``copied_record`` takes. A task needs its files, so ``create_task_items`` creates it. The response
-    is ``{owner, items}``, without content.
+    is ``{owner, items, synced}``, without content; ``wait`` is as in ``sync_touched``.
     """
     check_owner(owner)
     entries = body.get("items")
@@ -165,7 +165,7 @@ def create_items(dispatcher: Dispatcher, owner: str, body: Mapping[str, Any]) ->
         items.append(NewItem(item_id, content, metadata))
     check_uses(dispatcher, owner, uses)
     stored = data_store(dispatcher).create(owner, items)
-    synced = sync_touched(dispatcher, owner, uses)
+    synced = sync_touched(dispatcher, owner, uses, wait=wait)
     return {"owner": owner, "items": [item_json(item, content=False) for item in stored], "synced": synced}
 
 
@@ -174,29 +174,44 @@ def create_task_items(
 ) -> dict[str, Any]:
     """Create a task item for each Harbor task of the tar.gz ``archive``, each with ``metadata``; return them.
 
-    ``metadata`` is the client's metadata for every task; its ``kind`` is ``task``. Raise ``ValueError`` for an
-    archive that ``unpack_task_archive`` refuses or a directory that Harbor cannot load; nothing is stored then.
+    Raise ``ValueError`` for an archive that ``unpack_task_archive`` refuses, and as ``create_task_directories``.
+    """
+    with tempfile.TemporaryDirectory(prefix="reef-task-items-") as work:
+        return create_task_directories(dispatcher, owner, unpack_task_archive(archive, Path(work)), metadata)
+
+
+def create_task_directories(
+    dispatcher: Dispatcher,
+    owner: str,
+    directories: Sequence[Path],
+    metadata: Mapping[str, Any],
+    *,
+    wait: bool = True,
+) -> dict[str, Any]:
+    """Create a task item for each Harbor task directory of ``directories``, named after it, each with ``metadata``;
+    return ``{owner, items, synced}`` as ``create_items`` does.
+
+    ``metadata`` is the client's metadata for every task; its ``kind`` is ``task``. Raise ``ValueError`` for a
+    directory that Harbor cannot load; nothing is stored then.
     """
     check_owner(owner)
     if not isinstance(metadata, Mapping) or metadata.get("kind", "task") != "task":
         raise ValueError("the metadata of task items is an object whose kind is task")
     scenarios = check_scenarios(metadata.get("scenarios", {}), "task")
-    with tempfile.TemporaryDirectory(prefix="reef-task-items-") as work:
-        directories = unpack_task_archive(archive, Path(work))
-        for directory in directories:
-            try:
-                HarborTaskLoader(directory)
-            except (ValueError, OSError) as exc:
-                raise ValueError(f"{directory.name} is not a Harbor task: {exc}") from exc
-        new_uses = {
-            scenario: [new_use(directory.name, "task", None, split) for directory in directories]
-            for scenario, split in scenarios.items()
-        }
-        check_uses(dispatcher, owner, new_uses)
-        stored = data_store(dispatcher).create(
-            owner, [NewItem(directory.name, directory, {**metadata, "kind": "task"}) for directory in directories]
-        )
-    synced = sync_touched(dispatcher, owner, scenarios)
+    for directory in directories:
+        try:
+            HarborTaskLoader(directory)
+        except (ValueError, OSError) as exc:
+            raise ValueError(f"{directory.name} is not a Harbor task: {exc}") from exc
+    new_uses = {
+        scenario: [new_use(directory.name, "task", None, split) for directory in directories]
+        for scenario, split in scenarios.items()
+    }
+    check_uses(dispatcher, owner, new_uses)
+    stored = data_store(dispatcher).create(
+        owner, [NewItem(directory.name, directory, {**metadata, "kind": "task"}) for directory in directories]
+    )
+    synced = sync_touched(dispatcher, owner, scenarios, wait=wait)
     return {"owner": owner, "items": [item_json(item, content=False) for item in stored], "synced": synced}
 
 
@@ -294,8 +309,11 @@ __all__ = [
     "SYNC_WAIT_SECONDS",
     "NoDataStore",
     "create_items",
+    "create_task_directories",
     "create_task_items",
+    "data_store",
     "delete_item",
+    "item_json",
     "parsed_metadata",
     "query_items",
     "read_item",

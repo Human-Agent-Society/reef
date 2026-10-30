@@ -11,6 +11,7 @@ from reef.service.routes.data import register_data_routes
 from reef.service.routes.evaluations import register_evaluation_routes
 from reef.service.routes.records import register_record_routes
 from reef.service.routes.samples import register_sample_routes
+from reef.service.routes.scenario_files import register_scenario_file_routes
 from reef.service.routes.scenarios import register_scenario_routes
 from reef.service.routes.system import register_health_route, register_system_routes
 from reef.service.routes.tasks import register_task_routes
@@ -32,6 +33,7 @@ def register_routes(
     register_record_routes(app, request_service=request_service)
     if "data" in request_service.dispatcher.components:
         register_data_routes(app, request_service=request_service)
+        register_scenario_file_routes(app, request_service=request_service)
     register_task_routes(app, request_service=request_service)
     register_sample_routes(app, request_service=request_service)
     register_artifact_import_routes(app, request_service=request_service, imports=imports)
@@ -44,6 +46,7 @@ def register_data_service_routes(
     """The routes of the data service's app: the data routes and the reads of what each scenario stores."""
     register_health_route(app)
     register_data_routes(app, request_service=request_service)
+    register_scenario_file_routes(app, request_service=request_service)
     register_scenario_routes(app, request_service=request_service, evaluations=evaluations, writes=False)
     register_task_routes(app, request_service=request_service)
     register_sample_routes(app, request_service=request_service, writes=False)
