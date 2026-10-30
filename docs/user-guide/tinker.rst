@@ -382,6 +382,53 @@ base's own files, by reference or as a copy. The engine trains only its base, so
 with HTTP 400. To train another checkpoint, deploy a Spindle engine for it and
 a scenario with it as ``base``. A component trains one base.
 
+Score centering
+~~~~~~~~~~~~~~~
+
+A policy gradient whose token weight is not the full importance ratio
+``p / q`` drifts the trained policy ``p`` toward the sampler ``q``. Score
+centering (`arXiv:2609.20807 <https://arxiv.org/abs/2609.20807>`__) removes
+that drift. With ``training.options.score-centering: true``, a ``spindle_full``
+component trains each ``importance_sampling`` job, such as a generated-task or
+task job, as Spindle's ``cispo`` loss with the centering term:
+
+- ``cispo`` weights each sampled token's score by
+  ``clamp(p / q, score-centering-weight-low, score-centering-weight-high)``.
+  The default bounds, 1 and 1, are REINFORCE. Wider bounds, such as 0 and 2,
+  are truncated importance sampling. The term is zero under the full ratio,
+  so the weight cannot be the full ratio.
+- A task job's rollouts record the sampler's top ``score-centering-top-k``
+  log probabilities (default 128) at each sampled token. Those must come from
+  the distribution that the trainer reads, so the rollouts sample at
+  temperature 1 without truncation. A model call that sets another
+  ``temperature``, or a ``top_p`` or ``top_k``, gets HTTP 400. Harbor's
+  ``terminus-2`` agent sets none of them by default.
+- A job of uploaded trajectories trains only when every response token has
+  the sampler's top-k (``topk_indices`` and ``topk_log_probs`` in its training
+  capture, as an inference handler with ``capture_topk`` records them).
+- ``sft`` jobs train as they are. A job of another policy-gradient loss family
+  is refused, since the term must match the gradient it corrects. So is a
+  nonzero ``kl-coef``.
+
+.. code:: yaml
+
+   training:
+     backend: spindle_full
+     options:
+       score-centering: true
+       score-centering-top-k: 128           # sampler log probabilities per sampled token
+       score-centering-weight-low: 1.0      # 1 and 1: REINFORCE
+       score-centering-weight-high: 1.0
+       score-centering-min-tail-mass: 1.0e-6
+
+The Spindle deployment must implement the sampler's ``topk_sample_logprobs``
+and score centering on ``cispo`` (``loss_fn_config.score_centering`` with the
+``sampler_topk_token_ids`` and ``sampler_topk_logprobs`` inputs). A
+deployment without them refuses the rollouts' sample requests or the training
+call, so the job fails. Spindle reports the term in each job's metrics, as
+``score_centering:sum``, ``score_centering_sampler_head_mass:mean`` and
+``score_centering_trainer_head_mass:mean``.
+
 A full-parameter run is single tenant: each job holds the engine's training
 GPUs while it runs, for example 8 H200 GPUs to train and 4 to sample for a
 27B model. Each job also starts a new model on the engine, so it pays the
