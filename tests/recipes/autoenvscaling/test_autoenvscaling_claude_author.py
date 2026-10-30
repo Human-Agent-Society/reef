@@ -43,21 +43,16 @@ from recipes.beta.autoenvscaling.author import (
     REBUILD_RULES_TEXT,
     VARIANT_INPUTS_TEXT,
     VARIANT_PROMPT,
+    AgentTools,
     AuthoredTask,
     AuthorError,
     CandidateChecks,
     TaskVariant,
     VariantAuthor,
 )
-from recipes.beta.autoenvscaling.claude_author import (
-    AUTHOR_TOOLS,
-    CLAUDE_CHECK_TEXT,
-    CheckGateway,
-    CheckTools,
-    ClaudeCodeAuthor,
-    CredentialHeld,
-    rename_holding,
-)
+from recipes.beta.autoenvscaling.author_credentials import CredentialChecks, CredentialHeld, rename_holding
+from recipes.beta.autoenvscaling.check_gateway import CheckGateway
+from recipes.beta.autoenvscaling.claude_author import AUTHOR_TOOLS, CLAUDE_CHECK_TEXT, ClaudeCodeAuthor
 from recipes.beta.autoenvscaling.generator import AutoEnvScalingGenerator
 from reef.core.plugins import PluginConfigError
 from reef.core.tasks import write_harbor_task
@@ -331,7 +326,7 @@ def test_runs_pinned_claude_headless_with_token_only_in_secret_env(tmp_path: Pat
 def test_task_check_script_waits_and_rechecks(tmp_path: Path) -> None:
     release = threading.Event()
     held = CountingChecks(release=release)
-    tools = CheckTools(tmp_path, held, token=TOKEN)
+    tools = AgentTools(tmp_path, CredentialChecks(held, token=TOKEN))
     gateway = CheckGateway(tools)
     gateway.start()
     deadline = str(int((time.time() + 3600) * 1000))
@@ -358,7 +353,7 @@ def test_task_check_script_waits_and_rechecks(tmp_path: Path) -> None:
 def test_task_check_script_stops_waiting_at_the_run_deadline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(task_check, "WAIT_SECONDS", 30.0)
     release = threading.Event()
-    gateway = CheckGateway(CheckTools(tmp_path, CountingChecks(release=release), token=TOKEN))
+    gateway = CheckGateway(AgentTools(tmp_path, CredentialChecks(CountingChecks(release=release), token=TOKEN)))
     gateway.start()
     past = str(int((time.time() - 1) * 1000))
     environ = {
@@ -377,13 +372,65 @@ def test_task_check_script_stops_waiting_at_the_run_deadline(tmp_path: Path, mon
         gateway.stop()
 
 
-def test_check_tools_need_the_token(tmp_path: Path) -> None:
+def test_credential_checks_need_the_token() -> None:
     with pytest.raises(ValueError, match="need the run's token"):
-        CheckTools(tmp_path, CountingChecks(), token="")
+        CredentialChecks(CountingChecks(), token="")
+
+
+def test_credential_checks_preserve_delegate_configuration_and_budget(tmp_path: Path) -> None:
+    delegate = CountingChecks()
+    delegate.is_reviewing = True
+    checks = CredentialChecks(delegate, token=TOKEN)
+    assert checks.max_checks == delegate.max_checks and checks.is_reviewing
+    task_dir = tmp_path / "task"
+    task_dir.mkdir()
+    instruction = task_dir / "instruction.md"
+    instruction.write_text(TOKEN)
+    assert checks.check(task_dir)["ran"] is False
+    assert delegate.count == 0
+    instruction.write_text("A clean task")
+    assert checks.check(task_dir) == {"ran": True, "passed": True, "check": 1, "oracle_reward": 1.0, "nop_reward": 0.0}
+    assert delegate.count == 1
+
+
+@pytest.mark.parametrize(
+    ("route", "body", "expected_status"),
+    [
+        ("/check", b"not json", 400),
+        ("/check", b"[]", 400),
+        ("/trial", b"{}", 400),
+        ("/trial", b'{"task": "check 1", "script": {}}', 400),
+        ("/trial", b'{"task": "check 999"}', 200),
+        ("/trial", b'{"task": "not-a-check-id"}', 200),
+        ("/wrong-token/check", b"{}", 404),
+    ],
+)
+def test_check_gateway_validates_requests(tmp_path: Path, route: str, body: bytes, expected_status: int) -> None:
+    checks = CountingChecks()
+    gateway = CheckGateway(AgentTools(tmp_path, checks))
+    gateway.start()
+    try:
+        if route.startswith("/wrong-token"):
+            url = f"http://127.0.0.1:{gateway.port}/t{route}"
+        else:
+            url = f"{gateway.base_url}{route}"
+        request = urllib.request.Request(url, data=body, method="POST")
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                status = response.status
+                result = json.load(response)
+        except urllib.error.HTTPError as error:
+            status = error.code
+            result = json.load(error)
+        assert status == expected_status
+        assert "error" in result
+        assert checks.count == 0
+    finally:
+        gateway.stop()
 
 
 def test_check_gateway_relays_no_model_call(tmp_path: Path) -> None:
-    gateway = CheckGateway(CheckTools(tmp_path, CountingChecks(), token=TOKEN))
+    gateway = CheckGateway(AgentTools(tmp_path, CredentialChecks(CountingChecks(), token=TOKEN)))
     gateway.start()
 
     def status(route: str, *, method: str = "POST") -> int:
