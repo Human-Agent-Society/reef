@@ -30,15 +30,17 @@ from pathlib import Path, PurePosixPath
 from reef_client.client import ReefClient
 
 from recipes.beta.autoenvscaling.author import (
+    AGENT_PROMPT,
     FINISH_SECONDS,
     RECORD_READ_TIMEOUT_SECONDS,
+    VARIANT_INPUTS_TEXT,
     AgentTools,
     AuthoredTask,
     AuthorError,
     CandidateChecks,
     ModelCalls,
-    TaskAuthor,
     TaskVariant,
+    VariantAuthor,
     agent_prompt,
     agent_rules,
     close_when_stopped,
@@ -256,7 +258,7 @@ class CheckTools(AgentTools):
                 self.running_id = None
 
 
-class ClaudeCodeAuthor(TaskAuthor):
+class ClaudeCodeAuthor(VariantAuthor):
     """Reef's pinned Claude Code in a cloud sandbox, signed in with ``claude_token`` and asking for ``model``.
 
     Values: ``reef_url`` and ``token`` read the source sessions, and ``cache_dir`` keeps the repository snapshots.
@@ -264,8 +266,8 @@ class ClaudeCodeAuthor(TaskAuthor):
     ``timeout_seconds`` (positive) and at most ``max_turns`` (positive) agent turns, Claude Code's ``--max-turns``.
     With ``has_behaviour_rule`` the rules include the behaviour rule.
     Purpose: the generator builds one for ``author_harness: claude-code``; :meth:`author` runs Claude Code on one
-    session, or on a variant of a seeded parent, and returns its task with no recorded model call and the path of its
-    transcript.
+    session, and :meth:`vary` on a parent of that session, and each returns its task with no recorded model call
+    and the path of its transcript.
     """
 
     def __init__(
@@ -303,9 +305,33 @@ class ClaudeCodeAuthor(TaskAuthor):
         *,
         tags: Mapping[str, str],
         stop: threading.Event,
+    ) -> AuthoredTask:
+        return self.write_task(source, work_dir, checks, tags=tags, stop=stop)
+
+    def vary(
+        self,
+        source: SessionSource,
+        work_dir: Path,
+        checks: CandidateChecks,
+        *,
+        tags: Mapping[str, str],
+        stop: threading.Event,
+        variant: TaskVariant,
+    ) -> AuthoredTask:
+        return self.write_task(source, work_dir, checks, tags=tags, stop=stop, variant=variant)
+
+    def write_task(
+        self,
+        source: SessionSource,
+        work_dir: Path,
+        checks: CandidateChecks,
+        *,
+        tags: Mapping[str, str],
+        stop: threading.Event,
         variant: TaskVariant | None = None,
     ) -> AuthoredTask:
-        """Claude Code's task from ``source``; ``tags`` go unused, since Reef records none of its model calls.
+        """Claude Code's task from ``source``, or with ``variant`` a variant of its parent; ``tags`` go unused,
+        since Reef records none of its model calls.
 
         Raises :class:`CredentialHeld` when the task holds the token: the task is not admitted.
         """
@@ -319,7 +345,15 @@ class ClaudeCodeAuthor(TaskAuthor):
             gateway = CheckGateway(tools)
             gateway.start()
             try:
-                transcript = self.run(work_dir, gateway, tools, stop, variant=variant, is_seeded=source is None)
+                transcript = self.run(
+                    work_dir,
+                    gateway,
+                    tools,
+                    stop,
+                    extra_rules="" if variant is None or source is None else VARIANT_INPUTS_TEXT,
+                    prompt=agent_prompt(variant, source is None),
+                    is_seeded=source is None,
+                )
             finally:
                 gateway.stop()
         finally:
@@ -353,12 +387,14 @@ class ClaudeCodeAuthor(TaskAuthor):
         tools: AgentTools,
         stop: threading.Event,
         *,
-        variant: TaskVariant | None = None,
+        extra_rules: str = "",
+        prompt: str = AGENT_PROMPT,
         is_seeded: bool = False,
     ) -> str:
-        """Claude Code in a sandbox over the workspace until it stops, its time runs out or ``stop`` is set; with
-        ``variant``, the rules and the prompt ask for a variant of the parent in the inputs, and with ``is_seeded``
-        the seed rules apply. Answers the path of its transcript, relative to ``work_dir``, or ``""``.
+        """Claude Code in a sandbox over the workspace until it stops, its time runs out or ``stop`` is set;
+        ``extra_rules`` extends the authoring rules and ``prompt`` states the task to write. With ``is_seeded`` the
+        authoring rules are the seed rules (:func:`agent_rules`): the inputs hold no session. Answers the path of its
+        transcript, relative to ``work_dir``, or ``""``.
 
         Raises :class:`AuthorError` when the run could not start or was stopped, and when Claude Code ended with an
         error other than its turn limit: an outage (a spent plan, a lost sign-in) must not pass for the agent's
@@ -367,7 +403,7 @@ class ClaudeCodeAuthor(TaskAuthor):
         if stop.is_set():
             raise AuthorError("the agent's run was stopped before it started")
         executor, binary = self.executor.for_program(AdapterProgram(self.descriptor))
-        rules = agent_rules(tools.checks, self.has_behaviour_rule, variant, is_seeded)
+        rules = agent_rules(tools.checks, self.has_behaviour_rule, extra_rules, is_seeded)
         # The rules are Claude Code's CLAUDE.md, and settings.json its defaults: no model binding, so no endpoint.
         files = render_composition((("rules", {"text": rules + CLAUDE_CHECK_TEXT}),), self.descriptor)
         files["tools/task_check.py"] = CHECK_SCRIPT.read_text(encoding="utf-8")
@@ -394,7 +430,6 @@ class ClaudeCodeAuthor(TaskAuthor):
                 "REEF_AUTHOR_CHECK": str(work_dir / "tools" / "task_check.py"),
             }
         )
-        prompt = agent_prompt(variant, is_seeded)
         argv = [
             binary,
             "-p",

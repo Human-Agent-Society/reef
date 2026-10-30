@@ -6,7 +6,7 @@ import asyncio
 import json
 import threading
 from collections.abc import Mapping
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
 
 import pytest
@@ -25,6 +25,7 @@ from tests.recipes.autoenvscaling.autoenvscaling_stubs import (
     run_tasks,
     stand_in_e2b_package,
 )
+
 from recipes.beta.autoenvscaling import (
     AgentAuthor,
     AuthoredTask,
@@ -32,11 +33,12 @@ from recipes.beta.autoenvscaling import (
     AutoEnvScalingGenerator,
     CalibrationCheck,
     CandidateChecks,
-    TaskAuthor,
     TaskVariant,
+    VariantAuthor,
 )
 from recipes.beta.autoenvscaling import author as author_module
 from recipes.beta.autoenvscaling import generator as generator_module
+from recipes.beta.autoenvscaling.checks import PassRateBand
 from recipes.beta.autoenvscaling.generator import ParentTask
 from recipes.beta.autoenvscaling.sources import Repository, SessionSource
 from reef.core.plugins import PluginConfigError
@@ -242,8 +244,8 @@ def test_the_agent_gets_the_parent_and_its_pass_rate_and_the_variant_rules(
     )
     variant = TaskVariant(parent="t-0", parent_dir=parent_dir, direction="simpler", pass_rate=0.125, rollouts=8)
     source = SessionSource("session-1", "s", Repository("https://example.com/r.git", "abc1234", "/app"))
-    agent.author(source, tmp_path / "run", NoChecks(1), tags={}, stop=threading.Event(), variant=variant)
-    assert seen["variant"] == variant
+    agent.vary(source, tmp_path / "run", NoChecks(1), tags={}, stop=threading.Event(), variant=variant)
+    assert seen["prompt"] == author_module.VARIANT_PROMPT.format(direction="simpler")
     assert {"inputs/parent/instruction.md", "inputs/parent/tests/test.sh", "inputs/variant.md"} <= inputs
     assert seen["variant.md"] == (
         "The solver's mean reward on the task in ../inputs/parent/ (t-0) is 0.12 over 8 rollouts; a rollout that "
@@ -288,23 +290,33 @@ def test_a_parent_refuses_a_name_that_is_not_a_task_name(name: str) -> None:
         ParentTask(name, "session-1", 0, 1.0, 2, "harder")
 
 
-def test_the_prompt_designer_refuses_a_variant(tmp_path: Path) -> None:
+def test_adaptive_requires_an_author_that_implements_variants(tmp_path: Path) -> None:
     designer = author_module.PromptAuthor(
         reef_url="http://127.0.0.1:9", token=None, scenario="autoenvscaling", model="designer", api="openai"
     )
-    variant = TaskVariant(parent="t-0", parent_dir=tmp_path, direction="harder", pass_rate=1.0, rollouts=2)
-    source = SessionSource("session-1", "s", Repository("https://example.com/r.git", "abc1234", "/app"))
-    with pytest.raises(ValueError, match="adaptive generation needs author: agent"):
-        designer.author(source, tmp_path / "run", NoChecks(1), tags={}, stop=threading.Event(), variant=variant)
+    with pytest.raises(ValueError, match="adaptive generation needs a VariantAuthor"):
+        autoenvscaling(tmp_path, designer, count=2, is_adaptive=True)
 
 
-class BlockingVariantAuthor(TaskAuthor):
+class BlockingVariantAuthor(VariantAuthor):
     """An author whose run lasts until it is stopped; it keeps the parent of each variant it was asked for."""
 
     def __init__(self) -> None:
         self.started = threading.Event()
         self.stopped = threading.Event()
         self.varied: list[str] = []
+
+    def vary(
+        self,
+        source: SessionSource,
+        work_dir: Path,
+        checks: CandidateChecks,
+        *,
+        tags: Mapping[str, str],
+        stop: threading.Event,
+        variant: TaskVariant,
+    ) -> AuthoredTask:
+        return self.author(source, work_dir, checks, tags=tags, stop=stop, variant=variant)
 
     def author(
         self,
@@ -354,14 +366,81 @@ def test_with_a_refusing_calibration_a_task_outside_the_band_is_refused_and_beco
         max_rollouts=8,
         margin=0.15,
         min_std=0.1,
-        band_low=0.25,
-        band_high=0.75,
+        band=PassRateBand(0.25, 0.75),
     )
-    generator = autoenvscaling(
-        tmp_path, StandInAuthor(), service, count=2, is_adaptive=True, task_checks=(calibration,)
-    )
+    generator = autoenvscaling(tmp_path, StandInAuthor(), service, count=2, is_adaptive=True, calibration=calibration)
     results = run_tasks(generator, (1.0, 1.0))
     assert len(results) == 2 and all(isinstance(result, RejectedTask) for result in results)
     asyncio.run(generator.record_results(results, generation=0))
     assert [proposal["stage"] for proposal in report(tmp_path)["proposals"]] == ["calibration", "calibration"]
     assert parents(tmp_path) == [], "only a task that trained can become a parent"
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"position": -1},
+        {"parent_task": "parent"},
+        {"direction": "harder"},
+        {"position": -1, "parent_task": "parent", "direction": "sideways"},
+        {"position": -2},
+        {"source_record_id": ""},
+    ],
+)
+def test_proposal_rejects_inconsistent_variant_fields(changes: dict[str, object]) -> None:
+    with pytest.raises(ValueError):
+        generator_module.SessionProposal(**{"index": 0, "position": 0, "source_record_id": "session", **changes})
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"source_record_id": ""},
+        {"generation": -1},
+        {"generation": True},
+        {"rollouts": 1.5},
+        {"pass_rate": True},
+        {"pass_rate": float("nan")},
+        {"direction": "sideways"},
+        {"varied": "yes"},
+    ],
+)
+def test_parent_rejects_invalid_metadata(changes: dict[str, object]) -> None:
+    fields = asdict(ParentTask("parent", "session", 0, 1.0, 2, "harder"))
+    with pytest.raises(ValueError):
+        ParentTask(**{**fields, **changes})
+
+
+@pytest.mark.parametrize("duplicate", [True, False])
+def test_restart_rejects_duplicate_or_oversized_parent_files(tmp_path: Path, duplicate: bool) -> None:
+    generator = autoenvscaling(tmp_path, StandInAuthor(), count=2, is_adaptive=True)
+    entry = asdict(ParentTask("parent", "session", 0, 1.0, 2, "harder"))
+    entries = (
+        [entry, entry]
+        if duplicate
+        else [{**entry, "name": f"parent-{index}"} for index in range(generator_module.MAX_PARENTS + 1)]
+    )
+    generator.state_dir.mkdir(parents=True, exist_ok=True)
+    (generator.state_dir / "adaptive.json").write_text(json.dumps(entries))
+    with pytest.raises(ValueError, match="parents with unique names"):
+        autoenvscaling(tmp_path, StandInAuthor(), count=2, is_adaptive=True)
+
+
+def test_restart_recovers_a_parent_written_before_its_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    generator = autoenvscaling(tmp_path, StandInAuthor(), count=2, is_adaptive=True)
+    results = run_tasks(generator, (1.0, 1.0), (0.5, 0.5))
+
+    def interrupted_save() -> None:
+        raise OSError("interrupted before metadata was saved")
+
+    monkeypatch.setattr(generator, "save_parents", interrupted_save)
+    with pytest.raises(OSError, match="interrupted"):
+        asyncio.run(generator.record_results(results, generation=0))
+    parent_dir = generator.state_dir / "parents" / NAMES[0]
+    assert parent_dir.is_dir() and not (generator.state_dir / "adaptive.json").exists()
+    restarted = autoenvscaling(tmp_path, StandInAuthor(), count=2, is_adaptive=True)
+    asyncio.run(restarted.record_results(results, generation=0))
+    assert [parent["name"] for parent in parents(tmp_path)] == [NAMES[0]]
+    assert parent_dir.is_dir() and not restarted.open_path(0).exists()

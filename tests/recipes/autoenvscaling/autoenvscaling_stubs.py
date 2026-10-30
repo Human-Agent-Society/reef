@@ -30,10 +30,12 @@ from recipes.beta.autoenvscaling import (
     SessionSource,
     SourceError,
     TaskAuthor,
-    load_sources,
-    workspace_reply,
+    VariantAuthor,
 )
+from recipes.beta.autoenvscaling import author as author_module
+from recipes.beta.autoenvscaling import load_sources, workspace_reply
 from recipes.beta.autoenvscaling.author import AgentTools, ModelCalls, RecordingGateway, TaskVariant
+from recipes.beta.autoenvscaling.checks import PassRateBand
 from reef.core.tasks import HarborTask
 from reef.execution.sandbox.e2b import E2BExecutor, E2BSession
 from reef.execution.sandbox.process import ProcessOutcome, ProgramExecutor, RolloutLaunchError, SandboxProgram
@@ -152,7 +154,19 @@ def run_agent(
     gateway = RecordingGateway(author.upstream, calls, tools, headers={})
     gateway.start()
     try:
-        author.run(tmp_path / "run", gateway, tools, calls, stop, variant=variant)
+        author.run(
+            tmp_path / "run",
+            gateway,
+            tools,
+            calls,
+            stop,
+            extra_rules="" if variant is None else author_module.VARIANT_INPUTS_TEXT,
+            prompt=(
+                author_module.AGENT_PROMPT
+                if variant is None
+                else author_module.VARIANT_PROMPT.format(direction=variant.direction)
+            ),
+        )
     finally:
         gateway.stop()
 
@@ -255,7 +269,7 @@ def write_workspace_task(task_dir: Path, port: int, *, has_tmux: bool = True) ->
     return task_dir
 
 
-class StandInAuthor(TaskAuthor):
+class StandInAuthor(VariantAuthor):
     """Writes a task as the agent would, checks it once through the generator's checks, and returns its receipts.
 
     A source named in ``unusable`` holds no session; one named in ``unreachable`` is an outage.
@@ -274,6 +288,18 @@ class StandInAuthor(TaskAuthor):
         self.unusable = unusable
         self.unreachable = unreachable
         self.calls: list[dict[str, Any]] = []
+
+    def vary(
+        self,
+        source: SessionSource,
+        work_dir: Path,
+        checks: CandidateChecks,
+        *,
+        tags: Mapping[str, str],
+        stop: threading.Event,
+        variant: TaskVariant,
+    ) -> AuthoredTask:
+        return self.author(source, work_dir, checks, tags=tags, stop=stop, variant=variant)
 
     def author(
         self,
@@ -312,6 +338,7 @@ def autoenvscaling(
     source_count: int = 2,
     **fields: Any,
 ) -> AutoEnvScalingGenerator:
+    fields["band"] = PassRateBand(fields.pop("band_low", 0.25), fields.pop("band_high", 0.75))
     return AutoEnvScalingGenerator(
         scenario="autoenvscaling",
         service=service if service is not None else StandInGenerator(tmp_path / "tasks"),
