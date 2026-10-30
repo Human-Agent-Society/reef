@@ -224,6 +224,9 @@ class TrainingPipeline:
         self.store = TrainerSamples(MemorySampleStore()) if context.samples is None else context.samples
         #: The sequence of the last stored sample that the pipeline read.
         self.store_sequence = 0
+        #: Whether ``advance`` makes samples from records. False when the samples service makes them
+        #: (``produce``), so the trainer only reads the sample store.
+        self.produces_samples = True
         #: The stored samples that this trainer has not trained, in store order, each with the sample that job data
         #: trains: an upload rendered by the record-to-sample stage, else the stored sample. Imported tasks do not train.
         self.held: dict[str, tuple[StoredSample, Sample]] = {}
@@ -583,10 +586,19 @@ class TrainingPipeline:
         This operation needs no backend sample count. Call it on the same serialized path as other pipeline
         operations; it starts no new thread.
         """
+        if self.produces_samples:
+            self.produce()
+        self.read_store()
+
+    def produce(self) -> None:
+        """Advance the record-to-sample work: settle background work and move the formed record sets to samples.
+
+        The trainer calls it through ``advance`` in the one-process pipeline; the samples service calls it when
+        it makes the samples (``produces_samples`` False).
+        """
         # Background work, such as judgments or finished rounds, forms sets or makes samples without a new record.
         self.record2record.advance(time.monotonic())
         self.move_record_sets()
-        self.read_store()
 
     def ready(self, sample_count: int | None) -> bool:
         """Advance the pipeline and check readiness; auto mode needs ``sample_count`` samples in the buffer.

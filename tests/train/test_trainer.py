@@ -465,6 +465,21 @@ def test_trainer_reserves_batch_and_commits_backend_preparation() -> None:
 
 
 @pytest.mark.unit
+def test_with_the_samples_service_the_trainer_builds_jobs_only_from_samples_that_the_service_made() -> None:
+    trainer = preparing_trainer(one_pair_records())
+    trainer.use_samples_service()
+
+    # The trainer's own cycle reads the sample store only: no record became a sample yet.
+    assert trainer.run_once(0) is None
+    assert trainer.pipeline_status()["ready_samples"] == 0
+
+    # The samples service makes the samples; the next cycle builds the job from them.
+    assert trainer.produce_samples() is False
+    result = trainer.run_once(0)
+    assert result is not None and result.metrics["samples"] == 1
+
+
+@pytest.mark.unit
 def test_trainer_takes_job_samples_and_buffers_one_job_only_with_a_backend() -> None:
     records = SQLiteRecordStore()
     for sequence in range(3):

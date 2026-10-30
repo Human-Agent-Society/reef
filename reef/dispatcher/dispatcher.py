@@ -22,9 +22,11 @@ from reef.core.job_data import TrajectorySample
 from reef.core.records_types import AgentRecord, RequestType
 from reef.dispatcher import ingest
 from reef.execution.workers import ServiceWorkers
-from reef.storage.coordination import Coordination
+from reef.record2sample.service import SamplesWorker, request_selection
+from reef.storage.coordination import Coordination, instance_id
 from reef.dispatcher.errors import TrainingErrors
 from reef.dispatcher.local_workers import LocalTrainingWorkers
+from reef.dispatcher.samples import LocalSampleProducers
 from reef.dispatcher.record_item_copier import RecordItemCopier
 from reef.dispatcher.status import TrainingStatus
 from reef.observability import ExperimentTracker, NullExperimentTracker
@@ -114,6 +116,8 @@ class Dispatcher(ScenarioLifecycle):
         self.coordination = coordination
         #: The background workers of the services that this process runs; the dispatcher stops them first.
         self.workers = workers if workers is not None else ServiceWorkers()
+        #: The work queue of the samples service, or None when trainers make their own samples.
+        self.samples_queue = None if coordination is None else coordination.work_queue
         #: The deployment's recipe, before any scenario's own model settings.
         self.recipe = recipe
         self.storage = scenario_storage
@@ -133,6 +137,14 @@ class Dispatcher(ScenarioLifecycle):
         self.errors = TrainingErrors()
         self.background_threads = BackgroundThreads()
         self.local_workers = LocalTrainingWorkers(self.registry, self.errors, held=hold_local_cycles)
+        if self.samples_queue is not None:
+            self.workers.add(
+                SamplesWorker(
+                    self.samples_queue,
+                    LocalSampleProducers(self.registry, self.local_workers),
+                    worker_id=instance_id("samples"),
+                )
+            )
         self.training_status = TrainingStatus(recipe, self.registry, self.errors)
         self.record_items = (
             None if data_store is None else RecordItemCopier(self.registry, scenario_storage, data_store)
@@ -240,6 +252,10 @@ class Dispatcher(ScenarioLifecycle):
         The data sync can add uploads while the scenario opens, and no record wakes a worker for them, so the
         workers wake when a trainer holds untrained samples.
         """
+        if self.samples_queue is not None:
+            for component_trainer in instance.trainers:
+                component_trainer.trainer.use_samples_service()
+            self.request_samples(instance)
         self.local_workers.resume(instance)
         if self.record_items is not None:
             self.record_items.wake(instance.name)
@@ -618,12 +634,22 @@ class Dispatcher(ScenarioLifecycle):
         """Start consumption only after the accepted records are durable, and copy them to record items."""
         if self.record_items is not None:
             self.record_items.wake(current.name)
-        # Every component's trainer sees the record. A trainer that trains wakes its
-        # worker. A trainer that trains nothing only advances its record cursor, here.
+        # Every component's trainer sees the record. The samples service makes the samples of a trainer that
+        # trains, and its worker builds jobs from them. A trainer that trains nothing only advances its record
+        # cursor, here.
+        self.request_samples(current)
         self.local_workers.wake(current)
         for component_trainer in current.trainers:
             if not component_trainer.trainer.trains:
                 current.prepare_training_step(component_trainer.component)
+
+    def request_samples(self, current: Scenario) -> None:
+        """Ask the samples service for a selection of the new records of each trainer of ``current`` that trains."""
+        if self.samples_queue is None:
+            return
+        for component_trainer in current.trainers:
+            if component_trainer.trainer.trains:
+                request_selection(self.samples_queue, current.name, component_trainer.component)
 
     # -- Preload ---------------------------------------------------------
 

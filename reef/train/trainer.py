@@ -221,6 +221,8 @@ class Trainer:
         self._state = dict(state)
         self._data_offset = 0
         self._data_sequence = 0
+        #: Whether the samples service makes this trainer's samples (``use_samples_service``).
+        self.samples_from_service = False
         self.consumed_record_ids: set[str] = set()
         self.skipped_record_ids: set[str] = set()
         self._pending: _PendingStep | None = None
@@ -505,7 +507,28 @@ class Trainer:
         if item.request_type in self.pipeline.required_request_types:
             self._pipeline.push(item)
 
-    def _consume_data(self) -> None:
+    def use_samples_service(self) -> None:
+        """Let the samples service make this trainer's samples (``produce_samples``): the trainer's own cycle only
+        reads the sample store and builds jobs. A trainer that trains nothing keeps advancing its record cursor."""
+        with self._lock:
+            if self.trains:
+                self.samples_from_service = True
+                self._pipeline.produces_samples = False
+
+    def produce_samples(self) -> bool:
+        """Push every record that arrived since the last call into the pipeline and make samples of the formed record
+        sets; return whether background work of the pipeline still runs, so the samples service comes back."""
+        with self._lock:
+            if not self.trains:
+                return False
+            self._consume_data(stop_when_ready=False)
+            self._pipeline.produce()
+            return self._pipeline.background_jobs_running()
+
+    def _consume_data(self, *, stop_when_ready: bool = True) -> None:
+        if self.samples_from_service and stop_when_ready:
+            # The samples service consumes the records (``produce_samples``).
+            return
         while True:
             items = self._records.replay_page(
                 self.scenario,
@@ -518,7 +541,7 @@ class Trainer:
                 self.push_retained(item)
                 self._data_offset += 1
                 self._data_sequence = sequence
-                if self.pipeline_ready():
+                if stop_when_ready and self.pipeline_ready():
                     return
 
     def run_once(
