@@ -60,6 +60,7 @@ from recipes.beta.autoenvscaling.author import (
     VariantDirection,
     workspace_reply,
 )
+from recipes.beta.autoenvscaling.author_credentials import CredentialHeld
 from recipes.beta.autoenvscaling.checks import (
     BAND_ABOVE,
     BAND_BELOW,
@@ -79,13 +80,7 @@ from recipes.beta.autoenvscaling.checks import (
     reference_instructions,
     validate_calibration,
 )
-from recipes.beta.autoenvscaling.claude_author import (
-    CLAUDE_HARNESS,
-    TOKEN_PREFIX,
-    ClaudeCodeAuthor,
-    CredentialHeld,
-    overrides_run,
-)
+from recipes.beta.autoenvscaling.claude_author import CLAUDE_HARNESS, TOKEN_PREFIX, ClaudeCodeAuthor, overrides_run
 from recipes.beta.autoenvscaling.sources import SessionSource, load_sources
 from reef.core.plugins import PluginConfigError
 from reef.core.tasks import HarborTask, HarborTaskError, read_harbor_task, write_harbor_task

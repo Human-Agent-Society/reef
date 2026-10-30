@@ -436,6 +436,11 @@ class Trainer:
                 self._pipeline.remove_from_buffer(sample_ids)
         return self.buffer_listing()
 
+    def forget_samples(self, sample_ids: tuple[str, ...]) -> None:
+        """Stop holding the uploads that the data sync removed (``TrainingPipeline.forget_samples``)."""
+        with self._lock:
+            self._pipeline.forget_samples(sample_ids)
+
     def pipeline_status(self) -> Mapping[str, Any]:
         """Return caller-visible pipeline state under the pipeline's lock."""
         with self._lock:

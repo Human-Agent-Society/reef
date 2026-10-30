@@ -700,6 +700,54 @@ uses a ``LocalTaskFileStore`` in ``task-files`` under its directory.
    * - ``close()``
      - Release the resources of the store. A second call does nothing.
 
+Data stores
+~~~~~~~~~~~
+
+A ``DataStore`` (``reef.storage.data``) keeps the deployment's data items
+(RFC #1028). An item is ``(id, content, metadata)``. Its content never
+changes: the JSON object of a trajectory or a record, or the directory of a
+task, which the task file store keeps in the owner's partition. Its metadata
+is a JSON object. Reef reads ``kind`` (``trajectory``, ``task`` or
+``record``), ``owner``, ``scenarios`` (scenario name to ``train`` or
+``eval``) and, for a record, ``origin`` (``{scenario, release_id,
+load_id}``). ``kind``, ``owner`` and ``origin`` never change. A deployment
+selects the store in ``storage.data_store``; ``SQLiteDataStore`` and
+``PostgresDataStore`` (``reef.storage.sql_data``) and ``MemoryDataStore`` are
+built in. Every operation names one owner and reads or writes only its items.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 45 55
+
+   * - Member
+     - Contract
+   * - ``from_config(config, *, directory, task_files)``
+     - Class method that builds the store a deployment names. ``directory``
+       is ``storage.agent_record_dir``. The caller owns ``task_files``.
+   * - ``create(owner, items)``
+     - Stores ``NewItem`` values, all or none. The same ID and content again
+       changes nothing; other content is ``ItemConflict``. Bad metadata is
+       ``ValueError``.
+   * - ``read(owner, item_id)``
+     - The ``StoredItem``, or ``None``.
+   * - ``query(owner, *, kind, scenario, after, limit)``
+     - The owner's items after the sequence ``after``, in arrival order, at
+       most ``limit`` (1 to 1000), of ``kind`` and used by ``scenario`` when
+       given.
+   * - ``update(owner, item_ids, patch)``
+     - Applies one JSON merge patch to each item's metadata, all or none.
+       Changing ``kind``, ``owner`` or ``origin`` is ``ValueError``; an
+       unknown ID is ``ItemNotFound``.
+   * - ``delete(owner, item_id)``
+     - Removes the item; ``False`` for an unknown ID.
+   * - ``task_path(item)``
+     - A local directory with the files of a task item.
+   * - ``close()``
+     - Releases the store's resources; a second call does nothing.
+
+The store checks the form of the metadata. The service checks that
+``scenarios`` names only scenarios of the owner.
+
 Artifact backends
 -----------------
 

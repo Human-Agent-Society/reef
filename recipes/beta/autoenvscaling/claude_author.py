@@ -8,7 +8,7 @@ command, which reaches a loopback gateway (:class:`CheckGateway`) that runs the 
 route with 404.
 
 The token stays out of every command line, log, error text, file of the run's directory and task. The sandbox
-gets it through :meth:`~reef.sandbox.process.ProgramExecutor.set_secret_env`. Claude Code removes it from the
+gets it through :meth:`~reef.execution.sandbox.process.ProgramExecutor.set_secret_env`. Claude Code removes it from the
 environment of its Bash, hook and MCP subprocesses (``CLAUDE_CODE_SUBPROCESS_ENV_SCRUB``). The host redacts every
 text it logs or raises and every file and file name of the run's directory, refuses a check of a task that holds
 the token, and admits no such task (:class:`CredentialHeld`).
@@ -18,13 +18,11 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 import shutil
 import threading
 import time
 from collections.abc import Mapping
-from http.server import BaseHTTPRequestHandler
 from pathlib import Path, PurePosixPath
 
 from reef_client.client import ReefClient
@@ -38,7 +36,6 @@ from recipes.beta.autoenvscaling.author import (
     AuthoredTask,
     AuthorError,
     CandidateChecks,
-    ModelCalls,
     SeedVariantAuthor,
     TaskVariant,
     agent_prompt,
@@ -48,14 +45,14 @@ from recipes.beta.autoenvscaling.author import (
     workspace_reply,
     write_inputs,
 )
+from recipes.beta.autoenvscaling.author_credentials import CredentialChecks, CredentialHeld, clean_run, scrubbed
+from recipes.beta.autoenvscaling.check_gateway import CheckGateway
 from recipes.beta.autoenvscaling.sources import SessionSource
-from reef.execution.sandbox.environment import download_directory, execute
+from reef.execution.sandbox.environment import execute
 from reef.execution.sandbox.process import ProgramExecutor, RolloutLaunchError, RolloutTimeout, SandboxUnavailable
 from reef.harness.adapters import get_adapter
-from reef.harness.rollouts.model_binding import ModelBinding
 from reef.harness.rollouts.vendor_install import AdapterProgram
 from reef.harness.tree.render import render_composition
-from reef.recipe.reefine.agent_gateway import AgentGateway, refuse
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +62,6 @@ CLAUDE_HARNESS = "claude-code"
 TOKEN_VARIABLE = "CLAUDE_CODE_OAUTH_TOKEN"
 #: How every Claude Code OAuth token (``claude setup-token``) starts.
 TOKEN_PREFIX = "sk-ant-oat"
-REDACTED = "[redacted]"
 #: The tools the agent has, all of them allowed: the scrub switch keeps the permission mode at default.
 AUTHOR_TOOLS = "Read,Glob,Grep,Write,Edit,Bash"
 CHECK_SCRIPT = Path(__file__).with_name("task_check.py")
@@ -87,17 +83,8 @@ RUN_VARIABLES = frozenset(
 )
 #: The most characters of Claude Code's own text that an error message keeps.
 ERROR_TEXT_CHARS = 500
-#: What stays of Claude Code's config directory after a run: the rendered rules and settings, and the transcripts.
-KEPT_CONFIG = frozenset({"CLAUDE.md", "settings.json", "projects"})
 #: A Claude Code session id names its transcript file.
 SESSION_ID = re.compile(r"[0-9A-Za-z-]+")
-#: Port 9 (discard) answers nothing. The gateway's binding is never called: every model route answers 404.
-UNSERVED = ModelBinding(base_url="http://127.0.0.1:9", model="unserved")
-TOKEN_REFUSAL = (
-    "the check refused the task: a file in ./task/ holds this run's credential. Remove it from the task; a task "
-    "that holds it is never checked or admitted."
-)
-
 # Appended to the agent's rules: task_check is a command here, not a tool.
 CLAUDE_CHECK_TEXT = """
 HOW TO CHECK:
@@ -108,21 +95,6 @@ HOW TO CHECK:
   `python3 "$REEF_AUTHOR_CHECK"` also waits for it and starts no other check.
 - When it prints "Finish now", stop with the best task you have in ./task/.
 """
-
-
-class CredentialHeld(AuthorError):
-    """The agent's task held the run's Claude Code token, so it is not admitted.
-
-    Values: the message names no token. Purpose: :meth:`ClaudeCodeAuthor.author` raises it once the run's directory
-    is redacted; the generator ends the generation with stage ``credential``, since the token may have left the
-    sandbox.
-    """
-
-
-def scrubbed(text: str, token: str) -> str:
-    """``text`` with every occurrence of ``token`` replaced. Cut a text only after this, so no part of the token
-    stays."""
-    return text.replace(token, REDACTED)
 
 
 def overrides_run(name: str) -> bool:
@@ -137,40 +109,6 @@ def overrides_run(name: str) -> bool:
         or upper in RUN_VARIABLES
         or upper in get_adapter("claude").env
     )
-
-
-def holding_files(directory: Path, token: str) -> list[Path]:
-    """The regular files under ``directory`` whose bytes hold ``token``, symbolic links not followed."""
-    needle = token.encode()
-    held = []
-    for folder, _, names in os.walk(directory):
-        for name in names:
-            path = Path(folder) / name
-            if path.is_file() and not path.is_symlink() and needle in path.read_bytes():
-                held.append(path)
-    return held
-
-
-def rename_holding(directory: Path, token: str) -> None:
-    """Rename every file and folder under ``directory`` whose name holds ``token``, with the token replaced; one
-    that cannot take the new name, because another of a different kind holds it, is deleted."""
-    for folder, folders, names in os.walk(directory, topdown=False):
-        for name in (*names, *folders):
-            if token in name:
-                path = Path(folder) / name
-                try:
-                    path.rename(path.with_name(scrubbed(name, token)))
-                except OSError:
-                    if path.is_dir() and not path.is_symlink():
-                        shutil.rmtree(path, ignore_errors=True)
-                    else:
-                        path.unlink(missing_ok=True)
-
-
-def holds_token(task_dir: Path, token: str) -> bool:
-    """Whether the task in ``task_dir`` holds ``token``: in a regular file, or in the reply that a check and the
-    admission send, which follows symbolic links."""
-    return bool(holding_files(task_dir, token)) or token in workspace_reply(task_dir)
 
 
 def claude_result(stdout: str) -> dict[str, object] | None:
@@ -194,68 +132,6 @@ def transcript_path(work_dir: Path, session_id: str) -> str:
     if not found:
         found = sorted(projects.glob("*/*.jsonl"), key=lambda path: path.stat().st_mtime)
     return found[-1].relative_to(work_dir).as_posix() if found else ""
-
-
-class CheckGateway(AgentGateway):
-    """The agent gateway with its checks alone: every model, provider and model-list route answers 404.
-
-    Values: ``tools`` serves ``/check`` and ``/trial``; the gateway holds no model binding it calls and no
-    credential. Purpose: :class:`ClaudeCodeAuthor` starts one per run and gives Claude Code its ``base_url`` for
-    ``task_check.py``. Claude Code calls Anthropic itself, so no model call goes through Reef.
-    """
-
-    def __init__(self, tools: AgentTools) -> None:
-        super().__init__(UNSERVED, ModelCalls(0), tools, None)
-
-    def relay_model_call(self, client: BaseHTTPRequestHandler, route: str, payload: Mapping[str, object]) -> None:
-        refuse(client, 404, f"the gateway serves no {route}: Claude Code calls its model itself")
-
-    def relay_provider_call(self, client: BaseHTTPRequestHandler, route: str, payload: Mapping[str, object]) -> None:
-        refuse(client, 404, f"the gateway serves no {route}")
-
-    def relay_models(self, client: BaseHTTPRequestHandler, modality: str) -> None:
-        refuse(client, 404, "the gateway lists no models")
-
-
-class CheckTools(AgentTools):
-    """The agent's checks (:class:`AgentTools`), with a task that holds the token refused before the generator
-    service sees it.
-
-    Values: ``token`` is the run's Claude Code token, a non-empty string. A check of a workspace whose ``task/``
-    holds it (:func:`holds_token`) answers ``ran: false`` and reaches no :class:`CandidateChecks`; ``trial``
-    answers a check id that never started with ``ran: false``. Purpose: :class:`CheckGateway` serves it to
-    ``task_check.py`` for one run.
-    """
-
-    def __init__(self, root: Path, checks: CandidateChecks, *, token: str) -> None:
-        if not token:
-            raise ValueError("the checks need the run's token to refuse a task that holds it")
-        super().__init__(root, checks)
-        self.token = token
-
-    def trial(self, task: str, script: dict[str, object] | None = None) -> dict[str, object]:
-        number = task.removeprefix("check ")
-        with self.lock:
-            is_known = number.isdigit() and int(number) in self.results
-        if not is_known:
-            return {"ran": False, "error": f"no check is named {task!r}; start one without --wait"}
-        return super().trial(task, script)
-
-    def run_check(self, check_id: int) -> None:
-        # A failure still answers the agent; the exception then reaches the thread's hook.
-        result: dict[str, object] = {"ran": False, "error": "the check failed; the service log has the cause"}
-        try:
-            if self.session is not None:
-                download_directory(self.session, self.root, "workspace")
-            task_dir = self.root / "workspace" / "task"
-            if holds_token(task_dir, self.token):
-                result = {"ran": False, "passed": False, "error": TOKEN_REFUSAL}
-            else:
-                result = self.checks.check(task_dir)
-        finally:
-            with self.lock:
-                self.results[check_id] = result
-                self.running_id = None
 
 
 class ClaudeCodeAuthor(SeedVariantAuthor):
@@ -353,7 +229,7 @@ class ClaudeCodeAuthor(SeedVariantAuthor):
         try:
             if source is not None:
                 shutil.copytree(repository_snapshot(source, self.cache_dir), inputs / "repo", symlinks=True)
-            tools = CheckTools(work_dir, checks, token=self.claude_token)
+            tools = AgentTools(work_dir, CredentialChecks(checks, token=self.claude_token))
             gateway = CheckGateway(tools)
             gateway.start()
             try:
@@ -369,23 +245,7 @@ class ClaudeCodeAuthor(SeedVariantAuthor):
             finally:
                 gateway.stop()
         finally:
-            # The run's copy of the repository is large and the same as the cache. Of Claude Code's own files only
-            # the transcripts stay: .claude.json may hold the account's email.
-            shutil.rmtree(inputs / "repo", ignore_errors=True)
-            shutil.rmtree(work_dir / "home", ignore_errors=True)
-            config_dir = work_dir / "claude"
-            for path in config_dir.iterdir() if config_dir.is_dir() else ():
-                if path.name in KEPT_CONFIG:
-                    continue
-                if path.is_dir() and not path.is_symlink():
-                    shutil.rmtree(path, ignore_errors=True)
-                else:
-                    path.unlink(missing_ok=True)
-            # Before the redaction, which also rewrites a file outside the task that a link in it reads.
-            is_held = holds_token(task_dir, self.claude_token)
-            for path in holding_files(work_dir, self.claude_token):
-                path.write_bytes(path.read_bytes().replace(self.claude_token.encode(), REDACTED.encode()))
-            rename_holding(work_dir, self.claude_token)
+            is_held = clean_run(work_dir, self.claude_token)
         if is_held:
             raise CredentialHeld("the agent's task held the run's Claude Code token, so it is not admitted")
         # The transcript's path names the file as renamed.

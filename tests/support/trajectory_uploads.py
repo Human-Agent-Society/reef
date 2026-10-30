@@ -8,12 +8,16 @@ from pathlib import Path
 from typing import Any
 
 from reef.artifact import InMemoryRepositoryBackend
+from reef.artifact.repository import RepositoryBackendFactory
 from reef.core.evaluation import EvaluationResult, SelectionDecision, UpdateCandidate
 from reef.dispatcher import Dispatcher
 from reef.recipe import Recipe
 from reef.record2sample import NoSamples
 from reef.sample2job import Sample2Job
+from reef.service.task_import import DataScenarioStorage
+from reef.storage.sql_data import SQLiteDataStore
 from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.tasks import LocalTaskFileStore
 from reef.train import CandidateBackend, JobData, PreparedStep, Trainer, TrainStepResult
 from reef.train.pipeline import TrainingPipeline
 
@@ -30,10 +34,17 @@ def atif(text: str) -> dict[str, Any]:
     }
 
 
-def uploaded(*trajectory_ids: str) -> dict[str, Any]:
+#: The data route of the owner of scenario ``s``, which is ``s`` itself.
+DATA = "/reef/namespaces/s/data"
+
+
+def trajectory_items(*item_ids: str, scenario: str | None = "s") -> dict[str, Any]:
+    """The body of a create call: a trajectory item for each ID, used by ``scenario`` when it is given."""
+    scenarios = {} if scenario is None else {scenario: "train"}
     return {
-        "trajectories": [
-            {"trajectory_id": trajectory_id, "trajectory": atif(trajectory_id)} for trajectory_id in trajectory_ids
+        "items": [
+            {"id": item_id, "content": atif(item_id), "metadata": {"kind": "trajectory", "scenarios": scenarios}}
+            for item_id in item_ids
         ]
     }
 
@@ -107,11 +118,19 @@ class UploadRecipe(Recipe):
         )
 
 
-def dispatcher_for(tmp_path: Path, recipe: Recipe) -> Dispatcher:
+def dispatcher_for(tmp_path: Path, recipe: Recipe, factory: RepositoryBackendFactory | None = None) -> Dispatcher:
+    """A dispatcher with a data store, as deployment assembly builds it; the scenario storage owns the task files.
+
+    ``factory`` defaults to an in-memory repository under ``tmp_path``; a test that restarts passes its own.
+    """
     initial = tmp_path / "initial"
-    initial.mkdir(exist_ok=True)
+    initial.mkdir(parents=True, exist_ok=True)
+    task_files = LocalTaskFileStore(tmp_path / "task-files")
+    data = SQLiteDataStore(tmp_path / "data", task_files)
+    storage = SQLiteScenarioStorage(tmp_path / "records", task_files=task_files)
     return Dispatcher(
         recipe,
-        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
-        scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
+        factory or InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
+        scenario_storage=DataScenarioStorage(storage, data),
+        data_store=data,
     )
