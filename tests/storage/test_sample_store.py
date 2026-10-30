@@ -370,3 +370,22 @@ def test_a_trainers_manual_buffer_keeps_store_order_and_a_commit_removes_what_it
         samples.insert_into_buffer("", ("t2",))
         session.commit_step(expected_step=0, commit=training_commit(1, consumed_sample_id("t1")))
         assert samples.manual_buffer("") == ("t2",) and samples.manual_buffer("other") == ("t2",)
+
+
+def test_removing_uploads_keeps_stage_samples_and_train_counts_and_empties_the_buffers(storage):
+    with closing(storage.open("math")) as session:
+        samples = session.samples
+        samples.add_trajectories((("t1", trajectory("a")), ("t2", trajectory("b"))))
+        samples.add_record_samples("", None, ("record-1",), (("record-1:0", trajectory("made")),))
+        session.commit_step(expected_step=0, commit=training_commit(1, consumed_sample_id("t1")))
+        samples.insert_into_buffer("", ("t2", "record-1:0"))
+        last = samples.page()[-1].sequence
+        assert samples.remove_uploads(("t2", "t1", "record-1:0", "missing")) == ("t1", "t2")
+        assert [stored.sample_id for stored in samples.page()] == ["record-1:0"]
+        assert samples.manual_buffer("") == ("record-1:0",)
+        # An upload that comes back gets a new sequence and keeps its train counts.
+        samples.add_trajectories((("t1", trajectory("a")),))
+        (again,) = samples.get(("t1",))
+        assert again.sequence > last
+        assert again.train_counts == {"": 1}
+        assert samples.remove_uploads(()) == ()

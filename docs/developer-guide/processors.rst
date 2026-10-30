@@ -285,14 +285,16 @@ for cancellation and resource ownership.
 Uploaded trajectories
 ---------------------
 
-A client can upload complete ATIF trajectories to ``POST /reef/trajectories``
-(see the `HTTP API <../reference/http-api.rst#upload-trajectories>`__). An
-uploaded trajectory is not a record. Reef keeps it in the scenario's sample
-store, and the pipeline reads it from there.
+A client can give a scenario complete ATIF trajectories as data items (see the
+`HTTP API <../reference/http-api.rst#data-items>`__). A trajectory item is not a
+record. Reef copies each item that a scenario uses into the scenario's sample
+store, as an upload: a sample of no component. The pipeline reads it from there.
+When the item leaves the scenario, Reef removes the upload, and each trainer
+forgets it.
 
 A recipe takes uploads when its ``Sample2Job`` sets ``accepts_trajectories``
-to True. The default is False. Admission refuses an upload with 400 when no
-trainer of the scenario accepts uploaded trajectories.
+to True. The default is False. Reef refuses with 400 an item that names a
+scenario with no trainer that accepts uploaded trajectories.
 
 The record-to-sample stage turns each upload into its training sample with
 ``Record2Sample.uploaded_sample(trajectory)``. The default returns the trajectory

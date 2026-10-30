@@ -489,6 +489,44 @@ local cache. The `Python task file store contract
 <../reference/python-api.rst#task-file-stores>`__ gives the necessary
 behavior.
 
+Choose the data store
+---------------------
+
+The data store keeps the deployment's data items: the trajectories and the
+tasks that clients create, each with its metadata (`Data items
+<../reference/http-api.rst#data-items>`__). Each item belongs to an owner, and
+its metadata names the scenarios that use it. Archiving a scenario does not
+delete its items.
+
+``storage.data-store`` selects the store. Without it, the store follows
+``storage.record-backend``:
+
+- ``sqlite`` keeps the items in ``<agent-record-dir>/data/data-store.sqlite3``.
+  Put the directory on a persistent volume.
+- ``postgres`` keeps them in ``storage.record-database-url``, in the schema
+  ``reef_data``. Deployments that use one database share their items.
+- A plugin record backend uses ``sqlite``.
+
+To use another database or schema, or your own store, name a subclass of
+``reef.storage.data.DataStore``:
+
+.. code-block:: yaml
+
+   storage:
+     data-store:
+       module: reef.storage.sql_data:PostgresDataStore
+       config:
+         database_url: ${REEF_DATA_DATABASE_URL}
+         schema: reef_data
+
+The task file store keeps the files of task items, apart from the files of each
+scenario.
+
+When Reef opens a scenario for the first time after an upgrade, it moves the
+scenario's uploaded trajectories and tasks into the data store. They become
+items of the owner with the scenario's name, which the scenario uses in their
+split.
+
 Import Harbor tasks
 -------------------
 
@@ -512,20 +550,22 @@ The manifest is a JSON file. It names each task once, in ``train`` or ``eval``:
 Each name is a Harbor task directory under ``tasks-root``. A name starts
 with a lowercase letter or a digit, and holds only lowercase letters, digits,
 ``.``, ``_`` and ``-``. When a scenario
-opens, Reef checks each directory with Harbor's task loader, and adds it to the
-scenario's imported tasks in its split. The task file store
-keeps a copy of the files.
+opens, Reef checks each directory with Harbor's task loader, and stores it as a
+task item of the scenario's owner, which the scenario uses in its split (`Data
+items <../reference/http-api.rst#data-items>`__). The task file store keeps a
+copy of the files.
 
 The import runs again each time a scenario opens. To add tasks, add them to the
 manifest and the directory, and then restart the service or reload the
-scenario. To add tasks to one running scenario without a restart, upload them
-with ``POST /reef/scenarios/{scenario}/tasks`` (`Upload Harbor tasks
-<../reference/http-api.rst#upload-harbor-tasks>`__). A task that is already imported with the same files and split does
-not change. A scenario does not open, and the error says why, when:
+scenario. A task that moves to the other split in the manifest moves in the
+scenario. To add tasks to one running scenario without a restart, create task
+items with ``POST /reef/namespaces/{owner}/data/tasks``. A task that is already
+imported with the same files does not change. A scenario does not open, and the
+error says why, when:
 
 - a task directory is missing, or Harbor cannot load it;
-- an imported task now has other files, or it moved to the other split;
-- a task has the name of an uploaded trajectory of the scenario.
+- an imported task now has other files;
+- a task has the name of another sample of the scenario.
 
 To change an imported task, give it a new name.
 

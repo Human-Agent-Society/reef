@@ -154,7 +154,7 @@ class NewItem:
     """An item that a client creates.
 
     Values: ``item_id`` passes ``check_item_id``. ``content`` is a JSON object for a trajectory or a record, and
-    the path of a task directory for a task. ``metadata`` is the client's metadata, which ``created_metadata``
+    the path of a task directory for a task; a task's ``item_id`` is the name of that directory. ``metadata`` is the client's metadata, which ``created_metadata``
     checks against the owner.
 
     Purpose: the input of ``DataStore.create``.
@@ -303,6 +303,8 @@ def prepared_items(
         if metadata["kind"] == "task":
             if not isinstance(item.content, Path) or not item.content.is_dir():
                 raise ValueError(f"task item {item.item_id!r} needs a task directory as its content")
+            if item.content.name != item.item_id:
+                raise ValueError(f"task item {item.item_id!r} needs a task directory of the same name")
             digest = task_files.put(task_partition(owner), item.content)
         elif isinstance(item.content, Mapping):
             digest = json_digest(item.content)

@@ -1,8 +1,9 @@
-"""The import of a deployment's Harbor tasks into each scenario's task store."""
+"""The import of a deployment's Harbor tasks as task items that each scenario uses (RFC #1028)."""
 
 from __future__ import annotations
 
-from contextlib import closing
+from collections.abc import Iterator
+from contextlib import closing, contextmanager
 from dataclasses import replace
 from pathlib import Path
 
@@ -15,9 +16,11 @@ from reef.core.tasks.split import TaskSplit, TaskSplitError, write_split_manifes
 from reef.service.assembly import build_dispatcher
 from reef.service.deploy.deployment_config import translate_layout
 from reef.service.deploy.service_config import ServiceConfig, normalize_service_config, service_config_from_mapping
-from reef.service.task_import import TaskImport, TaskImportError, TaskImportingScenarioStorage
-from reef.storage.samples import SampleConflict
+from reef.service.task_import import DataScenarioStorage, TaskImport, TaskImportError
+from reef.storage.data import ItemConflict
+from reef.storage.sql_data import SQLiteDataStore
 from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.tasks import LocalTaskFileStore
 
 IMAGE = bytes(range(256))
 
@@ -35,7 +38,22 @@ def manifest(path: Path, train: tuple[str, ...], eval_: tuple[str, ...]) -> Path
     return path
 
 
-def imported(storage: TaskImportingScenarioStorage) -> list[tuple[str, str]]:
+@contextmanager
+def data_storage(tmp_path: Path, task_import: TaskImport | None) -> Iterator[DataScenarioStorage]:
+    """Scenario storage with the data sync over SQLite stores; the scenario storage owns the task files."""
+    task_files = LocalTaskFileStore(tmp_path / "task-files")
+    data = SQLiteDataStore(tmp_path / "data", task_files)
+    storage = DataScenarioStorage(
+        SQLiteScenarioStorage(tmp_path / "records", task_files=task_files), data, task_import
+    )
+    try:
+        yield storage
+    finally:
+        data.close()
+        storage.close()
+
+
+def imported(storage: DataScenarioStorage) -> list[tuple[str, str]]:
     with closing(storage.open("math")) as session:
         return [(task.sample_id, task.split) for task in session.samples.imported_tasks()]
 
@@ -46,8 +64,14 @@ def test_each_open_imports_the_manifest_into_the_sample_store(tmp_path: Path) ->
         harbor_task(root, name, 9000 + port)
     path = manifest(tmp_path / "split.json", ("b-task", "a-task"), ("c-task",))
     task_import = TaskImport(path, root)
-    with closing(TaskImportingScenarioStorage(SQLiteScenarioStorage(tmp_path / "records"), task_import)) as storage:
+    with data_storage(tmp_path, task_import) as storage:
         assert imported(storage) == [("a-task", "train"), ("b-task", "train"), ("c-task", "eval")]
+        items = storage.data.query("math", kind="task")
+        assert [(item.item_id, item.scenarios) for item in items] == [
+            ("a-task", {"math": "train"}),
+            ("b-task", {"math": "train"}),
+            ("c-task", {"math": "eval"}),
+        ]
         with closing(storage.open("math")) as session:
             (evaluated,) = session.samples.imported_tasks(split="eval")
             assert isinstance(evaluated.sample, TaskSample)
@@ -58,7 +82,7 @@ def test_each_open_imports_the_manifest_into_the_sample_store(tmp_path: Path) ->
         manifest(path, ("b-task", "a-task"), ("c-task", "d-task"))
         assert imported(storage)[-1] == ("d-task", "eval") and len(imported(storage)) == 4
 
-    with closing(TaskImportingScenarioStorage(SQLiteScenarioStorage(tmp_path / "records"), task_import)) as storage:
+    with data_storage(tmp_path, task_import) as storage:
         assert len(imported(storage)) == 4, "a restart imports nothing new"
 
 
@@ -66,19 +90,18 @@ def test_a_task_that_changed_or_cannot_load_stops_the_open(tmp_path: Path) -> No
     root = tmp_path / "tasks"
     harbor_task(root, "a-task", 9000)
     path = manifest(tmp_path / "split.json", ("a-task",), ())
-    storage = TaskImportingScenarioStorage(SQLiteScenarioStorage(tmp_path / "records"), TaskImport(path, root))
-    with closing(storage):
+    with data_storage(tmp_path, TaskImport(path, root)) as storage:
         assert imported(storage) == [("a-task", "train")]
 
         instruction = root / "a-task" / "instruction.md"
         original = instruction.read_text()
         instruction.write_text("Solve another problem.\n")
-        with pytest.raises(SampleConflict, match="other content"):
+        with pytest.raises(ItemConflict, match="other content"):
             storage.open("math")
         instruction.write_text(original)
+        # The split is the item's metadata, so a task that the manifest moves moves in the scenario.
         manifest(path, (), ("a-task",))
-        with pytest.raises(SampleConflict, match="stored in train, not eval"):
-            storage.open("math")
+        assert imported(storage) == [("a-task", "eval")]
 
         manifest(path, ("a-task", "missing-task"), ())
         with pytest.raises(TaskImportError, match="missing-task is not a Harbor task"):

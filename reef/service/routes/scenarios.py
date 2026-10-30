@@ -9,6 +9,7 @@ from reef.scenario.scenario import Scenario
 from reef.service.artifact_evaluations import ArtifactEvaluations
 from reef.service.request_service import RequestService
 from reef.service.routes.payload import read_object
+from reef.storage.data import check_owner
 
 
 def register_scenario_routes(
@@ -27,6 +28,9 @@ def register_scenario_routes(
             raise web.HTTPBadRequest(text="release_id must be a string")
         if isinstance(release_id, str) and not release_id.strip():
             raise web.HTTPBadRequest(text="release_id must be a non-empty string")
+        owner = payload.get("owner")
+        if owner is not None:
+            check_owner(owner)
         name = name.strip()
         if release_id is not None:
             release_id = release_id.strip()
@@ -48,10 +52,14 @@ def register_scenario_routes(
             )
         if scenario is None:
             raise RuntimeError("scenario creation returned no scenario")
+        if owner is not None:
+            # The owner whose data items the scenario uses (RFC #1028); the default is the scenario's own name.
+            await asyncio.to_thread(request_service.dispatcher.set_scenario_owner, name, owner)
         current = scenario.repository.require_current_artifact()
         return web.json_response(
             {
                 "scenario": scenario.name,
+                "owner": request_service.dispatcher.scenario_owner(name),
                 "release_id": current.release_id,
                 "content_id": current.content_id,
                 "model": scenario.model_config.view(),

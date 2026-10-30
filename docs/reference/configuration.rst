@@ -363,7 +363,7 @@ Train without an inference engine
 
 ``inference.backend: none`` runs no inference engine. Use it for supervised
 fine-tuning on data that does not come from the served model, such as uploaded
-trajectories (``POST /reef/trajectories``) or imported records
+trajectory items (``POST /reef/namespaces/{owner}/data``) or imported records
 (``POST /reef/records``). Only the Slime backend supports it. The trainer
 takes every GPU that ``training.options.actor-*`` names:
 
