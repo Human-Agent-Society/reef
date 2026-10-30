@@ -515,7 +515,7 @@ def distill_actor_pre_train(actor: Any, rollout_data: dict[str, Any]) -> None:
         ):
             raise ValueError("the teacher engine's columns must be filled by the training component before training")
         return
-    from slime.utils.timer import timer
+    from slime.observability.timer import timer
 
     from reef.train.slime_backend.distill.teacher import compute_teacher_rows
 

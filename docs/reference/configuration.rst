@@ -113,8 +113,10 @@ services:
 - ``distill-teacher``: a frozen SGLang teacher engine, only when a ``teacher``
   section is set.
 - ``reef``: the HTTP service. It hosts the Slime training component, which
-  starts a Slime driver on Ray for each job. The driver reserves the job's
-  GPUs, starts Slime's workers and releases the GPUs when the job ends.
+  starts a Slime driver on Ray for each job. The driver starts Slime's workers
+  on the GPUs of Slime's serving session when one runs (see `Task jobs on
+  Slime`_), and otherwise reserves the job's GPUs and releases them when the
+  job ends.
 
 The inference component and the HTTP service join the same Ray cluster
 (``RAY_ADDRESS`` or ``training.ray-address``), so the engines and the training
@@ -262,9 +264,10 @@ trains, keep its vision encoder frozen.
 
 Slime's own engine and placement options in ``training.options``
 (``rollout-num-gpus``, ``colocate``, ``sglang-*``, ``router-*`` and the rest)
-reach each job's Slime driver unread. They configure the rollout engines that a
-task job's driver starts (see `Task jobs on Slime`_), never the serving
-engines; a driver of any other job starts no rollout engines. Reef's serving
+reach each job's Slime driver unread. They configure the rollout engines of
+Slime's serving session, which the first task job starts (see `Task jobs on
+Slime`_), never the serving engines; before that session runs, a driver of any
+other job starts no rollout engines. Reef's serving
 never shares GPUs with training, so ``training.colocate`` is refused. Native
 options cannot override
 managed model, placement or parallelism settings. Pipeline/data parallel and
@@ -285,9 +288,11 @@ boundary.
 
 Training GPU capacity is set in ``training.options.actor-num-*`` (and, for
 rollout engines on GPUs of their own, ``rollout-num-gpus``); the physical node
-size is ``training.options.num-gpus-per-node``. Each job's driver reserves those
-GPUs while it runs, so between jobs they are free, and a job waits while
-another reservation holds them. The inference component reserves
+size is ``training.options.num-gpus-per-node``. Until the first task job, each
+job's driver reserves those GPUs while it runs, so between jobs they are free,
+and a job waits while another reservation holds them. From the first task job
+on, Slime's serving session holds them until the component closes. The
+inference component reserves
 ``inference.num-gpus`` GPUs on the same Ray cluster, and the inference control
 process takes one Ray CPU and no GPU. When a training worker fails, the running
 job fails, and the next job's driver starts again from the latest checkpoint.
@@ -1464,10 +1469,15 @@ job's start weights, and the Slime component on its own rollout engines (see
 Task jobs on Slime
 ~~~~~~~~~~~~~~~~~~
 
-The Slime component runs task jobs on Slime's own rollout engines: Slime's
-``RolloutManager`` and its SGLang engines, which a task job's driver starts with
-its workers and drives as Slime's own training loop does. Reef's serving never
-calls them. ``training.options.rollout-num-gpus`` gives the engines GPUs of
+The Slime component runs task jobs on Slime's own rollout engines: the SGLang
+engines of Slime's serving session (Slime's ``ServingCluster``), which a task
+job's driver drives through Slime's ``RolloutManager`` as Slime's own training
+loop does. Reef's serving never calls them. The first task job starts the
+session; it holds the engines, their router and the training GPUs until the
+component closes, so the next jobs attach to the started engines, and every job
+trains on the session's GPUs. A failed or cancelled job leaves the session
+running for the next job. The save root's ``reef-serving.json`` records the
+session, which the component disposes when it closes. ``training.options.rollout-num-gpus`` gives the engines GPUs of
 their own; ``training.options.colocate`` puts them on the training GPUs (all
 of them, unless ``rollout-num-gpus`` names fewer), and Slime moves the GPU
 memory between the engines and the workers. Slime's ``sglang-*``,
