@@ -116,8 +116,8 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_COUNT = 8
 DEFAULT_VARIANT_SHARE = 0.5
-# How many authors of a generation run at once; one runs them in turn.
-DEFAULT_AUTHOR_CONCURRENCY = 1
+# How many tasks of a generation are written at once; 1 writes them in turn.
+DEFAULT_CONCURRENCY = 1
 # The most parents an adaptive generator keeps; the oldest go first.
 MAX_PARENTS = 256
 FEEDBACK_FILE = "adaptive.json"
@@ -219,7 +219,7 @@ CONFIG_KEYS = frozenset(
         "claude_model",
         "claude_token_env",
         "count",
-        "author_concurrency",
+        "concurrency",
         "band_low",
         "band_high",
         "max_checks",
@@ -556,12 +556,12 @@ OPEN_GENERATION = TypeAdapter(OpenGeneration)
 
 
 @dataclass(frozen=True)
-class AuthoringSlot:
-    """A slot of a generation that an author fills.
+class TaskSlot:
+    """A slot of a generation whose task the Designer writes.
 
-    Values: ``proposal`` is the slot's proposal; ``source`` is the session the author reads, or None for a variant
-    of a seeded parent; ``variant`` is the parent the author varies, or None for a task from a session.
-    Purpose: ``generate`` plans its slots, starts their authors, and takes their tasks in slot order.
+    Values: ``proposal`` is the slot's proposal; ``source`` is the session the Designer reads, or None for a
+    variant of a seeded parent; ``variant`` is the parent it varies, or None for a task from a session.
+    Purpose: ``generate`` plans its slots, starts writing their tasks, and takes the tasks in slot order.
     """
 
     proposal: SessionProposal
@@ -923,7 +923,7 @@ class AutoEnvScalingGenerator(TaskGenerator):
     also reviews the tests. A review that only measures records its result in ``validate`` and nowhere else. A
     refusing calibration that finds the task outside the band gives it the stage ``calibration``.
 
-    Values: ``count``, ``max_checks`` and ``author_concurrency`` are positive. ``band`` is a PassRateBand, also used by
+    Values: ``count``, ``max_checks`` and ``concurrency`` are positive. ``band`` is a PassRateBand, also used by
     ``calibration`` when present. Checks run in order: oracle, task_checks, then calibration.
     ``calibration`` is a CalibrationCheck or None. ``cursor`` is the cursor
     saved under ``state_dir``, and ``generation`` is the generation that ``generate`` makes now. ``is_adaptive``
@@ -956,12 +956,12 @@ class AutoEnvScalingGenerator(TaskGenerator):
         is_adaptive: bool = False,
         variant_share: float = DEFAULT_VARIANT_SHARE,
         seeds: tuple[HarborTask, ...] = (),
-        author_concurrency: int = DEFAULT_AUTHOR_CONCURRENCY,
+        concurrency: int = DEFAULT_CONCURRENCY,
     ) -> None:
         if count < 1 or max_checks < 1:
             raise ValueError("count and max_checks must be positive")
-        if isinstance(author_concurrency, bool) or not isinstance(author_concurrency, int) or author_concurrency < 1:
-            raise ValueError("author_concurrency must be a positive integer")
+        if isinstance(concurrency, bool) or not isinstance(concurrency, int) or concurrency < 1:
+            raise ValueError("concurrency must be a positive integer")
         if seeds and not is_adaptive:
             raise ValueError("seed tasks need adaptive: true")
         if not sources and not seeds:
@@ -986,7 +986,7 @@ class AutoEnvScalingGenerator(TaskGenerator):
         self.sources = sources
         self.state_dir = state_dir
         self.count = count
-        self.author_concurrency = author_concurrency
+        self.concurrency = concurrency
         self.band = band
         self.max_checks = max_checks
         self.task_checks: tuple[TaskCheck, ...] = (OracleCheck(service), *task_checks)
@@ -1084,7 +1084,7 @@ class AutoEnvScalingGenerator(TaskGenerator):
                 is_adaptive=is_adaptive,
                 variant_share=variant_share,
                 seeds=seed_tasks(Path(seed_tasks_path).expanduser()) if seed_tasks_path is not None else (),
-                author_concurrency=config.get("author_concurrency", DEFAULT_AUTHOR_CONCURRENCY),
+                concurrency=config.get("concurrency", DEFAULT_CONCURRENCY),
             )
         except (OSError, ValueError, SandboxUnavailable) as exc:
             raise PluginConfigError(f"invalid AutoEnvScalingGenerator config: {exc}") from exc
@@ -1140,8 +1140,8 @@ class AutoEnvScalingGenerator(TaskGenerator):
         The sources file says what the tasks are, so the request's description goes unused. A request that
         carries source records is refused: this generator chooses its own sessions. The slots go to variants first,
         then to the seeds not taken yet (:meth:`seed_slot`), then to sessions; without sessions, the generation ends
-        when its variants and seeds run out. Up to ``author_concurrency`` authors run at once, started in slot order
-        (:meth:`authored`); the slots are still taken in order.
+        when its variants and seeds run out. Up to ``concurrency`` tasks are written at once, started in slot order
+        (:meth:`slot_task`); the slots are still taken in order.
 
         Raises :class:`AuthorError` when an outage leaves the generation with no task, after its report is saved:
         the recipe tries the generation again, and a round whose generation runs out of attempts is not complete,
@@ -1159,18 +1159,18 @@ class AutoEnvScalingGenerator(TaskGenerator):
         error = ""
         tasks: list[HarborTask] = []
         slots = self.slots()
-        gate = asyncio.Semaphore(self.author_concurrency)
+        gate = asyncio.Semaphore(self.concurrency)
         stopped = asyncio.Event()
-        authors = {
-            index: asyncio.ensure_future(self.authored(slot, gate, stopped))
+        writing = {
+            index: asyncio.ensure_future(self.slot_task(slot, gate, stopped))
             for index, slot in enumerate(slots)
-            if isinstance(slot, AuthoringSlot)
+            if isinstance(slot, TaskSlot)
         }
         next_seed = self.cursor.next_seed
         ended_on_outage = False
         try:
             for index, slot in enumerate(slots):
-                if not isinstance(slot, AuthoringSlot):
+                if not isinstance(slot, TaskSlot):
                     seeded, seed_proposal = self.seed_slot(slot, index)
                     pending[seeded.name] = seed_proposal
                     tasks.append(seeded)
@@ -1179,13 +1179,13 @@ class AutoEnvScalingGenerator(TaskGenerator):
                 proposal = slot.proposal
                 is_outage = False
                 try:
-                    task = await authors[index]
+                    task = await writing[index]
                 except ProposalRefused as exc:
                     refused.append(
                         replace(proposal, designer_record_id=exc.record_id, stage=exc.stage, refusal=str(exc))
                     )
                 except AuthorError as exc:
-                    # An outage must not pass for the author's failure: it ends the generation, and the report names
+                    # An outage must not pass for the Designer's failure: it ends the generation, and the report names
                     # it. So does a task that held the token, which may have left the sandbox.
                     error = f"the author could not rebuild {proposal.source_record_id}: {exc}"
                     is_outage = not isinstance(exc, CredentialHeld)
@@ -1199,7 +1199,7 @@ class AutoEnvScalingGenerator(TaskGenerator):
                         task_name=task.name,
                     )
                     tasks.append(task)
-                # The session is taken; a restart continues with the next one. So is the parent, unless its author's
+                # The session is taken; a restart continues with the next one. So is the parent, unless its Designer's
                 # run was cancelled or ended on an outage, neither of them the variant's failure: the parent keeps its
                 # slot for the next generation. Otherwise each parent gets one variant slot, whatever becomes of the
                 # variant.
@@ -1215,10 +1215,10 @@ class AutoEnvScalingGenerator(TaskGenerator):
                     logger.error("AutoEnvScaling generation %d stopped: %s", self.generation, error)
                     break
         finally:
-            # The authors of the slots after an outage, or of a cancelled generation, stop and take nothing.
-            for running in authors.values():
+            # The slots still being written after an outage, or in a cancelled generation, stop and take nothing.
+            for running in writing.values():
                 running.cancel()
-            await asyncio.gather(*authors.values(), return_exceptions=True)
+            await asyncio.gather(*writing.values(), return_exceptions=True)
         self.save_open(request.generation, OpenGeneration(self.generation, tuple(refused), pending, error))
         # The seeds are taken once the open generation holds them, so a restart continues with the next one. An
         # attempt that raised or was cancelled returned no task, so it takes no seed: the retry uses them again.
@@ -1228,13 +1228,13 @@ class AutoEnvScalingGenerator(TaskGenerator):
             raise AuthorError(error)
         return tuple(tasks)
 
-    def slots(self) -> list[AuthoringSlot | HarborTask]:
+    def slots(self) -> list[TaskSlot | HarborTask]:
         """The generation's slots in order: the variants, then the seeds not taken yet, then sessions from the walk.
 
-        A seed is the seed task itself, which no author writes. Sessions take the walk positions from the cursor's
+        A seed is the seed task itself, which no Designer writes. Sessions take the walk positions from the cursor's
         on, so the slots of a generation that is taken in order take them in order.
         """
-        slots: list[AuthoringSlot | HarborTask] = []
+        slots: list[TaskSlot | HarborTask] = []
         variants = self.variants()
         next_seed = self.cursor.next_seed
         position = self.cursor.next_position
@@ -1257,29 +1257,29 @@ class AutoEnvScalingGenerator(TaskGenerator):
                     direction=parent.direction,
                     seed_task=parent.seed_task,
                 )
-                slots.append(AuthoringSlot(proposal, source, variant))
+                slots.append(TaskSlot(proposal, source, variant))
             elif next_seed < len(self.seeds):
                 slots.append(self.seeds[next_seed])
                 next_seed += 1
             elif self.sources:
                 source = self.sources[position % len(self.sources)]
-                slots.append(AuthoringSlot(SessionProposal(index, position, source.record_id), source))
+                slots.append(TaskSlot(SessionProposal(index, position, source.record_id), source))
                 position += 1
             else:
                 # Without sessions, the generation ends when its variants and seeds run out.
                 break
         return slots
 
-    async def authored(self, slot: AuthoringSlot, gate: asyncio.Semaphore, stopped: asyncio.Event) -> HarborTask:
-        """The author's task for ``slot`` (:meth:`rebuilt`), once ``gate`` lets the author start.
+    async def slot_task(self, slot: TaskSlot, gate: asyncio.Semaphore, stopped: asyncio.Event) -> HarborTask:
+        """The task of ``slot`` (:meth:`rebuilt`), once ``gate`` lets its writing start.
 
-        The gate lets the authors start in slot order. An outage or a cancellation sets ``stopped`` before the gate
-        lets the next author in, so no author starts after it: the slots after it end with :class:`AuthorError`,
-        and ``generate`` takes none of them.
+        The gate lets the slots start in order. An outage or a cancellation sets ``stopped`` before the gate lets
+        the next slot in, so no slot starts after it: the slots after it end with :class:`AuthorError`, and
+        ``generate`` takes none of them.
         """
         async with gate:
             if stopped.is_set():
-                raise AuthorError("the generation stopped before this author started")
+                raise AuthorError("the generation stopped before this slot started")
             try:
                 return await self.rebuilt(
                     slot.source,

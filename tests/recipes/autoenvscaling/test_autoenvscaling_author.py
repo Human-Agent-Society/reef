@@ -191,7 +191,9 @@ def test_a_repository_snapshot_holds_the_base_commit_alone(tmp_path: Path) -> No
     assert repository_snapshot(source, tmp_path / "cache") == snapshot
 
 
-def test_authors_at_once_build_a_repository_snapshot_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_tasks_written_at_once_build_a_repository_snapshot_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     def git(*arguments: str) -> str:
         command = ["git", "-c", "user.name=t", "-c", "user.email=t@t", *arguments]
         return subprocess.run(command, cwd=tmp_path / "origin", check=True, capture_output=True, text=True).stdout
@@ -212,7 +214,7 @@ def test_authors_at_once_build_a_repository_snapshot_once(tmp_path: Path, monkey
     def slow_clone(command: list[str], **options: object) -> subprocess.CompletedProcess[bytes]:
         if command[1] == "clone":
             clones.append(command[-1])
-            # Both authors reach the snapshot before either clone ends.
+            # Both tasks reach the snapshot before either clone ends.
             time.sleep(0.5)
         return run(command, **options)  # type: ignore[call-overload]
 

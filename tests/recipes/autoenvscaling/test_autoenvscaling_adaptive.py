@@ -133,8 +133,8 @@ def test_a_generation_closed_again_after_a_crash_adds_its_parent_once(tmp_path: 
     assert not restarted.open_path(0).exists()
 
 
-class HoldingAuthor(StandInAuthor):
-    """The stand-in author, whose variants hold the run's Claude Code token."""
+class TokenHoldingStandIn(StandInAuthor):
+    """The stand-in, whose variants hold the run's Claude Code token."""
 
     def author(
         self,
@@ -153,7 +153,7 @@ class HoldingAuthor(StandInAuthor):
 
 @pytest.mark.parametrize(
     ("failing", "is_varied"),
-    [(StandInAuthor(unreachable=("session-1",)), False), (HoldingAuthor(), True)],
+    [(StandInAuthor(unreachable=("session-1",)), False), (TokenHoldingStandIn(), True)],
     ids=["outage", "credential"],
 )
 def test_an_outage_leaves_the_parent_its_slot_and_a_held_token_takes_it(
@@ -168,10 +168,10 @@ def test_an_outage_leaves_the_parent_its_slot_and_a_held_token_takes_it(
         with pytest.raises(AuthorError, match="the sandbox did not start"):
             asyncio.run(failed.generate(REQUEST))
     assert parents(tmp_path)[0]["varied"] is is_varied
-    author = StandInAuthor()
-    again = autoenvscaling(tmp_path, author, count=2, is_adaptive=True, variant_share=0.5)
+    stand_in = StandInAuthor()
+    again = autoenvscaling(tmp_path, stand_in, count=2, is_adaptive=True, variant_share=0.5)
     asyncio.run(again.generate(REQUEST))
-    varied = [call["variant"].parent for call in author.calls if call["variant"] is not None]
+    varied = [call["variant"].parent for call in stand_in.calls if call["variant"] is not None]
     assert varied == ([] if is_varied else [NAMES[0]]), "the next generation varies a parent the outage left"
 
 

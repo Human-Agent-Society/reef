@@ -642,7 +642,7 @@ def repository_snapshot(source: SessionSource, cache_dir: Path) -> Path:
     target = cache_dir / f"{hashlib.sha256(repository.url.encode()).hexdigest()[:8]}-{repository.commit}"
     if target.is_dir():
         return target
-    # Authors that run at once build each snapshot once: the second waits for the first, then finds it.
+    # Tasks written at once build each snapshot once: the second waits for the first, then finds it.
     with SNAPSHOT_LOCKS_LOCK:
         lock = SNAPSHOT_LOCKS.setdefault(target, threading.Lock())
     with lock:
