@@ -521,6 +521,9 @@ class Trainer:
         with self._lock:
             if not self.trains:
                 return False
+            # Another samples process can have stored the samples of later records since this trainer loaded;
+            # the records that stored samples consumed never form a record set again.
+            self.consumed_record_ids.update(self._pipeline.store.consumed_record_ids())
             self._consume_data(stop_when_ready=False)
             self._pipeline.produce()
             return self._pipeline.background_jobs_running()

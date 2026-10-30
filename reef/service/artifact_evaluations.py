@@ -357,30 +357,42 @@ class ArtifactEvaluations:
                 evaluation_id=evaluation_id, owner=QUEUE_OWNER, request=request, created_at=time.time(), state=state
             )
         agent = harbor_agent(request.harness)
-        for index, name in enumerate(names):
-            for repeat in range(request.rollouts_per_task):
-                rollout = EvaluationRollout(
-                    scenario,
-                    evaluation_id,
-                    request.artifact_id,
-                    request.component,
-                    index,
-                    name,
-                    str(held[name]),
-                    repeat,
-                    model,
-                    agent,
-                    request.environment,
-                )
-                self.queue.add(
-                    NewWork(
-                        EVALUATIONS_QUEUE,
-                        rollout.item_id(),
+        added: list[str] = []
+        try:
+            for index, name in enumerate(names):
+                for repeat in range(request.rollouts_per_task):
+                    rollout = EvaluationRollout(
                         scenario,
-                        EVALUATION_ROLLOUT_KIND,
-                        rollout.to_payload(),
+                        evaluation_id,
+                        request.artifact_id,
+                        request.component,
+                        index,
+                        name,
+                        str(held[name]),
+                        repeat,
+                        model,
+                        agent,
+                        request.environment,
                     )
-                )
+                    self.queue.add(
+                        NewWork(
+                            EVALUATIONS_QUEUE,
+                            rollout.item_id(),
+                            scenario,
+                            EVALUATION_ROLLOUT_KIND,
+                            rollout.to_payload(),
+                        )
+                    )
+                    added.append(rollout.item_id())
+        except BaseException as exc:
+            # An evaluation runs on all of its tasks or on none: the added rollouts are cancelled and it fails.
+            error = f"could not queue the rollouts: {type(exc).__name__}: {exc}"
+            for item_id in added:
+                self.queue.cancel(EVALUATIONS_QUEUE, item_id, error)
+            self.end(scenario, evaluation_id, request, result=None, error=error)
+            if self.endpoints.serves_beside:
+                self.stop_serving_candidate(scenario, request.artifact_id)
+            raise
         return stored
 
     def rollouts(self, evaluation_id: str, scenario: str) -> tuple[WorkItem, ...]:
@@ -401,13 +413,19 @@ class ArtifactEvaluations:
         """End each evaluation whose rollouts are all final, until ``close``."""
         sequence = 0
         while not self.stopped.is_set():
-            changes = self.queue.read_changes(EVALUATIONS_QUEUE, sequence)
+            try:
+                changes = self.queue.read_changes(EVALUATIONS_QUEUE, sequence)
+            except Exception:
+                # The store can fail for a moment; the thread reads again after its poll time.
+                logger.exception("could not read the evaluations queue")
+                self.stopped.wait(RESULT_POLL_SECONDS)
+                continue
             touched: dict[str, str] = {}
             for item in changes:
                 sequence = item.changed_sequence
                 if item.kind == EVALUATION_ROLLOUT_KIND:
-                    rollout = EvaluationRollout.from_item(item)
-                    touched[rollout.evaluation_id] = rollout.scenario
+                    # The payload names the evaluation; ``EvaluationRollout`` wrote it (``to_payload``).
+                    touched[str(item.payload["evaluation_id"])] = item.scenario
             for evaluation_id, scenario in touched.items():
                 try:
                     self.settle(scenario, evaluation_id)
@@ -431,9 +449,11 @@ class ArtifactEvaluations:
         rollouts = [EvaluationRollout.from_item(item) for item in items]
         names = list(dict.fromkeys(rollout.task_name for rollout in rollouts))
         scores = [
-            RolloutScore.from_json(cast(Mapping[str, object], item.result)["score"])
-            if item.state == "finished"
-            else RolloutScore(None)
+            (
+                RolloutScore.from_json(cast(Mapping[str, object], item.result)["score"])
+                if item.state == "finished"
+                else RolloutScore(None)
+            )
             for item in items
         ]
         result = PolicyEvaluation(

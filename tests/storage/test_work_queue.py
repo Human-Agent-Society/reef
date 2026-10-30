@@ -162,22 +162,26 @@ def test_served_models_writes_need_the_current_control_lease_number(open_coordin
     taken_over = lease.acquire("control-b", now=17)
     assert taken_over.instance_id == "control-b" and taken_over.number == 2
     assert lease.extend("control-a", now=17) is None and lease.current() == taken_over
+    # A stopped instance releases the lease; the next one takes it at once, with the next number.
+    assert not lease.release("control-a", now=18)
+    assert lease.release("control-b", now=18)
+    assert lease.acquire("control-a", now=19).number == 3
 
     served = ServedArtifact("artifact-1", "http://engine:8000/", "artifact-1")
     assert served.url == "http://engine:8000"
     before = table.changed_sequence()
     with pytest.raises(ControlLeaseConflict):
-        table.write(ScenarioModel("s"), served, control_lease_number=first.number)
-    table.write(ScenarioModel("s"), served, control_lease_number=2)
+        table.write(ScenarioModel("s"), served, control_lease_number=taken_over.number)
+    table.write(ScenarioModel("s"), served, control_lease_number=3)
     assert table.read(ScenarioModel("s")) == served and table.read_scenario("s") == {"active": served}
     assert table.read(ScenarioModel("s", "judge")) is None
     assert table.is_referenced(served) and table.changed_sequence() > before
 
-    table.schedule_stop(ScheduledStop(served, 30), control_lease_number=2)
+    table.schedule_stop(ScheduledStop(served, 30), control_lease_number=3)
     assert table.due_stops(29) == () and table.due_stops(30) == (ScheduledStop(served, 30),)
-    table.delete_stop(served, control_lease_number=2)
+    table.delete_stop(served, control_lease_number=3)
     assert table.due_stops(100) == ()
-    assert table.remove(ScenarioModel("s"), control_lease_number=2) == served
+    assert table.remove(ScenarioModel("s"), control_lease_number=3) == served
     assert not table.is_referenced(served)
 
 

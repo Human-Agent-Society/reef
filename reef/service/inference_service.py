@@ -12,7 +12,9 @@ Rules:
 - No row: 404. A replica that could not read ``served_models`` for longer than ``max_cache_age_seconds``: 503.
 - An answer whose ``model`` is not the row's ``model_name``: the replica reads the row again and retries once; then
   409.
-- A record that cannot be appended: 503. A replica never answers a request without its record.
+- An engine that fails or cannot be reached: 502; one that does not answer within the timeout: 504.
+- A record that cannot be appended: 503. A replica never answers a request without its record. A stream goes out
+  as the engine sends it, so its record is appended when it ends; a record that cannot be appended then is logged.
 """
 
 from __future__ import annotations
@@ -25,13 +27,16 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
+import aiohttp
 from aiohttp import web
+from sqlalchemy.exc import SQLAlchemyError
 
 from reef.artifact.artifact import Artifact
 from reef.core.artifact_ref import ArtifactRef
 from reef.core.errors import ReefError
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.served_models import ACTIVE, ServedArtifact
+from reef.dispatcher.served import CACHE_SECONDS
 from reef.inference.http import HttpInferenceHandler
 from reef.runtime.interfaces import UpstreamStatusError
 from reef.service.auth import create_authentication_middleware
@@ -71,7 +76,7 @@ class ServedModelsCache:
     """
 
     table: ServedModels
-    cache_seconds: float = 5.0
+    cache_seconds: float = CACHE_SECONDS
     max_cache_age_seconds: float = 300.0
     rows: dict[str, tuple[float, Mapping[str, ServedArtifact]]] = field(default_factory=dict)
 
@@ -82,7 +87,7 @@ class ServedModelsCache:
             return held[1]
         try:
             rows = self.table.read_scenario(scenario)
-        except Exception as exc:
+        except (SQLAlchemyError, ReefError, OSError) as exc:
             if held is not None and now - held[0] < self.max_cache_age_seconds:
                 logger.warning("serving %s from a cached read of served_models: %s", scenario, exc)
                 return held[1]
@@ -107,6 +112,11 @@ class ArtifactRefs:
     (``CommitRecord.components``) names it, or, with one component, the release whose ``release_id`` it is. An
     artifact that no commit binds, such as the artifact that a scenario started from, has no release here, and its
     records carry no ``artifact_ref``.
+
+    Values: ``storage`` holds the commit histories; ``known`` maps each ``(scenario, artifact_id)`` read before to
+    its release, or to None.
+
+    Purpose: ``InferenceReplica`` reads the release of each request's artifact through it, for the record.
     """
 
     def __init__(self, storage: ScenarioStorage) -> None:
@@ -136,7 +146,11 @@ class ArtifactRefs:
 
 @dataclass
 class InferenceReplica:
-    """One inference replica: ``served_models``, the record store, and the engine timeout.
+    """One inference replica.
+
+    Values: ``cache`` reads ``served_models``; ``storage`` holds each scenario's records and commit history;
+    ``timeout_seconds`` is the positive time that the replica waits for an engine; ``refs`` resolves the release of
+    each served artifact.
 
     Purpose: ``build_inference_app`` routes the model requests to ``answer``.
     """
@@ -147,6 +161,8 @@ class InferenceReplica:
     refs: ArtifactRefs = field(init=False)
 
     def __post_init__(self) -> None:
+        if not self.timeout_seconds > 0:
+            raise ValueError("timeout_seconds is positive")
         self.refs = ArtifactRefs(self.storage)
 
     def record(
@@ -178,36 +194,54 @@ class InferenceReplica:
             raise web.HTTPBadRequest(text="the request body is a JSON object") from exc
         if not isinstance(payload, dict):
             raise web.HTTPBadRequest(text="the request body is a JSON object")
-        try:
-            served = self.cache.read(scenario, payload.get("model"))
-            ref = await asyncio.to_thread(self.refs.ref, scenario, served.artifact_id)
-        except NotServed as exc:
-            raise web.HTTPNotFound(text=str(exc)) from exc
-        except StaleServedModels as exc:
-            raise web.HTTPServiceUnavailable(text=str(exc)) from exc
+        served, ref = await self.resolve(scenario, payload.get("model"), refresh=False)
         if payload.get("stream") is True:
             return await self.relay_stream(request, path, parsed, payload, served, ref)
         for attempt in range(2):
-            handler = HttpInferenceHandler(served.url, timeout_s=self.timeout_seconds, error_label=served.url)
-            body = {**payload, "model": served.model_name}
-            try:
-                response = await handler.inference(upstream_artifact(served, ref), path, body)
-            except UpstreamStatusError as exc:
-                raise web.HTTPBadGateway(text=str(exc)) from exc
+            response = await self.forward(served, ref, path, payload)
             if response.get("model") in (None, served.model_name):
                 break
             if attempt == 1:
                 raise web.HTTPConflict(
                     text=f"the engine answered as {response.get('model')!r}, not {served.model_name!r}"
                 )
-            served = self.cache.read(scenario, payload.get("model"), refresh=True)
-            ref = await asyncio.to_thread(self.refs.ref, scenario, served.artifact_id)
+            served, ref = await self.resolve(scenario, payload.get("model"), refresh=True)
         try:
             record_id = await asyncio.to_thread(self.record, parsed, payload, response, ref)
         except Exception as exc:
             logger.exception("could not append the record of a request to %s", scenario)
             raise web.HTTPServiceUnavailable(text="the record store cannot take the request's record") from exc
         return web.json_response(response, headers={RECORD_HEADER: record_id, RELEASE_HEADER: served.artifact_id})
+
+    async def resolve(
+        self, scenario: str, model: object, *, refresh: bool
+    ) -> tuple[ServedArtifact, ArtifactRef | None]:
+        """The ``ServedArtifact`` that answers ``model`` of ``scenario`` and its release, read off the event loop;
+        404 when the scenario serves no such model, 503 when ``served_models`` cannot be read."""
+        try:
+            served = await asyncio.to_thread(self.cache.read, scenario, model, refresh=refresh)
+            ref = await asyncio.to_thread(self.refs.ref, scenario, served.artifact_id)
+        except NotServed as exc:
+            raise web.HTTPNotFound(text=str(exc)) from exc
+        except StaleServedModels as exc:
+            raise web.HTTPServiceUnavailable(text=str(exc)) from exc
+        return served, ref
+
+    async def forward(
+        self, served: ServedArtifact, ref: ArtifactRef | None, path: str, payload: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """The answer of the engine of ``served`` to ``payload`` under the row's model name: 502 for an error status,
+        an unreachable engine or an answer that is no JSON object, 504 when the engine does not answer within the
+        timeout."""
+        handler = HttpInferenceHandler(served.url, timeout_s=self.timeout_seconds, error_label=served.url)
+        try:
+            return await handler.inference(
+                upstream_artifact(served, ref), path, {**payload, "model": served.model_name}
+            )
+        except (UpstreamStatusError, aiohttp.ClientError, TypeError, json.JSONDecodeError) as exc:
+            raise web.HTTPBadGateway(text=f"the engine at {served.url} failed: {exc}") from exc
+        except TimeoutError as exc:
+            raise web.HTTPGatewayTimeout(text=f"the engine at {served.url} did not answer in time") from exc
 
     async def relay_stream(
         self,
@@ -223,8 +257,10 @@ class InferenceReplica:
             upstream = await handler.inference_stream(
                 upstream_artifact(served, ref), path, {**payload, "model": served.model_name}
             )
-        except UpstreamStatusError as exc:
-            raise web.HTTPBadGateway(text=str(exc)) from exc
+        except (UpstreamStatusError, aiohttp.ClientError) as exc:
+            raise web.HTTPBadGateway(text=f"the engine at {served.url} failed: {exc}") from exc
+        except TimeoutError as exc:
+            raise web.HTTPGatewayTimeout(text=f"the engine at {served.url} did not answer in time") from exc
         response = web.StreamResponse(
             status=upstream.status, headers={**upstream.headers, RELEASE_HEADER: served.artifact_id}
         )
@@ -256,7 +292,7 @@ def build_inference_app(
     storage: ScenarioStorage,
     *,
     tokens: str | tuple[str, ...] | None,
-    cache_seconds: float = 5.0,
+    cache_seconds: float = CACHE_SECONDS,
     max_cache_age_seconds: float = 300.0,
     timeout_seconds: float = 300.0,
 ) -> web.Application:

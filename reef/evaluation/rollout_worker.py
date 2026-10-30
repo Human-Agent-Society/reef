@@ -24,9 +24,10 @@ from pathlib import Path
 from typing import Any, cast
 
 from reef.core.evaluation import PolicyHarness, PolicyModel, RolloutRequest, RolloutScore
+from reef.core.served_models import require_text
 from reef.execution.workers import ServiceWorker
 from reef.harness.client.tasks import DEFAULT_AGENT, TaskLab, TaskRolloutRunner
-from reef.storage.work_queue import JsonValue, WorkItem, WorkLeaseLost, WorkQueue
+from reef.storage.work_queue import JsonValue, LeaseExtender, WorkItem, WorkLeaseLost, WorkQueue
 
 logger = logging.getLogger(__name__)
 
@@ -54,8 +55,12 @@ def harbor_agent(harness: Mapping[str, Any] | None) -> Mapping[str, object]:
 
 
 def agent_harness(agent: Mapping[str, object]) -> PolicyHarness:
-    """The harness side of the policy that ``agent`` runs: the Harbor agent with no plugin."""
-    return PolicyHarness(str(agent.get("name") or agent.get("import_path")))
+    """The harness side of the policy that ``agent`` runs: the Harbor agent with no plugin. Raise ``ValueError``
+    for an agent with neither a ``name`` nor an ``import_path``."""
+    name = agent.get("name") or agent.get("import_path")
+    if not isinstance(name, str) or not name:
+        raise ValueError("a Harbor agent has a name or an import_path")
+    return PolicyHarness(name)
 
 
 @dataclass(frozen=True)
@@ -66,8 +71,8 @@ class EvaluationRollout:
     ``component`` the component of the scenario's artifacts that it is;
     ``task_index`` is the task's position in the evaluation and ``task_name`` its name; ``task_path`` is the
     Harbor task directory; ``repeat`` numbers the rollouts of one task from 0; ``model`` is the model that the
-    inference service serves for the candidate; ``agent`` is the Harbor agent configuration; ``environment`` is
-    the Harbor environment type.
+    service serves for the candidate; ``agent`` is the Harbor agent configuration; ``environment`` is the Harbor
+    environment type. The names are non-empty strings and the two numbers are non-negative integers.
 
     Purpose: control makes it when it adds an evaluation (``to_payload``); a worker reads it (``from_item``).
     """
@@ -83,6 +88,25 @@ class EvaluationRollout:
     model: PolicyModel
     agent: Mapping[str, object]
     environment: str
+
+    def __post_init__(self) -> None:
+        for value, name in (
+            (self.scenario, "scenario"),
+            (self.evaluation_id, "evaluation_id"),
+            (self.artifact_id, "artifact_id"),
+            (self.component, "component"),
+            (self.task_name, "task_name"),
+            (self.task_path, "task_path"),
+            (self.environment, "environment"),
+        ):
+            require_text(value, name)
+        for number, name in ((self.task_index, "task_index"), (self.repeat, "repeat")):
+            if isinstance(number, bool) or not isinstance(number, int) or number < 0:
+                raise ValueError(f"{name} is a non-negative integer")
+        if not isinstance(self.model, PolicyModel):
+            raise TypeError("model is a PolicyModel")
+        if not isinstance(self.agent, Mapping):
+            raise TypeError("agent is a JSON object")
 
     def item_id(self) -> str:
         return rollout_item_id(self.evaluation_id, self.task_index, self.repeat)
@@ -140,8 +164,13 @@ def candidate_url(service_url: str, scenario: str, artifact_id: str) -> str:
 
 @dataclass(frozen=True)
 class CandidateEndpoint:
-    """Where one rollout reaches the candidate's model: a base URL that answers Reef's inference routes for the
-    candidate without recording, and the bearer token that opens it, or None without authentication."""
+    """Where one rollout reaches the candidate's model.
+
+    Values: ``url`` is a non-empty base URL that answers Reef's inference routes for the candidate without
+    recording; ``token`` is the bearer token that opens it, or None without authentication.
+
+    Purpose: ``CandidateEndpoints.open`` makes it; the worker's rollout runner calls it.
+    """
 
     url: str
     token: str | None
@@ -228,7 +257,13 @@ class EvaluationRolloutWorker(ServiceWorker):
 
     def run(self) -> None:
         while not self.stopped.is_set():
-            if not self.run_once():
+            try:
+                took = self.run_once()
+            except Exception:
+                # The store can fail for a moment; the worker tries again after its poll time.
+                logger.exception("evaluation worker %s could not read the evaluations queue", self.worker_id)
+                took = False
+            if not took:
                 self.stopped.wait(self.poll_seconds)
 
     def run_once(self) -> bool:
@@ -237,12 +272,10 @@ class EvaluationRolloutWorker(ServiceWorker):
         item = self.queue.take(EVALUATIONS_QUEUE, self.worker_id, [EVALUATION_ROLLOUT_KIND])
         if item is None:
             return False
-        extender = LeaseExtender(self.queue, item, self.worker_id)
-        extender.start()
         try:
-            self.queue.start(EVALUATIONS_QUEUE, item.id, self.worker_id)
-            score = self.score(EvaluationRollout.from_item(item))
-            extender.stop()
+            with LeaseExtender(self.queue, item, self.worker_id):
+                self.queue.start(EVALUATIONS_QUEUE, item.id, self.worker_id)
+                score = self.score(EvaluationRollout.from_item(item))
             self.queue.finish(EVALUATIONS_QUEUE, item.id, self.worker_id, {"score": score.to_json()})
         except WorkLeaseLost:
             logger.warning("evaluation worker %s lost rollout %s", self.worker_id, item.id)
@@ -254,8 +287,6 @@ class EvaluationRolloutWorker(ServiceWorker):
                 )
             except WorkLeaseLost:
                 logger.warning("evaluation worker %s lost rollout %s", self.worker_id, item.id)
-        finally:
-            extender.stop()
         return True
 
     def score(self, rollout: EvaluationRollout) -> RolloutScore:
@@ -282,32 +313,6 @@ class EvaluationRolloutWorker(ServiceWorker):
             return runner.rollout_score(result)
 
 
-class LeaseExtender:
-    """Extends the lease of one held item every third of the lease while a rollout runs."""
-
-    def __init__(self, queue: WorkQueue, item: WorkItem, worker_id: str) -> None:
-        self.queue = queue
-        self.item = item
-        self.worker_id = worker_id
-        self.done = threading.Event()
-        self.thread = threading.Thread(target=self.run, name=f"reef-lease-{item.id}", daemon=True)
-
-    def start(self) -> None:
-        self.thread.start()
-
-    def stop(self) -> None:
-        self.done.set()
-        if self.thread.is_alive() and self.thread is not threading.current_thread():
-            self.thread.join()
-
-    def run(self) -> None:
-        while not self.done.wait(self.queue.lease_seconds / 3):
-            try:
-                self.queue.extend_lease(self.item.queue, self.item.id, self.worker_id)
-            except WorkLeaseLost:
-                return
-
-
 __all__ = [
     "EVALUATIONS_QUEUE",
     "EVALUATION_KIND",
@@ -316,7 +321,6 @@ __all__ = [
     "CandidateEndpoints",
     "EvaluationRollout",
     "EvaluationRolloutWorker",
-    "LeaseExtender",
     "ServiceCandidateEndpoints",
     "agent_harness",
     "candidate_url",

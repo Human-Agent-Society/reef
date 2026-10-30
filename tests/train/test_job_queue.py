@@ -13,8 +13,15 @@ from tests.support._trajectories import policy_trajectory
 from reef.artifact import BaseArtifactSource
 from reef.core.job_data import JobData
 from reef.runtime.jobs import JobStatus, ReleaseFormat, SavedCheckpoint, TrainingJob
-from reef.storage.work_queue import MemoryWorkQueue
-from reef.train.job_queue import JOBS_QUEUE, JobQueueComponent, TrainingJobWorker, job_kind
+from reef.storage.work_queue import MemoryWorkQueue, NewWork
+from reef.train.job_queue import (
+    JOBS_QUEUE,
+    JobQueueComponent,
+    TrainingJobWorker,
+    checkpoint_json,
+    job_kind,
+    job_payload,
+)
 from reef.train.jobs import JobLoop
 from reef.train.local_jobs import LocalJobComponent
 
@@ -154,3 +161,22 @@ def test_only_a_scenario_view_submits_and_a_control_only_component_closes_what_i
     assert component.closed_count == 0
     control.close()
     assert component.closed_count == 1
+
+
+@pytest.mark.unit
+def test_a_worker_that_continues_a_job_reports_each_checkpoint_step_once(tmp_path):
+    queue = MemoryWorkQueue(lease_seconds=30)
+    queue.add(NewWork(JOBS_QUEUE, "j1", "s", job_kind("steps"), job_payload(job("j1")), serial_key="s"))
+    # The first worker reported step 1, then stopped without a word; its lease expires.
+    queue.take(JOBS_QUEUE, "training-0", [job_kind("steps")])
+    queue.start(JOBS_QUEUE, "j1", "training-0")
+    first = SavedCheckpoint(1, "/old/step-1", "/old/step-1", {"loss": 1.0})
+    queue.add_progress(JOBS_QUEUE, "j1", "training-0", checkpoint_json(first), number=0)
+    queue.requeue_expired(now=time.time() + 60)
+
+    worker = TrainingJobWorker(StepComponent(tmp_path / "jobs"), queue, worker_id="training-1", poll_seconds=0.02)
+    assert worker.run_once()
+    item = queue.get(JOBS_QUEUE, "j1")
+    assert item.state == "finished"
+    assert [entry["step"] for entry in item.progress] == [1, 2]
+    worker.stop()

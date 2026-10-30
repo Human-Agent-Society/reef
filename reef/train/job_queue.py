@@ -22,8 +22,9 @@ from __future__ import annotations
 
 import logging
 import threading
-from contextlib import suppress
+import time
 from collections.abc import Mapping
+from contextlib import suppress
 from pathlib import Path
 from typing import Any, cast
 
@@ -58,42 +59,64 @@ def job_payload(job: TrainingJob) -> dict[str, JsonValue]:
     )
 
 
+def json_object(value: JsonValue, name: str) -> Mapping[str, JsonValue]:
+    """``value`` as a JSON object; ``ValueError`` when it is another JSON value."""
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{name} is a JSON object")
+    return value
+
+
+def json_text(value: JsonValue, name: str) -> str:
+    """``value`` as a non-empty string; ``ValueError`` when it is another JSON value."""
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{name} is a non-empty string")
+    return value
+
+
 def job_from_item(item: WorkItem) -> TrainingJob:
-    """The ``TrainingJob`` that ``job_payload`` wrote into ``item``."""
-    payload = cast(Mapping[str, Any], item.payload)
+    """The ``TrainingJob`` that ``job_payload`` wrote into ``item``; ``ValueError`` for another payload."""
+    payload = item.payload
     return TrainingJob(
         item.id,
-        payload["backend"],
-        payload["start"],
-        JobData.from_dict(payload["data"]),
-        payload["parameters"],
+        json_text(payload.get("backend"), "a job's backend"),
+        json_text(payload.get("start"), "a job's start"),
+        JobData.from_dict(json_object(payload.get("data"), "a job's data")),
+        json_object(payload.get("parameters"), "a job's parameters"),
     )
 
 
 def checkpoint_json(checkpoint: SavedCheckpoint) -> dict[str, JsonValue]:
-    return cast(
-        dict[str, JsonValue],
-        {
-            "step": checkpoint.step,
-            "path": checkpoint.path,
-            "release_path": checkpoint.release_path,
-            "metrics": dict(checkpoint.metrics),
-        },
+    return {
+        "step": checkpoint.step,
+        "path": checkpoint.path,
+        "release_path": checkpoint.release_path,
+        "metrics": cast(JsonValue, dict(checkpoint.metrics)),
+    }
+
+
+def checkpoint_from_json(entry: Mapping[str, JsonValue]) -> SavedCheckpoint:
+    """The ``SavedCheckpoint`` that ``checkpoint_json`` wrote; ``ValueError`` for another object."""
+    step = entry.get("step")
+    if isinstance(step, bool) or not isinstance(step, int):
+        raise ValueError("a checkpoint's step is an integer")
+    return SavedCheckpoint(
+        step,
+        json_text(entry.get("path"), "a checkpoint's path"),
+        json_text(entry.get("release_path"), "a checkpoint's release_path"),
+        json_object(entry.get("metrics"), "a checkpoint's metrics"),
     )
-
-
-def checkpoint_from_json(value: Mapping[str, Any]) -> SavedCheckpoint:
-    return SavedCheckpoint(value["step"], value["path"], value["release_path"], value["metrics"])
 
 
 def status_from_item(item: WorkItem) -> JobStatus:
     """The ``JobStatus`` of the job in ``item``: running until the item is final, then finished or failed."""
-    checkpoints = tuple(checkpoint_from_json(cast(Mapping[str, Any], entry)) for entry in item.progress)
-    if item.state == "finished":
-        result = cast(Mapping[str, Any], item.result)
-        return JobStatus(item.id, "finished", checkpoints, metrics=result.get("metrics", {}))
+    checkpoints = tuple(checkpoint_from_json(entry) for entry in item.progress)
+    if item.state == "finished" and item.result is not None:
+        return JobStatus(
+            item.id, "finished", checkpoints, metrics=json_object(item.result.get("metrics", {}), "metrics")
+        )
     if item.state == "failed":
-        return JobStatus(item.id, "failed", checkpoints, error=item.error or "the job failed")
+        # A failed item always carries its error (``WorkItem``).
+        return JobStatus(item.id, "failed", checkpoints, error=item.error)
     return JobStatus(item.id, "running", checkpoints)
 
 
@@ -231,7 +254,13 @@ class TrainingJobWorker(ServiceWorker):
 
     def run(self) -> None:
         while not self.stopped.is_set():
-            if not self.run_once():
+            try:
+                took = self.run_once()
+            except Exception:
+                # The store can fail for a moment; the worker tries again after its poll time.
+                logger.exception("training worker %s could not read the jobs queue", self.worker_id)
+                took = False
+            if not took:
                 self.stopped.wait(self.poll_seconds)
 
     def run_once(self) -> bool:
@@ -252,18 +281,29 @@ class TrainingJobWorker(ServiceWorker):
         return True
 
     def run_job(self, item: WorkItem) -> None:
+        """Run the job of ``item`` on the component and mirror its checkpoints, by step, into the item's progress.
+
+        The lease is extended a third of a lease after each extension, measured on a monotonic clock, so a slow
+        ``submit`` or ``status`` call counts too. A worker that continues a job reports only the checkpoints whose
+        step the item does not hold yet.
+        """
         job = job_from_item(item)
+        extend_every = self.queue.lease_seconds / 3
         self.component.submit(job)
         self.queue.start(JOBS_QUEUE, item.id, self.worker_id)
-        reported = len(item.progress)
-        lease_at = 0.0
+        extended_at = time.monotonic()
+        reported = {checkpoint_from_json(entry).step for entry in item.progress}
+        progress_count = len(item.progress)
         while True:
             status = self.component.status(job.job_id)
-            for number in range(reported, len(status.checkpoints)):
+            for checkpoint in status.checkpoints:
+                if checkpoint.step in reported:
+                    continue
                 self.queue.add_progress(
-                    JOBS_QUEUE, item.id, self.worker_id, checkpoint_json(status.checkpoints[number]), number=number
+                    JOBS_QUEUE, item.id, self.worker_id, checkpoint_json(checkpoint), number=progress_count
                 )
-            reported = len(status.checkpoints)
+                reported.add(checkpoint.step)
+                progress_count += 1
             if status.state == "finished":
                 self.queue.finish(
                     JOBS_QUEUE,
@@ -275,10 +315,9 @@ class TrainingJobWorker(ServiceWorker):
             if status.state == "failed":
                 self.queue.fail(JOBS_QUEUE, item.id, self.worker_id, status.error or "the job failed", retryable=False)
                 return
-            lease_at += self.poll_seconds
-            if lease_at >= self.queue.lease_seconds / 3:
+            if time.monotonic() - extended_at >= extend_every:
                 self.queue.extend_lease(JOBS_QUEUE, item.id, self.worker_id)
-                lease_at = 0.0
+                extended_at = time.monotonic()
             if self.stopped.wait(self.poll_seconds):
                 return
 

@@ -304,6 +304,10 @@ What survives a restart, provided the storage paths are persistent:
        recipe open once the service answers on its own address, and the
        rows train then, with no new record needed
 
+A process that stops normally releases the control lease. After a crash, the
+next process waits until the old lease expires (at most 30 seconds) before it
+loads scenarios; see `Run the services in separate processes`_.
+
 After a step commits, ``/reef/status`` reports its scenario's
 ``artifact_head_sync`` with the ``release_id`` of the `chain tip
 <../advanced_topics/state-model.rst#the-release-chain>`__ and any ``error``.
@@ -369,7 +373,9 @@ must reach the same store:
 * On one host, the default ``sqlite`` record backend works. The processes share
   the files under ``storage.agent-record-dir``.
 * On several hosts, use ``storage.record-backend: postgres``. The services keep
-  their shared tables in the ``reef_coordination`` schema.
+  their shared tables in the schema ``<record schema>_coordination``
+  (``reef_records_coordination`` by default), so deployments with their own
+  record schemas share no tables.
 
 Control and training must also reach the same artifact backend.
 
@@ -392,18 +398,30 @@ on control. The inference service answers:
 **Control restarts.** While control is down, the inference service continues to
 answer from ``served_models`` and to record. Training jobs, sample requests and
 evaluation rollouts that are already queued continue; new ones wait for control,
-because control adds them. To deploy a new control version, stop the old
-instance, then start the new one. The new instance writes ``served_models``
-after it takes the control lease, at the latest when the old lease expires
-(30 seconds). Each ``served_models`` write carries the lease number, so an old
-instance that lost the lease cannot overwrite the table. Do not run two control
-instances at the same time: the lease checks only the ``served_models`` writes.
+because control adds them.
+
+Control runs as one active instance and any number of standby instances on the
+same store. The active instance holds the control lease and extends it. A
+standby instance waits at start-up until it can take the lease: it loads no
+scenario and answers no request, ``/healthz`` included, so a load balancer that
+checks ``/healthz`` sends requests to the active instance alone. When the active
+instance stops, it releases the lease, and a standby takes over within 10
+seconds. When the active instance crashes, a standby takes over after the lease
+expires (30 seconds). An instance that loses the lease stops its training work
+and ends its process, so that its supervisor starts it again as a standby. Each
+``served_models`` write carries the lease number, so an old instance cannot
+overwrite the table. To deploy a new control version, start the new
+instance as a standby, then stop the old one.
 
 **Limits.** The inference service serves the active artifact of each scenario.
 A candidate under evaluation is served by control at its candidate route, so
 the evaluation service needs ``--control-url``. The evaluation service presents
 the first token of ``REEF_TOKEN`` or ``reef.tokens`` to control. A record of the
-artifact that a scenario started from carries no ``artifact_ref``.
+artifact that a scenario started from carries no ``artifact_ref``. A runtime
+that loads full weights in place serves the next artifact under the same model
+name after an activation, so a request in flight at that moment can be answered
+by the next artifact while its record names the old one. Adapter runtimes serve
+each artifact under its own name and do not have this limit.
 
 Choose the storage backend
 --------------------------

@@ -465,7 +465,7 @@ def _config_source(config_path: Path | None) -> str:
     return f"config: {config_path}"
 
 
-def _run_component(
+def run_component(
     config_path: str | None, overrides: dict[str, str] | None, component: str, control_url: str | None
 ) -> int:
     """Run the one service ``component`` of the deployment in this process, until a signal stops it.
@@ -674,7 +674,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         if args.recipe:
             _prepare_profile(args.recipe, args.model, os.environ, overrides)
         if args.component is not None and not args.print_config:
-            exit_code = _run_component(config_path, overrides, args.component, args.control_url)
+            exit_code = run_component(config_path, overrides, args.component, args.control_url)
         else:
             exit_code = _run_orchestrator(config_path, overrides, print_config=args.print_config)
     except InvalidOverrideError as exc:

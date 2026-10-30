@@ -84,25 +84,27 @@ class StoreChangesWatcher(ServiceWorker):
             self.stopped.wait(self.interval_seconds)
 
     def run_once(self) -> None:
-        """One round: report the scenarios with new records, then the scenarios with new samples."""
+        """One round: report the scenarios with new records, then the scenarios with new samples.
+
+        A sequence advances only after its report returns, so a report that raises comes again next round.
+        """
         loaded = {current.name: current for current in self.registry.loaded_scenarios()}
         for name in set(self.record_sequences) - set(loaded):
             self.record_sequences.pop(name)
         for name, current in loaded.items():
             newest = current.records.last_sequence(name)
             seen = self.record_sequences.get(name)
-            self.record_sequences[name] = newest
             # A scenario seen for the first time asks for a selection when it loads.
             if seen is not None and newest > seen:
                 self.changes.records_added(current)
-        finished: set[str] = set()
+            self.record_sequences[name] = newest
         while changed := self.queue.read_changes(SAMPLES_QUEUE, self.queue_sequence):
-            self.queue_sequence = changed[-1].changed_sequence
-            finished.update(
-                item.scenario for item in changed if item.kind == RECORD_SELECTION_KIND and item.state == "finished"
+            finished = sorted(
+                {item.scenario for item in changed if item.kind == RECORD_SELECTION_KIND and item.state == "finished"}
             )
-        for scenario in sorted(finished):
-            self.changes.samples_added(scenario)
+            for scenario in finished:
+                self.changes.samples_added(scenario)
+            self.queue_sequence = changed[-1].changed_sequence
 
 
 __all__ = ["StoreChanges", "StoreChangesWatcher"]

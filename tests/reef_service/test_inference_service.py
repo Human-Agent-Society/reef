@@ -98,3 +98,42 @@ def test_an_engine_that_answers_as_another_model_twice_is_a_conflict_and_nothing
     assert inference_records(records) == ()
     # One wrong answer is read again and retried.
     assert asyncio.run(ask(tmp_path / "again", ["math-v0"]))[0] == 200
+
+
+class BrokenStorage(SQLiteScenarioStorage):
+    """A record store that refuses every record."""
+
+    def open(self, scenario: str):
+        store = super().open(scenario)
+        if self.refuse:
+
+            def refuse(item):
+                raise OSError("the disk is full")
+
+            store.records.append = refuse
+        return store
+
+
+async def ask_failing(tmp_path: Path, *, engine_url: str | None, refuse_records: bool) -> int:
+    storage = BrokenStorage(tmp_path / "records")
+    storage.refuse = False
+    storage.open("math").commit_step(expected_step=0, commit=commit("release-1"))
+    storage.refuse = refuse_records
+    table = MemoryServedModels(MemoryControlLease())
+    number = table.control_lease.acquire("control-1").number
+    async with TestServer(engine_app([])) as engine:
+        url = engine_url or str(engine.make_url("/"))
+        table.write(
+            ScenarioModel("math", ACTIVE), ServedArtifact("release-1", url, "math-v1"), control_lease_number=number
+        )
+        async with TestClient(TestServer(build_inference_app(table, storage, tokens=TOKEN))) as client:
+            response = await client.post(
+                "/v1/chat/completions", headers=HEADERS, json={"model": "any", "messages": [{"role": "user"}]}
+            )
+            return response.status
+
+
+@pytest.mark.unit
+def test_an_answer_without_its_record_is_never_returned_and_a_dead_engine_is_a_bad_gateway(tmp_path: Path) -> None:
+    assert asyncio.run(ask_failing(tmp_path / "records", engine_url=None, refuse_records=True)) == 503
+    assert asyncio.run(ask_failing(tmp_path / "engine", engine_url="http://127.0.0.1:9", refuse_records=False)) == 502

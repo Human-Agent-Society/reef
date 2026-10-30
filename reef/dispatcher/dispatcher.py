@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import shutil
+import signal
 import tempfile
 import time
 from collections.abc import Iterable, Iterator, Mapping, Sequence
@@ -25,7 +26,7 @@ from reef.dispatcher.errors import TrainingErrors
 from reef.dispatcher.local_workers import LocalTrainingWorkers
 from reef.dispatcher.record_item_copier import RecordItemCopier
 from reef.dispatcher.samples import LocalSampleProducers
-from reef.dispatcher.served import CACHE_SECONDS, ServedModelsPublisher
+from reef.dispatcher.served import CACHE_SECONDS, ControlInstance, ServedModelsPublisher, wait_for_control_lease
 from reef.dispatcher.status import TrainingStatus
 from reef.dispatcher.store_changes import StoreChanges, StoreChangesWatcher
 from reef.execution.workers import SERVICE_COMPONENTS, ServiceWorkers, service_components
@@ -59,7 +60,7 @@ class BackgroundThreads:
     idle_unload_thread: Thread | None = None
 
 
-class Dispatcher(ScenarioLifecycle, StoreChanges):
+class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance):
     """Coordinate scenario creation, inference state, training, and model commits.
 
     A process trains the weights of one scenario on the deployment's
@@ -109,6 +110,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges):
         that this process runs. ``close`` stops the workers first and closes the store last.
 
         ``components``: the services that this process runs (``SERVICE_COMPONENTS``). With ``control``, the
+        constructor first waits for the control lease, while another control instance holds it; then the
         dispatcher writes ``served_models``, watches the shared store, and runs the trainers' local workers, which
         add the training jobs. With ``samples``, it runs the samples worker; without ``control``, that worker loads
         each scenario on demand and leaves the jobs to control.
@@ -150,16 +152,22 @@ class Dispatcher(ScenarioLifecycle, StoreChanges):
         self.background_threads = BackgroundThreads()
         self.local_workers = LocalTrainingWorkers(self.registry, self.errors, held=hold_local_cycles)
         if coordination is not None and self.runs_control:
+            # A standby instance waits here, before it loads or serves anything, until the active one stops.
+            control_id = instance_id("control")
+            lease = wait_for_control_lease(coordination.control_lease, control_id)
             runtime = recipe.runtime
             request_timeout_seconds = 300.0 if runtime is None else runtime.inference_timeout_s
-            self.workers.add(
-                ServedModelsPublisher(
-                    self.registry,
-                    coordination,
-                    instance_id=instance_id("control"),
-                    stop_delay_seconds=CACHE_SECONDS + request_timeout_seconds,
-                )
+            publisher = ServedModelsPublisher(
+                self.registry,
+                coordination,
+                self,
+                lease,
+                instance_id=control_id,
+                stop_delay_seconds=CACHE_SECONDS + request_timeout_seconds,
             )
+            self.workers.add(publisher)
+            # The publisher extends the lease; it starts now, so a slow start-up does not let the lease expire.
+            publisher.start()
             self.workers.add(StoreChangesWatcher(self.registry, coordination.work_queue, self))
         if self.samples_queue is not None and "samples" in self.components:
             self.workers.add(
@@ -669,6 +677,12 @@ class Dispatcher(ScenarioLifecycle, StoreChanges):
         for component_trainer in current.trainers:
             if not component_trainer.trainer.trains:
                 current.prepare_training_step(component_trainer.component)
+
+    def control_lease_lost(self) -> None:
+        """Another control instance took the lease: no local cycle of this instance runs or commits any more, and
+        the process ends (SIGTERM), so that its supervisor starts it again as a standby."""
+        self.local_workers.stop()
+        signal.raise_signal(signal.SIGTERM)
 
     def records_added(self, current: Scenario) -> None:
         """Another process appended records to ``current``: ask for their samples and copy them to record items."""

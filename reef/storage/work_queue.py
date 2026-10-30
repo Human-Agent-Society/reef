@@ -14,6 +14,7 @@ Two fields order the work:
 
 from __future__ import annotations
 
+import logging
 import math
 import threading
 import time
@@ -24,6 +25,8 @@ from typing import Literal
 
 from reef.core.errors import ReefError
 from reef.core.served_models import require_text
+
+logger = logging.getLogger(__name__)
 
 #: The state of a work item. ``finished`` and ``failed`` are final.
 WorkState = Literal["queued", "assigned", "running", "finished", "failed"]
@@ -85,17 +88,20 @@ class WorkItem:
     changed_sequence: int = 1
 
     def __post_init__(self) -> None:
-        for name in ("queue", "id", "scenario", "kind"):
-            require_text(getattr(self, name), name)
+        for value, name in ((self.queue, "queue"), (self.id, "id"), (self.scenario, "scenario"), (self.kind, "kind")):
+            require_text(value, name)
         if not isinstance(self.payload, Mapping):
             raise TypeError("a work item's payload is a JSON object")
         if self.state not in WORK_STATES:
             raise ValueError(f"a work item's state is one of {WORK_STATES}, not {self.state!r}")
         if self.serial_key is not None:
             require_text(self.serial_key, "serial_key")
-        for name in ("available_at", "created_at"):
-            value = getattr(self, name)
-            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        for time_value, name in ((self.available_at, "available_at"), (self.created_at, "created_at")):
+            if (
+                isinstance(time_value, bool)
+                or not isinstance(time_value, (int, float))
+                or not math.isfinite(time_value)
+            ):
                 raise ValueError(f"{name} is a finite time")
         if isinstance(self.attempt_count, bool) or not isinstance(self.attempt_count, int) or self.attempt_count < 0:
             raise ValueError("attempt_count is an integer from 0")
@@ -133,6 +139,20 @@ class NewWork:
     payload: Mapping[str, JsonValue] = field(default_factory=dict)
     serial_key: str | None = None
     available_at: float | None = None
+
+    def __post_init__(self) -> None:
+        for value, name in ((self.queue, "queue"), (self.id, "id"), (self.scenario, "scenario"), (self.kind, "kind")):
+            require_text(value, name)
+        if not isinstance(self.payload, Mapping):
+            raise TypeError("a work item's payload is a JSON object")
+        if self.serial_key is not None:
+            require_text(self.serial_key, "serial_key")
+        if self.available_at is not None and (
+            isinstance(self.available_at, bool)
+            or not isinstance(self.available_at, (int, float))
+            or not math.isfinite(self.available_at)
+        ):
+            raise ValueError("available_at is a finite time or None")
 
 
 class WorkQueue(ABC):
@@ -439,11 +459,51 @@ class MemoryWorkQueue(WorkQueue):
             return self.sequence
 
 
+class LeaseExtender:
+    """Extends the lease of one held item every third of the lease, on a background thread, while its work runs.
+
+    Values: ``queue`` holds the item; ``item`` is the item that ``worker_id`` holds; ``done`` ends the extension.
+    The thread ends at ``stop`` or when the worker no longer holds the item; a failed extension that is no lost
+    lease is logged and tried again at the next third.
+
+    Purpose: a worker opens one around work that can take longer than the lease (``with LeaseExtender(...)``).
+    """
+
+    def __init__(self, queue: WorkQueue, item: WorkItem, worker_id: str) -> None:
+        self.queue = queue
+        self.item = item
+        self.worker_id = worker_id
+        self.done = threading.Event()
+        self.thread = threading.Thread(target=self.run, name=f"reef-lease-{item.id}", daemon=True)
+
+    def __enter__(self) -> LeaseExtender:
+        self.thread.start()
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.stop()
+
+    def stop(self) -> None:
+        self.done.set()
+        if self.thread.is_alive() and self.thread is not threading.current_thread():
+            self.thread.join()
+
+    def run(self) -> None:
+        while not self.done.wait(self.queue.lease_seconds / 3):
+            try:
+                self.queue.extend_lease(self.item.queue, self.item.id, self.worker_id)
+            except WorkLeaseLost:
+                return
+            except Exception:
+                logger.exception("could not extend the lease of %s", self.item.id)
+
+
 __all__ = [
     "FINAL_STATES",
     "HELD_STATES",
     "WORK_STATES",
     "JsonValue",
+    "LeaseExtender",
     "MemoryWorkQueue",
     "NewWork",
     "WorkConflict",

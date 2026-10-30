@@ -18,7 +18,7 @@ import json
 from abc import abstractmethod
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from threading import RLock
 from typing import cast
@@ -49,9 +49,7 @@ from sqlalchemy.engine import Connection, Engine, RowMapping
 from sqlalchemy.pool import NullPool
 from sqlalchemy.schema import CreateSchema
 
-from reef.core.config import config_metadata, config_option
 from reef.core.errors import ReefError
-from reef.core.plugins import PluginSettings
 from reef.core.served_models import ScenarioModel, ScheduledStop, ServedArtifact, require_text
 from reef.storage.control_lease import ControlLease, ControlLeaseState
 from reef.storage.coordination import Coordination, CoordinationResource
@@ -154,6 +152,10 @@ def canonical_json(value: object) -> str:
 class CoordinationDatabase(CoordinationResource):
     """One database that holds the coordination tables, and its transactions.
 
+    Values: ``tables`` are the coordination tables in this database; the one row of the ``coordination_sequence``
+    table holds the last change number. A subclass gives transactions (``connection``) and whether a read must
+    lock rows to serialize writers (``locks_rows``).
+
     Purpose: ``SQLServedModels``, ``SQLWorkQueue`` and ``SQLControlLease`` share one database object, so a
     deployment opens one engine for all three.
     """
@@ -203,9 +205,18 @@ class CoordinationDatabase(CoordinationResource):
 
 
 class SequenceCounter:
-    """The change counter during one write transaction: each ``next`` is one change."""
+    """The change counter during one write transaction.
+
+    Values: ``value`` is a non-negative integer, the last change number that the transaction has given out; it
+    starts at the stored counter and increases by one at each ``next``.
+
+    Purpose: ``CoordinationDatabase.write`` makes one per transaction and stores ``value`` when the transaction
+    ends; the stores number each change with ``next``, so the change order is the commit order.
+    """
 
     def __init__(self, value: int) -> None:
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError("a change counter is a non-negative integer")
         self.value = value
 
     def next(self) -> int:
@@ -233,14 +244,18 @@ class SQLiteCoordinationDatabase(CoordinationDatabase):
         )
         self.lock = RLock()
         self.open: Connection | None = self.engine.connect()
-        if database != ":memory:":
-            # Several processes of one host open the same file at once; the first switches it to WAL.
-            enable_wal(self.open, database, timeout_seconds=30.0, retry_seconds=0.01)
-            self.open.commit()
-        with self.open.begin():
-            # Serialize the table creation of concurrent openers.
-            self.open.exec_driver_sql("BEGIN IMMEDIATE")
-            self.create(self.open, metadata)
+        try:
+            if database != ":memory:":
+                # Several processes of one host open the same file at once; the first switches it to WAL.
+                enable_wal(self.open, database, timeout_seconds=30.0, retry_seconds=0.01)
+                self.open.commit()
+            with self.open.begin():
+                # Serialize the table creation of concurrent openers.
+                self.open.exec_driver_sql("BEGIN IMMEDIATE")
+                self.create(self.open, metadata)
+        except BaseException:
+            self.close()
+            raise
 
     @property
     def locks_rows(self) -> bool:
@@ -266,14 +281,6 @@ class SQLiteCoordinationDatabase(CoordinationDatabase):
                 self.engine.dispose()
 
 
-@dataclass(frozen=True)
-class PostgresCoordinationSettings(PluginSettings):
-    """The PostgreSQL database and schema of the coordination tables."""
-
-    database_url: str = field(repr=False, metadata=config_metadata("PostgreSQL connection URL."))
-    schema: str = config_option("reef_coordination", help="SQL schema of the coordination tables.")
-
-
 class PostgresCoordinationDatabase(CoordinationDatabase):
     """The coordination tables in a PostgreSQL schema. All services of a deployment name the same schema."""
 
@@ -290,11 +297,15 @@ class PostgresCoordinationDatabase(CoordinationDatabase):
         key = int.from_bytes(
             hashlib.sha256(f"reef-coordination-schema:{schema}".encode()).digest()[:8], "big", signed=True
         )
-        with self.engine.begin() as connection:
-            # Serialize the check-then-create of the schema across services that start together.
-            connection.execute(select(func.pg_advisory_xact_lock(key)))
-            connection.execute(CreateSchema(schema, if_not_exists=True))
-            self.create(connection, metadata)
+        try:
+            with self.engine.begin() as connection:
+                # Serialize the check-then-create of the schema across services that start together.
+                connection.execute(select(func.pg_advisory_xact_lock(key)))
+                connection.execute(CreateSchema(schema, if_not_exists=True))
+                self.create(connection, metadata)
+        except BaseException:
+            self.close()
+            raise
 
     @property
     def locks_rows(self) -> bool:
@@ -475,6 +486,16 @@ class SQLControlLease(ControlLease):
             return self.store(
                 connection, ControlLeaseState(instance_id, held.number, moment + self.lease_seconds), existed=True
             )
+
+    def release(self, instance_id: str, *, now: float | None = None) -> bool:
+        moment = clock(now)
+        with self.database.write() as transaction:
+            connection = transaction[0]
+            held = self.held(connection)
+            if held is None or held.instance_id != instance_id or held.expires_at < moment:
+                return False
+            self.store(connection, ControlLeaseState(instance_id, held.number, moment), existed=True)
+            return True
 
     def current(self) -> ControlLeaseState | None:
         with self.database.read() as connection:
@@ -775,13 +796,20 @@ def open_coordination(
     *,
     agent_record_dir: str,
     record_database_url: str | None,
+    record_database_schema: str = "reef_records",
     lease_seconds: float = 60.0,
 ) -> Coordination:
     """The coordination store of a deployment. It follows ``record_backend``: ``postgres`` uses
-    ``record_database_url`` with the schema ``reef_coordination``; anything else uses a SQLite file in
+    ``record_database_url`` with the schema ``<record_database_schema>_coordination``, so that deployments with
+    their own record schemas keep their own coordination tables; anything else uses a SQLite file in
     ``<agent_record_dir>/coordination``."""
     if record_backend == "postgres":
-        database = open_coordination_database("postgres", directory=None, database_url=record_database_url)
+        database = open_coordination_database(
+            "postgres",
+            directory=None,
+            database_url=record_database_url,
+            schema=f"{record_database_schema}_coordination",
+        )
     else:
         database = open_coordination_database("sqlite", directory=Path(agent_record_dir) / "coordination")
     return Coordination(
@@ -796,7 +824,6 @@ __all__ = [
     "CoordinationDatabase",
     "CoordinationTables",
     "PostgresCoordinationDatabase",
-    "PostgresCoordinationSettings",
     "SQLControlLease",
     "SQLServedModels",
     "SQLWorkQueue",

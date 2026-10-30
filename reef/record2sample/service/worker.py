@@ -28,7 +28,7 @@ from abc import ABC, abstractmethod
 from typing import cast
 
 from reef.execution.workers import ServiceWorker
-from reef.storage.work_queue import JsonValue, NewWork, WorkItem, WorkLeaseLost, WorkQueue
+from reef.storage.work_queue import JsonValue, LeaseExtender, NewWork, WorkItem, WorkLeaseLost, WorkQueue
 
 logger = logging.getLogger(__name__)
 
@@ -121,20 +121,32 @@ class SamplesWorker(ServiceWorker):
 
     def run(self) -> None:
         while not self.stopped.is_set():
-            if not self.run_once():
+            try:
+                took = self.run_once()
+            except Exception:
+                # The store can fail for a moment; the worker tries again after its poll time.
+                logger.exception("samples worker %s could not read the samples queue", self.worker_id)
+                took = False
+            if not took:
                 self.stopped.wait(self.poll_seconds)
 
     def run_once(self) -> bool:
-        """Take one record selection and make its samples; return whether there was one."""
+        """Take one record selection and make its samples; return whether there was one.
+
+        The lease is extended while the producers run, so a long selection stays with this worker.
+        """
         self.queue.requeue_expired()
         item = self.queue.take(SAMPLES_QUEUE, self.worker_id, [RECORD_SELECTION_KIND])
         if item is None:
             return False
-        scenario = cast(str, item.payload["scenario"])
-        component = cast(str, item.payload["component"])
+        scenario = item.scenario
+        component = item.payload.get("component")
         try:
-            self.queue.start(SAMPLES_QUEUE, item.id, self.worker_id)
-            background = self.producers.produce(scenario, component)
+            if not isinstance(component, str) or not component:
+                raise ValueError("a record selection names its component")
+            with LeaseExtender(self.queue, item, self.worker_id):
+                self.queue.start(SAMPLES_QUEUE, item.id, self.worker_id)
+                background = self.producers.produce(scenario, component)
             self.queue.finish(SAMPLES_QUEUE, item.id, self.worker_id, {"background": background})
         except WorkLeaseLost:
             logger.warning("samples worker %s lost %s", self.worker_id, item.id)

@@ -2,16 +2,18 @@
 
 Control decides what each scenario serves and writes it to the ``served_models`` table
 (``reef.storage.served_models``). An inference service reads that table on each request and sends the request to
-the engine that the value names. Reef never changes the weights under a served artifact: to serve other weights,
-control serves a new ``ServedArtifact`` and stops serving the old one later. So the ``artifact_id`` of the value
-tells which weights answered a request, and no other identity crosses services.
+the engine that the value names. The ``artifact_id`` of the value is the only identity that crosses services.
+
+A runtime that serves each artifact under its own model name (an adapter runtime) gives every artifact its own
+value, so a request answered under a value's name was answered by its artifact. A runtime that loads full weights
+in place serves the next artifact under the same URL and name after an activation, so a request in flight across
+the activation can be answered by the next artifact while its record names the old one.
 """
 
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Any
 from urllib.parse import urlparse
 
 #: The name of a scenario's active artifact in ``ScenarioModel``.
@@ -31,11 +33,10 @@ class ServedArtifact:
 
     Values: ``artifact_id`` names an artifact of a scenario. ``url`` is an HTTP(S) base URL without credentials,
     query or fragment: the engine outside the Reef process. ``model_name`` is the name that the engine serves the
-    artifact under, a non-empty string. From ``serve`` to ``stop_serving``, ``(url, model_name)`` answers with the
-    weights of ``artifact_id`` only.
+    artifact under, a non-empty string.
 
-    Purpose: an inference service makes it when it starts serving an artifact (``InferenceServing.serve``);
-    control writes it to ``served_models``, and inference replicas send requests with it.
+    Purpose: a runtime makes it for the artifact that it serves (``InferenceRuntime.served_artifact``); control
+    writes it to ``served_models``, and inference replicas send requests with it.
     """
 
     artifact_id: str
@@ -89,8 +90,10 @@ class ScheduledStop:
 
     Values: ``served`` is a ``ServedArtifact``; ``stop_after`` is a finite time in seconds since the epoch.
 
-    Purpose: control adds one when an activation replaces a served artifact, so that requests that already use the
-    old one end before it stops (``stop_delay_seconds``); control reads the due ones and stops serving them.
+    Purpose: control adds one when it replaces or removes a ``served_models`` value that no row names any more, so
+    that requests that already read the old value end before it stops (``stop_delay_seconds``). Control reads the
+    due ones and deletes them. The runtimes of this version replace their weights in place when they load new
+    ones, so a due stop has no engine to stop.
     """
 
     served: ServedArtifact
@@ -103,9 +106,6 @@ class ScheduledStop:
             raise TypeError("stop_after is a number of seconds")
         if not math.isfinite(self.stop_after):
             raise ValueError("stop_after is a finite time")
-
-    def to_json(self) -> dict[str, Any]:
-        return {"served": self.served.to_json(), "stop_after": self.stop_after}
 
 
 __all__ = ["ACTIVE", "ScenarioModel", "ScheduledStop", "ServedArtifact", "require_text"]

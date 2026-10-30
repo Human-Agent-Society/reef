@@ -25,21 +25,17 @@ from aiohttp import web
 from reef.evaluation.rollout_worker import EvaluationRolloutWorker, ServiceCandidateEndpoints
 from reef.execution.workers import SERVICE_COMPONENTS, ServiceWorkers
 from reef.service.artifact_evaluations import LOCAL_ROLLOUT_WORKERS
-from reef.service.assembly import build_app, build_dispatcher, build_training_service, open_scenario_storage
+from reef.service.assembly import (
+    build_app,
+    build_dispatcher,
+    build_training_service,
+    open_scenario_storage,
+    open_service_coordination,
+)
 from reef.service.auth import create_authentication_middleware
 from reef.service.deploy.service_config import ServiceConfig
 from reef.service.inference_service import build_inference_app
-from reef.storage.coordination import Coordination, instance_id
-from reef.storage.sql_coordination import open_coordination
-
-
-def open_service_coordination(settings: ServiceConfig) -> Coordination:
-    """The deployment's coordination store, on the record backend of ``settings``."""
-    return open_coordination(
-        settings.record_backend,
-        agent_record_dir=settings.agent_record_dir,
-        record_database_url=settings.record_database_url,
-    )
+from reef.storage.coordination import instance_id
 
 
 def health_app(settings: ServiceConfig) -> web.Application:
@@ -77,9 +73,17 @@ def build_component_app(
         except BaseException:
             coordination.close()
             raise
-        app = build_inference_app(
-            coordination.served_models, storage, tokens=settings.tokens, timeout_seconds=settings.inference_timeout_s
-        )
+        try:
+            app = build_inference_app(
+                coordination.served_models,
+                storage,
+                tokens=settings.tokens,
+                timeout_seconds=settings.inference_timeout_s,
+            )
+        except BaseException:
+            storage.close()
+            coordination.close()
+            raise
 
         async def close_inference(app: web.Application) -> None:
             storage.close()
@@ -131,4 +135,4 @@ def build_component_app(
     return app
 
 
-__all__ = ["build_component_app", "health_app", "open_service_coordination"]
+__all__ = ["build_component_app", "health_app"]

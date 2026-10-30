@@ -35,7 +35,11 @@ class ControlLeaseState:
         require_text(self.instance_id, "instance_id")
         if isinstance(self.number, bool) or not isinstance(self.number, int) or self.number < 1:
             raise ValueError("a control lease number is a positive integer")
-        if not math.isfinite(self.expires_at):
+        if (
+            isinstance(self.expires_at, bool)
+            or not isinstance(self.expires_at, (int, float))
+            or not math.isfinite(self.expires_at)
+        ):
             raise ValueError("expires_at is a finite time")
 
 
@@ -44,7 +48,8 @@ class ControlLease(ABC):
 
     Values: the state is None before any take, else one ``ControlLeaseState``.
 
-    Purpose: each control instance calls ``acquire`` at start-up and on a timer; the active one calls ``extend``.
+    Purpose: each control instance calls ``acquire`` at start-up and on a timer; the active one calls ``extend``, and
+    ``release`` when it stops.
     """
 
     def __init__(self, *, lease_seconds: float = 30.0) -> None:
@@ -62,6 +67,11 @@ class ControlLease(ABC):
     def extend(self, instance_id: str, *, now: float | None = None) -> ControlLeaseState | None:
         """Extend the lease when ``instance_id`` holds it and it has not expired; return the new state, or None when
         the instance lost the lease. The number does not change."""
+
+    @abstractmethod
+    def release(self, instance_id: str, *, now: float | None = None) -> bool:
+        """End the lease of ``instance_id`` now, so that a standby instance takes it at once; return whether
+        ``instance_id`` held it. The number does not change."""
 
     @abstractmethod
     def current(self) -> ControlLeaseState | None:
@@ -97,6 +107,15 @@ class MemoryControlLease(ControlLease):
                 return None
             self.state = ControlLeaseState(instance_id, held.number, moment + self.lease_seconds)
             return self.state
+
+    def release(self, instance_id: str, *, now: float | None = None) -> bool:
+        moment = clock(now)
+        with self.lock:
+            held = self.state
+            if held is None or held.instance_id != instance_id or held.expires_at < moment:
+                return False
+            self.state = ControlLeaseState(instance_id, held.number, moment)
+            return True
 
     def current(self) -> ControlLeaseState | None:
         with self.lock:

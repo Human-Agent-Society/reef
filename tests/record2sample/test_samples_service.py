@@ -73,3 +73,28 @@ def test_a_selection_that_fails_is_retried_then_fails():
     assert worker.run_once()
     failed = queue.get(SAMPLES_QUEUE, item.id)
     assert failed.state == "failed" and "judge down" in failed.error
+
+
+class FlakyQueue(MemoryWorkQueue):
+    """A queue that fails once, as a database that drops a connection, and then stops its worker."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.calls = 0
+        self.worker: SamplesWorker | None = None
+
+    def requeue_expired(self, *, now=None):
+        self.calls += 1
+        if self.calls == 1:
+            raise ConnectionError("the database dropped the connection")
+        self.worker.stopped.set()
+        return super().requeue_expired(now=now)
+
+
+@pytest.mark.unit
+def test_a_worker_keeps_running_after_the_store_fails_for_a_moment():
+    queue = FlakyQueue()
+    worker = SamplesWorker(queue, Producers(), worker_id="samples-1", poll_seconds=0.01)
+    queue.worker = worker
+    worker.run()  # returns only because the second look stops it
+    assert queue.calls == 2

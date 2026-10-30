@@ -43,7 +43,7 @@ from reef.service.deploy.service_config import ServiceConfig, service_owned_keys
 from reef.service.deploy.serving import serving_runtime_config
 from reef.service.deploy.training import training_deployment_for
 from reef.service.task_import import DataScenarioStorage, TaskImport
-from reef.storage.coordination import instance_id
+from reef.storage.coordination import Coordination, instance_id
 from reef.storage.data import DataStore
 from reef.storage.observer import ObservedScenarioStorage
 from reef.storage.postgres import PostgresScenarioStorage
@@ -315,6 +315,16 @@ def build_data_store(settings: ServiceConfig, task_files: TaskFileStore) -> Data
     )
 
 
+def open_service_coordination(settings: ServiceConfig) -> Coordination:
+    """The deployment's coordination store, on the record backend, database and schema of ``settings``."""
+    return open_coordination(
+        settings.record_backend,
+        agent_record_dir=settings.agent_record_dir,
+        record_database_url=settings.record_database_url,
+        record_database_schema=settings.record_database_schema,
+    )
+
+
 def build_training_service(settings: ServiceConfig, *, environ: Mapping[str, str] | None = None) -> ServiceSetup:
     """The training service alone: the recipe's training component and the ``TrainingJobWorker`` that runs the jobs
     of the jobs queue on it.
@@ -324,11 +334,7 @@ def build_training_service(settings: ServiceConfig, *, environ: Mapping[str, str
     """
     env = os.environ if environ is None else environ
     services = ServiceSetup(
-        open_coordination(
-            settings.record_backend,
-            agent_record_dir=settings.agent_record_dir,
-            record_database_url=settings.record_database_url,
-        ),
+        open_service_coordination(settings),
         ServiceWorkers(),
         frozenset({"training"}),
     )
@@ -405,11 +411,7 @@ def build_dispatcher(
     selected_recipe = _require_non_empty(settings.recipe, "reef.recipe")
     env = os.environ if environ is None else environ
     services = ServiceSetup(
-        open_coordination(
-            settings.record_backend,
-            agent_record_dir=settings.agent_record_dir,
-            record_database_url=settings.record_database_url,
-        ),
+        open_service_coordination(settings),
         ServiceWorkers(),
         components,
     )
