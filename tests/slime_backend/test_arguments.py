@@ -217,8 +217,7 @@ def test_checkpoint_preflight_preserves_invalid_interval_for_validation(tmp_path
 @pytest.mark.unit
 def test_slime_parses_tensor_parallel_arguments_without_the_workers_cuda_variable(monkeypatch) -> None:
     """Megatron's check wants CUDA_DEVICE_MAX_CONNECTIONS=1 in the parsing process: the HTTP service and each driver."""
-    pytest.importorskip("slime")
-    import slime.utils.arguments as slime_parser
+    slime_parser = pytest.importorskip("slime.utils.arguments")
 
     from reef.train.slime_backend.reef_adapters import slime_arguments, startup
     from reef.train.slime_backend.reef_adapters.megatron import hf_arguments
