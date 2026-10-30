@@ -48,14 +48,16 @@ How Reef implements it
 SFT has three pipeline stages
 (`Training pipeline <../../developer-guide/processors.rst>`__):
 
-- ``SFTRecord2Record`` makes each report its own record set. It never drops a
-  record set unit as stale. An SFT target is fixed text, not tokens that an older model
+- ``SFTRecord2Record`` makes each report its own record set. It never finds a
+  sample stale. An SFT target is fixed text, not tokens that an older model
   version sampled. Thus the stage takes no ``max_staleness`` and refuses the key.
 - ``SFTSamples`` makes one ``TrajectorySample`` from each report. The item has the
   rendered tokens and an empty ``rollout_log_probs``.
-- ``SFTJobData`` puts the tasks into job data in arrival order. One job's
-  data holds ``pipeline.sample2job.config.job_samples`` samples. It also takes
-  uploaded ATIF trajectories (see `Train on whole conversations`_).
+- ``SFTJobData`` puts the samples into job data in store order: reports in
+  arrival order, and uploaded ATIF trajectories in upload order, interleaved
+  by arrival (see `Train on whole conversations`_). With the default
+  ``buffer_size``, one job's data holds
+  ``pipeline.sample2job.config.job_samples`` samples.
 
 The ``sft`` objective (``SftObjective``) sends no advantages. On Slime, the
 ``sft`` loss family in ``reef/train/slime_backend/sft.py`` selects Slime's
@@ -185,7 +187,7 @@ config.
    pipeline.record2sample.config.max_tokens | 0 | the maximum tokens in a sample, prompt and target together. The recipe skips a longer report and counts it in ``sft_overflow_reports``. 0 disables the limit. Set it to the trainer's sequence length.
    pipeline.record2sample.config.chat_template_kwargs | {} | the chat template arguments of every render, for example ``{enable_thinking: false}``. Set ``inference.handler-config.chat_template_kwargs`` to the same value, so the samples render as the engine serves.
    pipeline.sample2job.config.job_samples | required | the samples of one job. The example sets it to ``training.config.global_batch_size``, so one job is one optimizer step.
-   pipeline.sample2job.config.buffer_size | four times ``job_samples`` | the most samples that wait for a job. Reef releases the oldest reports beyond it.
+   pipeline.sample2job.config.buffer_size | ``job_samples`` | the most samples that one job takes. Later samples wait in the sample store for the next jobs.
    training.config.global_batch_size | none | the samples in one optimizer step. The example passes it to Slime as ``--global-batch-size``.
 
 A hybrid-thinking template such as Qwen3.5's or Qwen3.8's renders thinking
@@ -264,19 +266,37 @@ with every job:
 steps of a job, and at its end. Without it, a job saves one checkpoint at its
 end. Each checkpoint is a candidate that Reef can publish.
 
+SFT, then RL on uploaded tasks
+------------------------------
+
+The recipe gives parameters to trajectory jobs only. An uploaded train task
+(``POST /reef/scenarios/{scenario}/tasks?split=train``) trains in ``manual``
+mode, for an instruction whose ``parameters`` give its job's method and
+rollout. Thus one scenario runs SFT first and then RL:
+
+1. Set the scenario to ``manual`` and upload the trajectories and the tasks.
+2. Put the trajectories in the manual buffer and send an instruction. The job
+   trains them with SFT.
+3. Put the tasks in the manual buffer and send an instruction with
+   ``{"method": {"objective": "task_group"}, "rollout": {"rollouts_per_task": 4}}``
+   in ``parameters``. The job rolls the tasks out and trains on the rollouts.
+
+The training component must run task jobs: Tinker does, Slime does not. See
+`Manual training <../../reference/http-api.rst#manual-training>`__ for the
+instruction and `Choose the samples that train
+<../../reference/http-api.rst#choose-the-samples-that-train>`__ for the buffer.
+
 Train SFT for some jobs of another recipe
 -----------------------------------------
 
-A recipe can train some jobs with SFT, for example an SFT warmup before RL.
-Its ``JobPlan`` puts
-``TrainingMethod("reef.recipe.sft:SftObjective")`` in the ``method``
-parameter of those jobs (`Switch
-methods within a run
-<../../developer-guide/write-a-recipe.rst#switch-methods-within-a-run>`__).
+A recipe can train some jobs with SFT, for example its trajectory jobs, and its
+task jobs with a policy objective. Its ``parameters_by_kind()``
+puts ``TrainingMethod("reef.recipe.sft:SftObjective")`` in the ``method``
+parameter of the jobs of that kind (`Train each kind of sample with its own
+method
+<../../developer-guide/write-a-recipe.rst#train-each-kind-of-sample-with-its-own-method>`__).
 The pipeline of that recipe must make samples that the ``sft`` family can
-train. The first job after the SFT phase can restart training
-(``JobRequest(..., restart=True)``): it keeps the weights and starts a new
-optimizer state and learning-rate schedule.
+train.
 
 Limitations
 -----------

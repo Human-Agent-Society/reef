@@ -122,8 +122,8 @@ class FailedTask:
     ``HarborTask``, ``error`` a non-empty text and ``infrastructure_failure`` a
     bool. ``infrastructure_failure`` is true when the task could not run at all,
     for example because the sandbox failed or its result was lost; it is not a
-    failure of the solver. It is false when the generator service refused the
-    task.
+    failure of the solver. The built-in recipe sends only infrastructure failures:
+    a task job that reports no rewards for the task.
     Purpose: the recipe sends it for a train task whose first rollout ran no
     rollout.
     """
@@ -175,7 +175,7 @@ class TaskGenerator(Plugin, ABC):
 
     @abstractmethod
     async def validate(self, task: HarborTask) -> TaskValidationResult:
-        """Check one generated task before the recipe runs its rollouts.
+        """Check one generated task before the recipe publishes and trains it.
 
         Return task defects as validation errors. Raise when the checks cannot
         run; the exception stops the round. The task is a value: a validation

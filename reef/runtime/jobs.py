@@ -321,19 +321,6 @@ class TrainingComponent(ABC):
         every release.
         """
 
-    def fresh_start(self, start: str) -> str:
-        """A start with the weights of ``start`` and no training state; Reef calls it when a plan restarts training.
-
-        The returned start holds the same weights as ``start``. A job from it trains with a new optimizer
-        state, its learning-rate schedule from step 0, and an empty objective
-        state. The component writes it durably. The same ``start`` always
-        gives the same result, so a resubmission after the service restarts
-        names the same job. Raise ``ValueError`` when the component cannot
-        drop the training state of these weights. The default refuses every
-        start.
-        """
-        raise ValueError(f"the {self.name} training component cannot restart training from {start!r}")
-
     @abstractmethod
     def submit(self, job: TrainingJob) -> None:
         """Record ``job`` durably and run it in the background; a second submit of its ID does nothing.

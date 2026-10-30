@@ -107,9 +107,10 @@ and are grouped together: they all diverged from the task seed.
 From a report to a gradient:
 
 1. **Grouping.** The record stage, `CoralRecord2Record`, files each report
-   under its `parent_hash` with `CoralGrouping`. A group releases once
-   `group_size` scored siblings accrue. The default is 4; the demo's
-   `serve.yaml` sets 2:
+   under its `parent_hash` with `CoralGrouping`. A group is ready once
+   `group_size` scored siblings accrue. Reef then stores the group's samples,
+   and the group is fixed: later siblings of the same parent form a new
+   group. The default is 4; the demo's `serve.yaml` sets 2:
 
    ```yaml
    pipeline:
@@ -132,7 +133,7 @@ From a report to a gradient:
    revisions is discarded whole, because relative rewards only compare
    fairly within one policy version. A malformed attempt raises an explicit training data error; discarded
    groups are visible in the processor's `status()` (`discarded_groups`).
-4. **The step.** A released group becomes one training unit. The recipe
+4. **The step.** A ready group trains in one job. The recipe
    reuses the `tttd` training objective (grouped leave-one-out advantages) and
    the `tttd` Slime loss family, CORAL sibling groups have the same shape
    as TTT-Discover steps, so the recipe adds only the group barrier. A group

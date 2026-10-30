@@ -283,7 +283,8 @@ Training job
 ------------
 
 One ``TrainingJob``: its job data, the weights it starts from, and the backend's
-parameters. The recipe's ``JobPlan`` chooses the parameters of each job. The
+parameters. The recipe gives the parameters of each job, by the kind of its
+samples. The
 job ID is a hash of the scenario, the backend, the start, the records of the
 job's data and the parameters, so a retry submits the same job.
 

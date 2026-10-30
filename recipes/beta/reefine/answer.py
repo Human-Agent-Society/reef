@@ -87,7 +87,7 @@ HARNESS_SECTION = prompt("harness")
 NO_EXTENSIONS_SECTION = prompt("no_extensions")
 #: The platforms a change serves on a harness that runs on the person's machine.
 PLATFORMS_SENTENCE = prompt("platforms")
-#: The section of the request prompt and the agent's prompt carrying the failures a step in training_mode hybrid
+#: The section of the request prompt and the agent's prompt carrying the failures a step in training_mode manual
 #: hands over beside the request.
 FAILURES_SECTION = prompt("failing_requests")
 #: The request prompt's section carrying the extension API reference.
