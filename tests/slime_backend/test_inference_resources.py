@@ -1,8 +1,11 @@
-"""The Slime component's Ray session and its one reservation of the training GPUs and its own rollout engines'."""
+"""A Slime driver's Ray session and its placement group, which Slime makes and splits."""
+
+import sys
+import types
 
 import pytest
 
-from reef.runtime.executor.placement import GpuBundles, ModelGpuLayout
+from reef.runtime.executor.placement import GpuBundles
 from reef.train.slime_backend import resources
 from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
 
@@ -17,7 +20,7 @@ def ray_session(monkeypatch):
             self.failure = None
             self.initialized = False
             self.options = None
-            self.layout = None
+            self.args = None
 
         def event(self, name):
             self.events.append(name)
@@ -35,19 +38,17 @@ def ray_session(monkeypatch):
         session.initialized = False
         session.event("disconnect")
 
-    class Reservation:
-        training = GpuBundles("group", [0, 1], [0, 1])
-        inference = GpuBundles("group", [2, 3], [2, 3])
-
-        def release(self):
-            session.event("release")
-
-    def reserve(layout):
-        session.layout = layout
+    def create_placement_groups(args):
+        session.args = args
         session.event("reserve")
-        return Reservation()
+        # Slime's split of one group: the critic shares the actor's bundles, the engines take the ones after.
+        actor = ("group", [0, 1], [0, 1])
+        return {"actor": actor, "critic": actor if args.use_critic else None, "rollout": ("group", [], [])}
 
-    monkeypatch.setattr(resources, "reserve_model_gpus", reserve)
+    placement = types.ModuleType("slime.ray.placement_group")
+    placement.create_placement_groups = create_placement_groups  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "slime.ray.placement_group", placement)
+    monkeypatch.setattr(resources.ray.util, "remove_placement_group", lambda group: session.event("release"))
     monkeypatch.setattr(resources.ray, "is_initialized", lambda: session.initialized)
     monkeypatch.setattr(resources.ray, "init", connect)
     monkeypatch.setattr(resources.ray, "shutdown", disconnect)
@@ -55,13 +56,11 @@ def ray_session(monkeypatch):
     return session
 
 
-def component_resources(*, use_critic=False, colocate=False, rollout_num_gpus=0):
+def component_resources(*, use_critic=False):
     args = SlimeArguments(
         actor_num_nodes=1,
         actor_num_gpus_per_node=2,
         use_critic=use_critic,
-        colocate=colocate,
-        rollout_num_gpus=rollout_num_gpus,
     )
     return resources.SlimeDeploymentResources(
         args, ray_address="external", namespace="test", runtime_env={"env_vars": {"PYTHONPATH": "/repo"}}
@@ -69,16 +68,19 @@ def component_resources(*, use_critic=False, colocate=False, rollout_num_gpus=0)
 
 
 @pytest.mark.parametrize("use_critic", [False, True])
-def test_the_component_connects_once_reserves_its_training_gpus_and_releases_them_before_disconnecting(
+def test_the_driver_connects_once_reserves_slimes_placement_group_and_releases_it_before_disconnecting(
     ray_session, use_critic
 ):
     owned = component_resources(use_critic=use_critic)
     owned.start()
-    # The serving engines reserve their own GPUs on the inference component: the component reserves training GPUs.
-    assert ray_session.layout == ModelGpuLayout(training_gpus=2, inference_gpus=0)
-    # The actor and the critic share the training bundles; without a rollout group there are no engines.
-    training = GpuBundles("group", [0, 1], [0, 1])
-    assert owned.placement_groups == {"actor": training, "critic": training if use_critic else None, "rollout": None}
+    # Slime makes and splits the job's placement group from its own arguments.
+    assert ray_session.args is owned.args
+    actor = GpuBundles("group", [0, 1], [0, 1])
+    assert owned.placement_groups == {
+        "actor": actor,
+        "critic": actor if use_critic else None,
+        "rollout": GpuBundles("group", [], []),
+    }
     assert ray_session.options == {
         "address": "external",
         "namespace": "test",
@@ -135,31 +137,3 @@ def test_closing_retires_the_deployments_processes_before_disconnecting(ray_sess
         with pytest.raises(RuntimeError, match="unconfirmed"):
             owned.close()
     assert ray_session.events[-3:] == ["release", "retire-processes", "disconnect"]
-
-
-@pytest.mark.parametrize(
-    ("rollout_num_gpus", "colocate", "layout"),
-    [(0, False, ModelGpuLayout(16, 0)), (4, False, ModelGpuLayout(16, 4)), (8, True, ModelGpuLayout(16, 0))],
-)
-def test_the_reservation_adds_the_gpus_of_rollout_engines_that_are_not_colocated(rollout_num_gpus, colocate, layout):
-    args = SlimeArguments(
-        actor_num_nodes=2, actor_num_gpus_per_node=8, rollout_num_gpus=rollout_num_gpus, colocate=colocate
-    )
-    assert resources.model_gpu_layout(args) == layout
-
-
-@pytest.mark.parametrize(
-    ("colocate", "rollout_num_gpus", "rollout"),
-    [
-        # Colocated engines take the first training bundles; other engines the bundles after the training ones.
-        (True, 1, GpuBundles("group", [0], [0])),
-        (False, 2, GpuBundles("group", [2, 3], [2, 3])),
-    ],
-)
-def test_the_rollout_engines_get_their_bundles_from_the_one_reservation(
-    ray_session, colocate, rollout_num_gpus, rollout
-):
-    owned = component_resources(colocate=colocate, rollout_num_gpus=rollout_num_gpus)
-    owned.start()
-    assert owned.placement_groups["rollout"] == rollout
-    owned.close()

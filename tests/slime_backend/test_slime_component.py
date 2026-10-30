@@ -38,12 +38,12 @@ from reef.train.slime_backend.algorithm import SlimeAlgorithm, TrainResult
 from reef.train.slime_backend.component import (
     ROLLOUT_FILE,
     START_STATE,
+    SlimeJobRunner,
     SlimeRound,
     SlimeSettings,
     SlimeStart,
-    SlimeTrainingComponent,
     WorkerTrainingSettings,
-    create_slime_component,
+    start_slime_runner,
 )
 from reef.train.slime_backend.loss_families import register_loss_family, resolve_loss_family, unregister_loss_family
 from reef.train.slime_backend.reef_adapters import startup
@@ -201,7 +201,7 @@ class Stack:
         )
         self.critic = FakeTrainGroup(None, megatron_root=self.storage.critic_root) if critic else None
         self.processor = RecordingBatchProcessor()
-        self.component = SlimeTrainingComponent(
+        self.component = SlimeJobRunner(
             self.args,
             self.group,
             self.critic,
@@ -212,6 +212,7 @@ class Stack:
             train_timeout_s=train_timeout_s,
             rollout_group=rollout_group,
         )
+        self.component.start_jobs()
         start_rollout_id = int(self.args.start_rollout_id or 0)
         self.start = (
             self.component.base_start
@@ -393,16 +394,16 @@ def test_a_job_starts_only_from_the_weights_the_workers_hold(tmp_path, stacks) -
     other = tmp_path / "rollout_5"
     SlimeStart(5, None, {}, None).write(other)
     job = TrainingJob("elsewhere", "slime", str(other), batch_for(0), parameters(TrainingMethod("sft")))
-    with pytest.raises(ValueError, match="hold the startup weights; a job cannot start from rollout 5"):
+    with pytest.raises(ValueError, match="continues the startup weights; a job cannot start from rollout 5"):
         stack.component.submit(job)
     stack.run(TrainingMethod("sft"), step=0)
     # After a job, the workers hold its rollout: a job from any other start is refused.
     job = TrainingJob("other", "slime", str(other), batch_for(1), parameters(TrainingMethod("sft")))
-    with pytest.raises(ValueError, match="hold the weights of rollout 0"):
+    with pytest.raises(ValueError, match="continues the weights of rollout 0"):
         stack.component.submit(job)
     # A start without a rollout names the startup weights, which the workers no longer hold.
     job = TrainingJob("again", "slime", stack.component.base_start, batch_for(1), parameters(TrainingMethod("sft")))
-    with pytest.raises(ValueError, match="hold the weights of rollout 0; a job cannot start from the startup"):
+    with pytest.raises(ValueError, match="continues the weights of rollout 0; a job cannot start from the startup"):
         stack.component.submit(job)
     with pytest.raises(KeyError):
         stack.component.status("other")
@@ -420,7 +421,7 @@ def test_restarted_workers_continue_from_the_checkpoint_they_loaded_and_refuse_t
     SlimeStart(5, None, {}, None).write(other)
     for start in (str(other), stack.component.base_start):
         job = TrainingJob("other", "slime", start, batch_for(0), parameters(TrainingMethod("sft")))
-        with pytest.raises(ValueError, match="hold the weights of rollout 2"):
+        with pytest.raises(ValueError, match="continues the weights of rollout 2"):
             stack.component.submit(job)
 
     assert stack.start == str(tmp_path / "reef-starts" / "rollout_2")
@@ -438,7 +439,7 @@ def test_a_queued_job_whose_start_the_workers_left_fails_when_it_runs(tmp_path, 
     # Both jobs named the startup weights when they were submitted; the first one moved the workers on.
     stack.run(TrainingMethod("sft"), step=0)
     late = TrainingJob("late", "slime", stack.component.base_start, batch_for(1), parameters(TrainingMethod("sft")))
-    with pytest.raises(ValueError, match="hold the weights of rollout 0; a job cannot start from the startup"):
+    with pytest.raises(ValueError, match="continues the weights of rollout 0; a job cannot start from the startup"):
         stack.component.run(late, tmp_path / "late")
     assert len(stack.group.train_calls) == 1
 
@@ -860,7 +861,7 @@ def test_storage_preflight_resolves_the_paths_and_refuses_a_storage_it_cannot_fi
 def test_a_critic_group_needs_the_storages_critic_root(tmp_path) -> None:
     for critic, critic_root in ((FakeTrainGroup(None), None), (None, tmp_path / "megatron-critic")):
         with pytest.raises(ValueError, match="critic root: give both or neither"):
-            SlimeTrainingComponent(
+            SlimeJobRunner(
                 worker_args(tmp_path),
                 FakeTrainGroup(str(tmp_path / "hf" / "{rollout_id}")),
                 critic,
@@ -882,7 +883,7 @@ def test_closing_releases_the_critic_then_the_actor_then_the_resources(tmp_path)
     actor = FakeTrainGroup(str(tmp_path / "hf" / "{rollout_id}"))
     critic = FakeTrainGroup(None, release_error=RuntimeError("critic unavailable"))
     actor.events = critic.events = events
-    component = SlimeTrainingComponent(
+    component = SlimeJobRunner(
         worker_args(tmp_path),
         actor,
         critic,
@@ -907,7 +908,7 @@ def test_closing_releases_the_critic_then_the_actor_then_the_resources(tmp_path)
 
 @pytest.fixture
 def build_calls(tmp_path, monkeypatch):
-    """Replace Slime's parser, the Ray resources and the workers; record what ``create_slime_component`` gives them."""
+    """Replace Slime's parser, the Ray resources and the workers; record what ``start_slime_runner`` gives them."""
     calls: dict[str, Any] = {"events": []}
     args = worker_args(
         tmp_path,
@@ -1077,7 +1078,7 @@ def test_the_batch_processor_registers_a_familys_keys_and_refuses_another_dtype(
 
 @pytest.mark.unit
 def test_the_component_starts_its_workers_on_the_training_gpus_without_rollout_engines(build_calls) -> None:
-    component = create_slime_component(settings())
+    component = start_slime_runner(settings())
     try:
         # Reef's retention options never reach Slime's parser.
         assert build_calls["arguments"] == ["--lr=1e-06"]
@@ -1124,10 +1125,14 @@ def test_the_rollout_group_starts_before_the_workers_and_they_get_its_manager(bu
 
     monkeypatch.setattr(slime_component, "SlimeDeploymentResources", Resources)
     monkeypatch.setattr(slime_component, "SlimeRolloutGroup", RolloutGroup)
-    component = create_slime_component(settings())
+    # A task job's arguments give Slime's rollout engines GPUs.
+    build_calls["args"].rollout_num_gpus = 2
+    component = start_slime_runner(settings())
     try:
         # Colocated engines take and release their GPU memory before the workers load the model.
         assert events == ["start", "rollout-start:rollout-bundles"]
+        # The engines load Reef's SGLang plugin, which opens the weight-update session Slime's transfer needs.
+        assert build_calls["resources"]["runtime_env"]["env_vars"]["SGLANG_REEF_PLUGIN"] == "1"
         assert build_calls["groups"][0].events == ["set_rollout_manager:manager"]
         assert isinstance(component.rollout_group, RolloutGroup)
     finally:
@@ -1137,7 +1142,7 @@ def test_the_rollout_group_starts_before_the_workers_and_they_get_its_manager(bu
     build_calls["group_error"] = True
     events.clear()
     with pytest.raises(RuntimeError, match="workers failed to start"):
-        create_slime_component(settings())
+        start_slime_runner(settings())
     assert events == ["start", "rollout-start:rollout-bundles", "rollout-close", "close"]
 
 
@@ -1145,14 +1150,14 @@ def test_the_rollout_group_starts_before_the_workers_and_they_get_its_manager(bu
 def test_a_failed_worker_start_closes_the_resources(build_calls) -> None:
     build_calls["group_error"] = True
     with pytest.raises(RuntimeError, match="workers failed to start"):
-        create_slime_component(settings())
+        start_slime_runner(settings())
     assert build_calls["events"] == ["start", "close"]
 
 
 @pytest.mark.unit
 def test_a_recipe_with_an_unknown_loss_family_is_refused_before_slime_parses(build_calls) -> None:
     with pytest.raises(RuntimeError, match="declares unsupported loss family 'grpo'"):
-        create_slime_component(settings("grpo"))
+        start_slime_runner(settings("grpo"))
     assert "arguments" not in build_calls
 
 
@@ -1162,7 +1167,6 @@ def test_a_recipe_with_an_unknown_loss_family_is_refused_before_slime_parses(bui
     [
         ({"debug_train_only": True}, "debug-train-only"),
         ({"debug_rollout_only": True}, "debug-rollout-only"),
-        ({"colocate": True, "rollout_num_gpus": 8}, "1 to 4 of the training GPUs"),
         ({"rollout_num_gpus": 2, "megatron_lora_rank": 8}, "remove --megatron-lora-rank"),
         ({"num_rollout": 0}, "positive --num-rollout"),
         ({"save_hf": "/checkpoints/hf"}, "rollout_id"),

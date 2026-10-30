@@ -340,8 +340,8 @@ def test_slime_training_component_import_does_not_load_megatron_stack() -> None:
         "ray = types.ModuleType('ray'); "
         "ray.remote = lambda **kwargs: lambda actor: actor; "
         "sys.modules['ray'] = ray; "
-        "from reef.train.slime_backend.component import SlimeTrainingComponent; "
-        "assert SlimeTrainingComponent; "
+        "from reef.train.slime_backend.component import SlimeJobRunner, SlimeTrainingComponent; "
+        "assert SlimeJobRunner and SlimeTrainingComponent; "
         "assert not [name for name in sys.modules if name.startswith(('megatron', 'torch', 'slime.ray'))]"
     )
 

@@ -133,16 +133,8 @@ def test_cli_and_yaml_share_selected_recipe_and_native_option_parsing(tmp_path):
             "remove inference.handler-factory",
         ),
         ({"inference.backend": "none", "teacher.model-path": "/models/teacher"}, "remove teacher.model-path"),
-        (
-            {"inference.backend": "none", "training.options.sglang-context-length": "1024"},
-            "configures Slime's rollout engines",
-        ),
         ({"inference.tensor-parallel-size": "-1"}, "must be positive"),
         ({"inference.num-gpus": "1.5"}, "valid int"),
-        ({"training.options.rollout-num": "2"}, "abbreviates a rollout group option"),
-        ({"training.options.sglang-context-length": "1024"}, "configures Slime's rollout engines"),
-        ({"training.options.sglang-config": "engines.yaml"}, "configures Slime's rollout engines"),
-        ({"training.options.rollout-external": "true"}, "Slime does not start"),
         ({"inference.options.config": "engines.yaml"}, "managed by Reef"),
         ({"inference.options.pp-size": "2"}, "managed by Reef"),
         ({"inference.options.sglang-context-length": "1024"}, "without the sglang- prefix"),
@@ -514,7 +506,7 @@ def test_inference_cli_over_yaml_reaches_the_serving_engines_and_not_slime(tmp_p
     argv = slime_argv(config)
     assert argv == slime_argv(file_only)
     # Slime starts no engine and receives no engine flag.
-    assert "--rollout-num-gpus=0" in argv
+    assert not any(argument.startswith("--rollout-num-gpus") for argument in argv)
     assert not [argument for argument in argv if argument.startswith(("--sglang-", "--rollout-num-gpus-per-engine"))]
     assert all(not key.startswith(("rollout-num", "sglang-")) for key in config["reef"]["training_backend_options"])
     assert raw["inference"]["num-gpus"] == 2
@@ -526,17 +518,11 @@ def test_inference_cli_over_yaml_reaches_the_serving_engines_and_not_slime(tmp_p
     assert serving["options"] == {"mem-fraction-static": "0.6", "router-port": 30000, "disable-cuda-graph": False}
 
 
-def test_colocation_is_slimes_own_and_its_engine_options_need_a_rollout_group(tmp_path):
+def test_slimes_own_engine_and_placement_options_reach_slime_unread(tmp_path):
     raw = training_config()
-    raw["training"]["options"]["offload-rollout"] = True
-    with pytest.raises(
-        DeployConfigError, match=r"training\.options\.offload-rollout configures Slime's rollout engines"
-    ):
-        resolve_deployment_config(raw, None, tmp_path / "serve.yaml")
-    # With colocate, the engine options configure the component's own rollout engines on its training GPUs.
-    raw["training"]["options"]["colocate"] = True
+    raw["training"]["options"].update({"colocate": True, "offload-rollout": True, "sglang-mem-fraction-static": "0.5"})
     config, _ = resolve_deployment_config(raw, None, tmp_path / "serve.yaml")
-    assert config["reef"]["training_backend_options"]["colocate"] is True
+    assert {"--colocate", "--offload-rollout", "--sglang-mem-fraction-static=0.5"} <= set(slime_argv(config))
 
 
 @pytest.mark.parametrize("batch_size", [None, 0, "0", "1.5", "two", True])
@@ -588,7 +574,7 @@ def test_vllm_serving_engines_get_their_options_and_slime_gets_no_engine_flags(t
     component = config["services"][0]
     assert component["command"][component["command"].index("--engine") + 1] == "vllm"
     argv = slime_argv(config)
-    assert "--rollout-num-gpus=0" in argv
+    assert not any(argument.startswith("--rollout-num-gpus") for argument in argv)
     assert not any(argument.startswith("--sglang-") for argument in argv)
     serving = serving_config(config)
     assert (serving["engine"], serving["options"]) == ("vllm", {"max-model-len": "4096"})
@@ -607,7 +593,7 @@ def test_a_deployment_without_an_inference_engine_trains_on_every_gpu(tmp_path):
     assert reef["inference_backend"] == "none"
     assert not reef.get("inference_num_gpus") and not reef.get("inference_options")
     argv = slime_argv(config)
-    assert "--rollout-num-gpus=0" in argv
+    assert not any(argument.startswith("--rollout-num-gpus") for argument in argv)
     assert "--actor-num-gpus-per-node=8" in argv
     assert not any(
         argument.startswith(("--colocate", "--offload", "--sglang-", "--router-", "--rollout-num-gpus-per-engine"))

@@ -113,7 +113,8 @@ services:
 - ``distill-teacher``: a frozen SGLang teacher engine, only when a ``teacher``
   section is set.
 - ``reef``: the HTTP service. It hosts the Slime training component, which
-  reserves the training GPUs on Ray and starts Slime's workers.
+  starts a Slime driver on Ray for each job. The driver reserves the job's
+  GPUs, starts Slime's workers and releases the GPUs when the job ends.
 
 The inference component and the HTTP service join the same Ray cluster
 (``RAY_ADDRESS`` or ``training.ray-address``), so the engines and the training
@@ -259,15 +260,13 @@ Encoder engines keep the weights they started with. Published weights load
 only into the other engines of the model. When a model with an encoder group
 trains, keep its vision encoder frozen.
 
-Slime's engine options in ``training.options`` (``rollout-num-gpus``,
-``colocate``, ``rollout-num-gpus-per-engine``, ``offload-rollout``,
-``sglang-*`` and ``router-*``) configure the training component's own rollout
-engines, which only task jobs call (see `Task jobs on Slime`_); they never
-configure serving. Without ``rollout-num-gpus`` or ``colocate`` the component
-has no rollout engines, and the other engine options are refused, as are
-``rollout-external`` and abbreviations of ``rollout-num-gpus`` and
-``colocate``. Reef's serving never shares GPUs with training, so
-``training.colocate`` is refused. Native options cannot override
+Slime's own engine and placement options in ``training.options``
+(``rollout-num-gpus``, ``colocate``, ``sglang-*``, ``router-*`` and the rest)
+reach each job's Slime driver unread. They configure the rollout engines that a
+task job's driver starts (see `Task jobs on Slime`_), never the serving
+engines; a driver of any other job starts no rollout engines. Reef's serving
+never shares GPUs with training, so ``training.colocate`` is refused. Native
+options cannot override
 managed model, placement or parallelism settings. Pipeline/data parallel and
 prefill/decode-disaggregated inference topologies are not supported by this
 managed path yet. Reef binds ``training.options.hf-checkpoint`` to
@@ -284,12 +283,15 @@ inference component starts the engines from that data. See
 <../developer-guide/executors.rst#independent-sglang-backend>`__ for the
 boundary.
 
-Training GPU capacity is set in ``training.options.actor-num-*``; the physical
-node size is ``training.options.num-gpus-per-node``. The inference component
-reserves ``inference.num-gpus`` GPUs on the same Ray cluster, and the
-inference control process takes one Ray CPU and no GPU. When a training worker
-fails, the running job fails and later jobs fail too; restart the service, and
-the Slime component loads its latest checkpoint again. Engine failures are
+Training GPU capacity is set in ``training.options.actor-num-*`` (and, for
+rollout engines on GPUs of their own, ``rollout-num-gpus``); the physical node
+size is ``training.options.num-gpus-per-node``. Each job's driver reserves those
+GPUs while it runs, so between jobs they are free, and a job waits while
+another reservation holds them. The inference component reserves
+``inference.num-gpus`` GPUs on the same Ray cluster, and the inference control
+process takes one Ray CPU and no GPU. When a training worker fails, the running
+job fails, and the next job's driver starts again from the latest checkpoint.
+A configuration error that only Slime's workers detect fails the first job. Engine failures are
 handled by the inference component (see `Engine supervision
 <../developer-guide/executors.rst#engine-supervision>`__).
 
@@ -444,8 +446,9 @@ For Slime, a training stack can contain:
 
 Override an individual native flag with
 ``reef serve -c training.yaml --training.options.lr 0.000002``. The normalized
-options reach the Slime training component in the HTTP service through the
-effective config. The component takes out Reef's own options, such as
+options reach each job's Slime driver through the effective config. The
+training component parses them once at startup, which refuses a malformed
+option before the first job. The driver takes out Reef's own options, such as
 ``--reef-checkpoint-policy``, and the loss family's options, then passes the
 rest to Slime's native parser.
 
@@ -1460,9 +1463,9 @@ job's start weights, and the Slime component on its own rollout engines (see
 Task jobs on Slime
 ~~~~~~~~~~~~~~~~~~
 
-The Slime component runs task jobs on its own rollout engines: Slime's
-``RolloutManager`` and its SGLang engines, which the component starts with its
-workers and drives as Slime's own training loop does. Reef's serving never
+The Slime component runs task jobs on Slime's own rollout engines: Slime's
+``RolloutManager`` and its SGLang engines, which a task job's driver starts with
+its workers and drives as Slime's own training loop does. Reef's serving never
 calls them. ``training.options.rollout-num-gpus`` gives the engines GPUs of
 their own; ``training.options.colocate`` puts them on the training GPUs (all
 of them, unless ``rollout-num-gpus`` names fewer), and Slime moves the GPU
@@ -1483,8 +1486,9 @@ A task job loads the workers' weights into the engines, runs the rollouts the
 ``rollout`` parameter describes, frees the colocated engines' memory, and
 trains the samples of each task's group with the job's objective. The
 engines answer OpenAI text chat: system, user and assistant text messages, no
-tools. A LoRA actor cannot have rollout engines, since Reef's adapters do not
-reach Slime's weight transfer.
+tools. A task job whose options give the engines no GPUs fails. A LoRA actor
+cannot have rollout engines, since Reef's adapters do not reach Slime's weight
+transfer.
 
 Reef calls the generator class's ``from_config(config, *, scenario, environ)``
 once for each scenario. A generator that calls a remote service reads its

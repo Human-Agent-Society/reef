@@ -162,16 +162,13 @@ def test_slime_args_accept_a_run_the_training_component_can_run(overrides) -> No
 @pytest.mark.parametrize(
     ("overrides", "refusal"),
     [
-        # Colocated engines run on the training GPUs, so they cannot need more of them.
-        ({"colocate": True, "rollout_num_gpus": 8}, "1 to 4 of the training GPUs"),
-        ({"colocate": True, "rollout_num_gpus": 0}, "1 to 4 of the training GPUs"),
         # Reef's LoRA adapters are not wired into Slime's weight transfer to its engines.
         ({"rollout_num_gpus": 2, "megatron_lora_rank": 32}, "remove --megatron-lora-rank"),
         ({"debug_train_only": True}, "--debug-train-only"),
         ({"debug_rollout_only": True}, "--debug-rollout-only"),
         ({"num_rollout": 0}, "positive --num-rollout"),
         ({"save_hf": "/tmp/hf/checkpoint"}, "{rollout_id}"),
-        # The workers keep running between jobs, so nothing releases and recreates them.
+        # The workers keep running through a job, so nothing releases and recreates them.
         ({"release_train": True}, "remove --release-train"),
     ],
 )

@@ -39,9 +39,15 @@ def settings_of(config: dict) -> dict:
     return service_config_from_mapping(config).__dict__
 
 
-def test_native_training_options_become_slime_flags_and_slime_starts_no_engine():
+def test_native_training_options_become_slime_flags_unread():
     settings = {
-        "training_backend_options": {"lr": 1e-6, "use-critic": True},
+        # Slime's own engine and placement options reach Slime as they are; Reef reads none of them.
+        "training_backend_options": {
+            "lr": 1e-6,
+            "use-critic": True,
+            "colocate": True,
+            "sglang-mem-fraction-static": 0.5,
+        },
         # The inference section configures the serving engines, never Slime.
         "inference_num_gpus": 4,
         "tensor_parallel_size": 2,
@@ -50,25 +56,9 @@ def test_native_training_options_become_slime_flags_and_slime_starts_no_engine()
     assert slime_arguments(settings, loss_family="sao", environ={}) == [
         "--lr=1e-06",
         "--use-critic",
-        "--rollout-num-gpus=0",
+        "--colocate",
+        "--sglang-mem-fraction-static=0.5",
     ]
-
-
-@pytest.mark.parametrize(
-    ("options", "flags"),
-    [
-        ({"colocate": True, "sglang-mem-fraction-static": 0.5}, {"--colocate", "--sglang-mem-fraction-static=0.5"}),
-        (
-            {"rollout-num-gpus": 2, "rollout-num-gpus-per-engine": 1},
-            {"--rollout-num-gpus=2", "--rollout-num-gpus-per-engine=1"},
-        ),
-    ],
-)
-def test_a_rollout_group_gets_slimes_own_engine_options(tmp_path, options, flags):
-    # Slime's own options configure the component's rollout engines, which only task jobs call.
-    config = deployment_config(tmp_path, training={"options": {"global-batch-size": 4, **options}})
-    arguments = slime_arguments(settings_of(config), loss_family="sao", environ={})
-    assert flags <= set(arguments) and "--rollout-num-gpus=0" not in arguments
 
 
 def test_slime_trains_and_the_inference_section_serves_its_checkpoints_on_an_inference_component(tmp_path):
@@ -105,20 +95,6 @@ def test_slime_trains_and_the_inference_section_serves_its_checkpoints_on_an_inf
     [
         # Reef's serving shares no GPUs with training: colocation is Slime's own, for its rollout engines.
         ({}, {"colocate": True}, "unknown config fields: training.colocate"),
-        # Slime's engine options need its rollout engines.
-        ({}, {"options": {"global-batch-size": 4, "offload-rollout": True}}, "configures Slime's rollout engines"),
-        (
-            {},
-            {"options": {"global-batch-size": 4, "sglang-mem-fraction-static": 0.5}},
-            "configures Slime's rollout engines",
-        ),
-        (
-            {},
-            {"options": {"global-batch-size": 4, "rollout-num-gpus": 0, "router-policy": "random"}},
-            "rollout engines",
-        ),
-        ({}, {"options": {"global-batch-size": 4, "rollout-external": True}}, "Slime does not start"),
-        ({}, {"options": {"global-batch-size": 4, "colo": True}}, "abbreviates a rollout group option"),
         ({"backend": "vllm", "num-gpus": 2, "tensor-parallel-size": 1}, {}, "vllm serves one engine"),
         ({}, {"options": {"global-batch-size": 4, "hf-checkpoint": "/models/other"}}, "must match"),
         ({}, {"options": {"lr": 1e-6}}, "global-batch-size"),
@@ -140,7 +116,7 @@ def created_components(monkeypatch):
         calls["components"].append(StubTrainingComponent(name="slime"))
         return calls["components"][-1]
 
-    monkeypatch.setattr(slime_component, "create_slime_component", create)
+    monkeypatch.setattr(slime_component, "SlimeTrainingComponent", create)
     return calls
 
 
@@ -156,7 +132,7 @@ def test_the_factory_builds_only_the_training_component(tmp_path, created_compon
     )
     # The deployment's execution sections select the training workers' executor.
     assert settings.execution == runtime["execution"]
-    assert "--global-batch-size=4" in settings.arguments and "--rollout-num-gpus=0" in settings.arguments
+    assert "--global-batch-size=4" in settings.arguments
     # Without a configured timeout the component keeps its default worker timeout.
     component_factory(runtime, MODEL, {})
     assert created_components["settings"][1].train_timeout_s == slime_component.DEFAULT_TRAIN_TIMEOUT_S

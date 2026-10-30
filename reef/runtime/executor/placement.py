@@ -43,9 +43,8 @@ class ModelGpuLayout:
 
     Both are non-negative ints and at least one is positive. The training
     bundles come first, so inference's share starts at ``training_gpus``.
-    Its one purpose is the input of ``reserve_model_gpus``: the Slime training
-    component makes it with ``inference_gpus`` 0, and an inference
-    component's server with ``training_gpus`` 0.
+    Its one purpose is the input of ``reserve_model_gpus``: an inference
+    component's server makes it with ``training_gpus`` 0.
     """
 
     training_gpus: int

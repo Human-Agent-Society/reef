@@ -1,4 +1,4 @@
-"""Fakes of the Slime training component's worker groups and storage, for CPU tests of ``SlimeTrainingComponent``."""
+"""Fakes of the Slime job runner's worker groups and storage, for CPU tests of ``SlimeJobRunner``."""
 
 from __future__ import annotations
 
