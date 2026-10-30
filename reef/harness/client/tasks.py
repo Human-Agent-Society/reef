@@ -36,6 +36,7 @@ from reef_client.client import ReefClient, ReefClientError
 
 from reef.core.evaluation import PolicyHarness, PolicyModel, RolloutRequest, RolloutRunner, RolloutScore
 from reef.core.tasks import HarborTaskError, TaskSplitError, manifest_task_paths, primary_reward, read_harbor_task
+from reef.execution.sandbox.remote import REMOTE_TASK_ENVIRONMENTS
 from reef.harness.client.wrapper import CaptureProxy
 
 #: Terminus 2 with its model and endpoint left to the binding, the same placeholders the adapter descriptors use.
@@ -388,11 +389,14 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
     ) -> list[TaskRollout]:
         """``run_rollouts`` in a running event loop: each rollout holds one of ``slots`` while it runs.
 
-        A task directory that two or more requests name gets one ``TaskLab.build_environment`` first, which holds
-        one slot, and the task's rollouts start when it ends. So they never build the task's environment at the
-        same time, which E2B refuses: it cancels all but one build of a template. Rollouts of other tasks do not
-        wait for it. When the build fails, no rollout of the task runs: each comes back as an infrastructure
-        failure with the build's error.
+        On a remote environment (``REMOTE_TASK_ENVIRONMENTS``), a task directory that two or more requests name
+        gets one ``TaskLab.build_environment`` first, which holds one slot, and the task's rollouts start when it
+        ends. So they never build the task's environment at the same time, which E2B refuses: it cancels all but one
+        build of a template. Rollouts of other tasks do not wait for it. A failed build is tried once more, since a
+        sandbox create can fail for a moment while the template is fine. When the second build fails too, no rollout
+        of the task runs: each comes back as an infrastructure failure with the build's error. Docker needs no build
+        first: Harbor builds one Docker image at a time. Two calls that run the same task at once can still build its
+        template together.
 
         Raise ``ValueError`` before any rollout runs when a request names another harness or model than this
         runner's, or a record directory: Harbor keeps each trial under ``work_dir``. Raise ``TaskRolloutError``
@@ -410,15 +414,20 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
         task_paths = [Path(request.task) for request in requests]
 
         async def build(task_path: Path) -> str:
-            async with slots:
-                return await self.lab.build_environment(
-                    task_path, overrides={"environment": {"type": self.environment}}
-                )
+            error = ""
+            for _ in range(2):
+                async with slots:
+                    error = await self.lab.build_environment(
+                        task_path, overrides={"environment": {"type": self.environment}}
+                    )
+                if not error:
+                    break
+            return error
 
         builds = {
             task_path: asyncio.ensure_future(build(task_path))
             for task_path, count in Counter(task_paths).items()
-            if count > 1
+            if count > 1 and self.environment in REMOTE_TASK_ENVIRONMENTS
         }
 
         async def run_one(task_path: Path) -> TaskRollout:

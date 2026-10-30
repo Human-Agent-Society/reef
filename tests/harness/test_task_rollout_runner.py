@@ -145,9 +145,12 @@ class TemplateLab(StandInLab):
     rollout that started.
     """
 
-    def __init__(self, build_errors: Mapping[str, str] | None = None) -> None:
+    def __init__(self, build_errors: Mapping[str, str] | None = None, *, failing_builds: int = 1_000_000) -> None:
         super().__init__({"reward": 1.0})
         self.build_errors = dict(build_errors or {})
+        # The number of times each erroring task's build fails before it succeeds.
+        self.failing_builds = failing_builds
+        self.failed_builds: dict[str, int] = {}
         self.template_builds: list[str] = []
         self.built: set[str] = set()
         self.building: set[str] = set()
@@ -164,7 +167,8 @@ class TemplateLab(StandInLab):
             self.most_building = max(self.most_building, len(self.building))
             await asyncio.sleep(0.05)
             self.building.discard(name)
-            if name in self.build_errors:
+            if name in self.build_errors and self.failed_builds.get(name, 0) < self.failing_builds:
+                self.failed_builds[name] = self.failed_builds.get(name, 0) + 1
                 return self.build_errors[name]
             self.built.add(name)
         return ""
@@ -432,7 +436,7 @@ def test_rollouts_of_one_task_start_after_one_build_of_its_environment(reef: Sta
 def test_a_build_holds_a_rollout_slot(reef: StandInReef, tmp_path: Path) -> None:
     paths = [written_task(tmp_path / "tasks", name) for name in ("t1", "t2")]
     lab = TemplateLab()
-    running = runner(reef, tmp_path, lab, concurrency=1)
+    running = runner(reef, tmp_path, lab, concurrency=1, environment="e2b")
     rollouts = running.run_rollouts(
         [RolloutRequest(running.harness, running.served_model, str(path)) for path in paths * 2]
     )
@@ -443,7 +447,7 @@ def test_a_build_holds_a_rollout_slot(reef: StandInReef, tmp_path: Path) -> None
 def test_a_task_whose_environment_does_not_build_runs_no_rollout(reef: StandInReef, tmp_path: Path) -> None:
     bad, good = written_task(tmp_path / "tasks", "bad"), written_task(tmp_path / "tasks", "good")
     lab = TemplateLab({"bad": "COPY app.py: no such file"})
-    running = runner(reef, tmp_path, lab, concurrency=4)
+    running = runner(reef, tmp_path, lab, concurrency=4, environment="e2b")
     rollouts = running.run_rollouts(
         [RolloutRequest(running.harness, running.served_model, str(path)) for path in (bad, good, bad, good)]
     )
@@ -452,6 +456,25 @@ def test_a_task_whose_environment_does_not_build_runs_no_rollout(reef: StandInRe
     assert rollouts[0].rollout_id != rollouts[2].rollout_id
     assert [running.rollout_score(rollout) for rollout in rollouts[::2]] == [RolloutScore.failed()] * 2
     assert lab.rollout_starts == [good, good], "no rollout of bad starts"
+    assert lab.failed_builds == {"bad": 2}, "the build is tried twice"
+
+
+def test_a_build_that_fails_once_is_tried_again_and_the_rollouts_run(reef: StandInReef, tmp_path: Path) -> None:
+    task = written_task(tmp_path / "tasks", "t1")
+    lab = TemplateLab({"t1": "429: rate limit"}, failing_builds=1)
+    running = runner(reef, tmp_path, lab, concurrency=4, environment="e2b")
+    rollouts = running.run_rollouts([RolloutRequest(running.harness, running.served_model, str(task))] * 3)
+    assert [(rollout.reward, rollout.error) for rollout in rollouts] == [(1.0, "")] * 3
+    assert len(lab.builds) == 2 and lab.template_builds == ["t1", "t1"]
+
+
+def test_docker_rollouts_start_with_no_build_first(reef: StandInReef, tmp_path: Path) -> None:
+    task = written_task(tmp_path / "tasks", "t1")
+    lab = StandInLab({"reward": 1.0})
+    running = runner(reef, tmp_path, lab, concurrency=4, environment="docker")
+    rollouts = running.run_rollouts([RolloutRequest(running.harness, running.served_model, str(task))] * 3)
+    assert [rollout.reward for rollout in rollouts] == [1.0] * 3
+    assert lab.builds == [], "Harbor builds one Docker image at a time"
 
 
 def test_run_rollouts_refuses_a_directory_without_task_toml_before_any_build(

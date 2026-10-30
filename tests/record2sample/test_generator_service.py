@@ -528,7 +528,7 @@ def test_the_checks_and_the_rollouts_run_in_the_harbor_environment_they_are_give
     ):
         asyncio.run(generator_rollouts.run_rollouts(task_path, **rollout_arguments))  # type: ignore[arg-type]
     assert environments == ["docker", "docker", "e2b", "e2b"]
-    assert build_environments == [{"type": "docker"}, {"type": "e2b"}]
+    assert build_environments == [{"type": "e2b"}], "Docker builds one image at a time, so it gets no build first"
     assert HarborChecks(environment="e2b").environment == "e2b"
     # An environment the generator cannot probe is refused.
     for environment in ("", "modal"):
