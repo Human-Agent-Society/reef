@@ -31,8 +31,9 @@ ITEM_KINDS: tuple[ItemKind, ...] = get_args(ItemKind)
 FIXED_KEYS = ("kind", "owner", "origin")
 #: The most items that one query returns.
 MAX_QUERY_LIMIT = 1000
-#: Prefixes the task file partition of an owner, so that it cannot be a scenario's partition.
-TASK_PARTITION_PREFIX = "data-owner:"
+#: Prefixes the task file partition of an owner. A scenario name never contains ``/``, so no scenario's partition
+#: starts with it, and archiving a scenario never moves an owner's task files.
+TASK_PARTITION_PREFIX = "data/"
 
 
 class ItemConflict(ReefError):

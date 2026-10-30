@@ -207,3 +207,42 @@ def test_the_deployment_builds_the_data_store_it_names_and_closes_it(tmp_path, d
 def test_the_deployment_refuses_an_invalid_data_store(data_store, reason):
     with pytest.raises(ValueError, match=reason):
         ServiceConfig(recipe="recipe", data_store=data_store)
+
+
+def test_archiving_a_scenario_never_moves_an_owners_task_files(tmp_path):
+    task_files = LocalTaskFileStore(tmp_path / "task-files")
+    with closing(task_files), closing(MemoryDataStore(task_files)) as store:
+        task = tmp_path / "fix-bug"
+        task.mkdir()
+        (task / "instruction.md").write_text("Fix the bug.\n")
+        (item,) = store.create("acme", [NewItem("fix-bug", task, {"kind": "task"})])
+        # Scenarios named after the owner, or after its partition without the separator, have other partitions.
+        for scenario in ("acme", "data-acme", "data:acme", "data-owner:acme"):
+            task_files.archive(scenario)
+        assert (store.task_path(item) / "instruction.md").read_text() == "Fix the bug.\n"
+
+
+def test_concurrent_creates_of_one_id_end_in_a_no_op_or_a_conflict(open_durable_store):
+    from concurrent.futures import ThreadPoolExecutor
+
+    stores = [open_durable_store() for _ in range(4)]
+    try:
+
+        def create(index: int) -> str:
+            text = "changed" if index == 7 else "same"
+            try:
+                stores[index % len(stores)].create("acme", [trajectory(f"t{n}", text) for n in range(10)])
+            except ItemConflict:
+                return "conflict"
+            return "created"
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            outcomes = list(pool.map(create, range(8)))
+        reader = stores[0]
+        assert len(reader.query("acme")) == 10
+        stored_text = reader.read("acme", "t0").content["steps"][0]["message"]
+        # Whichever content came first is stored; every other call with that content changed nothing.
+        assert outcomes.count("conflict") == (7 if stored_text == "changed" else 1)
+    finally:
+        for store in stores:
+            store.close()

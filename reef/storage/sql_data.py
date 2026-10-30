@@ -39,6 +39,8 @@ from sqlalchemy import (
     select,
     update,
 )
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Connection, Engine, RowMapping
 from sqlalchemy.pool import NullPool
 from sqlalchemy.schema import CreateSchema
@@ -108,8 +110,11 @@ def canonical_json(value: Mapping[str, Any]) -> str:
 class SQLDataStore(DataStore):
     """A data store in the tables of ``data_tables``.
 
-    A subclass gives the tables and ``transaction``, one database transaction on one connection. Every operation
-    runs in one transaction, so an operation that refuses changes nothing in the database.
+    A subclass gives the tables, ``transaction`` (one database transaction on one connection), ``insert_new_item``
+    (an insert that leaves an existing ID alone) and, where transactions run at once, ``lock_creates``. Every
+    operation runs in one transaction, so an operation that refuses changes nothing in the database. ``create``
+    inserts first and compares digests after, so two creates of one ID at once end in a no-op or an
+    ``ItemConflict``, never in a failed insert.
     """
 
     def __init__(self, items: Table, scenarios: Table, task_files: TaskFileStore) -> None:
@@ -121,6 +126,21 @@ class SQLDataStore(DataStore):
     @contextmanager
     def transaction(self) -> Iterator[Connection]:
         """One transaction: commit when the block ends, roll back when it raises."""
+
+    @abstractmethod
+    def insert_new_item(self, connection: Connection, values: Mapping[str, Any]) -> bool:
+        """Insert one ``data_item`` row unless the owner has its ID already; return whether it inserted it.
+
+        The insert never fails on the unique ``(owner, item_id)``: a row that another transaction inserts
+        first wins, and the caller compares digests after the insert.
+        """
+
+    def lock_creates(self, connection: Connection) -> None:
+        """Serialize ``create`` with every other ``create`` of the store, until the transaction ends.
+
+        Sequence order is then commit order, so a reader that pages with ``after`` misses no item. The default
+        does nothing, for a store whose transactions already run one at a time.
+        """
 
     def stored_item(self, row: RowMapping) -> StoredItem:
         content = None if row["content_json"] is None else json.loads(row["content_json"])
@@ -152,28 +172,30 @@ class SQLDataStore(DataStore):
         prepared = prepared_items(owner, items, self.task_files)
         if not prepared:
             return ()
+        item_ids = [entry[0].item_id for entry in prepared]
         with self.transaction() as connection:
-            existing = self.rows(connection, owner, [entry[0].item_id for entry in prepared])
-            for entry in prepared:
-                row = existing.get(entry[0].item_id)
-                if row is not None and row["digest"] != entry[2]:
-                    raise ItemConflict(f"item {entry[0].item_id!r} of {owner!r} is stored with other content")
+            self.lock_creates(connection)
             for item, metadata, digest in prepared:
-                if item.item_id in existing:
-                    continue
-                connection.execute(
-                    insert(self.items_table).values(
-                        owner=owner,
-                        item_id=item.item_id,
-                        kind=metadata["kind"],
-                        digest=digest,
-                        metadata_json=canonical_json(metadata),
-                        content_json=canonical_json(item.content) if isinstance(item.content, Mapping) else None,
-                    )
+                inserted = self.insert_new_item(
+                    connection,
+                    {
+                        "owner": owner,
+                        "item_id": item.item_id,
+                        "kind": metadata["kind"],
+                        "digest": digest,
+                        "metadata_json": canonical_json(metadata),
+                        "content_json": canonical_json(item.content) if isinstance(item.content, Mapping) else None,
+                    },
                 )
-                self.write_scenarios(connection, owner, item.item_id, metadata["scenarios"])
-            stored = self.rows(connection, owner, [entry[0].item_id for entry in prepared])
-        return tuple(self.stored_item(stored[entry[0].item_id]) for entry in prepared)
+                if inserted:
+                    self.write_scenarios(connection, owner, item.item_id, metadata["scenarios"])
+            # An ID that was stored before, or that a concurrent create stored first, keeps its row; another
+            # digest there is a conflict, and the rollback removes the rows that this call inserted.
+            stored = self.rows(connection, owner, item_ids)
+            for entry in prepared:
+                if stored[entry[0].item_id]["digest"] != entry[2]:
+                    raise ItemConflict(f"item {entry[0].item_id!r} of {owner!r} is stored with other content")
+        return tuple(self.stored_item(stored[item_id]) for item_id in item_ids)
 
     def read(self, owner: str, item_id: str) -> StoredItem | None:
         check_owner(owner)
@@ -291,6 +313,16 @@ class SQLiteDataStore(SQLDataStore):
             with self.connection.begin():
                 yield self.connection
 
+    def insert_new_item(self, connection: Connection, values: Mapping[str, Any]) -> bool:
+        statement = (
+            sqlite_insert(self.items_table)
+            .values(**values)
+            .on_conflict_do_nothing(index_elements=["owner", "item_id"])
+            .returning(self.items_table.c.sequence)
+        )
+        # A row comes back only when this statement inserted one; rowcount is not reliable with RETURNING.
+        return connection.execute(statement).first() is not None
+
     def close(self) -> None:
         with self.lock:
             if self.connection is not None:
@@ -322,6 +354,9 @@ class PostgresDataStore(SQLDataStore):
         except ModuleNotFoundError:
             raise ReefError("the PostgreSQL data store requires the reef-infra[postgres] extra") from None
         key = int.from_bytes(hashlib.sha256(f"reef-data-schema:{schema}".encode()).digest()[:8], "big", signed=True)
+        self.create_lock_key = int.from_bytes(
+            hashlib.sha256(f"reef-data-create:{schema}".encode()).digest()[:8], "big", signed=True
+        )
         with self.engine.begin() as connection:
             # Serialize the check-then-create of the schema across deployments that start together.
             connection.execute(select(func.pg_advisory_xact_lock(key)))
@@ -339,6 +374,21 @@ class PostgresDataStore(SQLDataStore):
             raise ReefError("the data store is closed")
         with self.engine.begin() as connection:
             yield connection
+
+    def insert_new_item(self, connection: Connection, values: Mapping[str, Any]) -> bool:
+        statement = (
+            postgresql_insert(self.items_table)
+            .values(**values)
+            .on_conflict_do_nothing(index_elements=["owner", "item_id"])
+            .returning(self.items_table.c.sequence)
+        )
+        # A row comes back only when this statement inserted one; rowcount is not reliable with RETURNING.
+        return connection.execute(statement).first() is not None
+
+    def lock_creates(self, connection: Connection) -> None:
+        # Identity values are given at insert time, not at commit time. One lock per schema makes the two orders
+        # the same, also across deployments that share the schema.
+        connection.execute(select(func.pg_advisory_xact_lock(self.create_lock_key)))
 
     def close(self) -> None:
         if self.engine is not None:
