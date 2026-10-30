@@ -1,4 +1,4 @@
-"""Stand-ins for AutoEnvScaling's tests: sessions and sources, an author, a sandbox, a Reef and a generator.
+"""Stand-ins for AutoEnvScaling's tests: sessions and sources, a Designer, a sandbox, a Reef and a generator.
 
 The generator service itself is :class:`~tests.support.task_service_stubs.StandInGenerator`.
 """
@@ -21,21 +21,21 @@ import pytest
 from tests.support.task_service_stubs import DOCUMENT, StandInGenerator
 
 from recipes.beta.autoenvscaling import (
-    AgentAuthor,
-    AuthoredTask,
-    AuthorError,
+    AgentDesigner,
     AutoEnvScalingGenerator,
     CandidateChecks,
+    DesignedTask,
+    DesignerOutage,
     Repository,
     SessionSource,
     SourceError,
-    TaskAuthor,
-    VariantAuthor,
+    TaskDesigner,
+    VariantDesigner,
 )
-from recipes.beta.autoenvscaling import author as author_module
+from recipes.beta.autoenvscaling import designer as designer_module
 from recipes.beta.autoenvscaling import load_sources, workspace_reply
-from recipes.beta.autoenvscaling.author import AgentTools, ModelCalls, RecordingGateway, TaskVariant
 from recipes.beta.autoenvscaling.checks import PassRateBand
+from recipes.beta.autoenvscaling.designer import AgentTools, ModelCalls, RecordingGateway, TaskVariant
 from reef.core.tasks import HarborTask
 from reef.execution.sandbox.e2b import E2BExecutor, E2BSession
 from reef.execution.sandbox.process import ProcessOutcome, ProgramExecutor, RolloutLaunchError, SandboxProgram
@@ -48,7 +48,7 @@ from reef.record2sample.generator.inputs import TaskGenerationRequest
 def stand_in_e2b_package(monkeypatch: pytest.MonkeyPatch) -> None:
     """Let ``import e2b`` succeed where the package is missing.
 
-    Building the agent author checks that the package imports; no test here opens a sandbox.
+    Building the agent Designer checks that the package imports; no test here opens a sandbox.
     """
     if importlib.util.find_spec("e2b") is None:
         monkeypatch.setitem(sys.modules, "e2b", types.ModuleType("e2b"))
@@ -138,7 +138,7 @@ def run_agent(
     variant: TaskVariant | None = None,
 ) -> None:
     """The agent's run in ``tmp_path / "run"`` over a scripted sandbox, its calls through a gateway to no Reef."""
-    author = AgentAuthor(
+    designer = AgentDesigner(
         reef_url="http://127.0.0.1:9",
         token=None,
         scenario="autoenvscaling",
@@ -151,20 +151,20 @@ def run_agent(
         has_behaviour_rule=has_behaviour_rule,
     )
     tools = AgentTools(tmp_path, checks if checks is not None else NoChecks(1))
-    gateway = RecordingGateway(author.upstream, calls, tools, headers={})
+    gateway = RecordingGateway(designer.upstream, calls, tools, headers={})
     gateway.start()
     try:
-        author.run(
+        designer.run(
             tmp_path / "run",
             gateway,
             tools,
             calls,
             stop,
-            extra_rules="" if variant is None else author_module.VARIANT_INPUTS_TEXT,
+            extra_rules="" if variant is None else designer_module.VARIANT_INPUTS_TEXT,
             prompt=(
-                author_module.AGENT_PROMPT
+                designer_module.AGENT_PROMPT
                 if variant is None
-                else author_module.VARIANT_PROMPT.format(direction=variant.direction)
+                else designer_module.VARIANT_PROMPT.format(direction=variant.direction)
             ),
         )
     finally:
@@ -269,7 +269,7 @@ def write_workspace_task(task_dir: Path, port: int, *, has_tmux: bool = True) ->
     return task_dir
 
 
-class StandInAuthor(VariantAuthor):
+class StandInDesigner(VariantDesigner):
     """Writes a task as the agent would, checks it once through the generator's checks, and returns its receipts.
 
     A source named in ``unusable`` holds no session; one named in ``unreachable`` is an outage.
@@ -298,10 +298,10 @@ class StandInAuthor(VariantAuthor):
         tags: Mapping[str, str],
         stop: threading.Event,
         variant: TaskVariant,
-    ) -> AuthoredTask:
-        return self.author(source, work_dir, checks, tags=tags, stop=stop, variant=variant)
+    ) -> DesignedTask:
+        return self.design(source, work_dir, checks, tags=tags, stop=stop, variant=variant)
 
-    def author(
+    def design(
         self,
         source: SessionSource,
         work_dir: Path,
@@ -310,17 +310,17 @@ class StandInAuthor(VariantAuthor):
         tags: Mapping[str, str],
         stop: threading.Event,
         variant: TaskVariant | None = None,
-    ) -> AuthoredTask:
+    ) -> DesignedTask:
         self.calls.append({"source": source.record_id, "tags": dict(tags), "work_dir": work_dir, "variant": variant})
         if source.record_id in self.unusable:
             raise SourceError(f"the record {source.record_id} holds no session messages")
         if source.record_id in self.unreachable:
-            raise AuthorError("the agent could not run: the sandbox did not start")
+            raise DesignerOutage("the agent could not run: the sandbox did not start")
         # Each generation and index writes distinct content, so no task duplicates another.
         port = 8000 + 100 * int(tags["generation"]) + int(tags["index"])
         task_dir = write_workspace_task(work_dir / "workspace" / "task", port, has_tmux=self.has_tmux)
         self.calls[-1]["check"] = checks.check(task_dir)
-        return AuthoredTask(workspace_reply(task_dir), self.receipts)
+        return DesignedTask(workspace_reply(task_dir), self.receipts)
 
 
 def sources_file(tmp_path: Path, count: int) -> Path:
@@ -332,7 +332,7 @@ def sources_file(tmp_path: Path, count: int) -> Path:
 
 def autoenvscaling(
     tmp_path: Path,
-    author: TaskAuthor,
+    designer: TaskDesigner,
     service: StandInGenerator | None = None,
     *,
     source_count: int = 2,
@@ -342,7 +342,7 @@ def autoenvscaling(
     return AutoEnvScalingGenerator(
         scenario="autoenvscaling",
         service=service if service is not None else StandInGenerator(tmp_path / "tasks"),
-        author=author,
+        designer=designer,
         sources=load_sources(sources_file(tmp_path, source_count)),
         state_dir=tmp_path / "state",
         **{"count": 3, **fields},

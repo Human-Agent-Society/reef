@@ -1,6 +1,6 @@
 """The AutoEnvScaling task generator: recorded coding sessions rebuilt as Harbor tasks, and a pass-rate band.
 
-``generate`` has the author rebuild the next ``count`` sessions of the sources file. Admission
+``generate`` has the Designer rebuild the next ``count`` sessions of the sources file. Admission
 (:func:`admitted_task`) holds each reply to the generator service's parser and authoring checks and appends a
 Dockerfile step that keeps the repository's history up to the base commit only. ``validate`` runs the task checks
 on a copy under the generator service's tasks root. With ``calibration`` on, the last check runs the current
@@ -21,7 +21,7 @@ parent is varied once. The task checks run in ``validate``: Harbor's oracle and 
 check, the test review and the solver calibration when they are on.
 
 With ``seed_tasks_path`` an adaptive generation also takes seed tasks, Harbor tasks that reef wrote: its slots go to
-variants first, then to the seeds not used yet, then to sessions. A seed takes its slot as it is, with no author run.
+variants first, then to the seeds not used yet, then to sessions. A seed takes its slot as it is, with no Designer run.
 It runs the seed check and the contamination check, and a training seed outside the band becomes a parent whose
 variants have no session.
 """
@@ -45,22 +45,6 @@ from typing import Any, Literal, Self
 
 from pydantic import TypeAdapter
 
-from recipes.beta.autoenvscaling.author import (
-    VARIANT_HARDER,
-    VARIANT_SIMPLER,
-    AgentAuthor,
-    AuthorError,
-    CandidateChecks,
-    PromptAuthor,
-    SeedVariantAuthor,
-    SourceError,
-    TaskAuthor,
-    TaskVariant,
-    VariantAuthor,
-    VariantDirection,
-    workspace_reply,
-)
-from recipes.beta.autoenvscaling.author_credentials import CredentialHeld
 from recipes.beta.autoenvscaling.checks import (
     BAND_ABOVE,
     BAND_BELOW,
@@ -80,7 +64,23 @@ from recipes.beta.autoenvscaling.checks import (
     reference_instructions,
     validate_calibration,
 )
-from recipes.beta.autoenvscaling.claude_author import CLAUDE_HARNESS, TOKEN_PREFIX, ClaudeCodeAuthor, overrides_run
+from recipes.beta.autoenvscaling.claude_designer import CLAUDE_HARNESS, TOKEN_PREFIX, ClaudeCodeDesigner, overrides_run
+from recipes.beta.autoenvscaling.designer import (
+    VARIANT_HARDER,
+    VARIANT_SIMPLER,
+    AgentDesigner,
+    CandidateChecks,
+    DesignerOutage,
+    PromptDesigner,
+    SeedVariantDesigner,
+    SourceError,
+    TaskDesigner,
+    TaskVariant,
+    VariantDesigner,
+    VariantDirection,
+    workspace_reply,
+)
+from recipes.beta.autoenvscaling.designer_credentials import CredentialHeld
 from recipes.beta.autoenvscaling.sources import SessionSource, load_sources
 from reef.core.plugins import PluginConfigError
 from reef.core.tasks import HarborTask, HarborTaskError, read_harbor_task, write_harbor_task
@@ -139,11 +139,11 @@ DEFAULT_AGENT_TOKEN_ENV = "REEF_TOKEN"
 # The cloud sandbox the agent runs in: a provider of reef.execution.sandbox.config.REMOTE_EXECUTORS.
 DEFAULT_AGENT_SANDBOX = "e2b"
 # The Designer: the coding agent, or the generator service's one-reply prompt Designer on the same sessions.
-AUTHORS = ("agent", "prompt")
-DEFAULT_AUTHOR = "agent"
-# The coding agent that is the agent author: Reefine's pi, or Claude Code signed in with its owner's OAuth token.
-AUTHOR_HARNESSES = ("pi", CLAUDE_HARNESS)
-DEFAULT_AUTHOR_HARNESS = "pi"
+DESIGNERS = ("agent", "prompt")
+DEFAULT_DESIGNER = "agent"
+# The coding agent that is the agent Designer: Reefine's pi, or Claude Code signed in with its owner's OAuth token.
+DESIGNER_HARNESSES = ("pi", CLAUDE_HARNESS)
+DEFAULT_DESIGNER_HARNESS = "pi"
 CLAUDE_KEYS = ("claude_model", "claude_token_env")
 DEFAULT_CLAUDE_MODEL = "opus"
 DEFAULT_CLAUDE_TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN"
@@ -198,9 +198,9 @@ CURSOR_FILE = "cursor.json"
 OPEN_PREFIX = "open-"
 # Where a session that became no task in the band stopped; a task inside the band has no stage.
 STAGE_SOURCE = "source"  # the source holds no session, or its repository or base commit is not there
-STAGE_AUTHORING = "authoring"  # the author made no recorded call, or admission refused its task
-STAGE_OUTAGE = "outage"  # the author could not run; the generation ends here
-STAGE_CREDENTIAL = "credential"  # the author's task held its Claude Code token; the generation ends here
+STAGE_AUTHORING = "authoring"  # the Designer made no recorded call, or admission refused its task
+STAGE_OUTAGE = "outage"  # the Designer could not run; the generation ends here
+STAGE_CREDENTIAL = "credential"  # the Designer's task held its Claude Code token; the generation ends here
 STAGE_CHECK = "check"  # a check found a defect in the task, or the task is a duplicate
 STAGE_UNCHECKED = "unchecked"  # a refusing check could not run, so validate refused the task
 STAGE_CALIBRATION = "calibration"  # the solver's calibration rollouts put the task outside the band, or barely vary
@@ -214,8 +214,8 @@ CONFIG_KEYS = frozenset(
         "state_dir",
         "sources_path",
         "seed_tasks_path",
-        "author",
-        "author_harness",
+        "designer",
+        "designer_harness",
         "claude_model",
         "claude_token_env",
         "count",
@@ -261,7 +261,7 @@ def with_parent_limits(task: HarborTask, parent: HarborTask) -> HarborTask:
 
 
 def admitted_task(reply: str, *, generation: int, index: int, record_id: str, checkout_path: str | None) -> HarborTask:
-    """A Designer's reply as a Harbor task: the one admission for every author's task and the agent's candidates.
+    """A Designer's reply as a Harbor task: the one admission for every Designer's task and the agent's candidates.
 
     The reply goes through the generator service's parser and authoring checks, the rules a prompt Designer's
     reply is held to; a task they refuse raises ``ValueError`` (a
@@ -413,7 +413,7 @@ class GeneratorChecks(CandidateChecks):
 
 
 class ProposalRefused(ValueError):
-    """A session became no task: ``stage`` says where it stopped; ``record_id`` is the author's last recorded call."""
+    """A session became no task: ``stage`` says where it stopped; ``record_id`` is the Designer's last recorded call."""
 
     def __init__(self, reason: str, *, stage: str, record_id: str = "") -> None:
         super().__init__(reason)
@@ -455,9 +455,9 @@ class SessionProposal:
     proposal with one has a seed id (``seed-`` and 16 hex digits) as its source_record_id. Designer_record_id and
     refusal are text, empty when unavailable.
     Purpose: generate saves proposals; record_results updates them for the generation report.
-    ``task_name`` is a Harbor name or None, set once the author's task was admitted.
+    ``task_name`` is a Harbor name or None, set once the Designer's task was admitted.
     ``stage`` says where a session that became no task inside the band stopped (``STAGE_*``); it is empty for a task inside the band. ``designer_record_id`` is
-    the author's last recorded call, the one that wrote the task, or empty for an author that Reef records no call
+    the Designer's last recorded call, the one that wrote the task, or empty for a Designer that Reef records no call
     of (Claude Code; its task names the transcript instead). A variant has ``position`` -1, the name of the
     task it varies in ``parent_task`` and ``harder`` or ``simpler`` in ``direction``; both are empty otherwise.
     A seed has ``position`` -1, its directory name in ``seed_task`` and its seed id in ``source_record_id``, and a
@@ -697,36 +697,38 @@ def seed_record_id(seed: HarborTask) -> str:
     return f"{SEED_ID_PREFIX}{seed.digest[:SEED_ID_DIGITS]}"
 
 
-def task_author(
+def task_designer(
     config: Mapping[str, Any], environ: Mapping[str, str], *, scenario: str, cache_dir: Path
-) -> TaskAuthor:
-    """The author the config names, its model calls recorded under ``scenario``: the coding agent, or with
-    ``author: prompt`` the one-reply prompt Designer on the agent's model settings.
+) -> TaskDesigner:
+    """The Designer the config names, its model calls recorded under ``scenario``: the coding agent, or with
+    ``designer: prompt`` the one-reply prompt Designer on the agent's model settings.
 
-    The agent is pi, or Claude Code with ``author_harness: claude-code`` (:func:`claude_code_author`). It runs in
+    The agent is pi, or Claude Code with ``designer_harness: claude-code`` (:func:`claude_code_designer`). It runs in
     the cloud sandbox ``agent_sandbox`` names (``e2b`` by default, or ``modal``), with that provider's options from
     ``agent_sandbox_options``. Credentials come from ``environ``: the Reef token from the variable
     ``agent_token_env`` names, and the sandbox provider's own (``E2B_API_KEY``, or Modal's token).
     """
-    kind = config.get("author", DEFAULT_AUTHOR)
-    if kind not in AUTHORS:
-        raise ValueError(f"author must be one of {AUTHORS}")
-    harness = config.get("author_harness", DEFAULT_AUTHOR_HARNESS)
-    if harness not in AUTHOR_HARNESSES:
-        raise ValueError(f"author_harness must be one of {AUTHOR_HARNESSES}")
+    kind = config.get("designer", DEFAULT_DESIGNER)
+    if kind not in DESIGNERS:
+        raise ValueError(f"designer must be one of {DESIGNERS}")
+    harness = config.get("designer_harness", DEFAULT_DESIGNER_HARNESS)
+    if harness not in DESIGNER_HARNESSES:
+        raise ValueError(f"designer_harness must be one of {DESIGNER_HARNESSES}")
     if harness != CLAUDE_HARNESS and any(key in config for key in CLAUDE_KEYS):
-        raise ValueError(f"{' and '.join(CLAUDE_KEYS)} need author_harness: {CLAUDE_HARNESS}")
+        raise ValueError(f"{' and '.join(CLAUDE_KEYS)} need designer_harness: {CLAUDE_HARNESS}")
     if harness == CLAUDE_HARNESS and kind == "prompt":
-        raise ValueError(f"author_harness: {CLAUDE_HARNESS} needs author: agent")
+        raise ValueError(f"designer_harness: {CLAUDE_HARNESS} needs designer: agent")
     model = str(config.get("agent_model", "") or "")
     reef_url = str(config.get("agent_reef_url", "") or "")
     if not model or not reef_url or "${" in reef_url:
-        raise ValueError("the author needs agent_model and agent_reef_url: the Designer's model and the Reef it calls")
+        raise ValueError(
+            "the Designer needs agent_model and agent_reef_url: the Designer's model and the Reef it calls"
+        )
     api = str(config.get("agent_api", DEFAULT_AGENT_API))
     token = environ.get(str(config.get("agent_token_env", DEFAULT_AGENT_TOKEN_ENV))) or None
     has_behaviour_rule = bool(config.get("behaviour_rule", True))
     if kind == "prompt":
-        return PromptAuthor(
+        return PromptDesigner(
             reef_url=reef_url,
             token=token,
             scenario=scenario,
@@ -745,7 +747,7 @@ def task_author(
     if timeout_seconds <= 0 or max_model_calls < 1:
         raise ValueError("agent_timeout_seconds and max_model_calls must be positive")
     if harness == CLAUDE_HARNESS:
-        return claude_code_author(
+        return claude_code_designer(
             config,
             environ,
             reef_url=reef_url,
@@ -756,7 +758,7 @@ def task_author(
             max_turns=max_model_calls,
             has_behaviour_rule=has_behaviour_rule,
         )
-    return AgentAuthor(
+    return AgentDesigner(
         reef_url=reef_url,
         token=token,
         scenario=scenario,
@@ -770,7 +772,7 @@ def task_author(
     )
 
 
-def claude_code_author(
+def claude_code_designer(
     config: Mapping[str, object],
     environ: Mapping[str, str],
     *,
@@ -781,8 +783,8 @@ def claude_code_author(
     timeout_seconds: float,
     max_turns: int,
     has_behaviour_rule: bool,
-) -> ClaudeCodeAuthor:
-    """Claude Code as the agent author, on ``claude_model``, signed in with the OAuth token in the variable
+) -> ClaudeCodeDesigner:
+    """Claude Code as the agent Designer, on ``claude_model``, signed in with the OAuth token in the variable
     ``claude_token_env`` names.
 
     Raises ``ValueError`` when that variable is unset or empty, or holds no Claude Code OAuth token, and when the
@@ -795,7 +797,7 @@ def claude_code_author(
         raise ValueError("claude_token_env must name an environment variable")
     claude_token = environ.get(token_env, "").strip()
     if not claude_token:
-        raise ValueError(f"author_harness: {CLAUDE_HARNESS} needs a Claude Code OAuth token in {token_env}")
+        raise ValueError(f"designer_harness: {CLAUDE_HARNESS} needs a Claude Code OAuth token in {token_env}")
     if not claude_token.startswith(TOKEN_PREFIX):
         raise ValueError(
             f"{token_env} must hold a Claude Code OAuth token, which starts with {TOKEN_PREFIX} "
@@ -810,7 +812,7 @@ def claude_code_author(
                 f"agent_sandbox_options.env_from must not forward {name} to Claude Code: it would win over the "
                 f"run's own setup or carry the token, which comes from {token_env} alone"
             )
-    return ClaudeCodeAuthor(
+    return ClaudeCodeDesigner(
         reef_url=reef_url,
         token=token,
         claude_token=claude_token,
@@ -824,9 +826,9 @@ def claude_code_author(
 
 
 def review_check(config: Mapping[str, Any], environ: Mapping[str, str], *, scenario: str) -> ReviewCheck | None:
-    """The test review the config's ``review`` mode asks for, on the author's Reef and dialect; none when off.
+    """The test review the config's ``review`` mode asks for, on the Designer's Reef and dialect; none when off.
 
-    The model is ``review_model``, else ``agent_model``. :func:`task_author` checked the shared settings.
+    The model is ``review_model``, else ``agent_model``. :func:`task_designer` checked the shared settings.
     """
     mode = check_mode(config.get("review", DEFAULT_REVIEW), "review")
     if mode == "off":
@@ -915,7 +917,7 @@ def contamination_check(config: Mapping[str, object]) -> ContaminationCheck | No
 
 
 class AutoEnvScalingGenerator(TaskGenerator):
-    """Recorded sessions rebuilt as Harbor tasks by the author, checked through the generator service, and banded
+    """Recorded sessions rebuilt as Harbor tasks by the Designer, checked through the generator service, and banded
     by the solver's pass rate.
 
     ``task_checks`` run in ``validate`` after Harbor's oracle and nop check, in order. The first refusing check
@@ -933,7 +935,7 @@ class AutoEnvScalingGenerator(TaskGenerator):
     saved in ``adaptive.json``, in insertion order, with unique names and at most
     MAX_PARENTS entries; empty unless ``is_adaptive``. ``seeds`` are the seed
     tasks in directory-name order, empty unless ``is_adaptive``; ``sources`` and ``seeds`` are not both empty.
-    ``seed_author`` is ``author`` when it is a :class:`SeedVariantAuthor`, or None; it is set when there are seeds
+    ``seed_designer`` is ``designer`` when it is a :class:`SeedVariantDesigner`, or None; it is set when there are seeds
     or a parent has a ``seed_task``. ``seed_checks`` is the :class:`SeedCheck`, then the contamination checks among
     the given checks: the checks a seed runs.
     Purpose: the generated-task recipe builds it with ``from_config`` and calls ``generate``, ``validate`` and
@@ -945,7 +947,7 @@ class AutoEnvScalingGenerator(TaskGenerator):
         *,
         scenario: str,
         service: Generator,
-        author: TaskAuthor,
+        designer: TaskDesigner,
         sources: tuple[SessionSource, ...],
         state_dir: Path,
         count: int = DEFAULT_COUNT,
@@ -976,13 +978,13 @@ class AutoEnvScalingGenerator(TaskGenerator):
             raise ValueError("calibration and training must use the same pass-rate band")
         self.scenario = scenario
         self.service = service
-        self.author = author
-        if is_adaptive and not isinstance(author, VariantAuthor):
-            raise ValueError("adaptive generation needs a VariantAuthor")
-        self.variant_author = author if isinstance(author, VariantAuthor) else None
-        if seeds and not isinstance(author, SeedVariantAuthor):
-            raise ValueError("seed tasks need a SeedVariantAuthor")
-        self.seed_author = author if isinstance(author, SeedVariantAuthor) else None
+        self.designer = designer
+        if is_adaptive and not isinstance(designer, VariantDesigner):
+            raise ValueError("adaptive generation needs a VariantDesigner")
+        self.variant_designer = designer if isinstance(designer, VariantDesigner) else None
+        if seeds and not isinstance(designer, SeedVariantDesigner):
+            raise ValueError("seed tasks need a SeedVariantDesigner")
+        self.seed_designer = designer if isinstance(designer, SeedVariantDesigner) else None
         self.sources = sources
         self.state_dir = state_dir
         self.count = count
@@ -1022,8 +1024,8 @@ class AutoEnvScalingGenerator(TaskGenerator):
         )
         if len(self.parents) > MAX_PARENTS or len({parent.name for parent in self.parents}) != len(self.parents):
             raise ValueError(f"adaptive.json must hold at most {MAX_PARENTS} parents with unique names")
-        if self.seed_author is None and any(parent.seed_task for parent in self.parents):
-            raise ValueError("adaptive.json holds seeded parents, which need a SeedVariantAuthor")
+        if self.seed_designer is None and any(parent.seed_task for parent in self.parents):
+            raise ValueError("adaptive.json holds seeded parents, which need a SeedVariantDesigner")
 
     @classmethod
     def from_config(cls, config: Mapping[str, Any], *, scenario: str, environ: Mapping[str, str]) -> Self:
@@ -1051,8 +1053,8 @@ class AutoEnvScalingGenerator(TaskGenerator):
         variant_share = config.get("variant_share", DEFAULT_VARIANT_SHARE)
         if isinstance(variant_share, bool) or not isinstance(variant_share, (int, float)):
             raise PluginConfigError("variant_share must be in (0, 1]")
-        if is_adaptive is True and config.get("author", DEFAULT_AUTHOR) != "agent":
-            raise PluginConfigError("AutoEnvScalingGenerator adaptive generation needs author: agent")
+        if is_adaptive is True and config.get("designer", DEFAULT_DESIGNER) != "agent":
+            raise PluginConfigError("AutoEnvScalingGenerator adaptive generation needs designer: agent")
         if "variant_share" in config and is_adaptive is not True:
             raise PluginConfigError("AutoEnvScalingGenerator variant_share needs adaptive: true")
         if seed_tasks_path is not None and is_adaptive is not True:
@@ -1060,7 +1062,7 @@ class AutoEnvScalingGenerator(TaskGenerator):
         # Each scenario keeps its own cursor, reports, runs and repository snapshots.
         scenario_dir = Path(state_dir) / scenario
         try:
-            author = task_author(config, environ, scenario=scenario, cache_dir=scenario_dir / "repositories")
+            designer = task_designer(config, environ, scenario=scenario, cache_dir=scenario_dir / "repositories")
             service = HttpGenerator(generator_url)
             band_low = band_bound(config.get("band_low", DEFAULT_BAND_LOW), "band_low")
             band_high = band_bound(config.get("band_high", DEFAULT_BAND_HIGH), "band_high")
@@ -1073,7 +1075,7 @@ class AutoEnvScalingGenerator(TaskGenerator):
             return cls(
                 scenario=scenario,
                 service=service,
-                author=author,
+                designer=designer,
                 sources=load_sources(Path(sources_path)) if sources_path else (),
                 state_dir=scenario_dir,
                 count=int(config.get("count", DEFAULT_COUNT)),
@@ -1143,7 +1145,7 @@ class AutoEnvScalingGenerator(TaskGenerator):
         when its variants and seeds run out. Up to ``concurrency`` tasks are written at once, started in slot order
         (:meth:`slot_task`); the slots are still taken in order.
 
-        Raises :class:`AuthorError` when an outage leaves the generation with no task, after its report is saved:
+        Raises :class:`DesignerOutage` when an outage leaves the generation with no task, after its report is saved:
         the recipe tries the generation again, and a round whose generation runs out of attempts is not complete,
         so a restart gives it back. An empty generation that ends would count as a complete round.
         """
@@ -1184,10 +1186,10 @@ class AutoEnvScalingGenerator(TaskGenerator):
                     refused.append(
                         replace(proposal, designer_record_id=exc.record_id, stage=exc.stage, refusal=str(exc))
                     )
-                except AuthorError as exc:
+                except DesignerOutage as exc:
                     # An outage must not pass for the Designer's failure: it ends the generation, and the report names
                     # it. So does a task that held the token, which may have left the sandbox.
-                    error = f"the author could not rebuild {proposal.source_record_id}: {exc}"
+                    error = f"the Designer could not rebuild {proposal.source_record_id}: {exc}"
                     is_outage = not isinstance(exc, CredentialHeld)
                     ended_on_outage = is_outage
                     stage = STAGE_OUTAGE if is_outage else STAGE_CREDENTIAL
@@ -1225,7 +1227,7 @@ class AutoEnvScalingGenerator(TaskGenerator):
         if next_seed != self.cursor.next_seed:
             self.save_cursor(replace(self.cursor, next_seed=next_seed))
         if ended_on_outage and not tasks:
-            raise AuthorError(error)
+            raise DesignerOutage(error)
         return tuple(tasks)
 
     def slots(self) -> list[TaskSlot | HarborTask]:
@@ -1274,12 +1276,12 @@ class AutoEnvScalingGenerator(TaskGenerator):
         """The task of ``slot`` (:meth:`rebuilt`), once ``gate`` lets its writing start.
 
         The gate lets the slots start in order. An outage or a cancellation sets ``stopped`` before the gate lets
-        the next slot in, so no slot starts after it: the slots after it end with :class:`AuthorError`, and
+        the next slot in, so no slot starts after it: the slots after it end with :class:`DesignerOutage`, and
         ``generate`` takes none of them.
         """
         async with gate:
             if stopped.is_set():
-                raise AuthorError("the generation stopped before this slot started")
+                raise DesignerOutage("the generation stopped before this slot started")
             try:
                 return await self.rebuilt(
                     slot.source,
@@ -1287,14 +1289,14 @@ class AutoEnvScalingGenerator(TaskGenerator):
                     variant=slot.variant,
                     source_record_id=slot.proposal.source_record_id,
                 )
-            except (AuthorError, asyncio.CancelledError):
+            except (DesignerOutage, asyncio.CancelledError):
                 stopped.set()
                 raise
 
     def seed_slot(self, seed: HarborTask, index: int) -> tuple[HarborTask, SessionProposal]:
         """A seed in slot ``index``: the seed as it is, under the generation's task name, and its proposal.
 
-        No author runs. The task's source records are the seed's own, such as the session of a task from an earlier
+        No Designer runs. The task's source records are the seed's own, such as the session of a task from an earlier
         run, then the seed's id (:func:`seed_record_id`), so the seed shares a split with each task of that session
         and with its own variants. Its metadata names the seed's directory in ``seed_task`` and drops the
         ``parent_task`` and ``variant`` of a seed that was a variant in an earlier run: they name that run's tasks.
@@ -1352,8 +1354,8 @@ class AutoEnvScalingGenerator(TaskGenerator):
         variant: TaskVariant | None = None,
         source_record_id: str = "",
     ) -> HarborTask:
-        """The author's task from one session, or a variant of a parent from it, admitted; its sources are the
-        author's last recorded call and the session, so a variant shares its parent's split. An author with no
+        """The Designer's task from one session, or a variant of a parent from it, admitted; its sources are the
+        Designer's last recorded call and the session, so a variant shares its parent's split. A Designer with no
         recorded call but a transcript (Claude Code) gives a task whose one source is the session, and whose
         metadata names the transcript under the state directory.
 
@@ -1362,7 +1364,7 @@ class AutoEnvScalingGenerator(TaskGenerator):
         names the seed in ``seed_task``, as each variant of a seeded parent does.
 
         Raises ``ValueError`` for a None ``source`` without a ``variant`` and a ``source_record_id``,
-        :class:`ProposalRefused` when the session becomes no task, and ``AuthorError`` when the author could not run.
+        :class:`ProposalRefused` when the session becomes no task, and ``DesignerOutage`` when the Designer could not run.
         """
         if source is None and (variant is None or not source_record_id):
             raise ValueError("a task without a session is a variant of a seeded parent, with the seed's id")
@@ -1383,18 +1385,20 @@ class AutoEnvScalingGenerator(TaskGenerator):
         try:
             if source is None:
                 # The check above gave a task without a session a variant.
-                if self.seed_author is None or variant is None:
-                    raise ValueError("a variant of a seeded parent needs a SeedVariantAuthor")
-                authored = await asyncio.to_thread(
-                    self.seed_author.vary_seed, work_dir, checks, tags=tags, stop=stop, variant=variant
+                if self.seed_designer is None or variant is None:
+                    raise ValueError("a variant of a seeded parent needs a SeedVariantDesigner")
+                designed = await asyncio.to_thread(
+                    self.seed_designer.vary_seed, work_dir, checks, tags=tags, stop=stop, variant=variant
                 )
             elif variant is None:
-                authored = await asyncio.to_thread(self.author.author, source, work_dir, checks, tags=tags, stop=stop)
+                designed = await asyncio.to_thread(
+                    self.designer.design, source, work_dir, checks, tags=tags, stop=stop
+                )
             else:
-                if self.variant_author is None:
-                    raise ValueError("adaptive generation needs a VariantAuthor")
-                authored = await asyncio.to_thread(
-                    self.variant_author.vary, source, work_dir, checks, tags=tags, stop=stop, variant=variant
+                if self.variant_designer is None:
+                    raise ValueError("adaptive generation needs a VariantDesigner")
+                designed = await asyncio.to_thread(
+                    self.variant_designer.vary, source, work_dir, checks, tags=tags, stop=stop, variant=variant
                 )
         except asyncio.CancelledError:
             # The thread outlives the cancelled await; the stop signal ends the agent's run in it.
@@ -1405,12 +1409,12 @@ class AutoEnvScalingGenerator(TaskGenerator):
         finally:
             # A check the agent left running finishes, and deletes its candidate, before the task is written.
             await asyncio.to_thread(checks.close)
-        if not authored.record_ids and not authored.transcript:
+        if not designed.record_ids and not designed.transcript:
             raise ProposalRefused("the Designer made no model call that Reef recorded", stage=STAGE_AUTHORING)
-        record_id = authored.record_ids[-1] if authored.record_ids else ""
+        record_id = designed.record_ids[-1] if designed.record_ids else ""
         try:
             task = admitted_task(
-                authored.reply,
+                designed.reply,
                 generation=self.generation,
                 index=index,
                 record_id=record_id or record_source,
@@ -1432,7 +1436,7 @@ class AutoEnvScalingGenerator(TaskGenerator):
                 metadata={**task.metadata, "designer_record_id": record_id, **lineage},
             )
         designer = {
-            "designer_transcript": f"runs/{work_dir.name}/{authored.transcript}",
+            "designer_transcript": f"runs/{work_dir.name}/{designed.transcript}",
             "designer_harness": CLAUDE_HARNESS,
         }
         return replace(

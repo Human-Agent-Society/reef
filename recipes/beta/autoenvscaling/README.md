@@ -1,8 +1,8 @@
 # autoenvscaling
 
-**Status: beta.** AutoEnvScaling remains under `recipes/beta/autoenvscaling/` until complete, reproducible learning results are published. The tests validate the generator, the authors, the checks and the band against stand ins; they do not run pi, Claude Code or a model, and they do not establish learning performance. See [issue #422](https://github.com/Human-Agent-Society/reef/issues/422) for this classification.
+**Status: beta.** AutoEnvScaling remains under `recipes/beta/autoenvscaling/` until complete, reproducible learning results are published. The tests validate the generator, the Designers, the checks and the band against stand ins; they do not run pi, Claude Code or a model, and they do not establish learning performance. See [issue #422](https://github.com/Human-Agent-Society/reef/issues/422) for this classification.
 
-AutoEnvScaling (preprint forthcoming) as a Reef task generator: a coding agent rebuilds recorded coding-agent sessions as Harbor tasks. The agent writes one task in a workspace from one session and the repository the session changed. It runs the task's oracle and nop check itself through a tool, and revises until the check passes. A pass-rate band marks the tasks that the Reasoning Agent can reach. With `author: prompt`, the same generator runs the generator service's one-reply prompt Designer on the same sessions, as the baseline ([the prompt Designer baseline](#the-prompt-designer-baseline)).
+AutoEnvScaling (preprint forthcoming) as a Reef task generator: a coding agent rebuilds recorded coding-agent sessions as Harbor tasks. The agent writes one task in a workspace from one session and the repository the session changed. It runs the task's oracle and nop check itself through a tool, and revises until the check passes. A pass-rate band marks the tasks that the Reasoning Agent can reach. With `designer: prompt`, the same generator runs the generator service's one-reply prompt Designer on the same sessions, as the baseline ([the prompt Designer baseline](#the-prompt-designer-baseline)).
 
 ## Results
 
@@ -12,7 +12,7 @@ In every run, the agent and the prompt Designer use `gpt-6-sol`, `gpt-6-luna` ru
 
 **Agent mode and the prompt Designer.** 77 SWE-Together sessions, 3 rebuilds each, so 231 tasks for each mode:
 
-| | `author: prompt` | `author: agent` |
+| | `designer: prompt` | `designer: agent` |
 |---|---|---|
 | Valid: the oracle passes and nop fails | 30% | **100%** |
 | Faithful: SWE-Together's fix passes the rebuilt verifier, and the rebuilt solution passes SWE-Together's tests | 6% | **24%** |
@@ -32,15 +32,15 @@ On the 15 sessions that both arms ran, the arms give 5 and 6 fair tasks. The che
 
 ```text
 beta/autoenvscaling/
-  sources.py        the sources file (session records and their repositories), the session rendered for the agent
-  author.py         the author contract; the agent: pi in an E2B sandbox behind a gateway that records its calls; the prompt Designer
-  author_tools.ts   the agent's task_check tool
-  claude_author.py  Claude Code as the agent, signed in with its owner's OAuth token, behind a gateway that serves only the checks
-  task_check.py     Claude Code's task_check command
-  checks.py         the task checks: Harbor's oracle and nop agents, the contamination check, the test review and the solver calibration
-  generator.py      AutoEnvScalingGenerator: the session cursor, admission, the task checks, the band, the parents and the seeds
-  tmax.py           the command that converts extracted TMax tasks into seed tasks
-  tmax_verifier.sh  the verifier of a converted TMax task: the fraction of its tests that pass
+  sources.py          the sources file (session records and their repositories), the session rendered for the agent
+  designer.py         the Designer contract; the agent: pi in an E2B sandbox behind a gateway that records its calls; the prompt Designer
+  designer_tools.ts   the agent's task_check tool
+  claude_designer.py  Claude Code as the agent, signed in with its owner's OAuth token, behind a gateway that serves only the checks
+  task_check.py       Claude Code's task_check command
+  checks.py           the task checks: Harbor's oracle and nop agents, the contamination check, the test review and the solver calibration
+  generator.py        AutoEnvScalingGenerator: the session cursor, admission, the task checks, the band, the parents and the seeds
+  tmax.py             the command that converts extracted TMax tasks into seed tasks
+  tmax_verifier.sh    the verifier of a converted TMax task: the fraction of its tests that pass
   examples/tinker/serve.yaml   a Tinker deployment with the generator service and the generated-task recipe
 ```
 
@@ -50,7 +50,7 @@ AutoEnvScaling is a task generator. The deployment selects it in `pipeline.recor
 
 `AutoEnvScalingGenerator` implements `reef.recipe.generated_tasks.TaskGenerator`. One round of the recipe is one generation:
 
-1. `generate` takes the next `count` sessions of the sources file. The author rebuilds each session as a task (see [the author](#the-author)), `concurrency` sessions at once.
+1. `generate` takes the next `count` sessions of the sources file. The Designer rebuilds each session as a task (see [the Designer](#the-designer)), `concurrency` sessions at once.
 2. Admission holds each task to the generator service's parser and authoring checks, the rules a prompt Designer's reply is held to. Its Dockerfile gets a last step that keeps the repository's history up to the base commit only (below).
 3. `validate` writes the task under the generator service's tasks root, runs the task checks there, and removes the task again. The first check is Harbor's oracle and nop agents: the reference solution must score 1, and doing nothing must score below 1. With `contamination` on, the contamination check comes next ([contamination](#contamination)). The test review follows ([the task checks](#the-task-checks)). With `calibration` on, the current solver's rollouts come last ([solver calibration](#solver-calibration)). A duplicate task is invalid.
 4. The recipe saves each valid task with its train/eval split. Later the training component runs `rollout.rollouts_per_task` rollouts of each training task in a task job; the recipe runs no eval tasks.
@@ -58,7 +58,7 @@ AutoEnvScaling is a task generator. The deployment selects it in `pipeline.recor
 
 Until `record_results` closes a generation, the generator keeps its sessions and check results in `open-<generation>.json` under its state directory, named by the recipe's generation number, so a restart can still close it.
 
-An accepted task names two source records: the author's last recorded call, the one that wrote the task, and the session's record. A task that Claude Code wrote names one source record, the session's, and its transcript ([Claude Code as the author](#claude-code-as-the-author)). A task rebuilt from a repository gets 4 CPUs, 4 GB of memory, 10 GB of storage, 20 minutes to build, an hour for the solver and 7.5 minutes for the verifier.
+An accepted task names two source records: the Designer's last recorded call, the one that wrote the task, and the session's record. A task that Claude Code wrote names one source record, the session's, and its transcript ([Claude Code as the Designer](#claude-code-as-the-designer)). A task rebuilt from a repository gets 4 CPUs, 4 GB of memory, 10 GB of storage, 20 minutes to build, an hour for the solver and 7.5 minutes for the verifier.
 
 The last step of every task's Dockerfile keeps the solver from reading the change it must make out of the repository's history. It removes every remote and every ref but HEAD's, and prunes the rest, so no commit after the base commit is left in the image.
 
@@ -66,7 +66,7 @@ The last step of every task's Dockerfile keeps the solver from reading the chang
 
 The generator chooses its own sessions. It does not use the request's description, and it refuses a request that carries source records. Leave the record stage's `source_records_per_round` at 0, its default.
 
-`cursor.json` in the state directory keeps the next generation number and the next position in the sources file. The generations walk the whole file and then start again. A session counts as taken when its author finishes, whatever the result, so a restart continues with the next session. A run that a reload cancels takes no session. Task names hold the generation number and the session's index, not the scenario, so give each scenario its own generator service and tasks root: two scenarios on one service write tasks with the same names, and the service refuses the second one.
+`cursor.json` in the state directory keeps the next generation number and the next position in the sources file. The generations walk the whole file and then start again. A session counts as taken when its Designer finishes, whatever the result, so a restart continues with the next session. A run that a reload cancels takes no session. Task names hold the generation number and the session's index, not the scenario, so give each scenario its own generator service and tasks root: two scenarios on one service write tasks with the same names, and the service refuses the second one.
 
 ### Sessions without a task
 
@@ -75,9 +75,9 @@ The generation's report gives each session the stage where it stopped:
 | Stage | Meaning |
 | --- | --- |
 | `source` | the session's record is gone or holds no session, or its repository or base commit is not there (deleted, private or a wrong URL) |
-| `authoring` | the author made no recorded call, or admission refused its task |
-| `outage` | the author could not run; the generation ends here |
-| `credential` | the task of Claude Code as the author held its token; the generation ends here |
+| `authoring` | the Designer made no recorded call, or admission refused its task |
+| `outage` | the Designer could not run; the generation ends here |
+| `credential` | the task of Claude Code as the Designer held its token; the generation ends here |
 | `check` | a check found a defect in the task, or the task is a duplicate |
 | `unchecked` | a refusing check could not run, so `validate` refused the task |
 | `calibration` | with `calibration: refuse`, the solver's calibration rollouts put the task below or above the band, or their rewards vary too little |
@@ -88,7 +88,7 @@ The generation's report gives each session the stage where it stopped:
 
 Three kinds of failure end differently:
 
-- **An outage** is a failure the author does not cause: the session or the repository could not be fetched, the sandbox did not start, or a model call failed while the run's budget still had calls. The generation ends, and its report keeps the outage as its error. Validated tasks made before it stay in the task store, and its training tasks still run. The outage's session counts as taken. An outage that leaves the generation with no task makes it fail instead: the recipe tries it again up to `generation_attempts` times, and a round whose generation runs out of attempts is incomplete, so a restart gives the round back. A long outage, such as a spent Claude Code weekly limit, still uses up the run's rounds within minutes; restart the run once the outage ends. With `concurrency` above 1, no task starts after an outage, and the tasks still being written are stopped. The slots after the outage take nothing, even one whose task was finished: their sessions and parents go to the next generation.
+- **An outage** is a failure the Designer does not cause: the session or the repository could not be fetched, the sandbox did not start, or a model call failed while the run's budget still had calls. The generation ends, and its report keeps the outage as its error. Validated tasks made before it stay in the task store, and its training tasks still run. The outage's session counts as taken. An outage that leaves the generation with no task makes it fail instead: the recipe tries it again up to `generation_attempts` times, and a round whose generation runs out of attempts is incomplete, so a restart gives the round back. A long outage, such as a spent Claude Code weekly limit, still uses up the run's rounds within minutes; restart the run once the outage ends. With `concurrency` above 1, no task starts after an outage, and the tasks still being written are stopped. The slots after the outage take nothing, even one whose task was finished: their sessions and parents go to the next generation.
 - **The agent's own limits** are not outages: a run that spent `max_model_calls`, ran out of time or hit its reply budget leaves its task as it stands, and admission checks it like any other task.
 - **An oracle check that cannot run**, because the generator service failed, ends the round. `GET /reef/status` shows it as the round's last error, the generation's report names it, and the task store keeps the tasks that the round published before the failure. So does a rollout request of a refusing calibration that the generator service fails ([solver calibration](#solver-calibration)). A test review that cannot run is recorded instead (see [the task checks](#the-task-checks)).
 
@@ -103,8 +103,8 @@ The generator's `config` keys:
 | `generator_url` | required | the generator service, `${endpoints.generator}` |
 | `state_dir` | required | where each scenario keeps its cursor, reports, agent runs and repository snapshots |
 | `sources_path` | required | the sources file; optional with `seed_tasks_path` ([seed tasks](#seed-tasks)) |
-| `author` | `agent` | `agent`, or `prompt` for the baseline |
-| `author_harness` | `pi` | the agent: `pi`, or `claude-code` ([Claude Code as the author](#claude-code-as-the-author)); `claude-code` needs `author: agent` |
+| `designer` | `agent` | `agent`, or `prompt` for the baseline |
+| `designer_harness` | `pi` | the agent: `pi`, or `claude-code` ([Claude Code as the Designer](#claude-code-as-the-designer)); `claude-code` needs `designer: agent` |
 | `claude_model` | `opus` | with `claude-code`, the model Claude Code asks for (`--model`) |
 | `claude_token_env` | `CLAUDE_CODE_OAUTH_TOKEN` | with `claude-code`, the environment variable that holds the Claude Code OAuth token |
 | `count` | 8 | sessions in each generation |
@@ -119,22 +119,22 @@ The generator's `config` keys:
 | `agent_timeout_seconds` | 2700 | the longest one agent run lasts |
 | `agent_sandbox` | `e2b` | the cloud sandbox the agent runs in: `e2b` or `modal` |
 | `agent_sandbox_options` | none | that provider's options, such as `e2b_template`, or `modal_app` and `modal_image` |
-| `adaptive` | false | vary tasks outside the band in later generations ([adaptive generation](#adaptive-generation)); needs `author: agent` |
+| `adaptive` | false | vary tasks outside the band in later generations ([adaptive generation](#adaptive-generation)); needs `designer: agent` |
 | `variant_share` | 0.5 | with `adaptive`, the largest share of a generation's slots that go to variants, rounded down; a share that gives no slot is refused |
 
 Set `eval_fraction` and `split_seed` in `pipeline.record2sample.config`, outside the generator configuration. Their defaults are 0.0 and 0. The task store keeps each published task's split, not these settings. After a restart, published tasks keep their split and new tasks are placed with the settings in force. Reef does not refuse a changed `eval_fraction` or `split_seed`, so keep both fixed for the life of a scenario.
 
-## The author
+## The Designer
 
-The author is pi, Reefine's pinned coding agent, in an E2B sandbox. It reads the recorded session, the repository at the base commit (a fresh one-commit copy with no history, cached under `state_dir/<scenario>/repositories`) and the checkout path. It writes the task under `./task/`: `instruction.md`, `environment/` (a Dockerfile that clones the repository at the base commit into the checkout path), `tests/test.sh`, `solution/solve.sh`, and an optional `hint.txt`.
+The Designer is pi, Reefine's pinned coding agent, in an E2B sandbox. It reads the recorded session, the repository at the base commit (a fresh one-commit copy with no history, cached under `state_dir/<scenario>/repositories`) and the checkout path. It writes the task under `./task/`: `instruction.md`, `environment/` (a Dockerfile that clones the repository at the base commit into the checkout path), `tests/test.sh`, `solution/solve.sh`, and an optional `hint.txt`.
 
 Its one tool, `task_check`, runs the workspace's task through admission and Harbor's oracle and nop agents on the generator service, and answers with both rewards and, for a failing task, the reason. A check that could not run uses up none of `max_checks`.
 
 The agent holds no credential. Its model calls go through a loopback gateway that sends each one to `agent_reef_url` under the generator's scenario, with the token from `agent_token_env` and the tags `role: designer`, `generation` and `index`, so each call is an inference record. A run lasts at most `agent_timeout_seconds` and makes at most `max_model_calls` model calls. Each run keeps the task and pi's session log in `state_dir/<scenario>/runs/<generation>-<index>/`.
 
-### Claude Code as the author
+### Claude Code as the Designer
 
-With `author_harness: claude-code`, the agent is Claude Code, at the version Reef pins, in the same sandbox, with the same inputs, rules and checks. It is signed in with a Claude Code OAuth token that its owner made with `claude setup-token`:
+With `designer_harness: claude-code`, the agent is Claude Code, at the version Reef pins, in the same sandbox, with the same inputs, rules and checks. It is signed in with a Claude Code OAuth token that its owner made with `claude setup-token`:
 
 ```yaml
 pipeline:
@@ -144,7 +144,7 @@ pipeline:
         module: recipes.beta.autoenvscaling:AutoEnvScalingGenerator
         config:
           # The rest as in examples/tinker/serve.yaml.
-          author_harness: claude-code
+          designer_harness: claude-code
           claude_model: opus
 ```
 
@@ -153,9 +153,9 @@ export CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-...   # the variable claude_token_en
 ```
 
 - Claude Code sends every model call itself, straight to Anthropic, and Reef records none of them. The generator still reads the sessions from `agent_reef_url` with the token from `agent_token_env`, and the test review still calls `agent_model` there through `agent_api`.
-- The author passes the token through the existing sandbox environment. The sandbox launcher puts environment values in bubblewrap's command arguments, so the token can appear in process arguments and launcher diagnostics. Claude Code removes it from the environment of its shell commands.
-- The author redacts its log and error messages and replaces the token in retained run files and file names. It refuses a check of a task that holds the token, including through a symbolic link. Such a task is not admitted, and generation ends with stage `credential`: the token may have left the sandbox. Make a new token before the next run.
-- The agent checks its task with the command `python3 "$REEF_AUTHOR_CHECK"`, the same check as pi's tool. The command waits up to 9 minutes; for a longer check it prints `state: running` and the `--wait <check_id>` command that waits again.
+- The Designer passes the token through the existing sandbox environment. The sandbox launcher puts environment values in bubblewrap's command arguments, so the token can appear in process arguments and launcher diagnostics. Claude Code removes it from the environment of its shell commands.
+- The Designer redacts its log and error messages and replaces the token in retained run files and file names. It refuses a check of a task that holds the token, including through a symbolic link. Such a task is not admitted, and generation ends with stage `credential`: the token may have left the sandbox. Make a new token before the next run.
+- The agent checks its task with the command `python3 "$REEF_DESIGNER_CHECK"`, the same check as pi's tool. The command waits up to 9 minutes; for a longer check it prints `state: running` and the `--wait <check_id>` command that waits again.
 - A run ends at `agent_timeout_seconds` or after `max_model_calls` turns, Claude Code's own limit; either way its task stands. Any other error of Claude Code's (a spent plan, a refused token) is an outage.
 - The task names one source record, the session's, so a variant keeps its parent's split. Its metadata names the transcript, `designer_transcript`, relative to `state_dir/<scenario>/`, and `designer_harness: claude-code`. Each run keeps Claude Code's transcript under `claude/projects/` in its run directory. Reef deletes Claude Code's other state there, which can hold the account's email.
 
@@ -212,7 +212,7 @@ With `adaptive: true`, the solver's results steer later generations, as in RFC #
 
 Eval tasks, outages and tasks whose mean reward is outside [0, 1] never become parents, a parent gets one variant slot whatever becomes of the variant, except an outage, which leaves the parent its slot for the next generation, and the generator keeps at most 256 parents, dropping the oldest. Parents with missing files or sessions are skipped but still count toward the limit until they are dropped. A replayed result adds nothing: a closed generation is not closed again, and one closed again after a crash adds each parent once. The proposals of a variant name it in the report: `position` -1, `parent_task` and `direction`. With `adaptive` off, the generator keeps no parents and writes the same reports as before. With `calibration: refuse`, a task outside the band is refused before it trains, so it never becomes a parent: the parents are then the admitted tasks that the solver outgrows, or falls behind on, during training. With `calibration: measure`, every task is admitted and trained, so a task the calibration placed outside the band can still become a parent. Proposer training and retiring tasks from the pool are not part of this mode.
 
-A variant keeps its parent's limits: `[agent]` and `[verifier]` `timeout_sec` and `[environment]` `cpus`, `memory_mb`, `storage_mb` and `gpus` are the parent's, whatever the author wrote. A variant is harder or simpler by what it asks, not by more time or a larger machine, so its pass rate stays comparable with its parent's place in the band. Without this, a variant of a TMax seed (1200 s) took the authored task's 3600 s.
+A variant keeps its parent's limits: `[agent]` and `[verifier]` `timeout_sec` and `[environment]` `cpus`, `memory_mb`, `storage_mb` and `gpus` are the parent's, whatever the Designer wrote. A variant is harder or simpler by what it asks, not by more time or a larger machine, so its pass rate stays comparable with its parent's place in the band. Without this, a variant of a TMax seed (1200 s) took the 3600 s that the Designer wrote.
 
 ### Seed tasks
 
@@ -236,7 +236,7 @@ pipeline:
 
 Each directory in `seed_tasks_path`, except one whose name starts with a dot, is a seed and must be a task that reef wrote, as the converter does. The generator reads every seed when it starts and checks its digest. A directory that is not such a task fails the config, and the error names it.
 
-- **The slots.** A generation fills its slots in this order: variants of the newest parents, then the seeds that no generation took yet, then the next sessions. A seed takes its slot as it is: the task is the seed under the generation's task name, and no author runs. A seed that was a variant in an earlier run loses that run's `parent_task` and `variant`, so it is a seed here. Each seed is used once, in directory-name order. `cursor.json` keeps the next seed (`next_seed`) once a generation returns its tasks, so a restart continues with it, and an attempt that fails or is cancelled takes no seed; keep the directory fixed for the life of a scenario. Without a sources file, a generation ends when its variants and seeds run out, so it can be empty. The recipe counts an empty generation as one of its `rounds` and starts the next round at once, so the rounds can run out before the seeds' pass rates make parents. Give enough seeds that each generation finds unused seeds until the first parents exist, or give a sources file too.
+- **The slots.** A generation fills its slots in this order: variants of the newest parents, then the seeds that no generation took yet, then the next sessions. A seed takes its slot as it is: the task is the seed under the generation's task name, and no Designer runs. A seed that was a variant in an earlier run loses that run's `parent_task` and `variant`, so it is a seed here. Each seed is used once, in directory-name order. `cursor.json` keeps the next seed (`next_seed`) once a generation returns its tasks, so a restart continues with it, and an attempt that fails or is cancelled takes no seed; keep the directory fixed for the life of a scenario. Without a sources file, a generation ends when its variants and seeds run out, so it can be empty. The recipe counts an empty generation as one of its `rounds` and starts the next round at once, so the rounds can run out before the seeds' pass rates make parents. Give enough seeds that each generation finds unused seeds until the first parents exist, or give a sources file too.
 - **The seed check.** `validate` runs the seed check, then the contamination check when it is on. A seed gets no test review and no calibration: a seed outside the band is the parent a variant starts from. The seed check runs Harbor's oracle trial. It refuses a seed whose environment does not build, or whose verifier writes no reward. A converted seed's solution does nothing, so its oracle trial scores the untouched environment, and the seed passes when that score is below 1. A seed whose solution scores 1 passes when doing nothing scores below 1. A refused seed gets stage `check`.
 - **Training and parents.** A seed in the train split rolls out like any training task. Inside the band it stays a training task, as in upstream's static TMax pool. Outside the band it becomes a parent. Its variant has no session: the agent reads only the parent and `variant.md` in its inputs, its workspace starts with a copy of the parent's `environment/`, and its rules ask for a real reference solution, since the seed's does nothing. A harder variant needs a longer horizon or one more skill; a simpler one has fewer compounding steps, a clearer starting state or more scaffolding. The variant's Dockerfile gets no history step, since it has no repository. Upstream varies its first TMax tasks with no rollout and a pass rate of 0.5; here the first rollout of each seed measures it first.
 - **The split.** A seed's source records are its own, then `seed-` and the first 16 hex digits of its digest. A converted seed has no records of its own, so each such seed is a split group of its own. A seed from an earlier run's session task keeps that session, so it shares a split with the tasks of the same session. A variant keeps the seed's `seed-` record, so it joins the seed's split. An eval seed is held out: it never rolls out, so it is never varied.
@@ -268,8 +268,8 @@ Limits:
 
 A verifier written from a session tends to grade the session's own implementation: the wording of a report, or a function or a button the instruction never names. A different correct solution then fails. Two measures keep such tasks out:
 
-- **The behaviour rule.** Both authors get it with the rebuild rules: the tests check behaviour that the instruction names, never free-text wording, never a name the instruction does not give, and never a requirement the instruction does not state. `behaviour_rule: false` turns it off.
-- **The test review.** After Harbor's oracle and nop check, and the contamination check when it is on, `validate` makes one model call that reads `instruction.md` and every file under `tests/` and `solution/`. It lists each requirement that the tests check and the instruction does not state, of kind `wording`, `unnamed_interface` or `unstated_requirement`. The call goes where the author's calls go, through `agent_api` (`openai` or `responses`).
+- **The behaviour rule.** Both Designers get it with the rebuild rules: the tests check behaviour that the instruction names, never free-text wording, never a name the instruction does not give, and never a requirement the instruction does not state. `behaviour_rule: false` turns it off.
+- **The test review.** After Harbor's oracle and nop check, and the contamination check when it is on, `validate` makes one model call that reads `instruction.md` and every file under `tests/` and `solution/`. It lists each requirement that the tests check and the instruction does not state, of kind `wording`, `unnamed_interface` or `unstated_requirement`. The call goes where the Designer's calls go, through `agent_api` (`openai` or `responses`).
 
 The review has a mode: `off`, `measure` (run it and record the result, never refuse) or `refuse`. A refusing review that lists a requirement gives the task stage `check`. One that could not run, because the call failed or the reply is not the JSON asked for, gives it stage `unchecked`. The generation's report keeps the review's result for each task.
 
@@ -277,7 +277,7 @@ With `review: refuse`, the agent's own `task_check` also runs the review once th
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `behaviour_rule` | true | give both authors the behaviour rule |
+| `behaviour_rule` | true | give both Designers the behaviour rule |
 | `review` | `refuse` | the test review's mode; a bare YAML `off` reads as false and means `off` |
 | `review_model` | `agent_model` | the review's model |
 
@@ -313,9 +313,9 @@ The agent's own `task_check` does not run this check, and the agent's rules do n
 
 ## The prompt Designer baseline
 
-To compare Designers on identical inputs, set `author: prompt`. The author is then the generator service's one-reply prompt Designer, the one SPADE uses, on the same sources. It makes one model call with the repository, the session cut to 240,000 characters (tool results first, never the user's words), the agent's rebuild rules and the Designer's reply format. The reply's JSON block is the task. The call goes where the agent's calls go, through `agent_api`, which must be `openai` or `responses`. The agent's own settings go unused, and no E2B key is needed.
+To compare Designers on identical inputs, set `designer: prompt`. The Designer is then the generator service's one-reply prompt Designer, the one SPADE uses, on the same sources. It makes one model call with the repository, the session cut to 240,000 characters (tool results first, never the user's words), the agent's rebuild rules and the Designer's reply format. The reply's JSON block is the task. The call goes where the agent's calls go, through `agent_api`, which must be `openai` or `responses`. The agent's own settings go unused, and no E2B key is needed.
 
-Everything else is the same for both authors: the cursor, admission, the checks, rollouts, generation reports and the task store. SPADE keeps every task that passes its checks, so the baseline runs with the band off:
+Everything else is the same for both Designers: the cursor, admission, the checks, rollouts, generation reports and the task store. SPADE keeps every task that passes its checks, so the baseline runs with the band off:
 
 ```yaml
 pipeline:
@@ -325,12 +325,12 @@ pipeline:
         module: recipes.beta.autoenvscaling:AutoEnvScalingGenerator
         config:
           # The rest as in examples/tinker/serve.yaml.
-          author: prompt
+          designer: prompt
           band_low: null
           band_high: null
 ```
 
-Run each author as a deployment of its own, with its own state directory: both name their tasks `harbor-<generation>-<index>-autoenvscaling`.
+Run each Designer as a deployment of its own, with its own state directory: both name their tasks `harbor-<generation>-<index>-autoenvscaling`.
 
 ## Run it
 
@@ -419,4 +419,4 @@ The built-in generated-task recipe trains a generation's tasks only after the wh
 - For the agent, `git` on the Reef host, for the repository snapshots.
 - Docker and the `harbor` command line on the generator service's host, as for SPADE.
 
-Known limits: with `agent_reef_url` on the training deployment itself, the agent's calls share the training scenario, and the recipe's record stage keeps the ones no report references in memory. A long run should record them on a separate Designer's Reef, as the example does. No run has used the Claude Code image on E2B or Modal yet, so start `author_harness: claude-code` with one session.
+Known limits: with `agent_reef_url` on the training deployment itself, the agent's calls share the training scenario, and the recipe's record stage keeps the ones no report references in memory. A long run should record them on a separate Designer's Reef, as the example does. No run has used the Claude Code image on E2B or Modal yet, so start `designer_harness: claude-code` with one session.
