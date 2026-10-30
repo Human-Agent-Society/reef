@@ -67,6 +67,7 @@ from reef.train.algos.registry import job_training
 from reef.train.local_jobs import LocalJobComponent
 from reef.train.slime_backend.algorithm import SlimeAlgorithm
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
+from reef.train.slime_backend.dataset import DATASET_FILE, DatasetSettings, save_root
 from reef.train.slime_backend.distill import DistillAlgorithm
 from reef.train.slime_backend.loss_families import resolve_loss_family
 from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
@@ -101,7 +102,7 @@ ROLLOUT_FILE = "rollout.json"
 #: The rollouts of a task job, in its job directory.
 ROLLOUTS_FILE = "rollouts.json"
 #: A job's parameters; ``rollout`` applies only to a task job.
-JOB_PARAMETER_NAMES = frozenset({"method", "scheduling", "save_interval", "rollout"})
+JOB_PARAMETER_NAMES = frozenset({"method", "scheduling", "save_interval", "rollout", "dataset"})
 #: The settings a job's driver starts with, in the job's directory.
 DRIVER_FILE = "driver.json"
 #: The metrics of a job whose driver finished, in the job's directory.
@@ -112,6 +113,8 @@ DRIVER_LOG = "driver.log"
 DRIVER_STOP_TIMEOUT_S = 60
 #: The output of the disposal of the component's Slime serving session, in the save root.
 SERVING_LOG = "reef-serving.log"
+#: The loss family that leaves the training signal of a dataset job to Slime (``reef.train.slime_backend.native``).
+SLIME_NATIVE_FAMILY = "slime"
 #: The Slime option that starts no rollout engine, for a job that rolls nothing out.
 NO_ROLLOUT_ENGINES = "--rollout-num-gpus=0"
 
@@ -279,7 +282,7 @@ class SlimeJobs(LocalJobComponent):
     @staticmethod
     def root_of(args: SlimeArguments) -> Path:
         """The save root of ``args``: the directory of the checkpoint roots, the jobs and the starts."""
-        return Path(args.save_hf.format(rollout_id=0)).expanduser().resolve().parent.parent
+        return save_root(args.save_hf)
 
     @property
     @abstractmethod
@@ -342,6 +345,15 @@ class SlimeJobs(LocalJobComponent):
         unknown = set(job.parameters) - JOB_PARAMETER_NAMES
         if unknown:
             raise ValueError(f"Slime jobs accept no parameters {sorted(unknown)}")
+        dataset_family = self.args.loss_family == SLIME_NATIVE_FAMILY
+        if "dataset" in job.parameters:
+            if not dataset_family:
+                raise ValueError(f"a dataset job needs the {SLIME_NATIVE_FAMILY!r} loss family, which Slime trains")
+            if job.data.samples:
+                raise ValueError("a dataset job has no samples: Slime rolls out the dataset's prompts")
+            DatasetSettings.from_parameters(job.parameters)
+        elif dataset_family:
+            raise ValueError(f"the {SLIME_NATIVE_FAMILY!r} loss family trains only dataset jobs")
         tasks = [item for item in job.data.samples if isinstance(item, TaskSample)]
         if tasks and len(tasks) != len(job.data.samples):
             raise ValueError("a Slime job trains either trajectories or tasks, not both")
@@ -530,6 +542,8 @@ class SlimeJobRunner(SlimeJobs):
     # -- One job
 
     def run(self, job: TrainingJob, directory: Path) -> Mapping[str, Any]:
+        if "dataset" in job.parameters:
+            return self.run_dataset(job, directory, DatasetSettings.from_parameters(job.parameters))
         start = SlimeStart.read(Path(job.start))
         method, scheduling = job_training(job.parameters)
         saved = self.saved(directory)
@@ -669,17 +683,85 @@ class SlimeJobRunner(SlimeJobs):
                         )
                     )
             rewards = rollout_data["rewards"]
-            reward = math.fsum(rewards) / len(rewards)
-            self.group.save_model(rollout.rollout_id, force_sync=True)
-            if self.critic_group is not None and critic_checkpoint_due(
-                rollout.rollout_id, self.storage.critic_save_interval
-            ):
-                # The critic's weights and optimizer persist beside the actor's, so the value head survives a restart.
-                # No Hugging Face export: the critic never serves.
-                self.critic_group.save_model(rollout.rollout_id, force_sync=True)
-            self.storage.complete(job.job_id, rollout.rollout_id, reward=reward)
-            self.record_rollout(directory, rollout, saved_schedule, metrics)
+            self.save_rollout(job, directory, rollout, saved_schedule, metrics, math.fsum(rewards) / len(rewards))
         return saved_schedule
+
+    def save_rollout(
+        self,
+        job: TrainingJob,
+        directory: Path,
+        rollout: SlimeRound,
+        schedule_state: LearningRateScheduleState | None,
+        metrics: Mapping[str, Any],
+        reward: float,
+    ) -> None:
+        """Save the trained ``rollout``'s checkpoint pair, with ``reward`` for retention, and record it."""
+        self.group.save_model(rollout.rollout_id, force_sync=True)
+        if self.critic_group is not None and critic_checkpoint_due(
+            rollout.rollout_id, self.storage.critic_save_interval
+        ):
+            # The critic's weights and optimizer persist beside the actor's, so the value head survives a restart.
+            # No Hugging Face export: the critic never serves.
+            self.critic_group.save_model(rollout.rollout_id, force_sync=True)
+        self.storage.complete(job.job_id, rollout.rollout_id, reward=reward)
+        self.record_rollout(directory, rollout, schedule_state, metrics)
+
+    def run_dataset(self, job: TrainingJob, directory: Path, settings: DatasetSettings) -> Mapping[str, Any]:
+        """Train a dataset job with Slime's own loop: rollouts that Slime generates, rewards and trains.
+
+        The job trains ``epochs`` passes over the dataset, in rollouts of ``--rollout-batch-size`` prompts. Each
+        rollout runs Slime's sequence: the engines take the workers' weights, generate the rollout and release
+        their memory, and the workers train it. Every ``save_interval`` rollouts and the last one save a
+        checkpoint, whose step counts the job's rollouts. A resumed job continues after its last checkpoint.
+        """
+        if self.rollout_group is None:
+            raise RuntimeError("a dataset job rolls out on Slime's serving session, which this runner lacks")
+        saved = self.saved(directory)
+        started = read_json(directory / ROLLOUT_FILE)
+        recorded = saved[-1].step if saved else 0
+        if started is not None and started["rollout_id"] == self.loaded_rollout_id and started["step"] > recorded:
+            # A restart stopped the job after Megatron saved this rollout, which the workers loaded again.
+            done = started["step"]
+            rollout = SlimeRound(started["rollout_id"], done, None, None, None, {})
+            self.storage.complete(job.job_id, rollout.rollout_id, reward=0.0)
+            self.record_rollout(directory, rollout, None, {"resumed": 1})
+        else:
+            done = recorded
+            held = SlimeStart.read(Path(saved[-1].path if saved else job.start))
+            self.check_held_weights(held.rollout_id, job.start)
+        write_json(
+            self.root / DATASET_FILE,
+            {"job_id": job.job_id, "path": str(settings.path), "skip_rollouts": done, "token": uuid.uuid4().hex},
+        )
+        total = self.rollout_group.rollouts_per_epoch() * settings.epochs
+        if total == 0:
+            raise ValueError(f"the dataset {settings.path} holds fewer prompts than one rollout batch")
+        interval = job.parameters.get("save_interval") or total
+        metrics: dict[str, Any] = {"dataset_rollouts": total}
+        for index in range(done, total):
+            if self.stopping(directory):
+                break
+            rollout_id = self.next_rollout_id
+            self.rollout_group.sync(self.group)
+            data = self.rollout_group.generate(rollout_id)
+            self.rollout_group.release()
+            self.resolve(self.group.async_train(rollout_id, data))
+            rollout_metrics = merge_rank_metrics(self.resolve(self.group.async_pop_metrics()))
+            metrics.update(rollout_metrics)
+            step = index + 1
+            if step % interval and step != total:
+                self.next_rollout_id = rollout_id + 1
+                continue
+            rollout = SlimeRound(rollout_id, step, None, None, None, {})
+            reward = rollout_metrics.get("rollout/raw_reward", rollout_metrics.get("rollout/rewards", 0.0))
+            protected = set() if self.loaded_rollout_id is None else {self.loaded_rollout_id}
+            with self.storage.admit(rollout_id=rollout_id, active_rollouts=protected) as storage_plan:
+                if storage_plan["blocked"]:
+                    raise RuntimeError(f"checkpoint storage is full: {'; '.join(storage_plan['reasons'])}")
+                write_json(directory / ROLLOUT_FILE, {"rollout_id": rollout_id, "step": step})
+                self.save_rollout(job, directory, rollout, None, dict(rollout_metrics), float(reward))
+            metrics["rollout_id"] = rollout_id
+        return metrics
 
     def record_rollout(
         self,
