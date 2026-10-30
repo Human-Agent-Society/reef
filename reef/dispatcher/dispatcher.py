@@ -167,6 +167,8 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance):
         self.errors = TrainingErrors()
         self.background_threads = BackgroundThreads()
         self.local_workers = LocalTrainingWorkers(self.registry, self.errors, held=hold_local_cycles)
+        #: The writer of ``served_models``, when this process runs control.
+        self.publisher: ServedModelsPublisher | None = None
         if self.runs_control:
             # A standby instance waits here, before it loads or serves anything, until the active one stops.
             control_id = instance_id("control")
@@ -182,6 +184,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance):
                 stop_delay_seconds=CACHE_SECONDS + request_timeout_seconds,
             )
             self.workers.add(publisher)
+            self.publisher = publisher
             # The publisher extends the lease; it starts now, so a slow start-up does not let the lease expire.
             publisher.start()
             self.workers.add(StoreChangesWatcher(self.registry, coordination.work_queue, self))
@@ -304,12 +307,18 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance):
         if not self.runs_control:
             # Another process runs control: this one loaded the scenario only to make its samples.
             return
+        self.scenario_committed(instance)
         self.request_samples(instance)
         self.local_workers.resume(instance)
         if self.record_items is not None:
             self.record_items.wake(instance.name)
         if any(component_trainer.trainer.holds_untrained_records() for component_trainer in instance.trainers):
             self.local_workers.wake(instance)
+
+    def scenario_committed(self, instance: Scenario) -> None:
+        """Write what ``instance`` serves now to ``served_models``, in the step of the commit that changed it."""
+        if self.publisher is not None:
+            self.publisher.publish(instance)
 
     def scenario_reloaded(self, instance: Scenario) -> None:
         """A failure rebuilt ``instance``: ask the samples service again for the records after its progress. Its
@@ -447,17 +456,26 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance):
     def activate(self, scenario: str, artifact_id: str, component: str | None = None) -> ComponentArtifact:
         """Make ``artifact_id`` the active artifact of ``component`` in ``scenario``; no training start moves."""
         with self.registry.lock_for(scenario):
-            return self.registry.require(scenario).activate(artifact_id, component)
+            current = self.registry.require(scenario)
+            changed = current.activate(artifact_id, component)
+            self.scenario_committed(current)
+            return changed
 
     def serve(self, scenario: str, artifact_id: str, component: str | None = None) -> ComponentArtifact:
         """Serve ``artifact_id`` of ``component`` beside the active release of ``scenario``; that release stays."""
         with self.registry.lock_for(scenario):
-            return self.registry.require(scenario).serve(artifact_id, component)
+            current = self.registry.require(scenario)
+            changed = current.serve(artifact_id, component)
+            self.scenario_committed(current)
+            return changed
 
     def stop_serving(self, scenario: str, artifact_id: str) -> ServedBesideArtifact:
         """Stop serving ``artifact_id`` beside the active release of ``scenario``; the active release stays."""
         with self.registry.lock_for(scenario):
-            return self.registry.require(scenario).stop_serving(artifact_id)
+            current = self.registry.require(scenario)
+            changed = current.stop_serving(artifact_id)
+            self.scenario_committed(current)
+            return changed
 
     def train_from(self, scenario: str, artifact_id: str, component: str | None = None) -> ComponentArtifact:
         """Start ``component``'s trainer of ``scenario`` from ``artifact_id``; what serves stays."""

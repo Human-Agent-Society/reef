@@ -66,6 +66,11 @@ class ScenarioLifecycle(ABC):
         progress of the commit history, so the records after it need the samples service again."""
 
     @abstractmethod
+    def scenario_committed(self, instance: Scenario) -> None:
+        """React to a commit of ``instance`` that can change what it serves: a training step, an activation, a
+        served or stopped artifact. The caller holds the scenario's lock."""
+
+    @abstractmethod
     def close_replaced(self, instance: Scenario) -> None:
         """Close the instance that a reload replaced, now or once nothing runs on it any more."""
 
@@ -87,6 +92,9 @@ class StandaloneLifecycle(ScenarioLifecycle):
         return None
 
     def scenario_reloaded(self, instance: Scenario) -> None:
+        return None
+
+    def scenario_committed(self, instance: Scenario) -> None:
         return None
 
     def close_replaced(self, instance: Scenario) -> None:

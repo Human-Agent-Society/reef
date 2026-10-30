@@ -22,6 +22,7 @@ from abc import ABC, abstractmethod
 from reef.core.served_models import ACTIVE, ScenarioModel, ScheduledStop, ServedArtifact
 from reef.execution.workers import ServiceWorker
 from reef.scenario.registry import ScenarioRegistry
+from reef.scenario.scenario import Scenario
 from reef.storage.control_lease import ControlLease, ControlLeaseState
 from reef.storage.coordination import Coordination
 
@@ -71,7 +72,7 @@ class ServedModelsPublisher(ServiceWorker):
     (``wait_for_control_lease``); ``instance`` is told when the lease is lost;
     ``stop_delay_seconds`` is how long a replaced value keeps serving, at least ``CACHE_SECONDS`` plus the longest
     request; ``interval_seconds`` is the time between rounds, less than the lease. ``held`` is whether this
-    instance still holds the lease; it starts true.
+    instance still holds the lease, under ``lease_number``; it starts true.
 
     Purpose: the dispatcher of a control instance starts it as soon as it takes the lease, so the lease is extended
     while the rest of the instance starts; the inference service reads what it writes.
@@ -98,9 +99,12 @@ class ServedModelsPublisher(ServiceWorker):
         if lease.instance_id != instance_id:
             raise ValueError(f"the control lease given to {instance_id} is held by {lease.instance_id}")
         self.held = True
+        self.lease_number = lease.number
         self.instance_id = instance_id
         self.stop_delay_seconds = stop_delay_seconds
         self.interval_seconds = interval_seconds
+        #: Serializes the writes of a commit and of a round.
+        self.lock = threading.Lock()
         self.stopped = threading.Event()
         self.thread: threading.Thread | None = None
 
@@ -143,8 +147,36 @@ class ServedModelsPublisher(ServiceWorker):
         served = current.runtime.served_artifact(artifact_id, scenario)
         return {} if served is None else {ACTIVE: served}
 
+    def publish(self, current: Scenario, *, now: float | None = None) -> None:
+        """Write the rows of ``current`` now, as an activation does in the same step as its commit, so a request
+        after the commit reads the new value. Nothing happens when this instance does not hold the lease; a lease
+        that another instance took meanwhile refuses the write (``ControlLeaseConflict``)."""
+        with self.lock:
+            if self.held:
+                self.write_rows(current, time.time() if now is None else now)
+
+    def write_rows(self, current: Scenario, moment: float) -> None:
+        """Write the difference between ``current``'s rows and what it serves; the caller holds ``lock``."""
+        table = self.coordination.served_models
+        wanted = self.desired(current.name)
+        present = table.read_scenario(current.name)
+        for name in sorted(set(present) | set(wanted)):
+            old, new = present.get(name), wanted.get(name)
+            if old == new:
+                continue
+            key = ScenarioModel(current.name, name)
+            if new is None:
+                table.remove(key, control_lease_number=self.lease_number)
+            else:
+                table.write(key, new, control_lease_number=self.lease_number)
+            if old is not None and not table.is_referenced(old):
+                table.schedule_stop(
+                    ScheduledStop(old, moment + self.stop_delay_seconds), control_lease_number=self.lease_number
+                )
+
     def run_once(self, *, now: float | None = None) -> bool:
-        """One round; return whether this instance holds the lease and wrote the table."""
+        """One round: extend the lease, write the rows of every loaded scenario that a commit has not written yet,
+        and clear the due stops; return whether this instance holds the lease."""
         moment = time.time() if now is None else now
         state = self.coordination.control_lease.acquire(self.instance_id, now=moment)
         if state is None:
@@ -154,27 +186,13 @@ class ServedModelsPublisher(ServiceWorker):
                 self.instance.control_lease_lost()
             return False
         self.held = True
-        table = self.coordination.served_models
-        number = state.number
+        self.lease_number = state.number
         for current in self.registry.loaded_scenarios():
-            wanted = self.desired(current.name)
-            present = table.read_scenario(current.name)
-            for name in sorted(set(present) | set(wanted)):
-                old, new = present.get(name), wanted.get(name)
-                if old == new:
-                    continue
-                key = ScenarioModel(current.name, name)
-                if new is None:
-                    table.remove(key, control_lease_number=number)
-                else:
-                    table.write(key, new, control_lease_number=number)
-                if old is not None and not table.is_referenced(old):
-                    table.schedule_stop(
-                        ScheduledStop(old, moment + self.stop_delay_seconds), control_lease_number=number
-                    )
+            self.publish(current, now=moment)
+        table = self.coordination.served_models
         for stop in table.due_stops(moment):
             # A runtime frees the weights it replaced when it loads new ones, so the stop only clears the row.
-            table.delete_stop(stop.served, control_lease_number=number)
+            table.delete_stop(stop.served, control_lease_number=self.lease_number)
         return True
 
 
