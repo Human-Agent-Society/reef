@@ -29,7 +29,7 @@ from tests.support.harness_render import (
     native_tool,
     write_rendered,
 )
-from tests.support.harness_steps import COMPONENT, TreeReleases
+from tests.support.harness_steps import COMPONENT, TreeReleases, instruction_tasks
 
 from reef.evaluation.harness import ComparePolicy, EvaluationSettings, NoEvaluationPolicy
 from reef.execution.sandbox.process import SandboxExecutor
@@ -250,7 +250,7 @@ def native_backend(tmp_path: Path, model, method, score, tasks: tuple[str, ...])
     recipe = HarnessEvolutionRecipe(
         method=resolve_method(method),
         evolution=EvolutionSettings(adapter="native", binary=_launcher(tmp_path), state_dir=str(tmp_path / "harness")),
-        evaluation=EvaluationSettings(tasks=tasks),
+        evaluation=EvaluationSettings(tasks=instruction_tasks(*tasks)),
         scorer=resolve_task_scorer(score),
         seed=HarnessTree(NATIVE_SEED_FILES),
         runtime=InferenceProxyRuntime(model_path="fake", base_url=model.base_url, api_key="dummy"),

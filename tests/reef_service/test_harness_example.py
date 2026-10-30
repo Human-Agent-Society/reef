@@ -25,7 +25,7 @@ from tests.support.harness_service import backend_step
 from tests.support.harness_steps import COMPONENT, TreeReleases, harness_backend
 
 from reef.evaluation.activation import AlwaysActivate
-from reef.evaluation.harness import NoEvaluationPolicy
+from reef.evaluation.harness import EvaluationTask, NoEvaluationPolicy
 from reef.harness.adapters import get_adapter
 from reef.harness.tasks.model_binding import ModelBinding, ModelBindingError, ModelBindings
 from reef.harness.tasks.run import TaskResult
@@ -121,23 +121,16 @@ def releases_for(recipe: HarnessEvolutionRecipe) -> ComponentReleases:
 # -- the grader: exact last-line answers ---------------------------------------------------------
 
 
-def test_evaluate_grades_exact_final_lines_and_anything_else_as_zero(evolution) -> None:
-    prefix, answer = next(iter(evolution.ANSWERS.items()))
-    task = f"{prefix} the task"
+def test_evaluate_grades_exact_final_lines_against_the_tasks_answer_and_anything_else_as_zero(evolution) -> None:
+    answer = "9592"
+    task = EvaluationTask("sieve", instruction="count the primes", answer=answer)
     assert evolution.evaluate(task, task_run((pi_message(f"Working...\n\n{answer}"),))) == 1.0
     assert evolution.evaluate(task, task_run(({"role": "assistant", "content": answer},))) == 1.0
     assert evolution.evaluate(task, task_run((pi_message(f"{answer}!"),))) == 0.0
     assert evolution.evaluate(task, task_run((pi_message(f"The answer is {answer}"),))) == 0.0
     assert evolution.evaluate(task, task_run(())) == 0.0
-    assert evolution.evaluate("no such prefix", task_run((pi_message(answer),))) == 0.0
-
-
-def test_the_tutorial_grader_keeps_its_own_answers(evolution) -> None:
-    """The tutorial's grader knows the three arithmetic answers its deployments run, and no other task; it reads
-    the trajectory through the built-in reader."""
-    assert set(evolution.ANSWERS) == {"[sieve]", "[fib]", "[csv]"}
-    assert evolution.evaluate("[health] Run `echo reef-ok`.", task_run((pi_message("reef-ok"),))) == 0.0
-    assert evolution.evaluate("[sieve] count the primes", task_run((pi_message("Sieving...\n\n9592"),))) == 1.0
+    # A task without an answer scores 0, whatever the reply.
+    assert evolution.evaluate(EvaluationTask.of_instruction("count"), task_run((pi_message(answer),))) == 0.0
     assert final_assistant_text([pi_message("a"), {"role": "user", "content": "b"}]) == "a"
 
 
@@ -267,8 +260,11 @@ def test_the_serve_file_boots_the_recipe_through_from_environment(tmp_path, monk
     built = boot_serve_file(tmp_path, monkeypatch, "serve.yaml", binary=str(tmp_path / "fake-pi"))
     assert built.evolution.adapter == "pi" and built.evolution.binary == str(tmp_path / "fake-pi")
     tasks = built.configured_tasks()
-    assert len(tasks) == 3
-    assert all(any(task.startswith(prefix) for prefix in evolution.ANSWERS) for task in tasks)
+    assert [(task.id, task.answer) for task in tasks] == [
+        ("sieve", "9592"),
+        ("fib", "2880067194370816120"),
+        ("csv", "30"),
+    ]
     assert (built.batch_size, built.training_mode, built.evaluation.policy) == (1, "auto", "compare")
     assert type(built.method).__name__ == "RulesMethod" and type(built.scorer).__name__ == "AnswerScorer"
     # The seed is the starter rules and carries no provider; the binding comes from the runtime.
@@ -295,7 +291,7 @@ def test_the_native_serve_file_boots_the_recipe_with_the_shipped_seed(tmp_path, 
     assert type(built.method).__name__ == "NativeMethod" and type(built.scorer).__name__ == "NativeAnswerScorer"
     # The same three tasks as the pi variant, so the two runs are comparable.
     pi_tasks = load_config(EXAMPLE_DIR / "configs" / "serve.yaml")["evolution"]["evaluation"]["tasks"]
-    assert built.configured_tasks() == tuple(pi_tasks)
+    assert built.configured_tasks() == tuple(EvaluationTask.parse(task, setting="tasks") for task in pi_tasks)
     assert (built.batch_size, built.training_mode) == (1, "auto")
     assert built.seed == NATIVE_SEED
     assert {
@@ -501,7 +497,7 @@ def test_a_native_agent_change_routes_the_main_graph_through_the_agent(native_ev
 
 
 def test_native_evaluate_reads_the_last_assistant_message_with_content(native_evolution) -> None:
-    task = "[sieve] count the primes below 100000"
+    task = EvaluationTask("sieve", instruction="count the primes below 100000", answer="9592")
     call = {
         "type": "assistant/message",
         "seq": 2,

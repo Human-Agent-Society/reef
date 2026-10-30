@@ -14,7 +14,7 @@
 ``policy``
     The publication policies ``compare``, ``floor`` and ``none``.
 ``tasks``
-    The tasks each step evaluates, and the collection of traffic prompts.
+    ``EvaluationTask``, the tasks each step evaluates, and the collection of traffic instructions.
 ``settings``
     The ``evolution.evaluation`` section.
 """
@@ -37,7 +37,7 @@ from reef.evaluation.harness.scoring import (
     verifier_reward,
 )
 from reef.evaluation.harness.settings import EvaluationSettings
-from reef.evaluation.harness.tasks import EvaluationTasks, StepTasks, TaskCollector
+from reef.evaluation.harness.tasks import EvaluationTask, EvaluationTasks, StepTasks, TaskCollector, read_task_file
 
 __all__ = [
     "EVALUATION_SIDES",
@@ -46,6 +46,7 @@ __all__ = [
     "DecisionRecord",
     "EvaluationContext",
     "EvaluationSettings",
+    "EvaluationTask",
     "EvaluationTasks",
     "EvaluationWorkerPool",
     "FailureObservation",
@@ -64,5 +65,6 @@ __all__ = [
     "TaskScorer",
     "VerifierRewardScorer",
     "evaluation_selection",
+    "read_task_file",
     "verifier_reward",
 ]

@@ -50,6 +50,7 @@ from reef.evaluation.activation import AlwaysActivate, NeverActivate
 from reef.evaluation.harness import (
     ComparePolicy,
     EvaluationSettings,
+    EvaluationTask,
     FloorPolicy,
     NoEvaluationPolicy,
     TaskEvaluationWorker,
@@ -150,7 +151,9 @@ def test_a_deployment_names_its_plugins_by_reference_or_by_module_and_config() -
 def test_the_sections_parse_into_their_settings_over_the_defaults() -> None:
     defaults = from_config(evolution_config())
     assert defaults.evolution == EvolutionSettings(method=f"{SUPPORT}:IdleMethod")
-    assert defaults.evaluation == EvaluationSettings(tasks=("t",), scorer=f"{SUPPORT}:FixedScorer")
+    assert defaults.evaluation == EvaluationSettings(
+        tasks=({"id": "t", "instruction": "t"},), scorer=f"{SUPPORT}:FixedScorer"
+    )
     evolution = {
         "adapter": "pi",
         "state_dir": "state",
@@ -204,7 +207,7 @@ INVALID_SETTINGS = {
     ),
     "no-tasks": (
         {"evaluation": {"tasks": []}},
-        "needs tasks, a task_manifest or imported_tasks unless its policy is none",
+        "needs tasks, a task_file, harbor_tasks, a task_manifest or imported_tasks unless its policy is none",
     ),
     "no-scorer": ({"evaluation": {"scorer": None}}, "requires a scorer unless the evaluation policy is none"),
 }
@@ -365,14 +368,17 @@ def test_a_split_manifest_gives_the_evaluation_its_eval_task_directories(tmp_pat
     def boot(adapter: str = "pi", **evaluation: Any) -> HarnessEvolutionRecipe:
         return from_config(evolution_config(evaluation={**manifest, **evaluation}, adapter=adapter), runtime=runtime())
 
-    assert boot().configured_tasks() == (str(root / "held-1"), str(root / "held-2"))
+    assert boot().configured_tasks() == (
+        EvaluationTask.of_directory(root / "held-1"),
+        EvaluationTask.of_directory(root / "held-2"),
+    )
     assert boot().task_directories(get_adapter("pi"))
     with pytest.raises(RecipeConfigError, match="'hermes' cannot play Harbor task directories"):
         boot(adapter="hermes")
-    with pytest.raises(RecipeConfigError, match="collect_failures adds prompts"):
+    with pytest.raises(RecipeConfigError, match="collect_failures adds instructions"):
         boot(collect_failures=True)
     with pytest.raises(RecipeConfigError, match="one task source, not tasks and task_manifest"):
-        boot(tasks=["x"])
+        boot(tasks=[{"id": "x", "instruction": "x"}])
     with pytest.raises(RecipeConfigError, match=r"task_manifest and evaluation\.tasks_root go together"):
         boot(tasks_root=None)
     write_split_manifest(tmp_path / "empty.json", TaskSplit(("train-1",), (), 0, 0))
@@ -410,7 +416,9 @@ def test_each_step_evaluates_on_the_eval_split_of_the_imported_tasks_as_the_step
         assert task_count() == 1
         (second,) = samples.add_tasks((write_task(root, "held-2"),), "eval")
         assert task_count() == 2
-        assert backend.tasks.seed() == tuple(str(task.sample.task_path) for task in (first, second))
+        assert backend.tasks.seed() == tuple(
+            EvaluationTask.of_directory(task.sample.task_path) for task in (first, second)
+        )
         with pytest.raises(RecipeConfigError, match="needs the sample store"):
             built.build_backend("s", releases_for(built), None)
 
@@ -693,7 +701,9 @@ def test_the_cache_reuses_a_score_only_in_the_context_it_ran_in(tmp_path: Path, 
         backend = backend_of(from_config(settings, runtime=runtime()))
         try:
             backend.history.add_candidate(PI_SEED, step=1, origin="seed")
-            (record,) = backend.evaluator.runs(PI_SEED, ["t"], repeats=1, step=step_number)
+            (record,) = backend.evaluator.runs(
+                PI_SEED, [EvaluationTask("t", instruction="t")], repeats=1, step=step_number
+            )
         finally:
             backend.close()
         return record
@@ -802,7 +812,7 @@ def test_a_scorer_that_fails_or_returns_no_number_aborts_the_step_and_the_next_o
 def task_order_score(task, result):
     """Module level, so a process worker can import it."""
     assert result.exit_code == 0, result.stderr
-    return float(task == "task two")
+    return float(task.text == "task two")
 
 
 def test_evaluation_workers_run_both_sides_in_one_wave(tmp_path: Path) -> None:
@@ -879,12 +889,14 @@ def test_a_native_turn_that_ended_on_an_error_ranks_as_a_run_that_could_not_run(
         return TaskResult(exit_code=exit_code, stdout="", stderr="boom", trajectory=(session, end), residue=())
 
     error = {"code": "LOAD_ERROR", "message": "tool 'x' cannot load"}
-    errored = worker.score_result(result({"kind": "error", "error": error}, 1), "task one", MODELS)
+    errored = worker.score_result(
+        result({"kind": "error", "error": error}, 1), EvaluationTask.of_instruction("task one"), MODELS
+    )
     # The tree gave no answer: the run completed, so it scores 0 and names why.
     assert errored.score == RolloutScore.scored(0.0) and errored.failure is not None
     assert errored.failure.stage == "graph" and errored.failure.cause == "LOAD_ERROR: tool 'x' cannot load"
     assert errored.path == {"stages": [], "reason": "error", "error": error}
-    crashed = worker.score_result(result({"kind": "completed"}, 1), "task one", MODELS)
+    crashed = worker.score_result(result({"kind": "completed"}, 1), EvaluationTask.of_instruction("task one"), MODELS)
     assert (
         crashed.score == RolloutScore.scored(1.0) and crashed.failure is not None and crashed.failure.stage == "exit"
     )
@@ -902,7 +914,7 @@ def test_an_agents_error_that_ended_the_run_ranks_the_run_as_one_that_could_not_
         {"type": "stage/exit", "seq": 1, "time": 0, "data": {"stage": "think"}, "rules": "marker"},
     )
     result = TaskResult(exit_code=1, stdout="", stderr="", trajectory=trajectory, residue=())
-    scored = worker.score_result(result, "task one", MODELS)
+    scored = worker.score_result(result, EvaluationTask.of_instruction("task one"), MODELS)
     assert scored.score == RolloutScore.scored(0.0) and scored.failure is not None and scored.failure.stage == "graph"
     assert scored.failure.cause == "agent checker: MODEL_ERROR: the endpoint answered 500"
     assert scored.path == {"stages": ["think"], "reason": None, "error": error, "errored_agent": "checker"}
@@ -922,7 +934,7 @@ def test_a_run_whose_log_the_reader_found_empty_says_no_transcript_was_read() ->
     grader reads rides the result."""
     worker = run_worker_for("pi", lambda task, result: 0.0)
     empty = TaskResult(exit_code=0, stdout="reef-ok", stderr="", trajectory=(), residue=())
-    scored = worker.score_result(empty, "task one", MODELS)
+    scored = worker.score_result(empty, EvaluationTask.of_directory("task one"), MODELS)
     assert scored.score == RolloutScore.scored(0.0) and scored.reply is None
     assert scored.failure is None and scored.transcript_read is False
     answered = ({"role": "assistant", "content": "reef-ok"},)
@@ -941,13 +953,13 @@ def test_a_task_trial_that_never_ran_ranks_as_a_run_that_could_not_run() -> None
         return {"type": "verifier", "task": "task one", "rewards": {}, "reward": None, "failed": True, "error": error}
 
     never_ran = TaskResult(exit_code=1, stdout="", stderr="", trajectory=(row("docker build failed"),), residue=())
-    scored = worker.score_result(never_ran, "task one", MODELS)
+    scored = worker.score_result(never_ran, EvaluationTask.of_directory("task one"), MODELS)
     # The trial never ran: the environment, not the tree, failed it.
     assert scored.score.is_failed and scored.failure is not None
     assert scored.failure.stage == "trial" and scored.failure.cause == "docker build failed"
     # A verifier that ran and wrote nothing is the agent's loss: it scores through the scorer.
     wrote_nothing = TaskResult(exit_code=1, stdout="", stderr="", trajectory=(row(""),), residue=())
-    scored = worker.score_result(wrote_nothing, "task one", MODELS)
+    scored = worker.score_result(wrote_nothing, EvaluationTask.of_directory("task one"), MODELS)
     assert scored.score == RolloutScore.scored(0.0) and scored.failure is not None and scored.failure.stage == "exit"
 
 
@@ -962,7 +974,9 @@ def test_a_task_run_with_atif_steps_scores_by_its_verifier() -> None:
     verifier = {"type": "verifier", "task": "health", "rewards": {"reward": 1.0}, "reward": 1.0, "failed": False}
     trajectory = (verifier, *({"type": "step", **step} for step in steps))
     scored = worker.score_result(
-        TaskResult(exit_code=0, stdout="", stderr="", trajectory=trajectory, residue=()), "health", MODELS
+        TaskResult(exit_code=0, stdout="", stderr="", trajectory=trajectory, residue=()),
+        EvaluationTask.of_directory("health"),
+        MODELS,
     )
     assert scored.score == RolloutScore.scored(1.0) and scored.failure is None and scored.reply is None
 
@@ -976,7 +990,7 @@ def test_collect_failures_grows_the_evaluation_from_traffic(tmp_path: Path) -> N
     seen: list[str] = []
 
     def score(task, result):
-        seen.append(task)
+        seen.append(task.text)
         return marker_score(task, result)
 
     backend, _ = harness_backend(

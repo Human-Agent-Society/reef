@@ -42,6 +42,7 @@ from reef.evaluation.activation import AlwaysActivate
 from reef.evaluation.harness import (
     ComparePolicy,
     EvaluationSettings,
+    EvaluationTask,
     EvaluationTasks,
     FloorPolicy,
     HarnessTaskEvaluator,
@@ -50,6 +51,7 @@ from reef.evaluation.harness import (
     TaskCollector,
     TaskScorer,
     evaluation_selection,
+    read_task_file,
 )
 from reef.execution.sandbox.config import build_executor
 from reef.execution.sandbox.process import ProgramExecutor
@@ -263,6 +265,16 @@ class HarnessEvolutionRecipe(Recipe):
             raise RecipeConfigError(f"evolution.seed fails validation: {'; '.join(seed_problems)}")
         offline = self.runs_offline()
         task_directories = self.task_directories(descriptor)
+        if self.evaluation.instruction_source and descriptor.takes_task_directory:
+            raise RecipeConfigError(
+                f"adapter {descriptor.name!r} runs Harbor task directories, so its evaluation tasks must be "
+                "evaluation.harbor_tasks, a task_manifest or imported_tasks, not instructions"
+            )
+        if self.evaluation.instruction_source and offline:
+            raise RecipeConfigError(
+                "offline runs play task directories, so the evaluation tasks must be task directories too: use "
+                "evaluation.harbor_tasks, imported_tasks or a task_manifest instead of instruction tasks"
+            )
         if task_directories and not descriptor.takes_task_directory:
             # An adapter whose command takes text plays each Harbor task in the task's own container.
             if not can_run_in_task_container(descriptor):
@@ -275,19 +287,16 @@ class HarnessEvolutionRecipe(Recipe):
                     "Harbor task directories run in their own containers, which are the runs' boundary: "
                     "set evolution.executor to local"
                 )
-            if offline and self.evaluation.tasks:
-                raise RecipeConfigError(
-                    "offline runs play task directories, so the evaluation tasks must be task directories "
-                    "too: use evaluation.imported_tasks or evaluation.task_manifest instead of evaluation.tasks"
-                )
         if self.evaluation.collect_failures and task_directories:
-            raise RecipeConfigError("evaluation.collect_failures adds prompts, and these tasks are task directories")
+            raise RecipeConfigError(
+                "evaluation.collect_failures adds instructions, and these tasks are Harbor task directories"
+            )
         if offline and self.scorer is None:
             # An offline step plays the imported train tasks and scores each run.
             raise RecipeConfigError("offline runs score each train task, so they need evaluation.scorer")
         if self.scorer is not None:
             evaluation_selection(self.scorer, self.worker_executor)
-        # A task manifest is read now, so a deployment with an unreadable one refuses to start.
+        # A task file or manifest is read now, so a deployment with an unreadable one refuses to start.
         self.configured_tasks()
 
     def runs_offline(self) -> bool:
@@ -295,21 +304,30 @@ class HarnessEvolutionRecipe(Recipe):
         return issubclass(self.stages().sample2job.plugin_class, TrainTaskJobData)
 
     def task_directories(self, descriptor: AdapterDescriptor) -> bool:
-        """Whether the runs play Harbor task directories rather than prompts: always for an adapter whose
-        command takes a task directory, else when the evaluation reads a task manifest or the imported tasks, or the
-        steps roll out the imported train tasks."""
+        """Whether the runs play Harbor task directories rather than instructions: always for an adapter whose
+        command takes a task directory, else when the evaluation names Harbor tasks, or the steps run the
+        imported train tasks."""
         return (
             descriptor.takes_task_directory
+            or bool(self.evaluation.harbor_tasks)
             or self.evaluation.task_manifest is not None
             or self.evaluation.imported_tasks
             or self.runs_offline()
         )
 
-    def configured_tasks(self) -> tuple[str, ...]:
-        """The configured evaluation tasks: ``evaluation.tasks``, or the eval tasks the task manifest names."""
+    def configured_tasks(self) -> tuple[EvaluationTask, ...]:
+        """The configured evaluation tasks: ``evaluation.tasks``, the task file's, ``harbor_tasks``, or the eval
+        tasks the task manifest names."""
         evaluation = self.evaluation
+        if evaluation.task_file is not None:
+            try:
+                return read_task_file(Path(evaluation.task_file).expanduser())
+            except ValueError as exc:
+                raise RecipeConfigError(f"evolution.evaluation.task_file: {exc}") from exc
+        if evaluation.harbor_tasks:
+            return tuple(EvaluationTask.of_directory(Path(path).expanduser()) for path in evaluation.harbor_tasks)
         if evaluation.task_manifest is None or evaluation.tasks_root is None:
-            return evaluation.tasks
+            return evaluation.instruction_tasks()
         try:
             paths = manifest_task_paths(
                 Path(evaluation.task_manifest).expanduser(), Path(evaluation.tasks_root).expanduser(), "eval"
@@ -320,7 +338,7 @@ class HarnessEvolutionRecipe(Recipe):
             raise RecipeConfigError(
                 f"evolution.evaluation.task_manifest {evaluation.task_manifest} names no eval tasks"
             )
-        return tuple(str(path) for path in paths)
+        return tuple(EvaluationTask.of_directory(path) for path in paths)
 
     def with_model_config(self, config: ModelConfig) -> HarnessEvolutionRecipe:
         super().with_model_config(config)

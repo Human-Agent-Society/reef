@@ -4,7 +4,10 @@ Example::
 
     evolution:
       evaluation:
-        tasks: ["[fib] Compute fib(90) and reply with the number alone."]
+        tasks:
+          - id: fib
+            instruction: Compute fib(90) and reply with the number alone.
+            answer: "2880067194370816120"
         scorer: harness.scoring:AnswerScorer
         policy: compare
         statistic: wins
@@ -20,15 +23,20 @@ from typing import Any
 
 from reef.core.config import Settings, config_option
 from reef.evaluation.harness.policy import POLICIES, STATISTICS
+from reef.evaluation.harness.tasks import EvaluationTask, unique_tasks
 
 
 @dataclass(frozen=True)
 class EvaluationSettings(Settings):
     """The parsed ``evolution.evaluation`` section of a harness evolution deployment.
 
-    Values: at most one task source is set: ``tasks`` (instructions or task
-    directories), ``task_manifest`` with ``tasks_root``, or ``imported_tasks``;
-    one is required unless ``policy`` is ``none``. ``scorer`` and ``collector``
+    Values: at most one task source is set. ``tasks`` (instruction task
+    mappings, each with ``id``, ``instruction`` and optional ``answer`` and
+    ``metadata``, with distinct ids) and ``task_file`` (a JSONL file of them)
+    hold instruction tasks; ``harbor_tasks`` (task directories),
+    ``task_manifest`` with ``tasks_root``, and ``imported_tasks`` hold Harbor
+    tasks. One is required unless ``policy`` is ``none``. A plain string in
+    ``tasks``, the format before task records, is refused with the keys to use. ``scorer`` and ``collector``
     are plugin settings (a ``package.module:Class`` reference, or a mapping
     with ``module`` and ``config``); the recipe requires a scorer unless
     ``policy`` is ``none``. ``policy`` is one of ``POLICIES`` and ``statistic`` one of
@@ -41,7 +49,12 @@ class EvaluationSettings(Settings):
     source and the publication policy from it.
     """
 
-    tasks: tuple[str, ...] = config_option((), help="The evaluation tasks: instructions, or task directories.")
+    # A string is accepted only to refuse the format before task records with the keys that replace it.
+    tasks: tuple[str | Mapping[str, Any], ...] = config_option(
+        (), help="The instruction tasks: mappings with id, instruction, and optional answer and metadata."
+    )
+    task_file: str | None = config_option(None, help="A JSONL file of instruction tasks, one mapping per line.")
+    harbor_tasks: tuple[str, ...] = config_option((), help="The Harbor task directories the evaluation runs.")
     task_manifest: str | None = config_option(None, help="A split manifest whose eval side names the tasks.")
     tasks_root: str | None = config_option(None, help="The directory of the task manifest's task directories.")
     imported_tasks: bool = config_option(
@@ -72,6 +85,8 @@ class EvaluationSettings(Settings):
             name
             for name, present in (
                 ("tasks", bool(self.tasks)),
+                ("task_file", self.task_file is not None),
+                ("harbor_tasks", bool(self.harbor_tasks)),
                 ("task_manifest", self.task_manifest is not None),
                 ("imported_tasks", self.imported_tasks),
             )
@@ -79,6 +94,12 @@ class EvaluationSettings(Settings):
         ]
         if len(sources) > 1:
             raise ValueError(f"evaluation takes one task source, not {' and '.join(sources)}")
+        if any(isinstance(task, str) for task in self.tasks):
+            raise ValueError(
+                "evaluation.tasks holds task records now: write each instruction as {id, instruction, answer}, "
+                "and list Harbor task directories under evaluation.harbor_tasks"
+            )
+        unique_tasks(self.instruction_tasks(), source="evaluation.tasks")
         if (self.task_manifest is None) != (self.tasks_root is None):
             raise ValueError("evaluation.task_manifest and evaluation.tasks_root go together")
         if not isinstance(self.agent_host, str) or not self.agent_host.strip():
@@ -86,7 +107,10 @@ class EvaluationSettings(Settings):
         if self.policy not in POLICIES:
             raise ValueError(f"evaluation.policy must be one of {', '.join(POLICIES)}")
         if self.policy != "none" and not sources:
-            raise ValueError("evaluation needs tasks, a task_manifest or imported_tasks unless its policy is none")
+            raise ValueError(
+                "evaluation needs tasks, a task_file, harbor_tasks, a task_manifest or imported_tasks "
+                "unless its policy is none"
+            )
         if self.statistic not in STATISTICS:
             raise ValueError(f"evaluation.statistic must be one of {', '.join(STATISTICS)}")
         for label, number in (
@@ -112,6 +136,17 @@ class EvaluationSettings(Settings):
                 raise ValueError(f"evaluation.{label} must be at least 0")
         if self.collector is not None and not self.collect_failures:
             raise ValueError("evaluation.collector applies only with evaluation.collect_failures")
+
+    def instruction_tasks(self) -> tuple[EvaluationTask, ...]:
+        """The tasks of ``evolution.evaluation.tasks``, in order; ``ValueError`` names an invalid one."""
+        return tuple(
+            EvaluationTask.parse(task, setting=f"evaluation.tasks[{index}]") for index, task in enumerate(self.tasks)
+        )
+
+    @property
+    def instruction_source(self) -> bool:
+        """Whether the configured tasks are instructions (``tasks`` or ``task_file``) rather than Harbor tasks."""
+        return bool(self.tasks) or self.task_file is not None
 
 
 __all__ = ["EvaluationSettings"]

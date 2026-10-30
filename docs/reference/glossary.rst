@@ -371,9 +371,10 @@ serving, a LoRA/PEFT adapter layered on a frozen base model.
 Task
 ----
 
-What an agent is asked to do. An instruction task is text that the agent
-reads. A Harbor task is a directory with an instruction, an environment and
-tests that score the result. A harness evaluation scores trees on tasks, and a
+What an agent is asked to do. An instruction task is a record: an id, the
+text that the agent reads, and an optional answer and metadata that only the
+scorer reads. A Harbor task is a directory with an instruction, an environment
+and tests that score the result. A harness evaluation scores trees on tasks, and a
 weight training job can train on Harbor tasks.
 
 Run

@@ -7,7 +7,7 @@ import math
 import subprocess
 from pathlib import Path
 
-from reef.evaluation.harness import TaskScorer
+from reef.evaluation.harness import EvaluationTask, TaskScorer
 from reef.harness import TaskResult
 
 MANIFEST = json.loads(Path(__file__).with_name("tasks.json").read_text(encoding="utf-8"))
@@ -58,5 +58,5 @@ def evaluate(task: str, result: TaskResult) -> float:
 class VerifierScorer(TaskScorer):
     """:func:`evaluate` as the ``evolution.evaluation.scorer`` plugin terminal_bench.yaml names."""
 
-    def score(self, task: str, result: TaskResult) -> float:
-        return evaluate(task, result)
+    def score(self, task: EvaluationTask, result: TaskResult) -> float:
+        return evaluate(task.text, result)

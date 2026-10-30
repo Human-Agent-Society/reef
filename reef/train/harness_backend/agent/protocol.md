@@ -29,8 +29,9 @@ Reef serves the tools at `$REEF_AGENT_URL`. A `tree` argument is a directory of 
 - `curl -s "$REEF_AGENT_URL/tools"` lists the tools and their arguments.
 - `curl -s "$REEF_AGENT_URL/check" -H 'Content-Type: application/json' -d '{"tree": "harness"}'` validates a tree
   and answers `passed` and `problems`. Reef evaluates only a tree that passes.
-- `curl -s "$REEF_AGENT_URL/evaluate" -H 'Content-Type: application/json' -d '{"tree": "harness", "tasks": ["..."]}'`
-  scores a tree on tasks and answers one record per run, with the directory of its files. A record's `score`
+- `curl -s "$REEF_AGENT_URL/evaluate" -H 'Content-Type: application/json' -d '{"tree": "harness", "tasks": ["<id>"]}'`
+  scores a tree on tasks and answers one record per run, with the directory of its files. A task is the `id` of a
+  task in `material/evaluation.json`, or `{"instruction": "..."}` for any other instruction. A record's `score`
   is a number, or `"failed"` when the environment could not run the run; `failure` then says why. A scored
   run in the history is reused; each new run spends the step's run budget.
 

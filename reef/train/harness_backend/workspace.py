@@ -39,7 +39,7 @@ from reef.core.tasks import task_instruction
 from reef.core.training_request import TrainingRequest
 from reef.core.trajectories import source_record_id
 from reef.evaluation.harness import History, RunRecord
-from reef.evaluation.harness.tasks import client_of, prompt_of
+from reef.evaluation.harness.tasks import EvaluationTask, client_of, instruction_of
 from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.tree import HarnessTree
 
@@ -208,7 +208,7 @@ class Workspace:
         step: int,
         tree: HarnessTree,
         descriptor: AdapterDescriptor,
-        tasks: Sequence[str],
+        tasks: Sequence[EvaluationTask],
         repeats: int,
         task_directories: bool,
         samples: Sequence[TrajectorySample] = (),
@@ -221,9 +221,10 @@ class Workspace:
         ``tree`` goes to ``harness/`` and ``state_files`` (relative path to
         text) to ``state/``. ``material/`` gets one traffic trace per sample,
         then one run trace per run of ``runs``, the request, the
-        evaluation's ``tasks`` and ``repeats`` (0 when no run can run), and
-        the host facts. ``task_directories`` says that the tasks are Harbor
-        task directories rather than prompts.
+        evaluation's ``tasks`` (each id with its instruction or directory, no
+        answer) and ``repeats`` (0 when no run can run), and the host facts.
+        ``task_directories`` says that the tasks are Harbor task directories
+        rather than instructions.
         """
         workspace = cls(Path(root), Path(history_dir), step)
         for directory in (workspace.harness, workspace.material, workspace.state, workspace.scratch, workspace.output):
@@ -237,7 +238,7 @@ class Workspace:
             write_run_trace(material / TRACES_DIR / str(index), record, task_directories)
         if request is not None:
             write_json(material / REQUEST_FILE, {"id": request.id, **request.to_dict()})
-        write_json(material / EVALUATION_FILE, {"tasks": list(tasks), "repeats": repeats})
+        write_json(material / EVALUATION_FILE, {"tasks": [task.to_json() for task in tasks], "repeats": repeats})
         write_json(material / HOST_FILE, host_facts(descriptor, task_directories))
         return workspace
 
@@ -270,9 +271,10 @@ class Workspace:
         payload = json.loads(path.read_text(encoding="utf-8"))
         return TrainingRequest.from_dict(payload, request_id=str(payload.get("id", "")))
 
-    def tasks(self) -> tuple[str, ...]:
-        """The tasks this step's evaluation runs, the seed tasks first."""
-        return tuple(json.loads((self.material / EVALUATION_FILE).read_text(encoding="utf-8"))["tasks"])
+    def tasks(self) -> tuple[EvaluationTask, ...]:
+        """The tasks this step's evaluation runs, the seed tasks first, each without its answer and metadata."""
+        rows = json.loads((self.material / EVALUATION_FILE).read_text(encoding="utf-8"))["tasks"]
+        return tuple(EvaluationTask.from_json(row) for row in rows)
 
     def evaluation_repeats(self) -> int:
         """The runs the evaluation runs per task and tree; 0 when the deployment configured no scorer."""
@@ -367,7 +369,7 @@ def write_traffic_trace(directory: Path, sample: TrajectorySample) -> None:
     trace = Trace(
         directory=directory,
         source="traffic",
-        task=prompt_of(sample),
+        task=instruction_of(sample),
         reply=reply_of(sample),
         score=score,
         feedback=feedback,

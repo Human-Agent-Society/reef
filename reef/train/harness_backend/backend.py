@@ -50,6 +50,7 @@ from reef.core.requirements import MAX_REQUIRES, merge_requires
 from reef.evaluation.harness import (
     EVALUATION_SIDES,
     DecisionRecord,
+    EvaluationTask,
     EvaluationTasks,
     HarnessCandidate,
     HarnessCandidateEvaluator,
@@ -239,7 +240,9 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator):
         """Step ``step``'s candidate, or the skip and its reason; ``step`` is the scenario step it will commit as."""
         # The step's material: the traces of traffic, and on an offline step the train tasks it rolls out.
         samples = tuple(sample for sample in data.samples if isinstance(sample, TrajectorySample))
-        train_tasks = tuple(str(sample.task_path) for sample in data.samples if isinstance(sample, TaskSample))
+        train_tasks = tuple(
+            EvaluationTask.of_directory(sample.task_path) for sample in data.samples if isinstance(sample, TaskSample)
+        )
         if self.model_resolver is not None:
             self.models = self.model_resolver.resolve()
             if self.evaluator is not None:
@@ -301,7 +304,7 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator):
         workspace: Workspace,
         *,
         head: HarnessTree,
-        evaluation_tasks: tuple[str, ...],
+        evaluation_tasks: tuple[EvaluationTask, ...],
         data: JobData,
         state: HarnessState,
         calls: StepCalls,
@@ -316,6 +319,7 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator):
         services = StepServices(
             workspace=workspace,
             descriptor=self.descriptor,
+            tasks=evaluation_tasks,
             evaluator=self.evaluator,
             history=self.history,
             head=head.checksum(),
@@ -383,7 +387,7 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator):
             metrics["method_output_refused"] = dict(output.refused)
         return output
 
-    def run_train_tasks(self, head: HarnessTree, tasks: Sequence[str], step: int) -> tuple[RunRecord, ...]:
+    def run_train_tasks(self, head: HarnessTree, tasks: Sequence[EvaluationTask], step: int) -> tuple[RunRecord, ...]:
         """One run record of ``head`` on each of an offline step's train ``tasks``, in task order.
 
         The runs go through the score cache, as an evaluation's do: a run of the same tree, task and

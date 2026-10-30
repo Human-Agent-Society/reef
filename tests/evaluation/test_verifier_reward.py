@@ -6,7 +6,7 @@ from __future__ import annotations
 import pytest
 
 from reef.core.tasks import primary_reward
-from reef.evaluation.harness import TaskScorer, VerifierRewardScorer, verifier_reward
+from reef.evaluation.harness import EvaluationTask, TaskScorer, VerifierRewardScorer, verifier_reward
 from reef.harness.tasks.run import TaskResult
 
 TASK = "/tasks/openenv-00012-003-deduction"
@@ -43,7 +43,7 @@ def verifier(
     ],
 )
 def test_the_verifier_reward_is_the_score(result: TaskResult, expected: float) -> None:
-    assert verifier_reward(TASK, result) == expected
+    assert verifier_reward(EvaluationTask.of_directory(TASK), result) == expected
 
 
 @pytest.mark.parametrize(
@@ -63,12 +63,12 @@ def test_the_verifier_reward_is_the_score(result: TaskResult, expected: float) -
 )
 def test_a_record_that_cannot_be_scored_is_an_error(result: TaskResult, message: str) -> None:
     with pytest.raises(ValueError, match=message):
-        verifier_reward(TASK, result)
+        verifier_reward(EvaluationTask.of_directory(TASK), result)
 
 
 def test_an_older_row_without_the_rewards_mapping_still_scores() -> None:
     row = {"type": "verifier", "task": TASK, "reward": 0.5, "failed": False}
-    assert verifier_reward(TASK, task_run(row)) == 0.5
+    assert verifier_reward(EvaluationTask.of_directory(TASK), task_run(row)) == 0.5
 
 
 def test_the_scorer_resolves_from_its_class_reference() -> None:
@@ -76,4 +76,4 @@ def test_the_scorer_resolves_from_its_class_reference() -> None:
         "reef.evaluation.harness:VerifierRewardScorer", setting="evolution.evaluation.scorer"
     )
     assert isinstance(scorer, VerifierRewardScorer)
-    assert scorer.score(TASK, task_run(verifier({"reward": 0.5}))) == 0.5
+    assert scorer.score(EvaluationTask.of_directory(TASK), task_run(verifier({"reward": 0.5}))) == 0.5

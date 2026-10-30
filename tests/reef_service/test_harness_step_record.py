@@ -28,7 +28,7 @@ from tests.support.harness_steps import (
     make_pi_binary,
 )
 
-from reef.evaluation.harness import TaskEvaluationWorker
+from reef.evaluation.harness import EvaluationTask, TaskEvaluationWorker
 from reef.evaluation.harness.runner import TaskRun
 from reef.execution.sandbox.process import LocalExecutor
 from reef.harness.adapters import get_adapter
@@ -170,7 +170,9 @@ def test_remote_worker_returns_records_without_touching_driver_path(tmp_path):
         False,
         transfer_records=True,
     )
-    scored = worker.run(TaskRun({}, "one", blocker / "run"), ModelBindings(served=MODEL))
+    scored = worker.run(
+        TaskRun({}, EvaluationTask.of_instruction("one"), blocker / "run"), ModelBindings(served=MODEL)
+    )
     assert scored.record_archive is not None
     assert blocker.read_text() == "this path cannot be a directory on the worker"
     with tarfile.open(fileobj=BytesIO(scored.record_archive), mode="r:gz") as archive:

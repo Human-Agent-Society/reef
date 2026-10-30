@@ -31,10 +31,12 @@ from reef.service.deploy.service_config import service_config_from_mapping
 REPO_ROOT = Path(__file__).resolve().parents[3]
 TUTORIAL = REPO_ROOT / "recipes" / "beta" / "reefine" / "examples"
 #: The one evaluation task, the profile's: the floor checks that the tree still runs a shell command and answers.
-HEALTH_TASK = (
-    "[health] Run the shell command `echo reef-ok` with your shell tool and reply with its exact output as a "
-    "plain word alone on the last line."
-)
+HEALTH_TASK = {
+    "id": "health",
+    "instruction": "Run the shell command `echo reef-ok` with your shell tool and reply with its exact output as a "
+    "plain word alone on the last line.",
+    "answer": "reef-ok",
+}
 #: Additional retired concepts in the tutorial; check-doc-contracts.mjs checks simplified terminology repository-wide.
 DROPPED_WORDS = (
     r"\blineage\b",
@@ -84,7 +86,7 @@ def test_deployment_yaml_builds_the_recipe_answering_in_text_with_the_floor(monk
     assert serve["evaluation"]["tasks"] == [HEALTH_TASK]
     # The serve config's agent works in a step's directory, and pi reads every AGENTS.md above it: not this checkout's.
     assert not Path(serve["state_dir"]).expanduser().resolve().is_relative_to(REPO_ROOT)
-    assert grade_text(HEALTH_TASK, "$ echo reef-ok\nreef-ok") == 1.0
+    assert grade_text(HEALTH_TASK["answer"], "$ echo reef-ok\nreef-ok") == 1.0
     assert [service["name"] for service in config["services"]] == ["reef"]
     module_name = section["evaluation"]["scorer"].partition(":")[0]
     spec = importlib.util.find_spec(module_name)

@@ -73,8 +73,10 @@ worker. After it builds the recipe,
 the driver replaces the configured scorer and feedback classes with one
 `AIMEScorer` built from a serializable snapshot of the answer and context
 tables. Workers do not rely on driver globals, and later
-registrations do not change an existing recipe. Labels stay in scorer state,
-not in the task prompts or rendered harness files. Run subprocesses and
+registrations do not change an existing recipe. Each validation task record
+carries its own answer to the scorer; the tables answer the training problems,
+whose recorded traffic carries only the instruction. Answers never enter the
+task instructions, the method's workspace, or the rendered harness files. Run subprocesses and
 temporary directories remain isolated. Custom hooks are preserved; they must
 carry their own serializable state when used across processes.
 
@@ -206,4 +208,5 @@ iteration.
   the transcript, not scored twice.
 - `evolution.evaluation.tasks` is data, not configuration, so `gepa.yaml`
   ships it empty and `run.py` fills it from the pinned split before
-  `build_recipe`.
+  `build_recipe`: one record per validation problem, with the id
+  `aime-validation-NN`, the problem as its instruction, and its answer.

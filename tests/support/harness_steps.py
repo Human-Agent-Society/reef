@@ -111,13 +111,18 @@ class TreeReleases(CommittedReleases):
         return ReleaseFiles(release_id, dict(self.trees[release_id].files))
 
 
+def instruction_tasks(*tasks: str | Mapping[str, Any]) -> tuple[Mapping[str, Any], ...]:
+    """``evolution.evaluation.tasks`` records: a record as it is, and an instruction named by its own text."""
+    return tuple(task if isinstance(task, Mapping) else {"id": task, "instruction": task} for task in tasks)
+
+
 def harness_recipe(
     tmp_path: Path,
     method: Any,
     *,
     seed: HarnessTree = PI_SEED,
     score: Any = marker_score,
-    tasks: tuple[str, ...] = ("task one",),
+    tasks: tuple[str | Mapping[str, Any], ...] = ("task one",),
     evaluation: Mapping[str, Any] | None = None,
     worker_executor: ExecutorSettings | None = None,
     agent: AgentSettings | None = None,
@@ -127,7 +132,8 @@ def harness_recipe(
 ) -> HarnessEvolutionRecipe:
     """A pi recipe over the fake binary, its state under ``tmp_path``.
 
-    ``evaluation`` sets ``EvaluationSettings`` fields beside ``tasks``, and ``evolution`` sets
+    ``tasks`` are task records, or instructions that are their own task ids (``instruction_tasks``). ``evaluation`` sets
+    ``EvaluationSettings`` fields beside ``tasks``, and ``evolution`` sets
     ``EvolutionSettings`` fields. ``worker_executor`` places the run workers (``execution.evolution``),
     ``agent`` is the method's coding agent, ``models`` the method's named models, and ``activation`` the
     scenario's activation rule (the ``activation`` section; none is ``always``).
@@ -137,7 +143,7 @@ def harness_recipe(
         evolution=EvolutionSettings(
             **{"binary": str(make_pi_binary(tmp_path)), "state_dir": str(tmp_path / "harness"), **evolution}
         ),
-        evaluation=EvaluationSettings(tasks=tasks, **dict(evaluation or {})),
+        evaluation=EvaluationSettings(tasks=instruction_tasks(*tasks), **dict(evaluation or {})),
         scorer=resolve_task_scorer(score),
         seed=seed,
         runtime=runtime(),
@@ -224,7 +230,7 @@ def evolution_config(*, evaluation: Mapping[str, Any] | None = None, **evolution
         "evolution": {
             "method": "tests.support.harness_steps:IdleMethod",
             "evaluation": {
-                "tasks": ["t"],
+                "tasks": [{"id": "t", "instruction": "t"}],
                 "scorer": "tests.support.harness_steps:FixedScorer",
                 **dict(evaluation or {}),
             },
@@ -241,6 +247,7 @@ def step_services(
     return StepServices(
         workspace=workspace,
         descriptor=get_adapter(str(workspace.host()["adapter"])),
+        tasks=workspace.tasks(),
         evaluator=None,
         history=History.open(workspace.history_dir),
         head=workspace.tree().checksum(),

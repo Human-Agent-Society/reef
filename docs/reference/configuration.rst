@@ -946,7 +946,7 @@ model. Harness-evolution presets also carry ``recipe.config.evolution``:
          method: methods.mine:MyMethod
          batch_size: 1
          evaluation:
-           tasks: ["..."]
+           tasks: [{id: first, instruction: "...", answer: "..."}]
            scorer: methods.mine:MyScorer
    inference:
      upstream-model: qwen3-8b
@@ -993,7 +993,7 @@ trainer keeps the reports its own contract parses:
              evolution:
                adapter: pi
                method: methods.mine:MyMethod
-               evaluation: {tasks: ["..."], scorer: methods.mine:MyScorer}
+               evaluation: {tasks: [{id: first, instruction: "..."}], scorer: methods.mine:MyScorer}
          config:
            implementation: my_pkg.config:ConfigRecipe
    inference:
@@ -1017,7 +1017,7 @@ component that trains weights goes under its ``config.pipeline``:
          harness:
            implementation: reef.recipe.harness:HarnessEvolutionRecipe
            config:
-             evolution: {adapter: pi, method: methods.mine:MyMethod, evaluation: {tasks: ["..."], scorer: methods.mine:MyScorer}}
+             evolution: {adapter: pi, method: methods.mine:MyMethod, evaluation: {tasks: [{id: first, instruction: "..."}], scorer: methods.mine:MyScorer}}
    inference:
      model-path: Qwen/Qwen3-8B
    training:
@@ -1130,22 +1130,38 @@ that plays task directories (an npm ``install``) and
 
 ``evolution.evaluation`` decides how Reef evaluates a candidate and when it
 publishes one: the tasks, the scorer, and the publication policy. It takes
-one task source: ``tasks``, ``task_manifest`` with ``tasks_root``, or
-``imported_tasks``. The task source and ``scorer`` are required unless
-``policy`` is ``none``.
+one task source. The source also sets the kind of every task:
+
+- ``tasks`` or ``task_file`` holds instruction tasks. Each task is a record
+  with an ``id``, the ``instruction`` the agent reads, an optional
+  ``answer``, and optional ``metadata``. The scorer receives the record.
+- ``harbor_tasks``, ``task_manifest`` with ``tasks_root``, or
+  ``imported_tasks`` holds Harbor task directories. Each directory's verifier
+  holds its answer.
+
+The task source and ``scorer`` are required unless ``policy`` is ``none``.
 
 .. code:: yaml
 
    evolution:
      evaluation:
-       tasks: ["[fib] Compute fib(90) and reply with the number alone."]
+       tasks:
+         - id: fib
+           instruction: Compute fib(90) and reply with the number alone.
+           answer: "2880067194370816120"
        scorer: harness.scoring:AnswerScorer
        policy: compare
        statistic: wins
 
+A method sees each task's ``id`` and ``instruction`` (or directory), never its
+``answer`` or ``metadata``. A ``tasks`` list of plain strings, the format
+before task records, is refused with the keys to use instead.
+
 .. config::
 
-   evolution.evaluation.tasks | the evaluation tasks: instructions, the text the agent reads, or task directories for an adapter that takes one (``takes_task_directory``)
+   evolution.evaluation.tasks | the instruction tasks: records with ``id`` (unique), ``instruction`` (the text the agent reads), and optional ``answer`` (text; quote a number) and ``metadata`` (JSON values for the scorer). An adapter that takes a task directory (``takes_task_directory``) and offline training refuse them
+   evolution.evaluation.task_file | | a JSONL file of instruction tasks, one record of the ``tasks`` form per line; startup reads it and refuses an invalid line or a repeated id
+   evolution.evaluation.harbor_tasks | | the Harbor task directories the evaluation runs, each named by its path. The same adapter rule as ``task_manifest``
    evolution.evaluation.task_manifest | a split manifest written by ``reef.core.tasks``; its eval split names the evaluation's tasks as directories under ``evolution.evaluation.tasks_root``, each passed to the adapter as its path. Each task runs in its own container, and the adapter needs an npm ``install`` (`Task directories <../user-guide/evolve-your-harness.rst#task-directories>`__); startup refuses a manifest that names no eval task
    evolution.evaluation.tasks_root | the directory the manifest's task names live under; set together with ``task_manifest``
    evolution.evaluation.imported_tasks | false; true makes each step evaluate on the task directories of the eval split of the scenario's imported tasks as the step reads them, so tasks that the scenario gets later join the next step. The scenario then takes train task uploads (``POST /reef/scenarios/{scenario}/tasks``). The same adapter rule as ``task_manifest``
@@ -1158,13 +1174,13 @@ one task source: ``tasks``, ``task_manifest`` with ``tasks_root``, or
    evolution.evaluation.task_timeout_s | 600 | seconds one evaluation run may take
    evolution.evaluation.agent_host | host.docker.internal | the address at which an agent in a task's container reaches Reef; Reef puts it in place of a loopback host (``127.0.0.1``, ``localhost``, ``::1`` or ``0.0.0.0``) of the served model's base URL, and keeps the port and the path; another host stays. Docker Desktop and colima resolve the default. On Linux, name an address of the host that the container reaches, such as the Docker bridge gateway, and make Reef listen there
    evolution.evaluation.forbid_residue | false | when true, a run leaving files outside the cleanup whitelist scores 0, as a run that gave no answer
-   evolution.evaluation.collect_failures | false | when true, prompts of each step's traces become permanent evaluation tasks, so no later candidate can win while it brings a collected failure back; the seed tasks stay the floor. Refused when the evaluation tasks are task directories
-   evolution.evaluation.collector | | optional ``TaskCollector`` class, in the same form as ``evolution.method``, only with ``collect_failures``; its ``collect(samples)`` chooses which trace prompts to collect; without it every trace's user prompt is collected, and the caps and the credential and directive screens still apply
+   evolution.evaluation.collect_failures | false | when true, the last user message of each step's traces becomes a permanent instruction task without an answer, so no later candidate can win while it brings a collected failure back; the seed tasks stay the floor. Refused when the evaluation tasks are task directories
+   evolution.evaluation.collector | | optional ``TaskCollector`` class, in the same form as ``evolution.method``, only with ``collect_failures``; its ``collect(samples)`` chooses which trace instructions to collect; without it every trace's last user message is collected, and the caps and the credential and directive screens still apply
    evolution.evaluation.max_collected_tasks | 50 | the cap on collected tasks; admission stops there so the suite is bounded; 0 collects none
    evolution.evaluation.max_collected_per_client | 5 | the cap on collected tasks from one tagged client (its ``x-reef-tag-client``, else session, tag); untagged traffic has no identity to count under and meets only ``max_collected_tasks``; 0 disables the cap
 
 The evaluation context is what a run's score depends on besides the
-tree and the task: the served model and the named models of
+tree and the task (its instruction, answer and metadata, or its directory's files): the served model and the named models of
 ``evolution.models``; the adapter, its version and ``evolution.binary``; the
 scorer setting; ``task_timeout_s`` and ``forbid_residue``; and the run
 executor, ``evolution.executor`` and ``evolution.sandbox``. The history

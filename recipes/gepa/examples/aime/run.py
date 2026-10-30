@@ -102,7 +102,7 @@ RESULTS = HERE / "results" / "quickstart-seed-0-2026-09-01" / "manifest.json"
 
 
 def load_recipe(
-    tasks: list[str], *, api_key: str, seed: int = 0, trainset_size: int
+    tasks: list[dict[str, str]], *, api_key: str, seed: int = 0, trainset_size: int
 ) -> tuple[str, HarnessEvolutionRecipe]:
     """The recipe gepa.yaml declares, with the validation split filled in.
 
@@ -378,14 +378,14 @@ def solve(files: Mapping[str, str], task: str, binary: str) -> tuple[float, dict
     return aime.evaluate(task, result), {"response": response, "exit_code": result.exit_code}
 
 
-def committed_archive(service: RunService, tasks: Sequence[str], served: HarnessTree, seed: int) -> Archive:
+def committed_archive(service: RunService, task_ids: Sequence[str], served: HarnessTree, seed: int) -> Archive:
     """The archive as the next step starts from it: the latest commit's, settled from the history, current with
     ``served``."""
     state = service.committed_state()
     return archive_for_step(
         state.method_files.get(ARCHIVE_FILE),
         service.history(),
-        tasks,
+        task_ids,
         texts_of(served, get_adapter("pi").layout, COMPONENTS),
         repeats=service.recipe.evaluation.repeats,
         rng_seed=seed,
@@ -482,7 +482,8 @@ def main() -> None:
     binary = os.environ["REEF_PI_BINARY"]
     version = verify_binary(binary)
     trainset, valset, testset = aime.load_aime_splits()
-    tasks = [str(example["input"]) for example in valset]
+    tasks = aime.validation_tasks(valset)
+    task_ids = [task["id"] for task in tasks]
     if args.dry_run:
         # A dry run proves the recipe boots from gepa.yaml with the real
         # validation set; the placeholder credential is never sent anywhere.
@@ -528,9 +529,9 @@ def main() -> None:
         try:
             service.start()
             client = ReefClient(service.base_url, timeout_s=STEP_TIMEOUT_S)
-            search(service, client, binary, trainset, tasks, args.budget, args.seed)
+            search(service, client, binary, trainset, task_ids, args.budget, args.seed)
             scores = test_passes(service, recipe, client, binary, testset)
-            final = committed_archive(service, tasks, HarnessTree.read(WORK / "selected"), args.seed)
+            final = committed_archive(service, task_ids, HarnessTree.read(WORK / "selected"), args.seed)
             summary = {
                 "scenario": SCENARIO,
                 "seed": args.seed,

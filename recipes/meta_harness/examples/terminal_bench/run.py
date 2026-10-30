@@ -43,7 +43,7 @@ def configuration(tasks: tuple[str, ...], iterations: int | None, repeats: int |
     evolution = sections["evolution"]
     evaluation = evolution["evaluation"]
     evolution["seed"] = str(SEED)
-    evaluation["tasks"] = list(tasks)
+    evaluation["harbor_tasks"] = list(tasks)
     if repeats is not None:
         evaluation["repeats"] = repeats
     method = evolution["method"]["config"]
@@ -136,7 +136,7 @@ def record_run(scenario: Scenario, recipe: HarnessEvolutionRecipe) -> None:
         result = run_task(
             descriptor,
             files,
-            task,
+            task.text,
             binary=recipe.evolution.binary,
             timeout=recipe.evaluation.task_timeout_s,
             executor=recipe.executor,
@@ -152,7 +152,7 @@ def record_run(scenario: Scenario, recipe: HarnessEvolutionRecipe) -> None:
                 request_type=RequestType.INFERENCE,
                 payload={
                     "source": "terminus_run",
-                    "task": task,
+                    "task": task.text,
                     "tree": dict(tree.files),
                     "run": dataclasses.asdict(result),
                     "score": score,
@@ -166,7 +166,7 @@ def record_run(scenario: Scenario, recipe: HarnessEvolutionRecipe) -> None:
             request_type=RequestType.REPORT,
             payload={
                 "score": inference.payload["score"],
-                "feedback": {"task": task, "source": "Harbor verifier"},
+                "feedback": {"task": task.text, "source": "Harbor verifier"},
                 "references": [inference.agent_record_id],
             },
         )
@@ -182,7 +182,7 @@ def write_summary(scenario: Scenario, recipe: HarnessEvolutionRecipe, directory:
     step = committed.step + 1
     history = harness_backend(scenario).history
     head = served_tree(scenario).checksum()
-    members = search_population(history, head, step, recipe.configured_tasks())
+    members = search_population(history, head, step, [task.id for task in recipe.configured_tasks()])
     summary = {
         "scenario": scenario.name,
         "step": committed.step,

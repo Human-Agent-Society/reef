@@ -450,11 +450,14 @@ The example configuration's one evaluation task is a health check:
 ```yaml
 evaluation:
   tasks:
-    - '[health] Run the shell command `echo reef-ok` with your shell tool and reply with its exact output
-      as a plain word alone on the last line.'
+    - id: health
+      instruction: Run the shell command `echo reef-ok` with your shell tool and reply with its exact output
+        as a plain word alone on the last line.
+      answer: reef-ok
 ```
 
-Reefine's evaluator ([`scorer.py`](scorer.py)) grades the reply's last line, `reef-ok` exactly. The
+Reefine's evaluator ([`scorer.py`](scorer.py)) grades the reply's last line against the task's `answer`,
+`reef-ok` exactly. The
 floor answers one question: does the tree still work after the change? The
 model binding answers, the shell tool runs, every extension loads. It says
 nothing about whether the change does what was asked; the step's design and
@@ -464,8 +467,8 @@ workload of your own, and
 `evolution.evaluation.policy: compare` to require the candidate to beat
 the training start on them instead.
 
-An adapter whose prompt is a Harbor task directory, `terminus`, cannot
-take this prompt. There the recipe runs the same check as the task
+An adapter that runs Harbor task directories, `terminus`, cannot take this
+instruction. There the recipe runs the same check as the task
 directory [`health/`](health/) in its place: the agent writes the
 output of `echo reef-ok` to a file in the task container, and Reefine's
 evaluator reads the task verifier's reward.

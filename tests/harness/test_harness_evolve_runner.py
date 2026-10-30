@@ -22,9 +22,9 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 TUTORIAL = REPO_ROOT / "tutorials" / "evolve-your-harness"
 #: The three tasks serve.yaml carries; the leading key is what the tutorial grader's answer table reads.
 TASKS = (
-    "[sieve] how many primes are below 100000?",
-    "[fib] compute fib(90) exactly",
-    "[csv] compute the median of the value column",
+    {"id": "sieve", "instruction": "how many primes are below 100000?", "answer": "9592"},
+    {"id": "fib", "instruction": "compute fib(90) exactly", "answer": "2880067194370816120"},
+    {"id": "csv", "instruction": "compute the median of the value column", "answer": "30"},
 )
 
 #: The results of an all-passing run: one rejection on a 0 win / 0 loss / 3 tie evaluation, then two steps whose
