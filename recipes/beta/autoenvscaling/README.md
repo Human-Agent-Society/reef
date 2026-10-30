@@ -50,7 +50,7 @@ AutoEnvScaling is a task generator. The deployment selects it in `pipeline.recor
 
 `AutoEnvScalingGenerator` implements `reef.recipe.generated_tasks.TaskGenerator`. One round of the recipe is one generation:
 
-1. `generate` takes the next `count` sessions of the sources file. The author rebuilds each session as a task (see [the author](#the-author)).
+1. `generate` takes the next `count` sessions of the sources file. The author rebuilds each session as a task (see [the author](#the-author)), up to `author_concurrency` sessions at once.
 2. Admission holds each task to the generator service's parser and authoring checks, the rules a prompt Designer's reply is held to. Its Dockerfile gets a last step that keeps the repository's history up to the base commit only (below).
 3. `validate` writes the task under the generator service's tasks root, runs the task checks there, and removes the task again. The first check is Harbor's oracle and nop agents: the reference solution must score 1, and doing nothing must score below 1. With `contamination` on, the contamination check comes next ([contamination](#contamination)). The test review follows ([the task checks](#the-task-checks)). With `calibration` on, the current solver's rollouts come last ([solver calibration](#solver-calibration)). A duplicate task is invalid.
 4. The recipe saves each valid task with its train/eval split. Later the training component runs `rollout.rollouts_per_task` rollouts of each training task in a task job; the recipe runs no eval tasks.
@@ -88,7 +88,7 @@ The generation's report gives each session the stage where it stopped:
 
 Three kinds of failure end differently:
 
-- **An outage** is a failure the author does not cause: the session or the repository could not be fetched, the sandbox did not start, or a model call failed while the run's budget still had calls. The generation ends, and its report keeps the outage as its error. Validated tasks made before it stay in the task store, and its training tasks still run. The outage's session counts as taken.
+- **An outage** is a failure the author does not cause: the session or the repository could not be fetched, the sandbox did not start, or a model call failed while the run's budget still had calls. The generation ends, and its report keeps the outage as its error. Validated tasks made before it stay in the task store, and its training tasks still run. The outage's session counts as taken. With `author_concurrency` above 1, no author starts after an outage, and the authors still running are stopped. The slots after the outage take nothing, even one whose author had finished: their sessions and parents go to the next generation.
 - **The agent's own limits** are not outages: a run that spent `max_model_calls`, ran out of time or hit its reply budget leaves its task as it stands, and admission checks it like any other task.
 - **An oracle check that cannot run**, because the generator service failed, ends the round. `GET /reef/status` shows it as the round's last error, the generation's report names it, and the task store keeps the tasks that the round published before the failure. So does a rollout request of a refusing calibration that the generator service fails ([solver calibration](#solver-calibration)). A test review that cannot run is recorded instead (see [the task checks](#the-task-checks)).
 
@@ -108,6 +108,7 @@ The generator's `config` keys:
 | `claude_model` | `opus` | with `claude-code`, the model Claude Code asks for (`--model`) |
 | `claude_token_env` | `CLAUDE_CODE_OAUTH_TOKEN` | with `claude-code`, the environment variable that holds the Claude Code OAuth token |
 | `count` | 8 | sessions in each generation |
+| `author_concurrency` | 1 | authors of a generation that run at once, each in its own sandbox; they start in slot order, and the generation takes their tasks in slot order |
 | `band_low`, `band_high` | 0.25, 0.75 | the pass-rate band; null is no bound |
 | `agent_model` | required | the Designer's model |
 | `agent_reef_url` | required | the Reef that serves `agent_model`, records its calls and holds the sessions |

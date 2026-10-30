@@ -171,6 +171,93 @@ def test_a_cancelled_generation_stops_its_agent_and_takes_no_session(tmp_path: P
     assert cursor(tmp_path) == {"next_generation": 2, "next_position": 0}, "the session is taken again"
 
 
+class GatheringAuthor(StandInAuthor):
+    """The stand-in author, which writes its task only once ``limit`` authors have run at once, and keeps the most
+    that ran at once."""
+
+    def __init__(self, limit: int) -> None:
+        super().__init__()
+        self.limit = limit
+        self.lock = threading.Lock()
+        self.running = 0
+        self.most = 0
+        self.full = threading.Event()
+
+    def author(
+        self,
+        source: SessionSource,
+        work_dir: Path,
+        checks: CandidateChecks,
+        *,
+        tags: Mapping[str, str],
+        stop: threading.Event,
+        variant: TaskVariant | None = None,
+    ) -> AuthoredTask:
+        with self.lock:
+            self.running += 1
+            self.most = max(self.most, self.running)
+            if self.running == self.limit:
+                self.full.set()
+        try:
+            self.full.wait(10)
+            return super().author(source, work_dir, checks, tags=tags, stop=stop, variant=variant)
+        finally:
+            with self.lock:
+                self.running -= 1
+
+
+def test_authors_run_at_once_up_to_the_concurrency_and_the_slots_keep_their_order(tmp_path: Path) -> None:
+    author = GatheringAuthor(limit=3)
+    generator = autoenvscaling(tmp_path, author, source_count=5, count=5, author_concurrency=3)
+    tasks = asyncio.run(generator.generate(REQUEST))
+    assert author.full.is_set() and author.most == 3, "three authors ran at once, and never more"
+    assert [task.name for task in tasks] == [f"harbor-00000-{index:03d}-autoenvscaling" for index in range(5)]
+    assert [task.source_agent_record_ids[1] for task in tasks] == [f"session-{number}" for number in range(1, 6)]
+    assert cursor(tmp_path) == {"next_generation": 1, "next_position": 5}
+
+
+class OutageAuthor(TaskAuthor):
+    """The first session's author is an outage once the second session's author runs; that one runs until it is
+    stopped."""
+
+    def __init__(self) -> None:
+        self.sources: list[str] = []
+        self.second = threading.Event()
+        self.stopped = threading.Event()
+
+    def author(
+        self,
+        source: SessionSource,
+        work_dir: Path,
+        checks: CandidateChecks,
+        *,
+        tags: Mapping[str, str],
+        stop: threading.Event,
+        variant: TaskVariant | None = None,
+    ) -> AuthoredTask:
+        self.sources.append(source.record_id)
+        if source.record_id == "session-1":
+            self.second.wait(10)
+            raise AuthorError("the agent could not run: the sandbox did not start")
+        self.second.set()
+        if stop.wait(10):
+            self.stopped.set()
+        raise AuthorError("the agent's run was stopped")
+
+
+def test_an_outage_starts_no_further_author_and_stops_the_running_ones_after_it(tmp_path: Path) -> None:
+    author = OutageAuthor()
+    generator = autoenvscaling(tmp_path, author, source_count=4, count=4, author_concurrency=2)
+    assert asyncio.run(generator.generate(REQUEST)) == ()
+    assert author.stopped.wait(10), "the author running after the outage was stopped"
+    assert sorted(author.sources) == ["session-1", "session-2"], "no author started after the outage"
+    asyncio.run(generator.record_results((), generation=0))
+    document = report(tmp_path)
+    assert document["error"].startswith("the author could not rebuild session-1")
+    assert [(entry["position"], entry["stage"]) for entry in document["proposals"]] == [(0, "outage")]
+    assert cursor(tmp_path)["next_position"] == 1, "the stopped author's session is taken again"
+
+
 def test_a_task_the_authoring_checks_refuse_is_refused_and_names_the_last_call(tmp_path: Path) -> None:
     author = StandInAuthor(has_tmux=False)
     service = StandInGenerator(tmp_path / "tasks")
@@ -571,6 +658,9 @@ def test_from_config_builds_the_author_and_keeps_one_state_directory_for_each_sc
         ({"author": "prompt", "agent_api": "anthropic"}, "agent_api openai or responses"),
         ({"max_model_calls": 0}, "max_model_calls must be positive"),
         ({"count": 0}, "count and max_checks must be positive"),
+        ({"author_concurrency": 0}, "author_concurrency must be a positive integer"),
+        ({"author_concurrency": True}, "author_concurrency must be a positive integer"),
+        ({"author_concurrency": "2"}, "author_concurrency must be a positive integer"),
         ({"band_low": 0.8}, "band_low must not exceed band_high"),
         ({"band_high": 1.5}, r"band_high must be in \[0, 1\]"),
         ({"band_low": "low"}, "band_low must be a number"),
