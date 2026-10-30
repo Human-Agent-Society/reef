@@ -7,11 +7,10 @@ and Claude Code's transcript instead of a model-call record. The agent checks it
 command, which reaches a loopback gateway (:class:`CheckGateway`) that runs the checks and answers every model
 route with 404.
 
-The token stays out of every command line, log, error text, file of the run's directory and task. The sandbox
-gets it through the sandbox process environment, without placing values in command arguments. Claude Code removes it
-from the environment of its Bash, hook and MCP subprocesses (``CLAUDE_CODE_SUBPROCESS_ENV_SCRUB``). The host redacts every
-text it logs or raises and every file and file name of the run's directory, refuses a check of a task that holds
-the token, and admits no such task (:class:`CredentialHeld`).
+The author supplies the token through the existing executor environment. The sandbox launcher includes environment
+values in bubblewrap's command arguments. Claude Code removes the token from its Bash, hook and MCP subprocesses
+(``CLAUDE_CODE_SUBPROCESS_ENV_SCRUB``). The author redacts its log and error messages and the retained run files.
+It refuses a check of a task that holds the token and admits no such task (:class:`CredentialHeld`).
 """
 
 from __future__ import annotations

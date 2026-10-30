@@ -281,7 +281,7 @@ class CountingChecks(CandidateChecks):
         return {"check": self.count, "ran": True, "passed": True, "oracle_reward": 1.0, "nop_reward": 0.0}
 
 
-def test_runs_pinned_claude_headless_with_token_only_in_process_env(tmp_path: Path, reef_url: str) -> None:
+def test_runs_pinned_claude_headless_with_token_in_environment(tmp_path: Path, reef_url: str) -> None:
     session = ScriptedClaudeSession()
     authored = authored_in(tmp_path, reef_url, session)
     root = tmp_path / "run"
@@ -296,7 +296,7 @@ def test_runs_pinned_claude_headless_with_token_only_in_process_env(tmp_path: Pa
     ):
         assert argv[argv.index(option) + 1] == value
     assert "--disable-slash-commands" in argv and "--strict-mcp-config" in argv
-    # The token reaches the sandbox's process environment alone, and Claude Code keeps it from its subprocesses.
+    # The author passes the token in env; the executor owns the sandbox wrapper command.
     assert env["CLAUDE_CODE_OAUTH_TOKEN"] == TOKEN
     assert not any(TOKEN in value for value in argv)
     assert not any(name.startswith("ANTHROPIC_") for name in env)
