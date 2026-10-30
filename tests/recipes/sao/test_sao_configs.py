@@ -188,6 +188,14 @@ _MEGATRON_ONLY_FLAGS = frozenset(
 # example's ``run.sh`` normally supplies these before invoking ``reef serve``;
 # setting them here makes the generated command testable without a GPU stack.
 _CONFIG_ENV = {
+    "MODEL_DIR": "/tmp/reef-config-test/Qwen3-8B",
+    "CHECKPOINT_DIR": "/tmp/reef-config-test/retail-checkpoints",
+    "REEF_WORK": "/tmp/reef-config-test/retail",
+    "REEF_PORT": "8900",
+    "SAO_GPUS": "4",
+    "SAO_WARMUP": "10",
+    "SAO_MICRO_BATCH": "16",
+    "SAO_CONTEXT": "40960",
     "OPD_MODEL_PATH": "/root/models/Qwen3-8B-Base-SFT",
     "OPD_RUN_DIR": "/tmp/reef-opd-config-test",
     "OPD_TEACHER_PATH": "/root/models/Qwen3-32B",
@@ -409,6 +417,7 @@ def test_cookbook_training_configs_are_discovered() -> None:
 def test_user_facing_example_deployments_are_discovered() -> None:
     paths = {_config_id(path) for path in EXAMPLE_DEPLOYMENTS}
     assert paths == {
+        "recipes/sao/examples/servelearnbench/serve.yaml",
         "recipes/basic/external-provider.yaml",
         "recipes/beta/autoenvscaling/examples/tinker/serve.yaml",
         "recipes/beta/coral/examples/coral_demo/serve.yaml",
