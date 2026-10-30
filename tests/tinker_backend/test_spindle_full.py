@@ -193,6 +193,16 @@ def test_the_base_is_a_reference_to_the_base_revision_and_a_job_from_it_starts_f
 
 
 @pytest.mark.unit
+def test_a_new_base_commit_replaces_the_base_reference_in_the_state_dir(tmp_path, client, exporter):
+    # The deployment restarts with a later commit of the same repo in its config.
+    SpindleFullTrainingComponent(MODEL, settings(tmp_path), client, exporter).close_resources()
+    later = "f" * 40
+    component = SpindleFullTrainingComponent(MODEL, settings(tmp_path, base=f"hf://{MODEL}@{later}"), client, exporter)
+    assert read_reference(component.base_artifact_source().model_directory) == HuggingFaceRevision(MODEL, later)
+    assert component.start_at(Path(component.base_start)) == FreshStart(MODEL)
+
+
+@pytest.mark.unit
 def test_an_import_is_a_full_parameter_manifest_or_the_bases_files(component, client, hub, tmp_path):
     full = TinkerCheckpoint(MODEL, None, "tinker://f/state", "tinker://f/sampler", service=SPINDLE)
     full.write(tmp_path / "full")

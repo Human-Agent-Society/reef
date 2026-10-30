@@ -153,7 +153,8 @@ class TinkerJobComponent(LocalJobComponent, ABC):
 
     @abstractmethod
     def prepare_base(self) -> None:
-        """Write the base start into ``base/`` when it is not there; the constructor then checks it with ``start_at``."""
+        """Write the base start into ``base/`` when it is not there, or when it is a function of the configuration and
+        ``base/`` holds the start of another configuration; the constructor then checks it with ``start_at``."""
 
     @abstractmethod
     def validated(self, checkpoint: TinkerCheckpoint) -> TinkerCheckpoint:
