@@ -156,6 +156,7 @@ def test_openclawrl_processor_drops_unfillable_stale_version_candidates() -> Non
     processor.observe_serving_runtime_load_id("v2")
     _judged_turns(processor, worker, ["v1", "v1", "v2", "v2", "v2"])
 
+    processor.produce()
     batch = processor.build_job_data(3)
     versions = {sample.training.get("runtime_load_id", None) for sample in batch.samples}
     assert versions == {"v2"}
@@ -178,6 +179,7 @@ def test_openclawrl_processor_keeps_single_version_queue_intact() -> None:
     )
     _judged_turns(processor, worker, ["v1", "v1"])
     # All-one-version queue below batch size: nothing is dropped, not ready yet.
+    processor.produce()
     assert not processor.ready(3)
     assert processor.status()["ready_samples"] == 2
 

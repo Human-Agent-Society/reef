@@ -1,7 +1,8 @@
 """Batch goldens for the record-to-record migration (RFC #765).
 
-Each stream appends records to a record store and drives a ``Trainer`` through
-reserve, execute, prepare-commit, and commit, as the dispatcher does. For each
+Each stream appends records to a record store, makes their samples as the
+samples service does, and drives a ``Trainer`` through reserve, execute,
+prepare-commit, and commit, as the dispatcher does. For each
 committed batch, the test saves the batch ID, a stable digest of each item, and
 the record IDs that the commit consumed and released.
 
@@ -25,6 +26,7 @@ import pytest
 from tests.recipes.sdpo.test_sdpo_pipeline import SDPOTokenizer
 from tests.support._threshold_processor import ThresholdJobData, ThresholdSamples
 from tests.support._trajectories import policy_trajectory
+from tests.support.samples_service import make_samples
 
 from recipes.beta.coral.recipe import CoralRecipe
 from recipes.sdpo import SDPOReport
@@ -180,10 +182,13 @@ class StreamRun:
         return rebuilt
 
     def drain(self, trainer: Trainer) -> None:
-        """Commit every batch the trainer can reserve now."""
-        while (
-            result := trainer.run_once(len(self.commits), serving_runtime_load_id=self.serving_runtime_load_id)
-        ) is not None:
+        """Make the samples of the new records, as the samples service does, then commit every batch the trainer can
+        reserve now."""
+        while True:
+            make_samples(trainer)
+            result = trainer.run_once(len(self.commits), serving_runtime_load_id=self.serving_runtime_load_id)
+            if result is None:
+                return
             batch = trainer.pending_job_data
             if batch is None:
                 raise AssertionError("a commit was prepared without a reserved batch")

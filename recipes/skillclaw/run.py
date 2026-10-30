@@ -244,6 +244,8 @@ class RunService:
         """
         current = self.dispatcher.get_or_create_scenario(self.scenario)
         assert current is not None
+        # This step stands in for the samples service, which the trigger report would have woken.
+        current.produce_samples()
         result = current.prepare_training_step()
         if result is None:
             return False

@@ -20,6 +20,7 @@ from reef.core import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher, build_default_dispatcher
 from reef.runtime.jobs import SavedCheckpoint, TrainingJob
 from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.train.job_queue import TrainingJobWorker
 from reef.train.types import TrainStepResult
 
 
@@ -100,6 +101,17 @@ def wait_for_jobs(dispatcher: Dispatcher, expected: int) -> None:
     raise AssertionError("async training did not commit")
 
 
+def poll_jobs_quickly(dispatcher: Dispatcher) -> None:
+    """Make the training worker look at the jobs queue often.
+
+    The training worker runs each job on its own thread and looks for the next job after its poll time. The
+    trainer's worker polls a running job every ``local_workers.POLL_SECONDS``, which the tests patch.
+    """
+    for worker in dispatcher.workers.workers:
+        if isinstance(worker, TrainingJobWorker):
+            worker.poll_seconds = 0.01
+
+
 @pytest.mark.unit
 def test_activate_requires_the_observed_head(tmp_path) -> None:
     initial = tmp_path / "initial"
@@ -121,7 +133,8 @@ def test_activate_requires_the_observed_head(tmp_path) -> None:
 
 
 @pytest.mark.unit
-def test_concurrent_accepts_train_and_commit_exactly_once_per_batch(tmp_path) -> None:
+def test_concurrent_accepts_train_and_commit_exactly_once_per_batch(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr("reef.dispatcher.local_workers.POLL_SECONDS", 0.01)
     initial = tmp_path / "initial"
     initial.mkdir()
     component = CountingComponent(tmp_path / "checkpoints")
@@ -136,6 +149,7 @@ def test_concurrent_accepts_train_and_commit_exactly_once_per_batch(tmp_path) ->
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(),
     )
+    poll_jobs_quickly(dispatcher)
     base_version = dispatcher.get_or_create_scenario("math").serving_runtime_load_id()
 
     def worker(seed: int) -> None:
@@ -167,6 +181,7 @@ def test_async_worker_serializes_slow_trainer_commits(tmp_path, monkeypatch) -> 
     P. The worker must finish that trainer and version-chain commit before preparing
     another batch; otherwise P could be recorded as two scenario steps.
     """
+    monkeypatch.setattr("reef.dispatcher.local_workers.POLL_SECONDS", 0.01)
     initial = tmp_path / "initial"
     initial.mkdir()
     component = CountingComponent(tmp_path / "checkpoints")
@@ -176,6 +191,7 @@ def test_async_worker_serializes_slow_trainer_commits(tmp_path, monkeypatch) -> 
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(),
     )
+    poll_jobs_quickly(dispatcher)
     scenario = dispatcher.get_or_create_scenario("math")
     base_version = scenario.serving_runtime_load_id()
     original_prepare_commit = scenario.trainer.prepare_commit

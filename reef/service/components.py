@@ -25,13 +25,7 @@ from aiohttp import web
 from reef.evaluation.rollout_worker import EvaluationRolloutWorker, ServiceCandidateEndpoints
 from reef.execution.workers import SERVICE_COMPONENTS, ServiceWorkers
 from reef.service.artifact_evaluations import LOCAL_ROLLOUT_WORKERS
-from reef.service.assembly import (
-    build_app,
-    build_dispatcher,
-    build_training_service,
-    open_scenario_storage,
-    open_service_coordination,
-)
+from reef.service.assembly import build_app, build_dispatcher, open_scenario_storage, open_service_coordination
 from reef.service.auth import create_authentication_middleware
 from reef.service.deploy.service_config import ServiceConfig
 from reef.service.inference_service import build_inference_app
@@ -91,25 +85,18 @@ def build_component_app(
 
         app.on_cleanup.append(close_inference)
         return app
-    if component == "samples":
-        dispatcher = build_dispatcher(settings, environ=env, components=frozenset({"samples"}))
+    if component in ("samples", "training"):
+        # A queue service is a dispatcher that runs only its own workers on the shared store.
+        dispatcher = build_dispatcher(settings, environ=env, components=frozenset({component}))
+        if component == "training" and dispatcher.recipe.training_component is None:
+            dispatcher.close()
+            raise ValueError(f"recipe {settings.recipe!r} trains no weights, so it has no training service")
         app = health_app(settings)
 
-        async def close_samples(app: web.Application) -> None:
+        async def close_dispatcher(app: web.Application) -> None:
             dispatcher.close()
 
-        app.on_cleanup.append(close_samples)
-        return app
-    if component == "training":
-        services = build_training_service(settings, environ=env)
-        services.workers.start()
-        app = health_app(settings)
-
-        async def close_training(app: web.Application) -> None:
-            services.workers.stop()
-            services.coordination.close()
-
-        app.on_cleanup.append(close_training)
+        app.on_cleanup.append(close_dispatcher)
         return app
     if not control_url:
         raise ValueError("the evaluation service needs the control service's URL: pass --control-url")

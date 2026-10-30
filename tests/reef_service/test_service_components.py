@@ -97,7 +97,7 @@ def test_control_learns_of_records_and_samples_that_other_processes_add() -> Non
     sequence["math"] = 5
     request_selection(queue, "math", "weights")
     item = queue.take(SAMPLES_QUEUE, "samples-1", [RECORD_SELECTION_KIND])
-    queue.finish(SAMPLES_QUEUE, item.id, "samples-1", {})
+    queue.finish(SAMPLES_QUEUE, item.id, "samples-1", {"changed": True, "background": False})
     watcher.run_once()
     assert changes.records == ["math"] and changes.samples == ["math"]
     watcher.run_once()

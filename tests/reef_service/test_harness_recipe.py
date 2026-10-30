@@ -16,6 +16,7 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from tests.support._strategies import resolve_proposer, resolve_rollout_scorer
 from tests.support._trajectories import recorded_trajectory
+from tests.support.samples_service import make_samples
 
 import reef.evaluation.harness as reef_evaluation_harness
 import reef.train.cordis_backend.backend as reef_cordis_backend
@@ -781,7 +782,7 @@ def test_seed_with_an_inline_key_refuses_boot(tmp_path: Path, disabled: bool, da
 
 
 def _report_once(scenario, name: str, suffix: str) -> None:
-    """One scored sample through the record store: enough to wake one step."""
+    """One scored sample through the record store and the samples service: enough to wake one step."""
     scenario.records.append_result(
         AgentRecord.create(
             scenario=name,
@@ -798,6 +799,7 @@ def _report_once(scenario, name: str, suffix: str) -> None:
             agent_record_id=f"r{suffix}",
         )
     )
+    make_samples(scenario)
 
 
 def repository_factory(tmp_path: Path):

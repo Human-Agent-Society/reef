@@ -21,6 +21,7 @@ from tests.support._policy_recipe import TestPolicyRecipe
 from tests.support._strategies import resolve_proposer, resolve_rollout_scorer
 from tests.support._threshold_processor import ThresholdJobData, ThresholdSamples, threshold_pipeline
 from tests.support.runtime_stubs import StubTrainingComponent, runtime_bindings
+from tests.support.samples_service import make_samples
 
 from reef.artifact import Artifact, ArtifactRef, InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
@@ -1044,6 +1045,7 @@ def test_artifact_commit_failure_keeps_the_pending_job_data_retryable(tmp_path, 
     scenario = dispatcher.get_or_create_scenario("math")
     scenario.records.append(sft_inference("i1"))
     scenario.records.append(sft_report("r1", "i1"))
+    make_samples(scenario)
     result = scenario.prepare_training_step()
     assert result is not None
     pending = scenario.trainer.pending_job_data
@@ -1106,6 +1108,7 @@ def test_post_commit_failure_resumes_the_recorded_step_without_republication(
     scenario = dispatcher.get_or_create_scenario("math")
     scenario.records.append(sft_inference("i1"))
     scenario.records.append(sft_report("r1", "i1"))
+    make_samples(scenario)
     result = scenario.prepare_training_step()
     assert result is not None
     pending = scenario.trainer.pending_job_data
@@ -1161,6 +1164,7 @@ def test_a_commit_failure_keeps_one_retryable_batch_and_one_record(tmp_path, mon
     scenario = dispatcher.get_or_create_scenario("math")
     scenario.records.append(sft_inference("i1", scenario.serving_runtime_load_id()))
     scenario.records.append(sft_report("r1", "i1"))
+    make_samples(scenario)
     # The job's submission is the step that consumes the batch.
     result = scenario.prepare_training_step()
     assert result is not None
@@ -1194,6 +1198,8 @@ def test_a_commit_failure_keeps_one_retryable_batch_and_one_record(tmp_path, mon
 
     assert scenario.scenario_step == 1
     assert scenario.trainer.state == result.state
+    # The training worker hands the queued job to the component on its own thread.
+    wait_until(lambda: component.trained_data, "the training worker did not run the job")
     assert scenario.trainer.state["job"]["job_id"] == component.submitted[0].job_id
     assert scenario.trainer.pending_job_data is None
     assert scenario.store.training_run_position() == (0, 1)

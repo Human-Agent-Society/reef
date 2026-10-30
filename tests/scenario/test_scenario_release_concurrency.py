@@ -9,6 +9,7 @@ from threading import Event
 
 import pytest
 from tests.support._threshold_processor import threshold_pipeline
+from tests.support.samples_service import make_samples
 
 from reef.artifact import Artifact, ArtifactPublicationError, InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
@@ -105,8 +106,8 @@ def local_scenario(tmp_path):
 
 
 def _queue_batch(scenario: Scenario, step: int) -> None:
-    # Append directly so the test, rather than the dispatcher's worker, owns
-    # exactly when the real local training cycle starts and commits.
+    # Append directly and make the samples here so the test, rather than the dispatcher's workers,
+    # owns exactly when the real local training cycle starts and commits.
     scenario.records.append(
         AgentRecord.create(
             scenario="math",
@@ -124,6 +125,7 @@ def _queue_batch(scenario: Scenario, step: int) -> None:
             references=(f"i{step}",),
         )
     )
+    make_samples(scenario)
 
 
 def _prepare(scenario: Scenario) -> TrainStepResult:

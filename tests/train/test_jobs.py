@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from tests.support._threshold_processor import ThresholdJobData, ThresholdSamples, threshold_pipeline
 from tests.support._trajectories import policy_trajectory
+from tests.support.samples_service import make_samples
 from tests.support.task_service_stubs import task_for
 
 from reef.artifact import Artifact, BaseArtifactSource
@@ -348,6 +349,7 @@ def test_a_running_job_the_component_does_not_know_ends_failed_and_keeps_the_sta
     state = JobLoopState.from_dict(trainer.state)
     assert (state.job, state.start, state.finished_jobs) == (None, "/start", 1)
     # With the job ended, the ready batch becomes the next job, from the kept start.
+    make_samples(trainer)
     assert trainer.run_once() is not None
     [job] = component.jobs
     assert job.start == "/start"
@@ -381,6 +383,7 @@ def test_the_pipeline_learns_a_jobs_outcome_exactly_when_the_commit_of_its_end_s
         "math", scored_records(), pipeline_factory=pipeline, job_loop=loop_with(component), default_job_samples=1
     )
     [ended] = stages
+    make_samples(trainer)
     submitted = trainer.run_once()
     trainer.commit(trainer.prepare_commit(submitted))
     [job] = component.jobs

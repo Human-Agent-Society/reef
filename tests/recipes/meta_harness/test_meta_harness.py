@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 from tests.support._strategies import resolve_rollout_scorer
 from tests.support._trajectories import recorded_trajectory
+from tests.support.samples_service import make_samples
 
 from recipes.meta_harness.backend import POPULATION_STATE_KEY, MetaHarnessBackend
 from recipes.meta_harness.method import MetaHarnessPlugin, MetaHarnessProposer, mutations_between
@@ -171,6 +172,7 @@ def _report_once(scenario, name: str, suffix: str) -> None:
             agent_record_id=f"r{suffix}",
         )
     )
+    make_samples(scenario)
 
 
 # -- composition translation ------------------------------------------------

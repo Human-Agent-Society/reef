@@ -17,6 +17,7 @@ import pytest
 import yaml
 from tests.support._trajectories import policy_trajectory
 from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, job_sized_stages, runtime_bindings
+from tests.support.samples_service import make_samples
 
 from recipes.sao import SAORecipe
 from recipes.sao.processor import SAOJobData, SAOSamples
@@ -34,7 +35,8 @@ from reef.runtime.interfaces import TrainingMethod
 from reef.runtime.jobs import SavedCheckpoint, TrainingJob
 from reef.service.deploy.config_utils import interpolate_config_values
 from reef.storage.commits import CommitRecord
-from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
+from reef.storage.samples import TrainerSamples
+from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train import PipelineContext, Trainer
 from reef.train.algos.schedule import StepScheduling
 from reef.train.jobs import JobLoop, JobLoopState
@@ -624,48 +626,74 @@ def test_sao_recovers_its_job_state_from_the_commit_log_after_restart(tmp_path) 
 @pytest.mark.integration
 def test_sao_train_step_recovers_across_a_restart(tmp_path) -> None:
     # Restore the job state and record progress as scenario recovery does;
-    # retained records from the first rollout must not train again.
-    database = tmp_path / "records.sqlite3"
+    # retained records from the first rollout must not train again. The
+    # samples service stores the samples of both rollouts before the first
+    # job, so the scenario's durable sample store carries the second one
+    # across the restart.
     component = _SAOComponent(tmp_path / "checkpoints")
 
-    def _trainer(store: SQLiteRecordStore, algorithm_state: Mapping[str, Any] | None = None) -> Trainer:
+    def _trainer(session, algorithm_state: Mapping[str, Any] | None = None) -> Trainer:
         return Trainer.build(
             "math",
-            store,
+            session.records,
             pipeline_factory=lambda context: sao_processor(context),
             job_loop=JobLoop(component, scenario="math"),
             job_parameters=SAORecipe(**runtime_bindings(component)).parameters_by_kind(),
             algorithm_state=algorithm_state,
             default_job_samples=1,
+            samples=TrainerSamples(session.samples),
         )
 
-    with SQLiteRecordStore(database) as first_store:
-        for item in (
-            _sao_inference("i1"),
-            _sao_report("r1", "i1", 1.0),
-            _sao_inference("i2"),
-            _sao_report("r2", "i2", 0.5),
-        ):
-            first_store.append(item)
-        first = _trainer(first_store)
-        consumed: set[str] = set()
-        # Submission, the checkpoint decision and the job's end are one commit each.
-        for _ in range(3):
-            result = first.run_once()
-            assert result is not None
-            prepared = first.prepare_commit(result)
-            first.commit(prepared)
-            consumed |= prepared.consumed_ids
-        assert JobLoopState.from_dict(first.state).finished_jobs == 1
-        assert first_store.count("math") == 4
+    first_storage = SQLiteScenarioStorage(tmp_path / "records")
+    first_session = first_storage.open("math")
+    for item in (
+        _sao_inference("i1"),
+        _sao_report("r1", "i1", 1.0),
+        _sao_inference("i2"),
+        _sao_report("r2", "i2", 0.5),
+    ):
+        first_session.records.append(item)
+    first = _trainer(first_session)
+    make_samples(first)
+    consumed: set[str] = set()
+    # Submission, the checkpoint decision and the job's end are one commit each.
+    for step in range(1, 4):
+        result = first.run_once()
+        assert result is not None
+        prepared = first.prepare_commit(result)
+        first_session.commit_step(
+            expected_step=step - 1,
+            commit=CommitRecord(
+                scenario="math",
+                step=step,
+                artifact_ref=ArtifactRef("content:base", "release:base", "base"),
+                checkpoint=False,
+                algorithm_state=prepared.algorithm_state,
+                high_water_sequence=prepared.high_water_sequence,
+                high_water_offset=prepared.high_water_offset,
+                consumed_ids=prepared.consumed_ids,
+            ),
+        )
+        first.commit(prepared)
+        consumed |= prepared.consumed_ids
+    assert JobLoopState.from_dict(first.state).finished_jobs == 1
+    assert first_session.records.count("math") == 4
+    first_session.close()
+    first_storage.close()
 
-    with SQLiteRecordStore(database) as second_store:
-        second = _trainer(second_store, prepared.algorithm_state)
+    second_storage = SQLiteScenarioStorage(tmp_path / "records")
+    second_session = second_storage.open("math")
+    try:
+        second = _trainer(second_session, prepared.algorithm_state)
         second.replay_retained(up_to_sequence=prepared.high_water_sequence, consumed_ids=frozenset(consumed))
         second.restore_record_progress(after_sequence=prepared.high_water_sequence, offset=prepared.high_water_offset)
+        make_samples(second)
         assert JobLoopState.from_dict(second.state).finished_jobs == 1
         assert second.run_once() is not None
         assert [source_record_id(job.data.samples[0]) for job in component.submitted] == ["i1", "i2"]
+    finally:
+        second_session.close()
+        second_storage.close()
 
 
 if __name__ == "__main__":

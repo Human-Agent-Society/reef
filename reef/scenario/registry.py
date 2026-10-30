@@ -61,6 +61,11 @@ class ScenarioLifecycle(ABC):
         """
 
     @abstractmethod
+    def scenario_reloaded(self, instance: Scenario) -> None:
+        """React to ``instance``, which a reload built from durable state after a failure. It holds only the
+        progress of the commit history, so the records after it need the samples service again."""
+
+    @abstractmethod
     def close_replaced(self, instance: Scenario) -> None:
         """Close the instance that a reload replaced, now or once nothing runs on it any more."""
 
@@ -79,6 +84,9 @@ class StandaloneLifecycle(ScenarioLifecycle):
     """
 
     def scenario_loaded(self, instance: Scenario) -> None:
+        return None
+
+    def scenario_reloaded(self, instance: Scenario) -> None:
         return None
 
     def close_replaced(self, instance: Scenario) -> None:
@@ -393,7 +401,9 @@ class ScenarioRegistry:
         """Rebuild a scenario from durable state after a training failure.
 
         Accepts and inference reach the new instance at once; the replaced
-        instance goes to the lifecycle's ``close_replaced``.
+        instance goes to the lifecycle's ``close_replaced``. The new instance
+        goes to ``scenario_reloaded``, so its trainers ask the samples service
+        for the records after their recovered progress.
         """
         with self.lock_for(scenario):
             recovered = self._scenario_factory.load_or_create(
@@ -409,6 +419,7 @@ class ScenarioRegistry:
                 # worker threads. Accepts reach the recovered instance, so
                 # nothing observes the dropped instance mid-close.
                 self.lifecycle.close_replaced(dropped)
+            self.lifecycle.scenario_reloaded(recovered)
             return recovered
 
     def remove(self, scenario: str) -> Scenario | None:

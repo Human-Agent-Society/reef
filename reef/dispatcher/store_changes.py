@@ -99,8 +99,16 @@ class StoreChangesWatcher(ServiceWorker):
                 self.changes.records_added(current)
             self.record_sequences[name] = newest
         while changed := self.queue.read_changes(SAMPLES_QUEUE, self.queue_sequence):
+            # A selection that brought no new input gives the trainer's worker nothing to build.
             finished = sorted(
-                {item.scenario for item in changed if item.kind == RECORD_SELECTION_KIND and item.state == "finished"}
+                {
+                    item.scenario
+                    for item in changed
+                    if item.kind == RECORD_SELECTION_KIND
+                    and item.state == "finished"
+                    and item.result is not None
+                    and item.result.get("changed") is True
+                }
             )
             for scenario in finished:
                 self.changes.samples_added(scenario)

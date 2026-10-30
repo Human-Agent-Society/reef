@@ -351,11 +351,16 @@ def task_storage(tmp_path: Path, scenario: str = "tasks") -> TaskStorage:
 
 class CommittingPipeline(TrainingPipeline):
     """A pipeline whose ``acknowledge`` also commits what the job data consumed, as the trainer's commit of a
-    job's submission does: the commit counts the stored samples trained."""
+    job's submission does: the commit counts the stored samples trained. Each look also makes the samples first,
+    as the samples service does before the trainer reads the sample store."""
 
     def __init__(self, context: PipelineContext, session: CommitHistoryScenarioStore, **stages: Any) -> None:
         super().__init__(context, **stages)
         self.session = session
+
+    def advance(self) -> None:
+        self.produce()
+        super().advance()
 
     def acknowledge(self, data_id: str) -> frozenset[str]:
         consumed = super().acknowledge(data_id)

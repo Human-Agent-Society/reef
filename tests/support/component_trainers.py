@@ -24,6 +24,7 @@ from reef.recipe import Recipe
 from reef.runtime.jobs import SavedCheckpoint, TrainingJob
 from reef.scenario import Scenario
 from reef.storage.samples import TrainerSamples
+from reef.storage.sql_coordination import open_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.surface import ComponentSurface, Surface, TextFileTree
 from reef.surface.base import ServingRuntime
@@ -355,5 +356,7 @@ def _dispatcher(
         scenario_storage=SQLiteScenarioStorage(records),
         experiment_tracker=experiment_tracker,
         hold_local_cycles=hold_local_cycles,
+        # The work queues live beside the records, so a restarted dispatcher finds the running job, as in a deployment.
+        coordination=open_coordination("sqlite", agent_record_dir=str(records), record_database_url=None),
     )
     return dispatcher, backends

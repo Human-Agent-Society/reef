@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 from tests.support._strategies import resolve_rollout_scorer
 from tests.support._trajectories import recorded_trajectory
+from tests.support.samples_service import make_samples
 
 from recipes.gepa import components, reflection
 from recipes.gepa.archive import Archive, Candidate
@@ -743,6 +744,7 @@ def _report_once(scenario, name: str, suffix: str) -> None:
             agent_record_id=f"r{suffix}",
         )
     )
+    make_samples(scenario)
 
 
 def test_one_step_publishes_and_the_gate_carries_the_gepa_metrics(tmp_path: Path) -> None:

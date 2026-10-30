@@ -7,6 +7,7 @@ import pytest
 from reef.record2sample.service import (
     RECORD_SELECTION_KIND,
     SAMPLES_QUEUE,
+    ProducedSamples,
     SampleProducers,
     SamplesWorker,
     request_selection,
@@ -23,11 +24,11 @@ class Producers(SampleProducers):
         self.background = background
         self.error = error
 
-    def produce(self, scenario: str, component: str) -> bool:
+    def produce(self, scenario: str, component: str) -> ProducedSamples:
         self.calls.append((scenario, component))
         if self.error is not None:
             raise self.error
-        return self.background
+        return ProducedSamples(changed=True, background=self.background)
 
 
 @pytest.mark.unit

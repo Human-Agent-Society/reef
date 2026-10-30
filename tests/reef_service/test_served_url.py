@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 import asyncio
+from types import SimpleNamespace
 from urllib.parse import urlsplit
 
 import pytest
 from aiohttp import web
 
 from reef.service.assembly import default_served_url
+from reef.storage.coordination import memory_coordination
 
 
 @pytest.mark.unit
@@ -73,8 +73,8 @@ def test_the_recipe_evaluation_token_is_its_own_and_opens_the_evaluation_routes_
 
     def build_dispatcher(settings, **kwargs):
         seen["recipe_token"] = kwargs["evaluation_token"]
-        # The artifact evaluations read the dispatcher's coordination store; without one they keep their own queue.
-        return SimpleNamespace(coordination=None)
+        # The artifact evaluations read the dispatcher's work queue.
+        return SimpleNamespace(queue=memory_coordination().work_queue)
 
     def create_app(dispatcher, **kwargs):
         seen["tokens"] = kwargs["tokens"]

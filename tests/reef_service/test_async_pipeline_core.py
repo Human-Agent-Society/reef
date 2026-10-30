@@ -20,6 +20,8 @@ from reef.runtime.interfaces import InferenceHandler
 from reef.runtime.jobs import SavedCheckpoint, TrainingJob
 from reef.service.app import RequestService
 from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.train.job_queue import JobQueueComponent
+from reef.train.trainer import Trainer
 
 _ASYNC_WAIT_TIMEOUT_S = 5.0
 _ASYNC_WAIT_POLL_S = 0.01
@@ -192,6 +194,22 @@ def _wait_for_jobs(dispatcher: Dispatcher, finished_jobs: int) -> None:
     pytest.fail(f"scenario did not finish {finished_jobs} jobs: {dispatcher.build_training_status()}")
 
 
+def _hold_job_submission(monkeypatch: pytest.MonkeyPatch) -> tuple[Event, Event]:
+    """Hold control's job submission (the jobs-queue component's ``submit``, which runs in the trainer's cycle) until
+    the test sets the returned ``release``; ``started`` is set when a submission waits."""
+    started, release = Event(), Event()
+    queued_submit = JobQueueComponent.submit
+
+    def held(self: JobQueueComponent, job: TrainingJob) -> None:
+        started.set()
+        if not release.wait(_ASYNC_WAIT_TIMEOUT_S):
+            raise TimeoutError("test did not release the held job submission")
+        queued_submit(self, job)
+
+    monkeypatch.setattr(JobQueueComponent, "submit", held)
+    return started, release
+
+
 def _wait_for_error(dispatcher: Dispatcher) -> str:
     deadline = time.monotonic() + _ASYNC_WAIT_TIMEOUT_S
     while time.monotonic() < deadline:
@@ -219,16 +237,17 @@ def test_report_returns_and_inference_resolves_while_training_job_is_blocked(sta
 @pytest.mark.unit
 def test_lost_submission_acknowledgement_resubmits_the_same_job(start_dispatcher, monkeypatch) -> None:
     component, dispatcher = start_dispatcher()
-    submit = component.submit
+    # Control submits a job by adding it to the jobs queue; the first addition loses its acknowledgement.
+    queued_submit = JobQueueComponent.submit
     submissions: list[str] = []
 
-    def lose_first_acknowledgement(job: TrainingJob) -> None:
+    def lose_first_acknowledgement(self: JobQueueComponent, job: TrainingJob) -> None:
         submissions.append(job.job_id)
-        submit(job)
+        queued_submit(self, job)
         if len(submissions) == 1:
             raise ConnectionError("lost submission acknowledgement")
 
-    monkeypatch.setattr(component, "submit", lose_first_acknowledgement)
+    monkeypatch.setattr(JobQueueComponent, "submit", lose_first_acknowledgement)
     _submit_pair(dispatcher)
     # Each record wakes the worker, so a retry may clear the error before a poll sees it: wait for the count.
     deadline = time.monotonic() + _ASYNC_WAIT_TIMEOUT_S
@@ -254,7 +273,12 @@ def test_backend_failure_reaches_reef_status(start_dispatcher, monkeypatch) -> N
     monkeypatch.setattr(component, "submit", fail)
     _submit_pair(dispatcher)
 
-    assert _wait_for_error(dispatcher) == "math: RuntimeError: backend submission failed"
+    # The training service runs the job on the component: the component's failure ends the job, and the job's
+    # end reaches the status.
+    _wait_for_jobs(dispatcher, 1)
+    status = dispatcher.build_training_status()["scenarios"]["math"]["last_committed_step"]
+    assert status["metrics"]["training_job"]["event"] == "failed"
+    assert status["metrics"]["training_job"]["error"] == "RuntimeError: backend submission failed"
 
 
 @pytest.mark.unit
@@ -399,11 +423,22 @@ def test_operational_sample_wait_ignores_a_matching_backlog_before_training() ->
 def test_periodic_metrics_report_backlog_during_training_without_status_reads(start_dispatcher, monkeypatch) -> None:
     monkeypatch.setattr(Dispatcher, "operational_metrics_interval_seconds", 0.01)
     tracker = OperationalExperimentTracker()
-    component, dispatcher = start_dispatcher(block=True, experiment_tracker=tracker)
+    _, dispatcher = start_dispatcher(experiment_tracker=tracker)
+    # The trainer's cycle executes while it submits the first job: hold the submission.
+    started, release = _hold_job_submission(monkeypatch)
     _submit_pair(dispatcher)
-    assert component.started.wait(_ASYNC_WAIT_TIMEOUT_S)
+    assert started.wait(_ASYNC_WAIT_TIMEOUT_S)
+    # The samples service has not read the second pair yet: hold it, so that the pair's two records are the backlog.
+    samples_release = Event()
+    produce_samples = Trainer.produce_samples
+
+    def held_samples(self: Trainer) -> bool:
+        if not samples_release.wait(_ASYNC_WAIT_TIMEOUT_S):
+            raise TimeoutError("test did not release the held samples service")
+        return produce_samples(self)
+
+    monkeypatch.setattr(Trainer, "produce_samples", held_samples)
     _submit_pair(dispatcher, "2", "w1")
-    # The first pair can also produce a backlog of two before training starts.
     sample = wait_for_operational_sample(tracker, {"records/unread_count": 2, "training/execution/active": 1})
     assert sample["training/execution/active"] == 1
     assert sample["training/execution/elapsed_seconds"] >= 0
@@ -415,7 +450,8 @@ def test_periodic_metrics_report_backlog_during_training_without_status_reads(st
     assert "processor/ready_samples" in sample
     assert (sample["processor/job_samples"], sample["processor/buffer_size"]) == (1, 1)
     assert not tracker.events
-    component.release.set()
+    samples_release.set()
+    release.set()
     _wait_for_jobs(dispatcher, 2)
     dispatcher.close()
     final = [metrics for namespace, metrics in tracker.loggers["math"].logged if namespace == "operations"][-1]
@@ -429,20 +465,21 @@ def test_periodic_metrics_report_backlog_during_training_without_status_reads(st
 def test_periodic_metrics_keep_failures_after_training_recovery(start_dispatcher, monkeypatch) -> None:
     monkeypatch.setattr(Dispatcher, "operational_metrics_interval_seconds", 0.01)
     tracker = OperationalExperimentTracker()
-    component, dispatcher = start_dispatcher(experiment_tracker=tracker)
-    submit = component.submit
+    _, dispatcher = start_dispatcher(experiment_tracker=tracker)
+    # Control's submission of the job to the jobs queue fails until the test restores it.
+    submit = JobQueueComponent.submit
     failures: list[TrainingJob] = []
 
-    def fail(job: TrainingJob) -> None:
+    def fail(self: JobQueueComponent, job: TrainingJob) -> None:
         failures.append(job)
         raise ConnectionError("training submission unavailable")
 
-    monkeypatch.setattr(component, "submit", fail)
+    monkeypatch.setattr(JobQueueComponent, "submit", fail)
     _submit_pair(dispatcher)
     sample = wait_for_operational_sample(tracker, {"training/error": 1})
     assert sample["training/error"] == 1
     assert not tracker.events
-    monkeypatch.setattr(component, "submit", submit)
+    monkeypatch.setattr(JobQueueComponent, "submit", submit)
     dispatcher.local_workers.wake(dispatcher.get_or_create_scenario("math"))
     _wait_for_jobs(dispatcher, 1)
     dispatcher.record_operational_metrics()
@@ -457,13 +494,18 @@ def test_disabled_tracking_does_not_start_periodic_sampling(start_dispatcher) ->
     assert dispatcher.background_threads.metrics_thread is None
 
 
-def test_processor_lock_does_not_hide_execution_metrics(start_dispatcher) -> None:
-    component, dispatcher = start_dispatcher(block=True)
-    _submit_pair(dispatcher)
-    assert component.started.wait(_ASYNC_WAIT_TIMEOUT_S)
-    trainer = dispatcher.get_or_create_scenario("math").trainer
-    with trainer._lock:
-        sample = trainer.operational_metrics()
+def test_processor_lock_does_not_hide_execution_metrics(start_dispatcher, monkeypatch) -> None:
+    _, dispatcher = start_dispatcher()
+    # The trainer's cycle executes while it submits the job: hold the submission.
+    started, release = _hold_job_submission(monkeypatch)
+    try:
+        _submit_pair(dispatcher)
+        assert started.wait(_ASYNC_WAIT_TIMEOUT_S)
+        trainer = dispatcher.get_or_create_scenario("math").trainer
+        with trainer._lock:
+            sample = trainer.operational_metrics()
+    finally:
+        release.set()
     assert sample["training/execution/active"] == 1
     assert "records/unread_count" not in sample
 

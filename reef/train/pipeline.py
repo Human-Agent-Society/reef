@@ -224,9 +224,8 @@ class TrainingPipeline:
         self.store = TrainerSamples(MemorySampleStore()) if context.samples is None else context.samples
         #: The sequence of the last stored sample that the pipeline read.
         self.store_sequence = 0
-        #: Whether ``advance`` makes samples from records. False when the samples service makes them
-        #: (``produce``), so the trainer only reads the sample store.
-        self.produces_samples = True
+        #: Whether the pipeline stored a new sample or read a new training instruction since ``produce`` returned.
+        self.received_input = False
         #: The stored samples that this trainer has not trained, in store order, each with the sample that job data
         #: trains: an upload rendered by the record-to-sample stage, else the stored sample. Imported tasks do not train.
         self.held: dict[str, tuple[StoredSample, Sample]] = {}
@@ -343,7 +342,7 @@ class TrainingPipeline:
 
     # ------------------------------------------------------------- records
 
-    def move_record_sets(self) -> None:
+    def move_record_sets(self) -> bool:
         """Push each record set that the record stage formed to the sample stage, settle each sample result, and
         store the samples of each unit that became ready, and the samples that the sample stage made from no set.
 
@@ -352,7 +351,7 @@ class TrainingPipeline:
         wait for their unit. When the record stage makes a unit ready (``take_ready_units``), the pipeline
         saves its samples to the sample store in one
         transaction (``TrainerSamples.add_record_samples``), which consumes its
-        records, and the record stage ends the unit.
+        records, and the record stage ends the unit. Return whether one or more stored sample is new.
         """
         for record_set in self.record2record.pull():
             self.record2sample.push(record_set)
@@ -367,18 +366,24 @@ class TrainingPipeline:
                 self.set_samples[set_id] = result.samples
             self.record2record.settle(record_set, result.status)
         ready_units = self.record2record.take_ready_units()
+        stored = False
         for unit in ready_units:
-            self.store_unit(unit)
+            stored = self.store_unit(unit) or stored
         # The samples of the sets that the record stage ended are stored or never train.
         for set_id in self.record2record.take_ended():
             self.set_samples.pop(set_id, None)
         made = self.record2sample.made_samples()
         if made:
-            self.store.add_record_samples(
-                None, (), tuple((f"{self.sample_id_prefix}{name}", sample) for name, sample in made)
+            stored = (
+                self.store.add_record_samples(
+                    None, (), tuple((f"{self.sample_id_prefix}{name}", sample) for name, sample in made)
+                )
+                or stored
             )
         if ready_units or made:
             self.read_store()
+        self.received_input = self.received_input or stored
+        return stored
 
     @property
     def sample_id_prefix(self) -> str:
@@ -386,8 +391,9 @@ class TrainingPipeline:
         trainer of a scenario (key ``""``)."""
         return f"{self.store.trainer}:" if self.store.trainer else ""
 
-    def store_unit(self, unit: RecordSetUnit) -> None:
-        """Save the samples of the ready ``unit`` to the sample store, and end the unit in the record stage.
+    def store_unit(self, unit: RecordSetUnit) -> bool:
+        """Save the samples of the ready ``unit`` to the sample store, and end the unit in the record stage; return
+        whether one or more of them is new.
 
         Sample ``i`` of record set ``s`` has the ID ``<trainer>:<s>:<i>``, or ``<s>:<i>`` for the only trainer of a
         scenario. The samples of a unit of more than one sample share the group ``<trainer>:<first set>`` (or
@@ -401,8 +407,9 @@ class TrainingPipeline:
             for index, sample in enumerate(self.set_samples[set_id])
         )
         group = f"{prefix}{unit.set_ids()[0]}" if len(samples) > 1 else None
-        self.store.add_record_samples(group, tuple(unit.consumed_ids()), samples)
+        stored = self.store.add_record_samples(group, tuple(unit.consumed_ids()), samples)
         self.record2record.consume(unit)
+        return stored
 
     def push(self, item: AgentRecord) -> None:
         """Read one record. Training instructions stay here; every other record goes through the record stage."""
@@ -410,8 +417,9 @@ class TrainingPipeline:
             if item.scenario != self.scenario:
                 raise ValueError("training records must belong to the pipeline's scenario")
             request = TrainingRequest.from_dict(item.payload, request_id=item.agent_record_id)
-            if request.id not in self.consumed_requests:
-                self.training_requests.setdefault(request.id, request)
+            if request.id not in self.consumed_requests and request.id not in self.training_requests:
+                self.training_requests[request.id] = request
+                self.received_input = True
             return
         self.record2record.push(item)
         self.move_record_sets()
@@ -581,24 +589,24 @@ class TrainingPipeline:
         )
 
     def advance(self) -> None:
-        """Advance background work, settle its results, and read the samples stored since the last call.
+        """Read the samples stored since the last call; the samples service makes them (``produce``).
 
-        This operation needs no backend sample count. Call it on the same serialized path as other pipeline
-        operations; it starts no new thread.
+        Call it on the same serialized path as other pipeline operations; it starts no new thread.
         """
-        if self.produces_samples:
-            self.produce()
         self.read_store()
 
-    def produce(self) -> None:
-        """Advance the record-to-sample work: settle background work and move the formed record sets to samples.
+    def produce(self) -> bool:
+        """Advance the record-to-sample work: settle background work and move the formed record sets to samples;
+        return whether the trainer received new input since the last call: a sample stored here or by ``push`` when
+        a record completed a set, or a training instruction that ``push`` read.
 
-        The trainer calls it through ``advance`` in the one-process pipeline; the samples service calls it when
-        it makes the samples (``produces_samples`` False).
+        The samples service calls it (``Trainer.produce_samples``); ``advance`` only reads the sample store.
         """
         # Background work, such as judgments or finished rounds, forms sets or makes samples without a new record.
         self.record2record.advance(time.monotonic())
         self.move_record_sets()
+        stored, self.received_input = self.received_input, False
+        return stored
 
     def ready(self, sample_count: int | None) -> bool:
         """Advance the pipeline and check readiness; auto mode needs ``sample_count`` samples in the buffer.

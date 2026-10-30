@@ -59,7 +59,7 @@ from reef.storage.commits import CommitRecord
 from reef.storage.coordination import instance_id
 from reef.storage.evaluations import EvaluationStateConflict, EvaluationStore, StoredEvaluation
 from reef.storage.observer import RecordObserver
-from reef.storage.work_queue import MemoryWorkQueue, NewWork, WorkItem, WorkQueue
+from reef.storage.work_queue import NewWork, WorkItem
 
 logger = logging.getLogger(__name__)
 
@@ -160,7 +160,7 @@ class LocalCandidateEndpoints(CandidateEndpoints):
 class ArtifactEvaluations:
     """Accepts, queues, reads and ends the artifact evaluations of a service's scenarios.
 
-    Values: ``dispatcher`` holds the scenarios. ``queue`` is the work queue that carries the rollouts.
+    Values: ``dispatcher`` holds the scenarios. ``queue`` is the dispatcher's work queue, which carries the rollouts.
     ``endpoints`` opens a candidate's model for a rollout. ``new_artifacts`` reports the new artifacts that Reef
     evaluates with each scenario's settings, or is None for no automatic evaluation. ``workers`` are the evaluation
     workers that this object runs itself, none when the evaluation service runs elsewhere.
@@ -176,16 +176,12 @@ class ArtifactEvaluations:
         *,
         lab: TaskLab | None = None,
         new_artifacts: NewArtifacts | None = None,
-        queue: WorkQueue | None = None,
         endpoints: CandidateEndpoints | None = None,
         local_workers: int = LOCAL_ROLLOUT_WORKERS,
     ) -> None:
         self.dispatcher = dispatcher
         self.new_artifacts = new_artifacts
-        coordination = dispatcher.coordination
-        if queue is None:
-            queue = MemoryWorkQueue() if coordination is None else coordination.work_queue
-        self.queue = queue
+        self.queue = dispatcher.queue
         self.endpoints = endpoints if endpoints is not None else LocalCandidateEndpoints(dispatcher)
         self.workers = [
             EvaluationRolloutWorker(self.queue, self.endpoints, worker_id=instance_id("evaluation"), lab=lab)

@@ -244,8 +244,8 @@ class TrainingJobWorker(ServiceWorker):
         self.thread.start()
 
     def stop(self) -> None:
-        """Stop taking jobs, wait for the thread, and close the component. A job in progress keeps its lease until
-        it expires; then another worker continues it."""
+        """Stop taking jobs, give a job in progress back to the queue, wait for the thread, and close the
+        component. Another worker continues the job."""
         self.stopped.set()
         if self.thread is not None:
             self.thread.join()
@@ -276,15 +276,18 @@ class TrainingJobWorker(ServiceWorker):
             self.component.cancel(item.id)
         except Exception as exc:
             logger.exception("training worker %s could not run job %s", self.worker_id, item.id)
+            # A raised error can pass, such as a dropped connection to the backend: the job runs again under its
+            # ID until it uses up its attempts. A job that the component reports failed fails at once (``run_job``).
             with suppress(WorkLeaseLost):
-                self.queue.fail(JOBS_QUEUE, item.id, self.worker_id, f"{type(exc).__name__}: {exc}", retryable=False)
+                self.queue.fail(JOBS_QUEUE, item.id, self.worker_id, f"{type(exc).__name__}: {exc}", retryable=True)
         return True
 
     def run_job(self, item: WorkItem) -> None:
         """Run the job of ``item`` on the component and mirror its checkpoints, by step, into the item's progress.
 
         The lease is extended a third of a lease after each extension, measured on a monotonic clock, so a slow
-        ``submit`` or ``status`` call counts too. A worker that continues a job reports only the checkpoints whose
+        ``submit`` or ``status`` call counts too. At each poll the worker reads the item, and a job that control
+        cancelled, or that another worker took, ends here with ``WorkLeaseLost``, which cancels the local run. A worker that continues a job reports only the checkpoints whose
         step the item does not hold yet.
         """
         job = job_from_item(item)
@@ -319,7 +322,14 @@ class TrainingJobWorker(ServiceWorker):
                 self.queue.extend_lease(JOBS_QUEUE, item.id, self.worker_id)
                 extended_at = time.monotonic()
             if self.stopped.wait(self.poll_seconds):
+                # The job goes back to the queue, so another worker continues it at once: the component keeps
+                # running it, and that worker's ``submit`` continues from the job's latest checkpoint.
+                self.queue.fail(JOBS_QUEUE, item.id, self.worker_id, "the training worker stopped", retryable=True)
                 return
+            # Control can cancel the job (a deleted scenario, a new training start): stop at the next poll.
+            held = self.queue.get(JOBS_QUEUE, item.id)
+            if held is None or held.worker_id != self.worker_id or held.final:
+                raise WorkLeaseLost(f"job {item.id} is no longer held by {self.worker_id}")
 
 
 __all__ = [

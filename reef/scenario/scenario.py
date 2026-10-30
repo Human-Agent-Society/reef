@@ -216,6 +216,15 @@ class Scenario:
         for component_trainer in stepping:
             component_trainer.trainer.set_training_mode(training_mode, fill_manual_buffer=fill_manual_buffer)
 
+    def produce_samples(self) -> bool:
+        """Do the samples service's step for every trainer: make the samples of the new records
+        (``Trainer.produce_samples``). Return whether background work of a pipeline still runs. A process that
+        steps the scenario itself, such as a recipe's driver, calls it before ``prepare_training_step``."""
+        running = False
+        for component_trainer in self.trainers:
+            running = component_trainer.trainer.produce_samples().background or running
+        return running
+
     def prepare_training_step(self, component: str | None = None) -> TrainStepResult | None:
         """Prepare ``component``'s next commit: a harness step, a job submission or a job's checkpoint decision.
 

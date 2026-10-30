@@ -25,6 +25,7 @@ import logging
 import threading
 import time
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import cast
 
 from reef.execution.workers import ServiceWorker
@@ -73,6 +74,26 @@ def request_selection(
     )
 
 
+@dataclass(frozen=True)
+class ProducedSamples:
+    """What one record selection did.
+
+    Values: ``changed`` is whether it gave the trainer something new to build a job from: a new stored sample or a
+    new training instruction; ``background`` is whether background work of the stages still runs, so the samples
+    service looks again later.
+
+    Purpose: ``SampleProducers.produce`` returns it; the samples worker writes it as the selection's result, and
+    control wakes the trainer's worker only when ``changed`` is true.
+    """
+
+    changed: bool
+    background: bool
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.changed, bool) or not isinstance(self.background, bool):
+            raise TypeError("changed and background are booleans")
+
+
 class SampleProducers(ABC):
     """Makes the samples of one trainer from its new records.
 
@@ -80,10 +101,10 @@ class SampleProducers(ABC):
     """
 
     @abstractmethod
-    def produce(self, scenario: str, component: str) -> bool:
+    def produce(self, scenario: str, component: str) -> ProducedSamples:
         """Make samples of the records that the trainer of ``component`` in ``scenario`` has not used yet, and store
-        them; return whether background work of the stages still runs, so the worker looks again later. A
-        scenario that is gone, or a trainer that trains nothing, makes nothing and returns False."""
+        them; return what the selection did. A scenario that is gone, or a trainer that trains nothing, makes
+        nothing."""
 
 
 class SamplesWorker(ServiceWorker):
@@ -146,8 +167,13 @@ class SamplesWorker(ServiceWorker):
                 raise ValueError("a record selection names its component")
             with LeaseExtender(self.queue, item, self.worker_id):
                 self.queue.start(SAMPLES_QUEUE, item.id, self.worker_id)
-                background = self.producers.produce(scenario, component)
-            self.queue.finish(SAMPLES_QUEUE, item.id, self.worker_id, {"background": background})
+                produced = self.producers.produce(scenario, component)
+            self.queue.finish(
+                SAMPLES_QUEUE,
+                item.id,
+                self.worker_id,
+                {"changed": produced.changed, "background": produced.background},
+            )
         except WorkLeaseLost:
             logger.warning("samples worker %s lost %s", self.worker_id, item.id)
             return True
@@ -158,7 +184,7 @@ class SamplesWorker(ServiceWorker):
             except WorkLeaseLost:
                 logger.warning("samples worker %s lost %s", self.worker_id, item.id)
             return True
-        if background:
+        if produced.background:
             request_selection(self.queue, scenario, component, available_at=time.time() + BACKGROUND_POLL_SECONDS)
         return True
 
@@ -167,6 +193,7 @@ __all__ = [
     "BACKGROUND_POLL_SECONDS",
     "RECORD_SELECTION_KIND",
     "SAMPLES_QUEUE",
+    "ProducedSamples",
     "SampleProducers",
     "SamplesWorker",
     "request_selection",

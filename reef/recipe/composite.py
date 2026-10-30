@@ -247,6 +247,19 @@ class CompositeRecipe(Recipe):
             },
         )
 
+    def with_training_component(self, component: TrainingComponent) -> CompositeRecipe:
+        # The components share the composite's training component; each one that has it gets ``component``.
+        if self.training_component is None:
+            raise ValueError("this composite recipe has no training component to replace")
+        return replace(
+            self,
+            training_component=component,
+            components={
+                name: recipe.with_training_component(component) if recipe.training_component is not None else recipe
+                for name, recipe in self.components.items()
+            },
+        )
+
     def with_model_config(self, config: ModelConfig) -> CompositeRecipe:
         super().with_model_config(config)
         return replace(

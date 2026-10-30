@@ -610,6 +610,7 @@ def test_processor_attaches_topk_and_candidates() -> None:
     # The RL-only turn ships the un-enhanced anchor: the native ids verbatim.
     worker.push(TurnJudgment("i1", score=1.0, teacher_cands=({"hint": "", "teacher_tokens": [1, 2, 3, 4]},)))
 
+    processor.produce()
     batch = processor.build_job_data(2)
     by_source = {source_record_id(sample): sample for sample in batch.samples}
     sample = by_source["i0"]

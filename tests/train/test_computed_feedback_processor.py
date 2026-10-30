@@ -139,6 +139,7 @@ def test_track_complete_judge_batch_acknowledge() -> None:
     assert processor.background_jobs_running()
 
     worker.push(_Judgment("r1"))
+    processor.produce()
     assert processor.ready(1)
     batch = processor.build_job_data(1)
     assert source_record_id(batch.samples[0]) == "r1"
@@ -163,6 +164,7 @@ def test_failed_and_declined_judgments_retire_the_record() -> None:
     processor.push(_record("done2", completes="b"))
     worker.push(Failed("a"))
     worker.push(_Judgment("b", good=False))
+    processor.produce()
     assert not processor.ready(1)
     releasable = processor.releasable_record_ids()
     assert {"a", "b"} <= set(releasable)
@@ -189,6 +191,7 @@ def test_judged_samples_behind_the_serving_version_leave_the_buffer_before_a_bat
     processor.push(_record("done2", completes="new"))
     worker.push(_Judgment("new"))
     worker.push(_Judgment("old"))
+    processor.produce()
     assert not processor.ready(2)  # the stale sample is not in the buffer
     assert {"old", "new"} <= processor.releasable_record_ids()
     assert [source_record_id(sample) for sample in processor.build_job_data(1).samples] == ["new"]
@@ -202,6 +205,7 @@ def test_judged_sets_within_max_staleness_of_the_serving_version_stay() -> None:
         processor.push(_record(name, track=True, version=version))
         processor.push(_record(f"done-{name}", completes=name))
         worker.push(_Judgment(name))
+    processor.produce()
     assert not processor.ready(3)  # e:3 is two versions behind e:5
     assert {"v3", "v4", "v5"} <= processor.releasable_record_ids()
     assert [source_record_id(sample) for sample in processor.build_job_data(2).samples] == ["v4", "v5"]

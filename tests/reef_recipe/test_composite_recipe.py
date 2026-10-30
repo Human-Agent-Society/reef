@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from tests.support._threshold_processor import threshold_pipeline
+from tests.support.samples_service import make_samples
 
 from reef.artifact import Artifact, BaseArtifactSource, GitLFSRepositoryBackendFactory, InMemoryRepositoryBackend
 from reef.artifact.artifact import ArtifactValidator
@@ -406,6 +407,7 @@ def test_composite_scenario_serves_config_defaults_and_reports_components(tmp_pa
                 references=("i1",),
             )
         )
+        make_samples(scenario)
         result = scenario.prepare_training_step("harness")
         assert result is not None
         scenario.commit(result, component="harness")

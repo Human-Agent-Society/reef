@@ -7,6 +7,7 @@ from threading import Event
 import pytest
 from tests.support.artifact_versions import RecordingExperimentTracker, dispatcher, train
 from tests.support.component_trainers import HARNESS, _dispatcher, _RecordingTracker, _scenario
+from tests.support.samples_service import make_samples
 
 from reef.artifact import Artifact
 from reef.train import TrainStepResult
@@ -54,6 +55,8 @@ def test_local_tracker_read_locks(tmp_path, monkeypatch, callback, failing):
     # Loading a scenario wakes its workers: hold them, so that this test runs the one cycle.
     value, _ = _dispatcher(tmp_path, experiment_tracker=tracker, hold_local_cycles=True)
     scenario = _scenario(value, 1)
+    # The rows went to the store directly: make their samples, as the samples service does.
+    make_samples(scenario)
     value.local_workers.open()
     entered, release = Event(), Event()
 

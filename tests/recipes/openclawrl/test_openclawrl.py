@@ -126,15 +126,18 @@ def test_next_state_binds_by_trace_matching_and_verdicts_batch() -> None:
     assert [job.receipt for job in worker.jobs] == ["t1"]
     assert worker.jobs[0].next_state_text == "Great, that works!"
     assert worker.jobs[0].next_state_role == "user"
+    processor.produce()
     assert not processor.ready(1)
 
     worker.push(TurnJudgment("t1", score=1.0, teacher_cands=ANCHOR))
+    processor.produce()
     assert processor.ready(1)
     batch = processor.build_job_data(1)
     assert isinstance(batch, JobData)
     assert [trajectory_reward(sample) for sample in batch.samples] == [1.0]
     assert source_record_id(batch.samples[0]) == "t1"
     processor.acknowledge(batch.data_id)
+    processor.produce()
     assert not processor.ready(1)
     decision = processor.releasable_record_ids()
     assert "t1" in decision
@@ -183,6 +186,7 @@ def test_session_ttl_flushes_the_final_turn_terminal() -> None:
     processor = _processor(worker=worker, ttl_s=1e-6)
     processor.push(_turn("t1", Q1))
     time.sleep(0.001)
+    processor.produce()
     assert not processor.ready(1)  # catches up: the TTL pass runs
     decision = processor.releasable_record_ids()
     assert "t1" in decision
@@ -196,6 +200,7 @@ def test_untrainable_verdicts_and_bad_tensors_are_terminal() -> None:
     processor.push(_turn("declined", Q1))
     processor.push(_turn("cont1", _successor(Q1, "meh")))
     worker.push(TurnJudgment("declined"))  # judge declined: no RL, no directive
+    processor.produce()
     assert not processor.ready(1)
     assert "declined" in processor.releasable_record_ids()
 
@@ -203,6 +208,7 @@ def test_untrainable_verdicts_and_bad_tensors_are_terminal() -> None:
     processor.push(_turn("ragged", Q2, topk_rows=[[1, 2]]))
     processor.push(_turn("cont2", _successor(Q2, "ok")))
     worker.push(TurnJudgment("ragged", score=-1.0, teacher_cands=ANCHOR))
+    processor.produce()
     assert not processor.ready(1)
     assert "ragged" in processor.releasable_record_ids()
 
@@ -219,6 +225,7 @@ def test_candidates_behind_the_serving_version_leave_the_buffer() -> None:
     processor.push(_turn("cont2", _successor(Q2, "ok")))
     worker.push(TurnJudgment("old", score=1.0, teacher_cands=ANCHOR))
     worker.push(TurnJudgment("new", score=1.0, teacher_cands=ANCHOR))
+    processor.produce()
     assert not processor.ready(2)  # the stale candidate is not in the buffer, 1 < 2
     assert {"old", "new"} <= processor.releasable_record_ids()
     assert [source_record_id(sample) for sample in processor.build_job_data(1).samples] == ["new"]
@@ -229,6 +236,7 @@ def test_correlate_only_mode_never_trains_and_releases_everything() -> None:
     processor = _processor(worker=None)  # no prm_url, no injected worker
     processor.push(_turn("t1", Q1))
     processor.push(_turn("t2", _successor(Q1, "ok")))
+    processor.produce()
     assert not processor.ready(1)
     assert "t1" in processor.releasable_record_ids()
 
@@ -295,8 +303,10 @@ def test_scoring_worker_threads_the_combine_dispatch() -> None:
     processor.push(_turn("t2", _successor(Q1, "Great, that works!")))
 
     deadline = time.monotonic() + 10.0
+    processor.produce()
     while not processor.ready(1) and time.monotonic() < deadline:
         time.sleep(0.01)
+        processor.produce()
     assert processor.ready(1), "worker judgment never landed"
     batch = processor.build_job_data(1)
     sample = batch.samples[0]
@@ -566,6 +576,7 @@ def test_the_prm_record_file_reports_the_judged_population(tmp_path) -> None:
     processor.push(_turn("t1", Q1))
     processor.push(_turn("t2", _successor(Q1, "that works")))
     worker.push(TurnJudgment("t1", score=1.0, teacher_cands=ANCHOR))
+    processor.produce()
     assert processor.ready(1)
     processor.build_job_data(1)
 

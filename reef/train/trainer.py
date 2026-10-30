@@ -33,6 +33,7 @@ from reef.evaluation.evaluators import BackendAlwaysSelectPlugin
 from reef.observability import ExperimentLogger, NullExperimentLogger
 from reef.observability.operations import OperationMetrics
 from reef.pipeline_context import PipelineContext
+from reef.record2sample.service import ProducedSamples
 from reef.storage.records import RecordStore
 from reef.storage.samples import SAMPLE_KINDS, SampleKind, TrainerSamples
 from reef.storage.tasks import TaskStorage
@@ -221,8 +222,6 @@ class Trainer:
         self._state = dict(state)
         self._data_offset = 0
         self._data_sequence = 0
-        #: Whether the samples service makes this trainer's samples (``use_samples_service``).
-        self.samples_from_service = False
         self.consumed_record_ids: set[str] = set()
         self.skipped_record_ids: set[str] = set()
         self._pending: _PendingStep | None = None
@@ -507,31 +506,24 @@ class Trainer:
         if item.request_type in self.pipeline.required_request_types:
             self._pipeline.push(item)
 
-    def use_samples_service(self) -> None:
-        """Let the samples service make this trainer's samples (``produce_samples``): the trainer's own cycle only
-        reads the sample store and builds jobs. A trainer that trains nothing keeps advancing its record cursor."""
-        with self._lock:
-            if self.trains:
-                self.samples_from_service = True
-                self._pipeline.produces_samples = False
-
-    def produce_samples(self) -> bool:
+    def produce_samples(self) -> ProducedSamples:
         """Push every record that arrived since the last call into the pipeline and make samples of the formed record
-        sets; return whether background work of the pipeline still runs, so the samples service comes back."""
+        sets; return whether the trainer received new input (samples or instructions), and whether background work
+        of the pipeline still runs, so the samples service comes back."""
         with self._lock:
             if not self.trains:
-                return False
+                return ProducedSamples(changed=False, background=False)
             # Another samples process can have stored the samples of later records since this trainer loaded;
             # the records that stored samples consumed never form a record set again.
             self.consumed_record_ids.update(self._pipeline.store.consumed_record_ids())
-            self._consume_data(stop_when_ready=False)
-            self._pipeline.produce()
-            return self._pipeline.background_jobs_running()
+            self.read_records()
+            stored = self._pipeline.produce()
+            return ProducedSamples(changed=stored, background=self._pipeline.background_jobs_running())
 
-    def _consume_data(self, *, stop_when_ready: bool = True) -> None:
-        if self.samples_from_service and stop_when_ready:
-            # The samples service consumes the records (``produce_samples``).
-            return
+    def read_records(self) -> None:
+        """Push every record after the record cursor into the pipeline and move the cursor. The samples service
+        calls it for a trainer that trains (``produce_samples``); a trainer that trains nothing calls it in its own
+        cycle, only to move the cursor. The caller holds the lock."""
         while True:
             items = self._records.replay_page(
                 self.scenario,
@@ -544,8 +536,6 @@ class Trainer:
                 self.push_retained(item)
                 self._data_offset += 1
                 self._data_sequence = sequence
-                if stop_when_ready and self.pipeline_ready():
-                    return
 
     def run_once(
         self,
@@ -563,7 +553,7 @@ class Trainer:
         """
         with self._lock:
             if not self.trains:
-                self._consume_data()
+                self.read_records()
                 return None
             if self._pending is not None and self._pending.result is not None:
                 return self._pending.result
@@ -655,7 +645,7 @@ class Trainer:
             return self._pending.data
         if serving_runtime_load_id is not None:
             self._pipeline.observe_serving_runtime_load_id(serving_runtime_load_id)
-        self._consume_data()
+        # The samples service makes the samples (``produce_samples``); the cycle only reads the sample store.
         if not self.pipeline_ready():
             return None
         data = self._build_validated_job_data()

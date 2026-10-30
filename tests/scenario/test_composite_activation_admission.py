@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -13,6 +14,7 @@ from tests.support.component_trainers import _records
 from tests.support.component_trainers import _scenario as two_trainer_scenario
 from tests.support.component_trainers import _TwoTrainerRecipe, component_files, stop_workers
 from tests.support.runtime_stubs import StubInferenceRuntime
+from tests.support.samples_service import make_samples
 
 from reef.artifact import InMemoryRepositoryBackend
 from reef.artifact.artifact import ArtifactNotFound
@@ -76,10 +78,20 @@ def _scenario(dispatcher: Dispatcher, runtime: StubInferenceRuntime):
 def _step(scenario, component: str, step: int) -> str:
     for record in _records(step):
         scenario.records.append(record)
+    make_samples(scenario)
     result = scenario.prepare_training_step(component)
     assert result is not None
     scenario.commit(result, component=component)
     return scenario.current_artifact_ref().release_id
+
+
+def _job_step(scenario, component: str):
+    """The next prepared step of ``component``'s job loop; the training worker runs each job on its own thread."""
+    deadline = time.monotonic() + 10
+    while (result := scenario.prepare_training_step(component)) is None:
+        assert time.monotonic() < deadline, "the training job did not move"
+        time.sleep(0.01)
+    return result
 
 
 @pytest.mark.unit
@@ -91,6 +103,7 @@ def test_a_local_cycle_clears_only_the_errors_it_recorded(tmp_path: Path) -> Non
         scenario = _scenario(dispatcher, runtime)
         for record in _records(1):
             scenario.records.append(record)
+        make_samples(scenario)
         dispatcher.errors.record("agent", "RuntimeError: training job away", local_error_source(WEIGHTS))
         assert dispatcher.local_workers.process_step("agent", HARNESS) is True
         assert dispatcher.training_status.training_errors() == ["agent: RuntimeError: training job away"]
@@ -101,6 +114,7 @@ def test_a_local_cycle_clears_only_the_errors_it_recorded(tmp_path: Path) -> Non
         ]
         for record in _records(2):
             scenario.records.append(record)
+        make_samples(scenario)
         # The harness cycle clears its own error; the weights worker's stays until that worker clears it.
         assert dispatcher.local_workers.process_step("agent", HARNESS) is True
         assert dispatcher.training_status.training_errors() == ["agent: RuntimeError: training job away"]
@@ -201,10 +215,10 @@ def test_a_weights_start_the_training_component_refuses_is_refused_before_anythi
     )
     try:
         scenario = two_trainer_scenario(dispatcher, 1)
+        make_samples(scenario)
         base = scenario.current_artifact_ref().release_id
         for _ in range(3):
-            result = scenario.prepare_training_step(WEIGHTS)
-            assert result is not None
+            result = _job_step(scenario, WEIGHTS)
             scenario.commit(result, component=WEIGHTS)
         served = scenario.current_artifact_ref().release_id
         steps = scenario.scenario_step
@@ -229,16 +243,16 @@ def test_activation_and_a_new_start_wait_while_the_weight_trainer_has_a_prepared
     )
     try:
         scenario = two_trainer_scenario(dispatcher, 1, 2)
+        make_samples(scenario)
         base = scenario.current_artifact_ref().release_id
         # The first job's submission, checkpoint and end; then the second job's submission.
         for _ in range(4):
-            result = scenario.prepare_training_step(WEIGHTS)
-            assert result is not None
+            result = _job_step(scenario, WEIGHTS)
             scenario.commit(result, component=WEIGHTS)
         served = scenario.current_artifact_ref().release_id
         assert served != base
-        decided = scenario.prepare_training_step(WEIGHTS)
-        assert decided is not None and decided.metrics["training_job"]["event"] == "checkpoint"
+        decided = _job_step(scenario, WEIGHTS)
+        assert decided.metrics["training_job"]["event"] == "checkpoint"
         trainer = scenario.trainer_for(WEIGHTS)
         assert trainer.pending_job_data is None and trainer.has_pending_commit
         with pytest.raises(CommitPending, match="waits for its commit"):

@@ -9,7 +9,7 @@ the samples from the samples queue.
 from __future__ import annotations
 
 from reef.dispatcher.local_workers import LocalTrainingWorkers
-from reef.record2sample.service import SampleProducers
+from reef.record2sample.service import ProducedSamples, SampleProducers
 from reef.scenario.registry import ScenarioRegistry
 
 
@@ -26,21 +26,22 @@ class LocalSampleProducers(SampleProducers):
         self.registry = registry
         self.local_workers = local_workers
 
-    def produce(self, scenario: str, component: str) -> bool:
+    def produce(self, scenario: str, component: str) -> ProducedSamples:
         if self.local_workers is not None:
             current = self.registry.get_loaded(scenario)
         else:
             current = self.registry.get_or_create(scenario, allow_implicit_creation=False)
         if current is None:
             # Control asks again when the scenario loads; a scenario that does not exist has no samples.
-            return False
-        background = False
+            return ProducedSamples(changed=False, background=False)
+        produced = ProducedSamples(changed=False, background=False)
         for component_trainer in current.trainers:
             if component_trainer.component == component and component_trainer.trainer.trains:
-                background = component_trainer.trainer.produce_samples()
-        if self.local_workers is not None:
+                produced = component_trainer.trainer.produce_samples()
+        # Only new input gives the trainer's worker something to build; a selection that brought none leaves it.
+        if self.local_workers is not None and produced.changed:
             self.local_workers.wake(current)
-        return background
+        return produced
 
 
 __all__ = ["LocalSampleProducers"]

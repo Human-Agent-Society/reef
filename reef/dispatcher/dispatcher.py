@@ -39,13 +39,14 @@ from reef.scenario.committer import ComponentArtifact
 from reef.scenario.registry import ScenarioLifecycle, ScenarioRegistry
 from reef.scenario.releases import ServedBesideArtifact
 from reef.scenario.scenario import Scenario
-from reef.storage.coordination import Coordination, instance_id
+from reef.storage.coordination import Coordination, instance_id, memory_coordination
 from reef.storage.data import DataStore, check_owner
 from reef.storage.data_sync import sync_scenario_samples, uploads
 from reef.storage.record_items import sync_scenario_records
 from reef.storage.records import RecordRetention
 from reef.storage.samples import StoredSample
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage
+from reef.train.job_queue import JobQueueComponent, TrainingJobWorker
 from reef.train.trainer import Trainer
 
 logger = logging.getLogger(__name__)
@@ -107,7 +108,11 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance):
         loaded. The default admits all scenarios.
 
         ``coordination`` and ``workers``: the coordination store and the background workers of the services
-        that this process runs. ``close`` stops the workers first and closes the store last.
+        that this process runs; without a store, the dispatcher keeps one in memory (``memory_coordination``).
+        The constructor starts the workers; ``close`` stops them first and closes the store last.
+
+        The recipe's training component gets its jobs through the jobs queue: the dispatcher gives the trainers a
+        ``JobQueueComponent`` over it and, with ``training``, runs a ``TrainingJobWorker`` on it.
 
         ``components``: the services that this process runs (``SERVICE_COMPONENTS``). With ``control``, the
         constructor first waits for the control lease, while another control instance holds it; then the
@@ -122,7 +127,9 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance):
         """
         if scenario_idle_unload_seconds is not None and scenario_idle_unload_seconds <= 0:
             raise ValueError("scenario_idle_unload_seconds must be positive")
-        #: The deployment's coordination store (``served_models``, work queues, the control lease), or None.
+        if coordination is None:
+            coordination = memory_coordination()
+        #: The deployment's coordination store: ``served_models``, the work queues and the control lease.
         self.coordination = coordination
         #: The background workers of the services that this process runs; the dispatcher stops them first.
         self.workers = workers if workers is not None else ServiceWorkers()
@@ -130,9 +137,18 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance):
         self.components = service_components(components)
         #: Whether this process runs control: the trainers' local workers, ``served_models`` and the store watcher.
         self.runs_control = "control" in self.components
-        #: The work queue of the samples service, or None when trainers make their own samples.
-        self.samples_queue = None if coordination is None else coordination.work_queue
-        #: The deployment's recipe, before any scenario's own model settings.
+        #: The work queue of the samples, jobs and evaluations queues.
+        self.queue = coordination.work_queue
+        if recipe.training_component is not None:
+            queued = JobQueueComponent(
+                recipe.training_component, self.queue, owns_component="training" not in self.components
+            )
+            if "training" in self.components:
+                self.workers.add(
+                    TrainingJobWorker(recipe.training_component, self.queue, worker_id=instance_id("training"))
+                )
+            recipe = recipe.with_training_component(queued)
+        #: The deployment's recipe, before any scenario's own model settings; its trainers submit to the jobs queue.
         self.recipe = recipe
         self.storage = scenario_storage
         self.data_store = data_store
@@ -151,7 +167,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance):
         self.errors = TrainingErrors()
         self.background_threads = BackgroundThreads()
         self.local_workers = LocalTrainingWorkers(self.registry, self.errors, held=hold_local_cycles)
-        if coordination is not None and self.runs_control:
+        if self.runs_control:
             # A standby instance waits here, before it loads or serves anything, until the active one stops.
             control_id = instance_id("control")
             lease = wait_for_control_lease(coordination.control_lease, control_id)
@@ -169,10 +185,10 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance):
             # The publisher extends the lease; it starts now, so a slow start-up does not let the lease expire.
             publisher.start()
             self.workers.add(StoreChangesWatcher(self.registry, coordination.work_queue, self))
-        if self.samples_queue is not None and "samples" in self.components:
+        if "samples" in self.components:
             self.workers.add(
                 SamplesWorker(
-                    self.samples_queue,
+                    self.queue,
                     LocalSampleProducers(self.registry, self.local_workers if self.runs_control else None),
                     worker_id=instance_id("samples"),
                 )
@@ -181,7 +197,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance):
         self.record_items = (
             None if data_store is None else RecordItemCopier(self.registry, scenario_storage, data_store)
         )
-        if isinstance(backend_factory, EnumerableRepositoryBackendFactory):
+        if self.runs_control and isinstance(backend_factory, EnumerableRepositoryBackendFactory):
             self.background_threads.preload_thread = Thread(
                 target=self.preload_scenarios,
                 args=(backend_factory.list_registrations(),),
@@ -204,6 +220,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance):
                 daemon=True,
             )
             self.background_threads.idle_unload_thread.start()
+        self.workers.start()
 
     # -- Scenario API (delegates to registry) ----------------------------
 
@@ -284,9 +301,6 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance):
         The data sync can add uploads while the scenario opens, and no record wakes a worker for them, so the
         workers wake when a trainer holds untrained samples.
         """
-        if self.samples_queue is not None:
-            for component_trainer in instance.trainers:
-                component_trainer.trainer.use_samples_service()
         if not self.runs_control:
             # Another process runs control: this one loaded the scenario only to make its samples.
             return
@@ -296,6 +310,12 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance):
             self.record_items.wake(instance.name)
         if any(component_trainer.trainer.holds_untrained_records() for component_trainer in instance.trainers):
             self.local_workers.wake(instance)
+
+    def scenario_reloaded(self, instance: Scenario) -> None:
+        """A failure rebuilt ``instance``: ask the samples service again for the records after its progress. Its
+        workers keep the failure until the samples come and the next cycle runs."""
+        if self.runs_control:
+            self.request_samples(instance)
 
     def close_replaced(self, instance: Scenario) -> None:
         """Close a reloaded scenario's old instance once no local cycle runs on it."""
@@ -698,11 +718,9 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance):
 
     def request_samples(self, current: Scenario) -> None:
         """Ask the samples service for a selection of the new records of each trainer of ``current`` that trains."""
-        if self.samples_queue is None:
-            return
         for component_trainer in current.trainers:
             if component_trainer.trainer.trains:
-                request_selection(self.samples_queue, current.name, component_trainer.component)
+                request_selection(self.queue, current.name, component_trainer.component)
 
     # -- Preload ---------------------------------------------------------
 
@@ -811,11 +829,10 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance):
             self.experiment_tracker.close()
         except Exception:
             logger.exception("experiment tracker failed to close")
-        if self.coordination is not None:
-            try:
-                self.coordination.close()
-            except BaseException as exc:
-                errors.append(exc)
+        try:
+            self.coordination.close()
+        except BaseException as exc:
+            errors.append(exc)
         if errors:
             raise errors[0]
 

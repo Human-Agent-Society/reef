@@ -195,9 +195,11 @@ def search(scenario: Scenario, recipe: MetaHarnessRecipe, directory: Path) -> di
             break
         # A previous process may have recorded the report but not committed its
         # step. Let Reef replay it before spending on another rollout.
+        scenario.produce_samples()
         result = scenario.prepare_training_step()
         if result is None:
             record_rollout(scenario, recipe)
+            scenario.produce_samples()
             result = scenario.prepare_training_step()
         if result is None:
             raise RuntimeError("the recorded rollout did not produce a training step")

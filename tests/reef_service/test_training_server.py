@@ -18,7 +18,6 @@ from tests.support._policy_recipe import TestPolicyRecipe
 from tests.support.artifact_versions import inference, report
 from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, runtime_bindings
 
-from reef.train.job_queue import JobQueueComponent
 from reef.artifact import Artifact, GitLFSRepositoryBackendFactory, InMemoryRepositoryBackend, RepositoryBackendContext
 from reef.dispatcher import Dispatcher
 from reef.evaluation.activation import NeverActivate
@@ -29,6 +28,7 @@ from reef.service import deploy
 from reef.service.app import create_app
 from reef.service.deploy.service_config import ServiceConfig
 from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.train.job_queue import JobQueueComponent
 
 OPENCLAWRL_RECIPE = "recipes.openclawrl.recipe:OpenClawRLRecipe"
 SAO_RECIPE = "recipes.sao.recipe:SAORecipe"
@@ -574,6 +574,10 @@ def test_status_reports_the_running_job_the_finished_jobs_and_the_served_adapter
             dispatcher.accept_record(inference(1, "adapter:math:w0" if per_scenario_adapters else "w0"))
             dispatcher.accept_record(report(1))
             running = await wait_for(client, finished_jobs=0, running=True)
+            # The training service hands the queued job to the component on its own thread.
+            deadline = time.monotonic() + 5
+            while not component.submitted and time.monotonic() < deadline:
+                await asyncio.sleep(0.01)
             (job,) = component.submitted
             assert running["training_job"] == {"job_id": job.job_id, "backend": "stub", "checkpoints_handled": 0}
 

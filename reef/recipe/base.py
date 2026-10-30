@@ -146,6 +146,13 @@ class Recipe:
         stage = self.stages().record2sample
         return Record2Sample.referenced_class(stage).scenario_state_dirs(stage.config, scenario)
 
+    def with_training_component(self, component: TrainingComponent) -> Recipe:
+        """This recipe with ``component`` in place of its training component: the same recipe, whose trainers
+        submit their jobs to ``component``. Only a recipe with a training component has one to replace."""
+        if self.training_component is None:
+            raise ValueError(f"{type(self).__name__} has no training component to replace")
+        return replace(self, training_component=component)
+
     def with_model_config(self, config: ModelConfig) -> Recipe:
         """Bind model settings supplied for this scenario."""
         if config.runtime is not None and self.training_component is not None:

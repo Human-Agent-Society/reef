@@ -81,7 +81,9 @@ def test_dispatcher_closes_the_component_and_runtime_after_all_scenarios_but_not
     track_close(dispatcher.get_or_create_scenario("code"))
     dispatcher.close()
     dispatcher.close()
-    assert events == ["math", "code", "close component", "shutdown runtime"]
+    # The training worker owns the component and closes it when the dispatcher stops its workers, before the
+    # scenarios close; the scenarios submit jobs only to the jobs queue. The runtime closes after all scenarios.
+    assert events == ["close component", "math", "code", "shutdown runtime"]
     assert runtime.inference_admission_status["open"] is False
 
 
