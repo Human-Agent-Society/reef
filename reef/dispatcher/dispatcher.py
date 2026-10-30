@@ -21,6 +21,8 @@ from reef.core.errors import ReefError, ScenarioCapacityFull, UnknownScenario
 from reef.core.job_data import TrajectorySample
 from reef.core.records_types import AgentRecord, RequestType
 from reef.dispatcher import ingest
+from reef.execution.workers import ServiceWorkers
+from reef.storage.coordination import Coordination
 from reef.dispatcher.errors import TrainingErrors
 from reef.dispatcher.local_workers import LocalTrainingWorkers
 from reef.dispatcher.record_item_copier import RecordItemCopier
@@ -85,6 +87,8 @@ class Dispatcher(ScenarioLifecycle):
         hold_local_cycles: bool = False,
         scenario_idle_unload_seconds: float | None = None,
         scenario_admission: ScenarioAdmission | None = None,
+        coordination: Coordination | None = None,
+        workers: ServiceWorkers | None = None,
     ) -> None:
         """``hold_local_cycles``: run no local cycle until :meth:`open_local_cycles`.
         Use it when the recipe calls this same service. The service does not
@@ -96,6 +100,9 @@ class Dispatcher(ScenarioLifecycle):
         ``scenario_admission``: decides whether a scenario is created or
         loaded. The default admits all scenarios.
 
+        ``coordination`` and ``workers``: the coordination store and the background workers of the services
+        that this process runs. ``close`` stops the workers first and closes the store last.
+
         ``data_store``: the deployment's data store (RFC #1028). Each accepted
         inference and report becomes a record item in it
         (``RecordItemCopier``). The dispatcher closes it before the scenario
@@ -103,6 +110,10 @@ class Dispatcher(ScenarioLifecycle):
         """
         if scenario_idle_unload_seconds is not None and scenario_idle_unload_seconds <= 0:
             raise ValueError("scenario_idle_unload_seconds must be positive")
+        #: The deployment's coordination store (``served_models``, work queues, the control lease), or None.
+        self.coordination = coordination
+        #: The background workers of the services that this process runs; the dispatcher stops them first.
+        self.workers = workers if workers is not None else ServiceWorkers()
         #: The deployment's recipe, before any scenario's own model settings.
         self.recipe = recipe
         self.storage = scenario_storage
@@ -682,6 +693,7 @@ class Dispatcher(ScenarioLifecycle):
         """Stop all scenario workers, then close this dispatcher's runtime."""
         if self.local_workers.closed.is_set():
             return
+        self.workers.stop()
         local_workers = self.local_workers.begin_close()
         if self.background_threads.preload_thread is not None:
             self.background_threads.preload_thread.join()
@@ -720,6 +732,11 @@ class Dispatcher(ScenarioLifecycle):
             self.experiment_tracker.close()
         except Exception:
             logger.exception("experiment tracker failed to close")
+        if self.coordination is not None:
+            try:
+                self.coordination.close()
+            except BaseException as exc:
+                errors.append(exc)
         if errors:
             raise errors[0]
 

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from abc import ABC, abstractmethod
+from abc import abstractmethod
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -54,6 +54,7 @@ from reef.core.errors import ReefError
 from reef.core.plugins import PluginSettings
 from reef.core.served_models import ScenarioModel, ScheduledStop, ServedArtifact, require_text
 from reef.storage.control_lease import ControlLease, ControlLeaseState
+from reef.storage.coordination import Coordination, CoordinationResource
 from reef.storage.postgres import postgres_url, validate_postgres_schema
 from reef.storage.served_models import ControlLeaseConflict, ServedModelsWriter
 from reef.storage.work_queue import (
@@ -149,7 +150,7 @@ def canonical_json(value: object) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
-class CoordinationDatabase(ABC):
+class CoordinationDatabase(CoordinationResource):
     """One database that holds the coordination tables, and its transactions.
 
     Purpose: ``SQLServedModels``, ``SQLWorkQueue`` and ``SQLControlLease`` share one database object, so a
@@ -689,6 +690,16 @@ class SQLWorkQueue(WorkQueue):
                 lease_expires_at=None,
             )
 
+    def cancel(self, queue: str, item_id: str, error: str) -> WorkItem | None:
+        require_text(error, "error")
+        with self.database.write() as (connection, counter):
+            item = self.row(connection, queue, item_id, lock=True)
+            if item is None or item.final:
+                return item
+            return self.save(
+                connection, counter, item, state="failed", error=error, worker_id=None, lease_expires_at=None
+            )
+
     def requeue_expired(self, *, now: float | None = None) -> tuple[WorkItem, ...]:
         moment = clock(now)
         query = select(self.table).where(
@@ -750,6 +761,28 @@ def open_coordination_database(
     raise ValueError(f"coordination backend must be sqlite or postgres, not {backend!r}")
 
 
+def open_coordination(
+    record_backend: object,
+    *,
+    agent_record_dir: str,
+    record_database_url: str | None,
+    lease_seconds: float = 60.0,
+) -> Coordination:
+    """The coordination store of a deployment. It follows ``record_backend``: ``postgres`` uses
+    ``record_database_url`` with the schema ``reef_coordination``; anything else uses a SQLite file in
+    ``<agent_record_dir>/coordination``."""
+    if record_backend == "postgres":
+        database = open_coordination_database("postgres", directory=None, database_url=record_database_url)
+    else:
+        database = open_coordination_database("sqlite", directory=Path(agent_record_dir) / "coordination")
+    return Coordination(
+        database,
+        SQLWorkQueue(database, lease_seconds=lease_seconds),
+        SQLServedModels(database),
+        SQLControlLease(database),
+    )
+
+
 __all__ = [
     "CoordinationDatabase",
     "CoordinationTables",
@@ -760,5 +793,6 @@ __all__ = [
     "SQLWorkQueue",
     "SQLiteCoordinationDatabase",
     "coordination_tables",
+    "open_coordination",
     "open_coordination_database",
 ]

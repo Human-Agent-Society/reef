@@ -33,6 +33,11 @@ from reef.runtime.deployment import RuntimeRegistry, build_training_component, c
 from reef.runtime.interfaces import InferenceHandler, InferenceRuntime
 from reef.runtime.jobs import TrainingComponent
 from reef.scenario.admission import ScenarioAdmission, ScenarioLimits
+from reef.execution.workers import ServiceWorkers
+from reef.service.coordination import ServiceSetup
+from reef.storage.coordination import instance_id
+from reef.storage.sql_coordination import open_coordination
+from reef.train.job_queue import JobQueueComponent, TrainingJobWorker
 from reef.service.app import InferenceRetryPolicy, create_app
 from reef.service.artifact_evaluations import ArtifactEvaluations, NewArtifacts
 from reef.service.artifact_imports import ArtifactImports
@@ -84,13 +89,16 @@ def _require_non_empty(value: str | None, setting: str) -> str:
 
 
 def connect_training_component(
-    settings: ServiceConfig, *, model_path: str, loss_family: str
+    settings: ServiceConfig, *, model_path: str, loss_family: str, services: ServiceSetup | None = None
 ) -> tuple[TrainingComponent, InferenceRuntime]:
     """Build the selected training component for the recipe's ``loss_family``, then the serving of its releases.
 
     The training backend builds only the component. The serving runtime comes
     from the deployment's ``inference`` settings and the component's
     ``release_format`` (``reef.service.deploy.serving``).
+
+    With ``services``, the recipe gets a ``JobQueueComponent``: its jobs go through the jobs queue. When this
+    process runs the training service, a ``TrainingJobWorker`` runs them on the component.
     """
     backend = training_deployment_for(settings.training_backend)
     component = build_training_component(
@@ -103,7 +111,13 @@ def connect_training_component(
     except BaseException:
         component.close()
         raise
-    return component, serving
+    if services is None:
+        return component, serving
+    queue = services.coordination.work_queue
+    if services.runs_training:
+        services.workers.add(TrainingJobWorker(component, queue, worker_id=instance_id("training")))
+        return JobQueueComponent(component, queue), serving
+    return JobQueueComponent(component, queue, owns_component=True), serving
 
 
 def _upstream_runtime(settings: ServiceConfig) -> InferenceRuntime | None:
@@ -125,6 +139,7 @@ def _training_recipe(
     recipe_type: type[WeightTrainingRecipe],
     settings: ServiceConfig,
     env: Mapping[str, str],
+    services: ServiceSetup | None = None,
 ) -> Recipe:
     """Build a weight-training recipe on the selected backend runtime."""
     model_path = _require_non_empty(settings.model_path, "reef.model_path")
@@ -137,7 +152,7 @@ def _training_recipe(
         recipe_config["pipeline"] = dict(settings.pipeline_settings)
     resolved_recipe_data = resolve_config_field_values(recipe_type, recipe_config.get("data", {}), env)
     training_component, runtime = connect_training_component(
-        settings, model_path=model_path, loss_family=recipe_type.training_spec().loss_family
+        settings, model_path=model_path, loss_family=recipe_type.training_spec().loss_family, services=services
     )
     try:
         return recipe_type.from_resolved_config(
@@ -159,6 +174,7 @@ def composed_training_recipe(
     weight_type: type[WeightTrainingRecipe],
     settings: ServiceConfig,
     env: Mapping[str, str],
+    services: ServiceSetup | None = None,
 ) -> Recipe:
     """Build a recipe that trains weights through one of its components, on the selected backend runtime.
 
@@ -178,7 +194,7 @@ def composed_training_recipe(
             "components.<name>.config"
         )
     training_component, runtime = connect_training_component(
-        settings, model_path=model_path, loss_family=weight_type.training_spec().loss_family
+        settings, model_path=model_path, loss_family=weight_type.training_spec().loss_family, services=services
     )
     config = {**config, "model": {**dict(config.get("model", {})), "path": model_path}}
     if settings.pipeline_settings is not None:
@@ -201,7 +217,9 @@ def composed_training_recipe(
         raise
 
 
-def _serving_recipe(selected: str, settings: ServiceConfig, env: Mapping[str, str]) -> Recipe:
+def _serving_recipe(
+    selected: str, settings: ServiceConfig, env: Mapping[str, str], services: ServiceSetup | None = None
+) -> Recipe:
     """Build the one recipe ``reef.recipe`` names.
 
     The spellings differ only in where config and runtime come from: a dotted
@@ -214,7 +232,7 @@ def _serving_recipe(selected: str, settings: ServiceConfig, env: Mapping[str, st
     """
     training_recipe_type = _training_recipe_type(selected)
     if training_recipe_type is not None:
-        return _training_recipe(training_recipe_type, settings, env)
+        return _training_recipe(training_recipe_type, settings, env, services)
     if ":" in selected:
         config = _recipe_owned_settings(settings)
         if settings.preset_config is not None:
@@ -228,7 +246,7 @@ def _serving_recipe(selected: str, settings: ServiceConfig, env: Mapping[str, st
         recipe_type = recipe_class_for(selected)
         weight_training = None if recipe_type is None else recipe_type.select_weight_training(config)
         if weight_training is not None and recipe_type is not None:
-            return composed_training_recipe(selected, recipe_type, config, weight_training[0], settings, env)
+            return composed_training_recipe(selected, recipe_type, config, weight_training[0], settings, env, services)
         if settings.pipeline_settings is not None:
             config["pipeline"] = dict(settings.pipeline_settings)
         if settings.activation_settings is not None:
@@ -318,7 +336,20 @@ def build_dispatcher(
     """
     selected_recipe = _require_non_empty(settings.recipe, "reef.recipe")
     env = os.environ if environ is None else environ
-    recipe = _serving_recipe(selected_recipe, settings, env)
+    services = ServiceSetup(
+        open_coordination(
+            settings.record_backend,
+            agent_record_dir=settings.agent_record_dir,
+            record_database_url=settings.record_database_url,
+        ),
+        ServiceWorkers(),
+    )
+    try:
+        recipe = _serving_recipe(selected_recipe, settings, env, services)
+    except BaseException:
+        services.workers.stop()
+        services.coordination.close()
+        raise
     calls_service = isinstance(recipe, CompositeRecipe)
     if calls_service:
         # A composite's evaluation calls come back to this Reef, so they sample the release it serves.
@@ -398,7 +429,7 @@ def build_dispatcher(
             model=settings.model_path,
             training_config=settings.training_settings,
         )
-        return Dispatcher(
+        dispatcher = Dispatcher(
             recipe,
             backend_factory,
             local_artifact_dir=Path(settings.artifact_cache_dir) / "staged",
@@ -415,7 +446,11 @@ def build_dispatcher(
                 if settings.scenario_admission is None
                 else ScenarioAdmission.from_setting(settings.scenario_admission, setting="reef.scenario_admission")
             ),
+            coordination=services.coordination,
+            workers=services.workers,
         )
+        services.workers.start()
+        return dispatcher
     except BaseException:
         # The data store first: the scenario storage closes the task file store that it shares.
         if data_store is not None:
@@ -424,10 +459,12 @@ def build_dispatcher(
         if scenario_storage is not None:
             with suppress(Exception):
                 scenario_storage.close()
+        services.workers.stop()
         close_runtimes(recipe.training_component, recipe.runtime)
         if experiment_tracker is not None:
             with suppress(Exception):
                 experiment_tracker.close()
+        services.coordination.close()
         raise
 
 

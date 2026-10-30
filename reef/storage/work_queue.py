@@ -219,6 +219,12 @@ class WorkQueue(ABC):
         left, else ``failed``. ``WorkLeaseLost`` when ``worker_id`` does not hold it."""
 
     @abstractmethod
+    def cancel(self, queue: str, item_id: str, error: str) -> WorkItem | None:
+        """Make an item that is not final ``failed`` with ``error``, for the producer that added it. A worker that
+        held it gets ``WorkLeaseLost`` at its next call and stops. Return the item, or None when it does not exist;
+        a final item does not change."""
+
+    @abstractmethod
     def requeue_expired(self, *, now: float | None = None) -> tuple[WorkItem, ...]:
         """Return each held item whose lease expired to ``queued``, or make it ``failed`` when it has no attempts
         left; return the changed items."""
@@ -374,6 +380,14 @@ class MemoryWorkQueue(WorkQueue):
             return self.save(
                 item, state="queued" if again else "failed", error=error, worker_id=None, lease_expires_at=None
             )
+
+    def cancel(self, queue: str, item_id: str, error: str) -> WorkItem | None:
+        require_text(error, "error")
+        with self.lock:
+            item = self.store.get((queue, item_id))
+            if item is None or item.final:
+                return item
+            return self.save(item, state="failed", error=error, worker_id=None, lease_expires_at=None)
 
     def requeue_expired(self, *, now: float | None = None) -> tuple[WorkItem, ...]:
         moment = clock(now)

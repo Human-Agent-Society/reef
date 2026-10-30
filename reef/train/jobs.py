@@ -144,7 +144,7 @@ class JobLoop:
             raise TypeError(f"component must be a TrainingComponent, got {type(component).__name__}")
         if not isinstance(scenario, str) or not scenario:
             raise ValueError("scenario must be a non-empty string")
-        self.component = component
+        self.component = component.for_scenario(scenario)
         self.scenario = scenario
 
     def job_id(self, state: JobLoopState, start: str, data: JobData, parameters: Mapping[str, Any]) -> str:

@@ -263,6 +263,22 @@ class TrainingComponent(ABC):
         """
         return False
 
+    def check_job(self, job: TrainingJob) -> None:
+        """Raise ``ValueError`` for a job this component cannot train. The default accepts every job.
+
+        A queue-backed component calls it before it adds the job to the jobs queue, so a refused job never waits
+        in the queue.
+        """
+        return
+
+    def for_scenario(self, scenario: str) -> TrainingComponent:
+        """The component that runs the jobs of ``scenario``. The default is this component.
+
+        ``JobLoop`` calls it once. A queue-backed component returns a view that adds each job to the jobs queue
+        under ``scenario``.
+        """
+        return self
+
     def check_task_jobs(self, parameters: Mapping[str, Any]) -> None:
         """Raise ``ValueError`` unless the component can train jobs whose data are ``TaskSample`` values, with ``parameters``.
 

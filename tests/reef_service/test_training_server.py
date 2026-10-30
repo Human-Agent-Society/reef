@@ -18,6 +18,7 @@ from tests.support._policy_recipe import TestPolicyRecipe
 from tests.support.artifact_versions import inference, report
 from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, runtime_bindings
 
+from reef.train.job_queue import JobQueueComponent
 from reef.artifact import Artifact, GitLFSRepositoryBackendFactory, InMemoryRepositoryBackend, RepositoryBackendContext
 from reef.dispatcher import Dispatcher
 from reef.evaluation.activation import NeverActivate
@@ -285,7 +286,10 @@ def test_build_dispatcher_builds_the_training_component_and_injects_selected_rec
     )
 
     assert dispatcher.recipe.name == "openclawrl"
-    component = dispatcher.recipe.training_component
+    # The recipe's trainers add their jobs to the jobs queue; the training worker runs them on the component.
+    queued = dispatcher.recipe.training_component
+    assert isinstance(queued, JobQueueComponent)
+    component = queued.component
     assert component.received_model_path == "/models/demo"
     assert (component.config["inference_timeout_s"], component.config["train_timeout_s"]) == (30.0, None)
     assert component.config["batch_size"] == 4
@@ -474,7 +478,7 @@ def test_build_dispatcher_treats_sao_as_training_recipe(stub_repository, tmp_pat
 
     assert dispatcher.recipe.name == "sao"
     # The training backend built the component (the inference branch builds none).
-    component = dispatcher.recipe.training_component
+    component = dispatcher.recipe.training_component.component
     assert component.received_model_path == "/models/demo"
 
 
@@ -484,7 +488,7 @@ def test_build_dispatcher_gives_max_staleness_to_the_record_stage_only(stub_repo
     dispatcher = build(tmp_path, recipe=OPENCLAWRL_RECIPE, pipeline_settings=pipeline)
 
     # The window belongs to the record-to-record stage; the training component never receives it.
-    assert "max_staleness" not in dispatcher.recipe.training_component.config
+    assert "max_staleness" not in dispatcher.recipe.training_component.component.config
     assert dispatcher.recipe.build_pipeline(PipelineContext("s")).record2record.max_staleness == 2
 
 
