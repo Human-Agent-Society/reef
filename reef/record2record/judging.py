@@ -23,7 +23,6 @@ from dataclasses import dataclass
 from reef.core.records_types import AgentRecord
 from reef.execution.jobs import BackgroundJobRunner, BackgroundJobWorker, Failed, SupportsReceipt
 from reef.record2record.base import Record2Record
-from reef.record2record.selection import ArrivalOrder
 from reef.record2record.sets import RecordSet
 
 
@@ -72,16 +71,17 @@ class JudgedSet(RecordSet):
 
 
 class JudgingRecord2Record(Record2Record):
-    """Judge records on a background worker, and hold the judged sets until job data uses them.
+    """Judge records on a background worker, and form a set of each judged record.
 
-    Every record is in exactly one state: tracked, in flight, held in the
-    pool, or terminal. Terminal records are released from memory and never train. Judged sets wait in the order that their judgments arrived.
+    Every record is in exactly one state: tracked, in flight, formed into a
+    judged set, or terminal. Terminal records are released from memory and never train. Judged sets form in the
+    order that their judgments arrived.
 
     Without a worker, records track and expire, and nothing is ever judged.
     """
 
     def __init__(self, judging: RecordJudging, worker: BackgroundJobWorker | None, *, max_staleness: int = 0) -> None:
-        super().__init__(ArrivalOrder(), max_staleness=max_staleness)
+        super().__init__(max_staleness=max_staleness)
         self.judging = judging
         self.worker = worker
         self.tracked: dict[str, AgentRecord] = {}
@@ -109,14 +109,7 @@ class JudgingRecord2Record(Record2Record):
             if isinstance(judgment, Failed):
                 self.retire(judgment.receipt)
                 continue
-            self.form(
-                JudgedSet(
-                    set_id=judgment.receipt,
-                    arrival_index=self.pool.next_arrival_index(),
-                    record=record,
-                    judgment=judgment,
-                )
-            )
+            self.form(JudgedSet(set_id=judgment.receipt, record=record, judgment=judgment))
 
     # ------------------------------------------------------- the verbs for observe
 
@@ -147,8 +140,6 @@ class JudgingRecord2Record(Record2Record):
         self.tracked.pop(receipt, None)
         self.retire(receipt)
 
-    # ------------------------------------------------------------ consumption
-
     # --------------------------------------------------------- background work
 
     def background_jobs_running(self) -> bool:
@@ -162,23 +153,13 @@ class JudgingRecord2Record(Record2Record):
     # ---------------------------------------------------------------- release
 
     def releasable_record_ids(self) -> frozenset[str]:
-        held = frozenset(key for unit in self.pool.units() for key in unit.consumed_ids())
-        protected = frozenset(self.tracked) | frozenset(self.in_flight) | held
-        return super().releasable_record_ids() - protected
+        return super().releasable_record_ids() - frozenset(self.tracked) - frozenset(self.in_flight)
 
     def release_records(self, agent_record_ids: frozenset[str]) -> None:
         super().release_records(agent_record_ids)
         for agent_record_id in agent_record_ids:
             self.tracked.pop(agent_record_id, None)
             self.in_flight.pop(agent_record_id, None)
-            self.pool.remove(agent_record_id)
-            self.producing_runtime_load_ids.pop(agent_record_id, None)
 
     def operational_metrics(self) -> Mapping[str, float | int]:
-        reserved = len(self.pool.reserved_units())
-        return {
-            "tracked_records": len(self.tracked),
-            "judging_records": len(self.in_flight),
-            "unreserved_candidates": len(self.pool) - reserved,
-            "reserved_candidates": reserved,
-        }
+        return {"tracked_records": len(self.tracked), "judging_records": len(self.in_flight)}

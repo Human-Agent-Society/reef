@@ -25,8 +25,9 @@ class GeneratedTaskRecipe(WeightTrainingRecipe):
     ``GeneratedTaskJobData``; the deployment's ``pipeline`` section gives
     their config: the rounds, the task generator, and the generator service
     in ``record2sample``, the source sessions and the pace of the rounds in
-    ``record2record``, and the tasks of one job in ``sample2job``. Without that
-    section, no round runs and nothing trains. Each job is a task job: the
+    ``record2record``, and the tasks of one job in ``sample2job``. Without
+    ``rounds``, no round runs, and the recipe trains only the train tasks that
+    earlier generations saved. Each job is a task job: the
     training component rolls its tasks out, as ``recipe.config.job_parameters.rollout``
     says (the Tinker component's ``RolloutSettings``), which the recipe
     requires.

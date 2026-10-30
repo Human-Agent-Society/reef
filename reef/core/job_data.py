@@ -2,8 +2,7 @@
 
 Reef submits one training job for each ``JobData`` value. The training
 framework cuts the value's items into its own optimizer batches. When the job
-ends, its ``JobOutcome`` is what the training pipeline and the recipe's job plan
-learn about it.
+ends, its ``JobOutcome`` is what the training pipeline learns about it.
 """
 
 from __future__ import annotations
@@ -129,7 +128,7 @@ class JobData:
     ``<scenario>:instruction:<request id>`` for an instruction's data.
     ``samples`` is a tuple of ``TrajectorySample`` and ``TaskSample`` values in
     the order of the sample-to-job stage; it can be empty, for a harness step
-    that runs an instruction alone. ``request`` is the training instruction that
+    that runs an instruction with no held samples. ``request`` is the training instruction that
     the data carries, or None. The constructor refuses other sample types.
     Purpose: ``Sample2Job.make_job_data`` makes it, and the training component
     (``TrainingJob.data``) or the harness backend reads it. The consuming
@@ -256,8 +255,8 @@ class JobOutcome:
     ``finished`` or ``failed``; ``metrics`` is the component's telemetry for the whole job, a mapping that
     encodes as JSON and that Reef records without reading, such as a task job's ``rollout_rewards``;
     ``error`` is a non-empty string exactly when ``event`` is ``failed``. Purpose: the weight trainer's job
-    loop makes it when it commits a job's end and keeps the last one in its state; the recipe's job plan
-    (``JobPlanContext.last_job``) and the sample-to-job stage (``Sample2Job.job_ended``) read it.
+    loop makes it when it commits a job's end and keeps the last one in its state; the record-to-sample stage
+    (``Record2Sample.job_ended``) reads it.
     """
 
     job_id: str

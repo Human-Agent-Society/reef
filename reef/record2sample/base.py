@@ -3,7 +3,9 @@
 A sample is a ``Sample``: a ``TrajectorySample`` that trains directly, or a
 ``TaskSample`` that the algorithm rolls out. The training pipeline pushes each
 record set that the record stage forms (``push``) and pulls the sample results
-(``pull``). It gives each result back to the record stage.
+(``pull``). It gives each result back to the record stage. A stage can also make
+samples from no record set, such as generated tasks (``made_samples``); the
+pipeline stores them with the others.
 """
 
 from __future__ import annotations
@@ -14,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Self
 
-from reef.core.job_data import Sample, TrajectorySample
+from reef.core.job_data import JobOutcome, Sample, TrajectorySample
 from reef.core.plugins import NoSettings, Plugin, PluginConfigError
 from reef.pipeline_context import PipelineContext
 from reef.record2record import Record2Record, RecordSet, SampleStatus
@@ -99,6 +101,25 @@ class Record2Sample(ABC, Plugin):
     @abstractmethod
     def pull(self) -> tuple[tuple[Hashable, SampleResult], ...]:
         """Return the results that are ready since the last call, by set ID."""
+
+    def made_samples(self) -> tuple[tuple[str, Sample], ...]:
+        """Return the samples that the stage made from no record set since the last call; the default makes none.
+
+        Each pair is ``(name, sample)``. ``name`` is non-empty, and a name names the same sample every time it is
+        returned. The pipeline stores each sample as ``<name>``, or ``<component>:<name>`` for a trainer of a
+        scenario of several, with no group and no consumed record. A sample that the store holds already changes
+        nothing, so a stage may return a sample again, for example after a restart.
+        """
+        return ()
+
+    def job_ended(self, outcome: JobOutcome) -> None:
+        """A training job ended and the commit of its end is durable; the default does nothing.
+
+        A stage that made tasks reads their results from ``outcome``. A trainer that starts with no running job
+        calls it again for the last job that ended, before any other call of a new stage, so a stage that starts
+        in that process takes it as the end of the last job that may have trained its samples.
+        """
+        return
 
     def status(self) -> Mapping[str, Any]:
         """Return JSON-safe state that the pipeline adds to its status."""

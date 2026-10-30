@@ -266,7 +266,7 @@ class Proposer(ConfiguredPlugin, ABC):
 
     @property
     def reads_requests(self) -> bool:
-        """Whether this proposer can answer a training instruction (``manual`` and ``hybrid``); override to say so."""
+        """Whether this proposer can answer a training instruction (``manual``); override to say so."""
         return False
 
     @property

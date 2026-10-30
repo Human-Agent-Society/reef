@@ -65,7 +65,15 @@ class StepRecipe(Recipe):
     backend: CandidateBackend | None = None
 
     def build(
-        self, scenario, records, *, algorithm_state=None, experiment_logger=None, task_storage=None, releases=None
+        self,
+        scenario,
+        records,
+        *,
+        algorithm_state=None,
+        experiment_logger=None,
+        task_storage=None,
+        releases=None,
+        samples=None,
     ):
         return Trainer.build(
             scenario,

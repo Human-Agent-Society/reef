@@ -228,7 +228,7 @@ Every checkpoint that a job saves becomes an artifact. Without an ``evaluation``
 
 How often a job saves depends on the backend:
 
-- A Slime or Tinker job saves a checkpoint every ``save_interval`` optimizer steps, and at its end. ``save_interval`` is a job parameter: the recipe's job plan sets it, and ``recipe.config.job_parameters`` sets it for the default plan. Without it, a job saves one checkpoint at its end.
+- A Slime or Tinker job saves a checkpoint every ``save_interval`` optimizer steps, and at its end. ``save_interval`` is a job parameter: ``recipe.config.job_parameters`` sets it. Without it, a job saves one checkpoint at its end.
 - A Slime checkpoint is the Megatron checkpoint and its HF export (with LoRA, the PEFT adapter). Each run of ``save_interval`` steps trains as one Slime rollout (one ``rollout_id``, Slime's unit of training). ``save-interval`` in ``training.options`` does not change this cadence. Megatron requires ``save-interval`` together with ``save``, so keep both set.
 
 A Slime deployment bounds its checkpoints on disk with options in ``training.options``:
@@ -502,7 +502,7 @@ Each name is a Harbor task directory under ``tasks-root``. A name starts
 with a lowercase letter or a digit, and holds only lowercase letters, digits,
 ``.``, ``_`` and ``-``. When a scenario
 opens, Reef checks each directory with Harbor's task loader, and adds it to the
-scenario's task store ``imported-tasks`` in its split. The task file store
+scenario's imported tasks in its split. The task file store
 keeps a copy of the files.
 
 The import runs again each time a scenario opens. To add tasks, add them to the
@@ -513,12 +513,13 @@ with ``POST /reef/scenarios/{scenario}/tasks`` (`Upload Harbor tasks
 not change. A scenario does not open, and the error says why, when:
 
 - a task directory is missing, or Harbor cannot load it;
-- an imported task now has other files, or it moved to the other split.
+- an imported task now has other files, or it moved to the other split;
+- a task has the name of an uploaded trajectory of the scenario.
 
 To change an imported task, give it a new name.
 
 A harness evolution recipe evaluates on the imported eval tasks with
-``evolution.eval_task_store: imported-tasks`` and an adapter that runs a task
+``evolution.eval_imported_tasks: true`` and an adapter that runs a task
 directory, such as ``terminus``. Each step reads the eval split again, so a
 task that you import later joins the next step. See `Harness evolution keys
 <../reference/configuration.rst#harness-evolution-keys>`__.
