@@ -6,7 +6,7 @@ import asyncio
 from dataclasses import replace
 
 from aiohttp.test_utils import TestClient, TestServer
-from tests.support.trajectory_uploads import HEADERS, TOKEN, UploadRecipe, dispatcher_for, uploaded
+from tests.support.trajectory_uploads import DATA, HEADERS, TOKEN, UploadRecipe, dispatcher_for, trajectory_items
 
 from reef.service.app import create_app
 
@@ -27,8 +27,9 @@ def test_a_client_lists_the_samples_and_edits_the_buffer_only_in_manual_mode(tmp
 
     async def run() -> None:
         async with TestClient(TestServer(create_app(dispatcher, tokens=TOKEN))) as client:
-            response = await client.post("/reef/trajectories", headers=HEADERS, json=uploaded("t1"))
-            assert response.status == 200, await response.text()
+            await client.post("/reef/scenarios", headers=HEADERS, json={"name": "s"})
+            response = await client.post(DATA, headers=HEADERS, json=trajectory_items("t1"))
+            assert response.status == 201, await response.text()
             listing = await (await client.get("/reef/scenarios/s/samples", headers=AUTH)).json()
             assert [(sample["sample_id"], sample["kind"], sample["component"]) for sample in listing["samples"]] == [
                 ("t1", "trajectory", None)
@@ -44,7 +45,7 @@ def test_a_client_lists_the_samples_and_edits_the_buffer_only_in_manual_mode(tmp
             # A switch to manual starts from the auto buffer; new samples do not join it by themselves.
             switched = await client.post("/reef/scenarios/s/update", headers=AUTH, json={"training_mode": "manual"})
             assert switched.status == 200, await switched.text()
-            await client.post("/reef/trajectories", headers=HEADERS, json=uploaded("t2", "t3"))
+            await client.post(DATA, headers=HEADERS, json=trajectory_items("t2", "t3"))
             assert ids(await (await client.get("/reef/scenarios/s/buffer", headers=AUTH)).json()) == ["t1"]
             inserted = await client.post(
                 "/reef/scenarios/s/buffer/insert", headers=AUTH, json={"sample_ids": ["t3", "t2"]}
@@ -91,7 +92,8 @@ def test_a_listing_pages_through_the_store(tmp_path):
 
     async def run() -> None:
         async with TestClient(TestServer(create_app(dispatcher, tokens=TOKEN))) as client:
-            await client.post("/reef/trajectories", headers=HEADERS, json=uploaded("t1", "t2", "t3"))
+            await client.post("/reef/scenarios", headers=HEADERS, json={"name": "s"})
+            await client.post(DATA, headers=HEADERS, json=trajectory_items("t1", "t2", "t3"))
             first = await (await client.get("/reef/scenarios/s/samples?limit=2", headers=AUTH)).json()
             assert ids(first) == ["t1", "t2"] and first["next"] is not None
             rest = await (await client.get(f"/reef/scenarios/s/samples?after={first['next']}", headers=AUTH)).json()
@@ -110,12 +112,14 @@ def test_a_reload_in_manual_mode_keeps_the_manual_buffer_as_the_client_left_it(t
 
     async def switch(dispatcher) -> None:
         async with TestClient(TestServer(create_app(dispatcher, tokens=TOKEN))) as client:
-            await client.post("/reef/trajectories", headers=HEADERS, json=uploaded("t1"))
+            await client.post("/reef/scenarios", headers=HEADERS, json={"name": "s"})
+            await client.post(DATA, headers=HEADERS, json=trajectory_items("t1"))
             await client.post("/reef/scenarios/s/update", headers=AUTH, json={"training_mode": "manual"})
-            await client.post("/reef/trajectories", headers=HEADERS, json=uploaded("t2"))
+            await client.post(DATA, headers=HEADERS, json=trajectory_items("t2"))
 
     async def read(dispatcher) -> dict:
         async with TestClient(TestServer(create_app(dispatcher, tokens=TOKEN))) as client:
+            await client.post("/reef/scenarios", headers=HEADERS, json={"name": "s"})
             return await (await client.get("/reef/scenarios/s/buffer", headers=AUTH)).json()
 
     dispatcher = dispatcher_for(tmp_path, recipe)
@@ -140,10 +144,11 @@ def test_an_instruction_that_waits_for_an_empty_buffer_trains_once_a_client_inse
 
     async def run() -> None:
         async with TestClient(TestServer(create_app(dispatcher, tokens=TOKEN))) as client:
-            await client.post("/reef/trajectories", headers=HEADERS, json=uploaded("t0"))
+            await client.post("/reef/scenarios", headers=HEADERS, json={"name": "s"})
+            await client.post(DATA, headers=HEADERS, json=trajectory_items("t0"))
             await client.post("/reef/scenarios/s/update", headers=AUTH, json={"training_mode": "manual"})
             await client.post("/reef/scenarios/s/buffer/remove", headers=AUTH, json={"sample_ids": ["t0"]})
-            await client.post("/reef/trajectories", headers=HEADERS, json=uploaded("t1"))
+            await client.post(DATA, headers=HEADERS, json=trajectory_items("t1"))
             queued = await client.post("/reef/train", headers={"x-reef-scenario": "s", **AUTH}, json=instruction("r1"))
             assert queued.status == 200, await queued.text()
             await asyncio.sleep(0.2)

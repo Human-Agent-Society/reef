@@ -8,7 +8,6 @@ They do not start training: the caller wakes the trainers after new data lands.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from pathlib import Path
 from typing import Any
 
 from reef.core.job_data import TrajectorySample
@@ -18,8 +17,6 @@ from reef.core.training_request import normalize_training_request_payload
 from reef.harness.tree.nodes import directive_shaped, secret_shaped
 from reef.scenario.scenario import Scenario
 from reef.storage.records import RecordConflict
-from reef.storage.samples import StoredSample
-from reef.storage.tasks import SplitName
 
 
 def training_request_refusal(text: str, requires: Sequence[Mapping[str, Any]] = ()) -> str | None:
@@ -131,42 +128,31 @@ def append_records(current: Scenario, items: Sequence[AgentRecord]) -> tuple[tup
     return tuple(result.item for result in appended), any(result.inserted for result in appended)
 
 
-def append_tasks(current: Scenario, directories: tuple[Path, ...], split: SplitName) -> tuple[StoredSample, ...]:
-    """Save uploaded Harbor task ``directories`` to ``split`` of the scenario's sample store.
+def check_use(current: Scenario, trajectories: Sequence[tuple[str, TrajectorySample]], train_tasks: bool) -> None:
+    """Raise ``ValueError`` unless ``current`` can train on the data items that it is to use.
 
-    Return the stored tasks in the order of ``directories``. A task that the store holds with the same files
-    and split is returned as it is. Admission refuses an upload to the ``train`` split when no trainer of the
-    scenario reads imported tasks (``TrainingPipeline.accepts_imported_tasks``), since nothing would train on
-    them. The ``eval`` split is always open: an artifact evaluation runs its tasks. The caller checks that each
-    directory is a Harbor task. A ``SampleConflict`` (a name stored with other files, in the other split, or as a
-    trajectory) saves no task of the upload.
+    ``trajectories`` are the ``(item_id, trajectory)`` pairs of the trajectory items, and ``train_tasks`` says
+    whether one or more task item is to be in the ``train`` split. A trajectory needs a trainer that accepts
+    uploaded trajectories (``TrainingPipeline.accepts_trajectories``), and each such trainer must render it;
+    otherwise every trainer would skip it. A train task needs a trainer that reads imported tasks
+    (``TrainingPipeline.accepts_imported_tasks``). The ``eval`` split is always open: an artifact evaluation
+    runs its tasks.
     """
-    if split == "train" and not any(
+    if trajectories:
+        trainers = [
+            component_trainer.trainer
+            for component_trainer in current.trainers
+            if component_trainer.trainer.pipeline.accepts_trajectories
+        ]
+        if not trainers:
+            raise ValueError(f"the recipe of scenario {current.name!r} does not accept uploaded trajectories")
+        for item_id, trajectory in trajectories:
+            for trainer in trainers:
+                try:
+                    trainer.uploaded_sample(trajectory)
+                except ValueError as exc:
+                    raise ValueError(f"trajectory {item_id!r} cannot train: {exc}") from exc
+    if train_tasks and not any(
         component_trainer.trainer.pipeline.accepts_imported_tasks for component_trainer in current.trainers
     ):
         raise ValueError(f"the recipe of scenario {current.name!r} does not train on imported tasks")
-    return current.store.samples.add_tasks(directories, split)
-
-
-def append_trajectories(current: Scenario, trajectories: tuple[tuple[str, TrajectorySample], ...]) -> bool:
-    """Save uploaded ``(trajectory_id, trajectory)`` pairs in one transaction. Return True if one or more is new.
-
-    An uploaded trajectory trains only through a recipe that accepts uploaded
-    trajectories. Otherwise every trainer would skip it, so admission refuses it.
-    Each accepting trainer renders each trajectory once here; one that cannot
-    become a sample refuses the whole upload with its ID and the reason.
-    """
-    trainers = [
-        component_trainer.trainer
-        for component_trainer in current.trainers
-        if component_trainer.trainer.pipeline.accepts_trajectories
-    ]
-    if not trainers:
-        raise ValueError(f"the recipe of scenario {current.name!r} does not accept uploaded trajectories")
-    for trajectory_id, trajectory in trajectories:
-        for trainer in trainers:
-            try:
-                trainer.uploaded_sample(trajectory)
-            except ValueError as exc:
-                raise ValueError(f"trajectory {trajectory_id!r} cannot train: {exc}") from exc
-    return current.store.samples.add_trajectories(trajectories)
