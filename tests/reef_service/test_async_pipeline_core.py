@@ -7,6 +7,7 @@ from pathlib import Path
 from threading import Event
 
 import pytest
+from aiohttp.test_utils import TestClient, TestServer
 from tests.support._policy_recipe import TestPolicyRecipe
 from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, runtime_bindings
 
@@ -15,10 +16,9 @@ from reef.core import AgentRecord, ReefError, RequestType
 from reef.core.trajectories import source_record_id
 from reef.dispatcher import Dispatcher
 from reef.observability import ExperimentLogger, ExperimentTracker
-from reef.recipe import Recipe
 from reef.runtime.interfaces import InferenceHandler
 from reef.runtime.jobs import SavedCheckpoint, TrainingJob
-from reef.service.app import RequestService
+from reef.service.app import create_app
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.job_queue import JobQueueComponent
 from reef.train.trainer import Trainer
@@ -47,7 +47,8 @@ class DurableComponent(StubTrainingComponent):
         self.started = Event()
         self.release = Event()
         self.calls: list[TrainingJob] = []
-        self.inference = MaterializingInference(base_url="http://inference")
+        # A model name gives the engine a served_models row, so the scenario answers model calls.
+        self.inference = MaterializingInference(base_url="http://inference", model_path="stub-model")
 
     def train(self, job: TrainingJob) -> tuple[SavedCheckpoint, ...]:
         self.calls.append(job)
@@ -80,7 +81,6 @@ def _training(runtime_load_id: str) -> dict:
 
 class ImmediateBackend(InferenceHandler):
     async def inference(self, artifact, path, payload):
-        assert payload["return_meta_info"] is True
         return {"metadata": {"runtime_load_id": "w0"}}
 
 
@@ -308,16 +308,17 @@ def test_weight_inference_does_not_materialize_its_checkpoint(start_dispatcher, 
         lambda ref: pytest.fail(f"unexpected inference materialization: {ref.release_id}"),
     )
 
-    response, _ = asyncio.run(
-        RequestService(dispatcher).infer_with_data(
-            {"x-reef-scenario": "math"},
-            {"messages": [{"role": "user", "content": "hi"}]},
-            "/v1/chat/completions",
-            ImmediateBackend(),
-        )
-    )
+    async def run() -> dict:
+        async with TestClient(TestServer(create_app(dispatcher, inference_handler=ImmediateBackend()))) as client:
+            response = await client.post(
+                "/v1/chat/completions",
+                headers={"x-reef-scenario": "math"},
+                json={"messages": [{"role": "user", "content": "hi"}]},
+            )
+            assert response.status == 200
+            return await response.json()
 
-    assert response["metadata"]["runtime_load_id"] == "w0"
+    assert asyncio.run(run())["metadata"]["runtime_load_id"] == "w0"
 
 
 @pytest.mark.unit
@@ -508,61 +509,3 @@ def test_processor_lock_does_not_hide_execution_metrics(start_dispatcher, monkey
         release.set()
     assert sample["training/execution/active"] == 1
     assert "records/unread_count" not in sample
-
-
-def test_serving_only_scenarios_upload_requests_during_generation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(Dispatcher, "operational_metrics_interval_seconds", 0.01)
-    tracker = OperationalExperimentTracker()
-    initial = tmp_path / "initial"
-    initial.mkdir()
-    dispatcher = Dispatcher(
-        Recipe(),
-        InMemoryRepositoryBackend.factory(initial),
-        scenario_storage=SQLiteScenarioStorage(),
-        experiment_tracker=tracker,
-    )
-
-    class BlockingHandler(InferenceHandler):
-        def __init__(self) -> None:
-            self.started = asyncio.Event()
-            self.release = asyncio.Event()
-
-        async def inference(self, artifact: Artifact, path: str, payload: dict[str, object]) -> dict[str, object]:
-            self.started.set()
-            await self.release.wait()
-            return {"choices": []}
-
-    async def run() -> None:
-        handler = BlockingHandler()
-        service = RequestService(dispatcher)
-        request = asyncio.create_task(
-            service.infer_with_data({"x-reef-scenario": "math"}, {}, "/v1/chat/completions", handler)
-        )
-        try:
-            await asyncio.wait_for(handler.started.wait(), 2)
-            sample = await asyncio.to_thread(wait_for_operational_sample, tracker, {"serve/request/active": 1})
-            assert sample["serve/request/completed_total"] == 0
-            assert sample["serve/request/elapsed_seconds"] >= 0
-            assert not tracker.events
-            request.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await request
-            sample = await asyncio.to_thread(wait_for_operational_sample, tracker, {"serve/request/failed_total": 1})
-            assert sample["serve/request/active"] == 0
-            assert sample["ingest/accepted_total"] == 0
-            handler.release.set()
-            await service.infer_with_data({"x-reef-scenario": "math"}, {}, "/v1/chat/completions", handler)
-            sample = await asyncio.to_thread(
-                wait_for_operational_sample, tracker, {"serve/request/completed_total": 1}
-            )
-            assert sample["ingest/accepted_total"] == 1
-        finally:
-            request.cancel()
-            await asyncio.gather(request, return_exceptions=True)
-
-    try:
-        asyncio.run(run())
-    finally:
-        dispatcher.close()

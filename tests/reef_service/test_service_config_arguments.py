@@ -165,13 +165,6 @@ def test_non_reef_objects_and_generic_recipe_overrides_keep_their_ownership():
     assert normalized["execution"] == {"services": {"backend": "uni"}}
 
 
-def test_retry_deadline_still_follows_inference_timeout():
-    config = {"reef": {"recipe": "recipe", "inference_timeout_s": 42}}
-    assert service_config_from_mapping(normalize_service_config(config)).inference_retry_timeout_s == 42
-    config["reef"]["inference_retry_timeout_s"] = 12
-    assert service_config_from_mapping(config).inference_retry_timeout_s == 12
-
-
 @pytest.mark.parametrize(
     ("name", "value"),
     [

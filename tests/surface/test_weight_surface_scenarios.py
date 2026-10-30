@@ -1,16 +1,13 @@
-"""Per-scenario adapter routing on a runtime that serves each scenario its own adapter."""
+"""The weight loader on a runtime that serves each scenario its own adapter."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
 from tests.support.runtime_stubs import StubInferenceRuntime
 
 from reef.artifact import Artifact
-from reef.core.errors import ReefError
-from reef.surface import adapter_name
-from reef.surface.weights import WeightInferenceHooks, WeightLoader
+from reef.surface.weights import WeightLoader
 
 
 def checkpoint(tmp_path: Path) -> Artifact:
@@ -34,39 +31,12 @@ class AdapterRuntime(StubInferenceRuntime):
         return self.adapters.get(scenario)
 
 
-def hooks_for(scenario: str, adapters: dict[str, str]) -> WeightInferenceHooks:
-    return WeightInferenceHooks(scenario=scenario, runtime=AdapterRuntime(adapters))
-
-
-def test_checkpoint_requests_route_to_the_adapter_the_engine_serves(tmp_path: Path) -> None:
-    out = hooks_for("math", {"math": "inc:3"}).prepare_request(checkpoint(tmp_path), "/v1/chat/completions", {})
-    assert out["lora_path"] == adapter_name("math", "inc:3")
-    # A restart serves the checkpoint again under a new version.
-    out = hooks_for("math", {"math": "new:1"}).prepare_request(checkpoint(tmp_path), "/v1/chat/completions", {})
-    assert out["lora_path"] == adapter_name("math", "new:1")
-    with pytest.raises(ReefError, match="serves adapter"):
-        hooks_for("math", {"math": "new:1"}).prepare_request(
-            checkpoint(tmp_path), "/v1/chat/completions", {"lora_path": adapter_name("math", "inc:3")}
-        )
-
-
-def test_a_scenario_that_serves_no_adapter_samples_the_base(tmp_path: Path) -> None:
-    hooks = hooks_for("math", {"code": "inc:1"})
-    out = hooks.prepare_request(checkpoint(tmp_path), "/v1/chat/completions", {"messages": []})
-    assert "lora_path" not in out
-    with pytest.raises(ReefError, match="published no adapter yet"):
-        hooks.prepare_request(checkpoint(tmp_path), "/v1/chat/completions", {"lora_path": "x"})
-
-
 def test_a_restart_serves_the_checkpoint_under_the_version_it_was_loaded_again(tmp_path: Path) -> None:
     # The restart loaded math's checkpoint again as new:1.
     runtime = AdapterRuntime({"math": "new:1"})
-    loader = WeightLoader("math")
     saved = checkpoint(tmp_path)
-    # Requests reach the adapter that holds the checkpoint, and records carry its version.
-    out = WeightInferenceHooks(scenario="math", runtime=runtime).prepare_request(saved, "/v1/chat/completions", {})
-    assert out["lora_path"] == adapter_name("math", "new:1")
-    assert loader.served_runtime_load_id(saved, runtime) == "new:1"
+    # Records carry the version of the adapter that holds the checkpoint.
+    assert WeightLoader("math").served_runtime_load_id(saved, runtime) == "new:1"
     assert WeightLoader("code").served_runtime_load_id(saved, runtime) is None
 
 

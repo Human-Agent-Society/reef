@@ -117,7 +117,7 @@ Choose a starting release
 
 The default inference routes answer from the scenario's active release. No request header keeps a client on an older release. To keep an older artifact answering, serve it beside the active release (`Serve an artifact beside the active release`_).
 
-A new scenario starts from the base artifact. A request can carry ``x-reef-release-id: <id>``. If the request creates the scenario, Reef binds the new scenario to that starting release instead. On a scenario that already exists, the header must name the bound starting release. Otherwise, Reef refuses the request with HTTP 409. `Headers <../reference/http-api.rst#headers>`__ in the HTTP API lists this header.
+A new scenario starts from the base artifact. To start it from another release, create it with ``POST /reef/scenarios`` and ``{"name": "<scenario>", "release_id": "<id>"}``. A report or a record import that creates the scenario can carry ``x-reef-release-id: <id>`` instead. On a scenario that already exists, the header must name the bound starting release. Otherwise, Reef refuses the request with HTTP 409. `Headers <../reference/http-api.rst#headers>`__ in the HTTP API lists this header. An inference request never creates a scenario.
 
 To install a specific harness release, add ``?release_id=<id>`` to the harness manifest or install route. To serve an earlier artifact again, activate it as `Activate an artifact`_ describes.
 
@@ -380,20 +380,35 @@ must reach the same store:
 Control and training must also reach the same artifact backend.
 
 **Inference requests.** Send model requests to the inference service, with the
-scenario in ``x-reef-scenario``. For each request, the inference service reads
-the scenario's row in ``served_models`` and sends the request to the engine
-that the row names, under the row's model name. It appends the record to the
-scenario's record store and returns the record ID in
-``x-reef-agent-record-id``, and the ID of the artifact that answered in
-``x-reef-release-id``. ``x-reef-tag-*`` headers go into the record, as they do
-on control. The inference service answers:
+scenario in ``x-reef-scenario``. The inference service answers
+``/v1/chat/completions``, ``/v1/responses``, ``/v1/messages``,
+``/v1/messages/count_tokens``, the evaluation routes and the routes of an
+artifact served beside the active release. A one-process ``reef serve`` answers
+the same routes in the same way, in control's process.
 
-* ``404`` when the scenario serves no model.
-* ``409`` when the engine answers with another model twice, for example
-  during a change of the served model.
+For each request, the inference service reads the scenario's rows in
+``served_models``. The request's ``model`` selects the row of an artifact
+served beside the active release when it names one; any other ``model`` selects
+the active row. The service sends the request to the engine at the row's URL,
+under the row's model name. The only credential that it sends is the
+deployment's provider key (``inference.upstream-api-key``), when one is set.
+No artifact changes the request on its way to the engine. The service
+appends the record to the scenario's record store and returns the record ID in
+``x-reef-agent-record-id``, and the ID of the artifact that answered in
+``x-reef-release-id``. ``x-reef-tag-*`` headers go into the record. The
+inference service never creates a scenario: create it first with
+``POST /reef/scenarios`` or a harness install. The inference service answers:
+
+* ``404`` when the scenario is unknown or serves no model.
+* ``502`` when the engine fails or cannot be reached, and ``504`` when it does
+  not answer within ``inference.timeout-s``.
+* ``409`` when the engine answers with another model name or aborts the
+  request twice. The service reads the row again and retries once, for
+  example during a change of the served model.
 * ``503`` when it cannot read ``served_models`` and has no earlier read from
-  the last 300 seconds, or when the record store does not take the record. The service never
-  returns an answer without its record.
+  the last 300 seconds, or when the record store does not take the record. The
+  service never returns a buffered answer without its record. A stream goes
+  out as the engine sends it, and its record is appended when it ends.
 
 **Control restarts.** While control is down, the inference service continues to
 answer from ``served_models`` and to record. Training jobs, sample requests and
@@ -413,8 +428,8 @@ and ends its process, so that its supervisor starts it again as a standby. Each
 overwrite the table. To deploy a new control version, start the new
 instance as a standby, then stop the old one.
 
-**Limits.** The inference service serves the active artifact of each scenario.
-A candidate under evaluation is served by control at its candidate route, so
+**Limits.** The inference service serves what ``served_models`` names: the
+active artifact of each scenario and the artifacts served beside it. A candidate under evaluation is served by control at its candidate route, so
 the evaluation service needs ``--control-url``. The evaluation service presents
 the first token of ``REEF_TOKEN`` or ``reef.tokens`` to control. A record of the
 artifact that a scenario started from carries no ``artifact_ref``. A runtime
@@ -448,10 +463,6 @@ Select the backend with ``storage.record-backend``:
      - Tables in one PostgreSQL schema; ``agent_record_dir`` holds no scenario state
    * - a plugin reference
      - The ``ScenarioStorage`` subclass that the reference names
-
-A model configuration can hold an upstream ``api_key``. Thus only the owner
-can read a SQLite database that holds settings. Responses never return the
-key; they report only ``has_api_key``.
 
 To use PostgreSQL, install the driver with ``uv pip install 'reef-infra[postgres]'``
 (or ``uv pip install -e '.[postgres]'`` from a checkout), then configure:

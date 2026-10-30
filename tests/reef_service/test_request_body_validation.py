@@ -29,7 +29,13 @@ def test_object_routes_reject_non_object_bodies_with_400() -> None:
                     # data= so JSON null really travels as null; json=None would send no body at all.
                     response = await client.post(path, data=json.dumps(body), headers=json_headers)
                     assert response.status == 400, (path, body, response.status)
-                    assert "request body must be an object" in await response.text()
+                    # The inference routes read their body in the inference service, with its own message.
+                    expected = (
+                        "request body must be a JSON object"
+                        if path.startswith("/v1/")
+                        else "request body must be an object"
+                    )
+                    assert expected in await response.text()
                 empty = await client.post(path, data="", headers=json_headers)
                 assert empty.status == 400, (path, empty.status)
             created = await client.post("/reef/scenarios", json={"name": "still-works"}, headers=HEADERS)

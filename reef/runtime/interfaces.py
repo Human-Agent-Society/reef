@@ -33,7 +33,7 @@ from reef.core.errors import InferenceUnavailable, ReefError
 from reef.core.evaluation import ArtifactKind, PolicyModel
 from reef.core.served_models import ServedArtifact
 from reef.core.weight_layout import WEIGHT_LAYOUTS, WeightLayout
-from reef.surface.base import AdapterWeightRuntime, InferenceLease
+from reef.surface.base import AdapterWeightRuntime
 
 # -- Identities and errors ----------------------------------------------------
 
@@ -296,7 +296,7 @@ def learning_rate_metrics(
 # -- Request admission --------------------------------------------------------
 
 
-class InferenceAdmissionHandle(InferenceLease):
+class InferenceAdmissionHandle:
     """A handle for one admitted inference, released after model execution."""
 
     def __init__(self, controller: InferenceAdmissionController) -> None:
@@ -440,6 +440,17 @@ class InferenceHandler(ABC):
     async def inference(self, artifact: Artifact, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         """Return the provider response for one native request payload."""
 
+    def address_model(self, payload: Mapping[str, Any], model_name: str) -> dict[str, Any]:
+        """``payload`` addressed to ``model_name``, the name under which the engine serves an artifact
+        (``ServedArtifact.model_name``). The default names it as the request's ``model``."""
+        return {**payload, "model": model_name}
+
+    def answered_model(self, response: Mapping[str, Any]) -> str | None:
+        """The model name under which the engine says it answered, or None when the engine does not say it.
+        An inference replica compares it with the name it asked for. The default reports none, because a
+        provider can answer under another spelling of the same model."""
+        return None
+
     async def inference_stream(self, artifact: Artifact, path: str, payload: dict[str, Any]) -> InferenceStream:
         """Return a stream for one native request payload.
 
@@ -455,22 +466,30 @@ class InferenceHandler(ABC):
         return InferenceStream(status=200, headers={"Content-Type": "application/json"}, chunks=chunks())
 
 
-#: The routes a client calls on Reef for a multimodal call; a recipe's relay decides which its provider serves.
-MULTIMODAL_ROUTES: tuple[str, ...] = ("/v1/images", "/v1/embeddings", "/v1/audio/speech", "/v1/decisions")
+class EngineClients(ABC):
+    """The handlers that reach the engines that ``served_models`` names.
 
-
-class MultimodalRelay(ABC):
-    """Relay a recipe's multimodal calls (images, embeddings, speech, decisions) to the provider it configured.
-
-    A recipe that offers one keeps the provider's address and key; Reef only
-    forwards the client's request body and streams the answer back unchanged,
-    and records nothing.
+    Purpose: an inference replica asks for the handler of each ``ServedArtifact`` it serves; the deployment's
+    engine configuration, or the engines that a control process runs, decide which one it is.
     """
 
     @abstractmethod
-    async def relay(self, path: str, payload: dict[str, Any]) -> InferenceStream:
-        """Forward one request body to the provider and return its answer as a stream; raise
-        :class:`NotImplementedError` for a route the provider does not serve."""
+    def handler(self, served: ServedArtifact) -> InferenceHandler:
+        """The handler that calls the engine at ``served.url``; ``LookupError`` when no engine answers there."""
+
+
+class FixedEngineClients(EngineClients):
+    """One handler for every ``ServedArtifact``: an embedding application's own handler.
+
+    Values: ``fixed`` is that handler. Purpose: ``build_app`` gives it to the inference routes when the caller
+    passes an ``inference_handler``.
+    """
+
+    def __init__(self, fixed: InferenceHandler) -> None:
+        self.fixed = fixed
+
+    def handler(self, served: ServedArtifact) -> InferenceHandler:
+        return self.fixed
 
 
 # -- Runtime contracts --------------------------------------------------------

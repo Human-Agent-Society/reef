@@ -186,17 +186,6 @@ class ServiceConfig:
             "Inference request handler options as a JSON/YAML object.", public_path=("inference", "handler_config")
         ),
     )
-    inference_retry_initial_s: float = config_option(
-        0.05, public_path=("inference", "retry_initial_s"), help="Initial inference retry delay in seconds."
-    )
-    inference_retry_max_s: float = config_option(
-        1.0, public_path=("inference", "retry_max_s"), help="Maximum inference retry delay in seconds."
-    )
-    inference_retry_timeout_s: float = config_option(
-        300.0,
-        public_path=("inference", "retry_timeout_s"),
-        help="Retry deadline in seconds; defaults to the inference timeout.",
-    )
     #: ``git_lfs``, or a ``ConfigurableRepositoryBackendFactory`` plugin: ``package.module:ClassName`` or module
     #: and config.
     artifact_backend: str | Mapping[str, Any] = config_option(
@@ -538,9 +527,6 @@ def service_config_from_mapping(config: Mapping[str, Any]) -> ServiceConfig:
     tokens = (token.strip() for token in (values.pop("token") or "", *values["tokens"]))
     values["tokens"] = tuple(dict.fromkeys(token for token in tokens if token))
     values["console_origins"] = console_origins(values["console_origins"])
-    # The legacy retry deadline follows the request timeout unless supplied.
-    if _config_service_value(config, "reef", "inference_retry_timeout_s") is None:
-        values["inference_retry_timeout_s"] = values["inference_timeout_s"]
     # Preserve shared execution settings for directly selected recipes.
     preset = dict(config) if ":" in values["recipe"] else None
     execution = {key: config[key] for key in ("execution", "executors") if key in config}

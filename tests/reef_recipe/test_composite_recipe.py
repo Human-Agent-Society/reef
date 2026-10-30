@@ -1,4 +1,4 @@
-"""A composite recipe binds one recipe per component; the config component supplies request defaults."""
+"""A composite recipe binds one recipe per component; the config component holds request defaults."""
 
 from __future__ import annotations
 
@@ -20,12 +20,12 @@ from reef.artifact import Artifact, BaseArtifactSource, GitLFSRepositoryBackendF
 from reef.artifact.artifact import ArtifactValidator
 from reef.artifact.composite import compose_release
 from reef.core import AgentRecord, RequestType
-from reef.core.errors import ReefError, UnknownScenario
 from reef.core.plugins import PluginReference
 from reef.core.reports import ReportValidationError, ScoredRolloutReport
 from reef.dispatcher import Dispatcher
 from reef.evaluation import EvaluationResult, UpdateCandidate
 from reef.evaluation.activation import AlwaysActivate, NeverActivate
+from reef.inference.http import InferenceProxyRuntime
 from reef.pipeline_context import PipelineContext
 from reef.recipe import CompositeRecipe, Recipe, RecipeConfigError, build_recipe
 from reef.recipe.base import ServedEndpoint
@@ -35,8 +35,7 @@ from reef.service.app import create_app
 from reef.service.request_service import RequestService
 from reef.storage.samples import consumed_sample_id
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.surface import Surface, TextFileTree, create_config_surface, create_harness_surface
-from reef.surface.config import CONFIG_FILE, ConfigInferenceHooks, ConfigValidator
+from reef.surface import ComponentSurface, Surface, TextFileTree, create_harness_surface
 from reef.train import CandidateBackend, PreparedStep, Trainer, TrainStepResult
 from reef.train.pipeline import TrainingPipeline
 
@@ -119,14 +118,17 @@ class _ScoredTreeRecipe(_TreeRecipe):
 
 @dataclass(frozen=True)
 class _ConfigRecipe(Recipe):
-    """A flat configuration recipe with no trainer of its own."""
+    """A second component with one settings file and no trainer of its own."""
 
     def build_surface(self, scenario: str) -> Surface:
-        return create_config_surface()
+        return Surface(components={"config": ComponentSurface(kind="harness_plugin")})
 
     def base_artifact_source(self) -> BaseArtifactSource:
         return BaseArtifactSource(files={CONFIG_FILE: json.dumps({"request_defaults": {"temperature": 0.2}})})
 
+
+#: The settings file of the second component.
+CONFIG_FILE = "config.json"
 
 COMPOSITE = "reef.recipe.composite:CompositeRecipe"
 TREE = "tests.reef_recipe.test_composite_recipe:_TreeRecipe"
@@ -152,6 +154,11 @@ def _composite(tmp_path: Path) -> CompositeRecipe:
     )
 
 
+def _served_composite(tmp_path: Path) -> CompositeRecipe:
+    """The composite with a runtime whose engine has an HTTP address, so a loaded scenario has a served model."""
+    return replace(_composite(tmp_path), runtime=InferenceProxyRuntime(base_url="http://engine.test", model_path="m"))
+
+
 def _serve(recipe: CompositeRecipe, tmp_path: Path) -> Dispatcher:
     initial = tmp_path / "initial"
     for relative, text in recipe.base_artifact_source().files.items():
@@ -172,7 +179,6 @@ def test_composite_recipe_merges_surfaces_seeds_and_trainers(tmp_path: Path) -> 
     assert surface.names == ("harness", "config")
     assert surface.files_component == "harness"
     assert surface.harness is not None and surface.harness.served_model == "served-model"
-    assert isinstance(surface.components["config"].validator, ConfigValidator)
     base = recipe.base_artifact_source()
     assert base.files == {
         "harness/AGENTS.md": "seed",
@@ -379,16 +385,13 @@ def test_composite_recipe_reads_components_from_the_file_layout() -> None:
 
 
 @pytest.mark.unit
-def test_composite_scenario_serves_config_defaults_and_reports_components(tmp_path: Path) -> None:
+def test_composite_scenario_serves_its_config_and_reports_components(tmp_path: Path) -> None:
     with closing(_serve(_composite(tmp_path), tmp_path)) as dispatcher:
         scenario = dispatcher.get_or_create_scenario("agent")
         assert scenario is not None
-        hooks = scenario.surface.inference
-        assert hooks is not None
         artifact = Artifact(scenario.current_artifact_ref(), scenario.repository)
-        prepared = hooks.prepare_request(artifact, "/v1/chat/completions", {"messages": [], "max_tokens": 5})
-        assert prepared == {"temperature": 0.2, "messages": [], "max_tokens": 5}
-        assert hooks.prepare_request(artifact, "/v1/chat/completions", {"temperature": 1.0}) == {"temperature": 1.0}
+        local = artifact.component("config").materialize().local_path
+        assert json.loads((local / CONFIG_FILE).read_text()) == {"request_defaults": {"temperature": 0.2}}
 
         scenario.records.append(
             AgentRecord.create(
@@ -536,25 +539,6 @@ def test_composite_scenario_enforces_the_agreed_report_type_whatever_the_compone
             dispatcher.accept_record(scoreless)
 
 
-@pytest.mark.unit
-def test_config_validator_requires_a_json_object(tmp_path: Path) -> None:
-    root = tmp_path / "config"
-    root.mkdir()
-    with pytest.raises(ReefError, match=r"requires config\.json"):
-        ConfigValidator().validate(Artifact.local(root))
-    (root / CONFIG_FILE).write_text("[]", encoding="utf-8")
-    with pytest.raises(ReefError, match="JSON object"):
-        ConfigValidator().validate(Artifact.local(root))
-    (root / CONFIG_FILE).write_text(json.dumps({"request_defaults": 3}), encoding="utf-8")
-    with pytest.raises(ReefError, match="request_defaults must be an object"):
-        ConfigValidator().validate(Artifact.local(root))
-    (root / CONFIG_FILE).write_text(json.dumps({"request_defaults": {"top_p": 0.9}}), encoding="utf-8")
-    ConfigValidator().validate(Artifact.local(root))
-    (root / CONFIG_FILE).write_text(json.dumps({"request_defaults": {"/v1/responses": 3}}), encoding="utf-8")
-    with pytest.raises(ReefError, match="/v1/responses must be an object"):
-        ConfigValidator().validate(Artifact.local(root))
-
-
 class _EchoHandler(InferenceHandler):
     """Answer every chat completion with one word, so a test can tell served from recorded."""
 
@@ -571,27 +555,26 @@ class _EchoHandler(InferenceHandler):
 
 @pytest.mark.unit
 def test_an_evaluation_call_is_served_and_kept_by_nobody(tmp_path: Path) -> None:
-    with closing(_serve(_composite(tmp_path), tmp_path)) as dispatcher:
-        service = RequestService(dispatcher)
+    with closing(_serve(_served_composite(tmp_path), tmp_path)) as dispatcher:
         headers = {"x-reef-scenario": "agent"}
         # A rollout runs for a loaded scenario's step, so its calls find the scenario loaded.
         assert dispatcher.get_or_create_scenario("agent") is not None
 
         async def run() -> None:
-            response, item = await service.infer_with_data(
-                headers, {"messages": []}, "/v1/chat/completions", _EchoHandler(), record=False
-            )
-            assert item is None and response["choices"][0]["message"]["content"] == "ok"
-            _, item = await service.infer_with_data(headers, {"messages": []}, "/v1/chat/completions", _EchoHandler())
-            assert item is not None
+            async with TestClient(TestServer(create_app(dispatcher, inference_handler=_EchoHandler()))) as client:
+                evaluation = await client.post(
+                    "/reef/scenarios/agent/evaluation/v1/chat/completions", json={"messages": []}
+                )
+                assert evaluation.status == 200, await evaluation.text()
+                assert "x-reef-agent-record-id" not in evaluation.headers
+                assert (await evaluation.json())["choices"][0]["message"]["content"] == "ok"
+                served = await client.post("/v1/chat/completions", headers=headers, json={"messages": []})
+                assert served.status == 200, await served.text()
+                assert "x-reef-agent-record-id" in served.headers
 
         asyncio.run(run())
         scenario = dispatcher.get_or_create_scenario("agent")
         assert scenario is not None and scenario.records.count("agent") == 1
-        # An evaluation call is measured apart from served traffic.
-        snapshot = scenario.operations.snapshot()
-        assert snapshot["evaluate/request/completed_total"] == 1
-        assert snapshot["serve/request/completed_total"] == 1
 
 
 @pytest.mark.unit
@@ -616,7 +599,7 @@ def test_a_flat_scenario_without_a_durable_log_still_serves_its_head(tmp_path: P
         (evolved / "AGENTS.md").write_text("evolved")
         scenario.commit(TrainStepResult(state={}, artifact=Artifact.local(evolved)))
         head = scenario.current_artifact_ref().release_id
-        assert service.harness_head(headers) == head
+        assert service.harness_release_id(scenario) == head
         manifest = service.harness_manifest(headers)
         assert manifest["release_id"] == head and manifest["files"] == {"AGENTS.md": "evolved"}
         assert f'"release_id": "{head}"' in service.harness_install_script(headers, adapter="pi")
@@ -626,7 +609,7 @@ def test_a_flat_scenario_without_a_durable_log_still_serves_its_head(tmp_path: P
 
 @pytest.mark.unit
 def test_the_evaluation_route_names_the_scenario_in_its_path(tmp_path: Path) -> None:
-    with closing(_serve(_composite(tmp_path), tmp_path)) as dispatcher:
+    with closing(_serve(_served_composite(tmp_path), tmp_path)) as dispatcher:
         assert dispatcher.get_or_create_scenario("agent") is not None
 
         async def run() -> None:
@@ -634,7 +617,7 @@ def test_the_evaluation_route_names_the_scenario_in_its_path(tmp_path: Path) -> 
                 response = await client.post(
                     "/reef/scenarios/agent/evaluation/v1/chat/completions", json={"messages": []}
                 )
-                assert response.status == 200
+                assert response.status == 200, await response.text()
                 assert "x-reef-agent-record-id" not in response.headers
                 assert (await response.json())["choices"][0]["message"]["content"] == "ok"
                 missing = await client.post("/reef/scenarios/agent/evaluation/v1/nothing", json={})
@@ -682,84 +665,33 @@ def test_an_evaluation_call_during_a_delete_neither_holds_it_up_nor_brings_the_s
     """A delete closes the scenario's backend, which waits for the evaluation rollout in flight; the rollout's call
     must not wait for the scenario the delete holds, and must not create the scenario again once the delete ends."""
     harness = _RolloutTreeRecipe(label="harness", artifact_dir=tmp_path / "steps", seed={"AGENTS.md": "seed"})
-    dispatcher = _serve(CompositeRecipe(components={"harness": harness, "config": _ConfigRecipe()}), tmp_path)
-    service = RequestService(dispatcher)
-    try:
-        assert dispatcher.get_or_create_scenario("agent") is not None
-        deleted: dict[str, Any] = {}
-        deleting = threading.Thread(target=lambda: deleted.update(dispatcher.delete_scenario("agent")))
-        deleting.start()
-        assert harness.closing.wait(10)
-        answers: list[str] = []
+    runtime = InferenceProxyRuntime(base_url="http://engine.test", model_path="m")
+    dispatcher = _serve(
+        CompositeRecipe(components={"harness": harness, "config": _ConfigRecipe()}, runtime=runtime), tmp_path
+    )
+    path = "/reef/scenarios/agent/evaluation/v1/chat/completions"
 
-        def rollout_call() -> None:
+    async def run() -> None:
+        async with TestClient(TestServer(create_app(dispatcher, inference_handler=_EchoHandler()))) as client:
+            assert dispatcher.get_or_create_scenario("agent") is not None
+            deleting = asyncio.create_task(asyncio.to_thread(dispatcher.delete_scenario, "agent"))
+            assert await asyncio.to_thread(harness.closing.wait, 10)
             try:
-                asyncio.run(
-                    service.infer_with_data(
-                        {"x-reef-scenario": "agent"},
-                        {"messages": []},
-                        "/v1/chat/completions",
-                        _EchoHandler(),
-                        record=False,
-                        evaluated="harness",
-                    )
-                )
-                answers.append("served")
-            except UnknownScenario:
-                answers.append("unknown")
+                # The rollout's call answers while the delete still waits for it: the scenario is gone.
+                during = await asyncio.wait_for(client.post(path, json={"messages": []}), timeout=5)
+                assert during.status == 404, await during.text()
             finally:
                 harness.rollout_done.set()
+            deleted = await asyncio.wait_for(deleting, timeout=10)
+            assert deleted["scenario"] == "agent"
+            after = await client.post(path, json={"messages": []})
+            assert after.status == 404, await after.text()
 
-        calling = threading.Thread(target=rollout_call)
-        calling.start()
-        calling.join(5)
-        assert not calling.is_alive(), "the rollout call waited for the scenario the delete holds"
-        deleting.join(10)
-        assert not deleting.is_alive() and deleted["scenario"] == "agent"
-        assert answers == ["unknown"]
+    try:
+        asyncio.run(run())
         assert dispatcher.get_or_create_scenario("agent", allow_implicit_creation=False) is None
     finally:
         harness.rollout_done.set()
-        dispatcher.close()
-
-
-class _CaptureHandler(_EchoHandler):
-    """The echo handler, keeping every payload it serves."""
-
-    def __init__(self) -> None:
-        self.payloads: list[dict[str, Any]] = []
-
-    async def inference(self, artifact, path, payload):
-        self.payloads.append(dict(payload))
-        return await super().inference(artifact, path, payload)
-
-
-@pytest.mark.unit
-def test_an_evaluation_call_runs_every_hook_but_the_evaluated_components(tmp_path: Path) -> None:
-    """A rollout runs its own candidate of one component, so that component's served hooks stay out of its calls:
-    evaluating the harness keeps the served request defaults, evaluating the config drops them."""
-    dispatcher = _serve(_composite(tmp_path), tmp_path)
-    handler = _CaptureHandler()
-    try:
-        assert dispatcher.get_or_create_scenario("agent") is not None
-
-        async def run() -> None:
-            async with TestClient(TestServer(create_app(dispatcher, inference_handler=handler))) as client:
-                for path in (
-                    "/reef/scenarios/agent/evaluation/v1/chat/completions",
-                    "/reef/scenarios/agent/components/harness/evaluation/v1/chat/completions",
-                    "/reef/scenarios/agent/components/config/evaluation/v1/chat/completions",
-                ):
-                    response = await client.post(path, json={"messages": []})
-                    assert response.status == 200, path
-                missing = await client.post(
-                    "/reef/scenarios/agent/components/nothing/evaluation/v1/chat/completions", json={"messages": []}
-                )
-                assert missing.status == 404
-
-        asyncio.run(run())
-        assert [payload.get("temperature") for payload in handler.payloads] == [0.2, 0.2, None]
-    finally:
         dispatcher.close()
 
 
@@ -819,12 +751,6 @@ def test_a_composite_names_each_component_in_its_served_endpoint(tmp_path: Path)
         "harness": ServedEndpoint("http://127.0.0.1:8900", token="t", component="harness"),
         "tools": ServedEndpoint("http://127.0.0.1:8900", token="t", component="tools"),
     }
-    surface = _composite(tmp_path).build_surface("agent")
-    assert surface.inference_for_evaluation("config") is None
-    assert surface.inference_for_evaluation("harness") is not None
-    with pytest.raises(ValueError, match="no component 'nothing'"):
-        surface.inference_for_evaluation("nothing")
-    assert create_config_surface().inference_for_evaluation(None) is None
 
 
 class _RefuseAll(ArtifactValidator):
@@ -1067,34 +993,6 @@ def test_a_component_config_that_is_not_an_object_is_refused_under_a_composite_m
     harness = {"implementation": TREE, "config": component_config}
     with pytest.raises(RecipeConfigError, match=r"components\.harness\.config must be an object"):
         build_recipe(COMPOSITE, {}, config=composite_config(harness, data={"training_mode": "manual"}))
-
-
-@pytest.mark.unit
-def test_config_defaults_follow_the_route(tmp_path: Path) -> None:
-    """Shared fields reach every generation route; a route's own entry wins there; a token count takes none."""
-    root = tmp_path / "config"
-    root.mkdir()
-    defaults = {
-        "temperature": 0.2,
-        "/v1/chat/completions": {"max_tokens": 256},
-        "/v1/responses": {"max_output_tokens": 256, "temperature": 0.5},
-    }
-    (root / CONFIG_FILE).write_text(json.dumps({"request_defaults": defaults}), encoding="utf-8")
-    artifact = Artifact.local(root)
-    hooks = ConfigInferenceHooks()
-    assert hooks.prepare_request(artifact, "/v1/chat/completions", {"messages": []}) == {
-        "temperature": 0.2,
-        "max_tokens": 256,
-        "messages": [],
-    }
-    assert hooks.prepare_request(artifact, "/v1/responses", {"input": "x"}) == {
-        "temperature": 0.5,
-        "max_output_tokens": 256,
-        "input": "x",
-    }
-    assert hooks.prepare_request(artifact, "/v1/messages", {"messages": []}) == {"temperature": 0.2, "messages": []}
-    count = {"messages": [], "model": "m"}
-    assert hooks.prepare_request(artifact, "/v1/messages/count_tokens", count) == count
 
 
 @pytest.mark.unit

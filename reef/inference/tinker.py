@@ -24,7 +24,6 @@ from reef.artifact.artifact import Artifact
 from reef.artifact.sources import read_reference
 from reef.core.config import config_option
 from reef.core.evaluation import ArtifactKind, PolicyModel
-from reef.core.served_models import ServedArtifact
 from reef.runtime.deployment import RuntimeFactory, config_secret
 from reef.runtime.interfaces import (
     InferenceHandler,
@@ -97,8 +96,8 @@ class TinkerInferenceRuntime(InferenceRuntime):
         self._lock = RLock()
         self._incarnation = new_runtime_load_id_incarnation()
         self._load_count = 0
+        #: The runtime load ID that each sampler served under last, by sampler path (None: the base model).
         self._versions: dict[str | None, str] = {}
-        self._releases: dict[str, tuple[str | None, str]] = {}
         self._active, self._version = self._remember(None)
         self._closed = False
 
@@ -110,10 +109,19 @@ class TinkerInferenceRuntime(InferenceRuntime):
         """The sampler that serves ``artifact``; ``None`` for the base model (``checkpoint_sampler_path``)."""
         return checkpoint_sampler_path(artifact, self._model, self._service, full=self._kind == "model")
 
-    def served_artifact(self, artifact_id: str, scenario: str) -> ServedArtifact | None:
-        """None: Tinker's sampler answers through its SDK, so only the Reef service that holds this runtime reaches
-        it."""
-        return None
+    def served_model_name(self, scenario: str) -> str:
+        """The name of the sampler that serves now: its sampler path, or the base model before any release.
+        A request under this name reaches that sampler on the service at ``base_url``."""
+        with self._lock:
+            return self._active or self._model
+
+    def sampler_load(self, model_name: str) -> tuple[str | None, str]:
+        """The sampler that ``model_name`` names (None for the base model) and its runtime load ID."""
+        sampler_path = None if model_name == self._model else model_name
+        with self._lock:
+            if sampler_path == self._active:
+                return self._active, self._version
+            return self._remember(sampler_path)
 
     def artifact_model(self, artifact: Artifact) -> PolicyModel:
         """The model that serves ``artifact``: each call samples its own artifact.
@@ -154,21 +162,6 @@ class TinkerInferenceRuntime(InferenceRuntime):
         self._load_count += 1
         return sampler_path, version
 
-    def snapshot(self, artifact: Artifact) -> tuple[str | None, str]:
-        """Resolve exactly the frozen artifact; old in-flight calls keep their sampler."""
-        with self._lock:
-            if artifact.ref.release_id in self._releases:
-                return self._releases[artifact.ref.release_id]
-            sampler_path = self.sampler_path(artifact)
-            # A release that carries the served sampler forward (a step of
-            # another component, an activation of the same weights) was never
-            # activated; it serves under the load the engine reports now,
-            # not under the first load of that sampler.
-            carried = sampler_path == self._active
-            selected = (self._active, self._version) if carried else self._remember(sampler_path)
-            self._releases[artifact.ref.release_id] = selected
-            return selected
-
     # -- Serving releases
 
     def activate_checkpoint(self, artifact: Artifact, *, scenario: str | None = None) -> str:
@@ -178,7 +171,7 @@ class TinkerInferenceRuntime(InferenceRuntime):
             if sampler_path != self._active:
                 # Even a sampler served earlier in this incarnation, as after an activation, serves under a new load.
                 self._active, self._version = self._new_load(sampler_path)
-            self._releases[artifact.ref.release_id] = (self._active, self._version)
+                self._versions[sampler_path] = self._version
             return self._version
 
     def shutdown(self) -> None:
@@ -199,12 +192,13 @@ class TinkerInferenceHandler(InferenceHandler):
         self._model = model
 
     async def inference(self, artifact: Artifact, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """Sample from the sampler that the request's ``model`` names (``address_model``)."""
         if path != "/v1/chat/completions":
             raise UpstreamStatusError("Tinker supports /v1/chat/completions", status=400)
-        return await asyncio.to_thread(self._sample, artifact, payload)
+        return await asyncio.to_thread(self.sample, payload)
 
-    def _sample(self, artifact: Artifact, payload: dict[str, Any]) -> dict[str, Any]:
-        sampler_path, version = self._runtime.snapshot(artifact)
+    def sample(self, payload: dict[str, Any]) -> dict[str, Any]:
+        sampler_path, version = self._runtime.sampler_load(str(payload.get("model") or self._model))
         return sample_chat(self._sampler, sampler_path, payload, model=self._model, runtime_load_id=version)
 
     async def inference_stream(self, artifact: Artifact, path: str, payload: dict[str, Any]) -> InferenceStream:

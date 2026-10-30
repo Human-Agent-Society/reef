@@ -328,18 +328,14 @@ def test_adapters_endpoint_lists_bundled_adapters_with_install_pins(tmp_path) ->
 
 
 @pytest.mark.unit
-def test_a_published_step_reaches_the_catalog_the_pull_and_the_inference_headers(tmp_path) -> None:
-    """One gated step: the catalog row repeats the manifest's gate numbers, the stdlib pull writes exactly the
-    composition the gate measured plus a release file outside the served tree, and the push half of the update
-    channel holds: a resident harness learns of the new head on its next model call, streamed or not."""
+def test_a_published_step_reaches_the_catalog_and_the_pull(tmp_path) -> None:
+    """One gated step: the catalog row repeats the manifest's gate numbers, and the stdlib pull writes exactly the
+    composition the gate measured plus a release file outside the served tree."""
 
     async def run() -> None:
         async with served(_dispatcher(tmp_path, MUTATIONS[:1])) as client:
             rows = (await (await client.get("/reef/scenarios/delivery/artifacts")).json())["artifacts"]
             current = next(row["release_id"] for row in rows if row["active"])
-            body = {"messages": [{"role": "user", "content": "hi"}]}
-            response = await client.post("/v1/chat/completions", headers=DELIVERY, json=body)
-            assert response.status == 200 and response.headers["x-reef-release-id"] == current
             manifest = await _gate_step(client)
             assert manifest["release_id"] != current
 
@@ -377,13 +373,6 @@ def test_a_published_step_reaches_the_catalog_the_pull_and_the_inference_headers
             record = json.loads((destination / HARNESS_RELEASE_FILE).read_text(encoding="utf-8"))
             assert record["release_id"] == written
             assert record["files"] == sorted(manifest["files"])
-
-            for stream in (False, True):
-                response = await client.post("/v1/chat/completions", headers=DELIVERY, json={**body, "stream": stream})
-                assert response.status == 200
-                await response.read()
-                assert response.headers["x-reef-release-id"] == manifest["release_id"]
-                assert response.headers["x-reef-agent-record-id"]
 
     asyncio.run(run())
 

@@ -98,9 +98,6 @@ def _settings(**overrides) -> ServiceConfig:
         "inference_timeout_s": 30.0,
         "inference_handler_factory": None,
         "inference_handler_config": {},
-        "inference_retry_initial_s": 0.05,
-        "inference_retry_max_s": 1.0,
-        "inference_retry_timeout_s": 30.0,
         "artifact_repository": "/state/artifacts.git",
         "artifact_work_dir": "/state/work",
         "artifact_cache_dir": "/state/cache",
@@ -138,11 +135,6 @@ def test_service_config_exposes_shared_batch_controls() -> None:
     assert "groups_per_step" not in args.recipe_settings
     assert args.inference_handler_factory is None
     assert args.inference_handler_config == {}
-    assert (args.inference_retry_initial_s, args.inference_retry_max_s, args.inference_retry_timeout_s) == (
-        0.05,
-        1.0,
-        300.0,
-    )
 
 
 @pytest.mark.unit

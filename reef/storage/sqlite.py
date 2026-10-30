@@ -159,14 +159,28 @@ class SQLiteRecordStore(SQLRecordStore):
     _WAL_SWITCH_TIMEOUT = 30.0
     _WAL_RETRY_INTERVAL = 0.01
 
-    def __init__(self, database: str | Path | None = None) -> None:
+    def __init__(self, database: str | Path | None = None, *, memory_name: str | None = None) -> None:
+        """``database`` is the file; without it the store is in memory. ``memory_name`` names a shared in-memory
+        database: every store of one name in this process reads and writes the same records while one of them is
+        open."""
+        if memory_name is not None and database is not None:
+            raise ValueError("a store is in a file or in a named memory database, not both")
         self._database = ":memory:" if database is None else str(database)
         if self._database != ":memory:":
             Path(self._database).parent.mkdir(parents=True, exist_ok=True)
         self._lock = RLock()
         super().__init__(_TABLES)
+        url = (
+            URL.create("sqlite+pysqlite", database=self._database)
+            if memory_name is None
+            else URL.create(
+                "sqlite+pysqlite",
+                database=f"file:{memory_name}",
+                query={"mode": "memory", "cache": "shared", "uri": "true"},
+            )
+        )
         self._engine = create_engine(
-            URL.create("sqlite+pysqlite", database=self._database),
+            url,
             connect_args={"timeout": 30, "check_same_thread": False},
             poolclass=NullPool,
             hide_parameters=True,
@@ -377,8 +391,9 @@ class SQLiteScenarioStorage(ScenarioStorage):
     """Open hashed SQLite database paths and manage their lifecycle.
 
     Each scenario has one database file for its records, commits, settings,
-    generated tasks, training samples and evaluations. Without a directory, all state is in memory. Records, commits and task
-    states then last for one session, and settings last for the storage.
+    generated tasks, training samples and evaluations. Without a directory, all state is in memory and lasts for
+    the storage: every session of one scenario reads and writes the same memory database, as the services of one
+    process share the store.
     ``task_files`` keeps the files of published tasks.
     The default is a ``LocalTaskFileStore`` in ``directory/task-files``. If
     the storage has no directory, the default store uses a temporary directory.
@@ -389,6 +404,9 @@ class SQLiteScenarioStorage(ScenarioStorage):
         self._lock = RLock()
         self._closed = False
         self._memory_settings: dict[str, ScenarioSettings] = {}
+        #: Without a directory: per scenario, the name of its memory database and one open store that keeps the
+        #: database alive between sessions. An archive drops both, so the next session starts a new database.
+        self._memory_anchors: dict[str, tuple[str, SQLiteRecordStore]] = {}
         if task_files is None:
             task_files = LocalTaskFileStore(None if self._directory is None else self._directory / "task-files")
         self.task_files = task_files
@@ -430,8 +448,13 @@ class SQLiteScenarioStorage(ScenarioStorage):
         with self._lock:
             self._ensure_open()
             key = self._scenario_key(scenario)
-            database = None if self._directory is None else self._directory / f"{key}.sqlite3"
-            records = SQLiteRecordStore(database)
+            if self._directory is None:
+                if key not in self._memory_anchors:
+                    name = f"reef-{key}-{uuid.uuid4().hex}"
+                    self._memory_anchors[key] = (name, SQLiteRecordStore(memory_name=name))
+                records = SQLiteRecordStore(memory_name=self._memory_anchors[key][0])
+            else:
+                records = SQLiteRecordStore(self._directory / f"{key}.sqlite3")
             try:
                 return CommitHistoryScenarioStore(
                     scenario,
@@ -452,6 +475,9 @@ class SQLiteScenarioStorage(ScenarioStorage):
             archived_files = self.task_files.archive(scenario)
             if self._directory is None:
                 self._memory_settings.pop(scenario, None)
+                anchor = self._memory_anchors.pop(self._scenario_key(scenario), None)
+                if anchor is not None:
+                    anchor[1].close()
                 return archived_files
             stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
             destination = self._directory / "archived" / f"{self._scenario_key(scenario)}-{stamp}-{uuid.uuid4().hex}"
@@ -485,6 +511,9 @@ class SQLiteScenarioStorage(ScenarioStorage):
         with self._lock:
             if not self._closed:
                 self._closed = True
+                for _, anchor in self._memory_anchors.values():
+                    anchor.close()
+                self._memory_anchors.clear()
                 self.task_files.close()
 
     @staticmethod

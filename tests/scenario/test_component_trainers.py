@@ -1112,7 +1112,7 @@ def test_a_weights_step_is_no_new_harness_head(dispatchers: _Dispatchers) -> Non
     harness_release = scenario.current_artifact_ref().release_id
     assert _commit_step(scenario, WEIGHTS) is not None
     assert scenario.current_artifact_ref().release_id != harness_release
-    assert service.harness_head(headers) == harness_release
+    assert service.harness_release_id(scenario) == harness_release
     manifest = service.harness_manifest(headers)
     assert manifest["release_id"] == harness_release
     assert manifest["files"] == {"harness.txt": "harness step 1"}
@@ -1169,7 +1169,7 @@ def test_the_harness_catalog_is_one_lineage_of_trees(dispatchers: _Dispatchers) 
     assert rejected is not None and rejected.artifact is None
     scenario.commit(rejected, component=HARNESS)
     assert scenario.current_artifact_ref().release_id == w1
-    assert service.harness_head(headers) == h1
+    assert service.harness_release_id(scenario) == h1
     assert service.harness_manifest(headers)["release_id"] == h1
     catalog = service.harness_releases(headers)["releases"]
     # The rejected row is named by the listed release it ran on, so a client's poll agrees with the head;
@@ -1193,7 +1193,7 @@ def test_the_harness_catalog_is_one_lineage_of_trees(dispatchers: _Dispatchers) 
     assert catalog[-1]["parent_release_id"] == h1
     assert catalog[-1]["composed_parent_release_id"] == w2
     assert required_by(catalog, h2) == [{"name": "TOKEN", "kind": "env"}]
-    assert service.harness_head(headers) == h2
+    assert service.harness_release_id(scenario) == h2
     page = service.harness_release_page(headers, 3)
     assert h2 in page
 
@@ -1203,7 +1203,7 @@ def test_the_harness_catalog_is_one_lineage_of_trees(dispatchers: _Dispatchers) 
     assert activated.release_id not in (h1, h2)
     catalog = service.harness_releases(headers)["releases"]
     assert [row["release_id"] for row in catalog] == [creation, h1, h1, h2]
-    assert service.harness_head(headers) == h1
+    assert service.harness_release_id(scenario) == h1
     assert service.harness_manifest(headers)["release_id"] == h1
     assert required_by(catalog, h1) == [{"name": "TOKEN", "kind": "env"}]
 
@@ -1223,7 +1223,7 @@ def test_the_harness_catalog_is_one_lineage_of_trees(dispatchers: _Dispatchers) 
     assert component_files(scenario, scenario.current_artifact_ref())[WEIGHTS] == "weights step 3"
     catalog = service.harness_releases(headers)["releases"]
     assert [row["release_id"] for row in catalog] == [creation, h1, h1, h2, h3]
-    assert service.harness_head(headers) == h3
+    assert service.harness_release_id(scenario) == h3
     assert required_by(catalog, h3) == [{"name": "TOKEN", "kind": "env"}]
     script = service.harness_install_script(headers, adapter="pi")
     assert all(release not in script for release in (w1, w2, held, combined, activated.release_id))
@@ -1330,7 +1330,7 @@ def test_an_activation_of_weights_held_at_step_one_is_no_harness_release(dispatc
     held = scenario.store.history()[-1].artifact_ref.release_id
     scenario.activate(f"{held}:{WEIGHTS}", WEIGHTS)
     assert component_files(scenario, scenario.current_artifact_ref())[WEIGHTS] == "weights step 1"
-    assert service.harness_head(headers) == creation
+    assert service.harness_release_id(scenario) == creation
     assert [row["release_id"] for row in service.harness_releases(headers)["releases"]] == [creation]
 
 
@@ -1353,12 +1353,12 @@ def test_an_activation_under_the_same_tree_is_no_new_harness_head(dispatchers: _
     # Back to the first weights under the same tree: nothing to pull.
     scenario.activate(f"{first_weights}:{WEIGHTS}", WEIGHTS)
     assert component_files(scenario, scenario.current_artifact_ref())[WEIGHTS] == "weights step 1"
-    assert service.harness_head(headers) == harness_release
+    assert service.harness_release_id(scenario) == harness_release
     assert [row["release_id"] for row in service.harness_releases(headers)["releases"]] == [base, harness_release]
 
     # Back to the base's harness: the seed tree is served again, named by the base release.
     scenario.activate(f"{scenario.repository.backend.resolve_release('base').release_id}:{HARNESS}", HARNESS)
-    assert service.harness_head(headers) == base
+    assert service.harness_release_id(scenario) == base
     assert service.harness_manifest(headers)["release_id"] == base
     assert service.harness_manifest(headers)["files"] == {"harness.txt": "harness seed"}
     assert [row["release_id"] for row in service.harness_releases(headers)["releases"]] == [base, harness_release]

@@ -28,7 +28,7 @@ from reef.pipeline_context import PipelineContext
 from reef.recipe.config_fields import config_field, resolve_config_field_values
 from reef.recipe.errors import RecipeConfigError
 from reef.record2sample import Record2Sample
-from reef.runtime.interfaces import InferenceHandler, InferenceRuntime, MultimodalRelay, TrainingMethod
+from reef.runtime.interfaces import InferenceHandler, InferenceRuntime, TrainingMethod
 from reef.runtime.jobs import ReleaseLayout, TrainingComponent
 from reef.sample2job import NoJobData
 from reef.storage.records import RecordStore
@@ -324,11 +324,6 @@ class Recipe:
         """
         runtime = self.runtime
         return runtime.inference_handler if runtime is not None else None
-
-    @property
-    def multimodal_relay(self) -> MultimodalRelay | None:
-        """Where this recipe's scenarios send multimodal calls, or ``None`` when it offers none (the default)."""
-        return None
 
     def build_surface(self, scenario: str) -> Surface:
         """Build the serving surface for the named scenario.

@@ -1207,9 +1207,9 @@ and every turn runs on the graph's step budget and on ``--turn-timeout``
 seconds of wall clock (600), checked before each model call.
 
 With ``--follow head``, the default, the process polls
-``GET /reef/harness/releases`` every ``--poll-interval`` seconds (60) and
-reads the ``x-reef-release-id`` header of every inference answer, so a
-process with traffic learns of a new active release on its next model call.
+``GET /reef/harness/releases`` every ``--poll-interval`` seconds (60), so it
+learns of a new active release within one interval. Inference answers do not
+report harness releases.
 A new active release is mounted between two steps of the open turn, or at once when the process
 is idle. The mount is one line in the open turn's session, else in
 ``native/sessions/serve.jsonl``:

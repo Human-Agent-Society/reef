@@ -4,20 +4,13 @@ import pytest
 
 from reef.core.errors import ReefError
 from reef.recipe.base import Recipe
-from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.surface import (
     AdapterWeightRuntime,
-    ArtifactLoader,
     ComponentSurface,
-    InferenceHooks,
-    LeasingInferenceHooks,
-    RequestSkillLayer,
     SkillLayer,
     Surface,
-    WeightInferenceHooks,
     WeightLoader,
     WeightRuntime,
-    create_config_surface,
     create_harness_surface,
     create_skill_surface,
     create_weight_surface,
@@ -25,23 +18,6 @@ from reef.surface import (
 from reef.surface.base import AcceptAnyArtifact
 from reef.surface.skills import SkillValidator
 from reef.surface.weights import reported_runtime_load_id, reported_runtime_load_spans
-
-
-class _InjectingModule(RequestSkillLayer):
-    """Test stand-in for a method-owned injecting layer module.
-
-    Mirrors the shape of skillclaw's catalog module: reads its layer's
-    files and prepends a system message to chat payloads.
-    """
-
-    layer = "skills"
-
-    def prepare_request(self, files, path, payload):
-        del path
-        text = files.get("SKILL.md", "").strip()
-        if not text:
-            return payload
-        return {**payload, "messages": [{"role": "system", "content": text}, *payload["messages"]]}
 
 
 class _PullOnlyModule(SkillLayer):
@@ -54,7 +30,6 @@ def test_recipe_default_surface_is_noop() -> None:
     surface = Recipe().build_surface("s")
     assert type(surface) is Surface
     assert surface.loader is None
-    assert surface.inference is None
     assert surface.files is None
 
 
@@ -72,32 +47,11 @@ def test_each_built_in_surface_declares_the_kind_of_its_component() -> None:
     assert kinds(create_weight_surface(kind="model_adapter")) == {"weights": "model_adapter"}
     assert kinds(create_harness_surface()) == {"harness": "harness_plugin"}
     assert kinds(create_skill_surface([_PullOnlyModule()])) == {"skills": "harness_plugin"}
-    assert kinds(create_config_surface()) == {"config": "harness_plugin"}
     assert kinds(Surface(loader=WeightLoader())) == {"release": None}, "a surface may declare no kind"
     with pytest.raises(ValueError, match="model or a model_adapter"):
         create_weight_surface(kind="harness_plugin")  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="component kind"):
         ComponentSurface(kind="weights")  # type: ignore[arg-type]
-
-
-def test_optional_surface_capabilities_are_not_claimed_by_basic_implementations() -> None:
-    loader = WeightLoader()
-    hooks = WeightInferenceHooks()
-    assert isinstance(loader, ArtifactLoader)
-    assert isinstance(hooks, InferenceHooks)
-    assert not isinstance(hooks, LeasingInferenceHooks)
-    assert isinstance(_InjectingModule(), RequestSkillLayer)
-    assert not isinstance(_PullOnlyModule(), RequestSkillLayer)
-
-
-def test_request_injection_requires_declaring_the_optional_layer_capability() -> None:
-    class UndeclaredLayer(SkillLayer):
-        layer = "skills"
-
-        def prepare_request(self, files, path, request):
-            raise AssertionError("undeclared request hook must not run")
-
-    assert create_skill_surface([UndeclaredLayer()]).inference is None
 
 
 def test_default_component_validator_accepts_anything() -> None:
@@ -115,23 +69,6 @@ def _skill_artifact(tmp_path, text: str = "Always check units."):
     d.mkdir(parents=True)
     (d / "SKILL.md").write_text(text, encoding="utf-8")
     return Artifact.local(d.parent)
-
-
-def test_skill_surface_hands_each_module_its_layer_files(tmp_path) -> None:
-    artifact = _skill_artifact(tmp_path)
-    payload = {"model": "m", "messages": [{"role": "user", "content": "hi"}]}
-    hooks = create_skill_surface([_InjectingModule()]).inference
-    assert hooks is not None
-    out = hooks.prepare_request(artifact, "/v1/chat/completions", payload)
-    assert out["messages"][0] == {"role": "system", "content": "Always check units."}
-    assert out["messages"][1] == {"role": "user", "content": "hi"}
-    assert payload["messages"][0]["role"] == "user"
-
-
-def test_skill_surface_has_no_inference_hooks_for_pull_only_layers() -> None:
-    layer = _PullOnlyModule()
-    surface = create_skill_surface([layer])
-    assert surface.inference is None
 
 
 def test_skill_validator_rejects_empty_and_stray_files(tmp_path) -> None:
@@ -166,30 +103,6 @@ def test_skill_validator_ignores_repository_bookkeeping(tmp_path) -> None:
     assert surface.files is not None
     assert surface.files.read_files(Artifact.local(root)) == {"skills/SKILL.md": "rule"}
     SkillValidator((layer,)).validate(Artifact.local(root))
-
-
-def test_default_prepare_request_is_identity(tmp_path) -> None:
-    payload = {"model": "m"}
-    assert _weight_hooks().prepare_request(_checkpoint_artifact(tmp_path), "/v1/chat/completions", payload) is payload
-
-
-def _checkpoint_artifact(tmp_path):
-    from reef.artifact import Artifact
-
-    d = tmp_path / "checkpoint-artifact"
-    d.mkdir(exist_ok=True)
-    return Artifact.local(d)
-
-
-def _weight_hooks(surface: Surface | None = None):
-    hooks = (surface or create_weight_surface(kind="model")).inference
-    assert hooks is not None
-    return hooks
-
-
-def test_weight_surface_without_an_adapter_leaves_requests_alone(tmp_path) -> None:
-    payload = {"model": "m", "lora_path": "whatever"}
-    assert _weight_hooks().prepare_request(_checkpoint_artifact(tmp_path), "/v1/chat/completions", payload) is payload
 
 
 def test_the_reported_version_is_read_from_every_response_shape() -> None:
@@ -258,63 +171,6 @@ def test_impossible_runtime_load_histories_are_rejected(runtime_load_ids) -> Non
         reported_runtime_load_spans(response)
 
 
-def test_record_only_surface_has_no_inference_hooks() -> None:
-    assert Surface().inference is None
-
-
-def test_inference_injects_and_records_the_post_transform_request(tmp_path) -> None:
-    import asyncio
-
-    from reef.artifact import InMemoryRepositoryBackend
-    from reef.dispatcher import Dispatcher
-    from reef.runtime.interfaces import InferenceHandler
-    from reef.service.app import RequestService
-
-    class SkillRecipe(Recipe):
-        def build_surface(self, scenario):
-            return create_skill_surface([_InjectingModule()])
-
-    class RecordingBackend(InferenceHandler):
-        def __init__(self) -> None:
-            self.seen = None
-
-        async def inference(self, artifact, path, payload):
-            del artifact, path
-            self.seen = payload
-            return {"ok": True}
-
-    bootstrap = tmp_path / "bootstrap"
-    (bootstrap / "skills").mkdir(parents=True)
-    (bootstrap / "skills" / "SKILL.md").write_text("Always check units.", encoding="utf-8")
-
-    recipe = SkillRecipe(name="skill_delivery")
-    dispatcher = Dispatcher(
-        recipe,
-        InMemoryRepositoryBackend.factory(bootstrap, root=tmp_path / "repository"),
-        local_artifact_dir=tmp_path / "local",
-        scenario_storage=SQLiteScenarioStorage(None),
-    )
-    service = RequestService(dispatcher)
-    backend = RecordingBackend()
-
-    async def run() -> None:
-        response, item = await service.infer_with_data(
-            {"x-reef-scenario": "smoke"},
-            {"model": "m", "messages": [{"role": "user", "content": "hi"}]},
-            "/v1/chat/completions",
-            backend,
-        )
-        assert response == {"ok": True}
-        assert backend.seen["messages"][0] == {"role": "system", "content": "Always check units."}
-        recorded = item.payload["messages"]
-        assert recorded[0] == {"role": "system", "content": "Always check units."}
-        assert recorded[1] == {"role": "user", "content": "hi"}
-
-    asyncio.run(run())
-    scenario = dispatcher.get_or_create_scenario("smoke")
-    assert scenario.surface is scenario.surface
-
-
 class _StubTrainingRuntime(WeightRuntime):
     """Satisfies WeightRuntime; only the version probe does anything."""
 
@@ -359,32 +215,6 @@ def test_a_durable_release_serves_under_the_version_that_reef_acknowledged(tmp_p
     assert surface.served_runtime_load_id(release, adapters) == "e:4"
     # An engine that holds no adapter for the scenario leaves the served version unknown.
     assert surface.served_runtime_load_id(release, _StubAdapterRuntime("e:6", {})) is None
-
-
-def test_weight_hooks_route_each_scenario_to_its_own_adapter_revision(tmp_path) -> None:
-    from reef.artifact import Artifact
-    from reef.surface import adapter_name
-
-    hooks = WeightInferenceHooks(scenario="math", runtime=_StubAdapterRuntime("engine:9", {"math": "engine:7"}))
-    published = Artifact.local(tmp_path, metadata={"runtime_load_id": "engine:3"})
-    served = hooks.prepare_request(published, "/v1/chat/completions", {"messages": []})
-    # The release serves under the revision the runtime holds for the scenario.
-    assert served == {"messages": [], "lora_path": adapter_name("math", "engine:7")}
-    with pytest.raises(ReefError, match="asked for lora_path"):
-        hooks.prepare_request(published, "/v1/chat/completions", {"lora_path": adapter_name("code", "engine:7")})
-
-
-def test_weight_hooks_sample_the_base_before_a_scenario_publishes(tmp_path) -> None:
-    hooks = WeightInferenceHooks(scenario="math", runtime=_StubAdapterRuntime("engine:9", {}))
-    checkpoint = _checkpoint_artifact(tmp_path)
-    assert "lora_path" not in hooks.prepare_request(checkpoint, "/v1/chat/completions", {"messages": []})
-    with pytest.raises(ReefError, match="published no adapter yet"):
-        hooks.prepare_request(checkpoint, "/v1/chat/completions", {"lora_path": "anything"})
-
-
-def test_weight_hooks_need_the_scenario_and_its_runtime_together() -> None:
-    with pytest.raises(ValueError, match="both the scenario and the runtime"):
-        WeightInferenceHooks(scenario="math")
 
 
 def test_a_harness_artifact_holds_its_entries_and_a_client_pull_leaves_them_out(tmp_path) -> None:

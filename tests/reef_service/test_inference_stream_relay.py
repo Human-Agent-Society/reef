@@ -14,17 +14,22 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator, Mapping
-from types import SimpleNamespace
+from pathlib import Path
 from typing import Any
 
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
-from reef.core import AgentRecord, RequestType
-from reef.runtime.interfaces import InferenceStream
-from reef.service.routes.inference import register_inference_routes
+from reef.artifact.artifact import Artifact
+from reef.core import RequestType
+from reef.core.served_models import ACTIVE, ScenarioModel, ServedArtifact
+from reef.runtime.interfaces import FixedEngineClients, InferenceHandler, InferenceStream
+from reef.service.inference_service import InferenceReplica, ServedModelsCache, add_inference_routes
 from reef.service.streaming import frame_for_codex
+from reef.storage.control_lease import MemoryControlLease
+from reef.storage.served_models import MemoryServedModels
+from reef.storage.sqlite import SQLiteScenarioStorage
 
 #: One OpenRouter web search item, in the shape the OpenRouter SDK documents:
 #: the action already matches OpenAI's ``web_search_call.action``.
@@ -128,14 +133,13 @@ def test_frame_for_codex_leaves_every_other_frame_untouched() -> None:
     assert frame_for_codex(broken) == broken
 
 
-class _RecordingRequestService:
-    """The parts of ``RequestService`` the inference relay touches, over a scripted upstream stream."""
+class ScriptedStreamHandler(InferenceHandler):
+    """An engine handler that answers every stream with ``OPENROUTER_SSE``."""
 
-    def __init__(self, harness_adapter: str | None) -> None:
-        self.recorded: list[Mapping[str, Any]] = []
-        self.dispatcher = SimpleNamespace(recipe=SimpleNamespace(harness_adapter=harness_adapter))
+    async def inference(self, artifact: Artifact, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+        raise AssertionError("the relay tests only stream")
 
-    async def _upstream(self) -> InferenceStream:
+    async def inference_stream(self, artifact: Artifact, path: str, payload: dict[str, Any]) -> InferenceStream:
         async def chunks() -> AsyncIterator[bytes]:
             for frame in OPENROUTER_SSE.split("\n\n"):
                 if frame:
@@ -143,36 +147,34 @@ class _RecordingRequestService:
 
         return InferenceStream(status=200, headers={"content-type": "text/event-stream"}, chunks=chunks())
 
-    async def start_stream(
-        self,
-        headers: Mapping[str, str],
-        payload: dict[str, Any],
-        path: str,
-        handler: object = None,
-        *,
-        record: bool = True,
-        evaluated: str | None = None,
-        artifact_id: str | None = None,
-    ) -> tuple[InferenceStream, Any]:
-        pending = SimpleNamespace(
-            item=AgentRecord.create(scenario="reef-codex", request_type=RequestType.INFERENCE, payload=dict(payload)),
-            record=record,
-        )
-        return await self._upstream(), pending
 
-    def harness_head(self, headers: Mapping[str, str]) -> None:
-        return None
-
-    def record_stream(self, pending: Any, response: Mapping[str, Any]) -> AgentRecord:
-        self.recorded.append(dict(response))
-        return pending.item
-
-
-def _relay_client(harness_adapter: str | None) -> tuple[TestClient, _RecordingRequestService]:
-    request_service = _RecordingRequestService(harness_adapter)
+def _relay_client(tmp_path: Path, *, for_codex: bool) -> tuple[TestClient, SQLiteScenarioStorage]:
+    storage = SQLiteScenarioStorage(tmp_path / "records")
+    table = MemoryServedModels(MemoryControlLease())
+    number = table.control_lease.acquire("control-1").number
+    table.write(
+        ScenarioModel("reef-codex", ACTIVE),
+        ServedArtifact("release-1", "http://engine.invalid", "anthropic/claude"),
+        control_lease_number=number,
+    )
+    replica = InferenceReplica(
+        ServedModelsCache(table), storage, FixedEngineClients(ScriptedStreamHandler()), for_codex=for_codex
+    )
     app = web.Application()
-    register_inference_routes(app, request_service=request_service, inference_handler=None)
-    return TestClient(TestServer(app)), request_service
+    add_inference_routes(app, replica)
+    return TestClient(TestServer(app)), storage
+
+
+def recorded_responses(storage: SQLiteScenarioStorage) -> list[Mapping[str, Any]]:
+    store = storage.open("reef-codex")
+    try:
+        return [
+            item.payload["response"]
+            for item in store.records.replay("reef-codex")
+            if item.request_type is RequestType.INFERENCE
+        ]
+    finally:
+        store.close()
 
 
 def _post_codex_stream(client: TestClient) -> Any:
@@ -184,9 +186,9 @@ def _post_codex_stream(client: TestClient) -> Any:
 
 
 @pytest.mark.unit
-def test_codex_deployment_reads_web_search_call_and_reef_keeps_the_raw_item() -> None:
+def test_codex_deployment_reads_web_search_call_and_reef_keeps_the_raw_item(tmp_path: Path) -> None:
     async def run() -> None:
-        client, request_service = _relay_client("codex")
+        client, storage = _relay_client(tmp_path, for_codex=True)
         async with client:
             response = await _post_codex_stream(client)
             assert response.status == 200
@@ -206,7 +208,7 @@ def test_codex_deployment_reads_web_search_call_and_reef_keeps_the_raw_item() ->
         assert completed["reef"]["agent_record_id"]
 
         # Reef's own record keeps the raw upstream item, never the rewrite.
-        recorded = request_service.recorded[0]
+        (recorded,) = recorded_responses(storage)
         assert "openrouter:web_search" in recorded["body"]
         assert "web_search_call" not in recorded["body"]
 
@@ -214,9 +216,9 @@ def test_codex_deployment_reads_web_search_call_and_reef_keeps_the_raw_item() ->
 
 
 @pytest.mark.unit
-def test_non_codex_deployment_reads_the_raw_item() -> None:
+def test_non_codex_deployment_reads_the_raw_item(tmp_path: Path) -> None:
     async def run() -> None:
-        client, request_service = _relay_client("pi")
+        client, storage = _relay_client(tmp_path, for_codex=False)
         async with client:
             response = await _post_codex_stream(client)
             assert response.status == 200
@@ -228,6 +230,7 @@ def test_non_codex_deployment_reads_the_raw_item() -> None:
         # The receipt rides the terminal event here too.
         assert completed["reef"]["agent_record_id"]
         # Reef's record and the client both see the raw stream.
-        assert "openrouter:web_search" in request_service.recorded[0]["body"]
+        (recorded,) = recorded_responses(storage)
+        assert "openrouter:web_search" in recorded["body"]
 
     asyncio.run(run())

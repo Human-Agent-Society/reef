@@ -13,6 +13,7 @@ from threading import Event
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
+from tests.reef_service.test_served_artifacts import serving_dispatcher
 from tests.support._policy_recipe import TestPolicyRecipe
 from tests.support.artifact_versions import (
     ImportingComponent,
@@ -28,7 +29,7 @@ from reef.dispatcher import Dispatcher
 from reef.observability import TrainFromExperimentEvent, TrainingExperimentContext, TrainingExperimentEvent
 from reef.runtime.interfaces import InferenceHandler
 from reef.runtime.jobs import SavedCheckpoint
-from reef.service.app import RequestService, create_app
+from reef.service.app import create_app
 from reef.storage.commit_history import CommitHistoryScenarioStore
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.jobs import JobLoopState
@@ -278,29 +279,36 @@ def test_older_versions_and_version_catalog_survive_restart(tmp_path) -> None:
 
 @pytest.mark.unit
 def test_request_records_the_artifact_ref_captured_before_inference(tmp_path) -> None:
+    """A request keeps the served artifact it read first: a commit during the call changes neither the release
+    the engine got nor the release its record names."""
+
     async def run() -> None:
-        value, _, _ = dispatcher(tmp_path)
+        value, _, _ = serving_dispatcher(tmp_path)
         train(value, 1)
         selected_version = value.get_or_create_scenario("math").current_artifact_ref().release_id
         backend = BlockingBackend()
-        service = RequestService(value)
-        request = asyncio.create_task(
-            service.infer_with_data(
-                {"x-reef-scenario": "math"},
-                {"model": "reef", "messages": [{"role": "user", "content": "hi"}]},
-                "/v1/chat/completions",
-                backend,
+        async with TestClient(TestServer(create_app(value, inference_handler=backend))) as client:
+            request = asyncio.create_task(
+                client.post(
+                    "/v1/chat/completions",
+                    headers={"x-reef-scenario": "math"},
+                    json={"model": "reef", "messages": [{"role": "user", "content": "hi"}]},
+                )
             )
-        )
-        await backend.started.wait()
+            await backend.started.wait()
 
-        train(value, 2)
+            await asyncio.to_thread(train, value, 2)
+            assert value.get_or_create_scenario("math").current_artifact_ref().release_id != selected_version
 
-        backend.finish.set()
-        _, item = await request
+            backend.finish.set()
+            response = await request
+            assert response.status == 200
+            record_id = response.headers["x-reef-agent-record-id"]
+        item = value.get_or_create_scenario("math").records.get("math", record_id)
         assert backend.release_id == selected_version
         assert item.artifact_ref is not None
         assert item.artifact_ref.release_id == selected_version
+        value.close()
 
     asyncio.run(run())
 

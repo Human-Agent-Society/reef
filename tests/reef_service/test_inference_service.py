@@ -13,6 +13,8 @@ from aiohttp.test_utils import TestClient, TestServer
 from reef.core.artifact_ref import ArtifactRef
 from reef.core.records_types import RequestType
 from reef.core.served_models import ACTIVE, ScenarioModel, ServedArtifact
+from reef.inference.http import HttpInferenceHandler
+from reef.runtime.interfaces import EngineClients, InferenceHandler
 from reef.service.inference_service import RECORD_HEADER, RELEASE_HEADER, build_inference_app
 from reef.storage.commits import CommitRecord
 from reef.storage.control_lease import MemoryControlLease
@@ -34,6 +36,20 @@ def engine_app(answers: list[str]) -> web.Application:
 
     app.router.add_post("/v1/chat/completions", complete)
     return app
+
+
+class ReportingHandler(HttpInferenceHandler):
+    """An HTTP handler whose engine reports the model name that answered."""
+
+    def answered_model(self, response: Any) -> str | None:
+        return response.get("model")
+
+
+class ReportingEngines(EngineClients):
+    """A ``ReportingHandler`` for each engine URL."""
+
+    def handler(self, served: ServedArtifact) -> InferenceHandler:
+        return ReportingHandler(served.url)
 
 
 def commit(release_id: str) -> CommitRecord:
@@ -64,7 +80,7 @@ async def ask(tmp_path: Path, answers: list[str], *, write: bool = True) -> tupl
         if write:
             served = ServedArtifact("release-1", str(engine.make_url("/")), "math-v1")
             table.write(ScenarioModel("math", ACTIVE), served, control_lease_number=number)
-        app = build_inference_app(table, storage, tokens=TOKEN)
+        app = build_inference_app(table, storage, ReportingEngines(), tokens=TOKEN)
         async with TestClient(TestServer(app)) as client:
             response = await client.post(
                 "/v1/chat/completions", headers=HEADERS, json={"model": "any", "messages": [{"role": "user"}]}
@@ -126,7 +142,9 @@ async def ask_failing(tmp_path: Path, *, engine_url: str | None, refuse_records:
         table.write(
             ScenarioModel("math", ACTIVE), ServedArtifact("release-1", url, "math-v1"), control_lease_number=number
         )
-        async with TestClient(TestServer(build_inference_app(table, storage, tokens=TOKEN))) as client:
+        async with TestClient(
+            TestServer(build_inference_app(table, storage, ReportingEngines(), tokens=TOKEN))
+        ) as client:
             response = await client.post(
                 "/v1/chat/completions", headers=HEADERS, json={"model": "any", "messages": [{"role": "user"}]}
             )

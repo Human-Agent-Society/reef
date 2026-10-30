@@ -19,6 +19,8 @@ def main() -> None:
     args = parser.parse_args()
     client = ReefClient(args.url, token=os.environ["REEF_TOKEN"], timeout_s=args.timeout)
     scenario = f"tinker-smoke-{uuid.uuid4().hex[:8]}"
+    # The inference routes serve only a scenario that exists: create it first.
+    client.post("/reef/scenarios", scenario, {"name": scenario})
     for rollout in range(4):
         response, record = client.inference_with_record(
             scenario,

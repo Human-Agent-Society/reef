@@ -20,10 +20,11 @@ class NoDatabase(CoordinationResource):
 
 
 class Runtime:
-    """Serves ``math`` at one URL, under the model name of the release that serves it."""
+    """Serves ``math`` at one URL, under the model name of the release that serves it, through one handler."""
 
     def __init__(self) -> None:
         self.release = "release-1"
+        self.inference_handler = object()
 
     def served_artifact(self, artifact_id: str, scenario: str) -> ServedArtifact | None:
         return ServedArtifact(artifact_id, "http://engine:8000", f"{scenario}-{artifact_id}")
@@ -36,6 +37,7 @@ class Registry:
             runtime=runtime,
             trainers=(),
             artifact_status=lambda: {"weights": {"active": runtime.release, "training_start": None}},
+            served_beside=dict,
         )
 
     def loaded_scenarios(self) -> tuple[SimpleNamespace, ...]:
@@ -71,6 +73,7 @@ def test_the_active_artifact_is_published_and_a_replaced_value_is_stopped_after_
 
     assert publisher.run_once(now=100.0)
     assert store.served_models.read(key) == first
+    assert publisher.engines == {"http://engine:8000": runtime.inference_handler}
 
     runtime.release = "release-2"
     assert publisher.run_once(now=101.0)

@@ -153,7 +153,7 @@ def test_idle_scenario_unloads_and_loads_again_with_its_history_and_model(tmp_pa
         assert after is not None and after is not before
         assert after.scenario_step == 1
         assert after.releases() == releases
-        assert after.model_config.view() == {**MODEL_CONFIG, "api": "openai", "has_api_key": False}
+        assert after.model_config.view() == {**MODEL_CONFIG, "api": "openai"}
         assert [row["agent_record_id"] for row in dispatcher.read_records("math")["records"]] == ["i1", "r1"]
         # The reloaded scenario trains on, with a new local worker.
         trained(dispatcher, "math", 2)
@@ -209,7 +209,7 @@ def test_scenario_with_a_request_in_flight_stays_loaded(tmp_path) -> None:
     try:
         current = dispatcher.get_or_create_scenario("math")
         assert current is not None
-        measurement = current.operations.start("serve/request")
+        measurement = current.operations.start("ingest/write")
         assert not dispatcher.unload_if_idle("math")
         measurement.finish(succeeded=True)
         assert dispatcher.unload_if_idle("math")
@@ -239,7 +239,7 @@ def test_full_service_refuses_a_load_when_no_scenario_is_idle(tmp_path) -> None:
     try:
         busy = dispatcher.get_or_create_scenario("a")
         assert busy is not None
-        measurement = busy.operations.start("serve/request")
+        measurement = busy.operations.start("ingest/write")
 
         with pytest.raises(ScenarioCapacityFull) as refused:
             dispatcher.get_or_create_scenario("b")

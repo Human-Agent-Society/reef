@@ -37,26 +37,21 @@ Routes
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /v1/messages/count_tokens``                                               | count request tokens; recorded like any inference |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
-| ``POST /reef/scenarios/{scenario}/evaluation/v1/{route}``                        | one of the inference routes above, served for     |
-|                                                                                  | the named scenario and kept by nobody: what a     |
-|                                                                                  | recipe's evaluation rollouts call; a flat         |
-|                                                                                  | release's request hooks stay out, since the       |
-|                                                                                  | rollout runs a candidate of it. It serves a       |
-|                                                                                  | scenario loaded in this process and never creates |
-|                                                                                  | one: 404 for a scenario deleted under its rollout |
+| ``POST /reef/scenarios/{scenario}/evaluation/v1/{route}``                        | one of the inference routes above, answered by    |
+|                                                                                  | the scenario's active model and kept by nobody:   |
+|                                                                                  | what a recipe's evaluation rollouts call. The     |
+|                                                                                  | answer keeps its ``training`` block. 404 for an   |
+|                                                                                  | unknown scenario or one that serves no model      |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
-| ``POST /reef/scenarios/{scenario}/components/{component}/evaluation/v1/{route}`` | the same for a candidate of one component of a    |
-|                                                                                  | composed release: every other component's hooks   |
-|                                                                                  | run (weights, request defaults), the named one's  |
-|                                                                                  | stay out; 404 for a component it does not serve   |
+| ``POST /reef/scenarios/{scenario}/components/{component}/evaluation/v1/{route}`` | the same, for a candidate of one component of a   |
+|                                                                                  | composed release                                  |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/scenarios/{scenario}/artifacts/{artifact_id}/v1/{route}``           | one of the inference routes above, answered and   |
-|                                                                                  | recorded by one artifact of the scenario: a       |
-|                                                                                  | served artifact or an artifact of the active      |
-|                                                                                  | release; 404 for any other artifact               |
-+----------------------------------------------------------------------------------+---------------------------------------------------+
-| ``POST /v1/images``, ``/v1/embeddings``,                                         | multimodal call, relayed by the recipe to its     |
-| ``/v1/audio/speech``, ``/v1/decisions``                                          | gateway; not recorded, 501 when it offers none    |
+|                                                                                  | recorded by an artifact that the scenario serves  |
+|                                                                                  | beside its active release; 404 for any other      |
+|                                                                                  | artifact. The same prefix with                    |
+|                                                                                  | ``/evaluation/v1/{route}`` makes the same call    |
+|                                                                                  | without a record                                  |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/records``                                                           | import one existing inference or report           |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
@@ -168,55 +163,47 @@ Headers
 |                                   | carries the token. The evaluation routes also accept    |
 |                                   | the token the service issues the recipe at startup.     |
 +-----------------------------------+---------------------------------------------------------+
-| ``x-reef-release-id``             | optional: bind a new scenario to this starting release; |
-|                                   | on an existing scenario it must name the bound starting |
-|                                   | release, or the request is HTTP 409. Inference always   |
-|                                   | answers from the scenario's active release; to pull a   |
+| ``x-reef-release-id``             | optional on a report or a record import that creates a  |
+|                                   | scenario: bind the new scenario to this starting        |
+|                                   | release. On an existing scenario it must name the bound |
+|                                   | starting release, or the request is HTTP 409. To pull a |
 |                                   | specific release, use ``?release_id=`` on the harness   |
-|                                   | manifest or install route.                              |
+|                                   | manifest or install route. On an inference answer, it   |
+|                                   | is the ID of the artifact that answered.                |
 +-----------------------------------+---------------------------------------------------------+
 | ``x-reef-tag-<name>``             | optional on inference: context stored under             |
-|                                   | ``metadata.tags``. The ``release`` tag can select the   |
-|                                   | record's release; see `Client release tags`_ below.     |
+|                                   | ``metadata.tags``; see `Client release tags`_ below.    |
 +-----------------------------------+---------------------------------------------------------+
 | ``x-reef-rollout: 1``             | optional on inference: a call of a rollout that Reef    |
-|                                   | runs itself. It is served from the scenario's           |
-|                                   | release like any other call, but no record is kept, and |
-|                                   | the response keeps its ``training`` block with the      |
-|                                   | runtime load ID that answered. The call must not        |
-|                                   | stream (HTTP 400). Only the service token opens it.     |
+|                                   | runs itself. It is served like any other call, but no   |
+|                                   | record is kept, and the response keeps its ``training`` |
+|                                   | block with the runtime load ID that answered. The call  |
+|                                   | must not stream (HTTP 400). Only the service token      |
+|                                   | opens it.                                               |
 +-----------------------------------+---------------------------------------------------------+
 
 Client release tags
 ~~~~~~~~~~~~~~~~~~~
 
 ``x-reef-tag-release`` identifies the harness release installed by the client.
-Reef uses it as the inference record's ``artifact_ref`` only when all three
-conditions hold:
-
-- The scenario serves files for clients to pull.
-- Its surface has no inference hooks, and it has no training component.
-- The tag names a release in that scenario's catalog.
-
-Otherwise the record names the active release, including when the tag
-is absent or unknown. The tag does not change which release serves inference.
-
-For example, a harness client installed release A before the service published
-B. If these conditions hold, its calls tagged with A are recorded against A;
-an untagged call or a call tagged with an unknown release is recorded against B.
-This tag is separate from ``x-reef-release-id``, which binds a scenario to its
-starting release.
+Reef stores it under ``metadata.tags`` like any other tag, so a processor can
+read which harness release made the call. It does not change which release
+serves inference, and it does not change the record's ``artifact_ref``: the
+record names the release of the artifact that answered. This tag is separate
+from ``x-reef-release-id``, which binds a scenario to its starting release.
 
 Scenario model settings
 -----------------------
 
 ``POST /reef/scenarios`` accepts an optional ``model`` object with ``url``,
-``model``, ``api`` and ``api_key``. It applies only when creating a new
+``model`` and ``api``. Reef calls that endpoint with the deployment's provider
+key (``inference.upstream-api-key``); a model object holds no key, and an
+``api_key`` field is HTTP 400. It applies only when creating a new
 scenario. Existing scenarios retain their settings on repeated creation.
 The creation response carries the scenario's ``model`` view.
 ``POST /reef/scenarios/{scenario}/update`` accepts ``model`` alongside the
 other `scenario settings <#scenario-updates>`__. Send ``model: null`` to restore deployment
-defaults. Responses redact the API key and report ``has_api_key`` instead.
+defaults.
 
 See `Scenario model configuration <../user-guide/scenario-models.rst>`__ for
 protocols, persistence and model bindings used throughout evolution.
@@ -849,11 +836,19 @@ Scenarios
 ---------
 
 A scenario isolates the records, trainer, and release chain for one workload.
-The first inference request or report carrying a new ``x-reef-scenario`` creates
-the scenario using the deployment's configured recipe. Requests never select a
-recipe.
+Create it with ``POST /reef/scenarios`` before you send inference requests to
+it. An inference request never creates a scenario: for an unknown scenario, it
+answers HTTP 404. The first report or imported record carrying a new
+``x-reef-scenario`` also creates the scenario, and a harness install without
+``x-reef-scenario`` creates one with a generated name. Reef creates every scenario with
+the deployment's configured recipe. Requests never select a recipe.
 
 .. code:: bash
+
+   curl -sS -X POST http://127.0.0.1:8900/reef/scenarios \
+     -H "Authorization: Bearer $REEF_TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{"name": "hello-reef"}'
 
    curl -sS -i http://127.0.0.1:8900/v1/chat/completions \
      -H "Authorization: Bearer $REEF_TOKEN" \
@@ -873,8 +868,9 @@ A request can also need to load a scenario when the service already holds
 ``reef.max_loaded_scenarios`` loaded scenarios. If none of them is idle, the
 request returns HTTP 503 with a ``Retry-After`` header.
 
-If the deployment sets ``reef.allow_implicit_scenario_creation: false``, an
-unknown scenario returns HTTP 404 and you create it first:
+If the deployment sets ``reef.allow_implicit_scenario_creation: false``, a
+report, a record import or a harness install for an unknown scenario also
+returns HTTP 404, and you create the scenario first:
 
 +---------------------------------------------+---------------------------------------------+
 | Route                                       | Body and response                           |
@@ -1028,19 +1024,22 @@ Request
 ~~~~~~~
 
 Send the same body you would send to the provider. Reef never touches your
-sampling parameters. 
+sampling parameters, and no artifact adds to the request.
 
-Before calling the model, Reef reads the ref of the scenario's active release
-and builds the request against that release. The stored exchange normally uses
-that frozen ref, even if an update completes mid-request. For a scenario that
-only delivers files to clients, `Client release tags`_ describes when the
-record instead names the client's installed harness release.
+Reef answers the request from the scenario's row in ``served_models``. The
+request's ``model`` selects the row of an artifact served beside the active
+release when it names one; any other ``model`` selects the active row. Reef
+keeps that row for the whole request. It sends the request to the engine at
+the row's URL under the row's model name, and records the release of the row's
+artifact, even if an activation completes mid-request. `Run the services in
+separate processes
+<../user-guide/operate.rst#run-the-services-in-separate-processes>`__ gives the
+status codes of an inference request.
 
-On a weight-serving deployment it adds engine
-bookkeeping keys: ``lora_path`` to address the served adapter and
-``return_meta_info`` so the record proves which weights answered; a body
-naming a different ``lora_path`` is refused. Set ``"stream": true`` and read
-the SSE response for streaming.
+On a weight-serving deployment, the engine handler adds its bookkeeping keys:
+``lora_path`` to address the served adapter and ``return_meta_info`` so the
+record shows which weights answered. It replaces a ``lora_path`` that the body
+names. Set ``"stream": true`` and read the SSE response for streaming.
 
 The receipt identifies the stored record:
 
@@ -1065,14 +1064,9 @@ The record-to-record stage excludes aborted records from sample creation and
 training, including when a report references their IDs directly or retained
 records are replayed after a restart.
 
-On a scenario that serves harness files, every inference response also
-carries ``x-reef-release-id``: the active release when the response is
-written, so an activation during the call shows on the next one. A resident
-``reef-native serve`` process compares it with the release it mounted and
-learns of a new active release on its next model call, with no extra
-request. A weight serving scenario sends no such header, and neither does the
-evaluation route, whose caller runs a candidate and follows no active
-release.
+Every inference response also carries ``x-reef-release-id``: the ID of the
+artifact that answered. It does not report harness releases. A client learns
+of a new harness release from the harness routes (`Harness artifacts`_).
 
 A composite recipe's evaluation calls come through these routes; a recipe of
 one component calls its runtime's endpoint directly, as before composites.
@@ -1082,24 +1076,14 @@ alone, and hands it to the recipe: the rollouts and proposer run candidate
 code, which can then sample the active release but reach no other route. A
 restart issues a new one.
 
-Response
-~~~~~~~~
-
-Reef validates a response before recording it. ``prepare_request`` transforms
-the outgoing payload, and Reef forwards *and records* the transformed payload.
-``verify_response`` checks the provider's answer against the frozen release. On
-failure Reef records nothing and returns the error.
-
 Serving version of a training response
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 For a training scenario, Reef records which engine weights answered. The engine
 reports the ``runtime_load_id`` of the response, or of each generated token
-span when a weight load lands mid-generation. The spans must be contiguous and
-must not return to an earlier version. A training response that reports no
-``runtime_load_id``, or reports inconsistent spans, is a backend contract error
-and returns HTTP 409. A streamed training response must be buffered and
-recorded as a whole, so that its versions can be read.
+span when a weight load lands mid-generation. Reef stores the reported
+``runtime_load_id`` or ``runtime_load_spans`` in the record. It does not refuse
+a response because of its runtime load ID.
 
 Report
 ------
@@ -1665,8 +1649,10 @@ A served artifact answers at its own URL. Send an inference call to
 ``{route}`` is ``chat/completions``, ``responses``, ``messages`` or
 ``messages/count_tokens``. The call needs no ``x-reef-scenario`` header and
 never creates a scenario. Reef records it like a call to ``/v1/{route}``,
-and the record names the release that answered. The artifacts of the active
-release answer at their URLs too, without a serve.
+and the record names the release that answered. A call to ``/v1/{route}``
+whose ``model`` is the ``artifact_id`` of a served artifact is answered by that
+artifact too. An artifact that is not served beside the active release has no
+URL: its calls answer HTTP 404.
 
 A serve appends a ``serve`` record, so the artifact stays served after a
 restart. It changes neither the active release, nor the chain tip, nor a
@@ -1678,8 +1664,8 @@ release, so it refuses the records of a served artifact.
 
 ``POST /reef/scenarios/{scenario}/stop-serving`` with ``{"artifact_id":
 "<id>"}`` ends the serve and appends a ``stop_serving`` record. It answers
-``{scenario, component, artifact_id, release_id}``. An artifact of the
-active release still answers at its URL afterwards.
+``{scenario, component, artifact_id, release_id}``. The artifact's URL
+answers HTTP 404 afterwards.
 
 The runtime must answer each call from the release that the call names.
 The Tinker runtime does, so a Tinker scenario can serve any of its
@@ -2011,32 +1997,32 @@ Status codes
 |        | Authorization header is sent; the two harness pages also    |
 |        | read ``?key=`` (see Request page)                           |
 +--------+-------------------------------------------------------------+
-| 403    | relayed from the upstream provider. Reef issues none of its |
-|        | own: an unaccepted token is 401, and per-scenario           |
-|        | authorization belongs to the gateway in front of Reef.      |
+| 403    | never issued by Reef: an unaccepted token is 401, and       |
+|        | per-scenario authorization belongs to the gateway in front  |
+|        | of Reef.                                                    |
 +--------+-------------------------------------------------------------+
-| 404    | unknown scenario (with implicit creation off, or on         |
-|        | ``POST /reef/train``), unknown release or artifact, unknown |
-|        | adapter, no configured harness recipe, or a scenario that   |
-|        | serves no files                                             |
+| 404    | unknown scenario (on inference, on ``POST /reef/train``,    |
+|        | or with implicit creation off), a scenario that serves no   |
+|        | model, unknown release or artifact, unknown adapter, no     |
+|        | configured harness recipe, or a scenario that serves no     |
+|        | files                                                       |
 +--------+-------------------------------------------------------------+
 | 409    | a base artifact conflicting with the scenario registration, |
 |        | record id resent with different content, an activation or a |
 |        | train-from while a training result waits for its commit, or |
-|        | an engine that reports no serving runtime load ID           |
+|        | an engine that answered under another model name or aborted |
+|        | the request on both attempts                                |
 +--------+-------------------------------------------------------------+
-| 502    | the upstream provider failed on its own account             |
+| 502    | the engine failed or could not be reached; the body carries |
+|        | the engine's status and message                             |
 +--------+-------------------------------------------------------------+
-| 503    | the artifact store is unreachable, the deployment serves no |
-|        | inference (``inference.backend: none``), no loaded scenario |
-|        | is idle at ``reef.max_loaded_scenarios`` (with              |
-|        | ``Retry-After``), or inference attempts kept being aborted  |
-|        | until the retry deadline                                    |
+| 503    | the artifact store is unreachable, no loaded scenario is    |
+|        | idle at ``reef.max_loaded_scenarios`` (with                 |
+|        | ``Retry-After``), ``served_models`` cannot be read, or the  |
+|        | record store does not take an inference record              |
 +--------+-------------------------------------------------------------+
-
-Reef relays upstream 4xx failures with the provider's original message; the
-common client statuses (400, 401, 403, 404, 408, 409, 422, 429) keep their
-status code, and any other upstream 4xx comes back as 400.
+| 504    | the engine did not answer within ``inference.timeout-s``    |
++--------+-------------------------------------------------------------+
 
 Browser consoles
 ----------------
@@ -2082,9 +2068,8 @@ first; ``next_after_sequence`` is null at the end. Each row contains
 ``sequence``, ``agent_record_id``, ``request_type``, ``created_at``,
 ``references``, the recorded ``artifact_ref``, and the payload's ``score``
 field. No record payload or learning classification is included. An inference
-record's ``artifact_ref`` names the release that served the call, except when
-the conditions in `Client release tags`_ select the client's installed harness
-release.
+record's ``artifact_ref`` names the release of the artifact that answered the
+call.
 
 ``GET /reef/scenarios/{scenario}/records/{record_id}`` returns that metadata
 and the stored ``payload``. A missing body returns 404: it may have expired or

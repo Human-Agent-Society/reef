@@ -6,7 +6,7 @@ from reef.core import AgentRecord, RequestType
 from reef.core.artifact_ref import parse_runtime_load_spans
 from reef.core.trajectories import source_record_id, trajectory_reward
 from reef.record2sample.samples import make_multi_turn_policy_trajectory, make_policy_trajectory
-from reef.service.request_service import client_inference_response
+from reef.service.inference_service import client_response
 
 
 def _inference(payload) -> AgentRecord:
@@ -170,9 +170,9 @@ def test_client_response_hides_private_training_tensors() -> None:
         },
     }
 
-    client_response = client_inference_response(response)
+    answered = client_response(response)
 
-    assert "training" not in client_response
+    assert "training" not in answered
     assert response["training"]["rollout_log_probs"] == [-0.25]
 
 

@@ -37,6 +37,7 @@ from reef.evaluation.activation import (
     build_activation_rule,
     scenario_activation_reference,
 )
+from reef.inference.http import InferenceProxyRuntime
 from reef.inference.model_config import ModelConfig
 from reef.observability import ExperimentTracker, NullExperimentTracker
 from reef.observability.commits import ExperimentReportQueue
@@ -395,7 +396,7 @@ class ScenarioRegistry:
                 self.check_creation(scenario)
             # Creating an existing scenario never overwrites its configuration.
             if not create or not exists:
-                candidate = ModelConfig.from_value(value)
+                candidate = ModelConfig.from_value(value, api_key=self.provider_key())
                 self._recipe.with_model_config(candidate)
                 current = self._model_config(scenario)
                 # A validated value is an object or null.
@@ -478,8 +479,14 @@ class ScenarioRegistry:
     def _model_config(self, scenario: str) -> ModelConfig:
         if scenario not in self._model_configs:
             value = self._storage.read_settings(scenario).model_config
-            self._model_configs[scenario] = ModelConfig.from_value(value)
+            self._model_configs[scenario] = ModelConfig.from_value(value, api_key=self.provider_key())
         return self._model_configs[scenario]
+
+    def provider_key(self) -> str | None:
+        """The deployment's provider key, which a scenario's own model is called with: the key of the recipe's
+        provider runtime, or None."""
+        runtime = self._recipe.runtime
+        return runtime.api_key if isinstance(runtime, InferenceProxyRuntime) else None
 
     def apply_stored_settings(self, instance: Scenario) -> None:
         """Select the training mode and the activation rule a person stored for the scenario on a newly built

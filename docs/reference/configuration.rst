@@ -397,7 +397,8 @@ Training in this mode works as follows:
 - A restart continues from the last saved checkpoint, as with an engine.
 
 The deployment serves no inference. ``/v1/chat/completions``,
-``/v1/responses`` and ``/v1/messages`` answer 503 for every scenario. To use a
+``/v1/responses`` and ``/v1/messages`` answer 404 for every scenario,
+because no scenario serves a model. To use a
 trained version, serve its published checkpoint from a separate deployment.
 
 ``reef serve`` refuses the settings that configure an engine or call the
@@ -763,10 +764,10 @@ The HTTP service reads these fields from the ``recipe``, ``reef``,
    reef.console-origins | [] | exact browser console origins allowed to access the HTTP service; disabled by default
    reef.token | the bearer token the service accepts. Use ``tokens: [...]`` to accept several while rotating.
    reef.allow-unauthenticated | false | when true, serve without a token on a ``reef.host`` that other machines can reach. When false, Reef does not start on such an address without a token. A loopback address, such as ``127.0.0.1``, ``::1`` or ``localhost``, needs no token
-   reef.allow-implicit-scenario-creation | true | when false, an unknown scenario is HTTP 404
+   reef.allow-implicit-scenario-creation | true | when false, a report, a record import or a harness install for an unknown scenario is HTTP 404. An inference request never creates a scenario, whatever this setting says
    inference.model-path | a local HF model directory or a repo id, downloaded on start
    inference.upstream-url | the OpenAI-compatible provider, with no ``/v1`` suffix
-   inference.upstream-api-key | its credential. Reef is the only party that sees it.
+   inference.upstream-api-key | its credential. Reef is the only party that sees it. It is the only credential that Reef sends to an engine, also to the endpoint of a scenario's own model
    inference.upstream-model | the model to request upstream
    inference.upstream-api | openai | the provider dialect: ``openai`` for Chat Completions, ``responses`` for OpenAI Responses, or ``anthropic`` for an Anthropic-style endpoint
    inference.url | reserved: every built-in deployment refuses it, because Reef starts or names its engines itself (``inference.model-path``, ``inference.upstream-url`` or ``inference.remote``)
@@ -1120,7 +1121,7 @@ Reef refuses ``batch_size`` and ``batch_policy`` directly under
    evolution.max_steps | 0 | stop automatic evolve steps once this many steps ran, instruction steps included; 0 disables the limit; an instruction from ``POST /reef/train`` still runs past it
    evolution.max_failure_streak | 0 | stop automatic evolve steps after this many consecutive rejected steps, instruction steps included; 0 disables the limit; an instruction from ``POST /reef/train`` still runs while the breaker is open
    evolution.max_model_calls_per_step | 0 | cap the proposer's model calls in one step; 0 disables the limit
-   evolution.multimodal | | reefine only; the gateway Reef relays a scenario's ``/v1/images``, ``/v1/embeddings``, ``/v1/audio/speech`` and ``/v1/decisions`` to, unrecorded, and the agent proposer's trials reach: ``preset`` (``openrouter``, the default, or ``openai-compatible`` for OrcaRouter, LiteLLM, ...), ``url`` (the gateway's address, no ``/v1``; required for ``openai-compatible``) and ``api_key`` (its key; the profile reads ``REEF_MULTIMODAL_API_KEY``, and ``api_key_env`` names a variable instead; empty, the upstream's key when the upstream is the same address). Without a key those routes answer 501
+   evolution.multimodal | | reefine only; the gateway that serves images, embeddings, speech and decisions to the agent proposer and its trials: ``preset`` (``openrouter``, the default, or ``openai-compatible`` for OrcaRouter, LiteLLM, ...), ``url`` (the gateway's address, no ``/v1``; required for ``openai-compatible``) and ``api_key`` (its key; the profile reads ``REEF_MULTIMODAL_API_KEY``, and ``api_key_env`` names a variable instead; empty, the upstream's key when the upstream is the same address). Without a key, the agent's calls to these models answer 501. Reef's HTTP service relays none of these modalities to a scenario's clients
    evolution.proposer_agent | | off unless set (the reefine recipe sets it); a proposer whose ``runs_agent`` is true runs a coding agent under it: ``sandbox`` (``bwrap`` jails it with pasta networking and refuses to start where the host cannot; a cloud sandbox runs it where it reaches the gateway through a tunnel: ``e2b`` with ``e2b_api_key`` (else ``E2B_API_KEY``) and ``e2b_template`` (else ``reef-pi-<version>-rollouts-v1`` with bubblewrap, built on first use) and the ``e2b`` extra, or ``modal`` with the ``evolution.sandbox`` Modal options in this section and the ``modal`` extra; ``none`` runs it unisolated and must be chosen; unset, or ``REEF_PROPOSER_SANDBOX``, jails it where the host can and leaves it off where it cannot), ``timeout_s`` (1800, the whole agent run) and ``trial_timeout_s`` (300, each run of the candidate harness). See the reefine recipe guide
    evolution.executor | local | ``local`` runs rollouts as a plain subprocess; ``sandbox`` uses a local bubblewrap jail; ``e2b`` and ``modal`` create a cloud sandbox per rollout and check provider access, image, binary and namespace support at startup. A cloud sandbox uses remote binaries; Terminus retains its own Harbor execution
    execution.evolution.workers | 1 | fixed worker-group size; CPU auto selects ``uni`` for one and ``mp`` for multiple
@@ -1148,15 +1149,11 @@ The ``inference`` section
 -------------------------
 
 Read by every serving mode. ``inference.timeout-s`` limits one inference
-request. Buffered inference attempts share ``inference.retry-timeout-s``;
-when it is omitted, it follows ``inference.timeout-s``.
+request; an engine that does not answer within it gets a 504.
 
 .. config::
 
    inference.timeout-s | 300.0 | maximum time for one inference request
-   inference.retry-timeout-s | ``inference.timeout-s`` (300.0 by default) | total deadline shared by inference attempts and retry delays
-   inference.retry-initial-s | 0.05 | delay before the first retry
-   inference.retry-max-s | 1.0 | maximum delay between retries
 
 An ``inference.remote`` section runs the engines that ``inference.backend``
 names on a remote inference component instead of this host. The component's
@@ -1656,32 +1653,6 @@ The following names are relative to ``operations/``:
 
    * - Metric
      - Meaning
-   * - ``serve/request/*``
-     - Inference requests after scenario resolution, including admission,
-       backend calls, retries, and record acceptance. Streaming requests remain
-       active until their completion record is accepted; an incomplete or
-       engine-aborted stream, or a cancelled request, counts as failed.
-   * - ``serve/admission/*``
-     - Time acquiring runtime admission. ``active`` is the number waiting for
-       admission; immediate admissions also contribute to count and duration.
-   * - ``evaluate/request/*``, ``evaluate/admission/*``
-     - The same measurements for calls on the evaluation route, a step's
-       rollouts and proposer calls, which keep no record; counted apart so a
-       step does not read as served traffic.
-   * - ``rollout/request/*``, ``rollout/admission/*``
-     - The same measurements for the calls of rollouts that Reef runs
-       itself (``x-reef-rollout``), which keep no record. Their retries,
-       timeouts and version mismatches count under ``rollout/``.
-   * - ``serve/retries_total``, ``serve/timeouts_total``
-     - Additional buffered inference attempts and requests that exhaust the
-       inference retry deadline. Retries do not create extra request counts.
-       Calls on the evaluation route count under ``evaluate/retries_total``
-       and ``evaluate/timeouts_total``.
-   * - ``serve/version_mismatch_total``
-     - Responses rejected by runtime-load-ID verification, including missing
-       engine version information and buffered or deferred streaming responses.
-       This is a counter of observed rejections, not a background drift probe.
-       Calls on the evaluation route count under ``evaluate/version_mismatch_total``.
    * - ``ingest/accepted_total``, ``ingest/duplicates_total``
      - New records appended and identical retries acknowledged by the dispatcher.
        Accepted records include incomplete-stream diagnostics; acceptance does

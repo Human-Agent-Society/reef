@@ -35,7 +35,7 @@ from reef.runtime.deployment import RuntimeRegistry, build_training_component, c
 from reef.runtime.interfaces import InferenceHandler, InferenceRuntime
 from reef.runtime.jobs import TrainingComponent
 from reef.scenario.admission import ScenarioAdmission, ScenarioLimits
-from reef.service.app import InferenceRetryPolicy, create_app
+from reef.service.app import create_app
 from reef.service.artifact_evaluations import ArtifactEvaluations, NewArtifacts
 from reef.service.artifact_imports import ArtifactImports
 from reef.service.deploy.service_config import ServiceConfig, service_owned_keys
@@ -483,11 +483,6 @@ def build_app(
     evaluation workers call it at this service's candidate route.
     """
     record_retention = RecordRetention(max_bytes=settings.agent_record_retention_max_bytes)
-    retry_policy = InferenceRetryPolicy(
-        initial_s=settings.inference_retry_initial_s,
-        max_s=settings.inference_retry_max_s,
-        timeout_s=settings.inference_retry_timeout_s,
-    )
     # A composite's model calls come back to this service, which answers only once the app listens: its local
     # cycles wait for that, so a harness step started by the preload never fails its calls into a skip.
     # Evaluation calls run candidate code, so they get a token of their own that opens the evaluation routes alone,
@@ -522,7 +517,6 @@ def build_app(
             evaluation_tokens=evaluation_token,
             console_origins=settings.console_origins,
             inference_handler=inference_handler,
-            inference_retry_policy=retry_policy,
             close_dispatcher=True,
             record_retention=record_retention,
             open_local_cycles_at=default_served_url(settings.host, settings.port),

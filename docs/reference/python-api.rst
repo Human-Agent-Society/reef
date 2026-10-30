@@ -343,7 +343,7 @@ Embed the service
 
 An application can run the complete Reef service in its own process.
 ``reef.service.assembly.build_app`` makes the dispatcher and the HTTP app from
-a ``ServiceConfig``. The app includes record retention, inference retries,
+a ``ServiceConfig``. The app includes record retention, the inference routes,
 the evaluation token, readiness of local cycles, and cleanup.
 
 .. code:: python
@@ -431,10 +431,11 @@ Harbor tasks of its task stores (see `Task stores`_). ``archive``
 retires the settings and tasks with the records and commits.
 
 ``Recipe.with_model_config(config)`` accepts the concrete ``ModelConfig`` from
-``reef.inference.model_config``. ``ModelConfig.from_value(value)`` validates the
-model override; its ``runtime`` field holds an ``InferenceProxyRuntime``, or
-``None`` for the recipe default. ``view()`` returns the credential-redacted
-API representation. The type holds no file path and performs no file I/O.
+``reef.inference.model_config``. ``ModelConfig.from_value(value, api_key=...)``
+validates the model override (``url``, ``model`` and ``api``); ``api_key`` is
+the deployment's provider key, which the override's engine is called with. Its
+``runtime`` field holds an ``InferenceProxyRuntime``, or ``None`` for the
+recipe default. ``view()`` returns the API representation without the key. The type holds no file path and performs no file I/O.
 It replaces ``ScenarioModelConfig`` and the former read-only configuration
 protocol; there is no separate configuration collection class.
 
@@ -1713,11 +1714,12 @@ and ``CordisRecipe`` calls
 ``None`` means the capability is absent, and bare ``Surface()`` is the
 complete record-only configuration. A one-component surface serves a flat
 release; a surface with several components serves a release with one
-directory per component, and ``Surface.loader``, ``inference``, and ``files``
-route to their components.
+directory per component, and ``Surface.loader`` and ``files`` route to their
+components. No surface changes an inference request: the inference routes
+forward each request to the engine that ``served_models`` names.
 
 Migration: code written before components keeps working.
-``Surface(loader=..., inference=..., files=...)`` builds a one-component
+``Surface(loader=..., files=...)`` builds a one-component
 surface whose component is named ``release``; beside one component in
 ``components``, those keywords replace that component's fields, as
 ``dataclasses.replace`` does. A surface of several components refuses them:
@@ -1731,17 +1733,11 @@ set the capabilities on each ``ComponentSurface``.
 +---------------+-----------------------------+----------------------------------------------+
 | ``loader``    | ``ArtifactLoader | None``   | make published releases servable             |
 +---------------+-----------------------------+----------------------------------------------+
-| ``inference`` | ``InferenceHooks | None``   | prepare provider requests, verify responses  |
-+---------------+-----------------------------+----------------------------------------------+
 | ``files``     | ``FileTree | None``         | back client pulls                            |
 +---------------+-----------------------------+----------------------------------------------+
 
 ``loader.activate(artifact, runtime, source=...)`` makes a version servable
-once it is published, and returns the runtime load ID that serves it. One
-optional interface extends the hooks, and the scenario checks for it with
-``isinstance``: ``LeasingInferenceHooks`` adds ``inference.begin_request(artifact, path)``,
-returning a lease the service releases when the attempt ends, so serving state
-such as a resident adapter stays protected for its duration.
+once it is published, and returns the runtime load ID that serves it.
 
 A surface does not decide which records train, compute candidates, execute a
 training job, or mutate the release chain. Native streaming
@@ -1770,6 +1766,10 @@ Neither inherits from the other, and no trainer holds a serving engine.
   kind of the weights that the runtime serves from a release: ``model``, the
   default, for full weights, or ``model_adapter`` for a LoRA adapter on its
   base model. A runtime that serves adapters must override it.
+  ``served_artifact(artifact_id, scenario)`` gives the engine's HTTP(S) URL
+  and the model name (``served_model_name(scenario)``) that control writes to
+  ``served_models`` for the scenario. It returns None when the engine has no
+  such URL; the scenario then serves no model on the inference routes.
   ``artifact_model(artifact)`` is the ``PolicyModel`` that the runtime serves
   for an artifact on request, without loading it, or None, the default, for a
   runtime that serves only its loaded artifact. A runtime whose handler answers

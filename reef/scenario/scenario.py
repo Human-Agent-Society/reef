@@ -48,25 +48,8 @@ class Scenario:
         experiment_observer: CommitExperimentObserver | None = None,
     ) -> None:
         self.operations = OperationMetrics(
-            (
-                "serve/request",
-                "serve/admission",
-                "evaluate/request",
-                "evaluate/admission",
-                "rollout/request",
-                "rollout/admission",
-                "ingest/write",
-            ),
+            ("ingest/write",),
             counters=(
-                "serve/retries_total",
-                "serve/version_mismatch_total",
-                "serve/timeouts_total",
-                "evaluate/retries_total",
-                "evaluate/version_mismatch_total",
-                "evaluate/timeouts_total",
-                "rollout/retries_total",
-                "rollout/version_mismatch_total",
-                "rollout/timeouts_total",
                 "ingest/accepted_total",
                 "ingest/duplicates_total",
                 "ingest/rejected_report_total",
@@ -296,6 +279,12 @@ class Scenario:
     def stop_serving(self, artifact_id: str) -> ServedBesideArtifact:
         """Stop serving ``artifact_id`` beside the active release; see :meth:`ScenarioCommitter.stop_serving`."""
         return self._committer.stop_serving(artifact_id)
+
+    def served_beside(self) -> Mapping[str, ServedBesideArtifact]:
+        """The artifacts that the scenario serves beside its active release, by ``artifact_id``; see
+        :meth:`ScenarioReleases.served_beside`."""
+        with self.release_queries.publication_lock:
+            return self.release_queries.served_beside(self._committer.step, self._committer.component_names())
 
     def served_release(self, artifact_id: str) -> ArtifactRef:
         """The release that answers a call to the URL of ``artifact_id``.

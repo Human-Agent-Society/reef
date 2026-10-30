@@ -22,7 +22,7 @@ from reef.pipeline_context import PipelineContext
 from reef.recipe.errors import RecipeConfigError
 from reef.runtime.interfaces import TrainingMethod
 from reef.storage.sqlite import SQLiteRecordStore
-from reef.surface import Surface, WeightInferenceHooks, WeightLoader
+from reef.surface import Surface, WeightLoader
 from reef.train.algos.schedule import StepScheduling
 from reef.train.pipeline import TrainingPipeline
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
@@ -346,7 +346,6 @@ def test_recipe_uses_weight_surface_and_builds_a_trainer() -> None:
     surface = recipe.build_surface("s")
     assert type(surface) is Surface
     assert isinstance(surface.loader, WeightLoader)
-    assert isinstance(surface.inference, WeightInferenceHooks)
     trainer = recipe.build("s", SQLiteRecordStore())
     assert trainer.job_loop is not None
     assert trainer.pipeline.context.job_parameters["trajectory"]["method"]["objective"] == "openclawrl"

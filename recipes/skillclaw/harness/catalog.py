@@ -30,10 +30,10 @@ from typing import Any
 import yaml
 
 from reef.core.errors import ReefError
-from reef.surface.skills import RequestSkillLayer
+from reef.surface.skills import SkillLayer
 
 
-class SkillCatalogModule(RequestSkillLayer):
+class SkillCatalogModule(SkillLayer):
     """The LLM-read layer for a skill pool: many skills, catalog-injected."""
 
     layer = "pi-agent"
@@ -66,27 +66,6 @@ class SkillCatalogModule(RequestSkillLayer):
         for name in sorted(directories):
             if f"{prefix}{name}/{self.skill_filename}" not in files:
                 raise ReefError(f"{self.layer}/{prefix}{name}/ must contain {self.skill_filename}")
-
-    def prepare_request(self, files: Mapping[str, str], path: str, payload: dict[str, Any]) -> dict[str, Any]:
-        text = self.served_text(files)
-        if text is None:
-            return payload
-        if path == "/v1/messages":
-            system = payload.get("system")
-            if system is None:
-                return {**payload, "system": text}
-            if isinstance(system, str):
-                return {**payload, "system": f"{system}\n\n{text}"}
-            return {**payload, "system": [*system, {"type": "text", "text": text}]}
-        messages = payload.get("messages")
-        if not isinstance(messages, list):
-            return payload
-        for index, message in enumerate(messages):
-            if isinstance(message, Mapping) and message.get("role") == "system":
-                existing = _flatten_content(message.get("content"))
-                patched = {**message, "content": f"{existing}\n\n{text}"}
-                return {**payload, "messages": [*messages[:index], patched, *messages[index + 1 :]]}
-        return {**payload, "messages": [{"role": "system", "content": text}, *messages]}
 
     def served_text(self, files: Mapping[str, str]) -> str | None:
         """The complete injected section for this tree, or None when empty."""

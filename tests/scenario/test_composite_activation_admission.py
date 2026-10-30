@@ -26,7 +26,7 @@ from reef.dispatcher import Dispatcher
 from reef.dispatcher.errors import local_error_source
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.surface import ArtifactLayout, ComponentSurface, Surface, TextFileTree
-from reef.surface.weights import WeightInferenceHooks, WeightLoader
+from reef.surface.weights import WeightLoader
 
 
 @dataclass(frozen=True)
@@ -36,7 +36,7 @@ class _LoadedRecipe(_TwoTrainerRecipe):
     def build_surface(self, scenario: str) -> Surface:
         return Surface(
             components={
-                WEIGHTS: ComponentSurface(loader=WeightLoader(), inference=WeightInferenceHooks()),
+                WEIGHTS: ComponentSurface(loader=WeightLoader()),
                 HARNESS: ComponentSurface(files=TextFileTree()),
             }
         )

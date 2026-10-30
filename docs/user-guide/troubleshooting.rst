@@ -25,41 +25,36 @@ Requests
 --------
 
 An inference request reaches Reef on ``/v1/chat/completions``, ``/v1/responses``
-or ``/v1/messages``; all three take the provider's own request body.
+or ``/v1/messages``; all three take the provider's own request body. Reef
+answers it from the scenario's row in ``served_models``, as `Run the services in
+separate processes <operate.rst#run-the-services-in-separate-processes>`__
+describes.
 
 **401 invalid service token.** The ``Authorization: Bearer`` value (or ``x-api-key``, when no Authorization header is sent) is not one of ``reef.token`` / ``reef.tokens``. An unset ``${REEF_TOKEN}`` in the config becomes an empty entry, which is dropped; a deployment with no tokens at all accepts every request.
 
 **400 missing or empty x-reef-scenario.** Every inference, report, and harness read needs the header.
 
-**404 unknown scenario.** The deployment sets ``allow_implicit_scenario_creation: false`` and the scenario has not been created; ``POST /reef/scenarios`` creates it. With implicit creation on, the same typo silently creates a second scenario instead: check ``GET /reef/scenarios`` when traffic seems to vanish. ``POST /reef/train`` answers 404 with either setting and creates nothing.
+**404 unknown scenario, or a scenario that serves no model.** An inference request never creates a scenario. Create it first with ``POST /reef/scenarios`` or a harness install, and check the name with ``GET /reef/scenarios``. A scenario serves no model when its runtime has no engine that the inference routes can reach, for example with ``inference.backend: none``. A report answers 404 for an unknown scenario only when the deployment sets ``allow_implicit_scenario_creation: false``. With implicit creation on, a typo in a report's scenario silently creates a second scenario instead. ``POST /reef/train`` answers 404 with either setting and creates nothing.
 
-**409 on an inference request.** Either the ``x-reef-release-id`` header names a version that conflicts with the scenario's binding, or, on a training deployment, the engine answered with a runtime load ID other than the one frozen for the request. The second case is a backend contract violation and should not happen with the bundled stack; ``/reef/status`` shows the current runtime load ID.
+**409 on an inference request.** The engine answered under another model name, or aborted the request, on two attempts. Reef reads the scenario's row again before the second attempt, so a single change of the served model does not cause it. A repeated 409 means that the engine does not serve the model name that the row names. Check the model names that the engine serves.
 
-**A streaming request is refused on a training scenario.** Streaming through a training deployment requires the token-capturing backend (``inference_handler_factory`` set to the SGLang chat backend, as in the bundled configs); the plain HTTP proxy backend cannot stream there.
+**502 the engine failed.** The engine returned an error status or could not be reached. The response body carries the engine's status and message; read it. For a 4xx status, the request body is usually the problem.
 
-**The provider's error came back as 400.** Provider 4xx responses are relayed with the provider's message; read it, the request body is usually the problem. A provider 5xx becomes 502.
-
-**503 this deployment runs no inference engine.** The deployment sets
-``inference.backend: none``, so it trains without an engine and serves no
-requests. This is expected. Serve a published checkpoint from a separate
+**404 on a deployment that runs no inference engine.** The deployment sets
+``inference.backend: none``, so it trains without an engine and its scenarios
+serve no model. This is expected. Serve a published checkpoint from a separate
 deployment, or select an engine with ``inference.backend``. See `Train without
 an inference engine
 <../reference/configuration.rst#train-without-an-inference-engine>`__.
 
-**503 inference retry deadline exceeded (300s).** Buffered inference exhausted
-``inference.retry-timeout-s``. It follows ``inference.timeout-s`` when not set
-separately, and both default to 300 seconds. If one valid generation can take
-longer—for example, a Designer call against a slow local model—raise the
+**504 the engine did not answer in time.** One inference took longer than
+``inference.timeout-s`` (300 seconds by default). If one valid generation can
+take longer—for example, a Designer call against a slow local model—raise the
 request timeout:
 
 .. code:: bash
 
    reef serve ... --inference.timeout-s 1800
-
-If ``inference.retry-timeout-s`` is explicitly configured, make sure it is
-also long enough. ``inference.retry-initial-s`` and
-``inference.retry-max-s`` control only the delay between attempts; increasing
-them does not give one generation more time.
 
 Reports and training
 --------------------

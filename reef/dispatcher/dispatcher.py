@@ -272,6 +272,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance):
         The method holds the scenario's lock, so no accept or commit runs
         meanwhile. It does these steps:
 
+        - Its ``served_models`` rows go, so the inference service answers it 404.
         - The workers drop the scenario, and a training job it runs is cancelled.
         - The loaded instance closes.
         - The storage archives the records, the commits and the settings.
@@ -285,6 +286,9 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance):
         with self.record_retention_lock, self.registry.lock_for(scenario):
             if not self.registry.has(scenario):
                 raise UnknownScenario(f"unknown scenario {scenario!r}")
+            # The inference service stops answering the scenario first, so no record reaches the archived store.
+            if self.publisher is not None:
+                self.publisher.withdraw(scenario)
             dropped = self.registry.remove(scenario)
             self.local_workers.remove(scenario)
             self.errors.forget(scenario)

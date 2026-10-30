@@ -28,7 +28,8 @@ from reef.service.artifact_evaluations import LOCAL_ROLLOUT_WORKERS
 from reef.service.assembly import build_app, build_dispatcher, open_scenario_storage, open_service_coordination
 from reef.service.auth import create_authentication_middleware
 from reef.service.deploy.service_config import ServiceConfig
-from reef.service.inference_service import build_inference_app
+from reef.service.deploy.serving import inference_handler_factory_for
+from reef.service.inference_service import ConfiguredEngineClients, build_inference_app
 from reef.storage.coordination import instance_id
 
 
@@ -68,9 +69,17 @@ def build_component_app(
             coordination.close()
             raise
         try:
+            # The engines are reached with the deployment's handler type, as the runtimes of control reach them.
             app = build_inference_app(
                 coordination.served_models,
                 storage,
+                ConfiguredEngineClients(
+                    inference_handler_factory_for(settings.inference_handler_factory),
+                    settings.inference_handler_config,
+                    model_path=settings.model_path or "",
+                    timeout_seconds=settings.inference_timeout_s,
+                    api_key=settings.upstream_api_key or None,
+                ),
                 tokens=settings.tokens,
                 timeout_seconds=settings.inference_timeout_s,
             )

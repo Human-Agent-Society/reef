@@ -431,7 +431,7 @@ def test_exclusive_state_dir_and_model_validation(component, config, inference, 
     (tmp_path / "other" / MANIFEST).unlink()
     (tmp_path / "other" / "weights.bin").write_bytes(b"not a manifest")
     with pytest.raises(ValueError, match="missing"):
-        inference.snapshot(Artifact.local(tmp_path / "other"))
+        inference.sampler_path(Artifact.local(tmp_path / "other"))
     with pytest.raises(ValueError, match="missing"):
         component.import_start(tmp_path / "other")
 
@@ -599,6 +599,8 @@ def test_exact_chat_tokens_and_buffered_sse(inference, client, tmp_path):
         "chat_template_kwargs": {"enable_thinking": False},
     }
     handler = inference.inference_handler
+    # The inference service addresses each request to the row's model name: the active sampler.
+    request = handler.address_model(request, inference.served_model_name("s"))
     response = asyncio.run(handler.inference(artifact, "/v1/chat/completions", request))
     assert response["training"]["tokens"] == [101, 102, 201, 202]
     assert response["training"]["rollout_log_probs"] == [-0.2, -0.3]
@@ -649,22 +651,19 @@ def test_activation_serves_the_new_sampler_and_freezes_older_releases(component,
     published = Artifact.local(Path(checkpoint.release_path))
     selected = inference.activate_checkpoint(published)
     assert inference.current_runtime_load_id() == selected != first
-    # An in-flight request on the older release keeps its sampler and load.
-    assert inference.snapshot(base) == ("tinker://base/sampler", first)
-    assert inference.snapshot(published) == ("tinker://update-1/sampler", selected)
+    # The served row names the active sampler; a request under an older sampler's name keeps that sampler's load.
+    assert inference.served_model_name("s") == "tinker://update-1/sampler"
+    assert inference.sampler_load("tinker://base/sampler") == ("tinker://base/sampler", first)
+    assert inference.sampler_load("tinker://update-1/sampler") == ("tinker://update-1/sampler", selected)
     # Each release's model is the base with that release's sampler, whichever release is served.
     assert inference.artifact_model(published) == PolicyModel(MODEL, "tinker://update-1/sampler")
     assert inference.artifact_model(base) == PolicyModel(MODEL, "tinker://base/sampler")
     rollback = Artifact.local(base.local_path)
     latest = inference.activate_checkpoint(rollback)
     assert int(first.split(":")[-1]) < int(selected.split(":")[-1]) < int(latest.split(":")[-1])
-    assert inference.snapshot(base)[1] == first
-    assert inference.snapshot(published)[1] == selected
-    assert inference.snapshot(rollback)[1] == latest
+    assert inference.sampler_load("tinker://base/sampler")[1] == latest == inference.current_runtime_load_id()
+    assert inference.sampler_load("tinker://update-1/sampler")[1] == selected
     assert inference.activate_checkpoint(rollback) == latest
-    # A release another component minted with the same weights is never activated; it serves the active load.
-    carried = Artifact.local(base.local_path)
-    assert inference.snapshot(carried)[1] == latest == inference.current_runtime_load_id()
 
 
 # -- Deployment
@@ -825,11 +824,15 @@ def test_scenario_commits_recovers_activates_and_trains_from_remote_checkpoint(t
     try:
         scenario = first.get_or_create_scenario("math")
         base = scenario.current_artifact_ref().release_id
+        handler = inference.inference_handler
+        # As the inference service does: the request names the row's model, the sampler that serves now.
         response = asyncio.run(
-            inference.inference_handler.inference(
+            handler.inference(
                 scenario.release_queries.artifact_for_version(base),
                 "/v1/chat/completions",
-                {"messages": [{"role": "user", "content": "hello"}]},
+                handler.address_model(
+                    {"messages": [{"role": "user", "content": "hello"}]}, inference.served_model_name("math")
+                ),
             )
         )
         first.accept_record(
@@ -849,7 +852,8 @@ def test_scenario_commits_recovers_activates_and_trains_from_remote_checkpoint(t
                 agent_record_id="r1",
             )
         )
-        deadline = time.monotonic() + 10
+        # The samples service, the jobs queue and the training worker each take a turn: wait longer.
+        deadline = time.monotonic() + 30
         # Submission, the checkpoint's publication and the job's end each commit a step.
         while (loop_state(scenario).finished_jobs < 1) and time.monotonic() < deadline:
             time.sleep(0.01)
@@ -857,9 +861,8 @@ def test_scenario_commits_recovers_activates_and_trains_from_remote_checkpoint(t
         assert state.finished_jobs == 1 and state.job is None, first.build_training_status()
         published = scenario.current_artifact_ref()
         assert published.release_id != base
-        artifact = scenario.release_queries.artifact_for_version(published.release_id)
-        assert inference.snapshot(artifact)[0] == "tinker://update-1/sampler"
-        assert inference.current_runtime_load_id() == inference.snapshot(artifact)[1]
+        assert inference.served_model_name("math") == "tinker://update-1/sampler"
+        assert inference.current_runtime_load_id() == inference.sampler_load("tinker://update-1/sampler")[1]
         assert TinkerCheckpoint.read(Path(state.start)).state_path == "tinker://update-1/state"
         step = scenario.scenario_step
     finally:
@@ -872,17 +875,15 @@ def test_scenario_commits_recovers_activates_and_trains_from_remote_checkpoint(t
         scenario = second.get_or_create_scenario("math")
         assert scenario.scenario_step == step
         assert loop_state(scenario) == state
-        artifact = scenario.release_queries.artifact_for_version(published.release_id)
-        assert inference.snapshot(artifact)[1] == inference.current_runtime_load_id()
+        assert inference.sampler_load(inference.served_model_name("math"))[1] == inference.current_runtime_load_id()
         # The creation carried the base artifact forward: its artifact_id is the repository base's release ID.
         base_artifact = scenario.release_queries.artifact_for_version(base).artifact_id
         assert base_artifact == scenario.repository.backend.resolve_release("base").release_id != base
         scenario.activate(base_artifact)
         scenario.train_from(base_artifact)
         assert scenario.scenario_step == step + 2
-        current = scenario.release_queries.artifact_for_version(scenario.current_artifact_ref().release_id)
-        assert current.ref.release_id == base
-        assert inference.snapshot(current)[0] == UNTRAINED.sampler_path
+        assert scenario.current_artifact_ref().release_id == base
+        assert inference.served_model_name("math") == UNTRAINED.sampler_path
         # The base artifact imports as any release: the next job starts from the untrained adapter.
         assert TinkerCheckpoint.read(Path(loop_state(scenario).start)) == UNTRAINED
     finally:

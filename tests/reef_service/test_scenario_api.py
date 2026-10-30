@@ -172,7 +172,8 @@ def test_scenario_limits_answer_409_and_503_over_http(tmp_path) -> None:
             assert (await client.post("/reef/scenarios", json={"name": "a"})).status == 201
             busy = dispatcher.get_or_create_scenario("a")
             assert busy is not None
-            measurement = busy.operations.start("serve/request")
+            # A running record write keeps the loaded scenario busy, so it cannot be unloaded.
+            measurement = busy.operations.start("ingest/write")
             full = await client.post("/reef/scenarios", json={"name": "b"})
             assert full.status == 503
             assert full.headers["Retry-After"] == "30"

@@ -7,14 +7,12 @@ from reef.artifact.artifact import Artifact, ArtifactValidator
 from reef.core.artifact_ref import RuntimeLoadSpan, parse_runtime_load_spans
 from reef.core.errors import ReefError
 from reef.core.evaluation import ArtifactKind
-from reef.surface.adapter import adapter_name
 from reef.surface.base import (
     AcceptAnyArtifact,
     AdapterWeightRuntime,
     ArtifactLayout,
     ArtifactLoader,
     ComponentSurface,
-    InferenceHooks,
     ServingRuntime,
     Surface,
     WeightRuntime,
@@ -73,54 +71,6 @@ def scenario_adapter_version(scenario: str, runtime: ServingRuntime | None) -> s
     return runtime.serving_adapter_runtime_load_id(scenario) if isinstance(runtime, AdapterWeightRuntime) else None
 
 
-class WeightInferenceHooks(InferenceHooks):
-    """Address weight-backed requests to the adapter that serves them.
-
-    Without ``scenario``, requests name no adapter: the runtime serves full
-    weights. With ``scenario``, ``runtime`` serves one adapter per scenario,
-    and each request names ``adapter_name(scenario, runtime_load_id)`` for the
-    version ``runtime`` serves the scenario. A scenario the runtime serves no
-    adapter for samples the base model. The request service checks the version
-    a durable training response reports, so these hooks verify no response
-    themselves.
-    """
-
-    def __init__(self, *, scenario: str | None = None, runtime: AdapterWeightRuntime | None = None) -> None:
-        if (scenario is None) != (runtime is None):
-            raise ValueError("per-scenario adapters need both the scenario and the runtime that serves them")
-        self._scenario = scenario
-        self._runtime = runtime
-
-    def prepare_request(self, artifact: Artifact, path: str, payload: dict[str, Any]) -> dict[str, Any]:
-        return self._address_adapter(payload, self._served_adapter(artifact))
-
-    def _served_adapter(self, artifact: Artifact) -> str | None:
-        if self._scenario is None:
-            return None
-        version = scenario_adapter_version(self._scenario, self._runtime)
-        # A scenario that serves no adapter samples the base model, as the base artifact does.
-        return None if version is None else adapter_name(self._scenario, version)
-
-    def _address_adapter(self, payload: dict[str, Any], served: str | None) -> dict[str, Any]:
-        """Name the served adapter, refusing a request that names another one."""
-        requested = payload.get("lora_path")
-        if served is None:
-            if requested is not None and self._scenario is not None:
-                raise ReefError(
-                    f"scenario {self._scenario!r} has published no adapter yet; "
-                    f"the request asked for lora_path {requested!r}"
-                )
-            return payload
-        if requested is not None and requested != served:
-            raise ReefError(
-                f"this deployment serves adapter {served!r}; the request asked for lora_path {requested!r}"
-            )
-        return {**payload, "lora_path": served}
-
-    def verify_response(self, artifact: Artifact, path: str, response: Mapping[str, Any]) -> None:
-        return
-
-
 #: The component name a weight surface binds.
 WEIGHTS_COMPONENT = "weights"
 
@@ -148,7 +98,6 @@ def create_weight_surface(
             WEIGHTS_COMPONENT: ComponentSurface(
                 validator=AcceptAnyArtifact() if validator is None else validator,
                 loader=WeightLoader(scenario),
-                inference=WeightInferenceHooks(scenario=scenario, runtime=runtime),
                 kind=kind,
                 layout=layout,
             )

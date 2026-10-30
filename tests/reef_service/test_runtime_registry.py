@@ -114,6 +114,11 @@ def test_http_app_routes_scenarios_to_runtime_specific_inference_services(tmp_pa
                 self.recipe = recipe
 
             @property
+            def model_path(self) -> str:
+                # A served model name: control writes a scenario's served_models row only for a named model.
+                return f"{self.recipe}-model"
+
+            @property
             def inference_handler(self) -> InferenceHandler:
                 class _Backend(InferenceHandler):
                     async def inference(self, artifact, path, payload):
@@ -161,7 +166,9 @@ def test_http_app_routes_scenarios_to_runtime_specific_inference_services(tmp_pa
 
 @pytest.mark.unit
 @pytest.mark.parametrize("path", ["/v1/chat/completions", "/v1/responses", "/v1/messages"])
-def test_a_deployment_without_an_inference_engine_answers_inference_with_503(tmp_path, path) -> None:
+def test_a_deployment_without_an_inference_engine_serves_no_model(tmp_path, path) -> None:
+    """The ``none`` runtime has no HTTP engine address, so control writes no served_models row: every call is 404."""
+
     async def run() -> None:
         runtime = RuntimeRegistry().build({"type": "none"}, model_path="model")
         initial = tmp_path / "initial"
@@ -176,8 +183,8 @@ def test_a_deployment_without_an_inference_engine_answers_inference_with_503(tmp
         await client.start_server()
         try:
             response = await client.post(path, headers={"x-reef-scenario": "roleplay"}, json={"messages": []})
-            assert response.status == 503
-            assert "inference.backend: none" in await response.text()
+            assert response.status == 404, await response.text()
+            assert "scenario 'roleplay' serves no model 'active'" in await response.text()
         finally:
             await client.close()
 

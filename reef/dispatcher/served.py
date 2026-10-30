@@ -21,6 +21,7 @@ from abc import ABC, abstractmethod
 
 from reef.core.served_models import ACTIVE, ScenarioModel, ScheduledStop, ServedArtifact
 from reef.execution.workers import ServiceWorker
+from reef.runtime.interfaces import EngineClients, InferenceHandler
 from reef.scenario.registry import ScenarioRegistry
 from reef.scenario.scenario import Scenario
 from reef.storage.control_lease import ControlLease, ControlLeaseState
@@ -105,6 +106,8 @@ class ServedModelsPublisher(ServiceWorker):
         self.interval_seconds = interval_seconds
         #: Serializes the writes of a commit and of a round.
         self.lock = threading.Lock()
+        #: The handler of the runtime that serves each row's engine, by URL, for the inference routes of this process.
+        self.engines: dict[str, InferenceHandler] = {}
         self.stopped = threading.Event()
         self.thread: threading.Thread | None = None
 
@@ -133,19 +136,38 @@ class ServedModelsPublisher(ServiceWorker):
             self.stopped.wait(self.interval_seconds)
 
     def desired(self, scenario: str) -> dict[str, ServedArtifact]:
-        """The rows that ``scenario`` should have now, by name; empty when it is not loaded here."""
+        """The rows that ``scenario`` should have now, by name; empty when it is not loaded here or serves nothing.
+
+        ``active`` is the artifact that the runtime serves: the active artifact of the weights component (the
+        weight trainer's component, or the only component), or, for a scenario whose model is no Reef artifact,
+        such as a provider's, the active release. Each artifact served beside it (#997) gets a row under its own
+        ``artifact_id``: a weights artifact with the runtime's value for it, any other artifact with the active
+        model, which answers the calls of that artifact's candidate. Each component's active artifact also has a
+        row under its ``artifact_id`` with the active model, so it answers at its own URL.
+        """
         current = self.registry.get_loaded(scenario)
         if current is None or current.runtime is None:
             return {}
+        runtime = current.runtime
         status = current.artifact_status()
-        # The runtime serves the weights: the component of the weight trainer, or the only component.
         weights = [item.component for item in current.trainers if item.trainer.job_loop is not None]
-        names = weights or (list(status) if len(status) == 1 else [])
-        artifact_id = status[names[0]]["active"] if names else None
-        if artifact_id is None:
+        component = weights[0] if weights else (next(iter(status)) if len(status) == 1 else None)
+        active_id = status[component]["active"] if component is not None else None
+        if active_id is None:
+            active_id = current.current_artifact_ref().release_id
+        active = runtime.served_artifact(active_id, scenario)
+        if active is None:
             return {}
-        served = current.runtime.served_artifact(artifact_id, scenario)
-        return {} if served is None else {ACTIVE: served}
+        rows = {ACTIVE: active}
+        # Each component's active artifact also answers at its own URL (#997), with the active model.
+        for component_status in status.values():
+            if component_status["active"] is not None:
+                rows[component_status["active"]] = active
+        for artifact_id, beside in current.served_beside().items():
+            served = runtime.served_artifact(artifact_id, scenario) if beside.component == component else active
+            if served is not None:
+                rows[artifact_id] = served
+        return rows
 
     def publish(self, current: Scenario, *, now: float | None = None) -> None:
         """Write the rows of ``current`` now, as an activation does in the same step as its commit, so a request
@@ -159,6 +181,10 @@ class ServedModelsPublisher(ServiceWorker):
         """Write the difference between ``current``'s rows and what it serves; the caller holds ``lock``."""
         table = self.coordination.served_models
         wanted = self.desired(current.name)
+        if current.runtime is not None:
+            # In one process, the inference routes reach each row's engine through the runtime that serves it.
+            for served in wanted.values():
+                self.engines[served.url] = current.runtime.inference_handler
         present = table.read_scenario(current.name)
         for name in sorted(set(present) | set(wanted)):
             old, new = present.get(name), wanted.get(name)
@@ -173,6 +199,21 @@ class ServedModelsPublisher(ServiceWorker):
                 table.schedule_stop(
                     ScheduledStop(old, moment + self.stop_delay_seconds), control_lease_number=self.lease_number
                 )
+
+    def withdraw(self, scenario: str, *, now: float | None = None) -> None:
+        """Remove every row of ``scenario``, which is deleted, so the inference service answers it 404; each removed
+        value stops after the stop delay, as a replaced one does."""
+        with self.lock:
+            if not self.held:
+                return
+            moment = time.time() if now is None else now
+            table = self.coordination.served_models
+            for name, old in table.read_scenario(scenario).items():
+                table.remove(ScenarioModel(scenario, name), control_lease_number=self.lease_number)
+                if not table.is_referenced(old):
+                    table.schedule_stop(
+                        ScheduledStop(old, moment + self.stop_delay_seconds), control_lease_number=self.lease_number
+                    )
 
     def run_once(self, *, now: float | None = None) -> bool:
         """One round: extend the lease, write the rows of every loaded scenario that a commit has not written yet,
@@ -196,4 +237,22 @@ class ServedModelsPublisher(ServiceWorker):
         return True
 
 
-__all__ = ["CACHE_SECONDS", "ControlInstance", "ServedModelsPublisher", "wait_for_control_lease"]
+class PublishedEngines(EngineClients):
+    """The engines of the runtimes that this control process serves with, by the URL that ``served_models`` names.
+
+    Values: ``publisher`` keeps the handler of each published row's runtime. Purpose: in one process, the inference
+    routes reach each row's engine through it.
+    """
+
+    def __init__(self, publisher: ServedModelsPublisher) -> None:
+        self.publisher = publisher
+
+    def handler(self, served: ServedArtifact) -> InferenceHandler:
+        with self.publisher.lock:
+            found = self.publisher.engines.get(served.url)
+        if found is None:
+            raise LookupError(f"no engine of this process serves {served.url}")
+        return found
+
+
+__all__ = ["CACHE_SECONDS", "ControlInstance", "PublishedEngines", "ServedModelsPublisher", "wait_for_control_lease"]

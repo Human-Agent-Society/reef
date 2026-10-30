@@ -19,7 +19,7 @@ Start the bundled profile with an OpenAI-compatible endpoint:
 For an OpenAI Responses or Anthropic endpoint, add
 ``--inference.upstream-api responses`` or ``--inference.upstream-api anthropic``.
 The last line, an OpenRouter key (or ``REEF_MULTIMODAL_API_KEY``), gives the
-harness image, speech, embedding and decision models (see
+agent proposer image, speech, embedding and decision models (see
 `Images, speech, embeddings and decisions`_); leave it out to go without them,
 or when the upstream is OpenRouter.
 
@@ -381,13 +381,10 @@ Images, speech, embeddings and decisions
 ----------------------------------------
 
 ``evolution.multimodal`` names one gateway that serves these modalities behind
-a single key. Reef relays a scenario's ``/v1/images``, ``/v1/embeddings``,
-``/v1/audio/speech`` and ``/v1/decisions`` to it with the key, the way the
-upstream serves chat: an extension calls them at ``REEF_SERVICE_URL`` with the
-scenario and token headers, in the provider's own format, and holds no provider
-key. Nothing is recorded, so these calls are not learning signal. The agent
-proposer's trials reach the same gateway, so an extension it proves in a trial
-calls what the harness will call.
+a single key. The agent proposer and its trials reach it through their
+loopback gateway (see above), in the provider's own format, and hold no
+provider key. Reef's HTTP service does not relay these modalities: a
+scenario's clients call only the chat model routes.
 
 .. code:: yaml
 
@@ -403,7 +400,7 @@ key; the profile sets it to ``${REEF_MULTIMODAL_API_KEY}``, and
 Empty, the upstream key serves when the upstream is the same address, so a
 deployment that chats through OpenRouter needs nothing more. Without a key,
 or for a route the preset does not serve (``openai-compatible`` has no
-decisions), those routes answer 501. Recipes other than reefine offer none.
+decisions), the agent's call answers 501. Recipes other than reefine offer none.
 
 The health floor
 ----------------
