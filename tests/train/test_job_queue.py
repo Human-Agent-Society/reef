@@ -13,7 +13,8 @@ from tests.support._trajectories import policy_trajectory
 from reef.artifact import BaseArtifactSource
 from reef.core.job_data import JobData
 from reef.runtime.jobs import JobStatus, ReleaseFormat, SavedCheckpoint, TrainingJob
-from reef.storage.work_queue import MemoryWorkQueue, NewWork
+from reef.storage.coordination import memory_coordination
+from reef.storage.work_queue import NewWork
 from reef.train.job_queue import (
     JOBS_QUEUE,
     JobQueueComponent,
@@ -87,7 +88,7 @@ def wait_for(status: Callable[[], JobStatus], state: str) -> JobStatus:
 
 @pytest.fixture
 def worked(tmp_path):
-    queue = MemoryWorkQueue(lease_seconds=30)
+    queue = memory_coordination(lease_seconds=30).work_queue
     component = StepComponent(tmp_path / "jobs")
     worker = TrainingJobWorker(component, queue, worker_id="training-1", poll_seconds=0.02)
     worker.start()
@@ -137,7 +138,7 @@ def test_job_loop_submits_through_the_scenario_view(worked):
 
 @pytest.mark.unit
 def test_a_cancelled_job_fails_and_the_worker_owns_the_component(tmp_path):
-    queue = MemoryWorkQueue(lease_seconds=30)
+    queue = memory_coordination(lease_seconds=30).work_queue
     component = StepComponent(tmp_path / "jobs")
     view = JobQueueComponent(component, queue).for_scenario("s")
     view.submit(job("waiting"))
@@ -152,7 +153,7 @@ def test_a_cancelled_job_fails_and_the_worker_owns_the_component(tmp_path):
 
 @pytest.mark.unit
 def test_only_a_scenario_view_submits_and_a_control_only_component_closes_what_it_owns(tmp_path):
-    queue = MemoryWorkQueue()
+    queue = memory_coordination().work_queue
     component = StepComponent(tmp_path / "jobs")
     control = JobQueueComponent(component, queue, owns_component=True)
     with pytest.raises(RuntimeError, match="for_scenario"):
@@ -165,7 +166,7 @@ def test_only_a_scenario_view_submits_and_a_control_only_component_closes_what_i
 
 @pytest.mark.unit
 def test_a_worker_that_continues_a_job_reports_each_checkpoint_step_once(tmp_path):
-    queue = MemoryWorkQueue(lease_seconds=30)
+    queue = memory_coordination(lease_seconds=30).work_queue
     queue.add(NewWork(JOBS_QUEUE, "j1", "s", job_kind("steps"), job_payload(job("j1")), serial_key="s"))
     # The first worker reported step 1, then stopped without a word; its lease expires.
     queue.take(JOBS_QUEUE, "training-0", [job_kind("steps")])

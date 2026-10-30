@@ -17,8 +17,7 @@ from reef.inference.http import HttpInferenceHandler
 from reef.runtime.interfaces import EngineClients, InferenceHandler
 from reef.service.inference_service import RECORD_HEADER, RELEASE_HEADER, build_inference_app
 from reef.storage.commits import CommitRecord
-from reef.storage.control_lease import MemoryControlLease
-from reef.storage.served_models import MemoryServedModels
+from reef.storage.coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 
 TOKEN = "service-token"
@@ -74,8 +73,9 @@ async def ask(tmp_path: Path, answers: list[str], *, write: bool = True) -> tupl
     storage = SQLiteScenarioStorage(tmp_path / "records")
     store = storage.open("math")
     store.commit_step(expected_step=0, commit=commit("release-1"))
-    table = MemoryServedModels(MemoryControlLease())
-    number = table.control_lease.acquire("control-1").number
+    coordination = memory_coordination()
+    table = coordination.served_models
+    number = coordination.control_lease.acquire("control-1").number
     async with TestServer(engine_app(answers)) as engine:
         if write:
             served = ServedArtifact("release-1", str(engine.make_url("/")), "math-v1")
@@ -135,8 +135,9 @@ async def ask_failing(tmp_path: Path, *, engine_url: str | None, refuse_records:
     storage.refuse = False
     storage.open("math").commit_step(expected_step=0, commit=commit("release-1"))
     storage.refuse = refuse_records
-    table = MemoryServedModels(MemoryControlLease())
-    number = table.control_lease.acquire("control-1").number
+    coordination = memory_coordination()
+    table = coordination.served_models
+    number = coordination.control_lease.acquire("control-1").number
     async with TestServer(engine_app([])) as engine:
         url = engine_url or str(engine.make_url("/"))
         table.write(

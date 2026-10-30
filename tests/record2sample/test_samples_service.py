@@ -13,7 +13,8 @@ from reef.record2sample.service import (
     request_selection,
     selection_key,
 )
-from reef.storage.work_queue import MemoryWorkQueue
+from reef.storage.coordination import memory_coordination
+from reef.storage.sql_coordination import SQLiteCoordinationDatabase, SQLWorkQueue
 
 
 class Producers(SampleProducers):
@@ -33,7 +34,7 @@ class Producers(SampleProducers):
 
 @pytest.mark.unit
 def test_a_waiting_selection_reads_every_new_record_so_requests_add_one_item():
-    queue = MemoryWorkQueue()
+    queue = memory_coordination().work_queue
     first = request_selection(queue, "s", "weights")
     assert request_selection(queue, "s", "weights") == first
     assert (first.kind, first.serial_key, first.payload) == (
@@ -51,7 +52,7 @@ def test_a_waiting_selection_reads_every_new_record_so_requests_add_one_item():
 
 @pytest.mark.unit
 def test_the_worker_makes_the_samples_and_comes_back_while_background_work_runs():
-    queue = MemoryWorkQueue()
+    queue = memory_coordination().work_queue
     producers = Producers(background=True)
     worker = SamplesWorker(queue, producers, worker_id="samples-1")
     request_selection(queue, "s", "weights")
@@ -67,7 +68,7 @@ def test_the_worker_makes_the_samples_and_comes_back_while_background_work_runs(
 
 @pytest.mark.unit
 def test_a_selection_that_fails_is_retried_then_fails():
-    queue = MemoryWorkQueue(max_attempts={SAMPLES_QUEUE: 2})
+    queue = SQLWorkQueue(SQLiteCoordinationDatabase(None), max_attempts={SAMPLES_QUEUE: 2})
     worker = SamplesWorker(queue, Producers(error=RuntimeError("judge down")), worker_id="samples-1")
     item = request_selection(queue, "s", "weights")
     assert worker.run_once() and queue.get(SAMPLES_QUEUE, item.id).state == "queued"
@@ -76,11 +77,11 @@ def test_a_selection_that_fails_is_retried_then_fails():
     assert failed.state == "failed" and "judge down" in failed.error
 
 
-class FlakyQueue(MemoryWorkQueue):
+class FlakyQueue(SQLWorkQueue):
     """A queue that fails once, as a database that drops a connection, and then stops its worker."""
 
     def __init__(self) -> None:
-        super().__init__()
+        super().__init__(SQLiteCoordinationDatabase(None))
         self.calls = 0
         self.worker: SamplesWorker | None = None
 

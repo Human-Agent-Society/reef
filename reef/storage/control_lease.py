@@ -9,12 +9,10 @@ lease cannot change what is served.
 from __future__ import annotations
 
 import math
-import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
 from reef.core.served_models import require_text
-from reef.storage.work_queue import clock
 
 
 @dataclass(frozen=True)
@@ -78,48 +76,4 @@ class ControlLease(ABC):
         """The current state."""
 
 
-class MemoryControlLease(ControlLease):
-    """The control lease in process memory, for the one-process layout and for tests."""
-
-    def __init__(self, *, lease_seconds: float = 30.0) -> None:
-        super().__init__(lease_seconds=lease_seconds)
-        self.lock = threading.Lock()
-        self.state: ControlLeaseState | None = None
-
-    def acquire(self, instance_id: str, *, now: float | None = None) -> ControlLeaseState | None:
-        moment = clock(now)
-        with self.lock:
-            held = self.state
-            if held is not None and held.instance_id == instance_id and held.expires_at >= moment:
-                self.state = ControlLeaseState(instance_id, held.number, moment + self.lease_seconds)
-            elif held is None or held.expires_at < moment:
-                number = 1 if held is None else held.number + 1
-                self.state = ControlLeaseState(instance_id, number, moment + self.lease_seconds)
-            else:
-                return None
-            return self.state
-
-    def extend(self, instance_id: str, *, now: float | None = None) -> ControlLeaseState | None:
-        moment = clock(now)
-        with self.lock:
-            held = self.state
-            if held is None or held.instance_id != instance_id or held.expires_at < moment:
-                return None
-            self.state = ControlLeaseState(instance_id, held.number, moment + self.lease_seconds)
-            return self.state
-
-    def release(self, instance_id: str, *, now: float | None = None) -> bool:
-        moment = clock(now)
-        with self.lock:
-            held = self.state
-            if held is None or held.instance_id != instance_id or held.expires_at < moment:
-                return False
-            self.state = ControlLeaseState(instance_id, held.number, moment)
-            return True
-
-    def current(self) -> ControlLeaseState | None:
-        with self.lock:
-            return self.state
-
-
-__all__ = ["ControlLease", "ControlLeaseState", "MemoryControlLease"]
+__all__ = ["ControlLease", "ControlLeaseState"]

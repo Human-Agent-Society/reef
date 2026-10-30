@@ -812,6 +812,11 @@ def open_coordination(
         )
     else:
         database = open_coordination_database("sqlite", directory=Path(agent_record_dir) / "coordination")
+    return coordination_on(database, lease_seconds=lease_seconds)
+
+
+def coordination_on(database: CoordinationDatabase, *, lease_seconds: float = 60.0) -> Coordination:
+    """The coordination store whose tables ``database`` holds; ``lease_seconds`` is the lease of a work item."""
     return Coordination(
         database,
         SQLWorkQueue(database, lease_seconds=lease_seconds),
@@ -828,6 +833,7 @@ __all__ = [
     "SQLServedModels",
     "SQLWorkQueue",
     "SQLiteCoordinationDatabase",
+    "coordination_on",
     "coordination_tables",
     "open_coordination",
     "open_coordination_database",

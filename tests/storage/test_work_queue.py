@@ -4,8 +4,8 @@ from dataclasses import dataclass
 import pytest
 
 from reef.core.served_models import ScenarioModel, ScheduledStop, ServedArtifact
-from reef.storage.control_lease import ControlLease, MemoryControlLease
-from reef.storage.served_models import ControlLeaseConflict, MemoryServedModels, ServedModelsWriter
+from reef.storage.control_lease import ControlLease
+from reef.storage.served_models import ControlLeaseConflict, ServedModelsWriter
 from reef.storage.sql_coordination import (
     PostgresCoordinationDatabase,
     SQLControlLease,
@@ -13,7 +13,7 @@ from reef.storage.sql_coordination import (
     SQLServedModels,
     SQLWorkQueue,
 )
-from reef.storage.work_queue import MemoryWorkQueue, NewWork, WorkConflict, WorkItem, WorkLeaseLost, WorkQueue
+from reef.storage.work_queue import NewWork, WorkConflict, WorkItem, WorkLeaseLost, WorkQueue
 
 
 @dataclass
@@ -23,19 +23,12 @@ class Coordination:
     lease: ControlLease
 
 
-@pytest.fixture(params=["memory", "sqlite-memory", "sqlite", "postgres"])
+@pytest.fixture(params=["sqlite-memory", "sqlite", "postgres"])
 def open_coordination(request, tmp_path):
     """Open the coordination stores of one backend with the given lease and attempt settings."""
     databases = []
 
     def opened(*, lease_seconds: float = 10, max_attempts: dict[str, int] | None = None) -> Coordination:
-        if request.param == "memory":
-            lease = MemoryControlLease(lease_seconds=lease_seconds)
-            return Coordination(
-                MemoryWorkQueue(lease_seconds=lease_seconds, max_attempts=max_attempts),
-                MemoryServedModels(lease),
-                lease,
-            )
         if request.param == "postgres":
             url, schema = request.getfixturevalue("postgres_config")
             database = PostgresCoordinationDatabase(url, schema=schema)

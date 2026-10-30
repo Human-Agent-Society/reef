@@ -7,13 +7,11 @@ that lost its lease cannot change what is served. Inference replicas only read t
 
 from __future__ import annotations
 
-import threading
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 
 from reef.core.errors import ReefError
 from reef.core.served_models import ScenarioModel, ScheduledStop, ServedArtifact
-from reef.storage.control_lease import ControlLease
 
 
 class ControlLeaseConflict(ReefError):
@@ -87,78 +85,4 @@ class ServedModelsWriter(ServedModels):
         """Every served artifact that some row names."""
 
 
-class MemoryServedModels(ServedModelsWriter):
-    """``served_models`` in process memory, for the one-process layout and for tests.
-
-    Writes must carry the number of ``control_lease``, as in a coordination database.
-    """
-
-    def __init__(self, control_lease: ControlLease) -> None:
-        self.lock = threading.Lock()
-        self.rows: dict[ScenarioModel, ServedArtifact] = {}
-        self.stops: dict[ServedArtifact, ScheduledStop] = {}
-        self.sequence = 0
-        self.control_lease = control_lease
-
-    def lease_number(self) -> int:
-        state = self.control_lease.current()
-        return 0 if state is None else state.number
-
-    def check_lease(self, control_lease_number: int) -> None:
-        current = self.lease_number()
-        if control_lease_number != current:
-            raise ControlLeaseConflict(
-                f"control lease number {control_lease_number} is not the current number {current}"
-            )
-
-    def read(self, key: ScenarioModel) -> ServedArtifact | None:
-        with self.lock:
-            return self.rows.get(key)
-
-    def read_scenario(self, scenario: str) -> Mapping[str, ServedArtifact]:
-        with self.lock:
-            return {key.name: served for key, served in self.rows.items() if key.scenario == scenario}
-
-    def changed_sequence(self) -> int:
-        with self.lock:
-            return self.sequence
-
-    def current_lease_number(self) -> int:
-        return self.lease_number()
-
-    def write(self, key: ScenarioModel, served: ServedArtifact, *, control_lease_number: int) -> None:
-        with self.lock:
-            self.check_lease(control_lease_number)
-            self.rows[key] = served
-            self.sequence += 1
-
-    def remove(self, key: ScenarioModel, *, control_lease_number: int) -> ServedArtifact | None:
-        with self.lock:
-            self.check_lease(control_lease_number)
-            removed = self.rows.pop(key, None)
-            if removed is not None:
-                self.sequence += 1
-            return removed
-
-    def schedule_stop(self, stop: ScheduledStop, *, control_lease_number: int) -> None:
-        with self.lock:
-            self.check_lease(control_lease_number)
-            self.stops[stop.served] = stop
-            self.sequence += 1
-
-    def due_stops(self, now: float) -> tuple[ScheduledStop, ...]:
-        with self.lock:
-            return tuple(sorted((s for s in self.stops.values() if s.stop_after <= now), key=lambda s: s.stop_after))
-
-    def delete_stop(self, served: ServedArtifact, *, control_lease_number: int) -> None:
-        with self.lock:
-            self.check_lease(control_lease_number)
-            if self.stops.pop(served, None) is not None:
-                self.sequence += 1
-
-    def all_served(self) -> frozenset[ServedArtifact]:
-        with self.lock:
-            return frozenset(self.rows.values())
-
-
-__all__ = ["ControlLeaseConflict", "MemoryServedModels", "ServedModels", "ServedModelsWriter"]
+__all__ = ["ControlLeaseConflict", "ServedModels", "ServedModelsWriter"]

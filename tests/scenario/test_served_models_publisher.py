@@ -8,15 +8,8 @@ import pytest
 
 from reef.core.served_models import ACTIVE, ScenarioModel, ServedArtifact
 from reef.dispatcher.served import CACHE_SECONDS, ControlInstance, ServedModelsPublisher, wait_for_control_lease
-from reef.storage.control_lease import MemoryControlLease
-from reef.storage.coordination import Coordination, CoordinationResource
-from reef.storage.served_models import MemoryServedModels
-from reef.storage.work_queue import MemoryWorkQueue
-
-
-class NoDatabase(CoordinationResource):
-    def close(self) -> None:
-        return None
+from reef.storage.coordination import Coordination
+from reef.storage.sql_coordination import SQLControlLease, SQLiteCoordinationDatabase, SQLServedModels, SQLWorkQueue
 
 
 class Runtime:
@@ -61,8 +54,8 @@ class Instance(ControlInstance):
 
 
 def coordination() -> Coordination:
-    lease = MemoryControlLease(lease_seconds=30.0)
-    return Coordination(NoDatabase(), MemoryWorkQueue(), MemoryServedModels(lease), lease)
+    database = SQLiteCoordinationDatabase(None)
+    return Coordination(database, SQLWorkQueue(database), SQLServedModels(database), SQLControlLease(database))
 
 
 @pytest.mark.unit

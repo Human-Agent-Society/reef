@@ -18,7 +18,7 @@ from reef.service import assembly
 from reef.service.components import build_component_app
 from reef.service.deploy.cli import build_serve_parser
 from reef.service.deploy.service_config import ServiceConfig
-from reef.storage.work_queue import MemoryWorkQueue
+from reef.storage.coordination import memory_coordination
 
 MEMORY_BACKEND = "tests.support.artifact_backend_plugin:MemoryArtifactBackend"
 TOKEN = "service-token"
@@ -88,7 +88,7 @@ def test_control_learns_of_records_and_samples_that_other_processes_add() -> Non
     sequence = {"math": 3}
     scenario = SimpleNamespace(name="math", records=SimpleNamespace(last_sequence=lambda name: sequence[name]))
     registry = SimpleNamespace(loaded_scenarios=lambda: (scenario,))
-    queue = MemoryWorkQueue()
+    queue = memory_coordination().work_queue
     changes = Changes()
     watcher = StoreChangesWatcher(registry, queue, changes)
 

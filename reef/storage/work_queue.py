@@ -20,7 +20,7 @@ import threading
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import Literal
 
 from reef.core.errors import ReefError
@@ -267,198 +267,6 @@ def clock(now: float | None) -> float:
     return time.time() if now is None else float(now)
 
 
-class MemoryWorkQueue(WorkQueue):
-    """Work queues in process memory, for the one-process layout and for tests."""
-
-    def __init__(self, *, lease_seconds: float = 60.0, max_attempts: Mapping[str, int] | None = None) -> None:
-        super().__init__(lease_seconds=lease_seconds, max_attempts=max_attempts)
-        self.lock = threading.Lock()
-        self.store: dict[tuple[str, str], WorkItem] = {}
-        self.sequence = 0
-        self.changed = threading.Condition(self.lock)
-
-    def next_sequence(self) -> int:
-        self.sequence += 1
-        return self.sequence
-
-    def save(self, item: WorkItem, **changes: object) -> WorkItem:
-        updated = replace(item, changed_sequence=self.next_sequence(), **changes)  # type: ignore[arg-type]
-        self.store[(item.queue, item.id)] = updated
-        self.changed.notify_all()
-        return updated
-
-    def held(self, queue: str, item_id: str, worker_id: str, now: float) -> WorkItem:
-        item = self.store.get((queue, item_id))
-        if (
-            item is None
-            or item.state not in HELD_STATES
-            or item.worker_id != worker_id
-            or (item.lease_expires_at is not None and item.lease_expires_at < now)
-        ):
-            raise WorkLeaseLost(f"worker {worker_id!r} does not hold {queue}/{item_id}")
-        return item
-
-    def add(self, work: NewWork, *, now: float | None = None) -> WorkItem:
-        moment = clock(now)
-        with self.lock:
-            existing = self.store.get((work.queue, work.id))
-            if existing is not None:
-                if dict(existing.payload) != dict(work.payload):
-                    raise WorkConflict(f"{work.queue}/{work.id} exists with a different payload")
-                return existing
-            sequence = self.next_sequence()
-            item = WorkItem(
-                queue=work.queue,
-                id=work.id,
-                scenario=work.scenario,
-                kind=work.kind,
-                payload=dict(work.payload),
-                serial_key=work.serial_key,
-                available_at=moment if work.available_at is None else work.available_at,
-                created_at=moment,
-                created_sequence=sequence,
-                changed_sequence=sequence,
-            )
-            self.store[(work.queue, work.id)] = item
-            self.changed.notify_all()
-            return item
-
-    def take(self, queue: str, worker_id: str, kinds: Sequence[str], *, now: float | None = None) -> WorkItem | None:
-        require_text(worker_id, "worker_id")
-        moment = clock(now)
-        wanted = frozenset(kinds)
-        with self.lock:
-            ordered = sorted((i for i in self.store.values() if i.queue == queue), key=lambda i: i.created_sequence)
-            blocked: set[str] = set()
-            for item in ordered:
-                if item.serial_key is not None and item.serial_key in blocked:
-                    continue
-                if item.serial_key is not None and not item.final:
-                    blocked.add(item.serial_key)
-                if item.state != "queued" or item.kind not in wanted or item.available_at > moment:
-                    continue
-                return self.save(
-                    item,
-                    state="assigned",
-                    worker_id=worker_id,
-                    lease_expires_at=moment + self.lease_seconds,
-                    attempt_count=item.attempt_count + 1,
-                    error=None,
-                )
-            return None
-
-    def extend_lease(self, queue: str, item_id: str, worker_id: str, *, now: float | None = None) -> WorkItem:
-        moment = clock(now)
-        with self.lock:
-            item = self.held(queue, item_id, worker_id, moment)
-            return self.save(item, lease_expires_at=moment + self.lease_seconds)
-
-    def start(self, queue: str, item_id: str, worker_id: str, *, now: float | None = None) -> WorkItem:
-        with self.lock:
-            item = self.held(queue, item_id, worker_id, clock(now))
-            return item if item.state == "running" else self.save(item, state="running")
-
-    def add_progress(
-        self,
-        queue: str,
-        item_id: str,
-        worker_id: str,
-        progress: Mapping[str, JsonValue],
-        *,
-        number: int,
-        now: float | None = None,
-    ) -> WorkItem:
-        with self.lock:
-            item = self.held(queue, item_id, worker_id, clock(now))
-            if number < len(item.progress):
-                return item
-            if number != len(item.progress):
-                raise ValueError(f"progress number {number} skips {len(item.progress)}")
-            return self.save(item, progress=(*item.progress, dict(progress)))
-
-    def finish(
-        self, queue: str, item_id: str, worker_id: str, result: Mapping[str, JsonValue], *, now: float | None = None
-    ) -> WorkItem:
-        with self.lock:
-            item = self.held(queue, item_id, worker_id, clock(now))
-            return self.save(item, state="finished", result=dict(result), worker_id=None, lease_expires_at=None)
-
-    def fail(
-        self,
-        queue: str,
-        item_id: str,
-        worker_id: str,
-        error: str,
-        *,
-        retryable: bool,
-        now: float | None = None,
-    ) -> WorkItem:
-        require_text(error, "error")
-        with self.lock:
-            item = self.held(queue, item_id, worker_id, clock(now))
-            again = retryable and item.attempt_count < self.attempts_allowed(queue)
-            return self.save(
-                item, state="queued" if again else "failed", error=error, worker_id=None, lease_expires_at=None
-            )
-
-    def cancel(self, queue: str, item_id: str, error: str) -> WorkItem | None:
-        require_text(error, "error")
-        with self.lock:
-            item = self.store.get((queue, item_id))
-            if item is None or item.final:
-                return item
-            return self.save(item, state="failed", error=error, worker_id=None, lease_expires_at=None)
-
-    def requeue_expired(self, *, now: float | None = None) -> tuple[WorkItem, ...]:
-        moment = clock(now)
-        with self.lock:
-            changed = []
-            for item in list(self.store.values()):
-                if item.state not in HELD_STATES or item.lease_expires_at is None or item.lease_expires_at >= moment:
-                    continue
-                again = item.attempt_count < self.attempts_allowed(item.queue)
-                changed.append(
-                    self.save(
-                        item,
-                        state="queued" if again else "failed",
-                        error="the worker's lease expired",
-                        worker_id=None,
-                        lease_expires_at=None,
-                    )
-                )
-            return tuple(changed)
-
-    def get(self, queue: str, item_id: str) -> WorkItem | None:
-        with self.lock:
-            return self.store.get((queue, item_id))
-
-    def read_changes(self, queue: str, after_sequence: int, *, limit: int = 1000) -> tuple[WorkItem, ...]:
-        with self.lock:
-            changed = sorted(
-                (i for i in self.store.values() if i.queue == queue and i.changed_sequence > after_sequence),
-                key=lambda i: i.changed_sequence,
-            )
-            return tuple(changed[:limit])
-
-    def items(self, queue: str, *, scenario: str | None = None, kind: str | None = None) -> tuple[WorkItem, ...]:
-        with self.lock:
-            chosen = (
-                i
-                for i in self.store.values()
-                if i.queue == queue
-                and (scenario is None or i.scenario == scenario)
-                and (kind is None or i.kind == kind)
-            )
-            return tuple(sorted(chosen, key=lambda i: i.created_sequence))
-
-    def wait_for_change(self, after_sequence: int, timeout: float) -> int:
-        """Block until the store changes after ``after_sequence`` or ``timeout`` seconds pass; return the
-        current sequence. Workers in one process use it instead of polling."""
-        with self.lock:
-            self.changed.wait_for(lambda: self.sequence > after_sequence, timeout=timeout)
-            return self.sequence
-
-
 class LeaseExtender:
     """Extends the lease of one held item every third of the lease, on a background thread, while its work runs.
 
@@ -504,7 +312,6 @@ __all__ = [
     "WORK_STATES",
     "JsonValue",
     "LeaseExtender",
-    "MemoryWorkQueue",
     "NewWork",
     "WorkConflict",
     "WorkItem",

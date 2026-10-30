@@ -14,7 +14,9 @@ from reef.evaluation.rollout_worker import (
     EvaluationRolloutWorker,
     rollout_item_id,
 )
-from reef.storage.work_queue import MemoryWorkQueue, NewWork
+from reef.storage.coordination import memory_coordination
+from reef.storage.sql_coordination import SQLiteCoordinationDatabase, SQLWorkQueue
+from reef.storage.work_queue import NewWork
 
 
 def rollout(repeat: int = 0) -> EvaluationRollout:
@@ -41,7 +43,7 @@ class UnreachableEndpoints(CandidateEndpoints):
 @pytest.mark.unit
 def test_a_rollout_item_round_trips_and_names_its_place_in_the_evaluation():
     value = rollout(repeat=1)
-    queue = MemoryWorkQueue()
+    queue = memory_coordination().work_queue
     item = queue.add(NewWork(EVALUATIONS_QUEUE, value.item_id(), "s", EVALUATION_ROLLOUT_KIND, value.to_payload()))
     assert item.id == rollout_item_id("e1", 2, 1) == "evaluation_rollout:e1:00002:00001"
     assert EvaluationRollout.from_item(item) == value
@@ -59,7 +61,7 @@ def test_a_rollout_calls_the_candidate_at_its_unrecorded_route_on_the_inference_
 
 @pytest.mark.unit
 def test_a_rollout_that_cannot_reach_its_candidate_is_retried_then_fails():
-    queue = MemoryWorkQueue(max_attempts={EVALUATIONS_QUEUE: 2})
+    queue = SQLWorkQueue(SQLiteCoordinationDatabase(None), max_attempts={EVALUATIONS_QUEUE: 2})
     value = rollout()
     queue.add(NewWork(EVALUATIONS_QUEUE, value.item_id(), "s", EVALUATION_ROLLOUT_KIND, value.to_payload()))
     worker = EvaluationRolloutWorker(queue, UnreachableEndpoints("http://unused", None), worker_id="evaluation-1")

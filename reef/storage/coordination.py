@@ -1,9 +1,9 @@
 """The coordination store of a deployment, as one process opens it.
 
 Every service of a deployment opens the same coordination store: the ``served_models`` table, the work queues and
-the control lease. ``reef.storage.sql_coordination.open_coordination`` opens it in SQL; ``memory_coordination`` keeps
-it in the memory of one process. This module loads no database adapter, so a component that receives the store
-does not either.
+the control lease. ``reef.storage.sql_coordination.open_coordination`` opens it in a deployment's database;
+``memory_coordination`` opens it in an in-memory SQLite database of one process. This module loads no database
+adapter until ``memory_coordination`` runs, so a component that receives the store does not either.
 """
 
 from __future__ import annotations
@@ -14,9 +14,9 @@ import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
-from reef.storage.control_lease import ControlLease, MemoryControlLease
-from reef.storage.served_models import MemoryServedModels, ServedModelsWriter
-from reef.storage.work_queue import MemoryWorkQueue, WorkQueue
+from reef.storage.control_lease import ControlLease
+from reef.storage.served_models import ServedModelsWriter
+from reef.storage.work_queue import WorkQueue
 
 
 class CoordinationResource(ABC):
@@ -54,21 +54,13 @@ class Coordination:
         self.database.close()
 
 
-class ProcessMemory(CoordinationResource):
-    """The coordination tables of ``memory_coordination``: they live in the memory of the process and hold nothing
-    to release."""
-
-    def close(self) -> None:
-        return None
-
-
 def memory_coordination(*, lease_seconds: float = 60.0) -> Coordination:
-    """A coordination store in the memory of this process, for a process that runs every service and keeps no
-    state across restarts, such as a test. ``lease_seconds`` is the lease of a work item."""
-    lease = MemoryControlLease()
-    return Coordination(
-        ProcessMemory(), MemoryWorkQueue(lease_seconds=lease_seconds), MemoryServedModels(lease), lease
-    )
+    """A coordination store in an in-memory SQLite database of this process, for a process that runs every service
+    and keeps no state across restarts, such as a test. ``lease_seconds`` is the lease of a work item."""
+    # Imported here: the SQL module imports this one, and a process that is given its store loads no adapter.
+    from reef.storage.sql_coordination import SQLiteCoordinationDatabase, coordination_on
+
+    return coordination_on(SQLiteCoordinationDatabase(None), lease_seconds=lease_seconds)
 
 
-__all__ = ["Coordination", "CoordinationResource", "ProcessMemory", "instance_id", "memory_coordination"]
+__all__ = ["Coordination", "CoordinationResource", "instance_id", "memory_coordination"]

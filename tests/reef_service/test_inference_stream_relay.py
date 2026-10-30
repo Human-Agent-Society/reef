@@ -27,8 +27,7 @@ from reef.core.served_models import ACTIVE, ScenarioModel, ServedArtifact
 from reef.runtime.interfaces import FixedEngineClients, InferenceHandler, InferenceStream
 from reef.service.inference_service import InferenceReplica, ServedModelsCache, add_inference_routes
 from reef.service.streaming import frame_for_codex
-from reef.storage.control_lease import MemoryControlLease
-from reef.storage.served_models import MemoryServedModels
+from reef.storage.coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 
 #: One OpenRouter web search item, in the shape the OpenRouter SDK documents:
@@ -150,8 +149,9 @@ class ScriptedStreamHandler(InferenceHandler):
 
 def _relay_client(tmp_path: Path, *, for_codex: bool) -> tuple[TestClient, SQLiteScenarioStorage]:
     storage = SQLiteScenarioStorage(tmp_path / "records")
-    table = MemoryServedModels(MemoryControlLease())
-    number = table.control_lease.acquire("control-1").number
+    coordination = memory_coordination()
+    table = coordination.served_models
+    number = coordination.control_lease.acquire("control-1").number
     table.write(
         ScenarioModel("reef-codex", ACTIVE),
         ServedArtifact("release-1", "http://engine.invalid", "anthropic/claude"),
