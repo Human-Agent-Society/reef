@@ -1064,7 +1064,7 @@ def test_artifact_commit_failure_keeps_the_pending_job_data_retryable(tmp_path, 
         target = committer._artifacts
         method_name = failure_point
     original = getattr(target, method_name)
-    calls_before_failure = 2 if failure_point == "activation" else 1
+    calls_before_failure = 1
 
     def fail_once(*args, **kwargs):
         nonlocal calls_before_failure
@@ -1074,10 +1074,13 @@ def test_artifact_commit_failure_keeps_the_pending_job_data_retryable(tmp_path, 
         return original(*args, **kwargs)
 
     monkeypatch.setattr(target, method_name, fail_once)
+    active = scenario.current_artifact_ref()
 
     with pytest.raises(RuntimeError, match=f"injected {failure_point} failure"):
         scenario.commit(result)
 
+    # The active release moves only after the runtime serves the new one and its record lands.
+    assert scenario.current_artifact_ref() == active
     assert scenario.scenario_step == 0
     assert scenario.trainer.state == {"steps": 0}
     assert scenario.trainer.pending_job_data is pending

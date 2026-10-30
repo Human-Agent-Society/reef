@@ -778,11 +778,8 @@ class ScenarioCommitter:
             publication = SavedArtifactPublication(publication.artifact, component)
         local_artifact = self.stage_publication(next_step, publication, checkpoint)
         try:
-            # The engine must confirm the new revision before anything moves
-            # the active release: the staged bytes load first, and the version
-            # minted by publication then aliases them.
-            if activated:
-                self._activate(local_artifact)
+            # As at an activation, the runtime serves the published release once, before the record lands and
+            # before the active release moves.
             published_ref = artifacts.publish(
                 local_artifact,
                 expected_parent=checkpoint,
@@ -794,7 +791,7 @@ class ScenarioCommitter:
                     active_artifact=None if activated else head,
                 ),
                 advance_heads=not durable,
-                activate=activated,
+                activate=False,
             )
             if activated:
                 self._activate(artifacts.resolve(published_ref), source=local_artifact)
@@ -954,6 +951,9 @@ class ScenarioCommitter:
             if self._artifacts.checkpoint == record.artifact_ref:
                 if self._store.durable:
                     self._refresh_committed_checkpoint()
+                elif record.activated:
+                    # Publication moved the chain tip alone; the release serves now that its record landed.
+                    self._artifacts.activate(record.artifact_ref, expected=expected)
             else:
                 self._install_committed_checkpoint(
                     record.artifact_ref,
