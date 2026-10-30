@@ -66,6 +66,7 @@ from reef.record2sample.traces import TraceSamples
 from reef.runtime.executor.config import ExecutorSettings, role_executor_settings
 from reef.sample2job.traces import TraceJobData
 from reef.storage.records import RecordStore
+from reef.storage.samples import TrainerSamples
 from reef.storage.tasks import TaskStorage
 from reef.surface.base import ArtifactLayout, Surface
 from reef.train.backend import ComponentReleases
@@ -247,10 +248,10 @@ class HarnessEvolutionRecipe(Recipe):
         seed_problems = validate_tree(self.seed, descriptor).problems
         if seed_problems:
             raise RecipeConfigError(f"evolution.seed fails validation: {'; '.join(seed_problems)}")
-        directories = self.evaluation.task_manifest is not None or self.evaluation.task_store is not None
+        directories = self.evaluation.task_manifest is not None or self.evaluation.imported_tasks
         if directories and not descriptor.is_prompt_task_directory:
             raise RecipeConfigError(
-                f"evaluation tasks from a manifest or a task store are task directories, and adapter "
+                f"evaluation tasks from a manifest or the imported tasks are task directories, and adapter "
                 f"{descriptor.name!r} takes a prompt (terminus takes a task directory)"
             )
         if self.evaluation.promote_failures and descriptor.is_prompt_task_directory:
@@ -311,10 +312,16 @@ class HarnessEvolutionRecipe(Recipe):
                         f"evolution.{retired} is gone: the activation section decides whether a kept tree serves "
                         "(activation: {module: always, config: {review_kinds: [...]}}, or module: never)"
                     )
+            evaluation_section = section.get("evaluation", {})
+            if isinstance(evaluation_section, Mapping) and "task_store" in evaluation_section:
+                raise ValueError(
+                    "evolution.evaluation.task_store is gone: imported tasks are in the scenario's sample store; "
+                    "set evolution.evaluation.imported_tasks: true"
+                )
             evolution = EvolutionSettings.from_config(
                 {key: value for key, value in section.items() if key != "evaluation"}, setting="evolution"
             )
-            evaluation = EvaluationSettings.from_config(section.get("evaluation", {}), setting="evolution.evaluation")
+            evaluation = EvaluationSettings.from_config(evaluation_section, setting="evolution.evaluation")
             if evolution.method is None:
                 raise ValueError("evolution.method must name the Method that evolves the tree")
             method = Method.from_setting(evolution.method, setting="evolution.method")
@@ -463,10 +470,11 @@ class HarnessEvolutionRecipe(Recipe):
         experiment_logger: ExperimentLogger | None = None,
         task_storage: TaskStorage | None = None,
         releases: ComponentReleases | None = None,
+        samples: TrainerSamples | None = None,
     ) -> Trainer:
         if releases is None:
             raise RecipeConfigError("harness evolution reads its head tree from the scenario's committed releases")
-        backend = self.build_backend(scenario, releases, task_storage)
+        backend = self.build_backend(scenario, releases, samples)
         return Trainer.build(
             scenario,
             records,
@@ -478,6 +486,7 @@ class HarnessEvolutionRecipe(Recipe):
             experiment_logger=experiment_logger,
             training_mode=self.training_mode,
             task_storage=task_storage,
+            samples=samples,
             default_job_samples=self.batch_size,
         )
 
@@ -491,7 +500,7 @@ class HarnessEvolutionRecipe(Recipe):
         return NoEvaluationPolicy()
 
     def build_backend(
-        self, scenario: str, releases: ComponentReleases, task_storage: TaskStorage | None
+        self, scenario: str, releases: ComponentReleases, samples: TrainerSamples | None
     ) -> HarnessBackend:
         """The scenario's backend: the binary installed, the history, the evaluator, the tasks and the records."""
         descriptor = get_adapter(self.evolution.adapter)
@@ -503,11 +512,13 @@ class HarnessEvolutionRecipe(Recipe):
             raise RecipeConfigError(f"evolution.state_dir cannot hold {root}: {exc}") from exc
         models = self.model_bindings(scenario)
         evaluator = None if self.scorer is None else self.build_evaluator(descriptor, models, history, self.scorer)
-        task_store = None
-        if self.evaluation.task_store is not None:
-            if task_storage is None:
-                raise RecipeConfigError("evolution.evaluation.task_store needs the task storage of a scenario session")
-            task_store = task_storage.open(self.evaluation.task_store)
+        eval_samples = None
+        if self.evaluation.imported_tasks:
+            if samples is None:
+                raise RecipeConfigError(
+                    "evolution.evaluation.imported_tasks needs the sample store of a scenario session"
+                )
+            eval_samples = samples
         return HarnessBackend(
             descriptor=descriptor,
             releases=releases,
@@ -515,7 +526,7 @@ class HarnessEvolutionRecipe(Recipe):
             evaluator=evaluator,
             tasks=EvaluationTasks(
                 seed_tasks=self.configured_tasks(),
-                task_store=task_store,
+                eval_samples=eval_samples,
                 promote_failures=self.evaluation.promote_failures,
                 promoter=self.promoter,
                 max_promoted=self.evaluation.max_promoted_tasks,

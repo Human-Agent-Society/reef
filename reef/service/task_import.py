@@ -1,11 +1,11 @@
-"""The import of a deployment's Harbor tasks into each scenario's task store.
+"""The import of a deployment's Harbor tasks into each scenario's sample store.
 
 A deployment names a split manifest and the directory of its tasks in its
 ``task-import`` section. When a scenario opens, :class:`TaskImportingScenarioStorage`
-adds each task of the manifest to the scenario's task store ``imported-tasks``,
-in the split that the manifest gives. An identical import changes nothing, so
-the import runs again at each open and picks up the tasks that the operator
-added to the manifest. A task that conflicts with a published one stops the open.
+adds each task of the manifest to the scenario's sample store, in the split
+that the manifest gives. An identical import changes nothing, so the import
+runs again at each open and picks up the tasks that the operator added to the
+manifest. A task that conflicts with a stored sample stops the open.
 """
 
 from __future__ import annotations
@@ -20,8 +20,9 @@ from harbor.models.task.task import Task as HarborTaskLoader
 from reef.core.errors import ReefError
 from reef.core.plugins import PluginConfigError
 from reef.core.tasks.split import read_split_manifest
+from reef.storage.samples import SampleStore
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage, ScenarioStore
-from reef.storage.tasks import IMPORTED_TASK_STORE, SplitName, TaskFileStore, TaskStorage
+from reef.storage.tasks import SplitName, TaskFileStore
 
 
 class TaskImportError(ReefError):
@@ -44,26 +45,25 @@ class TaskImport:
     manifest: Path
     tasks_root: Path
 
-    def run(self, tasks: TaskStorage) -> None:
-        """Publish each task of the manifest to its split in the store ``imported-tasks``.
+    def run(self, samples: SampleStore) -> None:
+        """Save each task of the manifest to its split in the sample store ``samples``.
 
         The train tasks come first, then the eval tasks, each in name order.
         Raises ``TaskSplitError`` if the manifest cannot be read,
         ``TaskImportError`` if a task directory is missing or is not a Harbor
-        task, and ``TaskConflict`` if a task is published with other files or
-        in the other split.
+        task, and ``SampleConflict`` if a task is stored with other files, in
+        the other split, or as a trajectory.
         """
         manifest = read_split_manifest(self.manifest)
-        store = tasks.open(IMPORTED_TASK_STORE)
         splits: tuple[tuple[SplitName, tuple[str, ...]], ...] = (("train", manifest.train), ("eval", manifest.eval))
         for split, names in splits:
-            for name in names:
-                directory = self.tasks_root / name
+            directories = tuple(self.tasks_root / name for name in names)
+            for directory in directories:
                 try:
                     HarborTaskLoader(directory)
                 except (ValueError, OSError) as exc:
                     raise TaskImportError(f"{directory} is not a Harbor task: {exc}") from exc
-                store.add_task(directory=directory, split=split)
+            samples.add_tasks(directories, split)
 
 
 class TaskImportingScenarioStorage(ScenarioStorage):
@@ -101,7 +101,7 @@ class TaskImportingScenarioStorage(ScenarioStorage):
     def open(self, scenario: str) -> ScenarioStore:
         session = self.inner.open(scenario)
         try:
-            self.task_import.run(session.tasks)
+            self.task_import.run(session.samples)
         except BaseException:
             session.close()
             raise

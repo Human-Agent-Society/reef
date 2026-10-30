@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from typing import Any, Self, cast
 
 from reef.core.config import config_option
-from reef.core.job_data import TrajectorySample
+from reef.core.job_data import Sample, TrajectorySample
 from reef.core.plugins import NoSettings, PluginSettings
 from reef.core.reports import TeacherContextReport
 from reef.core.trajectories import atif_messages, make_trajectory
@@ -46,8 +46,8 @@ class SFTRecord2Record(ExclusiveReportRecord2Record):
         NoSettings.parse(config, plugin_class=cls)
         return cls(context)
 
-    def drop_stale_units(self) -> None:
-        return
+    def is_stale(self, samples: Sequence[Sample]) -> bool:
+        return False
 
 
 @dataclass(frozen=True)
@@ -236,9 +236,11 @@ class SFTSamples(ReportSamples):
 
 
 class SFTJobData(DistillJobData):
-    """``DistillJobData`` that also takes uploaded ATIF trajectories, which ``SFTSamples.uploaded_sample`` renders."""
+    """``DistillJobData`` that also takes uploaded ATIF trajectories, which ``SFTSamples.uploaded_sample`` renders,
+    and imported train tasks, which train only for an instruction that gives their job's parameters."""
 
     accepts_trajectories = True
+    accepts_imported_tasks = True
 
 
 __all__ = ["SFT_TARGETS", "SFTJobData", "SFTRecord2Record", "SFTSamples", "SFTSettings"]

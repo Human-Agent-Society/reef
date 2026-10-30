@@ -107,8 +107,11 @@ the grid from the record stage.
    pipeline.sample2job.config.job_samples | required | the fewest samples of one job; at most the grid's rollouts. Set it to the grid.
 
 ``TTTDJobData`` reads only ``job_samples`` and ``buffer_size``. One job's data
-is always one complete grid. ``job_samples`` must not exceed the grid's
-rollouts; with a larger one the scenario's pipeline fails to build. Set it and
+is always one complete grid: the pipeline stores a complete grid as one group
+of samples, and a job takes a whole group. ``job_samples`` must not exceed the grid's
+rollouts; with a larger one the scenario's pipeline fails to build. Leave
+``buffer_size`` at its default, ``job_samples``. A larger ``buffer_size`` can
+put two grids in one job's data, and ``TTTDJobData`` then raises an error. Set it and
 the backend's batch size, such as Slime's ``--global-batch-size``, equal to
 the grid to train one optimizer step per grid.
 Reef refuses ``groups_per_step`` or ``rollouts_per_group`` under ``recipe.config``

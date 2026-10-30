@@ -91,8 +91,8 @@ import a concrete integration.
 | ``reef/train/``         | the trainer, the training job loop, the training         | HTTP endpoints, deployment                 |
 |                         | pipeline, job data types, training components            | configuration parsing                      |
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
-| ``reef/record2record/`` | which records Reef uses and in what order: report        | sample and job data assembly, record       |
-|                         | grouping, judging, eligibility checks, selection order   | storage, task generation                   |
+| ``reef/record2record/`` | which records Reef uses and which train together: report | sample and job data assembly, record       |
+|                         | grouping, judging, eligibility checks, staleness check   | storage, task generation                   |
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
 | ``reef/record2sample/`` | turning a record set into samples (``Record2Sample``,    | which records train, job data shape,       |
 |                         | ``ReportSamples``, ``JudgedSamples``), and the generator | training loops                             |
@@ -103,8 +103,8 @@ import a concrete integration.
 |                         | harness publication policies, and the ``evaluation``     |                                            |
 |                         | plugin configuration                                     |                                            |
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
-| ``reef/sample2job/``    | shaping the samples of the selected record set units     | which records train, the training loop,    |
-|                         | into one job's data (``Sample2Job``)                     | step signals                               |
+| ``reef/sample2job/``    | shaping the samples of the buffer into one job's         | which records train, the training loop,    |
+|                         | data (``Sample2Job``), and the job size                  | step signals                               |
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
 | ``reef/runtime/``       | backend-neutral contracts: training components,          | concrete inference and training            |
 |                         | inference runtimes, saved-weight serving, executors      | integrations                               |
@@ -235,7 +235,7 @@ Runtime contracts have no direct imports of concrete inference or training
 code; the deployment registry resolves the selected factory explicitly.
 
 In ``train/``, ``trainer.py`` holds the ``Trainer``; ``jobs.py`` holds the
-``JobLoop``, the recipe's ``JobPlan`` and the committed ``JobLoopState``;
+``JobLoop`` and the committed ``JobLoopState``;
 ``local_jobs.py`` holds ``LocalJobComponent``, the base of the built-in
 training components; ``deployment.py`` holds the ``TrainingDeployment``
 definitions; and ``backend.py`` holds ``CandidateBackend``, the candidate
@@ -306,13 +306,14 @@ The extension points those packages expose are in `Python API
   or value in ``reef/storage/records.py``. It defines the ``RecordStore`` abstract base
   without importing scenario coordination, training, or concrete adapters.
   ``ScenarioStore`` combines a ``RecordStore`` with committed scenario state
-  and opens the scenario's task stores (``reef/storage/tasks.py``);
+  and opens the scenario's task stores (``reef/storage/tasks.py``) and its
+  sample store (``reef/storage/samples.py``);
   ``ScenarioStorage`` owns scenario settings, archival, and retention.
 - Does it turn a designer's replies into Harbor tasks, check them with Harbor
   or run them with an agent? Put it in ``reef/record2sample/generator/``, the
   generator service ``reef serve`` starts beside the HTTP service from a
   ``generator`` section. ``reef/service/deploy/generator.py`` assembles that
-  child, and ``reef/service/deploy/generator_process.py`` runs it. The built-in generated-task recipe, which runs generated tasks
+  child, and ``reef/service/deploy/generator_process.py`` runs it. The built-in generated-task recipe, which generates tasks
   through that service and trains on them, is in
   ``reef/recipe/generated_tasks/``, with the ``TaskGenerator`` contract
   (``generator.py``). The request, ``TaskGenerationRequest``, is in
@@ -323,9 +324,9 @@ The extension points those packages expose are in `Python API
 - Does it implement storage? Put it in ``reef/storage/``. ``sql_records.py``
   shares SQL record and retention operations, and ``ScopedTable``, one table
   with the namespace of one store. ``sql_tasks.py``,
-  ``sql_trajectories.py``, ``sql_evaluations.py`` and ``sql_commits.py``
-  share the task, trajectory, artifact evaluation and commit tables and their
-  operations in the same database.
+  ``sql_samples.py``, ``sql_evaluations.py`` and ``sql_commits.py``
+  share the task, training sample, artifact evaluation and commit tables and
+  their operations in the same database.
   ``tasks.py`` holds the local ``TaskFileStore`` next to the task contracts.
   ``sqlite.py`` supplies SQLite schema, connections, transactions, and file
   maintenance. ``postgres.py`` supplies PostgreSQL tables, pooled transactions,

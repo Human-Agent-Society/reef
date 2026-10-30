@@ -1,15 +1,12 @@
 """Storage contracts and values for the published Harbor tasks of a scenario.
 
-A task store holds published tasks, each in the train or eval split. A task
-gets into a store in one of two ways:
+A task store holds published tasks, each in the train or eval split. A
+record-to-sample stage generates them. The stage saves each generation job in
+the store before any rollout. A generation holds its source record ids and the
+directories of its candidate tasks. Each candidate then gets one outcome: the
+stage publishes it to a split, or rejects it with a reason.
 
-- A record-to-sample stage generates it. The stage saves each generation job in
-  the store before any rollout. A generation holds its source record ids and
-  the directories of its candidate tasks. Each candidate then gets one
-  outcome: the stage publishes it to a split, or rejects it with a reason.
-- A caller adds a task directory to a split (``TaskStore.add_task``).
-
-The caller chooses the split. The store keeps it and refuses writes that
+The stage chooses the split. The store keeps it and refuses writes that
 conflict with it.
 
 A task is a Harbor task directory. Its files can be text or binary, so they
@@ -20,8 +17,8 @@ changes nothing. A deployment selects the file store in
 ``storage.task_file_backend``: ``local`` selects :class:`LocalTaskFileStore`,
 and a plugin reference selects another subclass of :class:`TaskFileStore`.
 
-A store also keeps the train tasks that trained, and documents that the
-stage writing the store saves under keys of its own. The store keeps each
+A store also keeps documents that the stage writing the store saves under
+keys of its own. The store keeps each
 document as text and does not read it.
 
 A task store belongs to a scenario session. Archiving the scenario retires its
@@ -46,10 +43,6 @@ from typing import Any, Literal, Self
 
 from reef.core.errors import ReefError
 from reef.core.plugins import NoSettings, Plugin
-
-#: The task store of a scenario that holds the tasks a deployment imports. Only the service writes it, and
-#: every component of the scenario reads it.
-IMPORTED_TASK_STORE = "imported-tasks"
 
 SplitName = Literal["train", "eval"]
 SPLIT_NAMES: tuple[SplitName, ...] = ("train", "eval")
@@ -154,21 +147,18 @@ class StoredTask:
 class TaskStore(ABC):
     """The generations and published tasks of one named store of a scenario.
 
-    Values: the state of a store is a tuple ``(G, P, T, D)``. ``G`` is a finite
+    Values: the state of a store is a tuple ``(G, P, D)``. ``G`` is a finite
     sequence of generations in increasing ``generation``. ``P`` is a finite
     sequence of published tasks in publication order; no two have the same
-    name, and a published task does not change. ``T`` is a set of task names
-    with ``T ⊆ {name(p) : p ∈ P, split(p) = train}``: the train tasks that
-    trained. ``D : K ⇀ Str`` maps non-empty keys to documents, each key written
-    once. Nothing is removed from ``G``, ``P``, ``T`` or ``D``.
+    name, and a published task does not change. ``D : K ⇀ Str`` maps non-empty
+    keys to documents, each key written once. Nothing is removed from ``G``,
+    ``P`` or ``D``.
 
     Purpose: a record-to-sample stage writes its generations and publishes their
-    candidates. A caller adds task directories (``add_task``). Readers take the
-    published tasks of a split (``tasks``) and their directories (``path``).
-    The rollout of a task pool marks the tasks that trained (``mark_trained``),
-    so a restart rolls out only the others. The stage that writes the store
-    keeps its own durable state about its tasks in ``D``; the store does not
-    interpret a document.
+    candidates. Readers take the published tasks of a split (``tasks``) and their
+    directories (``path``). The stage that writes the store keeps its own
+    durable state about its tasks in ``D``; the store does not interpret a
+    document.
 
     A store is part of a scenario session and closes with it. Each write is
     durable when it returns. An identical retry of a write changes nothing.
@@ -203,20 +193,6 @@ class TaskStore(ABC):
         Raises ``TaskConflict`` if the name is published with other files or
         in the other split. Raises ``TaskStoreError`` if the candidate does not
         exist or is rejected.
-        """
-
-    @abstractmethod
-    def add_task(self, *, directory: Path, split: SplitName) -> StoredTask:
-        """Publish the task directory ``directory`` to ``split`` under the name ``directory.name``.
-
-        The method saves the task files before it records the publication, and
-        returns the published task. If the name is published with the same
-        files and split, the method returns that task. The caller checks that
-        the directory is a Harbor task.
-
-        Raises ``TaskConflict`` if the name is published with other files or
-        in the other split. Raises ``TaskStoreError`` if the directory holds an
-        entry that is not a file or a directory.
         """
 
     @abstractmethod
@@ -255,17 +231,6 @@ class TaskStore(ABC):
         """Return ``D``: every saved document by its key."""
 
     @abstractmethod
-    def mark_trained(self, *, task_names: tuple[str, ...]) -> None:
-        """Save that these published train tasks trained. A task marked again changes nothing.
-
-        Raises ``TaskStoreError`` if a name is not a published train task.
-        """
-
-    @abstractmethod
-    def trained_task_names(self) -> frozenset[str]:
-        """Return the names of the tasks that trained."""
-
-    @abstractmethod
     def path(self, files_digest: str) -> Path:
         """Return the local task directory of a candidate or a published task, by its ``files_digest``.
 
@@ -283,7 +248,7 @@ class TaskStorage(ABC):
 
 
 class TaskFileStore(Plugin, ABC):
-    """Keeps the directory of each published task, addressed by the digest of its files.
+    """Keeps the directory of each saved candidate, published task and imported task, addressed by the digest of its files.
 
     The store keeps the files of each scenario apart, so that ``archive``
     retires them with the scenario. The scenario storage owns the store and
@@ -435,7 +400,6 @@ def sync_directory(path: Path) -> None:
 
 
 __all__ = [
-    "IMPORTED_TASK_STORE",
     "GenerationState",
     "LocalTaskFileStore",
     "SplitName",

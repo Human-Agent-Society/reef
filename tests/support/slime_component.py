@@ -50,9 +50,6 @@ class FakeTrainGroup:
         self.train_calls.append((rollout_id, rollout_data_ref))
         return list(self.train_result)
 
-    def reset_training_state(self) -> None:
-        self.events.append("reset")
-
     def async_pop_metrics(self):
         return list(self.rank_metrics)
 

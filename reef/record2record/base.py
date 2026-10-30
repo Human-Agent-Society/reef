@@ -8,42 +8,28 @@ pipeline that trains nothing.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Hashable, Mapping
+from collections.abc import Hashable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Self
 
 from reef.core.config import config_option
+from reef.core.job_data import Sample
 from reef.core.plugins import NoSettings, Plugin, PluginConfigError, PluginSettings
 from reef.core.records_types import AgentRecord, RequestType
 from reef.pipeline_context import PipelineContext
-from reef.record2record.pool import RecordSetUnitPool
-from reef.record2record.selection import SelectionPolicy
 from reef.record2record.sets import RecordSet, RecordSetUnit, SingleRecordSet, SingleSetUnit
-from reef.record2record.staleness import ServedVersions, stale_units
+from reef.record2record.staleness import ServedVersions, is_stale, producing_runtime_load_ids
 from reef.runtime.interfaces import inference_aborted
 
 
 class SampleStatus(Enum):
     """What the record-to-sample stage made of a record set. The status settles all records of the set together."""
 
-    #: The set has one or more samples. Its records wait in one record set unit until job data uses it.
+    #: The set has one or more samples. Its records wait in one record set unit until the pipeline stores them.
     READY = "ready"
     #: The set has no sample and cannot train. The stage ends its records.
     SKIPPED = "skipped"
-
-
-class UnitDropReason(Enum):
-    """Why an unreserved unit ends without training.
-
-    Values are BUFFER_LIMIT (the sample buffer exceeded its limit) and STALE
-    (the unit failed the serving-version check). The pipeline and record
-    stage pass these values to ``drop_held_unit`` so stages can distinguish
-    capacity eviction from obsolete training data. Neither value confirms training.
-    """
-
-    BUFFER_LIMIT = "buffer_limit"
-    STALE = "stale"
 
 
 def require_max_staleness(value: object) -> None:
@@ -78,7 +64,7 @@ class Record2RecordSettings(PluginSettings):
 
 
 class Record2Record(ABC, Plugin):
-    """Turn records into record sets for one pipeline, and decide which record set units train and in what order.
+    """Turn records into record sets for one pipeline, and decide which record sets train together.
 
     The pipeline pushes every record that it reads, except training
     instructions, in append order (``push``). It pulls the record sets that
@@ -90,16 +76,17 @@ class Record2Record(ABC, Plugin):
     exposing a set, ``form`` rejects it if any inference response reports an
     engine abort. Rejection ends the whole set through the stage's lifecycle,
     including reports that reference an aborted inference. The stage
-    holds the sets that have samples in record set units in its ``pool`` until the
-    pipeline reserves them for job data; the pipeline reserves and consumes
-    through the pool, and the stage ends the consumed units (``consume``). The
-    pool applies the stage's selection policy. The stage never calls the pipeline.
+    holds the sets that have samples in record set units. The pipeline takes
+    the units that became ready (``take_ready_units``), saves the samples of each
+    one to the sample store, and the stage ends it (``consume``). The stage
+    never calls the pipeline.
 
     The stage also runs the staleness check. No other part of Reef checks how
     far the training data lags behind the weights. The pipeline gives the stage
     each version that the scenario serves (``observe_serving_runtime_load_id``).
-    Then it tells the stage to drop the held units that are more than
-    ``max_staleness`` versions behind (``drop_stale_units``). ``max_staleness``
+    Then the pipeline asks the stage whether the data of a stored sample is
+    more than ``max_staleness`` versions behind (``is_stale``) before job data
+    takes it. ``max_staleness``
     is a non-negative int, from ``Record2RecordSettings``; the constructor
     refuses other values.
 
@@ -125,12 +112,12 @@ class Record2Record(ABC, Plugin):
         """
         raise PluginConfigError(f"{cls.__name__} cannot be built from a deployment file: it has no from_config")
 
-    def __init__(self, selection: SelectionPolicy | None = None, *, max_staleness: int = 0) -> None:
+    def __init__(self, *, max_staleness: int = 0) -> None:
         require_max_staleness(max_staleness)
-        #: How many versions the training data of a held unit may lag behind the served version and still train.
+        #: How many versions the training data of a stored sample may lag behind the served version and still train.
         self.max_staleness = max_staleness
-        #: The held record set units. The pipeline reserves job data from it and consumes the reservation.
-        self.pool = RecordSetUnitPool(selection)
+        #: The record set units that became ready since the last ``take_ready_units``, by unit ID.
+        self.ready_units: dict[Hashable, RecordSetUnit] = {}
         #: Record sets that ended after the sample stage saw them. The pipeline forgets their samples.
         self.ended_set_ids: set[Hashable] = set()
         #: Records that ended and that no live set references, until their release.
@@ -139,8 +126,6 @@ class Record2Record(ABC, Plugin):
         self.formed: list[RecordSet] = []
         #: The set ID of each record that a formed set holds, until the record's release.
         self.set_of_record: dict[str, Hashable] = {}
-        #: The runtime load IDs that produced each held record set's training data, by set ID.
-        self.producing_runtime_load_ids: dict[Hashable, frozenset[str | None]] = {}
         #: The versions that the scenario served, oldest first. The last one is the version that it serves now.
         self.served_versions = ServedVersions()
 
@@ -186,26 +171,21 @@ class Record2Record(ABC, Plugin):
         """The pipeline's context changed: its training mode or admitted report type."""
         return
 
-    def settle(
-        self,
-        record_set: RecordSet,
-        status: SampleStatus,
-        producing_runtime_load_ids: frozenset[str | None] = frozenset(),
-    ) -> None:
-        """Keep a READY record set in the pool, or end a SKIPPED one.
-
-        ``producing_runtime_load_ids`` are the versions that produced the
-        training data of the set. The staleness check reads them.
-        """
+    def settle(self, record_set: RecordSet, status: SampleStatus) -> None:
+        """Hold a READY record set in a unit, or end a SKIPPED one."""
         if status is SampleStatus.READY:
-            self.producing_runtime_load_ids[record_set.set_id] = producing_runtime_load_ids
             self.accept(record_set)
         else:
             self.reject(record_set)
 
     def accept(self, record_set: RecordSet) -> None:
-        """Hold a set that has samples in the pool, as a record set unit by itself."""
-        self.pool.put(SingleSetUnit.of(record_set))
+        """Make a set that has samples ready, as a record set unit by itself."""
+        self.ready_units[record_set.set_id] = SingleSetUnit.of(record_set)
+
+    def take_ready_units(self) -> tuple[RecordSetUnit, ...]:
+        """Return the units that became ready since the last call, in the order that they first became ready."""
+        ready, self.ready_units = tuple(self.ready_units.values()), {}
+        return ready
 
     def reject(self, record_set: RecordSet) -> None:
         """End a set that cannot train."""
@@ -215,8 +195,6 @@ class Record2Record(ABC, Plugin):
     def take_ended(self) -> frozenset[Hashable]:
         """Return the IDs of the record sets that ended since the last call. The pipeline forgets their samples."""
         ended, self.ended_set_ids = frozenset(self.ended_set_ids), set()
-        for set_id in ended:
-            self.producing_runtime_load_ids.pop(set_id, None)
         return ended
 
     # ------------------------------------------------------------- staleness
@@ -225,34 +203,20 @@ class Record2Record(ABC, Plugin):
         """Add the version that the scenario serves now, if the version changed (``ServedVersions.observe``)."""
         self.served_versions.observe(runtime_load_id)
 
-    def drop_stale_units(self) -> None:
-        """End the held units whose training data is more than ``max_staleness`` versions behind.
+    def is_stale(self, samples: Sequence[Sample]) -> bool:
+        """Whether the training data of ``samples`` is more than ``max_staleness`` versions behind the served one.
 
-        The check does not run while job data is reserved, because the job data refers to held units.
+        ``is_stale`` of the versions that produced the samples (``producing_runtime_load_ids``) and the versions
+        that the scenario served since its engine started. The pipeline asks it for each sample that the record
+        stages made before job data takes it. A stage whose samples do not depend on the version that produced
+        them, such as fixed SFT targets, returns False.
         """
-        if self.pool.reserved is not None:
-            return
-        for unit in stale_units(
-            self.pool.units(), self.producing_runtime_load_ids, self.served_versions.versions, self.max_staleness
-        ):
-            self.drop_held_unit(unit, reason=UnitDropReason.STALE)
+        return is_stale(producing_runtime_load_ids(samples), self.served_versions.versions, self.max_staleness)
 
-    def drop_held_unit(self, unit: RecordSetUnit, *, reason: UnitDropReason) -> None:
-        """End an unreserved unit without training for the given reason.
-
-        A stage that holds groups overrides this operation to end the whole
-        group. The reason does not change the default record cleanup.
-        """
-        self.pool.remove(unit.unit_id)
-        for record_set in unit.record_sets():
-            self.reject(record_set)
-
-    def consume(self, units: tuple[RecordSetUnit, ...]) -> frozenset[str]:
-        """End the units that acknowledged job data trained on, and return their keys."""
-        consumed = frozenset(key for unit in units for key in unit.consumed_ids())
-        self.terminal |= consumed
-        self.ended_set_ids.update(set_id for unit in units for set_id in unit.set_ids())
-        return consumed
+    def consume(self, unit: RecordSetUnit) -> None:
+        """End ``unit``, whose samples the pipeline stored: its records are releasable."""
+        self.terminal |= unit.consumed_ids()
+        self.ended_set_ids.update(unit.set_ids())
 
     # ------------------------------------------------------------- lifecycle
 
@@ -316,6 +280,4 @@ class InferenceRecord2Record(Record2Record):
         if record.request_type is not RequestType.INFERENCE:
             self.terminal.add(record.agent_record_id)
             return
-        self.form(
-            SingleRecordSet(set_id=record.agent_record_id, arrival_index=self.pool.next_arrival_index(), record=record)
-        )
+        self.form(SingleRecordSet(set_id=record.agent_record_id, record=record))

@@ -1,8 +1,10 @@
-"""The per-job training method: learning-rate schedules, their progress, and the recipe's job plan."""
+"""The per-job training method: learning-rate schedules, their progress, and the recipe's method of each job."""
 
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -10,7 +12,7 @@ from tests.reef_recipe.test_recipe_config_fields import StagedRecipe
 from tests.support._trajectories import policy_trajectory
 from tests.support.runtime_stubs import StubTrainingComponent, runtime_bindings
 
-from reef.core.job_data import JobOutcome
+from reef.core.job_data import JobOutcome, TaskSample
 from reef.runtime.interfaces import (
     LearningRateSchedule,
     LearningRateScheduleState,
@@ -18,8 +20,9 @@ from reef.runtime.interfaces import (
     resolve_learning_rate_schedule_state,
 )
 from reef.runtime.jobs import job_id_for
+from reef.storage.samples import SampleKind
 from reef.storage.sqlite import SQLiteRecordStore
-from reef.train.jobs import FixedJobPlan, JobLoop, JobLoopState, JobPlan, JobPlanContext, JobRequest
+from reef.train.jobs import JobLoop, JobLoopState
 from reef.train.pipeline import PipelineConfig
 from reef.train.types import JobData
 
@@ -108,54 +111,46 @@ def test_the_method_takes_part_in_the_job_identity() -> None:
         TrainingMethod("sft", SFT.to_dict())  # type: ignore[arg-type]
 
 
-class SupervisedThenPolicy(JobPlan):
-    """Supervised warmup for the first jobs, then policy training with a fresh warmup and lower rate."""
-
-    def __init__(self, supervised_jobs: int) -> None:
-        self.supervised_jobs = supervised_jobs
-
-    def next_job(self, context: JobPlanContext) -> JobRequest:
-        if context.finished_jobs < self.supervised_jobs:
-            return JobRequest({"method": TrainingMethod("sft", SFT).to_dict()})
-        return JobRequest({"method": TrainingMethod("rl-objective", RL).to_dict()})
-
-
 def batch(name: str) -> JobData:
     return JobData(name, (policy_trajectory(f"s-{name}", (1, 2, 3), (1, 1), (-0.1, -0.2), 1.0, "v1"),))
+
+
+def task(name: str) -> JobData:
+    return JobData(name, (TaskSample(Path(name)),))
 
 
 @pytest.mark.unit
 def test_a_single_method_recipe_trains_every_job_with_its_spec_objective() -> None:
     recipe = StagedRecipe(**runtime_bindings(), pipeline_stages=ONE_SAMPLE_JOBS)
-    plan = recipe.job_plan()
-    assert isinstance(plan, FixedJobPlan)
-    assert plan.request.parameters["method"] == TrainingMethod("sft").to_dict()
-    assert "learning_rate_schedule" not in plan.experiment_config()
+    sft = {"method": TrainingMethod("sft").to_dict()}
+    assert recipe.parameters_by_kind() == {"trajectory": sft, "task": sft}
     trainer = recipe.build("scenario", SQLiteRecordStore())
-    assert trainer.job_loop is not None
-    assert (
-        trainer.job_loop.plan.next_job(JobPlanContext(batch("b"), 40, JobOutcome("j", "stub", "finished")))
-        == plan.request
-    )
+    stage = trainer.pipeline.sample2job
+    assert stage.job_parameters(batch("b")) == stage.job_parameters(task("t")) == sft
+    assert stage.experiment_config() == {"job_parameters": {"trajectory": sft, "task": sft}}
+    assert sft["method"]["learning_rate_schedule"] is None
 
 
 @pytest.mark.unit
-def test_a_recipe_job_plan_reaches_the_component_through_the_default_build() -> None:
-    class SwitchingRecipe(StagedRecipe):
-        def job_plan(self) -> JobPlan:
-            return SupervisedThenPolicy(supervised_jobs=1)
+def test_a_recipe_method_for_each_kind_reaches_the_component_through_the_default_build() -> None:
+    class SupervisedThenPolicy(StagedRecipe):
+        """Supervised trajectories with a warmup, then policy training on tasks with a lower rate."""
+
+        def parameters_by_kind(self) -> Mapping[SampleKind, Mapping[str, Any]]:
+            return {
+                "trajectory": {"method": TrainingMethod("sft", SFT).to_dict()},
+                "task": {"method": TrainingMethod("rl-objective", RL).to_dict()},
+            }
 
     component = StubTrainingComponent()
-    trainer = SwitchingRecipe(**runtime_bindings(component), pipeline_stages=ONE_SAMPLE_JOBS).build(
+    trainer = SupervisedThenPolicy(**runtime_bindings(component), pipeline_stages=ONE_SAMPLE_JOBS).build(
         "scenario", SQLiteRecordStore()
     )
-    loop = trainer.job_loop
-    assert loop is not None and isinstance(loop.plan, SupervisedThenPolicy)
-    loop.submit(JobLoopState(component.base_start), batch("first"))
-    loop.submit(
-        JobLoopState(component.base_start, finished_jobs=1, last_job=JobOutcome("j", "stub", "finished")),
-        batch("second"),
-    )
+    loop, stage = trainer.job_loop, trainer.pipeline.sample2job
+    assert loop is not None
+    loop.submit(JobLoopState(component.base_start), batch("first"), stage.job_parameters(batch("first")))
+    finished = JobLoopState(component.base_start, finished_jobs=1, last_job=JobOutcome("j", "stub", "finished"))
+    loop.submit(finished, task("second"), stage.job_parameters(task("second")))
     assert [TrainingMethod.from_dict(job.parameters["method"]) for job in component.submitted] == [
         TrainingMethod("sft", SFT),
         TrainingMethod("rl-objective", RL),
@@ -163,15 +158,6 @@ def test_a_recipe_job_plan_reaches_the_component_through_the_default_build() -> 
 
 
 @pytest.mark.unit
-def test_the_job_loop_refuses_a_plan_that_returns_no_job_request() -> None:
-    class Broken(JobPlan):
-        def next_job(self, context: JobPlanContext) -> JobRequest:
-            return "sft"  # type: ignore[return-value]
-
-    component = StubTrainingComponent()
-    with pytest.raises(TypeError, match="plan must be a JobPlan"):
-        JobLoop(component, "sft", scenario="s")  # type: ignore[arg-type]
-    loop = JobLoop(component, Broken(), scenario="s")
-    with pytest.raises(TypeError, match=r"Broken\.next_job must return a JobRequest"):
-        loop.submit(JobLoopState(component.base_start), batch("b"))
-    assert component.submitted == []
+def test_the_job_loop_refuses_a_value_that_is_no_training_component() -> None:
+    with pytest.raises(TypeError, match="component must be a TrainingComponent"):
+        JobLoop("sft", scenario="s")  # type: ignore[arg-type]
