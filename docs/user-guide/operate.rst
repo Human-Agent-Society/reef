@@ -314,7 +314,96 @@ Reef retries synchronization; if it still fails, the new commit stops before
 publishing or writing its commit record. A conflict never overwrites the other
 writer's head. Restart also synchronizes the head before loading the scenario.
 
-The scenario storage and the repository live under ``.reef/`` by default (``agent_record_dir``, ``task_file_dir``, ``artifact_repository``, ``artifact_work_dir``, ``artifact_cache_dir``). On ephemeral storage none of the guarantees above hold past its loss. Each scenario needs one Reef writer; run a second deployment on other ports and storage paths rather than two services on one store. `State model <../advanced_topics/state-model.rst#commit-ordering>`__ describes the commit ordering behind the table. ``DELETE /reef/scenarios/{scenario}`` retires a scenario: the storage backend archives its records, commits, settings and task files, its proposal inbox and step records move under an ``archived/`` sibling and its repository ref is renamed into ``refs/reef/archived/``, so a name can be reused without the old chain. Deleting a weight-training scenario cancels its running training job.
+The scenario storage and the repository live under ``.reef/`` by default (``agent_record_dir``, ``task_file_dir``, ``artifact_repository``, ``artifact_work_dir``, ``artifact_cache_dir``). On ephemeral storage none of the guarantees above hold past its loss. Each scenario needs one control service; run a second deployment on other ports and storage paths rather than two deployments on one store. The services of one deployment share its store; see `Run the services in separate processes`_. `State model <../advanced_topics/state-model.rst#commit-ordering>`__ describes the commit ordering behind the table. ``DELETE /reef/scenarios/{scenario}`` retires a scenario: the storage backend archives its records, commits, settings and task files, its proposal inbox and step records move under an ``archived/`` sibling and its repository ref is renamed into ``refs/reef/archived/``, so a name can be reused without the old chain. Deleting a weight-training scenario cancels its running training job.
+
+Run the services in separate processes
+--------------------------------------
+
+A deployment has five services. By default, ``reef serve`` runs all of them in
+one process. Run them in separate processes when inference must stay up while
+control restarts or deploys a new version, or when one service needs more
+replicas than the others. The services do not send work to each other: each one
+reads and writes the deployment's shared store. The one call between services
+goes from evaluation to control, for the candidate that a rollout evaluates.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 15 45 40
+
+   * - Service
+     - What it does
+     - What it writes
+   * - ``control``
+     - The HTTP API, scenarios, commits and activation. It serves a candidate
+       beside the active artifact while the candidate is evaluated.
+     - ``served_models``, training jobs, sample requests, evaluations, commits
+   * - ``inference``
+     - Answers model requests with the model that ``served_models`` names
+     - records
+   * - ``samples``
+     - Makes training samples from new records
+     - samples
+   * - ``training``
+     - Runs training jobs on the training component
+     - job progress, trained artifacts
+   * - ``evaluation``
+     - Runs the rollouts of artifact evaluations
+     - rollout results
+
+Start each service with the same config and ``--component``:
+
+.. code:: bash
+
+   export REEF_TOKEN="$(openssl rand -hex 16)"
+   reef serve -c deploy.yaml --component control --reef.port 8901
+   reef serve -c deploy.yaml --component inference --reef.port 8902
+   reef serve -c deploy.yaml --component samples --reef.port 8903
+   reef serve -c deploy.yaml --component training --reef.port 8904
+   reef serve -c deploy.yaml --component evaluation --reef.port 8905 \
+     --control-url http://127.0.0.1:8901
+
+A ``--component`` process starts no other child. Start the inference engines
+and the training backend that the config names on their own. All processes
+must reach the same store:
+
+* On one host, the default ``sqlite`` record backend works. The processes share
+  the files under ``storage.agent-record-dir``.
+* On several hosts, use ``storage.record-backend: postgres``. The services keep
+  their shared tables in the ``reef_coordination`` schema.
+
+Control and training must also reach the same artifact backend.
+
+**Inference requests.** Send model requests to the inference service, with the
+scenario in ``x-reef-scenario``. For each request, the inference service reads
+the scenario's row in ``served_models`` and sends the request to the engine
+that the row names, under the row's model name. It appends the record to the
+scenario's record store and returns the record ID in
+``x-reef-agent-record-id``, and the ID of the artifact that answered in
+``x-reef-release-id``. ``x-reef-tag-*`` headers go into the record, as they do
+on control. The inference service answers:
+
+* ``404`` when the scenario serves no model.
+* ``409`` when the engine answers with another model twice, for example
+  during a change of the served model.
+* ``503`` when it cannot read ``served_models`` and has no earlier read from
+  the last 300 seconds, or when the record store does not take the record. The service never
+  returns an answer without its record.
+
+**Control restarts.** While control is down, the inference service continues to
+answer from ``served_models`` and to record. Training jobs, sample requests and
+evaluation rollouts that are already queued continue; new ones wait for control,
+because control adds them. To deploy a new control version, stop the old
+instance, then start the new one. The new instance writes ``served_models``
+after it takes the control lease, at the latest when the old lease expires
+(30 seconds). Each ``served_models`` write carries the lease number, so an old
+instance that lost the lease cannot overwrite the table. Do not run two control
+instances at the same time: the lease checks only the ``served_models`` writes.
+
+**Limits.** The inference service serves the active artifact of each scenario.
+A candidate under evaluation is served by control at its candidate route, so
+the evaluation service needs ``--control-url``. The evaluation service presents
+the first token of ``REEF_TOKEN`` or ``reef.tokens`` to control. A record of the
+artifact that a scenario started from carries no ``artifact_ref``.
 
 Choose the storage backend
 --------------------------

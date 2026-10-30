@@ -344,6 +344,21 @@ The extension points those packages expose are in `Python API
   it in ``reef/train/algos/``. ``reef/train/pipeline.py`` drives the three
   stages. A recipe selects and binds that machinery; it should
   not reimplement it.
+- Does one service tell another what to do? Do it through the shared store,
+  not a call. ``reef/storage/work_queue.py`` defines the ``WorkQueue`` contract
+  of the jobs, samples and evaluations queues;
+  ``reef/storage/served_models.py`` the ``served_models`` table, which control
+  writes and the inference service reads; and
+  ``reef/storage/control_lease.py`` the lease that makes one control instance
+  active. ``reef/storage/sql_coordination.py`` keeps these tables in SQLite or
+  PostgreSQL. The workers that take queue items live with their service:
+  ``reef/train/job_queue.py`` (training), ``reef/record2sample/service/``
+  (samples) and ``reef/evaluation/rollout_worker.py`` (evaluation). Control's
+  writer of ``served_models`` and its watcher of the store are in
+  ``reef/dispatcher/served.py`` and ``reef/dispatcher/store_changes.py``.
+  ``reef/service/inference_service.py`` is the inference service, and
+  ``reef/service/components.py`` builds the app of each service for
+  ``reef serve --component``.
 - Is it HTTP-specific? Keep the aiohttp adapter in ``reef/service/routes/``
   and put transport-independent behavior in a service or domain object.
 - Does it orchestrate a benchmark, task, grader, or external environment?
