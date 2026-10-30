@@ -264,12 +264,7 @@ class ModalSession(RemoteSession):
             self.push(root)
             started = time.monotonic()
             process = self.sandbox.exec(
-                "/bin/sh",
-                "-c",
-                limited,
-                workdir=cwd,
-                env=envs,
-                timeout=seconds + KILL_AFTER_S + 30,
+                "/bin/sh", "-c", limited, workdir=cwd, env=envs, timeout=seconds + KILL_AFTER_S + 30
             )
             process.wait()
             status = process.returncode

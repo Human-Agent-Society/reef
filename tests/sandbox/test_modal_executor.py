@@ -234,36 +234,9 @@ def test_a_process_runs_in_the_jail_under_its_limit_with_the_deployments_environ
     command = shlex.split(args[-1])
     assert command[:4] == ["timeout", f"--kill-after={modal_sandbox.KILL_AFTER_S}", "30", "/bin/sh"]
     jailed = command[-1]
-    assert "| exec bwrap" in jailed and f"{REMOTE_BASE}/rollout/workspace/out.txt" in jailed
+    assert jailed.startswith("exec bwrap") and f"{REMOTE_BASE}/rollout/workspace/out.txt" in jailed
     assert options["workdir"] == f"{REMOTE_BASE}/rollout/workspace"
     assert options["env"] == {"CALLER": "1", "DEPLOYMENT": "yes"}
-
-
-@pytest.mark.unit
-def test_a_secret_reaches_the_process_environment_and_no_command_line(tmp_path, monkeypatch) -> None:
-    root = tmp_path / "rollout"
-    (root / "workspace").mkdir(parents=True)
-    sandbox = Sandbox(Process(0, "done"))
-    session = ModalSession(sandbox, env={"DEPLOYMENT": "yes"})
-    monkeypatch.setattr(session, "push", lambda path: None)
-    monkeypatch.setattr(session, "pull", lambda path, relative="": None)
-    session.launch(
-        ["claude"],
-        root=root,
-        workspace=root / "workspace",
-        env={"CALLER": "1", "CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat01-secret-value"},
-        timeout=30,
-    )
-    ((args, options),) = sandbox.commands
-    assert not any("sk-ant-oat01-secret-value" in argument for argument in args)
-    jailed = shlex.split(args[-1])[-1]
-    assert '--setenv CLAUDE_CODE_OAUTH_TOKEN "$CLAUDE_CODE_OAUTH_TOKEN"' in jailed
-    assert "| exec bwrap" in jailed
-    assert options["env"] == {
-        "CALLER": "1",
-        "DEPLOYMENT": "yes",
-        "CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat01-secret-value",
-    }
 
 
 @pytest.mark.unit

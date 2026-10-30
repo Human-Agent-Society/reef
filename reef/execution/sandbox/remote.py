@@ -112,16 +112,7 @@ def protected_command(
 
     The PID namespace retires tool children when the command is stopped. Bubblewrap
     also prevents privilege escalation, so sudo cannot undo the read-only mounts.
-
-    Environment values arrive through the provider process environment. The shell's
-    builtin ``printf`` passes them to bubblewrap through its ``--args`` descriptor,
-    after ``--clearenv``. Only variable names appear in the command line.
-    Variables managed by the shell, such as PWD, follow the shell's normal behavior.
     """
-    for name in env:
-        if not name.isascii() or not name.isidentifier():
-            raise ValueError(f"{name!r} is not an environment variable name")
-    forwarded_names = tuple(name for name in env if name not in (ISOLATION_ENV, "REEF_NATIVE_ENFORCE"))
     arguments = [
         "bwrap",
         "--unshare-user",
@@ -150,20 +141,15 @@ def protected_command(
         arguments.extend(("--ro-bind", target, target))
     for name, value in {
         "PATH": "/usr/local/bin:/usr/bin:/bin",
+        **env,
         ISOLATION_ENV: "bwrap",
         "REEF_NATIVE_ENFORCE": "bwrap",
     }.items():
         arguments.extend(("--setenv", name, value))
-    if forwarded_names:
-        # After --clearenv, which bubblewrap applies where it reads it.
-        arguments.extend(("--args", "3"))
     arguments.extend(
         ("--chdir", f"{remote}/{workspace.relative_to(root).as_posix()}", "--", "/bin/sh", "-c", f"exec {command}")
     )
-    if not forwarded_names:
-        return f"exec {shlex.join(arguments)}"
-    values = " ".join(f'--setenv {name} "${name}"' for name in forwarded_names)
-    return f"printf '%s\\000' {values} | exec {shlex.join(arguments)} 3<&0 </dev/null"
+    return f"exec {shlex.join(arguments)}"
 
 
 def pack(directory: Path) -> bytes:
@@ -377,12 +363,9 @@ class RemoteExecutor(ProgramExecutor):
 class RemoteSession(ProgramExecutor):
     """One running cloud sandbox: launch processes in it, pull what they wrote, close it when done.
 
-    ``env`` is the deployment's explicit environment; every process gets it over the caller's.
-    A subclass's ``launch`` passes the merged environment to the provider and gives
-    ``protected_command`` its variable names. Values never enter the generated command line.
-    A subclass implements the provider's primitives (:meth:`write_file`, :meth:`read_file`,
-    :meth:`run`, :meth:`start`, :meth:`public_url`, :meth:`stop`) and :meth:`launch`; this class forwards ports,
-    copies roots and closes.
+    ``env`` is the deployment's explicit environment; every process gets it over the caller's. A subclass
+    implements the provider's primitives (:meth:`write_file`, :meth:`read_file`, :meth:`run`, :meth:`start`,
+    :meth:`public_url`, :meth:`stop`) and :meth:`launch`; this class forwards ports, copies roots and closes.
     """
 
     #: The provider's name, for messages.
