@@ -145,7 +145,13 @@ def test_both_backends_preserve_skip_and_proposed_state_without_resolving_a_loss
         batch = JobData("empty", ())
         slime = prepare_slime_job(batch, TrainingMethod(objective.name), state, StepScheduling(), step_size=1)
         tinker = prepare_tinker_job(
-            batch, TrainingMethod(objective.name), state, StepScheduling(), batch_size=1, kl_coef=0.0
+            batch,
+            TrainingMethod(objective.name),
+            state,
+            StepScheduling(),
+            batch_size=1,
+            kl_coef=0.0,
+            score_centering=None,
         )
         assert slime.action == "skip" and slime.payload is None
         assert tinker.loss is None and tinker.steps == ()
@@ -175,7 +181,9 @@ def test_group_advantages_are_shared_across_backends_before_optimizer_partitioni
         for advantage in TttdObjective.adaptive_entropic_advantages(list(group))[0]
     )
     slime = prepare_slime_job(batch, TrainingMethod("tttd"), state, one_sample_steps, step_size=1)
-    tinker = prepare_tinker_job(batch, TrainingMethod("tttd"), state, one_sample_steps, batch_size=1, kl_coef=0.0)
+    tinker = prepare_tinker_job(
+        batch, TrainingMethod("tttd"), state, one_sample_steps, batch_size=1, kl_coef=0.0, score_centering=None
+    )
     assert slime.payload["loss"] == "tttd" and tinker.loss is resolve_tinker_loss("tttd")
     assert slime.payload["advantages"] == pytest.approx(expected)
     assert [rows[0].advantage for rows in tinker.steps] == pytest.approx(expected)

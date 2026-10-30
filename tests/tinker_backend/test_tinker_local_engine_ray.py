@@ -67,7 +67,7 @@ FAKE_SDK = textwrap.dedent(
 
     class _Trainer:
         def __init__(self, origin): self.origin = origin
-        def forward_backward(self, data, loss_fn):
+        def forward_backward(self, data, loss_fn, loss_fn_config=None):
             _log({"event": "forward_backward", "rows": len(data), "loss_fn": loss_fn, "from": self.origin})
             return _Future(SimpleNamespace(metrics={"loss:sum": -1.0}))
         def optim_step(self, params): return _Future(None)

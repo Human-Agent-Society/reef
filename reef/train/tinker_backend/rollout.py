@@ -18,22 +18,37 @@ class SamplerChat(RolloutChat):
     """Answer OpenAI text chat calls on one Tinker sampler, for the rollouts of one job.
 
     ``sampler_path`` is the job's start sampler, or None for the base model. Each answer carries the training
-    capture with ``runtime_load_id``. Another path gets 404, a sampler refusal its own status, and a sampler
-    failure (a malformed sample, a timeout) 502 with the reason.
+    capture with ``runtime_load_id``, and with a positive ``topk_logprobs`` the sampler's top-k at each sampled
+    token (``sample_chat``). Another path gets 404, a sampler refusal its own status, and a sampler failure (a
+    malformed sample, a timeout) 502 with the reason.
     """
 
-    def __init__(self, sampler: TinkerSampler, sampler_path: str | None, *, model: str, runtime_load_id: str) -> None:
+    def __init__(
+        self,
+        sampler: TinkerSampler,
+        sampler_path: str | None,
+        *,
+        model: str,
+        runtime_load_id: str,
+        topk_logprobs: int,
+    ) -> None:
         self.sampler = sampler
         self.sampler_path = sampler_path
         self.model = model
         self.runtime_load_id = runtime_load_id
+        self.topk_logprobs = topk_logprobs
 
     def answer(self, path: str, payload: Any) -> tuple[int, Mapping[str, Any]]:
         if path != CHAT_COMPLETIONS_PATH:
             return 404, {"error": {"message": f"no route {path}"}}
         try:
             return 200, sample_chat(
-                self.sampler, self.sampler_path, payload, model=self.model, runtime_load_id=self.runtime_load_id
+                self.sampler,
+                self.sampler_path,
+                payload,
+                model=self.model,
+                runtime_load_id=self.runtime_load_id,
+                topk_logprobs=self.topk_logprobs,
             )
         except UpstreamStatusError as exc:
             return exc.status, {"error": {"message": str(exc)}}

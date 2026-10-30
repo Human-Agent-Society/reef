@@ -26,7 +26,7 @@ class Trainer:
         self.events = events
         self.fail = fail
 
-    def forward_backward(self, data, loss_fn):
+    def forward_backward(self, data, loss_fn, loss_fn_config=None):
         self.events.append(("forward_backward", data, loss_fn))
         return Future(SimpleNamespace(metrics={"loss:sum": -2.0}))
 
@@ -54,6 +54,7 @@ class Sampler:
     def __init__(self, events):
         self.events = events
         self.logprobs = [-0.25, -0.5]
+        self.topk_logprobs: list | None = None
         self.refusal: Exception | None = None
 
     def get_base_model(self):
@@ -62,13 +63,14 @@ class Sampler:
     def compute_logprobs(self, prompt):
         return Future([None, -0.1, -0.5, -0.7])
 
-    def sample(self, *, prompt, num_samples, sampling_params):
-        self.events.append(("sample", prompt, num_samples, sampling_params))
+    def sample(self, *, prompt, num_samples, sampling_params, topk_sample_logprobs):
+        self.events.append(("sample", prompt, num_samples, sampling_params, topk_sample_logprobs))
         if self.refusal is not None:
             raise self.refusal
-        return Future(
-            SimpleNamespace(sequences=[SimpleNamespace(tokens=[20, 21], logprobs=self.logprobs, stop_reason="length")])
+        sequence = SimpleNamespace(
+            tokens=[20, 21], logprobs=self.logprobs, topk_logprobs=self.topk_logprobs, stop_reason="length"
         )
+        return Future(SimpleNamespace(sequences=[sequence]))
 
 
 class Service:
@@ -247,15 +249,24 @@ def test_initial_snapshot_and_sampling_use_explicit_immutable_paths(client, samp
     checkpoint = client.initialize()
     assert client._sdk.events[1] == ("initialize", client._model, 32, 0)
     assert client._sdk.events[-1] == ("close", "success")
-    result = sampler.sample(checkpoint.sampler_path, [10, 11], {"max_tokens": 2})
+    result = sampler.sample(checkpoint.sampler_path, [10, 11], {"max_tokens": 2}, topk_logprobs=0)
     assert result.tokens == (20, 21)
     assert result.logprobs == (-0.25, -0.5)
     assert client._sdk.events[-2] == ("sampler", checkpoint.sampler_path)
-    sampler.sample(None, [10, 11], {"max_tokens": 2})
+    sampler.sample(None, [10, 11], {"max_tokens": 2}, topk_logprobs=0)
     assert client._sdk.events[-1][0] == "sample"  # the base sampler needs no new client
+    client._service.sampler.topk_logprobs = [[(20, -0.25), (3, -2.0)], [(21, -0.5), (4, -1.5)]]
+    assert sampler.sample(checkpoint.sampler_path, [10, 11], {"max_tokens": 2}, topk_logprobs=2).topk == (
+        ((20, -0.25), (3, -2.0)),
+        ((21, -0.5), (4, -1.5)),
+    )
+    assert client._sdk.events[-1][-1] == 2
+    client._service.sampler.topk_logprobs = [[(20, -0.25)], None]
+    with pytest.raises(ValueError, match="no top-k log probabilities for every sampled token"):
+        sampler.sample(checkpoint.sampler_path, [10, 11], {"max_tokens": 2}, topk_logprobs=2)
     client._service.sampler.logprobs = None
     with pytest.raises(ValueError, match="exact log probabilities"):
-        sampler.sample(checkpoint.sampler_path, [10, 11], {"max_tokens": 2})
+        sampler.sample(checkpoint.sampler_path, [10, 11], {"max_tokens": 2}, topk_logprobs=0)
     client.close()
     assert client._sdk.events[-1] == ("close", "success")
 
@@ -295,8 +306,8 @@ def test_base_sampling_clients_are_made_at_their_first_use(client, sampler):
     )
     assert not any(event[0] == "base_sampler" for event in client._sdk.events)
 
-    sampler.sample(None, [10, 11], {"max_tokens": 2})
-    sampler.sample(None, [10, 11], {"max_tokens": 2})
+    sampler.sample(None, [10, 11], {"max_tokens": 2}, topk_logprobs=0)
+    sampler.sample(None, [10, 11], {"max_tokens": 2}, topk_logprobs=0)
     assert [event for event in client._sdk.events if event[0] == "base_sampler"] == [("base_sampler", "Qwen/Qwen3-8B")]
 
 
@@ -307,11 +318,11 @@ def test_a_refused_sample_is_the_callers_400_and_an_overflow_names_the_context_l
         "65614 prompt tokens + 4096 max_tokens > 65536"
     )
     with pytest.raises(UpstreamStatusError, match=r"maximum context length.*65614 prompt tokens") as overflow:
-        sampler.sample(None, [10, 11], {"max_tokens": 2})
+        sampler.sample(None, [10, 11], {"max_tokens": 2}, topk_logprobs=0)
     assert overflow.value.status == 400 and str(overflow.value).startswith("context_length_exceeded")
     sampler.base_client.refusal = BadRequestError("Error code: 400 - invalid sampling params")
     with pytest.raises(UpstreamStatusError, match=r"^Error code: 400 - invalid sampling params$"):
-        sampler.sample(None, [10, 11], {"max_tokens": 2})
+        sampler.sample(None, [10, 11], {"max_tokens": 2}, topk_logprobs=0)
 
 
 def test_frozen_base_logprobs_align_to_response_and_reject_missing_values(client):
@@ -334,7 +345,7 @@ def test_remote_model_mismatch_fails_before_training_or_sampling(client, sampler
     assert not any(event[0] == "forward_backward" for event in client._sdk.events)
     monkeypatch.setattr(Sampler, "get_base_model", lambda _: "other/model")
     with pytest.raises(ValueError, match="remote Tinker sampler checkpoint"):
-        sampler.sample(base.sampler_path, [10], {"max_tokens": 1})
+        sampler.sample(base.sampler_path, [10], {"max_tokens": 1}, topk_logprobs=0)
     assert not any(event[0] == "sample" for event in client._sdk.events)
 
 
