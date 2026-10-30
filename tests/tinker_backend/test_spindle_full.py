@@ -147,7 +147,7 @@ def train(component, start=None):
                                 "tokens": [10, 11, 20, 21],
                                 "loss_mask": [1, 0],
                                 "rollout_log_probs": [-0.2, -0.4],
-                                "runtime_load_id": "v",
+                                "artifact_id": "v",
                             }
                         }
                     },

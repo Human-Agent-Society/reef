@@ -203,10 +203,11 @@ def task_name(task: TaskSample) -> str:
     return task.task_path.name
 
 
-def rollout_sample(rollout: TaskRollout, group: str, assembly: SampleAssembly) -> TrajectorySample | None:
+def rollout_sample(rollout: TaskRollout, group: str, assembly: SampleAssembly, start: str) -> TrajectorySample | None:
     """The sample of one rollout in ``group``, or None when it has no calls, an aborted call, or does not assemble.
 
-    A rollout that ran without a reward scores 0.
+    Each call sampled the weights ``start``, so each turn's record names ``start`` as its ``artifact_id``: the
+    turns of one rollout are one policy. A rollout that ran without a reward scores 0.
     """
     if not rollout.turns or any(inference_aborted(turn.response) for turn in rollout.turns):
         return None
@@ -214,7 +215,7 @@ def rollout_sample(rollout: TaskRollout, group: str, assembly: SampleAssembly) -
         AgentRecord.create(
             scenario=ROLLOUT_SCENARIO,
             request_type=RequestType.INFERENCE,
-            payload={**turn.request, "response": dict(turn.response)},
+            payload={**turn.request, "response": dict(turn.response), "artifact_id": start},
         )
         for turn in rollout.turns
     )
@@ -233,12 +234,14 @@ def roll_out(
     *,
     model: str,
     work_dir: Path,
+    start: str,
     model_adapter: str | None = None,
     lab: TaskLab | None = None,
 ) -> TaskJobRollouts:
     """Run ``settings.rollouts_per_task`` rollouts of each task, answering their model calls with ``chat``.
 
-    ``model`` is the model name the agent sends, and ``model_adapter`` the adapter it names, or None.
+    ``model`` is the model name the agent sends, and ``model_adapter`` the adapter it names, or None. ``start`` is
+    the job's ``start``, the weights that ``chat`` samples; each sample names it as its ``artifact_id``.
     ``lab`` runs each rollout; None is reef-eval's Harbor lab under ``work_dir``.
     """
     assembly = SampleAssembly(
@@ -279,7 +282,7 @@ def roll_out(
             for rollout in rollouts[index * settings.rollouts_per_task : (index + 1) * settings.rollouts_per_task]
             if not rollout.is_infrastructure_failure
         ]
-        group = [sample for sample in (rollout_sample(rollout, name, assembly) for rollout in ran) if sample]
+        group = [sample for sample in (rollout_sample(rollout, name, assembly, start) for rollout in ran) if sample]
         # A group of fewer than two samples has no relative reward, so it does not train.
         if len(group) >= 2:
             samples.extend(group)

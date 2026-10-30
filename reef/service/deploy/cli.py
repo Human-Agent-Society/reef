@@ -277,10 +277,10 @@ def build_serve_parser(
         ),
     )
     parser.add_argument(
-        "--control-url",
+        "--inference-service-url",
         default=None,
         metavar="URL",
-        help="The control service's URL, which --component evaluation calls for candidates.",
+        help="The inference service's URL, which --component evaluation calls for candidates.",
     )
     parser.add_argument(
         "--print-config",

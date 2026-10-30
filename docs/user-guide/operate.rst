@@ -27,7 +27,7 @@ Check health and status
 It reports these values for every scenario:
 
 - the step counter and the latest committed step outcome
-- the runtime load ID that the engines serve
+- the artifact that answers the scenario's requests (``served_artifact_id``)
 - whether a job's data is waiting, and the processor's state
 - whether inference is admitted or paused while a release loads
 - for a weight-training scenario, its running training job (``training_job``) and the number of jobs that ended, finished or failed (``finished_jobs``)
@@ -351,7 +351,8 @@ goes from evaluation to control, for the candidate that a rollout evaluates.
      - Runs training jobs on the training component
      - job progress, trained artifacts
    * - ``evaluation``
-     - Runs the rollouts of artifact evaluations
+     - Runs the rollouts of artifact evaluations against the candidate on the
+       inference service
      - rollout results
 
 Start each service with the same config and ``--component``:
@@ -364,7 +365,7 @@ Start each service with the same config and ``--component``:
    reef serve -c deploy.yaml --component samples --reef.port 8903
    reef serve -c deploy.yaml --component training --reef.port 8904
    reef serve -c deploy.yaml --component evaluation --reef.port 8905 \
-     --control-url http://127.0.0.1:8901
+     --inference-service-url http://127.0.0.1:8902
 
 A ``--component`` process starts no other child. Start the inference engines
 and the training backend that the config names on their own. All processes
@@ -435,9 +436,11 @@ overwrite the table. To deploy a new control version, start the new
 instance as a standby, then stop the old one.
 
 **Limits.** The inference service serves what ``served_models`` names: the
-active artifact of each scenario and the artifacts served beside it. A candidate under evaluation is served by control at its candidate route, so
-the evaluation service needs ``--control-url``. The evaluation service presents
-the first token of ``REEF_TOKEN`` or ``reef.tokens`` to control. A record of the
+active artifact of each scenario and the artifacts served beside it. Control
+serves a candidate beside the active artifact while it is evaluated, so the
+evaluation service calls the candidate on the inference service
+(``--inference-service-url``). It presents the first token of ``REEF_TOKEN`` or
+``reef.tokens``. A record of the
 artifact that a scenario started from carries no ``artifact_ref``. A runtime
 that loads full weights in place serves the next artifact under the same model
 name after an activation, so a request in flight at that moment can be answered

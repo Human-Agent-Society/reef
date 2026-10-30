@@ -181,7 +181,7 @@ def item(version="v", group="g", token=20):
                         "tokens": [10, 11, token, 21],
                         "loss_mask": [1, 0],
                         "rollout_log_probs": [-0.2, -0.4],
-                        "runtime_load_id": version,
+                        "artifact_id": version,
                     }
                 }
             },
@@ -839,7 +839,8 @@ def test_scenario_commits_recovers_activates_and_trains_from_remote_checkpoint(t
             AgentRecord.create(
                 scenario="math",
                 request_type=RequestType.INFERENCE,
-                payload={"response": response},
+                # As the inference service records it: the payload names the artifact that answered.
+                payload={"artifact_id": scenario.serving_artifact_id(), "response": response},
                 agent_record_id="i1",
             )
         )

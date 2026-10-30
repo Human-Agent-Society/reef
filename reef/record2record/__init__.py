@@ -21,8 +21,8 @@ Entry point: ``Record2Record`` in ``base.py``.
   inference, including report references. Replay applies the same check; stored
   response data stays unchanged.
 * Every stage runs the staleness check. It is the only place where Reef
-  compares the version that produced training data with the version that the
-  scenario serves, and drops data that is more than ``max_staleness`` versions
+  compares the artifact that produced training data with the artifact that the
+  scenario serves, and drops data that is more than ``max_staleness`` artifacts
   behind. ``max_staleness`` is the stage's setting (``Record2RecordSettings``,
   ``pipeline.record2record.config.max_staleness``).
 
@@ -45,8 +45,9 @@ Values and checks:
   record-to-sample stage, and the record sets whose samples the pipeline stores
   as one group, which trains together.
 * ``is_stale`` (``staleness.py``): whether training data is more than
-  ``max_staleness`` versions behind the version that the scenario serves.
-  The lag counts the versions that the scenario served after the producing one.
+  ``max_staleness`` artifacts behind the artifact that the scenario serves.
+  The lag counts the artifacts that the scenario served after the producing one,
+  which the record names by ``artifact_id``.
 
 The package depends only on ``reef.core``, ``reef.runtime.interfaces``,
 ``reef.execution.jobs``, and ``reef.pipeline_context``. Thus record-to-sample and

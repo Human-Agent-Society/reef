@@ -124,9 +124,9 @@ and ``files`` keywords declares no kind (``None``).
 after Reef publishes a checkpoint that the activation rule activates, and at an activation. It returns the runtime load ID that serves the release:
 a new load ID for a runtime that loads weights, or the release ID for one that
 loads nothing, such as a proxy. The runtime loads only published weights; no trainer
-changes what the engines serve. For a training scenario, Reef records the
-serving runtime load ID that the engine reports for each exchange (see `HTTP
-API <../reference/http-api.rst#serving-version-of-a-training-response>`__).
+changes what the engines serve. The runtime load ID stays inside the
+runtime: each record names the artifact that answered by its ``artifact_id``
+(see `HTTP API <../reference/http-api.rst#artifact-of-a-training-response>`__).
 
 **Per-scenario adapters.** When the runtime serves one PEFT adapter per
 scenario (``InferenceRuntime.per_scenario_adapters``), the weight recipe

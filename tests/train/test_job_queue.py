@@ -71,7 +71,7 @@ class StepComponent(LocalJobComponent):
 
 
 def job(job_id: str, **parameters: Any) -> TrainingJob:
-    data = JobData(job_id, (policy_trajectory(f"s-{job_id}", (1, 2, 3), (1, 1), (-0.1, -0.2), 1.0, "v1"),))
+    data = JobData(job_id, (policy_trajectory(f"s-{job_id}", (1, 2, 3), (1, 1), (-0.1, -0.2), 1.0, artifact_id="v1"),))
     return TrainingJob(job_id, "steps", "steps:base", data, parameters)
 
 

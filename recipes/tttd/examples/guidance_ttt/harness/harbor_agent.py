@@ -168,7 +168,7 @@ class HarborAgent(BaseAgent):
             "agent_record_ids": [result.agent_record_id for result in outcome.results if result.guidance_format_ok],
             "start_step": outcome.start_step,
             "next_step": outcome.next_step,
-            "runtime_load_id": outcome.runtime_load_id,
+            "served_artifact_id": outcome.served_artifact_id,
             "step_summaries": list(outcome.step_summaries),
         }
         context.metadata = metadata

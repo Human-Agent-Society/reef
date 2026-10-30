@@ -95,7 +95,7 @@ class _ToySamples(JudgedSamples):
             loss_mask=(1,),
             rollout_log_probs=(-0.1,),
             reward=1.0,
-            runtime_load_id=record.payload.get("version", "v1"),
+            artifact_id=record.payload.get("version", "v1"),
         )
 
 
@@ -183,10 +183,10 @@ def test_refused_submission_retires_immediately() -> None:
 
 def test_judged_samples_behind_the_serving_version_leave_the_buffer_before_a_batch() -> None:
     processor, worker = _engine()
-    processor.observe_serving_runtime_load_id("v1")
+    processor.observe_serving_artifact_id("v1")
     processor.push(_record("old", track=True, version="v1"))
     processor.push(_record("done1", completes="old"))
-    processor.observe_serving_runtime_load_id("v2")
+    processor.observe_serving_artifact_id("v2")
     processor.push(_record("new", track=True, version="v2"))
     processor.push(_record("done2", completes="new"))
     worker.push(_Judgment("new"))
@@ -201,12 +201,12 @@ def test_judged_sets_within_max_staleness_of_the_serving_version_stay() -> None:
     worker = _FakeWorker()
     processor = _ToyProcessor(PipelineContext("s"), worker=worker, max_staleness=1)
     for name, version in (("v3", "e:3"), ("v4", "e:4"), ("v5", "e:5")):
-        processor.observe_serving_runtime_load_id(version)
+        processor.observe_serving_artifact_id(version)
         processor.push(_record(name, track=True, version=version))
         processor.push(_record(f"done-{name}", completes=name))
         worker.push(_Judgment(name))
     processor.produce()
-    assert not processor.ready(3)  # e:3 is two versions behind e:5
+    assert not processor.ready(3)  # e:3 is two artifacts behind e:5
     assert {"v3", "v4", "v5"} <= processor.releasable_record_ids()
     assert [source_record_id(sample) for sample in processor.build_job_data(2).samples] == ["v4", "v5"]
 

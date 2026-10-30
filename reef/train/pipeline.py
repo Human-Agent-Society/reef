@@ -435,9 +435,9 @@ class TrainingPipeline:
         """Give the record-to-sample stage the outcome of a job whose end the trainer committed."""
         self.record2sample.job_ended(outcome)
 
-    def observe_serving_runtime_load_id(self, runtime_load_id: str) -> None:
-        """Give the record-to-record stage the runtime load ID that serves the scenario now, for its staleness check."""
-        self.record2record.observe_serving_runtime_load_id(runtime_load_id)
+    def observe_serving_artifact_id(self, artifact_id: str) -> None:
+        """Give the record-to-record stage the artifact that serves the scenario now, for its staleness check."""
+        self.record2record.observe_serving_artifact_id(artifact_id)
 
     # --------------------------------------------------------- job data cycle
 

@@ -206,7 +206,7 @@ def _turn_inference(agent_record_id: str, tokens: list[int], log_prob: float) ->
                     "tokens": tokens,
                     "loss_mask": [1],
                     "rollout_log_probs": [log_prob],
-                    "runtime_load_id": "wv-1",
+                    "artifact_id": "artifact-1",
                 }
             }
         },

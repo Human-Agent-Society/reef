@@ -152,12 +152,8 @@ class ServedModelsPublisher(ServiceWorker):
             return {}
         runtime = current.runtime
         status = current.artifact_status()
-        weights = [item.component for item in current.trainers if item.trainer.job_loop is not None]
-        component = weights[0] if weights else (next(iter(status)) if len(status) == 1 else None)
-        active_id = status[component]["active"] if component is not None else None
-        if active_id is None:
-            active_id = current.current_artifact_ref().release_id
-        active = runtime.served_artifact(active_id, scenario)
+        component = current.served_component()
+        active = runtime.served_artifact(current.serving_artifact_id(), scenario)
         if active is None:
             return {}
         rows = {ACTIVE: active}

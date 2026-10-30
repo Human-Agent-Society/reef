@@ -86,10 +86,6 @@ class ArtifactLoader(ABC):
         bytes a commit published.
         """
 
-    def served_runtime_load_id(self, artifact: Artifact, runtime: ServingRuntime | None) -> str | None:
-        """Return the runtime load ID that serves the committed ``artifact``, or None when it is unknown."""
-        return None
-
 
 class FileTree(ABC):
     """A client-readable file tree derived from an artifact."""
@@ -313,16 +309,6 @@ class Surface:
         if current is None or before is None or name not in current.entries or name not in before.entries:
             return True
         return current.entries[name].content_id != before.entries[name].content_id
-
-    def served_runtime_load_id(self, artifact: Artifact, runtime: ServingRuntime | None) -> str | None:
-        """Return the runtime load ID that serves the committed release, or None when no component has a loader."""
-        name = self.loader_component
-        if name is None:
-            return None
-        loader = self.components[name].loader
-        if loader is None:
-            return None
-        return loader.served_runtime_load_id(self.component_artifact(artifact, name), runtime)
 
     def activate(
         self,

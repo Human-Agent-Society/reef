@@ -171,7 +171,7 @@ def training_inference(
                     "tokens": tokens,
                     "loss_mask": loss_mask,
                     "rollout_log_probs": rollout_log_probs,
-                    "runtime_load_id": "wv-1",
+                    "artifact_id": "artifact-1",
                 }
             }
         },
@@ -253,7 +253,7 @@ def test_pairing_processor_emits_policy_samples_for_spo() -> None:
     assert item.training["tokens"] == [1, 2]
     assert item.training["loss_mask"] == [0, 1]
     assert item.training["rollout_log_probs"] == [-0.2]
-    assert item.training["runtime_load_id"] is None
+    assert item.training["artifact_id"] is None
     assert item.metadata["report_agent_record_id"] == "r1"
 
 
@@ -286,7 +286,7 @@ def test_pairing_processor_assembles_ordered_multi_reference_report() -> None:
     assert item.training["tokens"] == [10, 20, 11, 21]
     assert item.training["loss_mask"] == [1, 0, 1]
     assert item.training["rollout_log_probs"] == [-0.1, 0.0, -0.2]
-    assert item.training["runtime_load_id"] == "wv-1"
+    assert item.training["artifact_id"] == "artifact-1"
     assert item.training["turn_count"] == 2
     assert [record["payload"] for record in item.metadata["records"]] == [first.payload, second.payload]
     processor.acknowledge(batch.data_id)
@@ -802,10 +802,10 @@ def test_a_grouped_recipe_trains_one_comparison_set_as_one_job(tmp_path) -> None
         scenario_storage=SQLiteScenarioStorage(),
     )
     scenario = dispatcher.get_or_create_scenario("math")
-    serving = scenario.serving_runtime_load_id()
+    serving = scenario.serving_artifact_id()
     for rid, score in (("i1", 0.2), ("i2", 0.8)):
         record = inference(rid)
-        dispatcher.accept_record(replace(record, payload={**record.payload, "runtime_load_id": serving}))
+        dispatcher.accept_record(replace(record, payload={**record.payload, "artifact_id": serving}))
         dispatcher.accept_record(report("r" + rid, rid, score, comparison_set="set-a"))
 
     deadline = time.monotonic() + 10

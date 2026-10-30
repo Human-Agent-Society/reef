@@ -74,8 +74,8 @@ def serving_runtime() -> StubInferenceRuntime:
 
 
 def weight_dispatcher(tmp_path, initial, *, training: bool = False):
-    """A dispatcher of weight scenarios that a stub runtime serves; ``training`` gives them a training component, so
-    they record serving versions. The commit history is durable, so a commit's activation moves the served row."""
+    """A dispatcher of weight scenarios that a stub runtime serves; ``training`` gives them a training component.
+    The commit history is durable, so a commit's activation moves the served row."""
     return Dispatcher(
         (
             WeightRecipe(**runtime_bindings(runtime=serving_runtime()))
@@ -305,8 +305,10 @@ def test_inference_payload_is_recorded_without_reef_body_fields(tmp_path) -> Non
 
     asyncio.run(run())
 
-    record = dispatcher.get_or_create_scenario("chat").records.replay("chat")[0]
-    assert record.payload == {**payload, "response": {"provider": "ok"}}
+    scenario = dispatcher.get_or_create_scenario("chat")
+    record = scenario.records.replay("chat")[0]
+    # The record names the artifact that answered.
+    assert record.payload == {**payload, "artifact_id": scenario.serving_artifact_id(), "response": {"provider": "ok"}}
     assert record.artifact_ref is not None
     assert "scenario" not in record.payload
     assert "type" not in record.payload
@@ -350,9 +352,12 @@ def test_a_rollout_call_keeps_no_record_and_returns_its_training_block(tmp_path)
     training = {"tokens": [1, 2, 3], "loss_mask": [1], "rollout_log_probs": [-0.5]}
 
     async def backend(artifact: Artifact, path: str, payload: dict) -> dict:
-        return {"choices": [{"message": {"content": "hi"}}], "training": training}
+        # The engine's own name for its loaded weights stays inside the engine.
+        engine_training = {**training, "runtime_load_id": "engine:3", "runtime_load_spans": []}
+        return {"choices": [{"message": {"content": "hi"}}], "training": engine_training}
 
     dispatcher = serving_dispatcher(tmp_path)
+    served_artifact_id = dispatcher.get_or_create_scenario("chat").serving_artifact_id()
 
     async def run() -> None:
         async with serving_client(dispatcher, backend) as client:
@@ -360,7 +365,8 @@ def test_a_rollout_call_keeps_no_record_and_returns_its_training_block(tmp_path)
             body = {"model": "reef", "messages": [{"role": "user", "content": "hi"}]}
             response = await client.post("/v1/chat/completions", headers=rollout, json=body)
             assert response.status == 200 and "x-reef-agent-record-id" not in response.headers
-            assert (await response.json())["training"] == training
+            # The training block names the artifact that answered.
+            assert (await response.json())["training"] == {**training, "artifact_id": served_artifact_id}
             streamed = await client.post("/v1/chat/completions", headers=rollout, json={**body, "stream": True})
             assert streamed.status == 400
             served = await client.post("/v1/chat/completions", headers={"x-reef-scenario": "chat"}, json=body)
@@ -369,6 +375,8 @@ def test_a_rollout_call_keeps_no_record_and_returns_its_training_block(tmp_path)
     asyncio.run(run())
     records = dispatcher.get_or_create_scenario("chat").records.replay("chat")
     assert len(records) == 1, "only the served call is a record"
+    assert records[0].payload["artifact_id"] == served_artifact_id
+    assert records[0].payload["response"]["training"] == training
 
 
 @pytest.mark.unit
@@ -1053,8 +1061,7 @@ def test_a_record_names_the_served_release_and_keeps_the_release_the_client_runs
     never the catalog. The release that a session says it runs stays in the record's tags."""
 
     async def backend(artifact: Artifact, path: str, payload: dict) -> dict:
-        # A training scenario records the version the engine reports.
-        return {"meta_info": {"runtime_load_id": "sglang-v2"}} if isinstance(recipe, WeightRecipe) else {"ok": True}
+        return {"ok": True}
 
     dispatcher = Dispatcher(
         recipe,

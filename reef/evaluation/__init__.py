@@ -11,8 +11,8 @@ built-in evaluators, selectors and rules.
 ``harness`` measures harness candidates by running evaluation rollouts. It
 holds ``HarnessCandidate``, its evaluator ``HarnessRolloutEvaluator``, the
 ``RolloutScorer`` contract that a method supplies, and the ``score_comparison``
-and ``floor`` selection policies. ``artifact_endpoint`` answers the model calls
-of an artifact evaluation's rollouts from the release that it evaluates.
+and ``floor`` selection policies. ``rollout_worker`` runs the rollouts of an
+artifact evaluation against the candidate's URL on the inference service.
 """
 
 from reef.core.activation import ActivationRule, MadeArtifact

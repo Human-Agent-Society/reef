@@ -9,7 +9,6 @@ import pytest
 from tests.support._trajectories import policy_trajectory
 
 from reef.core import AgentRecord, RequestType
-from reef.core.artifact_ref import RuntimeLoadSpan
 from reef.core.job_data import TaskSample
 from reef.core.plugins import PluginConfigError
 from reef.record2record import (
@@ -23,7 +22,7 @@ from reef.record2record import (
     SingleRecordSet,
     SingleSetUnit,
 )
-from reef.record2record.staleness import is_stale, producing_runtime_load_ids
+from reef.record2record.staleness import is_stale, producing_artifact_ids
 from reef.record2sample import SampleResult
 from reef.train import PipelineContext
 
@@ -103,52 +102,48 @@ def test_a_stage_hands_out_each_ready_unit_once_in_the_order_it_first_became_rea
     assert stage.take_ready_units() == ()
 
 
-def test_staleness_check_measures_lag_in_versions_the_scenario_served() -> None:
-    versions = {
-        "current": frozenset({"e:5"}),
-        "one-behind": frozenset({"e:4"}),
-        "two-behind": frozenset({"e:3"}),
-        "never-served": frozenset({"e:6"}),
+def test_staleness_check_measures_lag_in_artifacts_the_scenario_served() -> None:
+    artifacts = {
+        "current": frozenset({"a5"}),
+        "one-behind": frozenset({"a4"}),
+        "two-behind": frozenset({"a3"}),
+        "never-served": frozenset({"a6"}),
         "unknown": frozenset({None}),
-        "mixed": frozenset({"e:5", "e:3"}),
+        "mixed": frozenset({"a5", "a3"}),
         "rolled-out": frozenset(),
     }
-    # The engine sequence skips e:2: lag counts the scenario's own versions, not sequence numbers.
-    served = ("e:1", "e:3", "e:4", "e:5")
+    # The scenario never served a2: lag counts the artifacts that it served, not the artifacts that it made.
+    served = ("a1", "a3", "a4", "a5")
     stale = {"two-behind", "never-served", "unknown", "mixed"}
-    assert {name for name, produced in versions.items() if is_stale(produced, served, 1)} == stale
-    # Window 0 keeps only data of the current version, and data that the algorithm rolls out.
-    assert {name for name, produced in versions.items() if is_stale(produced, served, 0)} == stale | {"one-behind"}
-    # An unknown serving version checks nothing.
-    assert not any(is_stale(produced, (), 0) for produced in versions.values())
+    assert {name for name, produced in artifacts.items() if is_stale(produced, served, 1)} == stale
+    # Window 0 keeps only data of the served artifact, and data that the algorithm rolls out.
+    assert {name for name, produced in artifacts.items() if is_stale(produced, served, 0)} == stale | {"one-behind"}
+    # An unknown served artifact checks nothing.
+    assert not any(is_stale(produced, (), 0) for produced in artifacts.values())
 
 
-def test_producing_runtime_load_ids_come_from_every_sample_and_token_span() -> None:
-    spans = (
-        RuntimeLoadSpan(start=0, end=1, runtime_load_id="e:1"),
-        RuntimeLoadSpan(start=1, end=2, runtime_load_id="e:2"),
-    )
-    tasks = (
-        policy_trajectory("a", (1, 2), (1,), (-0.1,), 1.0, runtime_load_id="e:3"),
-        policy_trajectory("b", (1, 2, 3), (1, 1), (-0.1, -0.2), 1.0, runtime_load_spans=spans),
+def test_producing_artifact_ids_come_from_every_sample() -> None:
+    samples = (
+        policy_trajectory("a", (1, 2), (1,), (-0.1,), 1.0, artifact_id="a3"),
+        policy_trajectory("b", (1, 2), (1,), (-0.1,), 1.0, artifact_id="a4"),
         policy_trajectory("c", (1, 2), (1,), (-0.1,), 1.0),
         TaskSample(Path("task")),
     )
-    assert producing_runtime_load_ids(tasks) == frozenset({"e:1", "e:2", "e:3", None})
+    assert producing_artifact_ids(samples) == frozenset({"a3", "a4", None})
 
 
-def test_the_stage_finds_samples_behind_the_serving_version_stale() -> None:
+def test_the_stage_finds_samples_behind_the_served_artifact_stale() -> None:
     stage = InferenceRecord2Record()
-    old = policy_trajectory("old", (1, 2), (1,), (-0.1,), 1.0, runtime_load_id="e:1")
-    new = policy_trajectory("new", (1, 2), (1,), (-0.1,), 1.0, runtime_load_id="e:2")
-    unversioned = policy_trajectory("unversioned", (1, 2), (1,), (-0.1,), 1.0)
-    # Before the serving version is known, no sample is stale.
-    assert not stage.is_stale((old, unversioned))
-    stage.observe_serving_runtime_load_id("e:1")
-    stage.observe_serving_runtime_load_id("e:2")
+    old = policy_trajectory("old", (1, 2), (1,), (-0.1,), 1.0, artifact_id="a1")
+    new = policy_trajectory("new", (1, 2), (1,), (-0.1,), 1.0, artifact_id="a2")
+    unnamed = policy_trajectory("unnamed", (1, 2), (1,), (-0.1,), 1.0)
+    # Before the served artifact is known, no sample is stale.
+    assert not stage.is_stale((old, unnamed))
+    stage.observe_serving_artifact_id("a1")
+    stage.observe_serving_artifact_id("a2")
     assert stage.is_stale((old,)) and not stage.is_stale((new,))
     assert stage.is_stale((new, old)), "one stale sample makes the samples stale"
-    assert stage.is_stale((unversioned,)), "a sample without a producing version is stale"
+    assert stage.is_stale((unnamed,)), "a sample without a producing artifact is stale"
     assert not stage.is_stale((TaskSample(Path("task")),)), "a task rolls out with the weights it trains"
 
 
@@ -163,20 +158,22 @@ def test_record_stage_settings_default_to_zero_and_refuse_a_negative_limit() -> 
 
 def test_a_stage_finds_only_the_samples_more_than_its_configured_limit_behind_stale() -> None:
     stage = InferenceRecord2Record.from_config({"max-staleness": 1}, context=PipelineContext("s"), environ={})
-    for version in ("e:1", "e:2", "e:3"):
-        stage.observe_serving_runtime_load_id(version)
+    for artifact_id in ("a1", "a2", "a3"):
+        stage.observe_serving_artifact_id(artifact_id)
     stale = {
-        name: stage.is_stale((policy_trajectory(name, (1, 2), (1,), (-0.1,), 1.0, runtime_load_id=version),))
-        for name, version in (("two-behind", "e:1"), ("one-behind", "e:2"), ("current", "e:3"))
+        name: stage.is_stale((policy_trajectory(name, (1, 2), (1,), (-0.1,), 1.0, artifact_id=artifact_id),))
+        for name, artifact_id in (("two-behind", "a1"), ("one-behind", "a2"), ("current", "a3"))
     }
     assert stale == {"two-behind": True, "one-behind": False, "current": False}
 
 
-def test_a_serving_version_of_another_incarnation_restarts_the_served_versions() -> None:
+def test_an_artifact_that_serves_again_is_the_newest_and_its_data_is_fresh() -> None:
     stage = InferenceRecord2Record()
-    for version in ("e:1", "e:2", "e:2", "f:0"):
-        stage.observe_serving_runtime_load_id(version)
-    assert stage.served_versions.versions == ["f:0"]
+    for artifact_id in ("a1", "a2", "a2", "a1"):
+        stage.observe_serving_artifact_id(artifact_id)
+    assert stage.served_artifacts.artifact_ids == ["a1", "a2", "a1"]
+    assert not stage.is_stale((policy_trajectory("again", (1, 2), (1,), (-0.1,), 1.0, artifact_id="a1"),))
+    assert stage.is_stale((policy_trajectory("before", (1, 2), (1,), (-0.1,), 1.0, artifact_id="a2"),))
 
 
 @pytest.mark.unit

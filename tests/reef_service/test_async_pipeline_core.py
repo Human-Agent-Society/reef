@@ -75,10 +75,6 @@ class BlockingLostAckBackend(InMemoryRepositoryBackend):
         return ref
 
 
-def _training(runtime_load_id: str) -> dict:
-    return {"tokens": [1, 2], "loss_mask": [1], "rollout_log_probs": [-0.2], "runtime_load_id": runtime_load_id}
-
-
 class ImmediateBackend(InferenceHandler):
     async def inference(self, artifact, path, payload):
         return {"metadata": {"runtime_load_id": "w0"}}
@@ -139,14 +135,14 @@ def wait_for_operational_sample(
 def start_dispatcher(tmp_path: Path):
     opened = []
 
-    def start(backend_type=None, *, experiment_tracker=None, **component_options):
+    def start(backend_type=None, *, experiment_tracker=None, max_staleness=0, **component_options):
         initial = tmp_path / "initial"
         initial.mkdir(exist_ok=True)
         (initial / "model.txt").write_text("w0")
         component = DurableComponent(tmp_path / "checkpoints", **component_options)
         factory = (backend_type or InMemoryRepositoryBackend).factory(initial, root=tmp_path / "repository")
         dispatcher = Dispatcher(
-            TestPolicyRecipe(**runtime_bindings(component, component.inference)),
+            TestPolicyRecipe(**runtime_bindings(component, component.inference), max_staleness=max_staleness),
             factory,
             local_artifact_dir=tmp_path / "staged",
             experiment_tracker=experiment_tracker,
@@ -161,15 +157,19 @@ def start_dispatcher(tmp_path: Path):
         dispatcher.close()
 
 
-def _submit_pair(dispatcher: Dispatcher, suffix: str = "1", runtime_load_id: str = "w0") -> None:
-    dispatcher.get_or_create_scenario("math")
+def _submit_pair(dispatcher: Dispatcher, suffix: str = "1") -> None:
+    """Accept an inference, answered by the artifact that scenario ``math`` serves, and its report."""
+    served = dispatcher.get_or_create_scenario("math").serving_artifact_id()
     inference_id = f"inference-{suffix}"
     records = (
         AgentRecord.create(
             scenario="math",
             request_type=RequestType.INFERENCE,
             agent_record_id=inference_id,
-            payload={"response": {"training": _training(runtime_load_id)}},
+            payload={
+                "artifact_id": served,
+                "response": {"training": {"tokens": [1, 2], "loss_mask": [1], "rollout_log_probs": [-0.2]}},
+            },
         ),
         AgentRecord.create(
             scenario="math",
@@ -328,7 +328,7 @@ def test_two_jobs_form_one_deterministic_release_chain(start_dispatcher) -> None
     _wait_for_jobs(dispatcher, 1)
     scenario = dispatcher.get_or_create_scenario("math")
     first = scenario.current_artifact_ref()
-    _submit_pair(dispatcher, "2", "w1")
+    _submit_pair(dispatcher, "2")
     _wait_for_jobs(dispatcher, 2)
 
     assert [source_record_id(job.data.samples[0]) for job in component.calls] == ["inference-1", "inference-2"]
@@ -424,7 +424,8 @@ def test_operational_sample_wait_ignores_a_matching_backlog_before_training() ->
 def test_periodic_metrics_report_backlog_during_training_without_status_reads(start_dispatcher, monkeypatch) -> None:
     monkeypatch.setattr(Dispatcher, "operational_metrics_interval_seconds", 0.01)
     tracker = OperationalExperimentTracker()
-    _, dispatcher = start_dispatcher(experiment_tracker=tracker)
+    # The base artifact answers the second pair while the first job trains, so that pair trains one artifact behind.
+    _, dispatcher = start_dispatcher(experiment_tracker=tracker, max_staleness=1)
     # The trainer's cycle executes while it submits the first job: hold the submission.
     started, release = _hold_job_submission(monkeypatch)
     _submit_pair(dispatcher)
@@ -439,7 +440,7 @@ def test_periodic_metrics_report_backlog_during_training_without_status_reads(st
         return produce_samples(self)
 
     monkeypatch.setattr(Trainer, "produce_samples", held_samples)
-    _submit_pair(dispatcher, "2", "w1")
+    _submit_pair(dispatcher, "2")
     sample = wait_for_operational_sample(tracker, {"records/unread_count": 2, "training/execution/active": 1})
     assert sample["training/execution/active"] == 1
     assert sample["training/execution/elapsed_seconds"] >= 0

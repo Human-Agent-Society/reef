@@ -60,7 +60,7 @@ def _turn(
     tokens=(1, 2, 3, 4),
     loss_mask=(1, 1),
     logprobs=(-0.1, -0.2),
-    runtime_load_id="v1",
+    artifact_id="v1",
     topk_rows=None,
     session=None,
 ):
@@ -72,7 +72,7 @@ def _turn(
         # every response token.
         "topk_indices": [[1, 2] for _ in loss_mask] if topk_rows is None else topk_rows,
         "topk_log_probs": [[-0.1, -2.0] for _ in loss_mask],
-        "runtime_load_id": runtime_load_id,
+        "artifact_id": artifact_id,
         "response_length": len(loss_mask),
     }
     return AgentRecord.create(
@@ -214,14 +214,14 @@ def test_untrainable_verdicts_and_bad_tensors_are_terminal() -> None:
 
 
 @pytest.mark.unit
-def test_candidates_behind_the_serving_version_leave_the_buffer() -> None:
+def test_candidates_behind_the_served_artifact_leave_the_buffer() -> None:
     worker = FakeWorker()
     processor = _processor(worker=worker)
-    processor.observe_serving_runtime_load_id("v1")
-    processor.push(_turn("old", Q1, runtime_load_id="v1"))
+    processor.observe_serving_artifact_id("v1")
+    processor.push(_turn("old", Q1, artifact_id="v1"))
     processor.push(_turn("cont1", _successor(Q1, "ok")))
-    processor.observe_serving_runtime_load_id("v2")
-    processor.push(_turn("new", Q2, runtime_load_id="v2"))
+    processor.observe_serving_artifact_id("v2")
+    processor.push(_turn("new", Q2, artifact_id="v2"))
     processor.push(_turn("cont2", _successor(Q2, "ok")))
     worker.push(TurnJudgment("old", score=1.0, teacher_cands=ANCHOR))
     worker.push(TurnJudgment("new", score=1.0, teacher_cands=ANCHOR))

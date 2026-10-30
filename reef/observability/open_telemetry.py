@@ -234,9 +234,9 @@ class OpenTelemetryRecordObserver(RecordObserver):
         model = payload.get("model")
         if isinstance(model, str) and model:
             attributes["gen_ai.request.model"] = model
-        runtime_load_id = payload.get("runtime_load_id")
-        if isinstance(runtime_load_id, str) and runtime_load_id:
-            attributes["reef.runtime_load_id"] = runtime_load_id
+        artifact_id = payload.get("artifact_id")
+        if isinstance(artifact_id, str) and artifact_id:
+            attributes["reef.artifact_id"] = artifact_id
         response = payload.get("response")
         response = response if isinstance(response, Mapping) else {}
         response_model = response.get("model")

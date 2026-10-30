@@ -476,7 +476,9 @@ class SlimeJobRunner(SlimeJobs):
         tasks = tuple(item for item in job.data.samples if isinstance(item, TaskSample))
         self.rollout_group.sync(self.group)
         try:
-            rollouts = roll_out(tasks, settings, chat, model=self.args.hf_checkpoint, work_dir=directory / "rollouts")
+            rollouts = roll_out(
+                tasks, settings, chat, model=self.args.hf_checkpoint, work_dir=directory / "rollouts", start=job.start
+            )
         finally:
             self.rollout_group.release()
         write_json(

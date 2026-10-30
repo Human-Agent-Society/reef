@@ -39,8 +39,9 @@ class Registry:
         self.scenario = SimpleNamespace(
             name="math",
             runtime=runtime,
-            trainers=(),
             artifact_status=lambda: {"weights": {"active": runtime.release, "training_start": None}},
+            served_component=lambda: "weights",
+            serving_artifact_id=lambda: runtime.release,
             served_beside=dict,
         )
 

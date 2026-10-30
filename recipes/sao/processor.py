@@ -20,11 +20,11 @@ class SAOSampleAssembly(SampleAssembly):
 
     ``make_policy_trajectory`` reads the shared training fields, so SAO and
     the group-relative recipes resolve every shared field identically,
-    including the ``runtime_load_id`` fallback chain the durable runtime
-    needs to identify a training job's producing version. SAO then fills the
-    two fields that path leaves at their defaults: ``action_mask`` (read from
-    ``response.training`` first, the top-level payload second) and
-    ``rollout_created_at``, for the backend's queue-age metric.
+    including the producing ``artifact_id`` that the staleness check and the
+    backend's telemetry read. SAO then fills the two fields that path leaves
+    at their defaults: ``action_mask`` (read from ``response.training`` first,
+    the top-level payload second) and ``rollout_created_at``, for the
+    backend's queue-age metric.
     """
 
     def single_sample(self, record: AgentRecord, score: float) -> TrajectorySample:

@@ -23,7 +23,6 @@ pytest.importorskip("ray", reason="requires the optional Ray runtime")
 from tests.support._trajectories import policy_trajectory
 from tests.support.slime_component import FakeTrainGroup, RecordingBatchProcessor, checkpoint_storage, finished
 
-from reef.core.artifact_ref import RuntimeLoadSpan
 from reef.core.job_data import TaskSample
 from reef.core.trajectories import trajectory_reward
 from reef.core.weight_layout import ADAPTER_DIR
@@ -135,7 +134,7 @@ def worker_args(tmp_path: Path, **overrides: object) -> SlimeArguments:
         "advantage_estimator": "grpo",
         "compute_advantages_and_returns": False,
         "use_rollout_logprobs": True,
-        "custom_rollout_data_keys": ("producing_runtime_load_spans", "producing_runtime_load_ids"),
+        "custom_rollout_data_keys": ("producing_artifact_ids",),
         "reef_rollout_tensor_dtypes": {},
         "reef_external_batch_keys": (),
         "reef_rollout_log_skip_keys": (),
@@ -160,7 +159,9 @@ def batch_for(step: int, *, rewards: tuple[float, ...] = (1.0, 1.0)) -> JobData:
     return JobData(
         f"batch-{step}",
         tuple(
-            policy_trajectory(f"s{step}-{index}", (1, 2, 3), (1, 1), (-0.2, -0.1), reward, f"inc:{index}")
+            policy_trajectory(
+                f"s{step}-{index}", (1, 2, 3), (1, 1), (-0.2, -0.1), reward, artifact_id=f"artifact-{index}"
+            )
             for index, reward in enumerate(rewards)
         ),
     )
@@ -767,27 +768,14 @@ def test_worker_results_wait_for_the_configured_timeout_and_metrics_come_from_ev
 
 
 @pytest.mark.unit
-def test_the_workers_receive_each_rows_producing_versions(tmp_path, stacks) -> None:
+def test_the_workers_receive_each_rows_producing_artifact(tmp_path, stacks) -> None:
     stack = stacks(tmp_path)
-    mixed = policy_trajectory(
-        "mixed",
-        (10, 20, 21, 22),
-        (1, 1, 1),
-        (-0.1, -0.2, -0.3),
-        1.0,
-        None,
-        runtime_load_spans=(RuntimeLoadSpan(0, 1, "inc:6"), RuntimeLoadSpan(1, 3, "inc:7")),
-    )
-    batch = JobData("mixed", (*batch_for(0).samples, mixed))
+    unknown = policy_trajectory("unknown", (10, 20, 21, 22), (1, 1, 1), (-0.1, -0.2, -0.3), 1.0)
+    batch = JobData("mixed", (*batch_for(0).samples, unknown))
     stack.run(TrainingMethod("sft"), step=0, batch=batch)
     (data,) = stack.processor.calls
-    # Training metadata, not a check: a sample's version, or the versions of its token spans.
-    assert data["producing_runtime_load_ids"] == ["inc:0", "inc:1", None]
-    assert data["producing_runtime_load_spans"] == [
-        [],
-        [],
-        [{"start": 0, "end": 1, "runtime_load_id": "inc:6"}, {"start": 1, "end": 3, "runtime_load_id": "inc:7"}],
-    ]
+    # Training metadata, not a check: the artifact that produced each sample, or None when it is unknown.
+    assert data["producing_artifact_ids"] == ["artifact-0", "artifact-1", None]
 
 
 # -- Checkpoint storage

@@ -27,7 +27,6 @@ from reef.storage.samples import TrainerSamples
 from reef.storage.sql_coordination import open_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.surface import ComponentSurface, Surface, TextFileTree
-from reef.surface.base import ServingRuntime
 from reef.surface.weights import WeightLoader
 from reef.train import CandidateBackend, ComponentTrainer, PreparedStep, Trainer, TrainStepResult
 from reef.train.jobs import JobLoop
@@ -108,13 +107,6 @@ class WeightsJobComponent(StubTrainingComponent):
         return checkpoints
 
 
-class UnversionedWeightLoader(WeightLoader):
-    """Load weights through the runtime, but name no serving version: the test rows name none, so none is stale."""
-
-    def served_runtime_load_id(self, artifact: Artifact, runtime: ServingRuntime | None) -> str | None:
-        return None
-
-
 @dataclass(frozen=True)
 class Judgment(SupportsReceipt):
     receipt: str
@@ -147,6 +139,10 @@ class AutoOnlyThresholdJobData(ThresholdJobData):
 #: The node kind of a held artifact: the test recipe's activation rule does not activate it.
 HELD = "held"
 
+#: How many artifacts behind the served one a row may be and still train. A test appends rows before the jobs that
+#: it waits for move the served artifact, so its rows stay trainable until it ends.
+MAX_STALENESS = 100
+
 
 @dataclass(frozen=True)
 class _TwoTrainerRecipe(Recipe):
@@ -163,9 +159,7 @@ class _TwoTrainerRecipe(Recipe):
             components={
                 # A training component's weights load through the runtime, so train-from imports them as a start.
                 WEIGHTS: (
-                    ComponentSurface()
-                    if self.training_component is None
-                    else ComponentSurface(loader=UnversionedWeightLoader())
+                    ComponentSurface() if self.training_component is None else ComponentSurface(loader=WeightLoader())
                 ),
                 HARNESS: ComponentSurface(files=TextFileTree()),
             }
@@ -173,8 +167,10 @@ class _TwoTrainerRecipe(Recipe):
 
     def pipeline_for(self, component: str, context: PipelineContext) -> TrainingPipeline:
         if component in self.auto_only_components:
-            return threshold_pipeline(context, sample2job=AutoOnlyThresholdJobData(context, None, None))
-        return threshold_pipeline(context)
+            return threshold_pipeline(
+                context, sample2job=AutoOnlyThresholdJobData(context, None, None), max_staleness=MAX_STALENESS
+            )
+        return threshold_pipeline(context, max_staleness=MAX_STALENESS)
 
     def build_trainers(
         self, scenario, records, *, surface, algorithm_states, experiment_logger=None, task_storage=None, samples=None
@@ -243,13 +239,14 @@ class _RecordingTracker(ExperimentTracker):
         pass
 
 
-def _records(step: int, scenario: str = "agent") -> tuple[AgentRecord, AgentRecord]:
-    """One inference and the report on it; rows of scenarios other than ``agent`` carry the scenario's name."""
+def _records(step: int, artifact_id: str, scenario: str = "agent") -> tuple[AgentRecord, AgentRecord]:
+    """One inference, answered by the artifact ``artifact_id``, and the report on it; rows of scenarios other than
+    ``agent`` carry the scenario's name."""
     prefix = "" if scenario == "agent" else f"{scenario}-"
     inference = AgentRecord.create(
         scenario=scenario,
         request_type=RequestType.INFERENCE,
-        payload={"tokens": [1, 2], "loss_mask": [0, 1], "rollout_log_probs": [-0.2]},
+        payload={"tokens": [1, 2], "loss_mask": [0, 1], "rollout_log_probs": [-0.2], "artifact_id": artifact_id},
         agent_record_id=f"{prefix}i{step}",
     )
     report = AgentRecord.create(
@@ -263,9 +260,10 @@ def _records(step: int, scenario: str = "agent") -> tuple[AgentRecord, AgentReco
 
 
 def _append_records(scenario: Scenario, *steps: int) -> None:
-    """Append each step's rows to the store directly, so the test, not a worker, owns when a trainer prepares."""
+    """Append each step's rows, answered by the artifact that ``scenario`` serves now, to the store directly, so the
+    test, not a worker, owns when a trainer prepares."""
     for step in steps:
-        for record in _records(step, scenario.name):
+        for record in _records(step, scenario.serving_artifact_id(), scenario.name):
             scenario.records.append(record)
 
 

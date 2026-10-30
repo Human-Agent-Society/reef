@@ -298,6 +298,7 @@ class TinkerJobComponent(LocalJobComponent, ABC):
             chat,
             model=self._model,
             work_dir=directory / "rollouts",
+            start=job.start,
             model_adapter=start.sampler_path,
         )
         write_json(

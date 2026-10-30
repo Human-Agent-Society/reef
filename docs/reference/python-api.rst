@@ -1078,7 +1078,7 @@ record2sample=..., sample2job=...)``):
   (``reef.record2record``). It decides which records train and which train together:
   it groups reports, judges records, and ends records that can no longer
   train. Its staleness check (``is_stale``) keeps samples with data more than
-  ``max_staleness`` versions behind the serving version out of the buffer.
+  ``max_staleness`` artifacts behind the served artifact out of the buffer.
   ``max_staleness`` is the stage's own setting, from
   ``Record2RecordSettings`` (see `the staleness check
   <../developer-guide/processors.rst#staleness>`__). Without
@@ -1363,15 +1363,14 @@ Reef-specific fields live inside ``trajectory.extra.reef``:
 - ``source_agent_record_id`` identifies the primary source;
 - ``records`` preserves ordered source ids, timestamps and original provider
   payloads, including provider-specific fields;
-- ``training`` holds exact captured ``tokens``, ``loss_mask``,
-  ``rollout_log_probs``, ``runtime_load_id`` and ``runtime_load_spans``.
+- ``training`` holds exact captured ``tokens``, ``loss_mask`` and
+  ``rollout_log_probs``, and ``artifact_id``, the artifact that produced them.
   Recipes may also supply ``action_mask``, ``rollout_created_at``, ``turn_count``,
   ``topk_indices``, ``topk_log_probs`` and method-specific ``extras``.
 
 ``item.metadata`` and ``item.training`` read these extension objects.
 ``with_metadata`` and ``with_training`` return updated documents while preserving
-other extensions. Training arrays are JSON lists, and runtime load spans are
-objects with ``start``, ``end`` and ``runtime_load_id``.
+other extensions. Training arrays are JSON lists.
 
 ``TrajectorySample.group_id`` is an optional string, scoped to the job data.
 None means an independent trajectory. Group-relative policy algorithms require

@@ -5,19 +5,16 @@ import pytest
 from reef.core.errors import ReefError
 from reef.recipe.base import Recipe
 from reef.surface import (
-    AdapterWeightRuntime,
     ComponentSurface,
     SkillLayer,
     Surface,
     WeightLoader,
-    WeightRuntime,
     create_harness_surface,
     create_skill_surface,
     create_weight_surface,
 )
 from reef.surface.base import AcceptAnyArtifact
 from reef.surface.skills import SkillValidator
-from reef.surface.weights import reported_runtime_load_id, reported_runtime_load_spans
 
 
 class _PullOnlyModule(SkillLayer):
@@ -103,118 +100,6 @@ def test_skill_validator_ignores_repository_bookkeeping(tmp_path) -> None:
     assert surface.files is not None
     assert surface.files.read_files(Artifact.local(root)) == {"skills/SKILL.md": "rule"}
     SkillValidator((layer,)).validate(Artifact.local(root))
-
-
-def test_the_reported_version_is_read_from_every_response_shape() -> None:
-    assert reported_runtime_load_id({"metadata": {"runtime_load_id": "wv-7"}}) == "wv-7"
-    # Native /generate shape: top-level meta_info.
-    assert reported_runtime_load_id({"meta_info": {"runtime_load_id": "wv-7"}}) == "wv-7"
-    # OpenAI chat shape: per-choice meta_info.
-    assert reported_runtime_load_id({"choices": [{"meta_info": {"runtime_load_id": "wv-7"}}]}) == "wv-7"
-    assert reported_runtime_load_id({"choices": [{"message": {"content": "hi"}}]}) is None
-
-
-def test_mixed_token_versions_from_an_in_place_update_are_valid_spans() -> None:
-    response = {
-        "choices": [{"meta_info": {"runtime_load_id": "engine:7"}}],
-        "training": {
-            "response_length": 3,
-            "runtime_load_id": None,
-            "runtime_load_spans": [
-                {"start": 0, "end": 1, "runtime_load_id": "engine:6"},
-                {"start": 1, "end": 3, "runtime_load_id": "engine:7"},
-            ],
-        },
-    }
-
-    assert [span.runtime_load_id for span in reported_runtime_load_spans(response)] == ["engine:6", "engine:7"]
-
-
-def test_the_reported_version_of_an_anthropic_response_is_its_final_training_span() -> None:
-    response = {
-        "type": "message",
-        "content": [{"type": "text", "text": "done"}],
-        "training": {
-            "response_length": 2,
-            "runtime_load_id": None,
-            "runtime_load_spans": [
-                {"start": 0, "end": 1, "runtime_load_id": "engine:6"},
-                {"start": 1, "end": 2, "runtime_load_id": "engine:7"},
-            ],
-        },
-    }
-
-    assert reported_runtime_load_id(response) == "engine:7"
-
-
-@pytest.mark.parametrize(
-    "runtime_load_ids",
-    [
-        ("engine:6", "engine:7", "engine:6"),
-        ("engine:7", "engine:6"),
-        ("engine:6", "replacement:7"),
-    ],
-)
-def test_impossible_runtime_load_histories_are_rejected(runtime_load_ids) -> None:
-    response = {
-        "choices": [{"meta_info": {"runtime_load_id": runtime_load_ids[-1]}}],
-        "training": {
-            "response_length": len(runtime_load_ids),
-            "runtime_load_spans": [
-                {"start": index, "end": index + 1, "runtime_load_id": runtime_load_id}
-                for index, runtime_load_id in enumerate(runtime_load_ids)
-            ],
-        },
-    }
-
-    with pytest.raises(ValueError, match=r"advance monotonically|return to an earlier"):
-        reported_runtime_load_spans(response)
-
-
-class _StubTrainingRuntime(WeightRuntime):
-    """Satisfies WeightRuntime; only the version probe does anything."""
-
-    def __init__(self, served: str | None, published: str | None = None):
-        self._served = served
-        self._published = published
-
-    @property
-    def base_url(self) -> str:
-        return "http://engine.invalid"
-
-    def current_runtime_load_id(self) -> str | None:
-        return self._published
-
-    def activate_checkpoint(self, artifact, *, scenario=None) -> str:
-        return artifact.ref.release_id
-
-
-class _StubAdapterRuntime(_StubTrainingRuntime, AdapterWeightRuntime):
-    """Serves one adapter version per scenario, from ``adapters``."""
-
-    def __init__(self, served: str | None, adapters: dict[str, str]):
-        super().__init__(served)
-        self._adapters = adapters
-
-    def serving_adapter_runtime_load_id(self, scenario):
-        return self._adapters.get(scenario)
-
-
-def test_a_durable_release_serves_under_the_version_that_reef_acknowledged(tmp_path) -> None:
-    from reef.artifact import Artifact
-
-    # A commit, a rollback or a restart loaded the release under a version that the runtime names.
-    release = Artifact.local(tmp_path)
-    runtime = _StubTrainingRuntime("e:6", published="e:5")
-    assert create_weight_surface(kind="model").served_runtime_load_id(release, runtime) == "e:5"
-    # A runtime that serves no weights leaves the served version unknown.
-    assert create_weight_surface(kind="model").served_runtime_load_id(release, None) is None
-    # A per-scenario adapter serves a durable release under the version the engine holds for the scenario.
-    adapters = _StubAdapterRuntime("e:6", {"math": "e:4"})
-    surface = create_weight_surface(scenario="math", runtime=adapters, kind="model_adapter")
-    assert surface.served_runtime_load_id(release, adapters) == "e:4"
-    # An engine that holds no adapter for the scenario leaves the served version unknown.
-    assert surface.served_runtime_load_id(release, _StubAdapterRuntime("e:6", {})) is None
 
 
 def test_a_harness_artifact_holds_its_entries_and_a_client_pull_leaves_them_out(tmp_path) -> None:

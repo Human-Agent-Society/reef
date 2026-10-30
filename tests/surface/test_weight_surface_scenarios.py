@@ -16,30 +16,6 @@ def checkpoint(tmp_path: Path) -> Artifact:
     return Artifact.local(root)
 
 
-class AdapterRuntime(StubInferenceRuntime):
-    """Serves one adapter version per scenario, from ``adapters``, and ``engine`` as the last load's version."""
-
-    def __init__(self, adapters: dict[str, str], engine: str = "inc:9") -> None:
-        super().__init__()
-        self.adapters = adapters
-        self.engine = engine
-
-    def current_runtime_load_id(self):
-        return self.engine
-
-    def serving_adapter_runtime_load_id(self, scenario):
-        return self.adapters.get(scenario)
-
-
-def test_a_restart_serves_the_checkpoint_under_the_version_it_was_loaded_again(tmp_path: Path) -> None:
-    # The restart loaded math's checkpoint again as new:1.
-    runtime = AdapterRuntime({"math": "new:1"})
-    saved = checkpoint(tmp_path)
-    # Records carry the version of the adapter that holds the checkpoint.
-    assert WeightLoader("math").served_runtime_load_id(saved, runtime) == "new:1"
-    assert WeightLoader("code").served_runtime_load_id(saved, runtime) is None
-
-
 class RecordingRuntime(StubInferenceRuntime):
     """Records the scenario each activation names."""
 

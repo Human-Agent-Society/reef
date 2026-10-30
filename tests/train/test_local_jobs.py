@@ -80,7 +80,7 @@ class GatedComponent(LocalJobComponent):
 
 
 def training_job(job_id: str, **parameters: bool) -> TrainingJob:
-    data = JobData(job_id, (policy_trajectory(f"s-{job_id}", (1, 2, 3), (1, 1), (-0.1, -0.2), 1.0, "v1"),))
+    data = JobData(job_id, (policy_trajectory(f"s-{job_id}", (1, 2, 3), (1, 1), (-0.1, -0.2), 1.0, artifact_id="v1"),))
     return TrainingJob(job_id, "gated", "gated:base", data, parameters)
 
 

@@ -22,7 +22,7 @@ from collections.abc import Mapping
 
 from aiohttp import web
 
-from reef.evaluation.rollout_worker import EvaluationRolloutWorker, ServiceCandidateEndpoints
+from reef.evaluation.rollout_worker import CandidateEndpoints, EvaluationRolloutWorker
 from reef.execution.workers import SERVICE_COMPONENTS, ServiceWorkers
 from reef.service.artifact_evaluations import LOCAL_ROLLOUT_WORKERS
 from reef.service.assembly import build_app, build_dispatcher, open_scenario_storage, open_service_coordination
@@ -48,13 +48,14 @@ def build_component_app(
     component: str,
     settings: ServiceConfig,
     *,
-    control_url: str | None = None,
+    inference_service_url: str | None = None,
     environ: Mapping[str, str] | None = None,
 ) -> web.Application:
     """The app of the service ``component`` (one of ``SERVICE_COMPONENTS``), which owns what it opens.
 
-    ``control_url`` is the URL of the control service, which the evaluation service calls for candidates; it is
-    required for ``evaluation`` alone. Raise ``ValueError`` for an unknown service or a missing ``control_url``.
+    ``inference_service_url`` is the URL of the inference service, which the evaluation service calls for candidates; it
+    is required for ``evaluation`` alone. Raise ``ValueError`` for an unknown service or a missing
+    ``inference_service_url``.
     """
     env = os.environ if environ is None else environ
     if component not in SERVICE_COMPONENTS:
@@ -107,8 +108,8 @@ def build_component_app(
 
         app.on_cleanup.append(close_dispatcher)
         return app
-    if not control_url:
-        raise ValueError("the evaluation service needs the control service's URL: pass --control-url")
+    if not inference_service_url:
+        raise ValueError("the evaluation service needs the inference service's URL: pass --inference-service-url")
     coordination = open_service_coordination(settings)
     token = settings.tokens[0] if settings.tokens else None
     workers = ServiceWorkers()
@@ -116,7 +117,7 @@ def build_component_app(
         workers.add(
             EvaluationRolloutWorker(
                 coordination.work_queue,
-                ServiceCandidateEndpoints(control_url, token),
+                CandidateEndpoints(inference_service_url, token),
                 worker_id=instance_id("evaluation"),
             )
         )

@@ -69,7 +69,7 @@ def _sao_inference(
     loss_mask: tuple[int, ...] = (1, 1, 1),
     action_mask: tuple[int, ...] | None = None,
     rollout_log_probs: tuple[float, ...] = (-0.1, -0.2, -0.3),
-    runtime_load_id: str | None = "slime-v3",
+    artifact_id: str | None = "artifact-3",
 ) -> AgentRecord:
     payload: dict[str, Any] = {
         "tokens": list(tokens),
@@ -78,9 +78,9 @@ def _sao_inference(
     }
     if action_mask is not None:
         payload["action_mask"] = list(action_mask)
-    # The serve path of a training scenario records the version that answered.
-    if runtime_load_id:
-        payload["runtime_load_id"] = runtime_load_id
+    # The inference service records the artifact that answered.
+    if artifact_id:
+        payload["artifact_id"] = artifact_id
     artifact_ref = ArtifactRef(content_id="math", release_id="release-1", parent_release_id=None)
     return AgentRecord.create(
         scenario="math",
@@ -225,17 +225,16 @@ def test_processor_emits_one_independently_scheduled_sample_per_rollout() -> Non
     assert trajectory_reward(sample) == pytest.approx(0.75)
     # No explicit action mask -> the whole response is one action.
     assert tuple(sample.training.get("action_mask", [])) == tuple(sample.training.get("loss_mask", []))
-    # The producing version and timestamp support policy-lag / queue-age reporting.
-    assert sample.training.get("runtime_load_id", None) == "slime-v3"
+    # The producing artifact and timestamp support the staleness check and queue-age reporting.
+    assert sample.training.get("artifact_id", None) == "artifact-3"
     assert sample.training.get("rollout_created_at", None) is not None
 
 
 @pytest.mark.unit
-def test_processor_reads_runtime_load_id_from_the_payload_of_a_record_without_a_release() -> None:
-    # The producing version lives in payload["runtime_load_id"], set by the
-    # durable serve path. The sample must still record it, or prepare_training_step rejects
-    # the whole batch ("requires one recorded producing runtime load ID") and no
-    # SAO step ever runs.
+def test_processor_reads_the_producing_artifact_from_the_payload_of_a_record_without_a_release() -> None:
+    # The producing artifact lives in payload["artifact_id"], set by the
+    # inference service. The sample must still record it, or the staleness
+    # check finds the sample stale and no SAO step ever runs.
     inference = AgentRecord.create(
         scenario="math",
         request_type=RequestType.INFERENCE,
@@ -243,7 +242,7 @@ def test_processor_reads_runtime_load_id_from_the_payload_of_a_record_without_a_
             "tokens": [5, 1, 2, 3],
             "loss_mask": [1, 1, 1],
             "rollout_log_probs": [-0.1, -0.2, -0.3],
-            "runtime_load_id": "slime-v7",
+            "artifact_id": "artifact-7",
         },
         agent_record_id="i1",
         artifact_ref=None,
@@ -254,7 +253,7 @@ def test_processor_reads_runtime_load_id_from_the_payload_of_a_record_without_a_
 
     batch = processor.build_job_data(1)
 
-    assert batch.samples[0].training.get("runtime_load_id", None) == "slime-v7"
+    assert batch.samples[0].training.get("artifact_id", None) == "artifact-7"
 
 
 @pytest.mark.unit
@@ -458,9 +457,9 @@ def _sao_dispatcher(
 
 
 def _rollout(dispatcher: Dispatcher, index: int, score: float) -> None:
-    """Accept rollout ``i<index>`` as served by the scenario's current version, and its report."""
-    version = dispatcher.get_or_create_scenario("math").serving_runtime_load_id()
-    dispatcher.accept_record(_sao_inference(f"i{index}", runtime_load_id=version))
+    """Accept rollout ``i<index>`` as served by the scenario's served artifact, and its report."""
+    served = dispatcher.get_or_create_scenario("math").serving_artifact_id()
+    dispatcher.accept_record(_sao_inference(f"i{index}", artifact_id=served))
     dispatcher.accept_record(_sao_report(f"r{index}", f"i{index}", score))
 
 
@@ -548,26 +547,31 @@ def test_an_activation_rule_that_activates_nothing_keeps_the_checkpoint_from_ser
 
 
 @pytest.mark.integration
-def test_sao_train_step_swaps_the_served_runtime_load_id(tmp_path) -> None:
-    # The paper's async claim: after a step, the version an inference would
-    # freeze IS the freshly-trained one, not the pre-train head.
+def test_sao_train_step_swaps_the_served_artifact(tmp_path) -> None:
+    # The paper's async claim: after a step, the artifact that answers an
+    # inference IS the freshly-trained one, not the pre-train head.
     component = _SAOComponent(tmp_path / "checkpoints")
     inference = StubInferenceRuntime()
     dispatcher = _sao_dispatcher(
-        tmp_path, SAORecipe(**runtime_bindings(component, inference), pipeline_stages=single_rollout_steps())
+        tmp_path,
+        SAORecipe(**runtime_bindings(component, inference), pipeline_stages=single_rollout_steps()),
+        agent_dir=tmp_path / "records",
     )
     try:
-        pre_head = dispatcher.get_or_create_scenario("math").repository.require_current_artifact()
+        scenario = dispatcher.get_or_create_scenario("math")
+        pre_head = scenario.repository.require_current_artifact()
+        pre_served = scenario.serving_artifact_id()
 
         _rollout(dispatcher, 1, 0.9)
 
         _wait_for_finished_jobs(dispatcher, 1)
-        head = dispatcher.get_or_create_scenario("math").repository.require_current_artifact()
+        head = scenario.repository.require_current_artifact()
         # The new head is the saved release of the trained checkpoint, and it
         # actually moved off the pre-train head (guards against a constant stub).
         assert head.release_id != pre_head.release_id
-        assert inference.activated[1:] == ["w1"]
-        assert inference.current_runtime_load_id() == "w1"
+        # The runtime loaded the checkpoint, and the scenario serves its artifact.
+        assert inference.activated[-1] == "w1"
+        assert pre_served != scenario.serving_artifact_id() == head.release_id
     finally:
         dispatcher.close()
 

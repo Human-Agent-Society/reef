@@ -3724,3 +3724,46 @@ def test_doctor_reports_a_required_program_and_runs_no_check_of_its_own(tmp_path
     monkeypatch.setattr("shutil.which", lambda command: f"/usr/bin/{command}")
     assert doctor("doc-scenario", "pi", compose, str(binary)) == 0
     reef.close()
+
+
+@pytest.mark.unit
+def test_capture_proxy_forwards_each_call_under_the_upstreams_path_and_captures_it() -> None:
+    """An evaluation rollout's upstream is a candidate's URL on the inference service: every call keeps its path."""
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    paths: list[str] = []
+
+    class Upstream(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            self.rfile.read(int(self.headers["Content-Length"]))
+            paths.append(self.path)
+            body = json.dumps({"choices": [{"message": {"role": "assistant", "content": "ok"}}]}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format: str, *args: object) -> None:
+            return
+
+    upstream = ThreadingHTTPServer(("127.0.0.1", 0), Upstream)
+    threading.Thread(target=upstream.serve_forever, daemon=True).start()
+    candidate = f"http://127.0.0.1:{upstream.server_address[1]}/reef/scenarios/s/artifacts/a1/evaluation"
+    proxy = CaptureProxy(candidate, "s", None, is_unrecorded=True)
+    proxy.start()
+    try:
+        request = urllib.request.Request(
+            f"http://127.0.0.1:{proxy.port}/v1/chat/completions",
+            data=json.dumps({"model": "m", "messages": [{"role": "user", "content": "hi"}]}).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=5) as response:
+            assert json.loads(response.read())["choices"][0]["message"]["content"] == "ok"
+        assert paths == ["/reef/scenarios/s/artifacts/a1/evaluation/v1/chat/completions"]
+        assert [turn["path"] for turn in proxy._store.snapshot()] == [paths[0]]
+    finally:
+        proxy.stop()
+        upstream.shutdown()
+        upstream.server_close()

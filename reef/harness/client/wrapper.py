@@ -852,6 +852,15 @@ def _observing_handler(base: type[BaseHTTPRequestHandler], observer: ReleaseObse
     return Handler
 
 
+def prefixed_handler(base: type[BaseHTTPRequestHandler], base_path: str) -> type[BaseHTTPRequestHandler]:
+    class Handler(base):  # type: ignore[valid-type,misc]
+        def _route(self) -> tuple[str, str | None]:
+            forward_path, session_id = super()._route()
+            return base_path + forward_path, session_id
+
+    return Handler
+
+
 class CaptureProxyServer(ThreadingHTTPServer):
     """The proxy's HTTP server, quiet when a client resets a connection.
 
@@ -897,8 +906,14 @@ class CaptureProxy:
             fixed["authorization"] = f"Bearer {token}"
         if is_unrecorded:
             fixed[ROLLOUT_HEADER] = "1"
+        # An upstream with a path, such as a candidate's URL on the inference service, takes every call under
+        # that path; the proxy forwards to the upstream's host alone, so each call's path gets the prefix here.
+        base_path = urllib.parse.urlsplit(upstream).path.rstrip("/")
         self._config = ServeConfig(
-            upstream=upstream, listen_port=0, capture_paths=CAPTURE_PATHS, force_non_stream=is_unrecorded
+            upstream=upstream,
+            listen_port=0,
+            capture_paths=tuple(base_path + path for path in CAPTURE_PATHS),
+            force_non_stream=is_unrecorded,
         )
         #: The tag channel: the record keeps which release (and which trial) answered, under ``metadata.tags``.
         self.tags: MutableMapping[str, str] = _Tags(self._config, fixed)
@@ -906,6 +921,7 @@ class CaptureProxy:
             self.tags[name] = value
         self._store = _TaggedStore(self.tags)
         handler = build_handler(self._config, self._store)
+        handler = handler if not base_path else prefixed_handler(handler, base_path)
         self._handler = handler if observer is None else _observing_handler(handler, observer)
         self._server: CaptureProxyServer | None = None
 

@@ -70,7 +70,6 @@ from reef.service.streaming import (
 from reef.service.wire import HeaderError, RequestHeaders, parse_request_headers
 from reef.storage.scenario import ScenarioStorage
 from reef.storage.served_models import ServedModels
-from reef.surface.weights import reported_runtime_load_id, reported_runtime_load_spans
 
 logger = logging.getLogger(__name__)
 
@@ -195,25 +194,17 @@ def upstream_artifact(served: ServedArtifact, ref: ArtifactRef | None) -> Artifa
     return Artifact(ref or ArtifactRef(served.artifact_id, served.artifact_id, None), None)
 
 
-def with_runtime_load(payload: Mapping[str, Any], response: Mapping[str, Any]) -> dict[str, Any]:
-    """``payload`` with the engine weights that answered, as the engine reports them in ``response``: its
-    ``runtime_load_spans`` and, when one version answered, its ``runtime_load_id``."""
-    stamped = dict(payload)
-    spans = reported_runtime_load_spans(response)
-    if spans:
-        stamped["runtime_load_spans"] = [
-            {"start": span.start, "end": span.end, "runtime_load_id": span.runtime_load_id} for span in spans
-        ]
-        versions = {span.runtime_load_id for span in spans}
-        if len(versions) == 1:
-            stamped["runtime_load_id"] = versions.pop()
-        else:
-            stamped.pop("runtime_load_id", None)
-        return stamped
-    version = reported_runtime_load_id(response)
-    if version is not None:
-        stamped["runtime_load_id"] = version
-    return stamped
+#: The engine's own names for the weights that answered; they stay inside training and never reach a record.
+ENGINE_LOAD_KEYS = ("runtime_load_id", "runtime_load_spans")
+
+
+def recorded_response(response: Mapping[str, Any]) -> dict[str, Any]:
+    """``response`` as a record keeps it: its ``training`` block without the engine's load versions. The record
+    names the artifact that answered by its ``artifact_id`` instead."""
+    training = response.get("training")
+    if not isinstance(training, Mapping):
+        return dict(response)
+    return {**response, "training": {key: value for key, value in training.items() if key not in ENGINE_LOAD_KEYS}}
 
 
 def client_response(response: Mapping[str, Any]) -> dict[str, Any]:
@@ -221,13 +212,15 @@ def client_response(response: Mapping[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in response.items() if key != "training"}
 
 
-def rollout_response(response: Mapping[str, Any], stamped: Mapping[str, Any]) -> dict[str, Any]:
-    """The answer of a rollout's call: the ``training`` block stays, with the engine weights that answered."""
+def rollout_response(response: Mapping[str, Any], artifact_id: str) -> dict[str, Any]:
+    """The answer of a rollout's call: the ``training`` block stays, naming the artifact that answered."""
     training = response.get("training")
     if not isinstance(training, Mapping):
         return dict(response)
-    versions = {key: stamped[key] for key in ("runtime_load_id", "runtime_load_spans") if key in stamped}
-    return {**response, "training": {**versions, **training}}
+    return {
+        **recorded_response(response),
+        "training": {**recorded_response(response)["training"], "artifact_id": artifact_id},
+    }
 
 
 class SSERelay:
@@ -301,11 +294,12 @@ class InferenceReplica:
     def record(
         self, parsed: RequestHeaders, payload: Mapping[str, Any], response: Mapping[str, Any], ref: ArtifactRef | None
     ) -> str:
-        """Append the record of one answered request; return its ID."""
+        """Append the record of one answered request; return its ID. ``payload`` names the artifact that answered
+        (``artifact_id``)."""
         item = AgentRecord.create(
             scenario=parsed.scenario,
             request_type=RequestType.INFERENCE,
-            payload={**with_request_tags(payload, parsed), "response": dict(response)},
+            payload={**with_request_tags(payload, parsed), "response": recorded_response(response)},
             artifact_ref=ref,
         )
         store = self.storage.open(parsed.scenario)
@@ -389,7 +383,7 @@ class InferenceReplica:
                     raise web.HTTPConflict(text=INFERENCE_ABORT_ERROR)
                 raise web.HTTPConflict(text=f"the engine answered as {answered!r}, not {served.model_name!r}")
             served, ref = await self.resolve(parsed.scenario, payload.get("model"), name=name, refresh=True)
-        stamped = with_runtime_load(payload, response)
+        stamped = {**payload, "artifact_id": served.artifact_id}
         reply_headers = {RELEASE_HEADER: served.artifact_id}
         if record:
             try:
@@ -397,7 +391,7 @@ class InferenceReplica:
             except Exception as exc:
                 logger.exception("could not append the record of a request to %s", parsed.scenario)
                 raise web.HTTPServiceUnavailable(text="the record store cannot take the request's record") from exc
-        body = rollout_response(response, stamped) if keep_training else client_response(response)
+        body = rollout_response(response, served.artifact_id) if keep_training else client_response(response)
         return web.json_response(body, headers=reply_headers)
 
     async def relay_stream(
@@ -456,7 +450,7 @@ class InferenceReplica:
                         recorded = True
                         captured = stream_record(upstream, bytes(body), complete=True)
                         record_id = await asyncio.to_thread(
-                            self.record, parsed, with_runtime_load(payload, captured), captured, ref
+                            self.record, parsed, {**payload, "artifact_id": served.artifact_id}, captured, ref
                         )
                         frames = receipt_sse_events(path, relay.chat_identity, relay.terminal, record_id)
                     for frame in frames:
@@ -477,7 +471,9 @@ class InferenceReplica:
             if record and not recorded:
                 captured = stream_record(upstream, bytes(body), complete=complete, error=error)
                 try:
-                    await asyncio.to_thread(self.record, parsed, with_runtime_load(payload, captured), captured, ref)
+                    await asyncio.to_thread(
+                        self.record, parsed, {**payload, "artifact_id": served.artifact_id}, captured, ref
+                    )
                 except Exception:
                     logger.exception("could not append the record of a stream of %s", parsed.scenario)
         return response
@@ -623,5 +619,5 @@ __all__ = [
     "add_inference_routes",
     "build_inference_app",
     "client_response",
-    "with_runtime_load",
+    "recorded_response",
 ]

@@ -76,7 +76,7 @@ def _scenario(dispatcher: Dispatcher, runtime: StubInferenceRuntime):
 
 
 def _step(scenario, component: str, step: int) -> str:
-    for record in _records(step):
+    for record in _records(step, scenario.serving_artifact_id()):
         scenario.records.append(record)
     make_samples(scenario)
     result = scenario.prepare_training_step(component)
@@ -101,7 +101,7 @@ def test_a_local_cycle_clears_only_the_errors_it_recorded(tmp_path: Path) -> Non
     dispatcher = _dispatcher(tmp_path)
     try:
         scenario = _scenario(dispatcher, runtime)
-        for record in _records(1):
+        for record in _records(1, scenario.serving_artifact_id()):
             scenario.records.append(record)
         make_samples(scenario)
         dispatcher.errors.record("agent", "RuntimeError: training job away", local_error_source(WEIGHTS))
@@ -112,7 +112,7 @@ def test_a_local_cycle_clears_only_the_errors_it_recorded(tmp_path: Path) -> Non
             "agent: RuntimeError: training job away",
             "agent: harness away",
         ]
-        for record in _records(2):
+        for record in _records(2, scenario.serving_artifact_id()):
             scenario.records.append(record)
         make_samples(scenario)
         # The harness cycle clears its own error; the weights worker's stays until that worker clears it.

@@ -68,7 +68,7 @@ class FakeComponent(TrainingComponent):
 
 
 def batch(name: str = "b") -> JobData:
-    return JobData(name, (policy_trajectory(f"s-{name}", (1, 2, 3), (1, 1), (-0.1, -0.2), 1.0, "v1"),))
+    return JobData(name, (policy_trajectory(f"s-{name}", (1, 2, 3), (1, 1), (-0.1, -0.2), 1.0, artifact_id="v1"),))
 
 
 FINISHED = JobOutcome("j0", "fake", "finished")
@@ -435,7 +435,7 @@ def train_record(record_id: str, parameters: dict) -> AgentRecord:
 @pytest.mark.unit
 def test_an_sft_job_and_then_an_rl_job_each_take_the_parameters_of_their_instruction(component, tmp_path):
     session = SQLiteScenarioStorage(tmp_path / "records").open("math")
-    trajectory = policy_trajectory("t1", (1, 2, 3), (1, 1), (-0.1, -0.2), 1.0, "v1")
+    trajectory = policy_trajectory("t1", (1, 2, 3), (1, 1), (-0.1, -0.2), 1.0, artifact_id="v1")
     session.samples.add_trajectories((("t1", trajectory),))
     session.samples.add_tasks((write_harbor_task(task_for("task-a", "record-1", 9000), tmp_path / "a"),), "train")
     trainer = Trainer.build(

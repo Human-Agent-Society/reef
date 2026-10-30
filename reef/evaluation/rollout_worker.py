@@ -5,10 +5,10 @@ item for each rollout (``reef.service.artifact_evaluations``). An ``EvaluationRo
 runs the task once with a Harbor agent against the candidate's model, and finishes the item with the rollout's
 ``RolloutScore``. Control reads the scores back when every rollout of the evaluation is final.
 
-A worker reaches the candidate's model through ``CandidateEndpoints``. In a split deployment that is the inference
-service's unrecorded URL of the candidate artifact, opened with the evaluation token
-(``ServiceCandidateEndpoints``); in the one-process layout the service opens a loopback endpoint on its own
-runtime. Calls to either are not recorded, so an evaluation never trains the scenario.
+Control serves the candidate beside the active artifact while its rollouts run, so ``served_models`` holds a row
+for it. A worker reaches the candidate at the inference service's unrecorded URL of that artifact
+(``CandidateEndpoints``), in a split deployment and in the one-process layout alike. These calls are not recorded,
+so an evaluation never trains the scenario.
 """
 
 from __future__ import annotations
@@ -16,9 +16,7 @@ from __future__ import annotations
 import logging
 import tempfile
 import threading
-from abc import ABC, abstractmethod
-from collections.abc import Iterator, Mapping
-from contextlib import contextmanager
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
@@ -169,55 +167,37 @@ class CandidateEndpoint:
     Values: ``url`` is a non-empty base URL that answers Reef's inference routes for the candidate without
     recording; ``token`` is the bearer token that opens it, or None without authentication.
 
-    Purpose: ``CandidateEndpoints.open`` makes it; the worker's rollout runner calls it.
+    Purpose: ``CandidateEndpoints.endpoint`` makes it; the worker's rollout runner calls it.
     """
 
     url: str
     token: str | None
 
 
-class CandidateEndpoints(ABC):
-    """Opens the endpoint of a candidate artifact for the time of one rollout.
+class CandidateEndpoints:
+    """The candidate's unrecorded URL on the inference service at ``inference_url``, opened with ``token``.
 
-    Purpose: an ``EvaluationRolloutWorker`` opens one around each rollout.
+    Values: ``inference_url`` is the non-empty base URL of a service that answers Reef's inference routes from
+    ``served_models``; ``token`` is a token that it accepts on the candidate route, or None for a service without
+    tokens. Purpose: an ``EvaluationRolloutWorker`` reads the endpoint of each rollout's candidate (``endpoint``).
+    Raise ``ValueError`` at construction for an empty ``inference_url``.
     """
 
-    @abstractmethod
-    @contextmanager
-    def open(self, rollout: EvaluationRollout) -> Iterator[CandidateEndpoint]:
-        """The endpoint of ``rollout``'s candidate, until the block ends."""
-
-    @property
-    def serves_beside(self) -> bool:
-        """Whether the candidate must be served beside the active artifact before its rollouts run."""
-        return False
-
-
-class ServiceCandidateEndpoints(CandidateEndpoints):
-    """The candidate's unrecorded URL on the Reef service at ``service_url``, opened with ``token``.
-
-    Control serves a candidate beside the active artifact (``serves_beside``) and answers at its candidate route,
-    so the evaluation workers of another process reach it there. ``token`` is a token that the service accepts on
-    that route, or None for a service without tokens.
-    """
-
-    def __init__(self, service_url: str, token: str | None) -> None:
-        self.service_url = service_url
+    def __init__(self, inference_url: str, token: str | None) -> None:
+        if not inference_url:
+            raise ValueError("the evaluation workers need the inference service's URL")
+        self.inference_url = inference_url
         self.token = token
 
-    @property
-    def serves_beside(self) -> bool:
-        return True
-
-    @contextmanager
-    def open(self, rollout: EvaluationRollout) -> Iterator[CandidateEndpoint]:
-        yield CandidateEndpoint(candidate_url(self.service_url, rollout.scenario, rollout.artifact_id), self.token)
+    def endpoint(self, rollout: EvaluationRollout) -> CandidateEndpoint:
+        """The endpoint of ``rollout``'s candidate."""
+        return CandidateEndpoint(candidate_url(self.inference_url, rollout.scenario, rollout.artifact_id), self.token)
 
 
 class EvaluationRolloutWorker(ServiceWorker):
     """One worker of the evaluation service.
 
-    Values: ``queue`` is the work queue; ``endpoints`` opens the candidate's model for each rollout; ``lab`` runs
+    Values: ``queue`` is the work queue; ``endpoints`` names the candidate's URL for each rollout; ``lab`` runs
     each Harbor trial, None for reef-eval's lab; ``worker_id`` names this worker in leases; ``poll_seconds`` is the
     wait between two looks at the queue.
 
@@ -291,10 +271,8 @@ class EvaluationRolloutWorker(ServiceWorker):
 
     def score(self, rollout: EvaluationRollout) -> RolloutScore:
         """Run ``rollout`` once and return its score."""
-        with (
-            tempfile.TemporaryDirectory(prefix="reef-evaluation-") as work,
-            self.endpoints.open(rollout) as endpoint,
-        ):
+        endpoint = self.endpoints.endpoint(rollout)
+        with tempfile.TemporaryDirectory(prefix="reef-evaluation-") as work:
             runner = TaskRolloutRunner(
                 reef_url=endpoint.url,
                 scenario=rollout.scenario,
@@ -321,7 +299,6 @@ __all__ = [
     "CandidateEndpoints",
     "EvaluationRollout",
     "EvaluationRolloutWorker",
-    "ServiceCandidateEndpoints",
     "agent_harness",
     "candidate_url",
     "evaluation_item_id",

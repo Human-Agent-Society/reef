@@ -6,8 +6,8 @@ item ``record_item(r)`` is the item of ``o`` with:
 * the ID ``<s>/<r.agent_record_id>``, unique within ``o`` because a scenario name has no ``/`` and a record ID is
   unique within its scenario;
 * the content ``{agent_record_id, request_type, payload, created_at, references, artifact_ref}`` of ``r``;
-* the metadata ``kind: record``, ``scenarios: {s: train}`` and ``origin: {scenario: s, release_id, load_id}``,
-  where ``release_id`` is the release that ``r`` names and ``load_id`` the runtime load that served it, each
+* the metadata ``kind: record``, ``scenarios: {s: train}`` and ``origin: {scenario: s, release_id, artifact_id}``,
+  where ``release_id`` is the release that ``r`` names and ``artifact_id`` the artifact that answered it, each
   null when ``r`` names none.
 
 A training instruction is a record but not data, so it has no record item. ``copy_records`` makes the record items
@@ -46,7 +46,7 @@ def record_item(record: AgentRecord) -> NewItem:
     """The record item of ``record``, an inference or a report, as the module docstring defines it."""
     if record.request_type is RequestType.TRAIN:
         raise ValueError(f"record {record.agent_record_id!r} is a training instruction, which is not data")
-    load_id = record.payload.get("runtime_load_id")
+    artifact_id = record.payload.get("artifact_id")
     return NewItem(
         f"{record.scenario}/{record.agent_record_id}",
         {
@@ -63,7 +63,7 @@ def record_item(record: AgentRecord) -> NewItem:
             "origin": {
                 "scenario": record.scenario,
                 "release_id": None if record.artifact_ref is None else record.artifact_ref.release_id,
-                "load_id": load_id if isinstance(load_id, str) and load_id else None,
+                "artifact_id": artifact_id if isinstance(artifact_id, str) and artifact_id else None,
             },
         },
     )

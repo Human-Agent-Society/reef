@@ -80,17 +80,13 @@ class RecordingExperimentTracker(ExperimentTracker):
         pass
 
 
-def inference(index: int, runtime_load_id: str | None = None) -> AgentRecord:
-    """The inference record of job ``index``, served by the version that job ``index - 1`` published.
-
-    ``runtime_load_id`` names another serving version, such as one that an activation served.
-    """
-    version = f"w{index - 1}" if runtime_load_id is None else runtime_load_id
+def inference(index: int, artifact_id: str) -> AgentRecord:
+    """The inference record of job ``index``, answered by the artifact ``artifact_id``."""
     payload: dict[str, object] = {
         "tokens": [1, 2],
         "loss_mask": [0, 1],
         "rollout_log_probs": [-0.2],
-        "runtime_load_id": version,
+        "artifact_id": artifact_id,
     }
     return AgentRecord.create(
         scenario="math",
@@ -132,13 +128,14 @@ def finished_jobs(dispatcher: Dispatcher) -> int:
     return dispatcher.build_training_status()["scenarios"]["math"]["finished_jobs"]
 
 
-def train(dispatcher: Dispatcher, index: int, runtime_load_id: str | None = None) -> None:
-    """Accept job ``index``'s records and wait until the job it submits ends.
+def train(dispatcher: Dispatcher, index: int) -> None:
+    """Accept job ``index``'s records, answered by the artifact that scenario ``math`` serves, and wait until the
+    job it submits ends.
 
     A job commits three times: its submission, the decision on its checkpoint, and its end.
     """
     finished = finished_jobs(dispatcher)
-    dispatcher.accept_record(inference(index, runtime_load_id))
+    dispatcher.accept_record(inference(index, dispatcher.get_or_create_scenario("math").serving_artifact_id()))
     dispatcher.accept_record(report(index))
     for _ in range(5000):
         if finished_jobs(dispatcher) > finished:

@@ -23,8 +23,7 @@ import queue
 import threading
 import time
 import uuid
-from collections.abc import Iterator, Mapping
-from contextlib import contextmanager
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from typing import Literal, cast
 
@@ -41,11 +40,9 @@ from reef.core.evaluation import (
 )
 from reef.core.job_data import TaskSample
 from reef.dispatcher import Dispatcher
-from reef.evaluation.artifact_endpoint import ArtifactEndpoint
 from reef.evaluation.rollout_worker import (
     EVALUATION_ROLLOUT_KIND,
     EVALUATIONS_QUEUE,
-    CandidateEndpoint,
     CandidateEndpoints,
     EvaluationRollout,
     EvaluationRolloutWorker,
@@ -136,34 +133,16 @@ def request_settings(body: object) -> tuple[str, ArtifactEvaluationSettings]:
     )
 
 
-class LocalCandidateEndpoints(CandidateEndpoints):
-    """The candidate's model in the one-process layout: a loopback endpoint on the scenario's own runtime.
-
-    Purpose: an ``ArtifactEvaluations`` without an inference service URL gives it to its own workers.
-    """
-
-    def __init__(self, dispatcher: Dispatcher) -> None:
-        self.dispatcher = dispatcher
-
-    @contextmanager
-    def open(self, rollout: EvaluationRollout) -> Iterator[CandidateEndpoint]:
-        with self.dispatcher.locked_scenario(rollout.scenario) as current:
-            runtime = current.runtime
-            if runtime is None:
-                raise ReefError(f"scenario {rollout.scenario!r} has no runtime")
-            _, release = current.resolve_artifact(rollout.artifact_id, rollout.component)
-            artifact = release.materialize()
-        with ArtifactEndpoint(runtime, artifact) as endpoint:
-            yield CandidateEndpoint(endpoint.url, None)
-
-
 class ArtifactEvaluations:
     """Accepts, queues, reads and ends the artifact evaluations of a service's scenarios.
 
     Values: ``dispatcher`` holds the scenarios. ``queue`` is the dispatcher's work queue, which carries the rollouts.
-    ``endpoints`` opens a candidate's model for a rollout. ``new_artifacts`` reports the new artifacts that Reef
-    evaluates with each scenario's settings, or is None for no automatic evaluation. ``workers`` are the evaluation
-    workers that this object runs itself, none when the evaluation service runs elsewhere.
+    ``endpoints`` names a candidate's URL on the inference service for the workers that this object runs itself,
+    or is None when the evaluation service runs elsewhere. ``new_artifacts`` reports the new artifacts that Reef
+    evaluates with each scenario's settings, or is None for no automatic evaluation. ``workers`` are
+    ``LOCAL_ROLLOUT_WORKERS`` evaluation workers with ``endpoints``, none without them. Control serves each
+    candidate beside the active artifact while its rollouts run (``Dispatcher.serve``), so the inference service
+    answers at the candidate's URL.
 
     Purpose: the evaluation routes call ``start``, ``get`` and ``newest``, and the scenario update route calls
     ``configure``. ``open`` starts the threads that evaluate new artifacts, that run this object's workers, and
@@ -177,16 +156,18 @@ class ArtifactEvaluations:
         lab: TaskLab | None = None,
         new_artifacts: NewArtifacts | None = None,
         endpoints: CandidateEndpoints | None = None,
-        local_workers: int = LOCAL_ROLLOUT_WORKERS,
     ) -> None:
         self.dispatcher = dispatcher
         self.new_artifacts = new_artifacts
         self.queue = dispatcher.queue
-        self.endpoints = endpoints if endpoints is not None else LocalCandidateEndpoints(dispatcher)
-        self.workers = [
-            EvaluationRolloutWorker(self.queue, self.endpoints, worker_id=instance_id("evaluation"), lab=lab)
-            for _ in range(local_workers)
-        ]
+        self.workers = (
+            []
+            if endpoints is None
+            else [
+                EvaluationRolloutWorker(self.queue, endpoints, worker_id=instance_id("evaluation"), lab=lab)
+                for _ in range(LOCAL_ROLLOUT_WORKERS)
+            ]
+        )
         self.reader: threading.Thread | None = None
         self.results: threading.Thread | None = None
         self.stopped = threading.Event()
@@ -346,8 +327,7 @@ class ArtifactEvaluations:
             names = request.task_names or tuple(held)
             if not names:
                 raise ValueError("the eval split of the imported tasks holds no task to evaluate on")
-            if self.endpoints.serves_beside:
-                current.serve(request.artifact_id, request.component)
+            current.serve(request.artifact_id, request.component)
             evaluation_id = uuid.uuid4().hex
             stored = current.store.evaluations.create(
                 evaluation_id=evaluation_id, owner=QUEUE_OWNER, request=request, created_at=time.time(), state=state
@@ -386,8 +366,7 @@ class ArtifactEvaluations:
             for item_id in added:
                 self.queue.cancel(EVALUATIONS_QUEUE, item_id, error)
             self.end(scenario, evaluation_id, request, result=None, error=error)
-            if self.endpoints.serves_beside:
-                self.stop_serving_candidate(scenario, request.artifact_id)
+            self.stop_serving_candidate(scenario, request.artifact_id)
             raise
         return stored
 
@@ -456,8 +435,7 @@ class ArtifactEvaluations:
             agent_harness(harbor_agent(request.harness)), rollouts[0].model, RolloutScores.by_task(names, scores)
         )
         self.end(scenario, evaluation_id, request, result=result, error=None)
-        if self.endpoints.serves_beside:
-            self.stop_serving_candidate(scenario, request.artifact_id)
+        self.stop_serving_candidate(scenario, request.artifact_id)
 
     def stop_serving_candidate(self, scenario: str, artifact_id: str) -> None:
         """Stop serving the candidate beside the active artifact, unless another evaluation still uses it."""
@@ -550,7 +528,6 @@ __all__ = [
     "QUEUE_OWNER",
     "STOPPED_ERROR",
     "ArtifactEvaluations",
-    "LocalCandidateEndpoints",
     "NewArtifact",
     "NewArtifacts",
 ]

@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
-from contextlib import contextmanager
-
 import pytest
 
 from reef.core.evaluation import PolicyModel
@@ -15,7 +12,6 @@ from reef.evaluation.rollout_worker import (
     CandidateEndpoints,
     EvaluationRollout,
     EvaluationRolloutWorker,
-    ServiceCandidateEndpoints,
     rollout_item_id,
 )
 from reef.storage.work_queue import MemoryWorkQueue, NewWork
@@ -38,10 +34,8 @@ def rollout(repeat: int = 0) -> EvaluationRollout:
 
 
 class UnreachableEndpoints(CandidateEndpoints):
-    @contextmanager
-    def open(self, rollout: EvaluationRollout) -> Iterator[CandidateEndpoint]:
+    def endpoint(self, rollout: EvaluationRollout) -> CandidateEndpoint:
         raise ConnectionError("the inference service is down")
-        yield CandidateEndpoint("http://unused", None)
 
 
 @pytest.mark.unit
@@ -54,13 +48,13 @@ def test_a_rollout_item_round_trips_and_names_its_place_in_the_evaluation():
 
 
 @pytest.mark.unit
-def test_control_serves_the_candidate_beside_the_active_artifact_at_its_unrecorded_route():
-    endpoints = ServiceCandidateEndpoints("http://control:8000/", "rollout-token")
-    assert endpoints.serves_beside
-    with endpoints.open(rollout()) as endpoint:
-        assert endpoint == CandidateEndpoint(
-            "http://control:8000/reef/scenarios/s/artifacts/artifact-1/evaluation", "rollout-token"
-        )
+def test_a_rollout_calls_the_candidate_at_its_unrecorded_route_on_the_inference_service():
+    endpoints = CandidateEndpoints("http://inference:8000/", "rollout-token")
+    assert endpoints.endpoint(rollout()) == CandidateEndpoint(
+        "http://inference:8000/reef/scenarios/s/artifacts/artifact-1/evaluation", "rollout-token"
+    )
+    with pytest.raises(ValueError, match="inference service's URL"):
+        CandidateEndpoints("", None)
 
 
 @pytest.mark.unit
@@ -68,7 +62,7 @@ def test_a_rollout_that_cannot_reach_its_candidate_is_retried_then_fails():
     queue = MemoryWorkQueue(max_attempts={EVALUATIONS_QUEUE: 2})
     value = rollout()
     queue.add(NewWork(EVALUATIONS_QUEUE, value.item_id(), "s", EVALUATION_ROLLOUT_KIND, value.to_payload()))
-    worker = EvaluationRolloutWorker(queue, UnreachableEndpoints(), worker_id="evaluation-1")
+    worker = EvaluationRolloutWorker(queue, UnreachableEndpoints("http://unused", None), worker_id="evaluation-1")
 
     assert worker.run_once() is True
     assert queue.get(EVALUATIONS_QUEUE, value.item_id()).state == "queued"

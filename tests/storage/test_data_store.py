@@ -13,7 +13,7 @@ from reef.storage.sql_data import PostgresDataStore, SQLiteDataStore
 from reef.storage.tasks import LocalTaskFileStore, files_digest
 
 ATIF = {"schema_version": "ATIF-v1.4", "agent": {"name": "fixture"}, "steps": [{"step_id": 1, "message": "hi"}]}
-ORIGIN = {"scenario": "coding", "release_id": "r1", "load_id": "l1"}
+ORIGIN = {"scenario": "coding", "release_id": "r1", "artifact_id": "a1"}
 
 
 def trajectory(item_id: str, text: str = "hi", **metadata) -> NewItem:
@@ -86,15 +86,15 @@ def test_metadata_says_what_an_item_is_and_which_scenarios_use_it(store):
     )
     assert record.kind == "record"
     assert record.metadata["origin"] == ORIGIN
-    # An imported record names no release and no runtime load.
-    unserved = {**ORIGIN, "release_id": None, "load_id": None}
+    # An imported record names no release and no artifact.
+    unserved = {**ORIGIN, "release_id": None, "artifact_id": None}
     (imported,) = store.create("acme", [NewItem("r2", {}, {"kind": "record", "origin": unserved})])
     assert imported.metadata["origin"] == unserved
     bad = [
         (trajectory("x", kind="dataset"), "metadata.kind"),
         (NewItem("x", ATIF, {"kind": "trajectory", "owner": "globex"}), "metadata.owner"),
         (NewItem("x", {}, {"kind": "record"}), "metadata.origin"),
-        (NewItem("x", {}, {"kind": "record", "origin": {**ORIGIN, "load_id": ""}}), "origin.load_id"),
+        (NewItem("x", {}, {"kind": "record", "origin": {**ORIGIN, "artifact_id": ""}}), "origin.artifact_id"),
         (trajectory("x", origin=ORIGIN), "only a record"),
         (trajectory("x", scenarios={"coding": "eval"}), "always train"),
         (trajectory("x", scenarios={"coding": "dev"}), "train or eval"),

@@ -112,7 +112,7 @@ def test_a_client_record_item_needs_the_content_and_id_of_a_record(tmp_path: Pat
         "references": [],
         "artifact_ref": None,
     }
-    metadata = {"kind": "record", "origin": {"scenario": "old", "release_id": None, "load_id": None}}
+    metadata = {"kind": "record", "origin": {"scenario": "old", "release_id": None, "artifact_id": None}}
 
     async def check(client: TestClient) -> None:
         good = {"items": [{"id": "old/r1", "content": content, "metadata": metadata}]}

@@ -69,10 +69,8 @@ class TrainingStatus:
             processor["pending_instructions"] = stepping_trainer.pending_instructions()
         block: dict[str, Any] = {
             **current.commit_status,
-            # A version is current only after Reef commits its head
-            # and reopens admission. The backend may report it
-            # earlier while the update is still being published.
-            "current_runtime_load_id": (runtime.current_runtime_load_id() if runtime is not None else None),
+            # The artifact that answers the scenario's requests now: the one that served_models names.
+            "served_artifact_id": current.serving_artifact_id(),
             "job_data_ready": job_data_ready,
             "training_mode": stepping_trainer.pipeline.training_mode,
             "processor": processor,

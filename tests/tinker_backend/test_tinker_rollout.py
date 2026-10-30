@@ -89,6 +89,7 @@ def test_a_rollout_samples_each_task_on_the_start_sampler_and_groups_its_samples
         SamplerChat(sampler, "tinker://start/sampler", model=MODEL, runtime_load_id="tinker:start", topk_logprobs=0),
         model=MODEL,
         work_dir=tmp_path / "work",
+        start="tinker://start",
         model_adapter="tinker://start/sampler",
         lab=AgentLab({"add": 1.0, "sort": 0.0}, failing=frozenset({"broken"})),
     )
@@ -105,7 +106,8 @@ def test_a_rollout_samples_each_task_on_the_start_sampler_and_groups_its_samples
     ]
     training = rollouts.samples[0].training
     assert (training["tokens"], training["rollout_log_probs"]) == ([1, 2, 3, 7, 8], [-0.1, -0.2])
-    assert training["runtime_load_id"] == "tinker:start"
+    # Every call sampled the job's start, so the sample names it as the policy that produced its tokens.
+    assert training["artifact_id"] == "tinker://start"
     assert trajectory_reward(rollouts.samples[0]) == 1.0
 
 

@@ -221,12 +221,28 @@ class Scenario:
         """
         trainer = self.trainer_for(component)
         with self._committer.lock if len(self.trainers) == 1 else nullcontext():
-            return trainer.run_once(self.scenario_step, serving_runtime_load_id=self.serving_runtime_load_id())
+            # The staleness check measures data against the weights that serve; a scenario that loads no weights
+            # serves one fixed model, so its data never goes stale.
+            weights_load = self._binding.surface.loader_component is not None and self.runtime is not None
+            serving = self.serving_artifact_id() if weights_load else None
+            return trainer.run_once(self.scenario_step, serving_artifact_id=serving)
 
-    def serving_runtime_load_id(self) -> str | None:
-        """Return the runtime load ID that serves the active release, or None when it is unknown."""
-        artifact = Artifact(self.current_artifact_ref(), self.repository)
-        return self._binding.surface.served_runtime_load_id(artifact, self._binding.runtime)
+    def served_component(self) -> str | None:
+        """The component whose artifact the runtime serves: the weight trainer's component, or the only component;
+        None when the scenario has several components and no weight trainer."""
+        weights = [item.component for item in self.trainers if item.trainer.job_loop is not None]
+        if weights:
+            return weights[0]
+        names = self._committer.component_names()
+        return names[0] if len(names) == 1 else None
+
+    def serving_artifact_id(self) -> str:
+        """The artifact that answers this scenario's requests now: the active artifact of ``served_component``,
+        or the active release for a scenario whose model is no Reef artifact or whose store keeps no commit
+        history to name the active artifact."""
+        component = self.served_component()
+        active = None if component is None or not self.store.durable else self.artifact_status()[component]["active"]
+        return active or self.current_artifact_ref().release_id
 
     def replay_retained(
         self, *, up_to_sequence: int, consumed_ids: frozenset[str], component: str | None = None

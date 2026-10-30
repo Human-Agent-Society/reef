@@ -26,7 +26,7 @@ def test_a_record_item_keeps_the_record_and_says_where_it_came_from():
     served = AgentRecord.create(
         scenario="math",
         request_type=RequestType.INFERENCE,
-        payload={"tokens": [1, 2], "runtime_load_id": "load-1"},
+        payload={"tokens": [1, 2], "artifact_id": "artifact-1"},
         agent_record_id="i1",
         created_at=1.0,
         artifact_ref=ArtifactRef(content_id="c1", release_id="rel-1", parent_release_id=None),
@@ -36,7 +36,7 @@ def test_a_record_item_keeps_the_record_and_says_where_it_came_from():
     assert item.content == {
         "agent_record_id": "i1",
         "request_type": "inference",
-        "payload": {"tokens": [1, 2], "runtime_load_id": "load-1"},
+        "payload": {"tokens": [1, 2], "artifact_id": "artifact-1"},
         "created_at": 1.0,
         "references": [],
         "artifact_ref": {"kind": "artifact", "content_id": "c1", "release_id": "rel-1", "parent_release_id": None},
@@ -44,12 +44,12 @@ def test_a_record_item_keeps_the_record_and_says_where_it_came_from():
     assert item.metadata == {
         "kind": "record",
         "scenarios": {"math": "train"},
-        "origin": {"scenario": "math", "release_id": "rel-1", "load_id": "load-1"},
+        "origin": {"scenario": "math", "release_id": "rel-1", "artifact_id": "artifact-1"},
     }
     assert record_item(record("r1", score=1.0)).metadata["origin"] == {
         "scenario": "math",
         "release_id": None,
-        "load_id": None,
+        "artifact_id": None,
     }
     with pytest.raises(ValueError, match="training instruction"):
         record_item(record("t1", RequestType.TRAIN))

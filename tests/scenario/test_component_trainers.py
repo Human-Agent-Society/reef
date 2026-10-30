@@ -444,7 +444,7 @@ def test_held_local_cycles_run_nothing_until_the_service_answers(tmp_path: Path,
     dispatcher, backends = dispatchers.open(hold_local_cycles=True)
     scenario = _scenario(dispatcher, 1)
     dispatcher.preload_scenarios(("agent",))
-    for record in _records(2):
+    for record in _records(2, scenario.serving_artifact_id()):
         dispatcher.accept_record(record)
     time.sleep(0.2)
     assert backends[HARNESS].prepared == 0
@@ -665,19 +665,20 @@ def test_a_recipe_serving_fewer_components_than_registered_is_refused(
 
 @pytest.mark.unit
 def test_a_weights_job_commits_while_the_harness_backend_is_away(tmp_path: Path, dispatchers: _Dispatchers) -> None:
-    """The harness cycle keeps failing; the weights job still lands and the failure shows."""
+    """The harness cycle fails and the failure shows; the weights job still lands. Then the harness's rows are
+    stale, since the job's checkpoint serves, so the harness stops trying them."""
     away = _AwayBackend(HARNESS, tmp_path / "candidates")
     dispatcher, _ = dispatchers.open(backends={HARNESS: away}, training=WeightsJobComponent(tmp_path / "checkpoints"))
-    _scenario(dispatcher)
-    for record in _records(1):
+    scenario = _scenario(dispatcher)
+    for record in _records(1, scenario.serving_artifact_id()):
         dispatcher.accept_record(record)
+    assert _wait_for(lambda: dispatcher.build_training_status()["error"] == "agent: RuntimeError: proposer away")
     assert _wait_for(
         lambda: "finished" in [_job_event(row) for row in _scenario(dispatcher).store.history()],
         timeout_seconds=15,
     )
     time.sleep(0.2)
     assert 1 <= away.attempts <= 3
-    assert dispatcher.build_training_status()["error"] == "agent: RuntimeError: proposer away"
 
 
 @pytest.mark.unit
@@ -783,7 +784,7 @@ def test_a_retry_settled_for_a_taken_slot_stays_settled_after_a_restart(
     dispatcher, _ = dispatchers.open(recipe=_SlottedRecipe(backends=_local_pair(tmp_path)), hold_local_cycles=True)
     scenario = _loaded(dispatcher)
     for step in (1, 2, 3):
-        scenario.records.append(_records(step)[0])
+        scenario.records.append(_records(step, scenario.serving_artifact_id())[0])
     scenario.records.append(_slotted_report("r1", "i1", "G", 0))
     scenario.records.append(_slotted_report("r1dup", "i3", "G", 0))
     scenario.records.append(_slotted_report("r2", "i2", "G", 1))
@@ -791,7 +792,7 @@ def test_a_retry_settled_for_a_taken_slot_stays_settled_after_a_restart(
     assert _commit_step(scenario, HARNESS) == [("i1", "r1"), ("i2", "r2")]
     assert scenario.records.get("agent", "r1dup") is not None
     rebuilt = _reload(dispatcher)
-    rebuilt.records.append(_records(4)[0])
+    rebuilt.records.append(_records(4, rebuilt.serving_artifact_id())[0])
     rebuilt.records.append(_slotted_report("r4", "i4", "G", 2))
     # Live, slot 0 was never r1dup's: G holds r4 alone and waits.
     assert rebuilt.prepare_training_step(HARNESS) is None
@@ -896,7 +897,6 @@ class _RetiringRetriesSamples(JudgedSamples):
             loss_mask=(1,),
             rollout_log_probs=(-0.1,),
             reward=1.0,
-            runtime_load_id="v1",
         )
 
 
@@ -965,7 +965,7 @@ def test_a_run_report_on_an_inference_both_trainers_trained_is_skipped_by_both(
     trained already. Each trainer then skips run, since one of its sources trained, instead of raising on it."""
     dispatcher, _ = dispatchers.open(training=WeightsJobComponent(tmp_path / "checkpoints"))
     scenario = _loaded(dispatcher, 1)
-    scenario.records.append(_records(2)[0])
+    scenario.records.append(_records(2, scenario.serving_artifact_id())[0])
     submitted = scenario.prepare_training_step(WEIGHTS)
     assert submitted is not None
     assert _commit_step(scenario, HARNESS) is not None
@@ -1418,9 +1418,9 @@ def test_a_lone_trainer_names_no_component_on_record(tmp_path: Path, dispatchers
 @pytest.mark.unit
 def test_dispatcher_runs_one_worker_per_component(dispatchers: _Dispatchers) -> None:
     dispatcher, _ = dispatchers.open()
-    _scenario(dispatcher)
+    served = _scenario(dispatcher).serving_artifact_id()
     for step in (1, 2):
-        for record in _records(step):
+        for record in _records(step, served):
             dispatcher.accept_record(record)
 
     def both_committed_twice() -> bool:
@@ -1658,9 +1658,9 @@ def test_dispatcher_runs_the_weights_jobs_and_the_harness_on_their_own_workers(
     and each job starts from the checkpoint of the job before it."""
     training = WeightsJobComponent(tmp_path / "checkpoints")
     dispatcher, _ = dispatchers.open(training=training)
-    _scenario(dispatcher)
+    served = _scenario(dispatcher).serving_artifact_id()
     for step in (1, 2):
-        for record in _records(step):
+        for record in _records(step, served):
             dispatcher.accept_record(record)
 
     def both_trained_twice() -> bool:
@@ -1744,9 +1744,12 @@ def test_a_restart_polls_the_running_weights_job_and_commits_its_checkpoint(
     scenario = _scenario(restarted)
     assert _wait_for(lambda: _job_events(scenario)[:3] == ["submitted", "checkpoint", "finished"])
     assert training.submitted[0] == job
-    # The rows behind the job train in the next job, which starts from the job's checkpoint.
+    # The base answered the rows behind the job, so they are stale once the job's checkpoint serves. Rows that the
+    # checkpoint answers train in the next job, which starts from that checkpoint.
+    for record in _records(3, scenario.serving_artifact_id()):
+        restarted.accept_record(record)
     assert _wait_for(lambda: len(training.submitted) == 2)
-    assert [item.source_agent_record_ids for item in training.submitted[1].data.samples] == [("i2", "r2")]
+    assert [item.source_agent_record_ids for item in training.submitted[1].data.samples] == [("i3", "r3")]
     assert training.submitted[1].start == str(tmp_path / "checkpoints" / "1")
 
 

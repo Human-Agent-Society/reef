@@ -87,18 +87,18 @@ def check_scenarios(value: object, kind: ItemKind) -> dict[str, str]:
 
 
 def check_origin(value: object) -> dict[str, str | None]:
-    """Return ``value`` as a record's ``origin``: ``{scenario, release_id, load_id}``.
+    """Return ``value`` as a record's ``origin``: ``{scenario, release_id, artifact_id}``.
 
-    ``scenario`` is a valid scenario name. ``release_id`` and ``load_id`` are non-empty strings, or null for a
-    record that names no release or no runtime load, such as an imported record. Raise ``ValueError`` otherwise.
+    ``scenario`` is a valid scenario name. ``release_id`` and ``artifact_id`` are non-empty strings, or null for a
+    record that names no release or no artifact, such as an imported record. Raise ``ValueError`` otherwise.
     """
-    if not isinstance(value, Mapping) or set(value) != {"scenario", "release_id", "load_id"}:
-        raise ValueError("metadata.origin must be {scenario, release_id, load_id}")
+    if not isinstance(value, Mapping) or set(value) != {"scenario", "release_id", "artifact_id"}:
+        raise ValueError("metadata.origin must be {scenario, release_id, artifact_id}")
     check_owner(value["scenario"])
-    for key in ("release_id", "load_id"):
+    for key in ("release_id", "artifact_id"):
         if value[key] is not None and not (isinstance(value[key], str) and value[key]):
             raise ValueError(f"metadata.origin.{key} must be a non-empty string or null")
-    return {key: value[key] for key in ("scenario", "release_id", "load_id")}
+    return {key: value[key] for key in ("scenario", "release_id", "artifact_id")}
 
 
 def created_metadata(owner: str, metadata: Mapping[str, Any]) -> dict[str, Any]:

@@ -321,10 +321,10 @@ def test_a_batch_holds_the_tasks_of_every_report_in_a_group_in_arrival_order() -
 @pytest.mark.unit
 def test_the_report_stage_releases_a_report_whose_data_is_behind_the_serving_version() -> None:
     processor = threshold_pipeline(PipelineContext("s"))
-    processor.observe_serving_runtime_load_id("e:1")
+    processor.observe_serving_artifact_id("e:1")
     processor.push(inference("i1", version="e:1"))
     processor.push(report("r1", "i1"))
-    processor.observe_serving_runtime_load_id("e:2")
+    processor.observe_serving_artifact_id("e:2")
     processor.push(inference("i2", version="e:2"))
     processor.push(report("r2", "i2"))
     batch = processor.build_job_data(1)
@@ -539,8 +539,8 @@ def test_samples_beyond_the_buffer_size_wait_and_stale_samples_leave_the_buffer(
     assert processor.status()["ready_samples"] == 1
     assert len(processor.store.page()) == 2
     assert processor.releasable_record_ids() == {"i1", "i2"}
-    # Trajectories without a producing version become stale once the serving version is known.
-    processor.observe_serving_runtime_load_id("e:1")
+    # Trajectories without a producing artifact become stale once the served artifact is known.
+    processor.observe_serving_artifact_id("e:1")
     processor.advance()
     assert processor.status()["ready_samples"] == 0
     assert len(processor.store.page()) == 2, "a stale sample stays in the store untrained"

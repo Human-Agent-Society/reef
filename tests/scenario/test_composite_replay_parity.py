@@ -91,7 +91,6 @@ class _SessionSamples(JudgedSamples):
             loss_mask=(0, 1),
             rollout_log_probs=(-0.1,),
             reward=1.0,
-            runtime_load_id="v1",
         )
 
 

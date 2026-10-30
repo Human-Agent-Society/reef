@@ -75,7 +75,7 @@ def inference(record_id: str) -> AgentRecord:
             "tokens": [1, 2, 3],
             "loss_mask": [0, 1, 1],
             "rollout_log_probs": [0.0, -0.5, -0.7],
-            "runtime_load_id": "r1",
+            "artifact_id": "r1",
         },
     }
     return AgentRecord.create(
@@ -145,7 +145,7 @@ def handed_out_names(p: TrainingPipeline) -> list[str]:
 
 def sample(task: str, index: int, reward: float) -> TrajectorySample:
     """One rollout's sample in the task group ``task``, as the training component's rollout makes it."""
-    trajectory = policy_trajectory(f"{task}-{index}", (1, 2, 3), (1, 1), (-0.1, -0.2), reward, "r1")
+    trajectory = policy_trajectory(f"{task}-{index}", (1, 2, 3), (1, 1), (-0.1, -0.2), reward, artifact_id="r1")
     return dataclasses.replace(trajectory, group_id=task)
 
 

@@ -47,7 +47,7 @@ class BlockingBackend(InferenceHandler):
         self.release_id = artifact.ref.release_id
         self.started.set()
         await self.finish.wait()
-        return {"choices": [{"message": {"content": "ok"}}], "metadata": {"runtime_load_id": "w1"}}
+        return {"choices": [{"message": {"content": "ok"}}]}
 
 
 def stored_paths(tmp_path: Path) -> set[Path]:
@@ -175,8 +175,8 @@ def test_train_from_sets_the_next_job_start_and_leaves_serving_alone(tmp_path) -
     assert [row["artifact_id"] for row in value.list_artifacts("math") if row["active"]] == [served.release_id]
     imported = str(runtime.imported[-1])
     assert JobLoopState.from_dict(scenario.trainer.state).start == imported
-    # The next job starts from the imported release; the engine still serves w2.
-    train(value, 3, "w2")
+    # The next job starts from the imported release.
+    train(value, 3)
     assert runtime.submitted[-1].start == imported
     value.close()
 
@@ -201,7 +201,7 @@ def test_activation_and_training_start_survive_a_restart(tmp_path) -> None:
     assert [row["artifact_id"] for row in recovered.artifacts() if row["active"]] == [first["artifact_id"]]
     # The training start is taken again: the trainer's own commits do not record it yet.
     assert JobLoopState.from_dict(recovered.trainer.state).start == str(component.imported[-1])
-    train(restarted, 3, "w1")
+    train(restarted, 3)
     assert component.submitted[-1].start == str(component.imported[-1])
     restarted.close()
 
@@ -242,8 +242,7 @@ def test_train_from_starts_a_new_experiment_run_segment_and_activate_does_not(tm
 
     value.activate("math", target_version)
     value.train_from("math", created)
-    # The engine serves the activated checkpoint under the version that its weights name.
-    train(value, 3, "w1")
+    train(value, 3)
     value.registry.experiment_reports.flush()
 
     # Each job reports three commits; the activation at step 7 reports nothing, the new start at step 8 opens the
@@ -557,7 +556,7 @@ def test_slow_correlation_tracker_does_not_block_published_artifact_reads(
     monkeypatch.setattr(tracker, "correlation_metrics", correlation)
     monkeypatch.setattr(tracker, "record", record)
     try:
-        value.accept_record(inference(1))
+        value.accept_record(inference(1, scenario.serving_artifact_id()))
         value.accept_record(report(1))
         with ThreadPoolExecutor(max_workers=1) as executor:
             try:
@@ -599,7 +598,7 @@ def test_slow_training_tracker_does_not_block_scenario_resolution(
 
     monkeypatch.setattr(tracker, "record", record)
     try:
-        value.accept_record(inference(1))
+        value.accept_record(inference(1, scenario.serving_artifact_id()))
         value.accept_record(report(1))
         with ThreadPoolExecutor(max_workers=1) as executor:
             try:
@@ -638,8 +637,8 @@ def test_each_saved_checkpoint_becomes_an_artifact_version(tmp_path, monkeypatch
     monkeypatch.setattr(runtime, "train", save_checkpoints)
     try:
         scenario = value.get_or_create_scenario("math")
-        train(value, 1, scenario.serving_runtime_load_id())
-        train(value, 2, scenario.serving_runtime_load_id())
+        train(value, 1)
+        train(value, 2)
         assert [record.checkpoint for record in scenario.store.history()] == [False, *[True] * checkpoints, False] * 2
         state = JobLoopState.from_dict(scenario.trainer.state)
         assert state.finished_jobs == runtime.trained == 2

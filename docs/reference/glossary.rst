@@ -329,14 +329,16 @@ load that produced a span of generated tokens. It is a serving fence, not a
 publication or content identity. Reloading the same ``content_id`` can produce
 a new runtime load ID, for example when an older release is activated
 again. A restart invalidates runtime load IDs but not the release chain.
+Runtime load IDs stay inside the engines and training; records name the
+artifact that answered by ``artifact_id``.
 
 Staleness
 ---------
 
-The number of versions that a scenario served after the runtime load that
+The number of artifacts that a scenario served after the artifact that
 produced a sample, bounded by the record-to-record stage's ``max_staleness``
-(``pipeline.record2record.config.max_staleness``). Zero requires a sample to
-train against the weights that generated it. The record-to-record stage checks
+(``pipeline.record2record.config.max_staleness``). Zero trains a sample only
+while the artifact that produced it serves. The record-to-record stage checks
 it before job data forms.
 
 Reported and computed feedback

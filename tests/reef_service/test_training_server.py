@@ -562,8 +562,7 @@ def test_status_reports_the_running_job_the_finished_jobs_and_the_served_adapter
             assert "last_drain_at" not in idle and "checkpoint_storage" not in idle
             assert ("adapter_runtime_load_id" in idle) is per_scenario_adapters
 
-            # A per-scenario adapter answers requests under its own version.
-            dispatcher.accept_record(inference(1, "adapter:math:w0" if per_scenario_adapters else "w0"))
+            dispatcher.accept_record(inference(1, idle["served_artifact_id"]))
             dispatcher.accept_record(report(1))
             running = await wait_for(client, finished_jobs=0, running=True)
             # The training service hands the queued job to the component on its own thread.
@@ -575,6 +574,9 @@ def test_status_reports_the_running_job_the_finished_jobs_and_the_served_adapter
 
             component.finish_jobs()
             finished = await wait_for(client, finished_jobs=1, running=False)
+            # The status names the artifact that serves the scenario: the job's checkpoint, once it is active.
+            (active,) = [row["artifact_id"] for row in dispatcher.list_artifacts("math") if row["active"]]
+            assert finished["served_artifact_id"] == active != idle["served_artifact_id"]
             if per_scenario_adapters:
                 assert finished["adapter_runtime_load_id"] == "adapter:math:w1"
             else:

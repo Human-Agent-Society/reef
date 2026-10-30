@@ -32,7 +32,7 @@ class ReleaseEcho(InferenceHandler):
     async def inference(self, artifact, path, payload):
         del path, payload
         self.release_ids.append(artifact.ref.release_id)
-        return {"choices": [{"message": {"content": "ok"}}], "metadata": {"runtime_load_id": "w1"}}
+        return {"choices": [{"message": {"content": "ok"}}]}
 
 
 class NamedInference(ImportingInference):

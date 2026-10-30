@@ -252,8 +252,7 @@ def _install_rollout_logging() -> None:
     # families hide their own fields through their declared
     # ``rollout_log_skip_keys``.
     skipped = {
-        "producing_runtime_load_ids",
-        "producing_runtime_load_spans",
+        "producing_artifact_ids",
     }
 
     def log_rollout_data(rollout_id, args, rollout_data):

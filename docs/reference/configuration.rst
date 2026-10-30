@@ -1283,13 +1283,13 @@ hyphen spelling is also accepted.
 
 Every built-in record-to-record stage that holds units reads
 ``max_staleness``, Reef's staleness filter. Reef drops held training data
-whose producing version lags the served version by more than this many
-versions. The limit is a record-to-record setting, not a recipe setting:
+whose producing artifact is more than this many served artifacts behind the
+artifact that the scenario serves. The limit is a record-to-record setting, not a recipe setting:
 ``recipe.config.max_staleness`` is an error.
 
 .. config::
 
-   pipeline.record2record.config.max_staleness | 0 | the versions that training data may lag behind the served version and still train, a non-negative int; 0 trains only data of the served version
+   pipeline.record2record.config.max_staleness | 0 | the artifacts that training data may lag behind the served artifact and still train, a non-negative int; 0 trains only data of the served artifact
 
 .. code:: yaml
 
@@ -1785,8 +1785,8 @@ id, so a restart or a second Reef host produces the same ids. The span carries:
   ``gen_ai.usage.input_tokens``, ``gen_ai.usage.output_tokens`` and
   ``gen_ai.response.finish_reasons`` from the provider request and response,
   following the OpenTelemetry GenAI semantic conventions.
-* ``reef.release_id``, ``reef.content_id`` and ``reef.runtime_load_id``: the
-  version that served the request, when the record names one.
+* ``reef.release_id``, ``reef.content_id`` and ``reef.artifact_id``: the
+  release and the artifact that answered the request, when the record names them.
 * ``reef.tags``: the ``x-reef-tag-*`` request tags.
 
 A feedback record becomes a ``feedback`` span inside the trace of the first

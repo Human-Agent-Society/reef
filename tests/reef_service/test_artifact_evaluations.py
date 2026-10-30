@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import socket
 import tarfile
 import time
 import urllib.request
@@ -25,11 +26,11 @@ from reef.core.evaluation import ArtifactEvaluationRequest, PolicyModel
 from reef.core.tasks import write_harbor_task
 from reef.dispatcher import Dispatcher
 from reef.evaluation.activation import AlwaysActivate, EvaluatedActivation, NeverActivate, activation_reference
+from reef.evaluation.rollout_worker import CandidateEndpoints, EvaluationRollout
 from reef.harness.client.tasks import RolloutRow, TaskLab
 from reef.recipe import Recipe
 from reef.runtime.interfaces import InferenceHandler, InferenceRuntime
 from reef.service.app import create_app
-from reef.evaluation.rollout_worker import EvaluationRollout
 from reef.service.artifact_evaluations import STOPPED_ERROR, ArtifactEvaluations, NewArtifact, NewArtifacts
 from reef.storage.commits import CommitRecord
 from reef.storage.observer import ObservedScenarioStorage
@@ -48,12 +49,15 @@ class ReleaseHandler(InferenceHandler):
         self.releases: list[str] = []
 
     async def inference(self, artifact: Artifact, path: str, payload: dict[str, Any]) -> dict[str, Any]:
-        self.releases.append(artifact.artifact_id)
+        self.releases.append(artifact.ref.release_id)
         return {"choices": [{"message": {"role": "assistant", "content": "ls"}, "finish_reason": "stop"}]}
 
 
 class ReleaseRuntime(InferenceRuntime):
-    """A runtime that answers each call from the release that the call names, as a sampler for each checkpoint."""
+    """A runtime that answers each call from the release that the call names, as a sampler for each checkpoint.
+
+    Its engine serves every scenario under one model name, so control writes the ``served_models`` rows that the
+    inference routes answer from."""
 
     def __init__(self, *, serves_any_release: bool = True) -> None:
         super().__init__(base_url="http://runtime.invalid")
@@ -67,6 +71,9 @@ class ReleaseRuntime(InferenceRuntime):
     @property
     def served_weight_kind(self):
         return "model_adapter"
+
+    def served_model_name(self, scenario: str) -> str:
+        return "base"
 
     def artifact_model(self, artifact: Artifact) -> PolicyModel | None:
         return PolicyModel("base", f"sampler:{artifact.artifact_id}") if self.serves_any_release else None
@@ -138,6 +145,17 @@ def archive(root: Path, *names: str) -> bytes:
     return buffer.getvalue()
 
 
+def evaluating_server(dispatcher: Dispatcher, lab: TaskLab, **options: Any) -> tuple[TestServer, ArtifactEvaluations]:
+    """The service and its evaluations. As in one process, the evaluation workers call each candidate at the
+    service's own inference routes; ``options`` go to ``ArtifactEvaluations``."""
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    endpoints = CandidateEndpoints(f"http://127.0.0.1:{port}", TOKEN)
+    evaluations = ArtifactEvaluations(dispatcher, lab=lab, endpoints=endpoints, **options)
+    return TestServer(create_app(dispatcher, tokens=TOKEN, evaluations=evaluations), port=port), evaluations
+
+
 async def finished(client: TestClient, evaluation_id: str) -> dict[str, Any]:
     for _ in range(200):
         answer = await (await client.get(f"/reef/scenarios/s/evaluations/{evaluation_id}", headers=AUTH)).json()
@@ -168,8 +186,8 @@ def test_a_model_artifact_is_evaluated_with_the_configured_harness_on_the_releas
     lab = ModelCallingLab({"add": 1.0, "sort": 0.0}, failing=frozenset({"broken"}))
 
     async def run() -> None:
-        app = create_app(dispatcher, tokens=TOKEN, evaluations=ArtifactEvaluations(dispatcher, lab=lab))
-        async with TestClient(TestServer(app)) as client:
+        server, _ = evaluating_server(dispatcher, lab)
+        async with TestClient(server) as client:
             artifact_id = await created(client, tmp_path, "add", "broken", "sort")
             body = {"artifact_id": artifact_id, "harness": {"name": "terminus-2"}, "rollouts_per_task": 2}
             response = await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)
@@ -202,10 +220,9 @@ def test_a_model_artifact_is_evaluated_with_the_configured_harness_on_the_releas
 @pytest.mark.integration
 def test_a_request_that_the_scenario_cannot_run_is_refused_before_any_rollout(tmp_path: Path) -> None:
     dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=ReleaseRuntime()))
-    lab = ModelCallingLab({"add": 1.0})
 
     async def run() -> None:
-        app = create_app(dispatcher, tokens=TOKEN, evaluations=ArtifactEvaluations(dispatcher, lab=lab))
+        app = create_app(dispatcher, tokens=TOKEN, evaluations=ArtifactEvaluations(dispatcher))
         async with TestClient(TestServer(app)) as client:
             artifact_id = await created(client, tmp_path, "add")
             agent = {"name": "terminus-2"}
@@ -232,7 +249,7 @@ def test_a_runtime_that_serves_only_its_current_release_or_a_scenario_with_a_har
     tmp_path: Path,
 ) -> None:
     async def run(dispatcher: Dispatcher, root: Path, message: str, *, harness: bool) -> None:
-        evaluations = ArtifactEvaluations(dispatcher, lab=ModelCallingLab({}))
+        evaluations = ArtifactEvaluations(dispatcher)
         async with TestClient(TestServer(create_app(dispatcher, tokens=TOKEN, evaluations=evaluations))) as client:
             artifact_id = await created(client, root, "add")
             body = {"artifact_id": artifact_id, "harness": {"name": "terminus-2"}, "component": "weights"}
@@ -268,7 +285,7 @@ def test_an_evaluation_whose_rollouts_are_not_in_the_queue_reads_as_failed(tmp_p
     dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=ReleaseRuntime()))
 
     async def run() -> None:
-        evaluations = ArtifactEvaluations(dispatcher, lab=ModelCallingLab({"add": 1.0}))
+        evaluations = ArtifactEvaluations(dispatcher)
         async with TestClient(TestServer(create_app(dispatcher, tokens=TOKEN, evaluations=evaluations))) as client:
             artifact_id = await created(client, tmp_path, "add")
             request = ArtifactEvaluationRequest(artifact_id, "weights", harness={"name": "terminus-2"})
@@ -288,8 +305,8 @@ def test_reef_evaluates_each_new_artifact_with_the_scenarios_settings_through_th
     new_artifacts = NewArtifacts()
 
     async def run() -> None:
-        evaluations = ArtifactEvaluations(dispatcher, lab=ModelCallingLab({"add": 1.0}), new_artifacts=new_artifacts)
-        async with TestClient(TestServer(create_app(dispatcher, tokens=TOKEN, evaluations=evaluations))) as client:
+        server, evaluations = evaluating_server(dispatcher, ModelCallingLab({"add": 1.0}), new_artifacts=new_artifacts)
+        async with TestClient(server) as client:
             artifact_id = await created(client, tmp_path, "add")
             settings = {"harness": {"name": "terminus-2"}, "rollouts_per_task": 2}
             response = await client.post(

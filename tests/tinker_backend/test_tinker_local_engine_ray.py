@@ -151,7 +151,7 @@ def training_item(version: str, index: int):
                         "tokens": [10, 11, 20 + index, 21],
                         "loss_mask": [1, 1],
                         "rollout_log_probs": [-0.2, -0.4],
-                        "runtime_load_id": version,
+                        "artifact_id": version,
                     }
                 }
             },
@@ -287,7 +287,8 @@ def train_one_step(dispatcher, inference) -> None:
     from reef.core import AgentRecord, RequestType
 
     scenario = dispatcher.get_or_create_scenario(SCENARIO)
-    version = inference.current_runtime_load_id()
+    # The staleness check keeps only data of the artifact that the scenario serves.
+    version = scenario.serving_artifact_id()
     for index in range(4):
         item = training_item(version, index)
         dispatcher.accept_record(

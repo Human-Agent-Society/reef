@@ -140,6 +140,6 @@ class HarborAgent(BaseAgent):
             "agent_record_ids": valid_receipts,
             "start_step": outcome.start_step,
             "next_step": outcome.next_step,
-            "runtime_load_id": outcome.runtime_load_id,
+            "served_artifact_id": outcome.served_artifact_id,
         }
         context.metadata = metadata

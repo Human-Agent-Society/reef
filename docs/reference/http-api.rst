@@ -177,7 +177,7 @@ Headers
 | ``x-reef-rollout: 1``             | optional on inference: a call of a rollout that Reef    |
 |                                   | runs itself. It is served like any other call, but no   |
 |                                   | record is kept, and the response keeps its ``training`` |
-|                                   | block with the runtime load ID that answered. The call  |
+|                                   | block with the ``artifact_id`` that answered. The call  |
 |                                   | must not stream (HTTP 400). Only the service token      |
 |                                   | opens it.                                               |
 +-----------------------------------+---------------------------------------------------------+
@@ -464,8 +464,8 @@ owner:
   "created_at", "references", "artifact_ref"}``: the record as the scenario
   stores it.
 - Its metadata is ``{"kind": "record", "scenarios": {"<scenario>": "train"},
-  "origin": {"scenario", "release_id", "load_id"}}``. ``release_id`` is the
-  release that the record names, and ``load_id`` the runtime load that served
+  "origin": {"scenario", "release_id", "artifact_id"}}``. ``release_id`` is the
+  release that the record names, and ``artifact_id`` the artifact that answered
   the call. Each is null when the record names none.
 
 A background job makes the items after the records are stored, so an item
@@ -551,7 +551,7 @@ the next job trains, in store order, with the trainer's ``training_mode``. In
 ``auto`` it is the buffer that the pipeline computes; in ``manual`` it is the
 manual buffer. Each sample has ``sample_id``, ``kind``, ``group``,
 ``component``, the trainer's ``train_count``, and ``stale``, true when the
-staleness check finds the data of a record sample too many versions behind.
+staleness check finds the data of a record sample too many artifacts behind.
 A scenario of several components needs ``?component=<name>``.
 
 In ``manual``, ``POST /reef/scenarios/{scenario}/buffer/insert`` adds samples
@@ -1076,14 +1076,16 @@ alone, and hands it to the recipe: the rollouts and proposer run candidate
 code, which can then sample the active release but reach no other route. A
 restart issues a new one.
 
-Serving version of a training response
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Artifact of a training response
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-For a training scenario, Reef records which engine weights answered. The engine
-reports the ``runtime_load_id`` of the response, or of each generated token
-span when a weight load lands mid-generation. Reef stores the reported
-``runtime_load_id`` or ``runtime_load_spans`` in the record. It does not refuse
-a response because of its runtime load ID.
+Each inference record names the artifact that answered: Reef writes its
+``artifact_id`` into the record, the same ID as ``x-reef-release-id``. The
+staleness check reads it (see `Staleness
+<../developer-guide/processors.rst#staleness>`__). The engine's own weight-load
+IDs (``runtime_load_id`` and ``runtime_load_spans`` in the ``training`` block)
+stay inside the engines: Reef removes them from the record and from a
+rollout's response. It does not refuse a response because of them.
 
 Report
 ------
@@ -1659,8 +1661,9 @@ restart. It changes neither the active release, nor the chain tip, nor a
 training start. An activation does not change what is served: serve the
 active artifact first to keep it answering after you activate another one.
 Serving a served artifact changes nothing. Only the active release trains.
-The staleness check of a recipe counts only the versions of the active
-release, so it refuses the records of a served artifact.
+The staleness check of a recipe counts only the artifacts that the scenario
+served as active, so it refuses the records of a served artifact that was not
+active within ``max_staleness`` artifacts.
 
 ``POST /reef/scenarios/{scenario}/stop-serving`` with ``{"artifact_id":
 "<id>"}`` ends the serve and appends a ``stop_serving`` record. It answers
@@ -1924,7 +1927,7 @@ a training job runs or an update is being published.
            "recorded_at": 1756400000.0,
            "metrics": {"selected": false, "selection": {"reason": "candidate lost"}}
          },
-         "current_runtime_load_id": "7f2a:12",
+         "served_artifact_id": "5e1c...",
          "job_data_ready": false,
          "training_mode": "auto",
          "processor": {"...": "..."},
@@ -1939,6 +1942,10 @@ a training job runs or an update is being published.
 
 ``error`` and ``preload_errors`` report asynchronous training and preload
 failures. ``loaded_scenarios`` counts the scenarios loaded in this process.
+``served_artifact_id`` is the ``artifact_id`` of the artifact that answers
+the scenario's requests now, the one that ``served_models`` names: the active
+artifact of the weight trainer's component, or of the only component.
+Otherwise it is the active release ID.
 ``job_data_ready`` says whether the processor has a job's data waiting.
 ``artifacts`` gives two ``artifact_id`` values for each component: its
 active artifact and its trainer's training start. A value is ``null`` when

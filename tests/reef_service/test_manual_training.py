@@ -998,14 +998,12 @@ def test_a_job_trainer_runs_each_instruction_as_a_job_and_a_failed_job_does_not_
 ):
     component, runtime = _FirstJobFails(tmp_path / "checkpoints"), StubInferenceRuntime()
     dispatcher = open_dispatcher(_InstructionJobRecipe(component, runtime=runtime, training_mode="manual"))
-    served = dispatcher.get_or_create_scenario("s").serving_runtime_load_id()
     for receipt in ("a", "b"):
-        # The exchange names the served version, so the staleness check keeps it for the job.
         dispatcher.accept_record(
             AgentRecord.create(
                 scenario="s",
                 request_type=RequestType.INFERENCE,
-                payload={"response": {"training": {"runtime_load_id": served}}},
+                payload={"response": {"training": {}}},
                 agent_record_id=receipt,
             )
         )
