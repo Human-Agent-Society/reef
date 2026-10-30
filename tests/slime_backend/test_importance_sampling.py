@@ -120,7 +120,9 @@ def test_slime_and_tinker_give_generated_task_samples_the_same_token_advantages_
     data = to_slime_rollout_data(slime_step.payload)
     assert data["rollout_log_probs"] == [list(ROLLOUT_LOG_PROBS)] * len(REWARDS)
 
-    tinker_step = prepare_tinker_job(job_data, method, {}, scheduling, batch_size=len(REWARDS), kl_coef=0.0)
+    tinker_step = prepare_tinker_job(
+        job_data, method, {}, scheduling, batch_size=len(REWARDS), kl_coef=0.0, score_centering=None
+    )
     (rows,) = tinker_step.steps
     tinker_inputs = resolve_tinker_loss("importance_sampling").inputs(rows, [], kl_coef=0.0)
     tinker_advantages = [values["advantages"][-len(LOSS_MASK) :] for values in tinker_inputs]
