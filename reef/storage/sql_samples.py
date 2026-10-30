@@ -281,6 +281,22 @@ class SQLSampleStore(SampleStore):
                 )
             )
 
+    def remove_uploads(self, sample_ids: tuple[str, ...]) -> tuple[str, ...]:
+        if not sample_ids:
+            return ()
+        table, buffer = self.table.table, self.buffer.table
+        uploads = (self.table.condition(), table.c.component.is_(None), table.c.sample_id.in_(list(sample_ids)))
+        with self.records._transaction(write=True) as connection:
+            removed = tuple(
+                connection.execute(select(table.c.sample_id).where(*uploads).order_by(table.c.sequence)).scalars()
+            )
+            if removed:
+                connection.execute(table.delete().where(*uploads))
+                connection.execute(
+                    buffer.delete().where(self.buffer.condition(), buffer.c.sample_id.in_(list(removed)))
+                )
+        return removed
+
     def add_tasks(self, directories: tuple[Path, ...], split: SplitName) -> tuple[StoredSample, ...]:
         if split not in SPLIT_NAMES:
             raise ValueError("split must be 'train' or 'eval'")

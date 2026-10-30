@@ -20,6 +20,7 @@ from reef.core.config import ConfigArgument, config_arguments, config_metadata, 
 from reef.scenario.admission import ScenarioAdmission, ScenarioLimits
 from reef.service.cors import console_origins
 from reef.service.deploy.config_utils import config_value, interpolate_config, interpolate_config_values
+from reef.storage.data import DataStore
 from reef.storage.postgres import postgres_url, validate_postgres_schema
 from reef.storage.records import RecordRetention
 from reef.storage.scenario import ScenarioStorage
@@ -229,6 +230,14 @@ class ServiceConfig:
         public_path=("storage", "record_backend"),
         help="Scenario storage backend: sqlite, postgres, or a ScenarioStorage plugin reference.",
     )
+    #: ``sqlite``, ``postgres``, or a ``DataStore`` plugin: ``package.module:ClassName`` or module and config.
+    #: Unset follows ``record_backend``: ``postgres`` uses ``record_database_url`` and the schema ``reef_data``, and
+    #: a plugin record backend uses ``sqlite``.
+    data_store: str | Mapping[str, Any] | None = config_option(
+        None,
+        public_path=("storage", "data_store"),
+        help="Data store of the deployment's items (RFC #1028): sqlite, postgres, or a DataStore plugin reference.",
+    )
     #: ``local``, or a ``TaskFileStore`` plugin: ``package.module:ClassName`` or module and config.
     task_file_backend: str | Mapping[str, Any] = config_option(
         "local",
@@ -377,6 +386,14 @@ class ServiceConfig:
             if isinstance(self.record_backend, str) and ":" not in self.record_backend:
                 raise ValueError("storage.record_backend must be sqlite, postgres, or 'package.module:ClassName'")
             ScenarioStorage.reference(self.record_backend, setting="storage.record_backend")
+        if self.data_store not in (None, "sqlite", "postgres"):
+            if isinstance(self.data_store, str) and ":" not in self.data_store:
+                raise ValueError("storage.data_store must be sqlite, postgres, or 'package.module:ClassName'")
+            DataStore.reference(self.data_store, setting="storage.data_store")
+        if self.data_store == "postgres" and self.record_backend != "postgres":
+            raise ValueError(
+                "storage.data_store: postgres uses storage.record_database_url, so it needs record_backend: postgres"
+            )
         if self.task_file_backend != "local":
             if isinstance(self.task_file_backend, str) and ":" not in self.task_file_backend:
                 raise ValueError("storage.task_file_backend must be local or 'package.module:ClassName'")

@@ -154,7 +154,10 @@ class SampleStore(ABC):
     sequence of stored samples, in increasing ``sequence``. No two of them have
     the same ``sample_id``, also across kinds. A stored sample's ``sample``,
     ``split`` and ``files_digest`` do not change, and record retention does not
-    remove it. ``B`` maps each trainer (a ``train_counts`` key) to its manual
+    remove it. ``remove_uploads`` is the only operation that removes samples:
+    the uploads (samples of no component) of the data items that the scenario
+    no longer uses. A new sample always gets a ``sequence`` above every
+    ``sequence`` the store gave before. ``B`` maps each trainer (a ``train_counts`` key) to its manual
     buffer, a set of sample IDs. ``insert_into_buffer`` and
     ``remove_from_buffer`` change ``B``. Only a commit changes
     ``train_counts``: the commit history adds one, for the commit's trainer,
@@ -162,9 +165,10 @@ class SampleStore(ABC):
     from that trainer's manual buffer. Archiving the scenario retires the whole
     store.
 
-    Purpose: the dispatcher adds the trajectories of each upload
-    (``add_trajectories``) and the tasks of each task upload or deployment
-    import (``add_tasks``). A trainer's pipeline adds the samples that its
+    Purpose: the data sync (``reef.storage.data_sync``) keeps the uploads equal
+    to the scenario's data items: it adds trajectories (``add_trajectories``)
+    and tasks (``add_tasks``), and removes the uploads of items that left the
+    scenario (``remove_uploads``). A trainer's pipeline adds the samples that its
     stages make (``add_record_samples``), and a rebuilt trainer skips the
     records they consumed (``consumed_record_ids``). The pipeline reads the
     samples in arrival order, after its cursor (``page``), and the samples of
@@ -254,6 +258,15 @@ class SampleStore(ABC):
     def remove_from_buffer(self, trainer: str, sample_ids: tuple[str, ...]) -> None:
         """Remove ``sample_ids`` from the manual buffer of ``trainer``, in one transaction; an absent ID is skipped."""
 
+    @abstractmethod
+    def remove_uploads(self, sample_ids: tuple[str, ...]) -> tuple[str, ...]:
+        """Remove the uploads of ``sample_ids`` and their entries in every manual buffer, in one transaction.
+
+        An upload is a sample of no component. An ID of no upload is skipped. The train counts stay, so a sample
+        that the store gets again under the same ID keeps them. Return the IDs that the call removed, in arrival
+        order.
+        """
+
     def imported_tasks(self, split: SplitName | None = None) -> tuple[StoredSample, ...]:
         """Every imported task (a task of no component), in arrival order; only ``split``'s if given."""
         found: list[StoredSample] = []
@@ -278,6 +291,7 @@ class MemorySampleStore(SampleStore):
     def __init__(self) -> None:
         self.rows: list[StoredSample] = []
         self.buffers: dict[str, set[str]] = {}
+        self.next_sequence = 1
 
     def stored(self, sample_id: str) -> StoredSample | None:
         return next((row for row in self.rows if row.sample_id == sample_id), None)
@@ -311,13 +325,13 @@ class MemorySampleStore(SampleStore):
                 raise ValueError("a sample ID must be a non-empty string")
             stored = new.get(sample_id) or self.stored(sample_id)
             if stored is None:
-                sequence = len(self.rows) + len(new) + 1
                 new[sample_id] = StoredSample(
-                    sequence, sample_id, "train", sample, None, {}, component, group, record_ids
+                    self.next_sequence + len(new), sample_id, "train", sample, None, {}, component, group, record_ids
                 )
             elif stored.sample != sample:
                 raise SampleConflict(f"sample {sample_id!r} is already stored with other content")
         self.rows.extend(new.values())
+        self.next_sequence += len(new)
         return bool(new)
 
     def add_tasks(self, directories: tuple[Path, ...], split: SplitName) -> tuple[StoredSample, ...]:
@@ -356,6 +370,13 @@ class MemorySampleStore(SampleStore):
 
     def remove_from_buffer(self, trainer: str, sample_ids: tuple[str, ...]) -> None:
         self.buffers.get(trainer, set()).difference_update(sample_ids)
+
+    def remove_uploads(self, sample_ids: tuple[str, ...]) -> tuple[str, ...]:
+        removed = tuple(row.sample_id for row in self.rows if row.component is None and row.sample_id in sample_ids)
+        self.rows = [row for row in self.rows if row.sample_id not in removed]
+        for buffer in self.buffers.values():
+            buffer.difference_update(removed)
+        return removed
 
 
 @dataclass(frozen=True)

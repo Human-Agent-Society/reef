@@ -208,7 +208,7 @@ def test_report_returns_and_inference_resolves_while_training_job_is_blocked(sta
     scenario = dispatcher.get_or_create_scenario("math")
     expected = scenario.current_artifact_ref()
     _submit_pair(dispatcher)
-    assert component.started.wait(1)
+    assert component.started.wait(_ASYNC_WAIT_TIMEOUT_S)
     assert scenario.current_artifact_ref() == expected
     component.release.set()
     _wait_for_jobs(dispatcher, 1)
@@ -264,7 +264,7 @@ def test_lost_ack_publication_commits_the_checkpoint_once(start_dispatcher) -> N
     BlockingLostAckBackend.failed = False
     component, dispatcher = start_dispatcher(BlockingLostAckBackend)
     _submit_pair(dispatcher)
-    assert BlockingLostAckBackend.started.wait(1)
+    assert BlockingLostAckBackend.started.wait(_ASYNC_WAIT_TIMEOUT_S)
     BlockingLostAckBackend.release.set()
     _wait_for_jobs(dispatcher, 1)
 
@@ -401,7 +401,7 @@ def test_periodic_metrics_report_backlog_during_training_without_status_reads(st
     tracker = OperationalExperimentTracker()
     component, dispatcher = start_dispatcher(block=True, experiment_tracker=tracker)
     _submit_pair(dispatcher)
-    assert component.started.wait(1)
+    assert component.started.wait(_ASYNC_WAIT_TIMEOUT_S)
     _submit_pair(dispatcher, "2", "w1")
     # The first pair can also produce a backlog of two before training starts.
     sample = wait_for_operational_sample(tracker, {"records/unread_count": 2, "training/execution/active": 1})
@@ -460,7 +460,7 @@ def test_disabled_tracking_does_not_start_periodic_sampling(start_dispatcher) ->
 def test_processor_lock_does_not_hide_execution_metrics(start_dispatcher) -> None:
     component, dispatcher = start_dispatcher(block=True)
     _submit_pair(dispatcher)
-    assert component.started.wait(1)
+    assert component.started.wait(_ASYNC_WAIT_TIMEOUT_S)
     trainer = dispatcher.get_or_create_scenario("math").trainer
     with trainer._lock:
         sample = trainer.operational_metrics()

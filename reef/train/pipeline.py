@@ -433,6 +433,15 @@ class TrainingPipeline:
     # Make job data when the buffer holds the trainer's sample count (auto) or an instruction is queued (manual),
     # hand the same data out until it is acknowledged, then count its samples trained.
 
+    def forget_samples(self, sample_ids: tuple[str, ...]) -> None:
+        """Stop holding ``sample_ids``: the data sync removed their uploads from the store.
+
+        A sample in handed out job data stays in it; its commit counts it as usual. A sample that the store gets
+        again has a new ``sequence``, so ``read_store`` reads it again.
+        """
+        for sample_id in sample_ids:
+            self.held.pop(sample_id, None)
+
     def read_store(self) -> None:
         """Read the stored samples after the store cursor that this trainer reads: hold each untrained one that it
         can train (``trainable``)."""
