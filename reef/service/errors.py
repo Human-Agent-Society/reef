@@ -25,7 +25,9 @@ from reef.core.errors import (
 )
 from reef.runtime.interfaces import UpstreamStatusError
 from reef.service.artifact_evaluations import EvaluationLimitReached
+from reef.service.data import NoDataStore
 from reef.service.request_service import InferenceRetryTimeout
+from reef.storage.data import ItemConflict, ItemNotFound
 from reef.storage.records import RecordConflict
 from reef.storage.samples import SampleConflict
 from reef.surface.weights import RuntimeLoadMismatch
@@ -36,6 +38,9 @@ logger = logging.getLogger(__name__)
 ERROR_STATUS_TABLE: tuple[tuple[type[Exception], type[web.HTTPError]], ...] = (
     (ArtifactNotFound, web.HTTPNotFound),
     (UnknownScenario, web.HTTPNotFound),
+    (ItemNotFound, web.HTTPNotFound),
+    (ItemConflict, web.HTTPConflict),
+    (NoDataStore, web.HTTPServiceUnavailable),
     (ScenarioLimitReached, web.HTTPConflict),
     (ScenarioCapacityFull, web.HTTPServiceUnavailable),
     (ArtifactConflict, web.HTTPConflict),

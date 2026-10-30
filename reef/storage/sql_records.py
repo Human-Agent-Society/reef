@@ -625,6 +625,8 @@ class SQLRecordStore(RecordStore):
             training_mode=values.get("training_mode"),
             artifact_evaluation=values.get("artifact_evaluation"),
             activation=values.get("activation"),
+            owner=values.get("owner"),
+            record_items_sequence=values.get("record_items_sequence", 0),
         )
 
     def write_settings(self, settings: ScenarioSettings) -> None:
@@ -637,6 +639,8 @@ class SQLRecordStore(RecordStore):
                 None if settings.artifact_evaluation is None else dict(settings.artifact_evaluation)
             ),
             "activation": None if settings.activation is None else dict(settings.activation),
+            "owner": settings.owner,
+            "record_items_sequence": settings.record_items_sequence or None,
         }
         rows = [
             {**self._tables.scope, "name": name, "value_json": json.dumps(value, ensure_ascii=False)}

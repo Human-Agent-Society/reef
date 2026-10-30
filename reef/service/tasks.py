@@ -1,24 +1,20 @@
-"""Transport-independent handling of uploaded Harbor tasks.
+"""Transport-independent handling of Harbor task archives and of a scenario's task listing.
 
-A client uploads tasks to one scenario as a gzip-compressed tar archive whose top-level entries are Harbor task
-directories, one for each task, named by the task. ``upload_tasks`` unpacks the archive into a temporary
-directory, checks that each directory is a Harbor task, and gives the directories to the dispatcher, which
-saves them to the scenario's sample store in the split that the request names. No aiohttp
-types appear here. ``reef.service.routes.tasks`` adapts it to HTTP.
+A client creates task items from a gzip-compressed tar archive whose top-level entries are Harbor task
+directories, one for each task, named by the task (``reef.service.data``). ``unpack_task_archive`` unpacks and
+checks such an archive. ``list_imported_tasks`` lists the tasks that a scenario uses. No aiohttp types appear
+here. ``reef.service.routes.tasks`` adapts the listing to HTTP.
 """
 
 from __future__ import annotations
 
 import tarfile
-import tempfile
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from harbor.models.task.task import Task as HarborTaskLoader
 
 from reef.core.tasks.harbor import TASK_NAME_PATTERN
 from reef.dispatcher import Dispatcher
-from reef.storage.tasks import SPLIT_NAMES, SplitName
 
 #: The most tasks in one upload.
 MAX_TASKS_PER_UPLOAD = 1000
@@ -67,31 +63,6 @@ def unpack_task_archive(archive: Path, target: Path) -> tuple[Path, ...]:
     except (tarfile.TarError, EOFError, OSError) as exc:
         raise ValueError(f"the body is not a gzip-compressed tar archive: {exc}") from exc
     return tuple(target / name for name in sorted(names))
-
-
-def upload_tasks(dispatcher: Dispatcher, scenario: str, split: str, archive: Path) -> dict[str, Any]:
-    """Save the Harbor tasks of ``archive`` to ``split`` of ``scenario``'s sample store, and return the receipt.
-
-    The receipt is ``{scenario, split, tasks: [{name, files_digest}]}``, in name order. Raise ``ValueError`` for a
-    split other than ``train`` and ``eval``, an archive that ``unpack_task_archive`` refuses, or a directory that
-    Harbor cannot load; nothing is published then.
-    """
-    if split not in SPLIT_NAMES:
-        raise ValueError(f"split must be one of {', '.join(SPLIT_NAMES)}")
-    checked_split: SplitName = "train" if split == "train" else "eval"
-    with tempfile.TemporaryDirectory(prefix="reef-task-upload-") as work:
-        directories = unpack_task_archive(archive, Path(work))
-        for directory in directories:
-            try:
-                HarborTaskLoader(directory)
-            except (ValueError, OSError) as exc:
-                raise ValueError(f"{directory.name} is not a Harbor task: {exc}") from exc
-        published = dispatcher.accept_tasks(scenario, directories, checked_split)
-    return {
-        "scenario": scenario,
-        "split": checked_split,
-        "tasks": [{"name": task.sample_id, "files_digest": task.files_digest} for task in published],
-    }
 
 
 def list_imported_tasks(dispatcher: Dispatcher, scenario: str) -> dict[str, Any]:
