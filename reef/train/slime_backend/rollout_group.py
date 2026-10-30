@@ -166,6 +166,14 @@ class SlimeRolloutGroup:
         if self.colocated:
             ray.get(self.manager.offload.remote())
 
+    def rollouts_per_epoch(self) -> int:
+        """The rollouts of one pass over the data source's dataset, in ``--rollout-batch-size`` prompts."""
+        return int(ray.get(self.manager.get_num_rollout_per_epoch.remote()))
+
+    def generate(self, rollout_id: int) -> Any:
+        """Generate and reward rollout ``rollout_id`` with Slime's rollout function: its training data per DP rank."""
+        return ray.get(self.manager.generate.remote(rollout_id))
+
     def close(self) -> None:
         """Detach this driver from the session: the engines, their router and the GPUs stay for the next job."""
         self.startup.close(failed=True)

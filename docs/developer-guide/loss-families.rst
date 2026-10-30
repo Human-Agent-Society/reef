@@ -60,6 +60,8 @@ refuses a mismatch.
 +---------------------+-----------------------------+----------------------------+
 | ``sft``             | ``sft_loss``                | not required               |
 +---------------------+-----------------------------+----------------------------+
+| ``slime``           | ``policy_loss``             | Slime's own setting        |
++---------------------+-----------------------------+----------------------------+
 | ``tttd``            | ``custom_loss``             | ``--use-rollout-logprobs`` |
 +---------------------+-----------------------------+----------------------------+
 | ``openclawrl``      | ``custom_loss``             | not required               |
@@ -157,6 +159,9 @@ A family that ships more than the five policy columns declares them on the spec.
 
 Bundled families worth reading: ``reef/train/slime_backend/sft.py`` (the
 built-in SFT family: Slime's ``sft_loss`` and no hooks),
+``reef/train/slime_backend/native.py`` (the built-in ``slime`` family of dataset
+jobs, whose advantages and loss are Slime's; see `Dataset jobs on Slime
+<../reference/configuration.rst#dataset-jobs-on-slime>`__),
 ``recipes/tttd/slime/`` (two hooks, the default row), ``recipes/sao/slime/`` (critic schedule, the pg-primitive lane),
 ``recipes/openclawrl/slime/`` (a custom row, both actor lifecycle hooks, a
 frozen Megatron teacher), ``recipes/sdft/slime/`` and ``recipes/sdpo/slime/``
