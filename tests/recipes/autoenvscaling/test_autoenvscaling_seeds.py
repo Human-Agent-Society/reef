@@ -54,11 +54,13 @@ from recipes.beta.autoenvscaling.author import SEED_VARIANT_PROMPT, VARIANT_INPU
 from recipes.beta.autoenvscaling.checks import PassRateBand
 from recipes.beta.autoenvscaling.claude_author import CLAUDE_CHECK_TEXT
 from recipes.beta.autoenvscaling.generator import (
+    REPOSITORY_TASK_CONFIG,
     GenerationCursor,
     ParentTask,
     SessionProposal,
     seed_record_id,
     seed_tasks,
+    with_parent_limits,
 )
 from recipes.beta.autoenvscaling.sources import Repository
 from reef.core.plugins import PluginConfigError
@@ -82,7 +84,7 @@ def e2b_package(monkeypatch: pytest.MonkeyPatch) -> None:
     stand_in_e2b_package(monkeypatch)
 
 
-def seed_task(number: int) -> HarborTask:
+def seed_task(number: int, config: Mapping[str, Mapping[str, object]] | None = None) -> HarborTask:
     """A seed as the TMax converter writes one: its own image and fixture, and a solution that does nothing."""
     document = json.loads(json.dumps(DOCUMENT).replace("8471", str(9100 + number)))
     return HarborTask(
@@ -92,12 +94,13 @@ def seed_task(number: int) -> HarborTask:
         environment={**document["environment"], "fixtures/data.txt": f"seed {number}\n"},
         solution={"solve.sh": "#!/bin/bash\nexit 0\n"},
         metadata={"tmax_task": f"TMax_{number}"},
+        config=dict(config or {}),
     )
 
 
-def write_seeds(root: Path, count: int) -> Path:
+def write_seeds(root: Path, count: int, config: Mapping[str, Mapping[str, object]] | None = None) -> Path:
     for number in range(count):
-        write_harbor_task(seed_task(number), root)
+        write_harbor_task(seed_task(number, config), root)
     return root
 
 
@@ -184,6 +187,7 @@ def seeded(
     count: int = 2,
     task_checks: Sequence[ContaminationCheck | ReviewCheck] = (),
     calibration: CalibrationCheck | None = None,
+    seed_config: Mapping[str, Mapping[str, object]] | None = None,
 ) -> AutoEnvScalingGenerator:
     """An adaptive generator with ``seed_count`` seeds and ``source_count`` sessions, half its slots for variants."""
     return AutoEnvScalingGenerator(
@@ -196,7 +200,7 @@ def seeded(
         task_checks=tuple(task_checks),
         calibration=calibration,
         is_adaptive=True,
-        seeds=seed_tasks(write_seeds(tmp_path / "seeds", seed_count)),
+        seeds=seed_tasks(write_seeds(tmp_path / "seeds", seed_count, seed_config)),
     )
 
 
@@ -782,3 +786,29 @@ def test_seeds_and_seeded_parents_need_an_author_that_varies_seeds(tmp_path: Pat
 def test_a_cursor_holds_non_negative_ints(fields: dict[str, object]) -> None:
     with pytest.raises(ValueError, match="must be a non-negative int"):
         GenerationCursor(**fields)  # type: ignore[arg-type]
+
+
+def test_a_seed_variant_keeps_its_seeds_time_and_machine(tmp_path: Path) -> None:
+    limits = {
+        "agent": {"timeout_sec": 1200.0},
+        "verifier": {"timeout_sec": 600.0},
+        "environment": {"cpus": 1, "memory_mb": 2048, "storage_mb": 4096, "gpus": 0},
+    }
+    generator = seeded(tmp_path, SeedAuthor(), seed_config=limits)
+    asyncio.run(generator.record_results(run_tasks(generator, (1.0, 1.0), (0.5, 0.5)), generation=0))
+    [variant] = asyncio.run(generator.generate(REQUEST))
+    assert variant.metadata["seed_task"] == generator.seeds[0].name
+    for section, values in limits.items():
+        for key, value in values.items():
+            assert variant.config[section][key] == value, (section, key)
+    # The rest of the authored config stays: the parent sets no network mode or build timeout.
+    assert variant.config["environment"]["network_mode"] == REPOSITORY_TASK_CONFIG["environment"]["network_mode"]
+
+
+def test_parent_limits_leave_a_limit_the_parent_does_not_set() -> None:
+    task = seed_task(0, REPOSITORY_TASK_CONFIG)
+    parent = seed_task(1, {"agent": {"timeout_sec": 900}})
+    limited = with_parent_limits(task, parent)
+    assert limited.config["agent"]["timeout_sec"] == 900
+    assert limited.config["verifier"] == REPOSITORY_TASK_CONFIG["verifier"]
+    assert limited.config["environment"] == REPOSITORY_TASK_CONFIG["environment"]

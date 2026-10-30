@@ -167,6 +167,13 @@ REPOSITORY_TASK_CONFIG: dict[str, dict[str, object]] = {
         "build_timeout_sec": 1200,
     },
 }
+#: The task.toml limits a variant keeps from its parent. A variant is harder or simpler by what it asks, not by more
+#: time or a larger machine, so its pass rate stays comparable with its parent's place in the band.
+PARENT_LIMITS: Mapping[str, tuple[str, ...]] = {
+    "agent": ("timeout_sec",),
+    "verifier": ("timeout_sec",),
+    "environment": ("cpus", "memory_mb", "storage_mb", "gpus"),
+}
 ERROR_CHARS = 3000
 #: A generator may hold several recipes' tasks; this suffix keeps this recipe's names apart from SPADE's
 #: ``harbor-<generation>-<index>``.
@@ -237,6 +244,17 @@ CONFIG_KEYS = frozenset(
         "contamination_ngram",
     }
 )
+
+
+def with_parent_limits(task: HarborTask, parent: HarborTask) -> HarborTask:
+    """``task`` with ``parent``'s values of :data:`PARENT_LIMITS`; a limit the parent does not set stays as it is."""
+    config = {section: dict(values) for section, values in task.config.items()}
+    for section, keys in PARENT_LIMITS.items():
+        limits = parent.config.get(section, {})
+        for key in keys:
+            if key in limits:
+                config.setdefault(section, {})[key] = limits[key]
+    return replace(task, config=config)
 
 
 def admitted_task(reply: str, *, generation: int, index: int, record_id: str, checkout_path: str | None) -> HarborTask:
@@ -1314,6 +1332,8 @@ class AutoEnvScalingGenerator(TaskGenerator):
             raise ProposalRefused(
                 f"the Designer's task is refused: {exc}", stage=STAGE_AUTHORING, record_id=record_id
             ) from exc
+        if variant is not None:
+            task = with_parent_limits(task, read_harbor_task(variant.parent_dir))
         lineage = {} if variant is None else {"parent_task": variant.parent, "variant": variant.direction}
         if variant is not None and variant.seed_task:
             lineage["seed_task"] = variant.seed_task
