@@ -77,6 +77,37 @@ class TinkerConfig(TinkerServiceConfig):
             raise ValueError("Tinker lora_rank must be positive")
 
 
+@dataclass(frozen=True)
+class ScoreCentering:
+    """Score centering (arXiv:2609.20807) on Spindle's ``cispo`` loss, for the policy-gradient jobs of a component.
+
+    Values: ``top_k`` is a positive int, the sampler's head width that every trained token carries;
+    ``min_tail_mass`` is in (0, 1), the floor of the sampler's and the trainer's tail masses; ``weight_low`` and
+    ``weight_high`` are finite with ``0 <= weight_low <= weight_high`` and ``weight_high > 0``, the bounds of the
+    token weight ``clamp(p / q, weight_low, weight_high)``. ``weight_low == weight_high == 1`` is REINFORCE.
+    Purpose: ``SpindleFullConfig.score_centering_settings`` makes it; ``ScoreCenteredLoss`` trains with it and
+    the component's task rollouts record ``top_k`` sampler log probabilities per sampled token.
+    """
+
+    top_k: int
+    min_tail_mass: float
+    weight_low: float
+    weight_high: float
+
+    def __post_init__(self) -> None:
+        if isinstance(self.top_k, bool) or not isinstance(self.top_k, int) or self.top_k <= 0:
+            raise ValueError("score centering top_k must be a positive int")
+        if not 0 < self.min_tail_mass < 1:
+            raise ValueError("score centering min_tail_mass must be in (0, 1)")
+        if (
+            not math.isfinite(self.weight_low)
+            or not math.isfinite(self.weight_high)
+            or not 0 <= self.weight_low <= self.weight_high
+            or self.weight_high <= 0
+        ):
+            raise ValueError("score centering weights need finite bounds with 0 <= low <= high and high > 0")
+
+
 @dataclass(frozen=True, kw_only=True)
 class SpindleFullConfig(TinkerServiceConfig):
     """The ``training.options`` of the Spindle full-parameter training component (RFC #996).
@@ -87,8 +118,10 @@ class SpindleFullConfig(TinkerServiceConfig):
     repo that each saved checkpoint's weights are exported to, one commit each. ``checkpoint_volume`` and
     ``modal_environment`` name the Modal Volume where the Spindle deployment keeps its checkpoints (``None``: the
     profile's default environment), and ``hf_secret`` the Modal Secret there whose ``HF_TOKEN`` may write
-    ``release_repo`` and read the base. Purpose: ``spindle_full_settings`` parses it; the component, its SDK
-    client, its sampler and its exporter read it, and ``SpindleFullDeployment`` derives serving from it.
+    ``release_repo`` and read the base. ``score_centering`` turns score centering on; the four
+    ``score_centering_*`` values make a ``ScoreCentering`` whether it is on or not. Purpose:
+    ``spindle_full_settings`` parses it; the component, its SDK client, its sampler and its exporter read it, and
+    ``SpindleFullDeployment`` derives serving from it.
     """
 
     base: str = config_option(
@@ -106,6 +139,25 @@ class SpindleFullConfig(TinkerServiceConfig):
     hf_secret: str = config_option(
         "huggingface-secret", help="The Modal Secret whose HF_TOKEN may write release_repo and read the base."
     )
+    score_centering: bool = config_option(
+        False,
+        help=(
+            "Train importance_sampling jobs as Spindle's cispo loss with score centering, and record the "
+            "sampler's top-k log probabilities in task rollouts."
+        ),
+    )
+    score_centering_top_k: int = config_option(
+        128, help="Sampler log probabilities per sampled token that score centering reads."
+    )
+    score_centering_min_tail_mass: float = config_option(
+        1e-6, help="Floor of the sampler's and the trainer's tail masses before score centering takes their ratio."
+    )
+    score_centering_weight_low: float = config_option(
+        1.0, help="Lower bound of the score-centered token weight clamp(p / q); 1 with a high bound of 1 is REINFORCE."
+    )
+    score_centering_weight_high: float = config_option(
+        1.0, help="Upper bound of the score-centered token weight clamp(p / q)."
+    )
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -117,6 +169,21 @@ class SpindleFullConfig(TinkerServiceConfig):
             raise ValueError(f"Spindle full-parameter release_repo is org/name, got {self.release_repo!r}")
         if not self.checkpoint_volume or not self.hf_secret:
             raise ValueError("Spindle full-parameter training requires checkpoint_volume and hf_secret")
+        self.score_centering_values()
+
+    def score_centering_values(self) -> ScoreCentering:
+        """The four ``score_centering_*`` values as a ``ScoreCentering``; ``ValueError`` when they are not one."""
+        return ScoreCentering(
+            self.score_centering_top_k,
+            self.score_centering_min_tail_mass,
+            self.score_centering_weight_low,
+            self.score_centering_weight_high,
+        )
+
+    @property
+    def score_centering_settings(self) -> ScoreCentering | None:
+        """The score centering of the component's policy-gradient jobs, or None when it is off."""
+        return self.score_centering_values() if self.score_centering else None
 
     @property
     def base_revision(self) -> HuggingFaceRevision:

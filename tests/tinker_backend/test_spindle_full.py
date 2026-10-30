@@ -83,7 +83,7 @@ class SpindleClient(TinkerClient, TinkerSampler):
     def decode(self, tokens):
         return "hello"
 
-    def sample(self, sampler_path, prompt, params):
+    def sample(self, sampler_path, prompt, params, *, topk_logprobs):
         self.sampled.append(sampler_path)
         return SampleResult((201,), (-0.2,), "stop")
 
@@ -283,7 +283,9 @@ def test_the_sdk_client_creates_a_full_parameter_model_and_restores_only_full_pa
 ):
     created = []
     trainer = SimpleNamespace(
-        forward_backward=lambda data, loss_fn: SimpleNamespace(result=lambda timeout: SimpleNamespace(metrics={})),
+        forward_backward=lambda data, loss_fn, loss_fn_config=None: SimpleNamespace(
+            result=lambda timeout: SimpleNamespace(metrics={})
+        ),
         optim_step=lambda params: SimpleNamespace(result=lambda timeout: None),
         save_state=lambda name, ttl_seconds: SimpleNamespace(
             result=lambda timeout: SimpleNamespace(path="tinker://s/state")
