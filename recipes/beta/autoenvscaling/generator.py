@@ -447,6 +447,7 @@ class SessionProposal:
             STAGE_SOURCE,
             STAGE_AUTHORING,
             STAGE_OUTAGE,
+            STAGE_CREDENTIAL,
             STAGE_CHECK,
             STAGE_UNCHECKED,
             STAGE_CALIBRATION,

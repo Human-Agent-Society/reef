@@ -42,8 +42,8 @@ from recipes.beta.autoenvscaling.author import (
     AuthorError,
     CandidateChecks,
     ModelCalls,
-    TaskAuthor,
     TaskVariant,
+    VariantAuthor,
     close_when_stopped,
     rebuild_rules,
     repository_snapshot,
@@ -261,7 +261,7 @@ class CheckTools(AgentTools):
                 self.running_id = None
 
 
-class ClaudeCodeAuthor(TaskAuthor):
+class ClaudeCodeAuthor(VariantAuthor):
     """Reef's pinned Claude Code in a cloud sandbox, signed in with ``claude_token`` and asking for ``model``.
 
     Values: ``reef_url`` and ``token`` read the source sessions, and ``cache_dir`` keeps the repository snapshots.
@@ -269,7 +269,8 @@ class ClaudeCodeAuthor(TaskAuthor):
     ``timeout_seconds`` (positive) and at most ``max_turns`` (positive) agent turns, Claude Code's ``--max-turns``.
     With ``has_behaviour_rule`` the rules include the behaviour rule.
     Purpose: the generator builds one for ``author_harness: claude-code``; :meth:`author` runs Claude Code on one
-    session and returns its task with no recorded model call and the path of its transcript.
+    session, and :meth:`vary` on a parent of that session, and each returns its task with no recorded model call
+    and the path of its transcript.
     """
 
     def __init__(
@@ -307,9 +308,33 @@ class ClaudeCodeAuthor(TaskAuthor):
         *,
         tags: Mapping[str, str],
         stop: threading.Event,
+    ) -> AuthoredTask:
+        return self.write_task(source, work_dir, checks, tags=tags, stop=stop)
+
+    def vary(
+        self,
+        source: SessionSource,
+        work_dir: Path,
+        checks: CandidateChecks,
+        *,
+        tags: Mapping[str, str],
+        stop: threading.Event,
+        variant: TaskVariant,
+    ) -> AuthoredTask:
+        return self.write_task(source, work_dir, checks, tags=tags, stop=stop, variant=variant)
+
+    def write_task(
+        self,
+        source: SessionSource,
+        work_dir: Path,
+        checks: CandidateChecks,
+        *,
+        tags: Mapping[str, str],
+        stop: threading.Event,
         variant: TaskVariant | None = None,
     ) -> AuthoredTask:
-        """Claude Code's task from ``source``; ``tags`` go unused, since Reef records none of its model calls.
+        """Claude Code's task from ``source``, or with ``variant`` a variant of its parent; ``tags`` go unused,
+        since Reef records none of its model calls.
 
         Raises :class:`CredentialHeld` when the task holds the token: the task is not admitted.
         """
@@ -322,7 +347,14 @@ class ClaudeCodeAuthor(TaskAuthor):
             gateway = CheckGateway(tools)
             gateway.start()
             try:
-                transcript = self.run(work_dir, gateway, tools, stop, variant=variant)
+                transcript = self.run(
+                    work_dir,
+                    gateway,
+                    tools,
+                    stop,
+                    extra_rules="" if variant is None else VARIANT_INPUTS_TEXT,
+                    prompt=AGENT_PROMPT if variant is None else VARIANT_PROMPT.format(direction=variant.direction),
+                )
             finally:
                 gateway.stop()
         finally:
@@ -356,10 +388,11 @@ class ClaudeCodeAuthor(TaskAuthor):
         tools: AgentTools,
         stop: threading.Event,
         *,
-        variant: TaskVariant | None = None,
+        extra_rules: str = "",
+        prompt: str = AGENT_PROMPT,
     ) -> str:
-        """Claude Code in a sandbox over the workspace until it stops, its time runs out or ``stop`` is set; with
-        ``variant``, the rules and the prompt ask for a variant of the parent in the inputs. Answers the path of its
+        """Claude Code in a sandbox over the workspace until it stops, its time runs out or ``stop`` is set;
+        ``extra_rules`` extends the authoring rules and ``prompt`` states the task to write. Answers the path of its
         transcript, relative to ``work_dir``, or ``""``.
 
         Raises :class:`AuthorError` when the run could not start or was stopped, and when Claude Code ended with an
@@ -374,7 +407,7 @@ class ClaudeCodeAuthor(TaskAuthor):
             rules=rebuild_rules(self.has_behaviour_rule),
             max_checks=tools.checks.max_checks,
             review=REVIEW_TEXT if tools.checks.is_reviewing else "",
-            variant="" if variant is None else VARIANT_INPUTS_TEXT,
+            variant=extra_rules,
         )
         # The rules are Claude Code's CLAUDE.md, and settings.json its defaults: no model binding, so no endpoint.
         files = render_composition((("rules", {"text": rules + CLAUDE_CHECK_TEXT}),), self.descriptor)
@@ -402,7 +435,6 @@ class ClaudeCodeAuthor(TaskAuthor):
                 "REEF_AUTHOR_CHECK": str(work_dir / "tools" / "task_check.py"),
             }
         )
-        prompt = AGENT_PROMPT if variant is None else VARIANT_PROMPT.format(direction=variant.direction)
         argv = [
             binary,
             "-p",

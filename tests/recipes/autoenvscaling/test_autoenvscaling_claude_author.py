@@ -41,10 +41,13 @@ from recipes.beta.autoenvscaling import task_check
 from recipes.beta.autoenvscaling.author import (
     AGENT_PROMPT,
     REBUILD_RULES_TEXT,
+    VARIANT_INPUTS_TEXT,
+    VARIANT_PROMPT,
     AuthoredTask,
     AuthorError,
     CandidateChecks,
     TaskVariant,
+    VariantAuthor,
 )
 from recipes.beta.autoenvscaling.claude_author import (
     AUTHOR_TOOLS,
@@ -447,6 +450,36 @@ def test_claude_variant_shares_parent_split(tmp_path: Path, reef_url: str) -> No
             sources={task.name: split_source_ids(task)},
         )
         assert task.name in (assigned.train if split == "train" else assigned.eval)
+
+
+def test_claude_vary_gives_claude_code_the_parent_and_the_variant_rules(tmp_path: Path, reef_url: str) -> None:
+    parent_dir = write_harbor_task(
+        task_for("harbor-00000-000-autoenvscaling", "designer-1", 8100), tmp_path / "parents"
+    )
+    variant = TaskVariant(parent="t-0", parent_dir=parent_dir, direction="simpler", pass_rate=0.125, rollouts=8)
+    session = ScriptedClaudeSession()
+    author = claude_code(tmp_path, reef_url, session)
+    assert isinstance(author, VariantAuthor)
+    authored = author.vary(
+        source_of(sources(1)[0]), tmp_path / "run", NoChecks(1), tags={}, stop=threading.Event(), variant=variant
+    )
+    root = tmp_path / "run"
+    assert session.argv[:3] == ["claude", "-p", VARIANT_PROMPT.format(direction="simpler")]
+    rules = (root / "claude" / "CLAUDE.md").read_text()
+    assert VARIANT_INPUTS_TEXT.strip() in rules and CLAUDE_CHECK_TEXT.strip() in rules
+    assert (root / "inputs" / "parent" / "instruction.md").is_file()
+    assert "(t-0) in 12% of 8 rollouts" in (root / "inputs" / "variant.md").read_text()
+    assert authored.record_ids == () and "port.txt" in authored.reply
+
+
+def test_adaptive_config_builds_claude_code_as_a_variant_author(tmp_path: Path) -> None:
+    generator = AutoEnvScalingGenerator.from_config(
+        generating_config(tmp_path, author_harness="claude-code", adaptive=True, count=2),
+        scenario="one",
+        environ={"E2B_API_KEY": "e2b-test", "CLAUDE_CODE_OAUTH_TOKEN": TOKEN},
+    )
+    assert generator.is_adaptive and isinstance(generator.author, ClaudeCodeAuthor)
+    assert generator.variant_author is generator.author
 
 
 @pytest.mark.parametrize(
