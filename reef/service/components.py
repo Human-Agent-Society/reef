@@ -22,9 +22,9 @@ from collections.abc import Mapping
 
 from aiohttp import web
 
-from reef.evaluation.rollout_worker import CandidateEndpoints, EvaluationRolloutWorker
+from reef.evaluation.rollout_worker import EvaluationRolloutWorker
 from reef.execution.workers import SERVICE_COMPONENTS, ServiceWorkers
-from reef.service.artifact_evaluations import LOCAL_ROLLOUT_WORKERS
+from reef.service.artifact_evaluations import LOCAL_ROLLOUT_WORKERS, LocalCandidateEndpoints
 from reef.service.assembly import build_app, build_dispatcher, open_scenario_storage, open_service_coordination
 from reef.service.auth import create_authentication_middleware
 from reef.service.deploy.service_config import ServiceConfig
@@ -48,14 +48,11 @@ def build_component_app(
     component: str,
     settings: ServiceConfig,
     *,
-    inference_service_url: str | None = None,
     environ: Mapping[str, str] | None = None,
 ) -> web.Application:
     """The app of the service ``component`` (one of ``SERVICE_COMPONENTS``), which owns what it opens.
 
-    ``inference_service_url`` is the URL of the inference service, which the evaluation service calls for candidates; it
-    is required for ``evaluation`` alone. Raise ``ValueError`` for an unknown service or a missing
-    ``inference_service_url``.
+    Raise ``ValueError`` for an unknown service.
     """
     env = os.environ if environ is None else environ
     if component not in SERVICE_COMPONENTS:
@@ -108,17 +105,14 @@ def build_component_app(
 
         app.on_cleanup.append(close_dispatcher)
         return app
-    if not inference_service_url:
-        raise ValueError("the evaluation service needs the inference service's URL: pass --inference-service-url")
-    coordination = open_service_coordination(settings)
-    token = settings.tokens[0] if settings.tokens else None
+    # The evaluation service is a dispatcher too: it loads each rollout's scenario on demand, resolves the candidate
+    # artifact and serves it to the rollout itself.
+    dispatcher = build_dispatcher(settings, environ=env, components=frozenset({"evaluation"}))
     workers = ServiceWorkers()
     for _ in range(LOCAL_ROLLOUT_WORKERS):
         workers.add(
             EvaluationRolloutWorker(
-                coordination.work_queue,
-                CandidateEndpoints(inference_service_url, token),
-                worker_id=instance_id("evaluation"),
+                dispatcher.queue, LocalCandidateEndpoints(dispatcher), worker_id=instance_id("evaluation")
             )
         )
     workers.start()
@@ -126,7 +120,7 @@ def build_component_app(
 
     async def close_evaluation(app: web.Application) -> None:
         workers.stop()
-        coordination.close()
+        dispatcher.close()
 
     app.on_cleanup.append(close_evaluation)
     return app

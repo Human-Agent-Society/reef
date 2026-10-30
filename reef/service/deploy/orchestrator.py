@@ -465,9 +465,7 @@ def _config_source(config_path: Path | None) -> str:
     return f"config: {config_path}"
 
 
-def run_component(
-    config_path: str | None, overrides: dict[str, str] | None, component: str, inference_service_url: str | None
-) -> int:
+def run_component(config_path: str | None, overrides: dict[str, str] | None, component: str) -> int:
     """Run the one service ``component`` of the deployment in this process, until a signal stops it.
 
     The process starts no other child: the inference engines, the other services and the shared store run on
@@ -488,7 +486,7 @@ def run_component(
 
     _log(f"service: {component}")
     try:
-        app = build_component_app(component, settings, inference_service_url=inference_service_url)
+        app = build_component_app(component, settings)
     except ValueError as exc:
         raise DeployConfigError(str(exc)) from exc
     web.run_app(app, host=settings.host, port=settings.port)
@@ -674,7 +672,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         if args.recipe:
             _prepare_profile(args.recipe, args.model, os.environ, overrides)
         if args.component is not None and not args.print_config:
-            exit_code = run_component(config_path, overrides, args.component, args.inference_service_url)
+            exit_code = run_component(config_path, overrides, args.component)
         else:
             exit_code = _run_orchestrator(config_path, overrides, print_config=args.print_config)
     except InvalidOverrideError as exc:

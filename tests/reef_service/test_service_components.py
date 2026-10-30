@@ -122,19 +122,21 @@ def test_the_inference_component_answers_from_served_models_alone(tmp_path: Path
 
 
 @pytest.mark.unit
-def test_the_evaluation_component_needs_the_inference_service_url(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="--inference-service-url"):
-        build_component_app("evaluation", settings(tmp_path))
+def test_the_evaluation_service_runs_on_its_own_and_an_unknown_service_is_refused(tmp_path: Path) -> None:
+    # It serves its candidates itself, so it starts with the config alone: no other service's URL.
+    async def run() -> None:
+        async with TestClient(TestServer(build_component_app("evaluation", settings(tmp_path)))) as client:
+            assert (await client.get("/healthz")).status == 200
+
+    asyncio.run(run())
     with pytest.raises(ValueError, match="unknown service"):
         build_component_app("router", settings(tmp_path))
 
 
 @pytest.mark.unit
 def test_reef_serve_names_one_service_with_component() -> None:
-    # With the service arguments, so that the flag cannot collide with a configuration option.
     parser = build_serve_parser()
-    args = parser.parse_args(["--component", "evaluation", "--inference-service-url", "http://inference:8000"])
-    assert (args.component, args.inference_service_url) == ("evaluation", "http://inference:8000")
+    assert parser.parse_args(["--component", "evaluation"]).component == "evaluation"
     assert parser.parse_args([]).component is None
     with pytest.raises(SystemExit):
         parser.parse_args(["--component", "router"])

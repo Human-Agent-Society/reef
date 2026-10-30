@@ -28,7 +28,6 @@ to forced cleanup of the managed service processes.
    --recipe NAME | start a built in recipe's profile instead of a config file. Today: ``reefine``.
    --model [PROVIDER/]MODEL | the upstream model. An ``ollama/`` or ``openai/`` prefix fills the endpoint and the key; any other spelling is the model ID as is.
    --component NAME | run one service of the deployment in this process: ``control``, ``inference``, ``samples``, ``training`` or ``evaluation``. The process starts no other child. Without it, one process runs all services. See `Run the services in separate processes <../user-guide/operate.rst#run-the-services-in-separate-processes>`__.
-   --inference-service-url URL | the inference service's URL. ``--component evaluation`` calls it for the candidates that it evaluates.
    --print-config | print every resolved setting with its source (file, command line, environment, automatic, default) and exit without downloading models or starting services. Credentials are masked.
    --help | the command list
    -V, --version | the installed reef version. Takes no command: ``reef --version``.

@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import io
 import json
-import socket
 import tarfile
 import time
 import urllib.request
@@ -26,12 +25,18 @@ from reef.core.evaluation import ArtifactEvaluationRequest, PolicyModel
 from reef.core.tasks import write_harbor_task
 from reef.dispatcher import Dispatcher
 from reef.evaluation.activation import AlwaysActivate, EvaluatedActivation, NeverActivate, activation_reference
-from reef.evaluation.rollout_worker import CandidateEndpoints, EvaluationRollout
+from reef.evaluation.rollout_worker import EvaluationRollout
 from reef.harness.client.tasks import RolloutRow, TaskLab
 from reef.recipe import Recipe
 from reef.runtime.interfaces import InferenceHandler, InferenceRuntime
 from reef.service.app import create_app
-from reef.service.artifact_evaluations import STOPPED_ERROR, ArtifactEvaluations, NewArtifact, NewArtifacts
+from reef.service.artifact_evaluations import (
+    STOPPED_ERROR,
+    ArtifactEvaluations,
+    LocalCandidateEndpoints,
+    NewArtifact,
+    NewArtifacts,
+)
 from reef.storage.commits import CommitRecord
 from reef.storage.observer import ObservedScenarioStorage
 from reef.storage.sqlite import SQLiteScenarioStorage
@@ -49,7 +54,7 @@ class ReleaseHandler(InferenceHandler):
         self.releases: list[str] = []
 
     async def inference(self, artifact: Artifact, path: str, payload: dict[str, Any]) -> dict[str, Any]:
-        self.releases.append(artifact.ref.release_id)
+        self.releases.append(artifact.artifact_id)
         return {"choices": [{"message": {"role": "assistant", "content": "ls"}, "finish_reason": "stop"}]}
 
 
@@ -146,14 +151,10 @@ def archive(root: Path, *names: str) -> bytes:
 
 
 def evaluating_server(dispatcher: Dispatcher, lab: TaskLab, **options: Any) -> tuple[TestServer, ArtifactEvaluations]:
-    """The service and its evaluations. As in one process, the evaluation workers call each candidate at the
-    service's own inference routes; ``options`` go to ``ArtifactEvaluations``."""
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        port = probe.getsockname()[1]
-    endpoints = CandidateEndpoints(f"http://127.0.0.1:{port}", TOKEN)
-    evaluations = ArtifactEvaluations(dispatcher, lab=lab, endpoints=endpoints, **options)
-    return TestServer(create_app(dispatcher, tokens=TOKEN, evaluations=evaluations), port=port), evaluations
+    """The service and its evaluations. As in one process, the evaluation workers serve each candidate themselves;
+    ``options`` go to ``ArtifactEvaluations``."""
+    evaluations = ArtifactEvaluations(dispatcher, lab=lab, endpoints=LocalCandidateEndpoints(dispatcher), **options)
+    return TestServer(create_app(dispatcher, tokens=TOKEN, evaluations=evaluations)), evaluations
 
 
 async def finished(client: TestClient, evaluation_id: str) -> dict[str, Any]:

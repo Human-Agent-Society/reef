@@ -277,12 +277,6 @@ def build_serve_parser(
         ),
     )
     parser.add_argument(
-        "--inference-service-url",
-        default=None,
-        metavar="URL",
-        help="The inference service's URL, which --component evaluation calls for candidates.",
-    )
-    parser.add_argument(
         "--print-config",
         action="store_true",
         help="Print every resolved setting with its source and exit without downloading models or starting services.",

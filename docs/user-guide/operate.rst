@@ -338,8 +338,7 @@ goes from evaluation to control, for the candidate that a rollout evaluates.
      - What it does
      - What it writes
    * - ``control``
-     - The HTTP API, scenarios, commits and activation. It serves a candidate
-       beside the active artifact while the candidate is evaluated.
+     - The HTTP API, scenarios, commits and activation
      - ``served_models``, training jobs, sample requests, evaluations, commits
    * - ``inference``
      - Answers model requests with the model that ``served_models`` names
@@ -351,8 +350,8 @@ goes from evaluation to control, for the candidate that a rollout evaluates.
      - Runs training jobs on the training component
      - job progress, trained artifacts
    * - ``evaluation``
-     - Runs the rollouts of artifact evaluations against the candidate on the
-       inference service
+     - Runs the rollouts of artifact evaluations. It serves each candidate
+       artifact itself, from the artifact repository
      - rollout results
 
 Start each service with the same config and ``--component``:
@@ -364,8 +363,7 @@ Start each service with the same config and ``--component``:
    reef serve -c deploy.yaml --component inference --reef.port 8902
    reef serve -c deploy.yaml --component samples --reef.port 8903
    reef serve -c deploy.yaml --component training --reef.port 8904
-   reef serve -c deploy.yaml --component evaluation --reef.port 8905 \
-     --inference-service-url http://127.0.0.1:8902
+   reef serve -c deploy.yaml --component evaluation --reef.port 8905
 
 A ``--component`` process starts no other child. Start the inference engines
 and the training backend that the config names on their own. All processes
@@ -378,7 +376,7 @@ must reach the same store:
   (``reef_records_coordination`` by default), so deployments with their own
   record schemas share no tables.
 
-Control and training must also reach the same artifact backend.
+Control, training and evaluation must also reach the same artifact backend.
 
 **Inference requests.** Send model requests to the inference service, with the
 scenario in ``x-reef-scenario``. The inference service answers
@@ -436,11 +434,10 @@ overwrite the table. To deploy a new control version, start the new
 instance as a standby, then stop the old one.
 
 **Limits.** The inference service serves what ``served_models`` names: the
-active artifact of each scenario and the artifacts served beside it. Control
-serves a candidate beside the active artifact while it is evaluated, so the
-evaluation service calls the candidate on the inference service
-(``--inference-service-url``). It presents the first token of ``REEF_TOKEN`` or
-``reef.tokens``. A record of the
+active artifact of each scenario and the artifacts served beside it. A
+candidate under evaluation is not one of them: the evaluation service loads the
+candidate from the artifact repository and answers its rollouts with the
+scenario's runtime, so it needs no other service. A record of the
 artifact that a scenario started from carries no ``artifact_ref``. A runtime
 that loads full weights in place serves the next artifact under the same model
 name after an activation, so a request in flight at that moment can be answered

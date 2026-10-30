@@ -22,7 +22,6 @@ from aiohttp import web
 from reef.artifact.repository import ConfigurableRepositoryBackendFactory, RepositoryBackendContext
 from reef.artifact.sources import ArtifactSources
 from reef.dispatcher import Dispatcher
-from reef.evaluation.rollout_worker import CandidateEndpoints
 from reef.execution.workers import SERVICE_COMPONENTS
 from reef.inference.http import InferenceProxyRuntime
 from reef.observability import build_experiment_tracker, build_record_observer
@@ -36,7 +35,7 @@ from reef.runtime.interfaces import InferenceHandler, InferenceRuntime
 from reef.runtime.jobs import TrainingComponent
 from reef.scenario.admission import ScenarioAdmission, ScenarioLimits
 from reef.service.app import create_app
-from reef.service.artifact_evaluations import ArtifactEvaluations, NewArtifacts
+from reef.service.artifact_evaluations import ArtifactEvaluations, LocalCandidateEndpoints, NewArtifacts
 from reef.service.artifact_imports import ArtifactImports
 from reef.service.deploy.service_config import ServiceConfig, service_owned_keys
 from reef.service.deploy.serving import serving_runtime_config
@@ -478,9 +477,9 @@ def build_app(
     An embedding application adds its middleware and routes to the returned
     app before startup and reaches the dispatcher with ``get_dispatcher(app)``.
 
-    ``components`` names the services that this process runs besides ``control``. Control serves each candidate
-    beside the active artifact, and the evaluation workers call it at the inference service's candidate route: this
-    process's own URL when it runs ``evaluation``, another process otherwise.
+    ``components`` names the services that this process runs besides ``control``. With ``evaluation``, this
+    process's evaluation workers serve each candidate themselves; without it, the evaluation service runs in another
+    process.
     """
     record_retention = RecordRetention(max_bytes=settings.agent_record_retention_max_bytes)
     # A composite's model calls come back to this service, which answers only once the app listens: its local
@@ -497,12 +496,10 @@ def build_app(
         new_artifacts=new_artifacts,
         components=components,
     )
-    served_url = settings.served_url or default_served_url(settings.host, settings.port)
-    # This process answers the inference routes too, so its own workers call the candidate here.
     evaluations = ArtifactEvaluations(
         dispatcher,
         new_artifacts=new_artifacts,
-        endpoints=CandidateEndpoints(served_url, evaluation_token) if "evaluation" in components else None,
+        endpoints=LocalCandidateEndpoints(dispatcher) if "evaluation" in components else None,
     )
     # No tokens (e.g. REEF_TOKEN="" in the environment) means no auth,
     # not auth with the empty string.
