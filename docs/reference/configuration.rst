@@ -1501,6 +1501,60 @@ tools. A task job whose options give the engines no GPUs fails. A LoRA actor
 cannot have rollout engines, since Reef's adapters do not reach Slime's weight
 transfer.
 
+Dataset jobs on Slime
+~~~~~~~~~~~~~~~~~~~~~
+
+A dataset job trains a prompt dataset the way Slime trains on its own (RFC
+#1041). Slime rolls the prompts out on its serving session's engines, scores
+them with its reward model, computes the advantages and trains its loss; Reef
+records each saved rollout as a candidate. The deployment selects the built-in
+recipe ``reef.recipe.dataset:DatasetRecipe`` with ``data.training_mode:
+manual``. Its loss family, ``slime``, leaves the training signal to Slime and
+refuses every other job. Each training instruction (``POST /reef/train``)
+whose ``parameters`` hold ``dataset`` is one job:
+
+.. code:: json
+
+   {"text": "GRPO on the prompts", "session": "s", "release_id": "r",
+    "parameters": {"dataset": {"path": "/data/prompts.jsonl", "epochs": 1}, "save_interval": 10}}
+
+``dataset.path`` is an absolute path, on the Ray cluster, to a JSONL file in
+Slime's prompt-data format. ``dataset.epochs`` (default 1) is the passes over
+it. The job trains ``len(dataset) // rollout-batch-size`` rollouts per epoch,
+and ``save_interval`` counts rollouts between checkpoints (default: one
+checkpoint at the end). A checkpoint's step is the job's rollouts up to it,
+and its reward is the rollout's mean raw reward. A resumed job continues after
+its last checkpoint and skips the prompts of the rollouts it saved. The
+recipe's ``job_parameters`` can set a default ``dataset``.
+
+Slime's own options in ``training.options`` configure the rest:
+
+.. code:: yaml
+
+   training:
+     backend: slime
+     options:
+       colocate: true
+       input-key: messages
+       label-key: label
+       apply-chat-template: true
+       rollout-batch-size: 32
+       n-samples-per-prompt: 8
+       global-batch-size: 256
+       rollout-max-response-len: 1024
+       rollout-temperature: 1.0
+       advantage-estimator: grpo
+       custom-rm-path: my_package.reward.reward
+       loss-type: policy_loss
+
+A rollout function (``rollout-function-path``, ``custom-generate-function-path``),
+a reward model (``custom-rm-path`` or ``rm-type``) and a hook on the rollout data
+after the advantages (``rollout-data-postprocess-path``) are Slime's plugins and
+run in Slime's processes. Reef sets ``data-source-path`` itself: its data source
+serves each job's dataset to the serving session's rollout manager, which
+outlives the jobs, so the option is refused. ``disable-compute-advantages-and-returns``
+is refused too.
+
 Reef calls the generator class's ``from_config(config, *, scenario, environ)``
 once for each scenario. A generator that calls a remote service reads its
 credentials through environment references in ``config``. The generator
