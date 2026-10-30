@@ -25,10 +25,11 @@ from reef.train.slime_backend.loss_families import register_loss_family
 # The source suite exercises the repository cookbook as well as Reef core.
 # Load those packages explicitly: production ``import reef`` deliberately does
 # not, while importing a selected cookbook package registers its objective and
-# lazy loss-family reference in this test process. The built-in SFT recipe
-# is loaded the same way: ``import reef`` does not import it either.
+# lazy loss-family reference in this test process. The built-in SFT and
+# dataset recipes are loaded the same way: ``import reef`` does not import them either.
 for _cookbook_package in (
     "reef.recipe.sft",
+    "reef.recipe.dataset",
     "reef.train.cordis_backend",
     "recipes.openclawrl",
     "recipes.opd",

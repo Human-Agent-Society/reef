@@ -5,8 +5,9 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_reef_never_wires_the_internal_rollout_stack() -> None:
-    # Reef supplies batches externally and never calls the runtime's rollout
-    # generation package.
+    # Reef supplies the batches of trajectory and task jobs externally and never
+    # calls the runtime's rollout generation package. A dataset job's rollouts
+    # are Slime's own, through its rollout manager (RFC #1041).
     offenders = [
         str(path.relative_to(ROOT))
         for path in (ROOT / "reef").rglob("*.py")
