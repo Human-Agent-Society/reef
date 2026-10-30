@@ -222,7 +222,7 @@ def test_the_dataset_stage_has_the_job_size_a_weight_trainer_requires() -> None:
 
 @pytest.mark.unit
 def test_the_data_source_loads_the_recorded_job_and_skips_its_trained_rollouts(tmp_path, monkeypatch) -> None:
-    pytest.importorskip("slime")
+    pytest.importorskip("slime.data.data_source", reason="requires Slime's optional dataset dependencies")
     from reef.train.slime_backend import dataset_source
 
     monkeypatch.setattr(dataset_source, "load_tokenizer", lambda *args, **kwargs: None)

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import re
+import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -217,9 +219,6 @@ def test_checkpoint_preflight_preserves_invalid_interval_for_validation(tmp_path
 @pytest.mark.unit
 def test_slime_parses_tensor_parallel_arguments_without_the_workers_cuda_variable(monkeypatch) -> None:
     """Megatron's check wants CUDA_DEVICE_MAX_CONNECTIONS=1 in the parsing process: the HTTP service and each driver."""
-    pytest.importorskip("slime")
-    import slime.utils.arguments as slime_parser
-
     from reef.train.slime_backend.reef_adapters import slime_arguments, startup
     from reef.train.slime_backend.reef_adapters.megatron import hf_arguments
 
@@ -232,7 +231,7 @@ def test_slime_parses_tensor_parallel_arguments_without_the_workers_cuda_variabl
         return argparse.Namespace()
 
     monkeypatch.delenv("CUDA_DEVICE_MAX_CONNECTIONS", raising=False)
-    monkeypatch.setattr(slime_parser, "parse_args", parse_args)
+    monkeypatch.setitem(sys.modules, "slime.utils.arguments", SimpleNamespace(parse_args=parse_args))
     monkeypatch.setattr(hf_arguments, "add_hf_architecture_arguments", lambda arguments: list(arguments))
     monkeypatch.setattr(slime_arguments, "finalize_reef_slime_args", lambda args, arguments: None)
     startup.parse_slime_args(["--tensor-model-parallel-size=4"])
