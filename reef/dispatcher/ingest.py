@@ -18,7 +18,8 @@ from reef.core.training_request import normalize_training_request_payload
 from reef.harness.tree.checks import directive_shaped, secret_shaped
 from reef.scenario.scenario import Scenario
 from reef.storage.records import RecordConflict
-from reef.storage.tasks import IMPORTED_TASK_STORE, SplitName, StoredTask
+from reef.storage.samples import StoredSample
+from reef.storage.tasks import SplitName
 
 
 def training_request_refusal(text: str, requires: Sequence[Mapping[str, Any]] = ()) -> str | None:
@@ -53,7 +54,7 @@ def validate_record(current: Scenario, item: AgentRecord, preceding: Mapping[str
             if (existing := current.records.existing_receipt(item)) is not None:
                 return existing
             if current.training_mode == "auto":
-                raise ValueError("explicit training requests require training_mode='manual' or 'hybrid'")
+                raise ValueError("explicit training requests require training_mode='manual'")
             if not any(component_trainer.trainer.trains for component_trainer in current.trainers):
                 raise ValueError("explicit training requests require a training backend")
             request = normalize_training_request_payload(item.payload)
@@ -130,22 +131,21 @@ def append_records(current: Scenario, items: Sequence[AgentRecord]) -> tuple[tup
     return tuple(result.item for result in appended), any(result.inserted for result in appended)
 
 
-def append_tasks(current: Scenario, directories: tuple[Path, ...], split: SplitName) -> tuple[StoredTask, ...]:
-    """Publish uploaded Harbor task ``directories`` to ``split`` of the scenario's ``imported-tasks`` store.
+def append_tasks(current: Scenario, directories: tuple[Path, ...], split: SplitName) -> tuple[StoredSample, ...]:
+    """Save uploaded Harbor task ``directories`` to ``split`` of the scenario's sample store.
 
-    Return the published tasks in the order of ``directories``. A task that the store holds with the same files
+    Return the stored tasks in the order of ``directories``. A task that the store holds with the same files
     and split is returned as it is. Admission refuses an upload to the ``train`` split when no trainer of the
     scenario reads imported tasks (``Trainer.accepts_imported_tasks``), since nothing would train on
     them. The ``eval`` split is always open: an artifact evaluation runs its tasks. The caller checks that each
-    directory is a Harbor task. A ``TaskConflict`` (a name published with other files or in the other split)
-    stops the upload; the tasks before it stay published, and a corrected upload adds the rest.
+    directory is a Harbor task. A ``SampleConflict`` (a name stored with other files, in the other split, or as a
+    trajectory) saves no task of the upload.
     """
     if split == "train" and not any(
         component_trainer.trainer.accepts_imported_tasks for component_trainer in current.trainers
     ):
         raise ValueError(f"the recipe of scenario {current.name!r} does not train on imported tasks")
-    store = current.store.tasks.open(IMPORTED_TASK_STORE)
-    return tuple(store.add_task(directory=directory, split=split) for directory in directories)
+    return current.store.samples.add_tasks(directories, split)
 
 
 def append_trajectories(current: Scenario, trajectories: tuple[tuple[str, TrajectorySample], ...]) -> bool:
@@ -169,4 +169,4 @@ def append_trajectories(current: Scenario, trajectories: tuple[tuple[str, Trajec
                 trainer.uploaded_sample(trajectory)
             except ValueError as exc:
                 raise ValueError(f"trajectory {trajectory_id!r} cannot train: {exc}") from exc
-    return current.store.trajectories.add(trajectories)
+    return current.store.samples.add_trajectories(trajectories)

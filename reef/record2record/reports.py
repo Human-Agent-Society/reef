@@ -2,9 +2,9 @@
 
 ``ReportRecord2Record`` reads inference and report records. It validates each report,
 filters the reports that are not training data, and forms one
-``ReportCandidate`` per report for the pipeline to make tasks from. It then places
-each report that has tasks in its group (``ReportGrouping``) and holds singleton
-reports and ready groups in its pool, as ``ReportSet`` record set units. It owns
+``ReportCandidate`` per report for the pipeline to make samples from. It then places
+each report that has samples in its group (``ReportGrouping``) and makes singleton
+reports and ready groups ready, as ``ReportSet`` record set units. It owns
 deduplication, group slots, consumption, and record release. No inference is in
 two candidates: a report that references an inference of another candidate ends.
 """
@@ -22,8 +22,7 @@ from typing import Any, Self
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.reports import ReportBase, ReportValidationError, validate_report_payload
 from reef.pipeline_context import PipelineContext
-from reef.record2record.base import Record2Record, Record2RecordSettings, UnitDropReason
-from reef.record2record.selection import ArrivalOrder, GroupKeyOrder
+from reef.record2record.base import Record2Record, Record2RecordSettings
 from reef.record2record.sets import RecordSet, RecordSetUnit
 
 logger = logging.getLogger(__name__)
@@ -98,7 +97,7 @@ class ReportGrouping:
         return True
 
     def placement(self, context: ReportContext) -> tuple[Hashable | None, Hashable | None]:
-        """Return the training group and retry slot of a report that has tasks. The default is an independent report.
+        """Return the training group and retry slot of a report that has samples. The default is an independent report.
 
         These coordinates belong to the record stage, separately from an item's
         comparison group. For example, TTTD trains a whole step containing
@@ -132,9 +131,8 @@ class ReportCandidate(RecordSet):
 
 @dataclass(frozen=True)
 class ReportEntry:
-    """One report candidate that has tasks, with its place in a group slot or by itself."""
+    """One report candidate that has samples, with its place in a group slot or by itself."""
 
-    order: int
     candidate: ReportCandidate
     group_key: Hashable | None
     slot: Hashable
@@ -153,9 +151,9 @@ class ReportSet(RecordSetUnit):
     """A singleton report or a ready group.
 
     Values: a record set unit whose record sets are the candidates of ``entries``,
-    in arrival order. A singleton has one entry and no ``group_key``. A group
-    has the ``group_key`` of each of its entries.
-    Purpose: the report stage holds it in its pool until job data takes it.
+    in arrival order. A singleton has one entry with no ``group_key``. A group
+    holds every entry of its group key.
+    Purpose: the report stage makes it ready; the pipeline stores its samples as one group.
     """
 
     entries: tuple[ReportEntry, ...]
@@ -164,23 +162,23 @@ class ReportSet(RecordSetUnit):
         return tuple(entry.candidate for entry in self.entries)
 
 
-def report_units(units: tuple[RecordSetUnit, ...]) -> tuple[ReportSet, ...]:
-    """Return pool units as report sets. A report stage puts only report sets in its pool."""
-    selected = tuple(unit for unit in units if isinstance(unit, ReportSet))
-    if len(selected) != len(units):
-        raise TypeError("the report stage's pool must hold only report sets")
-    return selected
+def report_set(unit: RecordSetUnit) -> ReportSet:
+    """Return ``unit`` as a report set. A report stage makes only report sets ready."""
+    if not isinstance(unit, ReportSet):
+        raise TypeError(f"the report stage makes report sets ready, not {type(unit).__name__}")
+    return unit
 
 
 class ReportStatus(Enum):
     """Where a report is in the stage, from its first read to its release."""
 
-    #: A candidate whose tasks the task stage has not made yet. A failed assembly leaves it here for a retry.
+    #: A candidate whose samples the record-to-sample stage has not made yet. A failed assembly leaves it here for a
+    #: retry.
     FORMED = "formed"
-    #: The report has tasks and waits in the pool, by itself or in a group.
+    #: The report has samples and waits for its group, or for the pipeline to store them.
     HELD = "held"
-    #: Committed job data trained on the report. Its record is releasable.
-    TRAINED = "trained"
+    #: The pipeline stored the report's samples. Its record is releasable.
+    STORED = "stored"
     #: The report ended without training. Its record is releasable.
     ENDED = "ended"
 
@@ -207,14 +205,13 @@ class ReportGroup:
 
 
 class ReportRecord2Record(Record2Record):
-    """Form report sets, and hold singleton reports and ready groups until job data uses them.
+    """Form report candidates, and make singleton reports and ready groups ready as report sets.
 
     Invalid references raise immediately. Deduplication, consumed-source
     tracking, and group slots preserve retry behavior. Release keeps every
     live report and the inference records that it references.
 
     * ``exclusive_sources``: a report that ends owns its referenced inference records outright.
-    * ``ordered_groups``: select ready groups in group-key order instead of arrival order.
     * ``max_staleness``: the staleness limit of ``Record2Record``.
 
     Config: ``Record2RecordSettings``.
@@ -226,22 +223,20 @@ class ReportRecord2Record(Record2Record):
         grouping: ReportGrouping,
         *,
         exclusive_sources: bool = False,
-        ordered_groups: bool = False,
         max_staleness: int = 0,
     ) -> None:
-        super().__init__(GroupKeyOrder() if ordered_groups else ArrivalOrder(), max_staleness=max_staleness)
+        super().__init__(max_staleness=max_staleness)
         self.scenario = context.scenario
         self.report_type = context.report_type
         self.admitted_report_type = context.admitted_report_type
         self.grouping = grouping
         self.exclusive_sources = exclusive_sources
-        self.candidate_count = 0
         #: The inference records, by ID, until their release.
         self.inferences: dict[str, AgentRecord] = {}
         #: Every report the stage read, by ID, until its release.
         self.reports: dict[str, ReportState] = {}
-        #: Inference records that committed job data consumed, until their release.
-        self.trained_sources: set[str] = set()
+        #: Inference records of the reports whose samples the pipeline stored, until their release.
+        self.stored_sources: set[str] = set()
         #: Inference records that ended reports own. They are released once no live report references them.
         self.owned_sources: set[str] = set()
         self.groups: dict[Hashable, ReportGroup] = {}
@@ -302,11 +297,10 @@ class ReportRecord2Record(Record2Record):
             self.end_report(record)
             return
         context = self.report_context(record, parsed_report)
-        # The report is live before its tasks are made: a contract failure must not let
+        # The report is live before its samples are made: a contract failure must not let
         # buffer release drop its inputs or turn a retry into a successful no-op.
         self.reports[record.agent_record_id] = ReportState(record, ReportStatus.FORMED)
-        self.candidate_count += 1
-        self.form(ReportCandidate(set_id=record.agent_record_id, arrival_index=self.candidate_count, context=context))
+        self.form(ReportCandidate(set_id=record.agent_record_id, context=context))
 
     def handle_other_report(self, report: AgentRecord) -> None:
         """End a valid report that this method does not train on. A subclass can keep it for another use."""
@@ -332,11 +326,10 @@ class ReportRecord2Record(Record2Record):
             self.end_report(report)
             return
         self.reports[report.agent_record_id].status = ReportStatus.HELD
-        entry = ReportEntry(order=self.pool.next_arrival_index(), candidate=candidate, group_key=key, slot=slot)
+        entry = ReportEntry(candidate=candidate, group_key=key, slot=slot)
         if group is None:
-            self.pool.put(
-                ReportSet(unit_id=("report", report.agent_record_id), arrival_index=entry.order, entries=(entry,))
-            )
+            unit_id = ("report", report.agent_record_id)
+            self.ready_units[unit_id] = ReportSet(unit_id=unit_id, entries=(entry,))
         else:
             group.entries[slot] = entry
             self.refresh_group(key)
@@ -350,7 +343,7 @@ class ReportRecord2Record(Record2Record):
         A report owns its sources when it was a candidate, because no other
         candidate can take them. A report that ended before it was a candidate
         owns its sources when it claims more than one inference, or any number
-        under ``exclusive_sources``. The pipeline forgets the tasks of the report's record set.
+        under ``exclusive_sources``. The pipeline forgets the samples of the report's record set.
         """
         state = self.reports.get(report.agent_record_id)
         was_candidate = state is not None and state.live
@@ -361,18 +354,17 @@ class ReportRecord2Record(Record2Record):
 
     # ---------------------------------------------------------------- groups
 
-    def group_entries(self, key: Hashable) -> tuple[ReportEntry, ...]:
-        return tuple(sorted(self.groups[key].entries.values(), key=lambda entry: entry.order))
-
     def refresh_group(self, key: Hashable) -> None:
-        entries = self.group_entries(key)
+        """Decide the group again after an entry joined it: make it ready, wait, or discard it.
+
+        A slot takes one entry and a filled slot refuses another, so the entries are in arrival order.
+        """
+        entries = tuple(self.groups[key].entries.values())
         decision = self.grouping.decide(key, tuple(entry.context for entry in entries))
         if decision is GroupDecision.READY:
-            self.pool.put(
-                ReportSet(unit_id=("group", key), arrival_index=entries[0].order, group_key=key, entries=entries)
-            )
+            self.ready_units[("group", key)] = ReportSet(unit_id=("group", key), entries=entries)
         elif decision is GroupDecision.INCOMPLETE:
-            self.pool.remove(("group", key))
+            self.ready_units.pop(("group", key), None)
         elif decision is GroupDecision.DISCARD:
             self.discard_group(key)
         else:
@@ -380,61 +372,26 @@ class ReportRecord2Record(Record2Record):
 
     def discard_group(self, key: Hashable) -> None:
         """End every report of the group, and refuse later reports for its key."""
-        self.pool.remove(("group", key))
+        self.ready_units.pop(("group", key), None)
         group = self.groups[key]
         group.discarded = True
         for entry in group.entries.values():
             self.end_report(entry.context.report)
         group.entries = {}
 
-    # ------------------------------------------------------- held unit limit
-
-    def drop_held_unit(self, unit: RecordSetUnit, *, reason: UnitDropReason) -> None:
-        self.release_set(report_units((unit,))[0])
-
-    def release_set(self, report_set: ReportSet) -> None:
-        """Release a whole held group or singleton. Its reports own every source that they reference."""
-        if report_set.group_key is not None:
-            self.discard_group(report_set.group_key)
-        else:
-            self.pool.remove(report_set.unit_id)
-        for entry in report_set.entries:
-            self.end_report(entry.context.report)
-            self.owned_sources.update(entry.context.references)
-
     # ------------------------------------------------------------ consumption
 
-    def reserved_report_ids(self) -> set[str]:
-        """Return the IDs of the reports in the reserved job data."""
-        return {
-            entry.report_id for report_set in report_units(self.pool.reserved_units()) for entry in report_set.entries
-        }
+    def consume(self, unit: RecordSetUnit) -> None:
+        """End the reports of ``unit``, whose samples the pipeline stored; a stored group reopens for later reports.
 
-    def consume(self, units: tuple[RecordSetUnit, ...]) -> frozenset[str]:
-        trained_reports: set[str] = set()
-        trained_sources: set[str] = set()
-        changed_groups: set[Hashable] = set()
-        for entry in (entry for report_set in report_units(units) for entry in report_set.entries):
-            self.reports[entry.report_id] = ReportState(entry.context.report, ReportStatus.TRAINED)
-            trained_reports.add(entry.report_id)
-            trained_sources.update(entry.context.references)
+        A ready group holds every entry of its key (``refresh_group``), so storing it empties the group.
+        """
+        for entry in report_set(unit).entries:
+            self.reports[entry.report_id] = ReportState(entry.context.report, ReportStatus.STORED)
+            self.stored_sources.update(entry.context.references)
             self.ended_set_ids.add(entry.report_id)
-            if entry.group_key is None:
-                continue
-            # A reserved group that was discarded after its reservation has no slots left to free.
-            group = self.groups.get(entry.group_key)
-            if group is not None and not group.discarded:
-                group.entries.pop(entry.slot, None)
-                changed_groups.add(entry.group_key)
-        for key in changed_groups:
-            if self.groups[key].entries:
-                self.refresh_group(key)
-            else:
-                # A consumed group reopens for later reports.
-                self.groups.pop(key)
-                self.pool.remove(("group", key))
-        self.trained_sources |= trained_sources
-        return frozenset(trained_reports | trained_sources)
+            if entry.group_key is not None:
+                self.groups.pop(entry.group_key, None)
 
     # ---------------------------------------------------------------- release
 
@@ -445,12 +402,12 @@ class ReportRecord2Record(Record2Record):
         """Find completed records with no remaining live dependents.
 
         The releasable-source set is recomputed here every time: a source is
-        releasable while an ended report owns it (or job data consumed it)
+        releasable while an ended report owns it (or a stored report used it)
         and no live report references it. Live claims and ownership both
         move between reads, so the answer is never latched at event time.
         """
         ended_reports = {report_id for report_id, state in self.reports.items() if not state.live}
-        releasable_sources = (self.owned_sources | self.trained_sources) - self.live_references()
+        releasable_sources = (self.owned_sources | self.stored_sources) - self.live_references()
         return frozenset(ended_reports | releasable_sources)
 
     def release_records(self, agent_record_ids: frozenset[str]) -> None:
@@ -461,21 +418,17 @@ class ReportRecord2Record(Record2Record):
                 self.reports.pop(agent_record_id)
             # Only completed inferences without live report references are released.
             self.inferences.pop(agent_record_id, None)
-        self.trained_sources -= agent_record_ids
+        self.stored_sources -= agent_record_ids
         self.owned_sources -= agent_record_ids
 
     def status(self) -> Mapping[str, Any]:
         return self.grouping.status()
 
     def operational_metrics(self) -> Mapping[str, float | int]:
-        """Unconsumed reports, excluding the reserved job data."""
-        reserved = self.reserved_report_ids()
-        waiting = [
-            state.record for record_id, state in self.reports.items() if state.live and record_id not in reserved
-        ]
+        """The live reports, which wait for their group or for the store."""
+        waiting = [state.record for state in self.reports.values() if state.live]
         return {
-            "unreserved_reports": len(waiting),
-            "reserved_reports": len(reserved),
+            "waiting_reports": len(waiting),
             "oldest_report_wait_seconds": (
                 max(0.0, time.time() - min(report.created_at for report in waiting)) if waiting else 0.0
             ),
