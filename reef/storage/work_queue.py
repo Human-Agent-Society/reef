@@ -267,6 +267,34 @@ def clock(now: float | None) -> float:
     return time.time() if now is None else float(now)
 
 
+def request_waiting(
+    queue: WorkQueue,
+    queue_name: str,
+    scenario: str,
+    kind: str,
+    key: str,
+    payload: Mapping[str, JsonValue],
+    *,
+    available_at: float | None = None,
+) -> WorkItem:
+    """Ask for one run of the work that ``key`` names; return the item that will do it: a queued one, or a new one.
+
+    The items of ``key`` share it as their ``serial_key``, so they run one at a time, in order. An item reads the
+    state that it works on when it runs, so a queued item covers every request made while it waits: a request adds
+    nothing then. Otherwise it adds ``<key>:<n>``, where ``n`` counts the earlier items of ``key``; two requests at
+    once compute the same ID, so they add one item.
+    """
+    earlier = [item for item in queue.items(queue_name, scenario=scenario, kind=kind) if item.serial_key == key]
+    waiting = [item for item in earlier if item.state == "queued"]
+    if waiting:
+        return waiting[0]
+    return queue.add(
+        NewWork(
+            queue_name, f"{key}:{len(earlier)}", scenario, kind, payload, serial_key=key, available_at=available_at
+        )
+    )
+
+
 class LeaseExtender:
     """Extends the lease of one held item every third of the lease, on a background thread, while its work runs.
 
@@ -319,4 +347,5 @@ __all__ = [
     "WorkQueue",
     "WorkState",
     "clock",
+    "request_waiting",
 ]

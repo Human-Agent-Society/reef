@@ -14,6 +14,7 @@ from reef.dispatcher import Dispatcher
 from reef.recipe import Recipe
 from reef.record2sample import NoSamples
 from reef.sample2job import Sample2Job
+from reef.service.data_service import DataWorker
 from reef.service.task_import import DataScenarioStorage
 from reef.storage.sql_data import SQLiteDataStore
 from reef.storage.sqlite import SQLiteScenarioStorage
@@ -128,9 +129,15 @@ def dispatcher_for(tmp_path: Path, recipe: Recipe, factory: RepositoryBackendFac
     task_files = LocalTaskFileStore(tmp_path / "task-files")
     data = SQLiteDataStore(tmp_path / "data", task_files)
     storage = SQLiteScenarioStorage(tmp_path / "records", task_files=task_files)
-    return Dispatcher(
+    dispatcher = Dispatcher(
         recipe,
         factory or InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         scenario_storage=DataScenarioStorage(storage, data),
+        record_storage=storage,
         data_store=data,
     )
+    # The data service copies the records to record items, as assembly runs it.
+    dispatcher.workers.add(
+        DataWorker(dispatcher.queue, storage, data, dispatcher.coordination.marks, worker_id="data-test")
+    )
+    return dispatcher

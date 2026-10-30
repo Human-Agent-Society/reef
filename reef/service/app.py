@@ -90,7 +90,7 @@ def create_app(
     runtime = dispatcher.recipe.runtime
     replica = InferenceReplica(
         ServedModelsCache(dispatcher.coordination.served_models),
-        dispatcher.storage,
+        dispatcher.record_storage,
         PublishedEngines(publisher) if inference_handler is None else FixedEngineClients(inference_handler),
         timeout_seconds=300.0 if runtime is None else runtime.inference_timeout_s,
         for_codex=dispatcher.recipe.harness_adapter == "codex",

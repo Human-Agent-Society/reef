@@ -1,7 +1,7 @@
 """The coordination store of a deployment, as one process opens it.
 
-Every service of a deployment opens the same coordination store: the ``served_models`` table, the work queues and
-the control lease. ``reef.storage.sql_coordination.open_coordination`` opens it in a deployment's database;
+Every service of a deployment opens the same coordination store: the ``served_models`` table, the work queues, the
+control lease and the marks. ``reef.storage.sql_coordination.open_coordination`` opens it in a deployment's database;
 ``memory_coordination`` opens it in an in-memory SQLite database of one process. This module loads no database
 adapter until ``memory_coordination`` runs, so a component that receives the store does not either.
 """
@@ -15,6 +15,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
 from reef.storage.control_lease import ControlLease
+from reef.storage.marks import Marks
 from reef.storage.served_models import ServedModelsWriter
 from reef.storage.work_queue import WorkQueue
 
@@ -39,8 +40,8 @@ def instance_id(role: str) -> str:
 class Coordination:
     """The coordination store of a deployment, opened by one process.
 
-    Values: ``database`` holds the tables; ``work_queue``, ``served_models`` and ``control_lease`` are the stores
-    on it.
+    Values: ``database`` holds the tables; ``work_queue``, ``served_models``, ``control_lease`` and ``marks`` are
+    the stores on it.
 
     Purpose: assembly opens it once per process (``open_coordination``) and gives each service the store it uses.
     """
@@ -49,6 +50,7 @@ class Coordination:
     work_queue: WorkQueue
     served_models: ServedModelsWriter
     control_lease: ControlLease
+    marks: Marks
 
     def close(self) -> None:
         self.database.close()

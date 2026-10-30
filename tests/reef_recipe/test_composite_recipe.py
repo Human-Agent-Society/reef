@@ -730,7 +730,9 @@ def test_only_a_composite_evaluates_through_the_service(
     monkeypatch.setattr(assembly, "Dispatcher", dispatcher)
     monkeypatch.setattr(GitLFSRepositoryBackendFactory, "from_config", lambda *args, **kwargs: lambda name: object())
     settings = ServiceConfig(recipe="recipe", agent_record_dir=str(tmp_path), port=8900)
-    assembly.build_dispatcher(settings, hold_local_cycles=True, evaluation_token="rollout")
+    assembly.build_dispatcher(
+        settings, hold_local_cycles=True, evaluation_token="rollout", components=frozenset({"control"})
+    )
     if composite:
         assert built["hold"] is True
         assert built["recipe"].components["harness"].endpoint == ServedEndpoint(

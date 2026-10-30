@@ -37,11 +37,12 @@ from reef.scenario.admission import ScenarioAdmission, ScenarioLimits
 from reef.service.app import create_app
 from reef.service.artifact_evaluations import ArtifactEvaluations, LocalCandidateEndpoints, NewArtifacts
 from reef.service.artifact_imports import ArtifactImports
+from reef.service.data_service import DataWorker
 from reef.service.deploy.service_config import ServiceConfig, service_owned_keys
 from reef.service.deploy.serving import serving_runtime_config
 from reef.service.deploy.training import training_deployment_for
 from reef.service.task_import import DataScenarioStorage, TaskImport
-from reef.storage.coordination import Coordination
+from reef.storage.coordination import Coordination, instance_id
 from reef.storage.data import DataStore
 from reef.storage.observer import ObservedScenarioStorage
 from reef.storage.postgres import PostgresScenarioStorage
@@ -391,14 +392,16 @@ def build_dispatcher(
             if settings.task_import_manifest is not None and settings.task_import_tasks_root is not None
             else None
         )
-        # Each scenario's session opens with copies of the data items that the scenario uses.
-        scenario_storage = DataScenarioStorage(scenario_storage, data_store, task_import)
         # Record tracing observes storage events; the storage closes the observer with itself.
         record_observer = build_record_observer(settings.tracing_config, environ=env)
         if record_observer is not None:
             scenario_storage = ObservedScenarioStorage(scenario_storage, record_observer)
         if new_artifacts is not None:
             scenario_storage = ObservedScenarioStorage(scenario_storage, new_artifacts)
+        # The inference path and the data service append and read records without opening a scenario.
+        record_storage = scenario_storage
+        # Each scenario's session opens with copies of the data items that the scenario uses.
+        scenario_storage = DataScenarioStorage(scenario_storage, data_store, task_import)
         artifact_backend = (
             {"module": GIT_LFS_ARTIFACT_BACKEND, "config": {"repository": settings.artifact_repository}}
             if settings.artifact_backend == "git_lfs"
@@ -426,11 +429,12 @@ def build_dispatcher(
             model=settings.model_path,
             training_config=settings.training_settings,
         )
-        return Dispatcher(
+        dispatcher = Dispatcher(
             recipe,
             backend_factory,
             local_artifact_dir=Path(settings.artifact_cache_dir) / "staged",
             scenario_storage=scenario_storage,
+            record_storage=record_storage,
             data_store=data_store,
             allow_implicit_creation=settings.allow_implicit_scenario_creation,
             experiment_tracker=experiment_tracker,
@@ -446,6 +450,17 @@ def build_dispatcher(
             coordination=coordination,
             components=components,
         )
+        if "data" in components and data_store is not None:
+            dispatcher.workers.add(
+                DataWorker(
+                    coordination.work_queue,
+                    record_storage,
+                    data_store,
+                    coordination.marks,
+                    worker_id=instance_id("data"),
+                )
+            )
+        return dispatcher
     except BaseException:
         # The data store first: the scenario storage closes the task file store that it shares.
         if data_store is not None:

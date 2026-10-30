@@ -24,6 +24,7 @@ from aiohttp import web
 
 from reef.evaluation.rollout_worker import EvaluationRolloutWorker
 from reef.execution.workers import SERVICE_COMPONENTS, ServiceWorkers
+from reef.observability import build_record_observer
 from reef.service.artifact_evaluations import LOCAL_ROLLOUT_WORKERS, LocalCandidateEndpoints
 from reef.service.assembly import build_app, build_dispatcher, open_scenario_storage, open_service_coordination
 from reef.service.auth import create_authentication_middleware
@@ -31,6 +32,7 @@ from reef.service.deploy.service_config import ServiceConfig
 from reef.service.deploy.serving import inference_handler_factory_for
 from reef.service.inference_service import ConfiguredEngineClients, build_inference_app
 from reef.storage.coordination import instance_id
+from reef.storage.observer import ObservedScenarioStorage
 
 
 def health_app(settings: ServiceConfig) -> web.Application:
@@ -63,6 +65,10 @@ def build_component_app(
         coordination = open_service_coordination(settings)
         try:
             storage, _ = open_scenario_storage(settings)
+            # Records that this service appends are traced as the records that control appends are.
+            record_observer = build_record_observer(settings.tracing_config, environ=env)
+            if record_observer is not None:
+                storage = ObservedScenarioStorage(storage, record_observer)
         except BaseException:
             coordination.close()
             raise
@@ -92,7 +98,7 @@ def build_component_app(
 
         app.on_cleanup.append(close_inference)
         return app
-    if component in ("samples", "training"):
+    if component in ("samples", "training", "data"):
         # A queue service is a dispatcher that runs only its own workers on the shared store.
         dispatcher = build_dispatcher(settings, environ=env, components=frozenset({component}))
         if component == "training" and dispatcher.recipe.training_component is None:

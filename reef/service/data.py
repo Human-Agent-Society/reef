@@ -6,7 +6,9 @@ to a scenario, or removes one, follows the same order:
 1. Check the scenarios that the items are to use: each existing one must have the owner, and must be able to train
    on its new items (``Dispatcher.check_use``). A scenario that does not exist yet is checked when it opens.
 2. Write the data store.
-3. Sync the uploads and record copies of each loaded scenario that the write touched (``Dispatcher.sync_items``).
+3. Ask control to sync each scenario that the write touched (``request_data_sync``), and wait up to
+   ``SYNC_WAIT_SECONDS`` for the syncs to end. The response says whether they ended (``synced``); a sync that did
+   not end runs when control takes it, or when the scenario opens.
 
 No aiohttp types appear here. ``reef.service.routes.data`` adapts it to HTTP.
 """
@@ -15,7 +17,8 @@ from __future__ import annotations
 
 import json
 import tempfile
-from collections.abc import Mapping, Sequence
+import time
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -27,6 +30,7 @@ from reef.core.job_data import TrajectorySample
 from reef.dispatcher import Dispatcher
 from reef.service.tasks import unpack_task_archive
 from reef.storage.data import (
+    DATA_QUEUE,
     ITEM_KINDS,
     MAX_QUERY_LIMIT,
     DataStore,
@@ -40,12 +44,17 @@ from reef.storage.data import (
     created_metadata,
     patched_metadata,
 )
+from reef.storage.data_sync import request_data_sync
 from reef.storage.record_items import copied_record
 
 #: The most items in one create call: the most trajectories of one upload before RFC #1028.
 MAX_ITEMS_PER_CREATE = 1000
 #: The item kinds by name, so that a query parameter becomes an ``ItemKind``.
 KINDS: dict[str, ItemKind] = {kind: kind for kind in ITEM_KINDS}
+#: The longest time a write waits for control to sync the scenarios that it touched.
+SYNC_WAIT_SECONDS = 30.0
+#: The wait between two looks at the sync items.
+SYNC_POLL_SECONDS = 0.05
 
 
 class NoDataStore(ReefError):
@@ -89,6 +98,23 @@ class Use:
 def new_use(item_id: str, kind: str, content: Mapping[str, Any] | None, split: str) -> Use:
     trajectory = TrajectorySample(content) if kind == "trajectory" and content is not None else None
     return Use(item_id, trajectory, kind == "task" and split == "train")
+
+
+def sync_touched(dispatcher: Dispatcher, owner: str, scenarios: Iterable[str]) -> bool:
+    """Ask control to sync each scenario in ``scenarios`` with the items of ``owner``; return whether every sync
+    ended within ``SYNC_WAIT_SECONDS``."""
+    queue = dispatcher.queue
+    pending = {request_data_sync(queue, owner, scenario).id for scenario in sorted(set(scenarios))}
+    deadline = time.monotonic() + SYNC_WAIT_SECONDS
+    while pending:
+        # A sync item that is gone or final has ended.
+        pending = {
+            item_id for item_id in pending if (item := queue.get(DATA_QUEUE, item_id)) is not None and not item.final
+        }
+        if not pending or time.monotonic() >= deadline:
+            break
+        time.sleep(SYNC_POLL_SECONDS)
+    return not pending
 
 
 def check_uses(dispatcher: Dispatcher, owner: str, uses: Mapping[str, list[Use]]) -> None:
@@ -139,8 +165,8 @@ def create_items(dispatcher: Dispatcher, owner: str, body: Mapping[str, Any]) ->
         items.append(NewItem(item_id, content, metadata))
     check_uses(dispatcher, owner, uses)
     stored = data_store(dispatcher).create(owner, items)
-    dispatcher.sync_items(owner, uses)
-    return {"owner": owner, "items": [item_json(item, content=False) for item in stored]}
+    synced = sync_touched(dispatcher, owner, uses)
+    return {"owner": owner, "items": [item_json(item, content=False) for item in stored], "synced": synced}
 
 
 def create_task_items(
@@ -170,8 +196,8 @@ def create_task_items(
         stored = data_store(dispatcher).create(
             owner, [NewItem(directory.name, directory, {**metadata, "kind": "task"}) for directory in directories]
         )
-    dispatcher.sync_items(owner, scenarios)
-    return {"owner": owner, "items": [item_json(item, content=False) for item in stored]}
+    synced = sync_touched(dispatcher, owner, scenarios)
+    return {"owner": owner, "items": [item_json(item, content=False) for item in stored], "synced": synced}
 
 
 def query_items(
@@ -224,8 +250,8 @@ def update_items(dispatcher: Dispatcher, owner: str, body: Mapping[str, Any]) ->
                 uses.setdefault(scenario, []).append(new_use(item.item_id, item.kind, item.content, split))
     check_uses(dispatcher, owner, uses)
     updated = store.update(owner, ids, patch)
-    dispatcher.sync_items(owner, touched)
-    return {"owner": owner, "items": [item_json(item, content=False) for item in updated]}
+    synced = sync_touched(dispatcher, owner, touched)
+    return {"owner": owner, "items": [item_json(item, content=False) for item in updated], "synced": synced}
 
 
 def delete_item(dispatcher: Dispatcher, owner: str, item_id: str) -> dict[str, Any]:
@@ -233,8 +259,8 @@ def delete_item(dispatcher: Dispatcher, owner: str, item_id: str) -> dict[str, A
     store = data_store(dispatcher)
     (item,) = touched_items(store, owner, [item_id])
     store.delete(owner, item_id)
-    dispatcher.sync_items(owner, item.scenarios)
-    return {"owner": owner, "id": item_id, "deleted": True}
+    synced = sync_touched(dispatcher, owner, item.scenarios)
+    return {"owner": owner, "id": item_id, "deleted": True, "synced": synced}
 
 
 def touched_items(store: DataStore, owner: str, ids: Sequence[object]) -> list[StoredItem]:
@@ -265,6 +291,7 @@ def parsed_metadata(text: str | None) -> Mapping[str, Any]:
 
 __all__ = [
     "MAX_ITEMS_PER_CREATE",
+    "SYNC_WAIT_SECONDS",
     "NoDataStore",
     "create_items",
     "create_task_items",

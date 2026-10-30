@@ -5,6 +5,7 @@ The services of a deployment hand work to each other through these tables:
 - ``served_model`` and ``scheduled_stop`` hold ``served_models`` (``reef.storage.served_models``);
 - ``control_lease`` holds the control lease (``reef.storage.control_lease``);
 - ``work_item`` holds the work queues (``reef.storage.work_queue``);
+- ``coordination_mark`` holds the marks (``reef.storage.marks``);
 - ``coordination_sequence`` holds the one counter that numbers every change.
 
 Every write takes the counter row first. So writes are serialized, and the sequence order of the changes is the
@@ -53,6 +54,7 @@ from reef.core.errors import ReefError
 from reef.core.served_models import ScenarioModel, ScheduledStop, ServedArtifact, require_text
 from reef.storage.control_lease import ControlLease, ControlLeaseState
 from reef.storage.coordination import Coordination, CoordinationResource
+from reef.storage.marks import Marks, check_mark_name
 from reef.storage.postgres import postgres_url, validate_postgres_schema
 from reef.storage.served_models import ControlLeaseConflict, ServedModelsWriter
 from reef.storage.sqlite import enable_wal
@@ -73,7 +75,7 @@ from reef.storage.work_queue import (
 class CoordinationTables:
     """The tables of one coordination database.
 
-    Values: five ``Table`` objects of one ``MetaData``, defined by ``coordination_tables``.
+    Values: six ``Table`` objects of one ``MetaData``, defined by ``coordination_tables``.
 
     Purpose: a ``CoordinationDatabase`` makes it; the coordination stores query it.
     """
@@ -83,6 +85,7 @@ class CoordinationTables:
     scheduled_stop: Table
     control_lease: Table
     work_item: Table
+    mark: Table
 
 
 def coordination_tables(metadata: MetaData) -> CoordinationTables:
@@ -142,7 +145,13 @@ def coordination_tables(metadata: MetaData) -> CoordinationTables:
         Column("changed_sequence", BigInteger, nullable=False, index=True),
         PrimaryKeyConstraint("queue", "item_id"),
     )
-    return CoordinationTables(sequence, served_model, scheduled_stop, control_lease, work_item)
+    mark = Table(
+        "coordination_mark",
+        metadata,
+        Column("name", Text, primary_key=True),
+        Column("value", BigInteger, nullable=False),
+    )
+    return CoordinationTables(sequence, served_model, scheduled_stop, control_lease, work_item, mark)
 
 
 def canonical_json(value: object) -> str:
@@ -505,6 +514,36 @@ class SQLControlLease(ControlLease):
         return ControlLeaseState(row["instance_id"], int(row["number"]), float(row["expires_at"]))
 
 
+class SQLMarks(Marks):
+    """The marks as rows of ``coordination_mark``. A mark changes no work, so it takes no sequence value."""
+
+    def __init__(self, database: CoordinationDatabase) -> None:
+        self.database = database
+        self.table = database.tables.mark
+
+    def read(self, name: str) -> int:
+        with self.database.read() as connection:
+            value = connection.execute(
+                select(self.table.c.value).where(self.table.c.name == check_mark_name(name))
+            ).scalar_one_or_none()
+        return 0 if value is None else int(value)
+
+    def advance(self, name: str, value: int) -> None:
+        check_mark_name(name)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError("a mark is a non-negative int")
+        with self.database.write() as transaction:
+            connection = transaction[0]
+            query = select(self.table.c.value).where(self.table.c.name == name)
+            if self.database.locks_rows:
+                query = query.with_for_update()
+            current = connection.execute(query).scalar_one_or_none()
+            if current is None:
+                connection.execute(insert(self.table).values(name=name, value=value))
+            elif value > int(current):
+                connection.execute(update(self.table).where(self.table.c.name == name).values(value=value))
+
+
 def item_from_row(row: RowMapping) -> WorkItem:
     return WorkItem(
         queue=row["queue"],
@@ -822,6 +861,7 @@ def coordination_on(database: CoordinationDatabase, *, lease_seconds: float = 60
         SQLWorkQueue(database, lease_seconds=lease_seconds),
         SQLServedModels(database),
         SQLControlLease(database),
+        SQLMarks(database),
     )
 
 
@@ -830,6 +870,7 @@ __all__ = [
     "CoordinationTables",
     "PostgresCoordinationDatabase",
     "SQLControlLease",
+    "SQLMarks",
     "SQLServedModels",
     "SQLWorkQueue",
     "SQLiteCoordinationDatabase",

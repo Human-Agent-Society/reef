@@ -22,9 +22,9 @@ from reef.core.errors import ReefError, ScenarioCapacityFull, UnknownScenario
 from reef.core.job_data import TrajectorySample
 from reef.core.records_types import AgentRecord, RequestType
 from reef.dispatcher import ingest
+from reef.dispatcher.data_sync_worker import DataSyncWorker, ItemSync
 from reef.dispatcher.errors import TrainingErrors
 from reef.dispatcher.local_workers import LocalTrainingWorkers
-from reef.dispatcher.record_item_copier import RecordItemCopier
 from reef.dispatcher.samples import LocalSampleProducers
 from reef.dispatcher.served import CACHE_SECONDS, ControlInstance, ServedModelsPublisher, wait_for_control_lease
 from reef.dispatcher.status import TrainingStatus
@@ -42,7 +42,7 @@ from reef.scenario.scenario import Scenario
 from reef.storage.coordination import Coordination, instance_id, memory_coordination
 from reef.storage.data import DataStore, check_owner
 from reef.storage.data_sync import sync_scenario_samples, uploads
-from reef.storage.record_items import sync_scenario_records
+from reef.storage.record_items import request_record_copy, sync_scenario_records
 from reef.storage.records import RecordRetention
 from reef.storage.samples import StoredSample
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage
@@ -61,7 +61,7 @@ class BackgroundThreads:
     idle_unload_thread: Thread | None = None
 
 
-class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance):
+class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync):
     """Coordinate scenario creation, inference state, training, and model commits.
 
     A process trains the weights of one scenario on the deployment's
@@ -89,6 +89,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance):
         allow_implicit_creation: bool = True,
         experiment_tracker: ExperimentTracker | None = None,
         scenario_storage: ScenarioStorage,
+        record_storage: ScenarioStorage | None = None,
         data_store: DataStore | None = None,
         hold_local_cycles: bool = False,
         scenario_idle_unload_seconds: float | None = None,
@@ -107,6 +108,10 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance):
         ``scenario_admission``: decides whether a scenario is created or
         loaded. The default admits all scenarios.
 
+        ``record_storage``: the scenario storage that the work outside a loaded scenario uses, such as the inference
+        path that appends records and the data service that copies them. It is ``scenario_storage`` without what a
+        scenario's session does when it opens (the data sync); None means ``scenario_storage``.
+
         ``coordination`` and ``workers``: the coordination store and the background workers of the services
         that this process runs; without a store, the dispatcher keeps one in memory (``memory_coordination``).
         The constructor starts the workers; ``close`` stops them first and closes the store last.
@@ -120,10 +125,10 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance):
         add the training jobs. With ``samples``, it runs the samples worker; without ``control``, that worker loads
         each scenario on demand and leaves the jobs to control.
 
-        ``data_store``: the deployment's data store (RFC #1028). Each accepted
-        inference and report becomes a record item in it
-        (``RecordItemCopier``). The dispatcher closes it before the scenario
-        storage, which owns the task file store that the data store shares.
+        ``data_store``: the deployment's data store (RFC #1028). Control asks the data service to copy each
+        scenario's new records into it (``request_record_copy``), and runs the ``data_sync`` items that the data
+        service adds after its writes (``DataSyncWorker``). The dispatcher closes it before the scenario storage,
+        which owns the task file store that the data store shares.
         """
         if scenario_idle_unload_seconds is not None and scenario_idle_unload_seconds <= 0:
             raise ValueError("scenario_idle_unload_seconds must be positive")
@@ -151,6 +156,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance):
         #: The deployment's recipe, before any scenario's own model settings; its trainers submit to the jobs queue.
         self.recipe = recipe
         self.storage = scenario_storage
+        self.record_storage = scenario_storage if record_storage is None else record_storage
         self.data_store = data_store
         self.record_retention_lock = Lock()
         self.experiment_tracker = experiment_tracker if experiment_tracker is not None else NullExperimentTracker()
@@ -194,6 +200,8 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance):
             # The publisher extends the lease; it starts now, so a slow start-up does not let the lease expire.
             publisher.start()
             self.workers.add(StoreChangesWatcher(self.registry, coordination.work_queue, self))
+            if data_store is not None:
+                self.workers.add(DataSyncWorker(coordination.work_queue, self, worker_id=instance_id("data-sync")))
         if "samples" in self.components:
             self.workers.add(
                 SamplesWorker(
@@ -203,9 +211,6 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance):
                 )
             )
         self.training_status = TrainingStatus(recipe, self.registry, self.errors)
-        self.record_items = (
-            None if data_store is None else RecordItemCopier(self.registry, scenario_storage, data_store)
-        )
         if self.runs_control and isinstance(backend_factory, EnumerableRepositoryBackendFactory):
             self.background_threads.preload_thread = Thread(
                 target=self.preload_scenarios,
@@ -320,8 +325,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance):
         self.scenario_committed(instance)
         self.request_samples(instance)
         self.local_workers.resume(instance)
-        if self.record_items is not None:
-            self.record_items.wake(instance.name)
+        self.request_record_copy(instance.name)
         if any(component_trainer.trainer.holds_untrained_records() for component_trainer in instance.trainers):
             self.local_workers.wake(instance)
 
@@ -715,8 +719,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance):
 
     def process_accepted_records(self, current: Scenario) -> None:
         """Start consumption only after the accepted records are durable, and copy them to record items."""
-        if self.record_items is not None:
-            self.record_items.wake(current.name)
+        self.request_record_copy(current.name)
         # Every component's trainer sees the record. The samples service makes the samples of a trainer that
         # trains, and its worker builds jobs from them. A trainer that trains nothing only advances its record
         # cursor, here.
@@ -732,10 +735,14 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance):
         self.local_workers.stop()
         signal.raise_signal(signal.SIGTERM)
 
+    def request_record_copy(self, scenario: str) -> None:
+        """Ask the data service to copy the new records of ``scenario`` to record items, when there is a data store."""
+        if self.data_store is not None:
+            request_record_copy(self.queue, scenario)
+
     def records_added(self, current: Scenario) -> None:
         """Another process appended records to ``current``: ask for their samples and copy them to record items."""
-        if self.record_items is not None:
-            self.record_items.wake(current.name)
+        self.request_record_copy(current.name)
         self.request_samples(current)
 
     def samples_added(self, scenario: str) -> None:
@@ -826,8 +833,6 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance):
             self.background_threads.idle_unload_thread.join()
         for worker in local_workers:
             worker.thread.join()
-        if self.record_items is not None:
-            self.record_items.close()
         if self.background_threads.metrics_thread is not None:
             self.background_threads.metrics_thread.join()
             self.record_operational_metrics()

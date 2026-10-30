@@ -10,6 +10,10 @@ component. The sync makes ``U(s)`` match ``I(s)``:
 
 The data store is the source of the content; an upload is a copy, so training reads it as before. Records are
 items too, but the sync leaves them alone: the scenario's record store keeps its records.
+
+Control runs the sync, because the trainers of a loaded scenario must forget the uploads that leave it. The data
+service writes the data store; after each write it asks control to sync each scenario that the write touched, with
+a ``data_sync`` item in the ``data`` queue (``request_data_sync``). A scenario that is not loaded syncs when it opens.
 """
 
 from __future__ import annotations
@@ -18,9 +22,13 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 
 from reef.core.job_data import TaskSample, TrajectorySample
-from reef.storage.data import DataStore, NewItem, StoredItem
+from reef.storage.data import DATA_QUEUE, DataStore, NewItem, StoredItem
 from reef.storage.samples import SampleStore, StoredSample
 from reef.storage.tasks import SPLIT_NAMES
+from reef.storage.work_queue import WorkItem, WorkQueue, request_waiting
+
+#: The kind of the ``data`` queue item that asks control to sync one scenario with the items of its owner.
+DATA_SYNC_KIND = "data_sync"
 
 
 @dataclass(frozen=True)
@@ -138,10 +146,22 @@ def release_items(data: DataStore, owner: str, scenario: str) -> None:
             data.update(owner, ids, {"scenarios": {scenario: None}})
 
 
+def request_data_sync(queue: WorkQueue, owner: str, scenario: str) -> WorkItem:
+    """Ask control to sync ``scenario`` with the items of ``owner``; return the item that will run the sync.
+
+    A sync reads the items when it runs, so a queued sync covers every write made while it waits.
+    """
+    return request_waiting(
+        queue, DATA_QUEUE, scenario, DATA_SYNC_KIND, f"{DATA_SYNC_KIND}:{scenario}", {"owner": owner}
+    )
+
+
 __all__ = [
+    "DATA_SYNC_KIND",
     "SyncResult",
     "adopt_uploads",
     "release_items",
+    "request_data_sync",
     "scenario_items",
     "sync_scenario_samples",
     "uploads",

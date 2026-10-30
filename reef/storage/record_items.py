@@ -11,7 +11,10 @@ item ``record_item(r)`` is the item of ``o`` with:
   null when ``r`` names none.
 
 A training instruction is a record but not data, so it has no record item. ``copy_records`` makes the record items
-of one page of a record store, in record order.
+of one page of a record store, in record order. The data service copies each scenario (``copy_scenario_records``)
+when it takes a ``record_copy`` item from the ``data`` queue, which control adds when records arrive
+(``request_record_copy``). The mark ``record_copy:<s>`` keeps how far the records of ``s`` are copied: each record
+of ``s`` with a sequence at most the mark that ``record_item`` gives an item has that item in the store of ``o``.
 
 Another scenario ``t`` of ``o`` uses a record item ``i`` whose ``scenarios`` names ``t`` through a copy in its own
 record store: ``copied_record(i, t)``, with the record ID ``i.item_id``. Each reference ``x`` of ``i`` becomes
@@ -29,10 +32,16 @@ from typing import Any
 
 from reef.core.artifact_ref import decode_artifact_ref, encode_artifact_ref
 from reef.core.records_types import AgentRecord, RequestType
-from reef.storage.data import DataStore, NewItem, StoredItem
+from reef.storage.data import DATA_QUEUE, DataStore, NewItem, StoredItem
+from reef.storage.marks import Marks
 from reef.storage.records import RecordConflict, RecordStore
+from reef.storage.scenario import ScenarioStorage
+from reef.storage.work_queue import WorkItem, WorkQueue, request_waiting
 
 logger = logging.getLogger(__name__)
+
+#: The kind of the ``data`` queue item that copies the new records of one scenario.
+RECORD_COPY_KIND = "record_copy"
 
 #: The most records that one ``copy_records`` call reads.
 RECORD_PAGE_SIZE = 256
@@ -142,6 +151,41 @@ def copy_records(records: RecordStore, data: DataStore, owner: str, scenario: st
     return page[-1][0]
 
 
+def record_copy_mark(scenario: str) -> str:
+    """The name of the mark that keeps how far the records of ``scenario`` are copied."""
+    return f"{RECORD_COPY_KIND}:{scenario}"
+
+
+def request_record_copy(queue: WorkQueue, scenario: str) -> WorkItem:
+    """Ask the data service to copy the new records of ``scenario``; return the item that will copy them."""
+    return request_waiting(queue, DATA_QUEUE, scenario, RECORD_COPY_KIND, record_copy_mark(scenario), {})
+
+
+def copy_scenario_records(storage: ScenarioStorage, data: DataStore, marks: Marks, scenario: str) -> int:
+    """Copy the records of ``scenario`` after its mark, page by page, and advance the mark after each page.
+
+    Return the number of pages copied. A scenario without an owner has no store to copy into, and copies nothing.
+    A crash between a page and its mark copies the page again, which changes nothing.
+    """
+    owner = storage.read_settings(scenario).owner
+    if owner is None:
+        return 0
+    name = record_copy_mark(scenario)
+    store = storage.open(scenario)
+    pages = 0
+    try:
+        after = marks.read(name)
+        while True:
+            sequence = copy_records(store.records, data, owner, scenario, after)
+            if sequence == after:
+                return pages
+            marks.advance(name, sequence)
+            after = sequence
+            pages += 1
+    finally:
+        store.close()
+
+
 def sync_scenario_records(records: RecordStore, data: DataStore, owner: str, scenario: str) -> tuple[str, ...]:
     """Append to ``records``, the record store of ``scenario``, the copy of each record item that it uses.
 
@@ -172,10 +216,14 @@ def sync_scenario_records(records: RecordStore, data: DataStore, owner: str, sce
 
 __all__ = [
     "RECORD_CONTENT_KEYS",
+    "RECORD_COPY_KIND",
     "RECORD_PAGE_SIZE",
     "copied_record",
     "copy_records",
+    "copy_scenario_records",
     "is_record_copy",
+    "record_copy_mark",
     "record_item",
+    "request_record_copy",
     "sync_scenario_records",
 ]

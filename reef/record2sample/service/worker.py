@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from typing import cast
 
 from reef.execution.workers import ServiceWorker
-from reef.storage.work_queue import JsonValue, LeaseExtender, NewWork, WorkItem, WorkLeaseLost, WorkQueue
+from reef.storage.work_queue import JsonValue, LeaseExtender, WorkItem, WorkLeaseLost, WorkQueue, request_waiting
 
 logger = logging.getLogger(__name__)
 
@@ -51,26 +51,15 @@ def request_selection(
 ) -> WorkItem:
     """Ask for a selection of the new records of the trainer of ``component`` in ``scenario``; return the item that
     will read them: a queued one, or a new one."""
-    key = selection_key(scenario, component)
-    earlier = [
-        item
-        for item in queue.items(SAMPLES_QUEUE, scenario=scenario, kind=RECORD_SELECTION_KIND)
-        if item.serial_key == key
-    ]
-    waiting = [item for item in earlier if item.state == "queued"]
-    if waiting:
-        return waiting[0]
     payload = cast(dict[str, JsonValue], {"scenario": scenario, "component": component})
-    return queue.add(
-        NewWork(
-            SAMPLES_QUEUE,
-            f"{key}:{len(earlier)}",
-            scenario,
-            RECORD_SELECTION_KIND,
-            payload,
-            serial_key=key,
-            available_at=available_at,
-        )
+    return request_waiting(
+        queue,
+        SAMPLES_QUEUE,
+        scenario,
+        RECORD_SELECTION_KIND,
+        selection_key(scenario, component),
+        payload,
+        available_at=available_at,
     )
 
 

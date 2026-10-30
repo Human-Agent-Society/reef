@@ -25,6 +25,8 @@ from reef.core.errors import ReefError
 from reef.core.plugins import Plugin, PluginConfigError
 from reef.storage.tasks import SPLIT_NAMES, TaskFileStore
 
+#: The work queue of the data service: record copies, imports and exports, and the sync requests that control takes.
+DATA_QUEUE = "data"
 ItemKind = Literal["trajectory", "task", "record"]
 ITEM_KINDS: tuple[ItemKind, ...] = get_args(ItemKind)
 #: The metadata keys that Reef reads. ``kind``, ``owner`` and ``origin`` are set at creation and never change.
