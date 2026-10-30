@@ -54,8 +54,9 @@ class _TestAlgorithm(SlimeAlgorithm):
         pass
 
 
-#: The cookbook families, the backend's own importance_sampling, and the two plain ones tests/conftest.py registers.
-_ALL_FAMILIES = ("importance_sampling", "opd", "openclawrl", "pg", "sao", "sdft", "sdpo", "sft", "tttd")
+#: The cookbook families, the backend's own importance_sampling, the built-in sft and slime families, and the plain one
+#: tests/conftest.py registers.
+_ALL_FAMILIES = ("importance_sampling", "opd", "openclawrl", "pg", "sao", "sdft", "sdpo", "sft", "slime", "tttd")
 
 
 @pytest.mark.unit
