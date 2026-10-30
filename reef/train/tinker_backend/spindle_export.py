@@ -22,8 +22,11 @@ from reef.train.tinker_backend.config import SpindleFullConfig
 CHECKPOINT_MOUNT = "/checkpoints"
 #: The files of a checkpoint directory that are its Hugging Face weights; the rest is training state.
 WEIGHT_FILES = ("config.json", "generation_config.json", "model.safetensors.index.json")
-#: The base's files that a model needs beside its weights: its tokenizer, chat template and processor.
+#: The base's files that a model needs beside its weights: its tokenizer, chat template, processor and generation
+#: config. Spindle saves no generation config, and without one a serving engine stops only at the tokenizer's EOS
+#: token, not at the chat template's end-of-turn token. A checkpoint's own file of the same name replaces the base's.
 BASE_FILES = (
+    "generation_config.json",
     "tokenizer*",
     "*.jinja",
     "chat_template*",
@@ -49,7 +52,8 @@ class CheckpointExporter(ABC):
 
     Values: ``export(state_path, base)`` returns a commit of the exporter's release repo whose files are exactly the
     weights of the checkpoint at ``state_path`` (its safetensors, ``config.json`` and ``generation_config.json``) and
-    the tokenizer, chat template and processor files of ``base``. It raises ``ValueError`` for a path that names no
+    the tokenizer, chat template, processor and generation config files of ``base``; a checkpoint's file replaces the
+    base's file of the same name. It raises ``ValueError`` for a path that names no
     checkpoint with weights, and ``RuntimeError`` when the export fails. Purpose: the Spindle full-parameter
     component exports each saved checkpoint, so that its release refers to the weights on the Hub.
     """
