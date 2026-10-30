@@ -60,7 +60,12 @@ from reef.core.tasks import HarborTask, read_harbor_task
 from reef.pipeline_context import PipelineContext
 from reef.recipe.generated_tasks import GeneratedTaskRecord2Record, GeneratedTaskSamples
 from reef.recipe.generated_tasks.generator import FailedTask, HeldOutTask, RejectedTask, RolledOutTask
-from reef.recipe.generated_tasks.processor import GenerationJob, RoundSettings, TaskGroupSettings
+from reef.recipe.generated_tasks.processor import (
+    GenerationJob,
+    RoundSettings,
+    TaskGroupSettings,
+    complete_generation_count,
+)
 from reef.recipe.generated_tasks.results import TaskRolloutResult, rollout_results
 from reef.record2sample.generator import DuplicateTask, GeneratorError, WrittenTask
 from reef.record2sample.generator.harbor import ORACLE_TIMEOUT_S
@@ -248,7 +253,8 @@ class OutageAuthor(TaskAuthor):
 def test_an_outage_starts_no_further_author_and_stops_the_running_ones_after_it(tmp_path: Path) -> None:
     author = OutageAuthor()
     generator = autoenvscaling(tmp_path, author, source_count=4, count=4, author_concurrency=2)
-    assert asyncio.run(generator.generate(REQUEST)) == ()
+    with pytest.raises(AuthorError, match="the author could not rebuild session-1"):
+        asyncio.run(generator.generate(REQUEST))
     assert author.stopped.wait(10), "the author running after the outage was stopped"
     assert sorted(author.sources) == ["session-1", "session-2"], "no author started after the outage"
     asyncio.run(generator.record_results((), generation=0))
@@ -795,6 +801,26 @@ def test_a_round_of_the_generated_task_recipe_runs_autoenvscaling_end_to_end(tmp
     assert service.rollout_requests == [], "the training component runs the training rollouts"
     assert generation.task_store is not None and len(generation.task_store.tasks(split="train")) == 2
     assert [task["band"] for task in report(tmp_path)["tasks"]] == ["inside", "inside"]
+
+
+def test_an_outage_that_makes_no_task_leaves_the_round_incomplete_so_a_restart_gives_it_back(tmp_path: Path) -> None:
+    service = StandInGenerator(tmp_path / "tasks")
+    author = StandInAuthor(unreachable=("session-1", "session-2"))
+    generator = autoenvscaling(tmp_path, author, service, count=2)
+    session = SQLiteScenarioStorage(tmp_path / "records").open("autoenvscaling")
+    context = PipelineContext("autoenvscaling", task_storage=session.tasks, samples=TrainerSamples(session.samples))
+    generation = GeneratedTaskSamples(
+        context,
+        RoundSettings(rounds=1, description=DESCRIPTION, generation_attempts=2),
+        GeneratedTaskRecord2Record(context, TaskGroupSettings()),
+        task_generator=generator,
+        generator_service=service,
+    )
+    outcome = asyncio.run(generation.run(GenerationJob(receipt="generation-00000", generation=0)))
+    generation.close()
+    assert not outcome.is_complete and "the sandbox did not start" in outcome.error
+    assert [call["source"] for call in author.calls] == ["session-1", "session-2"], "one session for each attempt"
+    assert generation.task_store is not None and complete_generation_count(generation.task_store) == 0
 
 
 def test_a_task_whose_calibration_rollouts_cannot_run_leaves_the_generation_complete(tmp_path: Path) -> None:

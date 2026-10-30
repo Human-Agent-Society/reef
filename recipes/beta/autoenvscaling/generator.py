@@ -1142,6 +1142,10 @@ class AutoEnvScalingGenerator(TaskGenerator):
         then to the seeds not taken yet (:meth:`seed_slot`), then to sessions; without sessions, the generation ends
         when its variants and seeds run out. Up to ``author_concurrency`` authors run at once, started in slot order
         (:meth:`authored`); the slots are still taken in order.
+
+        Raises :class:`AuthorError` when an outage leaves the generation with no task, after its report is saved:
+        the recipe tries the generation again, and a round whose generation runs out of attempts is not complete,
+        so a restart gives it back. An empty generation that ends would count as a complete round.
         """
         self.generation = self.cursor.next_generation
         # A generation number is used once, so no attempt meets the task names of an attempt a reload cancelled.
@@ -1163,6 +1167,7 @@ class AutoEnvScalingGenerator(TaskGenerator):
             if isinstance(slot, AuthoringSlot)
         }
         next_seed = self.cursor.next_seed
+        ended_on_outage = False
         try:
             for index, slot in enumerate(slots):
                 if not isinstance(slot, AuthoringSlot):
@@ -1184,6 +1189,7 @@ class AutoEnvScalingGenerator(TaskGenerator):
                     # it. So does a task that held the token, which may have left the sandbox.
                     error = f"the author could not rebuild {proposal.source_record_id}: {exc}"
                     is_outage = not isinstance(exc, CredentialHeld)
+                    ended_on_outage = is_outage
                     stage = STAGE_OUTAGE if is_outage else STAGE_CREDENTIAL
                     refused.append(replace(proposal, stage=stage, refusal=error))
                 else:
@@ -1218,6 +1224,8 @@ class AutoEnvScalingGenerator(TaskGenerator):
         # attempt that raised or was cancelled returned no task, so it takes no seed: the retry uses them again.
         if next_seed != self.cursor.next_seed:
             self.save_cursor(replace(self.cursor, next_seed=next_seed))
+        if ended_on_outage and not tasks:
+            raise AuthorError(error)
         return tuple(tasks)
 
     def slots(self) -> list[AuthoringSlot | HarborTask]:

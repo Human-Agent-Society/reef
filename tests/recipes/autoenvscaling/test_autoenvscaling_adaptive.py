@@ -37,8 +37,8 @@ from recipes.beta.autoenvscaling import (
     VariantAuthor,
 )
 from recipes.beta.autoenvscaling import author as author_module
-from recipes.beta.autoenvscaling.author_credentials import CredentialHeld
 from recipes.beta.autoenvscaling import generator as generator_module
+from recipes.beta.autoenvscaling.author_credentials import CredentialHeld
 from recipes.beta.autoenvscaling.checks import PassRateBand
 from recipes.beta.autoenvscaling.generator import ParentTask
 from recipes.beta.autoenvscaling.sources import Repository, SessionSource
@@ -162,7 +162,11 @@ def test_an_outage_leaves_the_parent_its_slot_and_a_held_token_takes_it(
     generator = autoenvscaling(tmp_path, StandInAuthor(), count=2, is_adaptive=True, variant_share=0.5)
     asyncio.run(generator.record_results(run_tasks(generator, (1.0, 1.0), (0.5, 0.5)), generation=0))
     failed = autoenvscaling(tmp_path, failing, count=2, is_adaptive=True, variant_share=0.5)
-    assert asyncio.run(failed.generate(REQUEST)) == ()
+    if is_varied:
+        assert asyncio.run(failed.generate(REQUEST)) == (), "a held token ends the generation empty"
+    else:
+        with pytest.raises(AuthorError, match="the sandbox did not start"):
+            asyncio.run(failed.generate(REQUEST))
     assert parents(tmp_path)[0]["varied"] is is_varied
     author = StandInAuthor()
     again = autoenvscaling(tmp_path, author, count=2, is_adaptive=True, variant_share=0.5)
