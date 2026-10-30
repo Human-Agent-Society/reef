@@ -24,7 +24,6 @@ from reef.core.errors import (
     UnknownScenario,
 )
 from reef.runtime.interfaces import UpstreamStatusError
-from reef.service.artifact_evaluations import EvaluationLimitReached
 from reef.service.data import NoDataStore
 from reef.service.request_service import InferenceRetryTimeout
 from reef.storage.data import ItemConflict, ItemNotFound
@@ -49,7 +48,6 @@ ERROR_STATUS_TABLE: tuple[tuple[type[Exception], type[web.HTTPError]], ...] = (
     (ReleaseNotRestorable, web.HTTPBadRequest),
     (RecordConflict, web.HTTPConflict),
     (SampleConflict, web.HTTPConflict),
-    (EvaluationLimitReached, web.HTTPTooManyRequests),
     (RuntimeLoadMismatch, web.HTTPConflict),
     (InferenceRetryTimeout, web.HTTPServiceUnavailable),
     (InferenceUnavailable, web.HTTPServiceUnavailable),

@@ -69,7 +69,7 @@ PAGE_ROUTES = re.compile(r"^/reef/harness/(requests/[^/]+|releases/\d{1,9})/page
 
 #: The routes a recipe's own evaluation calls reach, matched on the raw path so an escaped scenario name stays one
 #: segment: the only routes an evaluation token opens.
-EVALUATION_ROUTES = re.compile(r"^/reef/scenarios/[^/]+(/components/[^/]+)?/evaluation/v1/.+$")
+EVALUATION_ROUTES = re.compile(r"^/reef/scenarios/[^/]+(/components/[^/]+|/artifacts/[^/]+)?/evaluation/v1/.+$")
 
 
 def create_authentication_middleware(

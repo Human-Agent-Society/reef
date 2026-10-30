@@ -273,6 +273,14 @@ def register_inference_routes(
         headers = {**dict(request.headers), SCENARIO_HEADER: request.match_info["scenario"]}
         return await serve(request, headers, path, record=True, artifact_id=request.match_info["artifact_id"])
 
+    async def served_artifact_evaluation(request: web.Request) -> web.StreamResponse:
+        """An evaluation rollout's call to one served artifact: the artifact answers, and nobody keeps the call."""
+        path = "/v1/" + request.match_info["route"]
+        if path not in INFERENCE_PATHS:
+            raise web.HTTPNotFound(text=f"{path} is not an inference route")
+        headers = {**dict(request.headers), SCENARIO_HEADER: request.match_info["scenario"]}
+        return await serve(request, headers, path, record=False, artifact_id=request.match_info["artifact_id"])
+
     async def multimodal(request: web.Request) -> web.StreamResponse:
         """Relay a multimodal call through the scenario's recipe; the answer streams back unchanged, unrecorded."""
         payload = await read_object(request)
@@ -295,6 +303,9 @@ def register_inference_routes(
     app.router.add_post("/reef/scenarios/{scenario}/evaluation/v1/{route:.+}", evaluation)
     app.router.add_post("/reef/scenarios/{scenario}/components/{component}/evaluation/v1/{route:.+}", evaluation)
     app.router.add_post("/reef/scenarios/{scenario}/artifacts/{artifact_id}/v1/{route:.+}", served_artifact)
+    app.router.add_post(
+        "/reef/scenarios/{scenario}/artifacts/{artifact_id}/evaluation/v1/{route:.+}", served_artifact_evaluation
+    )
     for path in MULTIMODAL_ROUTES:
         app.router.add_post(path, multimodal)
 

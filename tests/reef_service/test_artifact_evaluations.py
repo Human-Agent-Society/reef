@@ -29,6 +29,7 @@ from reef.harness.client.tasks import RolloutRow, TaskLab
 from reef.recipe import Recipe
 from reef.runtime.interfaces import InferenceHandler, InferenceRuntime
 from reef.service.app import create_app
+from reef.evaluation.rollout_worker import EvaluationRollout
 from reef.service.artifact_evaluations import STOPPED_ERROR, ArtifactEvaluations, NewArtifact, NewArtifacts
 from reef.storage.commits import CommitRecord
 from reef.storage.observer import ObservedScenarioStorage
@@ -140,7 +141,7 @@ def archive(root: Path, *names: str) -> bytes:
 async def finished(client: TestClient, evaluation_id: str) -> dict[str, Any]:
     for _ in range(200):
         answer = await (await client.get(f"/reef/scenarios/s/evaluations/{evaluation_id}", headers=AUTH)).json()
-        if answer["state"] != "running":
+        if answer["state"] not in ("queued", "running"):
             return answer
         await asyncio.sleep(0.05)
     raise AssertionError("the evaluation did not end")
@@ -263,7 +264,7 @@ def test_a_runtime_that_serves_only_its_current_release_or_a_scenario_with_a_har
 
 
 @pytest.mark.integration
-def test_an_evaluation_that_another_service_left_running_reads_as_failed_and_the_limit_is_two(tmp_path: Path) -> None:
+def test_an_evaluation_whose_rollouts_are_not_in_the_queue_reads_as_failed(tmp_path: Path) -> None:
     dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=ReleaseRuntime()))
 
     async def run() -> None:
@@ -278,18 +279,11 @@ def test_an_evaluation_that_another_service_left_running_reads_as_failed_and_the
             answer = await (await client.get("/reef/scenarios/s/evaluations/stale", headers=AUTH)).json()
             assert (answer["state"], answer["error"]) == ("failed", STOPPED_ERROR)
 
-            evaluations.running.update({"one", "two"})
-            body = {"artifact_id": artifact_id, "harness": {"name": "terminus-2"}}
-            busy = await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)
-            assert busy.status == 429
-
     asyncio.run(run())
 
 
 @pytest.mark.integration
-def test_reef_evaluates_each_new_artifact_with_the_scenarios_settings_and_queues_it_while_two_run(
-    tmp_path: Path,
-) -> None:
+def test_reef_evaluates_each_new_artifact_with_the_scenarios_settings_through_the_queue(tmp_path: Path) -> None:
     dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=ReleaseRuntime()))
     new_artifacts = NewArtifacts()
 
@@ -308,9 +302,8 @@ def test_reef_evaluates_each_new_artifact_with_the_scenarios_settings_and_queues
             )
             assert refused.status == 400 and "configure the harness" in await refused.text()
 
-            # A commit that publishes a checkpoint is a new artifact: Reef queues its evaluation, and runs it once
-            # fewer than two run.
-            evaluations.running.update({"one", "two"})
+            # A commit that publishes a checkpoint is a new artifact: Reef adds its rollouts to the evaluations
+            # queue, and the evaluation workers run them.
             commit = CommitRecord(
                 scenario="s",
                 step=1,
@@ -323,9 +316,9 @@ def test_reef_evaluates_each_new_artifact_with_the_scenarios_settings_and_queues
             new_artifacts.record_committed(commit)
             new_artifacts.record_committed(replace(commit, checkpoint=False))
             queued = await until(client, lambda listing: len(listing) == 1)
-            assert queued[0]["state"] == "queued" and queued[0]["request"]["artifact_id"] == artifact_id
-            evaluations.running.difference_update({"one", "two"})
-            await asyncio.to_thread(evaluations.launch_waiting)
+            assert queued[0]["request"]["artifact_id"] == artifact_id
+            rollouts = evaluations.rollouts(queued[0]["evaluation_id"], "s")
+            assert [EvaluationRollout.from_item(item).repeat for item in rollouts] == [0, 1]
             answer = await finished(client, queued[0]["evaluation_id"])
             assert answer["state"] == "finished" and answer["mean_score"] == 1.0
             assert len(await until(client, lambda listing: True)) == 1, "a step that published nothing is no artifact"

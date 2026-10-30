@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import asyncio
 from urllib.parse import urlsplit
 
@@ -71,7 +73,8 @@ def test_the_recipe_evaluation_token_is_its_own_and_opens_the_evaluation_routes_
 
     def build_dispatcher(settings, **kwargs):
         seen["recipe_token"] = kwargs["evaluation_token"]
-        return object()
+        # The artifact evaluations read the dispatcher's coordination store; without one they keep their own queue.
+        return SimpleNamespace(coordination=None)
 
     def create_app(dispatcher, **kwargs):
         seen["tokens"] = kwargs["tokens"]
