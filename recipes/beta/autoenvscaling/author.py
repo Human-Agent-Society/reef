@@ -392,7 +392,7 @@ class TaskAuthor(ABC):
 
 
 class VariantAuthor(TaskAuthor):
-    """A task author that also accepts every valid TaskVariant through ``vary``.
+    """A task author that also accepts every valid TaskVariant without a ``seed_task`` through ``vary``.
 
     ``vary`` has the same output, checks, cancellation and failure contract as ``author``.
     Its additional input is a parent from the supplied session. The returned task keeps
@@ -679,10 +679,12 @@ def write_inputs(reef: ReefClient, source: SessionSource | None, work_dir: Path,
     files and its pass rate. The repository's files are copied in later, from the snapshot cache. Without a
     ``source`` (a variant of a seeded parent), the inputs are the parent and its pass rate alone, nothing is read
     from Reef, and ``workspace/task/environment`` starts as a copy of the parent's. Raises ``ValueError`` for a
-    None ``source`` without a ``variant`` that names a ``seed_task``.
+    None ``source`` without a ``variant`` that names a ``seed_task``, and for a ``source`` with one.
     """
     if source is None and (variant is None or not variant.seed_task):
         raise ValueError("an author's run without a session needs a variant of a seeded parent")
+    if source is not None and variant is not None and variant.seed_task:
+        raise ValueError("a variant of a seeded parent takes no session")
     inputs = work_dir / "inputs"
     (work_dir / "workspace" / "task").mkdir(parents=True)
     inputs.mkdir()

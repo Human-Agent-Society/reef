@@ -53,7 +53,14 @@ from recipes.beta.autoenvscaling import load_sources, workspace_reply
 from recipes.beta.autoenvscaling.author import SEED_VARIANT_PROMPT, VARIANT_INPUTS_TEXT, agent_prompt, agent_rules
 from recipes.beta.autoenvscaling.checks import PassRateBand
 from recipes.beta.autoenvscaling.claude_author import CLAUDE_CHECK_TEXT
-from recipes.beta.autoenvscaling.generator import ParentTask, SessionProposal, seed_record_id, seed_tasks
+from recipes.beta.autoenvscaling.generator import (
+    GenerationCursor,
+    ParentTask,
+    SessionProposal,
+    seed_record_id,
+    seed_tasks,
+)
+from recipes.beta.autoenvscaling.sources import Repository
 from reef.core.plugins import PluginConfigError
 from reef.core.tasks import HarborTask, read_harbor_task, write_harbor_task
 from reef.core.tasks.split import TaskSplit, extend_split_by_source
@@ -573,6 +580,9 @@ def test_a_seed_variant_gets_only_the_parent_and_variant_md_and_the_parents_envi
         author.vary_seed(
             tmp_path / "other", checks, tags={}, stop=threading.Event(), variant=replace(variant, seed_task="")
         )
+    source = SessionSource("session-1", "s", Repository("https://example.com/r.git", "abc1234", "/app"))
+    with pytest.raises(ValueError, match="a variant of a seeded parent takes no session"):
+        author.vary(source, tmp_path / "third", checks, tags={}, stop=threading.Event(), variant=variant)
 
 
 @pytest.mark.parametrize("is_reviewing", [True, False])
@@ -763,3 +773,12 @@ def test_seeds_and_seeded_parents_need_an_author_that_varies_seeds(tmp_path: Pat
             count=2,
             is_adaptive=True,
         )
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [{"next_seed": -1}, {"next_seed": "1"}, {"next_seed": True}, {"next_position": -2}, {"next_generation": 1.0}],
+)
+def test_a_cursor_holds_non_negative_ints(fields: dict[str, object]) -> None:
+    with pytest.raises(ValueError, match="must be a non-negative int"):
+        GenerationCursor(**fields)  # type: ignore[arg-type]

@@ -411,12 +411,21 @@ class GenerationCursor:
 
     The position counts every session taken so far. The walk takes ``sources[position % len(sources)]``, so it
     cycles through the sources file. ``next_seed`` counts the seed tasks taken so far, in directory-name order, by
-    generations that returned their tasks; a seed is taken once.
+    generations that returned their tasks; a seed is taken once. Each field is a non-negative int.
     """
 
     next_generation: int = 0
     next_position: int = 0
     next_seed: int = 0
+
+    def __post_init__(self) -> None:
+        for name, value in (
+            ("next_generation", self.next_generation),
+            ("next_position", self.next_position),
+            ("next_seed", self.next_seed),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"a cursor's {name} must be a non-negative int, not {value!r}")
 
 
 @dataclass(frozen=True)
