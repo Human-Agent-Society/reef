@@ -134,7 +134,6 @@ class ScriptedClaudeSession(E2BSession):
         stop: threading.Event | None = None,
     ) -> None:
         self.env: dict[str, str] = {}
-        self.secret_env: dict[str, str] = {}
         self.stdout = stdout or result_json()
         self.exit_code = exit_code
         self.stderr = stderr
@@ -150,7 +149,6 @@ class ScriptedClaudeSession(E2BSession):
         self.is_closed = threading.Event()
         self.argv: list[str] = []
         self.launch_env: dict[str, str] = {}
-        self.launch_secret_env: dict[str, str] = {}
         self.writable: list[Path] = []
         self.readonly: list[Path] = []
         self.check_outputs: list[str] = []
@@ -168,7 +166,6 @@ class ScriptedClaudeSession(E2BSession):
     ) -> ProcessOutcome:
         self.argv = list(argv)
         self.launch_env = dict(env)
-        self.launch_secret_env = dict(self.secret_env)
         self.writable = list(writable_paths)
         self.readonly = list(readonly_paths)
         if self.stop is not None:
@@ -284,7 +281,7 @@ class CountingChecks(CandidateChecks):
         return {"check": self.count, "ran": True, "passed": True, "oracle_reward": 1.0, "nop_reward": 0.0}
 
 
-def test_runs_pinned_claude_headless_with_token_only_in_secret_env(tmp_path: Path, reef_url: str) -> None:
+def test_runs_pinned_claude_headless_with_token_only_in_process_env(tmp_path: Path, reef_url: str) -> None:
     session = ScriptedClaudeSession()
     authored = authored_in(tmp_path, reef_url, session)
     root = tmp_path / "run"
@@ -300,9 +297,9 @@ def test_runs_pinned_claude_headless_with_token_only_in_secret_env(tmp_path: Pat
         assert argv[argv.index(option) + 1] == value
     assert "--disable-slash-commands" in argv and "--strict-mcp-config" in argv
     # The token reaches the sandbox's process environment alone, and Claude Code keeps it from its subprocesses.
-    assert session.launch_secret_env == {"CLAUDE_CODE_OAUTH_TOKEN": TOKEN}
-    assert not any(TOKEN in value for value in (*argv, *env.values()))
-    assert "CLAUDE_CODE_OAUTH_TOKEN" not in env and not any(name.startswith("ANTHROPIC_") for name in env)
+    assert env["CLAUDE_CODE_OAUTH_TOKEN"] == TOKEN
+    assert not any(TOKEN in value for value in argv)
+    assert not any(name.startswith("ANTHROPIC_") for name in env)
     assert env["CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"] == "1" and env["DISABLE_ERROR_REPORTING"] == "1"
     assert env["CLAUDE_CONFIG_DIR"] == f"{root}/claude" and env["HOME"] == f"{root}/home"
     assert env["BASH_DEFAULT_TIMEOUT_MS"] == env["BASH_MAX_TIMEOUT_MS"] == "600000"
@@ -747,7 +744,9 @@ def test_env_from_refuses_every_variable_the_run_sets(tmp_path: Path, reef_url: 
         fields = {"author_harness": "claude-code", "agent_sandbox_options": {"env_from": [name]}}
         with pytest.raises(PluginConfigError, match=f"must not forward {name}"):
             AutoEnvScalingGenerator.from_config(
-                generating_config(tmp_path, **fields), scenario="one", environ={**environ, name: "0"}
+                generating_config(tmp_path, **fields),
+                scenario="one",
+                environ={**environ, name: TOKEN if name == "CLAUDE_CODE_OAUTH_TOKEN" else "0"},
             )
     # A variable of the deployment's own still reaches the sandbox.
     fields = {"author_harness": "claude-code", "agent_sandbox_options": {"env_from": ["OWNER_SETTING"]}}

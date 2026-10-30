@@ -234,9 +234,9 @@ def test_a_process_runs_in_the_jail_under_its_limit_with_the_deployments_environ
     command = shlex.split(args[-1])
     assert command[:4] == ["timeout", f"--kill-after={modal_sandbox.KILL_AFTER_S}", "30", "/bin/sh"]
     jailed = command[-1]
-    assert jailed.startswith("exec bwrap") and f"{REMOTE_BASE}/rollout/workspace/out.txt" in jailed
+    assert "| exec bwrap" in jailed and f"{REMOTE_BASE}/rollout/workspace/out.txt" in jailed
     assert options["workdir"] == f"{REMOTE_BASE}/rollout/workspace"
-    assert options["env"] == {"CALLER": "1", "DEPLOYMENT": "yes"}
+    assert options["env"] == {"REEF_PROCESS_ENV_CALLER": "1", "REEF_PROCESS_ENV_DEPLOYMENT": "yes"}
 
 
 @pytest.mark.unit
@@ -247,18 +247,22 @@ def test_a_secret_reaches_the_process_environment_and_no_command_line(tmp_path, 
     session = ModalSession(sandbox, env={"DEPLOYMENT": "yes"})
     monkeypatch.setattr(session, "push", lambda path: None)
     monkeypatch.setattr(session, "pull", lambda path, relative="": None)
-    session.set_secret_env({"CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat01-secret-value"})
-    session.launch(["claude"], root=root, workspace=root / "workspace", env={"CALLER": "1"}, timeout=30)
+    session.launch(
+        ["claude"],
+        root=root,
+        workspace=root / "workspace",
+        env={"CALLER": "1", "CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat01-secret-value"},
+        timeout=30,
+    )
     ((args, options),) = sandbox.commands
     assert not any("sk-ant-oat01-secret-value" in argument for argument in args)
     jailed = shlex.split(args[-1])[-1]
-    assert jailed.startswith(
-        "printf '%s\\000' --setenv CLAUDE_CODE_OAUTH_TOKEN \"$CLAUDE_CODE_OAUTH_TOKEN\" | exec bwrap"
-    )
+    assert '--setenv CLAUDE_CODE_OAUTH_TOKEN "$REEF_PROCESS_ENV_CLAUDE_CODE_OAUTH_TOKEN"' in jailed
+    assert "| exec bwrap" in jailed
     assert options["env"] == {
-        "CALLER": "1",
-        "DEPLOYMENT": "yes",
-        "CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat01-secret-value",
+        "REEF_PROCESS_ENV_CALLER": "1",
+        "REEF_PROCESS_ENV_DEPLOYMENT": "yes",
+        "REEF_PROCESS_ENV_CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat01-secret-value",
     }
 
 

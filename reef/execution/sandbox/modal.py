@@ -34,6 +34,7 @@ from reef.execution.sandbox.remote import (
     RemoteExecutor,
     RemoteSession,
     check_options,
+    launch_environment,
     parse_env_from,
     parse_forward_ports,
     probe_command,
@@ -255,9 +256,7 @@ class ModalSession(RemoteSession):
     ) -> ProcessOutcome:
         """Run one process in the jail; ``timeout`` stops its whole tree, and Modal's own limit backs it up."""
         command, envs = remote_command(argv, {**env, **self.env}, root)
-        command = protected_command(
-            command, envs, root, workspace, writable_paths, readonly_paths, secret_names=tuple(self.secret_env)
-        )
+        command = protected_command(command, envs, root, workspace, writable_paths, readonly_paths)
         seconds = max(math.ceil(timeout), 1)
         limited = f"timeout --kill-after={KILL_AFTER_S} {seconds} /bin/sh -c {shlex.quote(command)}"
         cwd = f"{remote_root(root)}/{workspace.relative_to(root).as_posix()}"
@@ -270,7 +269,7 @@ class ModalSession(RemoteSession):
                 "-c",
                 limited,
                 workdir=cwd,
-                env={**envs, **self.secret_env},
+                env=launch_environment(envs),
                 timeout=seconds + KILL_AFTER_S + 30,
             )
             process.wait()
