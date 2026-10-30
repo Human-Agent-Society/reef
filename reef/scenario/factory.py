@@ -419,7 +419,6 @@ class ScenarioFactory:
                     surface=surface,
                     runtime=runtime,
                     training_component=recipe.training_component,
-                    inference_handler=recipe.inference_handler,
                     activation_rule=recipe.activation_rule(),
                     # The recipe's own contract, not the first trainer's: a composite agrees
                     # one across its components, whatever order they are listed in.

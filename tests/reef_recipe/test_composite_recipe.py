@@ -221,7 +221,6 @@ def test_composite_recipe_builds_from_config() -> None:
     assert isinstance(recipe.components["harness"], _TreeRecipe)
     # The components share one runtime, resolved from the environment.
     assert recipe.runtime is not None
-    assert recipe.inference_handler is not None
     assert all(component.runtime is recipe.runtime for component in recipe.components.values())
     with pytest.raises(RecipeConfigError, match=r"components\.step is a metric prefix .*rename the component"):
         build_recipe(COMPOSITE, {}, config=composite_config({"implementation": TREE}, name="step"))

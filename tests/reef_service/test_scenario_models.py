@@ -157,10 +157,12 @@ def test_full_evolution_uses_only_custom_binding(platform, tmp_path, monkeypatch
         scenario = dispatcher.configure_scenario_model("alpha", configure(platform, "alpha", api), create=True)
         artifact = Artifact(scenario.repository.require_current_artifact(), scenario.repository)
         path = "/v1/messages" if api == "anthropic" else "/v1/chat/completions"
-        asyncio.run(scenario.inference_handler.inference(artifact, path, {"model": "custom-alpha", "messages": []}))
+        asyncio.run(
+            scenario.runtime.inference_handler.inference(artifact, path, {"model": "custom-alpha", "messages": []})
+        )
         if api == "anthropic":
             asyncio.run(
-                scenario.inference_handler.inference(
+                scenario.runtime.inference_handler.inference(
                     artifact, "/v1/messages/count_tokens", {"model": "custom-alpha", "messages": []}
                 )
             )
@@ -194,7 +196,7 @@ def test_full_evolution_uses_only_custom_binding(platform, tmp_path, monkeypatch
         assert PLATFORM_KEY not in json.dumps(result.state)
         result.publication.artifact.discard()
         asyncio.run(
-            scenario.inference_handler.inference(
+            scenario.runtime.inference_handler.inference(
                 artifact,
                 "/v1/messages" if api == "anthropic" else "/v1/chat/completions",
                 {"model": "custom-alpha", "messages": []},

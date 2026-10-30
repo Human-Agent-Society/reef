@@ -18,7 +18,7 @@ from reef.core.reports import ReportBase
 from reef.inference.model_config import ModelConfig
 from reef.observability.commits import CommitExperimentObserver
 from reef.observability.operations import OperationMetrics
-from reef.runtime.interfaces import InferenceHandler, InferenceRuntime
+from reef.runtime.interfaces import InferenceRuntime
 from reef.runtime.jobs import TrainingComponent
 from reef.scenario.binding import ScenarioBinding
 from reef.scenario.committer import ComponentArtifact, ScenarioCommitter
@@ -109,11 +109,6 @@ class Scenario:
     def report_type(self) -> type[ReportBase] | None:
         """The recipe's declared report contract, enforced at ingress when set."""
         return self._binding.report_type
-
-    @property
-    def inference_handler(self) -> InferenceHandler | None:
-        runtime = self.model_config.runtime
-        return runtime.inference_handler if runtime is not None else self._binding.inference_handler
 
     @property
     def repository(self) -> Repository:
