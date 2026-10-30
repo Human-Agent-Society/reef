@@ -60,7 +60,7 @@ class ReefDatasetSource(RolloutDataSourceWithBuffer):
         if not len(self.dataset):
             raise RuntimeError(f"the dataset {record['path']} has no prompt within --rollout-max-prompt-len")
         # The previous job's aborted groups are not this job's prompts.
-        self.buffer = []
+        self.buffer: list[Any] = []
         self.epoch_id, self.sample_offset = divmod(
             record["skip_rollouts"] * args.rollout_batch_size, len(self.dataset)
         )
