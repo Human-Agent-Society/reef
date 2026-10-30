@@ -26,7 +26,8 @@ from reef.core.errors import ReefError
 from reef.core.plugins import PluginConfigError
 from reef.core.tasks.split import read_split_manifest
 from reef.storage.data import DataStore, NewItem
-from reef.storage.data_sync import adopt_uploads, sync_scenario_samples
+from reef.storage.data_sync import adopt_uploads, release_items, sync_scenario_samples
+from reef.storage.record_items import sync_scenario_records
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage, ScenarioStore
 from reef.storage.tasks import SplitName, TaskFileStore
 
@@ -87,9 +88,13 @@ class DataScenarioStorage(ScenarioStorage):
        after its uploads become items of that owner (``adopt_uploads``);
     2. runs ``task_import`` for the owner, when it is set;
     3. syncs the session's uploads with the owner's items
-       (``sync_scenario_samples``).
+       (``sync_scenario_samples``), and appends to its record store the copy
+       of each record item of the owner that it uses and that another
+       scenario made (``sync_scenario_records``).
 
-    If a step raises, ``open`` closes the session and raises.
+    If a step raises, ``open`` closes the session and raises. ``archive`` also
+    removes the scenario from the ``scenarios`` of its owner's items, except
+    the record items that it made, before the archive of ``inner``.
 
     Purpose: deployment assembly wraps the scenario storage in it. The
     scenario factory opens each scenario's session through it.
@@ -126,12 +131,16 @@ class DataScenarioStorage(ScenarioStorage):
             if self.task_import is not None:
                 self.task_import.run(self.data, owner, scenario)
             sync_scenario_samples(session.samples, self.data, owner, scenario)
+            sync_scenario_records(session.records, self.data, owner, scenario)
         except BaseException:
             session.close()
             raise
         return session
 
     def archive(self, scenario: str) -> tuple[str, ...]:
+        owner = self.inner.read_settings(scenario).owner
+        if owner is not None:
+            release_items(self.data, owner, scenario)
         return self.inner.archive(scenario)
 
     def prune(self, *, max_bytes: int) -> int:

@@ -6,7 +6,7 @@ to a scenario, or removes one, follows the same order:
 1. Check the scenarios that the items are to use: each existing one must have the owner, and must be able to train
    on its new items (``Dispatcher.check_use``). A scenario that does not exist yet is checked when it opens.
 2. Write the data store.
-3. Sync the uploads of each loaded scenario that the write touched (``Dispatcher.sync_items``).
+3. Sync the uploads and record copies of each loaded scenario that the write touched (``Dispatcher.sync_items``).
 
 No aiohttp types appear here. ``reef.service.routes.data`` adapts it to HTTP.
 """
@@ -40,6 +40,7 @@ from reef.storage.data import (
     created_metadata,
     patched_metadata,
 )
+from reef.storage.record_items import copied_record
 
 #: The most items in one create call: the most trajectories of one upload before RFC #1028.
 MAX_ITEMS_PER_CREATE = 1000
@@ -108,8 +109,9 @@ def check_uses(dispatcher: Dispatcher, owner: str, uses: Mapping[str, list[Use]]
 def create_items(dispatcher: Dispatcher, owner: str, body: Mapping[str, Any]) -> dict[str, Any]:
     """Create trajectory and record items from ``{"items": [{"id", "content", "metadata"}]}``; return them.
 
-    1 to ``MAX_ITEMS_PER_CREATE`` items. A trajectory's content must be an ATIF document. A task needs its files,
-    so ``create_task_items`` creates it. The response is ``{owner, items}``, without content.
+    1 to ``MAX_ITEMS_PER_CREATE`` items. A trajectory's content must be an ATIF document. A record's content and ID
+    must be what ``copied_record`` takes. A task needs its files, so ``create_task_items`` creates it. The response
+    is ``{owner, items}``, without content.
     """
     check_owner(owner)
     entries = body.get("items")
@@ -132,6 +134,8 @@ def create_items(dispatcher: Dispatcher, owner: str, body: Mapping[str, Any]) ->
             uses.setdefault(scenario, []).append(new_use(item_id, checked["kind"], content, split))
         if checked["kind"] == "trajectory":
             TrajectorySample(content)
+        if checked["kind"] == "record":
+            copied_record(item_id, content, checked["origin"]["scenario"], checked["origin"]["scenario"])
         items.append(NewItem(item_id, content, metadata))
     check_uses(dispatcher, owner, uses)
     stored = data_store(dispatcher).create(owner, items)

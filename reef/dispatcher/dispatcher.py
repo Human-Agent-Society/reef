@@ -23,6 +23,7 @@ from reef.core.records_types import AgentRecord, RequestType
 from reef.dispatcher import ingest
 from reef.dispatcher.errors import TrainingErrors
 from reef.dispatcher.local_workers import LocalTrainingWorkers
+from reef.dispatcher.record_item_copier import RecordItemCopier
 from reef.dispatcher.status import TrainingStatus
 from reef.observability import ExperimentTracker, NullExperimentTracker
 from reef.recipe.base import Recipe
@@ -34,6 +35,7 @@ from reef.scenario.releases import ServedArtifact
 from reef.scenario.scenario import Scenario
 from reef.storage.data import DataStore, check_owner
 from reef.storage.data_sync import sync_scenario_samples, uploads
+from reef.storage.record_items import sync_scenario_records
 from reef.storage.records import RecordRetention
 from reef.storage.samples import StoredSample
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage
@@ -94,9 +96,10 @@ class Dispatcher(ScenarioLifecycle):
         ``scenario_admission``: decides whether a scenario is created or
         loaded. The default admits all scenarios.
 
-        ``data_store``: the deployment's data store (RFC #1028). The dispatcher
-        closes it before the scenario storage, which owns the task file store
-        that the data store shares.
+        ``data_store``: the deployment's data store (RFC #1028). Each accepted
+        inference and report becomes a record item in it
+        (``RecordItemCopier``). The dispatcher closes it before the scenario
+        storage, which owns the task file store that the data store shares.
         """
         if scenario_idle_unload_seconds is not None and scenario_idle_unload_seconds <= 0:
             raise ValueError("scenario_idle_unload_seconds must be positive")
@@ -120,6 +123,9 @@ class Dispatcher(ScenarioLifecycle):
         self.background_threads = BackgroundThreads()
         self.local_workers = LocalTrainingWorkers(self.registry, self.errors, held=hold_local_cycles)
         self.training_status = TrainingStatus(recipe, self.registry, self.errors)
+        self.record_items = (
+            None if data_store is None else RecordItemCopier(self.registry, scenario_storage, data_store)
+        )
         if isinstance(backend_factory, EnumerableRepositoryBackendFactory):
             self.background_threads.preload_thread = Thread(
                 target=self.preload_scenarios,
@@ -224,6 +230,8 @@ class Dispatcher(ScenarioLifecycle):
         workers wake when a trainer holds untrained samples.
         """
         self.local_workers.resume(instance)
+        if self.record_items is not None:
+            self.record_items.wake(instance.name)
         if any(component_trainer.trainer.holds_untrained_records() for component_trainer in instance.trainers):
             self.local_workers.wake(instance)
 
@@ -501,16 +509,19 @@ class Dispatcher(ScenarioLifecycle):
                     self.apply_sync(current, owner)
 
     def apply_sync(self, current: Scenario, owner: str) -> None:
-        """Sync the uploads of the loaded scenario ``current``; its trainers forget the uploads that left it.
+        """Sync the uploads and record copies of the loaded scenario ``current`` with the items of ``owner``.
 
-        The caller holds the scenario's lock.
+        Its trainers forget the uploads that left it, and its workers wake for new uploads and copies. The caller
+        holds the scenario's lock.
         """
         if self.data_store is None:
             raise ReefError("this dispatcher has no data store")
         result = sync_scenario_samples(current.store.samples, self.data_store, owner, current.name)
         for component_trainer in current.trainers:
             component_trainer.trainer.forget_samples(result.removed)
-        if result.added:
+        if sync_scenario_records(current.store.records, self.data_store, owner, current.name):
+            self.process_accepted_records(current)
+        elif result.added:
             self.local_workers.wake(current)
 
     def sample_buffer(self, scenario: str, component: str | None = None) -> Mapping[str, Any]:
@@ -593,7 +604,9 @@ class Dispatcher(ScenarioLifecycle):
             return current.store.samples.imported_tasks()
 
     def process_accepted_records(self, current: Scenario) -> None:
-        """Start consumption only after the accepted records are durable."""
+        """Start consumption only after the accepted records are durable, and copy them to record items."""
+        if self.record_items is not None:
+            self.record_items.wake(current.name)
         # Every component's trainer sees the record. A trainer that trains wakes its
         # worker. A trainer that trains nothing only advances its record cursor, here.
         self.local_workers.wake(current)
@@ -676,6 +689,8 @@ class Dispatcher(ScenarioLifecycle):
             self.background_threads.idle_unload_thread.join()
         for worker in local_workers:
             worker.thread.join()
+        if self.record_items is not None:
+            self.record_items.close()
         if self.background_threads.metrics_thread is not None:
             self.background_threads.metrics_thread.join()
             self.record_operational_metrics()

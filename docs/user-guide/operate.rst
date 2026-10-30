@@ -493,10 +493,13 @@ Choose the data store
 ---------------------
 
 The data store keeps the deployment's data items: the trajectories and the
-tasks that clients create, each with its metadata (`Data items
+tasks that clients create, and a record item for each inference call and
+report, each with its metadata (`Data items
 <../reference/http-api.rst#data-items>`__). Each item belongs to an owner, and
 its metadata names the scenarios that use it. Archiving a scenario does not
-delete its items.
+delete its items. Record items stay when record retention removes the
+records from a scenario's record store, so the data store grows until clients
+delete items.
 
 ``storage.data-store`` selects the store. Without it, the store follows
 ``storage.record-backend``:
@@ -525,7 +528,9 @@ scenario.
 When Reef opens a scenario for the first time after an upgrade, it moves the
 scenario's uploaded trajectories and tasks into the data store. They become
 items of the owner with the scenario's name, which the scenario uses in their
-split.
+split. A background job then makes record items from the scenario's stored
+records, in pages of 256, while the scenario serves. The job continues from
+its last page after a restart.
 
 Import Harbor tasks
 -------------------

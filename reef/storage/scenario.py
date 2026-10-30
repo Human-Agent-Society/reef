@@ -29,7 +29,7 @@ class ScenarioStoreConflict(ReefError):
 
 @dataclass(frozen=True)
 class ScenarioSettings:
-    """The settings a person selects for one scenario, kept with its records and commits.
+    """The settings of one scenario, kept with its records and commits.
 
     ``model_config`` is the validated model override as JSON (``None`` selects
     the recipe's model). ``training_mode`` is the selected mode (``None``
@@ -42,6 +42,12 @@ class ScenarioSettings:
     owner whose items the scenario uses (RFC #1028), a name that passes
     ``check_owner``. It is ``None`` only for a scenario that the data sync has
     not opened yet; the first open sets it.
+
+    ``record_items_sequence`` is not a choice but Reef's own state: a record
+    sequence ``n >= 0`` such that each record of the scenario with a sequence
+    at most ``n`` that ``reef.storage.record_items`` gives a record item has
+    that item in the store of ``owner``. Only the record item copier
+    (``reef.dispatcher.record_item_copier``) increases it.
     """
 
     model_config: Mapping[str, object] | None = None
@@ -49,6 +55,7 @@ class ScenarioSettings:
     artifact_evaluation: Mapping[str, object] | None = None
     activation: Mapping[str, object] | None = None
     owner: str | None = None
+    record_items_sequence: int = 0
 
     def __post_init__(self) -> None:
         if self.model_config is not None and not isinstance(self.model_config, Mapping):
@@ -61,6 +68,8 @@ class ScenarioSettings:
             raise ValueError("scenario settings activation must be an object or null")
         if self.owner is not None:
             check_owner(self.owner)
+        if type(self.record_items_sequence) is not int or self.record_items_sequence < 0:
+            raise ValueError("scenario settings record_items_sequence must be an int of at least 0")
 
 
 class ScenarioStore(ABC):

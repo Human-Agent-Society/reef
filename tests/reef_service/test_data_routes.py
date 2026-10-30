@@ -100,3 +100,26 @@ def test_a_deployment_without_a_data_store_serves_no_data_route(tmp_path: Path) 
         assert "no data store" in await response.text()
 
     served(dispatcher, check)
+
+
+def test_a_client_record_item_needs_the_content_and_id_of_a_record(tmp_path: Path) -> None:
+    dispatcher = dispatcher_for(tmp_path, UploadRecipe())
+    content = {
+        "agent_record_id": "r1",
+        "request_type": "report",
+        "payload": {"score": 1.0},
+        "created_at": 1.0,
+        "references": [],
+        "artifact_ref": None,
+    }
+    metadata = {"kind": "record", "origin": {"scenario": "old", "release_id": None, "load_id": None}}
+
+    async def check(client: TestClient) -> None:
+        good = {"items": [{"id": "old/r1", "content": content, "metadata": metadata}]}
+        assert (await client.post("/reef/namespaces/acme/data", headers=AUTH, json=good)).status == 201
+        for item_id, body in [("r1", content), ("old/r2", {**content, "agent_record_id": "r2", "payload": []})]:
+            bad = {"items": [{"id": item_id, "content": body, "metadata": metadata}]}
+            response = await client.post("/reef/namespaces/acme/data", headers=AUTH, json=bad)
+            assert response.status == 400, item_id
+
+    served(dispatcher, check)

@@ -86,10 +86,15 @@ def test_metadata_says_what_an_item_is_and_which_scenarios_use_it(store):
     )
     assert record.kind == "record"
     assert record.metadata["origin"] == ORIGIN
+    # An imported record names no release and no runtime load.
+    unserved = {**ORIGIN, "release_id": None, "load_id": None}
+    (imported,) = store.create("acme", [NewItem("r2", {}, {"kind": "record", "origin": unserved})])
+    assert imported.metadata["origin"] == unserved
     bad = [
         (trajectory("x", kind="dataset"), "metadata.kind"),
         (NewItem("x", ATIF, {"kind": "trajectory", "owner": "globex"}), "metadata.owner"),
         (NewItem("x", {}, {"kind": "record"}), "metadata.origin"),
+        (NewItem("x", {}, {"kind": "record", "origin": {**ORIGIN, "load_id": ""}}), "origin.load_id"),
         (trajectory("x", origin=ORIGIN), "only a record"),
         (trajectory("x", scenarios={"coding": "eval"}), "always train"),
         (trajectory("x", scenarios={"coding": "dev"}), "train or eval"),

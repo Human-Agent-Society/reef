@@ -374,7 +374,9 @@ the item to its split, ``train`` or ``eval``. A trajectory is always
 A scenario uses only the items of its owner. A scenario's owner is the
 scenario's name, or the ``owner`` that ``POST /reef/scenarios`` gave when it
 created the scenario. Reef refuses an item that names a scenario of another
-owner. Archiving a scenario does not delete its items.
+owner. Archiving a scenario does not delete its items. It removes the
+scenario from their ``scenarios``, except from the record items that the
+scenario made.
 
 Training reads the items in the scenario's sample store: Reef copies each item
 that a scenario uses into it, and removes the copy when the item leaves the
@@ -463,6 +465,46 @@ returns:
   files. To change a task, give it a new name;
 - 415 for another content type.
 
+Record items
+~~~~~~~~~~~~
+
+Reef makes a record item from each inference call and report of a scenario.
+A training instruction gets no item. The item belongs to the scenario's
+owner:
+
+- Its ID is ``<scenario>/<agent_record_id>``.
+- Its content is ``{"agent_record_id", "request_type", "payload",
+  "created_at", "references", "artifact_ref"}``: the record as the scenario
+  stores it.
+- Its metadata is ``{"kind": "record", "scenarios": {"<scenario>": "train"},
+  "origin": {"scenario", "release_id", "load_id"}}``. ``release_id`` is the
+  release that the record names, and ``load_id`` the runtime load that served
+  the call. Each is null when the record names none.
+
+A background job makes the items after the records are stored, so an item
+can arrive a short time after its record. When a scenario loads for the first
+time after an upgrade, the job also makes items from its older records, in
+pages. The scenario serves while the job runs.
+
+The scenario that made a record trains on its own record store, as before.
+To train another scenario of the same owner on a record, add that scenario to
+the item's ``scenarios``. Reef then appends a copy of the record to the other
+scenario's record store, with the item ID as its record ID. Each reference
+``x`` of a report becomes ``<origin scenario>/x``, so add a report together
+with the inferences that it references. The copy is not the other scenario's
+own traffic: its recipe decides whether it trains on it. For example, ``sft``
+trains on it, and an on-policy recipe skips an inference that another runtime
+load served.
+
+A record store keeps what it holds. When an item leaves a scenario that
+holds its copy, the copy stays and can still train. The scenario that made a
+record always uses its item: a patch that removes it returns 400.
+
+You can also create record items with ``POST /reef/namespaces/{owner}/data``,
+for example records that you keep from an older system. The content must have
+the keys above, ``request_type`` must be ``inference`` or ``report``, and the
+ID must be ``<origin scenario>/<agent_record_id>``. Otherwise Reef returns 400.
+
 Read, query, update and delete items
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -482,7 +524,8 @@ Read, query, update and delete items
   ``eval`` split. Reef checks the new uses as for a create call. A patch that
   changes ``kind``, ``owner`` or ``origin`` returns 400.
 - ``DELETE /reef/namespaces/{owner}/data/{id}`` deletes one item. The
-  scenarios that used it lose its copy.
+  scenarios that used a trajectory or a task lose its copy. A record stays in
+  each record store that holds it.
 
 An unknown ID returns 404. A deployment without a data store returns 503.
 An item that leaves a scenario keeps its train counts there, so ``auto`` does

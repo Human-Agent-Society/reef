@@ -122,4 +122,27 @@ def adopt_uploads(samples: SampleStore, data: DataStore, owner: str, scenario: s
             data.update(owner, ids, {"scenarios": {scenario: split}})
 
 
-__all__ = ["SyncResult", "adopt_uploads", "scenario_items", "sync_scenario_samples", "uploads"]
+def release_items(data: DataStore, owner: str, scenario: str) -> None:
+    """Remove ``scenario`` from the ``scenarios`` of each item of ``owner`` that it uses, page by page.
+
+    The record items that ``scenario`` made keep it: it is their origin. The archive of a scenario calls this, so
+    that its items stay and a later scenario with the same name does not use them.
+    """
+    after = 0
+    while page := data.query(owner, scenario=scenario, after=after):
+        after = page[-1].sequence
+        ids = [
+            item.item_id for item in page if item.kind != "record" or item.metadata["origin"]["scenario"] != scenario
+        ]
+        if ids:
+            data.update(owner, ids, {"scenarios": {scenario: None}})
+
+
+__all__ = [
+    "SyncResult",
+    "adopt_uploads",
+    "release_items",
+    "scenario_items",
+    "sync_scenario_samples",
+    "uploads",
+]

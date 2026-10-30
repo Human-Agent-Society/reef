@@ -86,13 +86,18 @@ def check_scenarios(value: object, kind: ItemKind) -> dict[str, str]:
     return scenarios
 
 
-def check_origin(value: object) -> dict[str, str]:
-    """Return ``value`` as a record's ``origin``: ``{scenario, release_id, load_id}``, each a non-empty string."""
+def check_origin(value: object) -> dict[str, str | None]:
+    """Return ``value`` as a record's ``origin``: ``{scenario, release_id, load_id}``.
+
+    ``scenario`` is a valid scenario name. ``release_id`` and ``load_id`` are non-empty strings, or null for a
+    record that names no release or no runtime load, such as an imported record. Raise ``ValueError`` otherwise.
+    """
     if not isinstance(value, Mapping) or set(value) != {"scenario", "release_id", "load_id"}:
         raise ValueError("metadata.origin must be {scenario, release_id, load_id}")
-    if not all(isinstance(value[key], str) and value[key] for key in ("scenario", "release_id", "load_id")):
-        raise ValueError("metadata.origin holds non-empty strings")
     check_owner(value["scenario"])
+    for key in ("release_id", "load_id"):
+        if value[key] is not None and not (isinstance(value[key], str) and value[key]):
+            raise ValueError(f"metadata.origin.{key} must be a non-empty string or null")
     return {key: value[key] for key in ("scenario", "release_id", "load_id")}
 
 
@@ -137,7 +142,8 @@ def patched_metadata(metadata: Mapping[str, Any], patch: Mapping[str, Any]) -> d
     """``metadata`` with the JSON merge patch ``patch`` applied, or ``ValueError``.
 
     The patch may not change ``kind``, ``owner`` or ``origin``. The patched ``scenarios`` must be valid for the
-    item's kind; removing ``scenarios`` leaves it empty.
+    item's kind; removing ``scenarios`` leaves it empty. A record item that its origin scenario uses stays in it:
+    that scenario's record store keeps the record.
     """
     if not isinstance(patch, Mapping):
         raise ValueError("a metadata patch must be an object")
@@ -146,6 +152,10 @@ def patched_metadata(metadata: Mapping[str, Any], patch: Mapping[str, Any]) -> d
         if patched.get(key) != metadata.get(key):
             raise ValueError(f"metadata.{key} is set at creation and never changes")
     patched["scenarios"] = check_scenarios(patched.get("scenarios", {}), metadata["kind"])
+    if metadata["kind"] == "record":
+        origin = metadata["origin"]["scenario"]
+        if origin in metadata["scenarios"] and origin not in patched["scenarios"]:
+            raise ValueError(f"a record item stays in {origin!r}, the scenario that made it")
     return patched
 
 

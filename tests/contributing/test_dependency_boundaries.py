@@ -184,6 +184,7 @@ def test_dispatcher_does_not_select_a_record_backend() -> None:
             for contract in (
                 "reef.storage.data",
                 "reef.storage.data_sync",
+                "reef.storage.record_items",
                 "reef.storage.records",
                 "reef.storage.samples",
                 "reef.storage.scenario",
