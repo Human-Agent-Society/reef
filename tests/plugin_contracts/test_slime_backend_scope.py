@@ -31,7 +31,7 @@ def test_batch_processor_only_accepts_external_training_batches() -> None:
 
 def test_slime_pin_replaces_the_submodule() -> None:
     project_metadata = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    pin = "41014d1f29e201137fdffce737bb8bac65bc5219"
+    pin = "540ea919e45b8b929198abce008a103be9cfc779"
 
     assert f"github.com/THUDM/slime.git@{pin}" in project_metadata
     assert "third_party/slime" not in (ROOT / ".gitmodules").read_text(encoding="utf-8")

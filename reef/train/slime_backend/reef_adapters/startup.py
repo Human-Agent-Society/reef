@@ -81,6 +81,9 @@ def parse_slime_args(arguments: Sequence[str]) -> SlimeArguments:
     from reef.train.slime_backend.reef_adapters.megatron.hf_arguments import add_hf_architecture_arguments
 
     prepared_arguments = add_hf_architecture_arguments(arguments)
+    # Megatron's argument check requires it in the parsing process with tensor or context parallelism; the
+    # workers get the same value (job_runtime_env).
+    os.environ.setdefault("CUDA_DEVICE_MAX_CONNECTIONS", "1")
     original_argv = sys.argv
     sys.argv = [original_argv[0], *prepared_arguments]
     try:

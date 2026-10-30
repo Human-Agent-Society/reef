@@ -870,7 +870,7 @@ def openclawrl_actor_pre_train(actor: Any, rollout_data: dict) -> None:
     """Run the frozen-teacher K-loop over the batch's hint candidates."""
     if not rollout_data.get("teacher_tokens_cand"):
         return
-    from slime.utils.timer import timer
+    from slime.observability.timer import timer
 
     from recipes.openclawrl.slime.teacher import compute_openclaw_teacher_cands
 
