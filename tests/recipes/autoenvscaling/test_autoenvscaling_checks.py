@@ -281,7 +281,9 @@ def calibration(service: StandInGenerator, **settings: float | bool | str | None
         "band_low": 0.25,
         "band_high": 0.75,
     }
-    return checks.CalibrationCheck(service, scenario="autoenvscaling", **{**rule, **settings})
+    rule.update(settings)
+    band = checks.PassRateBand(rule.pop("band_low"), rule.pop("band_high"))
+    return checks.CalibrationCheck(service, scenario="autoenvscaling", band=band, **rule)
 
 
 def calibrated(
@@ -293,7 +295,13 @@ def calibrated(
     """
     service = ScriptedRollouts(tmp_path / "tasks", outcomes)
     generator = autoenvscaling(
-        tmp_path, StandInAuthor(), service, count=1, task_checks=(calibration(service, **settings),)
+        tmp_path,
+        StandInAuthor(),
+        service,
+        count=1,
+        calibration=calibration(service, **settings),
+        band_low=settings.get("band_low", 0.25),
+        band_high=settings.get("band_high", 0.75),
     )
     task, errors = validated(generator)
     return service, errors, closed_with(generator, task, errors)
@@ -493,7 +501,7 @@ def test_too_few_scored_rollouts_refuse_only_the_task_as_unchecked(
 
 def test_the_kept_rollout_errors_are_cut(tmp_path: Path) -> None:
     service = ScriptedRollouts(tmp_path / "tasks", [None] * 8, rollout_error="x" * (checks.ERROR_CHARS + 10))
-    generator = autoenvscaling(tmp_path, StandInAuthor(), service, count=1, task_checks=(calibration(service),))
+    generator = autoenvscaling(tmp_path, StandInAuthor(), service, count=1, calibration=calibration(service))
     task, errors = validated(generator)
     details = calibration_details(closed_with(generator, task, errors))
     assert details["rollout_errors"] == ["x" * checks.ERROR_CHARS] * 3
@@ -502,7 +510,7 @@ def test_the_kept_rollout_errors_are_cut(tmp_path: Path) -> None:
 def test_a_failed_rollout_request_stops_the_round_and_the_next_attempt_starts_again(tmp_path: Path) -> None:
     error = "job 9 failed: the rollout job did not finish"
     service = ScriptedRollouts(tmp_path / "tasks", [0.0, 1.0, 1.0, 0.0], error=error)
-    generator = autoenvscaling(tmp_path, StandInAuthor(), service, count=1, task_checks=(calibration(service),))
+    generator = autoenvscaling(tmp_path, StandInAuthor(), service, count=1, calibration=calibration(service))
     (task,) = asyncio.run(generator.generate(REQUEST))
     with pytest.raises(GeneratorError, match=error):
         asyncio.run(generator.validate(task))
@@ -531,7 +539,7 @@ def test_measure_mode_records_calibration_and_never_refuses(
 ) -> None:
     service = ScriptedRollouts(tmp_path / "tasks", outcomes, error=error)
     check = calibration(service, is_refusing=False)
-    generator = autoenvscaling(tmp_path, StandInAuthor(), service, count=1, task_checks=(check,))
+    generator = autoenvscaling(tmp_path, StandInAuthor(), service, count=1, calibration=check)
     task, errors = validated(generator)
     assert errors == ()
     document = closed_with(generator, task, errors)
@@ -793,4 +801,47 @@ def test_from_config_refuses_contamination_settings_that_cannot_run(
     with pytest.raises(PluginConfigError, match=message):
         AutoEnvScalingGenerator.from_config(
             generating_config(tmp_path, **{**fields, **paths}), scenario="one", environ={"E2B_API_KEY": "e2b-test"}
+        )
+
+
+@pytest.mark.parametrize(
+    ("rewards", "failure", "result", "place"),
+    [
+        ((0.0, 1.0), "", "kept", "inside"),
+        ((0.0, 0.0), "", "below", "below"),
+        ((1.0, 1.0), "", "above", "above"),
+        ((0.5, 0.5), "", "no_variance", "inside"),
+        ((0.0,), "", "outage", None),
+        ((0.0, 1.0), "service unavailable", "outage", None),
+        ((-1.0, -1.0), "", "below", "below"),
+    ],
+)
+def test_calibration_outcome_derives_consistent_statistics_and_result(
+    rewards: tuple[float, ...],
+    failure: str,
+    result: str,
+    place: str | None,
+) -> None:
+    sample = checks.CalibrationSample(rewards, len(rewards), 0, False, (), failure)
+    outcome = checks.CalibrationOutcome(sample, checks.PassRateBand(0.25, 0.75), 0.1)
+    assert (outcome.result, outcome.place) == (result, place)
+    if result == "outage":
+        assert outcome.mean is None and outcome.std is None
+    else:
+        assert outcome.mean == sum(rewards) / len(rewards)
+        assert outcome.std is not None
+
+
+def test_generator_rejects_a_calibration_with_a_different_band(tmp_path: Path) -> None:
+    service = StandInGenerator(tmp_path / "tasks")
+    generator = autoenvscaling(tmp_path, StandInAuthor(), service, count=1)
+    with pytest.raises(ValueError, match="same pass-rate band"):
+        type(generator)(
+            scenario=generator.scenario,
+            service=service,
+            author=generator.author,
+            sources=generator.sources,
+            state_dir=generator.state_dir,
+            band=checks.PassRateBand(0.1, 0.9),
+            calibration=calibration(service),
         )

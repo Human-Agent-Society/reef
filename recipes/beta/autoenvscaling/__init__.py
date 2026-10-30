@@ -27,6 +27,7 @@ from recipes.beta.autoenvscaling.author import (
     SourceError,
     TaskAuthor,
     TaskVariant,
+    VariantAuthor,
     workspace_reply,
 )
 from recipes.beta.autoenvscaling.checks import (
@@ -63,6 +64,7 @@ __all__ = [
     "TaskAuthor",
     "TaskCheck",
     "TaskVariant",
+    "VariantAuthor",
     "admitted_task",
     "load_sources",
     "render_session",

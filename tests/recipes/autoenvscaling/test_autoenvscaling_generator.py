@@ -53,7 +53,7 @@ from recipes.beta.autoenvscaling import (
 from recipes.beta.autoenvscaling import generator as generator_module
 from recipes.beta.autoenvscaling import workspace_reply
 from recipes.beta.autoenvscaling.author import AgentTools, TaskVariant
-from recipes.beta.autoenvscaling.checks import CheckResult
+from recipes.beta.autoenvscaling.checks import CheckResult, PassRateBand
 from reef.core import AgentRecord, RequestType
 from reef.core.plugins import PluginConfigError
 from reef.core.tasks import HarborTask, read_harbor_task
@@ -544,7 +544,7 @@ def test_from_config_builds_the_author_and_keeps_one_state_directory_for_each_sc
     assert isinstance(generator.author, AgentAuthor) and generator.author.upstream.api_key == "designer-token"
     assert generator.author.cache_dir == tmp_path / "state" / "one" / "repositories"
     assert generator.state_dir == tmp_path / "state" / "one" and generator.count == 2
-    assert (generator.band_low, generator.band_high) == (0.25, None)
+    assert (generator.band.low, generator.band.high) == (0.25, None)
     assert [source.record_id for source in generator.sources] == ["session-1", "session-2"]
 
     prompt = AutoEnvScalingGenerator.from_config(
@@ -717,10 +717,9 @@ def test_a_task_whose_calibration_rollouts_cannot_run_leaves_the_generation_comp
         max_rollouts=8,
         margin=0.15,
         min_std=0.1,
-        band_low=0.25,
-        band_high=0.75,
+        band=PassRateBand(0.25, 0.75),
     )
-    generator = autoenvscaling(tmp_path, StandInAuthor(), service, count=2, task_checks=(check,))
+    generator = autoenvscaling(tmp_path, StandInAuthor(), service, count=2, calibration=check)
     session = SQLiteScenarioStorage(tmp_path / "records").open("autoenvscaling")
     context = PipelineContext("autoenvscaling", task_storage=session.tasks, samples=TrainerSamples(session.samples))
     generation = GeneratedTaskSamples(
@@ -804,4 +803,5 @@ def test_from_config_gives_the_calibration_the_configured_band(tmp_path: Path) -
         environ={"E2B_API_KEY": "key"},
     )
     [calibration] = [check for check in generator.task_checks if isinstance(check, CalibrationCheck)]
-    assert (calibration.band_low, calibration.band_high) == (0.1, 0.9)
+    assert (calibration.band.low, calibration.band.high) == (0.1, 0.9)
+    assert calibration.band is generator.band
