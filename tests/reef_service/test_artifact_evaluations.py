@@ -11,10 +11,12 @@ import urllib.request
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from tests.support.task_service_stubs import task_for
+from tests.support.trajectory_uploads import dispatcher_for
 
 from reef.artifact import InMemoryRepositoryBackend
 from reef.artifact.artifact import Artifact
@@ -126,16 +128,6 @@ class ModelCallingLab(TaskLab):
         return RolloutRow(rewards={"reward": self.rewards[task_path.name]})
 
 
-def dispatcher_for(tmp_path: Path, recipe: Recipe) -> Dispatcher:
-    initial = tmp_path / "initial"
-    initial.mkdir(parents=True, exist_ok=True)
-    return Dispatcher(
-        recipe,
-        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
-        scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
-    )
-
-
 def archive(root: Path, *names: str) -> bytes:
     """A tar.gz of one Harbor task directory for each name."""
     buffer = io.BytesIO()
@@ -156,12 +148,14 @@ async def finished(client: TestClient, evaluation_id: str) -> dict[str, Any]:
 
 async def created(client: TestClient, tmp_path: Path, *names: str) -> str:
     """Create the scenario with eval tasks ``names``, and return its active artifact."""
+    await client.post("/reef/scenarios", headers=AUTH, json={"name": "s"})
+    metadata = urlencode({"metadata": json.dumps({"scenarios": {"s": "eval"}})})
     upload = await client.post(
-        "/reef/scenarios/s/tasks?split=eval",
+        f"/reef/namespaces/s/data/tasks?{metadata}",
         headers={**AUTH, "Content-Type": "application/gzip"},
         data=archive(tmp_path, *names),
     )
-    assert upload.status == 200, await upload.text()
+    assert upload.status == 201, await upload.text()
     artifacts = await (await client.get("/reef/scenarios/s/artifacts", headers=AUTH)).json()
     return next(row["artifact_id"] for row in artifacts["artifacts"] if row["active"])
 
@@ -358,7 +352,7 @@ def test_a_scenario_activation_overrides_the_deployment_rule_and_applies_again_a
     (tmp_path / "initial").mkdir()
     # The in-memory repository keeps its registrations in its factory: a restart reuses it.
     factory = InMemoryRepositoryBackend.factory(tmp_path / "initial", root=tmp_path / "repository")
-    dispatcher = Dispatcher(recipe, factory, scenario_storage=SQLiteScenarioStorage(tmp_path / "records"))
+    dispatcher = dispatcher_for(tmp_path, recipe, factory)
 
     async def run() -> None:
         async with TestClient(TestServer(create_app(dispatcher, tokens=TOKEN))) as client:
@@ -382,7 +376,7 @@ def test_a_scenario_activation_overrides_the_deployment_rule_and_applies_again_a
     asyncio.run(run())
     dispatcher.close()
 
-    restarted = Dispatcher(recipe, factory, scenario_storage=SQLiteScenarioStorage(tmp_path / "records"))
+    restarted = dispatcher_for(tmp_path, recipe, factory)
 
     async def after_restart() -> None:
         async with TestClient(TestServer(create_app(restarted, tokens=TOKEN))) as client:

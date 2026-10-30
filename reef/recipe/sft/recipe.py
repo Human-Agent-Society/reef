@@ -24,7 +24,7 @@ class SFTRecipe(WeightTrainingRecipe):
     two methods can train on the same reports.
 
     The recipe binds the objective and the report contract. Its stages are ``SFTRecord2Record``, ``SFTSamples``, and
-    ``SFTJobData``. ``SFTJobData`` also takes uploaded ATIF trajectories (``POST /reef/trajectories``); ``SFTSamples``
+    ``SFTJobData``. ``SFTJobData`` also takes trajectory items (``POST /reef/namespaces/{owner}/data``); ``SFTSamples``
     renders each one with every agent turn trained, except ``is_copied_context`` steps. The ``pipeline`` section of the deployment configures
     the stages:
 

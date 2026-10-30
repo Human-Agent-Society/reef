@@ -62,7 +62,17 @@ Routes
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/records/batch``                                                     | atomically import a batch of records              |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
-| ``POST /reef/trajectories``                                                      | upload ATIF trajectories to train on directly     |
+| ``POST /reef/namespaces/{owner}/data``                                           | create trajectory and record items                |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/namespaces/{owner}/data/tasks``                                     | create task items from a tar.gz of Harbor tasks   |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/namespaces/{owner}/data``                                            | the owner's items, in arrival order               |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/namespaces/{owner}/data/{id}``                                       | one item, with its content                        |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/namespaces/{owner}/data/metadata``                                  | patch the metadata of items                       |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``DELETE /reef/namespaces/{owner}/data/{id}``                                    | delete one item                                   |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/report``                                                            | submit feedback about one or more receipts        |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
@@ -99,9 +109,7 @@ Routes
 | ``POST /reef/scenarios/{scenario}/stop-serving``                                 | stop serving an artifact beside the active        |
 |                                                                                  | release                                           |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
-| ``POST /reef/scenarios/{scenario}/tasks``                                        | add Harbor tasks to the scenario's imported tasks |
-+----------------------------------------------------------------------------------+---------------------------------------------------+
-| ``GET /reef/scenarios/{scenario}/tasks``                                         | imported tasks, their splits, which trained       |
+| ``GET /reef/scenarios/{scenario}/tasks``                                         | the tasks the scenario uses, which trained        |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/scenarios/{scenario}/samples``                                       | the scenario's training samples, in store order   |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
@@ -213,6 +221,12 @@ defaults. Responses redact the API key and report ``has_api_key`` instead.
 See `Scenario model configuration <../user-guide/scenario-models.rst>`__ for
 protocols, persistence and model bindings used throughout evolution.
 
+``POST /reef/scenarios`` also accepts ``owner``: the owner whose `data items
+<#data-items>`__ the scenario uses. Without it, the owner is the scenario's
+name. A scenario gets its owner when Reef creates it. A later call with
+another ``owner`` returns 400 for a scenario that already uses data items.
+The creation response carries the scenario's ``owner``.
+
 Import records for cold-start learning
 --------------------------------------
 
@@ -251,8 +265,8 @@ understands. Import does not synthesize missing training tensors, run inference,
 or assign the active artifact to externally generated examples.
 Reports use the same schema and reference validation as ``POST /reef/report``;
 import referenced inferences first. Training instructions use ``POST /reef/train``.
-To upload ATIF trajectories that are already complete, see
-`Upload trajectories <#upload-trajectories>`__.
+To train on ATIF trajectories that are already complete, see `Data items
+<#data-items>`__.
 
 For existing datasets, use the batch endpoint and resumable JSONL importer
 below. Both endpoints accept request bodies up to 10 MiB.
@@ -339,109 +353,188 @@ before all reports can therefore build a large in-memory backlog. Where possible
 place reports close to their referenced inferences. Large-dataset throughput and
 end-to-end memory use require measurement with the selected recipe.
 
-Upload trajectories
--------------------
+Data items
+----------
 
-Use this route when your data is already a complete ATIF trajectory. An
-uploaded trajectory is not a record. Reef keeps it in the scenario storage.
-The recipe's record-to-sample stage renders it as a training sample, and the
-sample-to-job stage puts it in the next job's data. The scenario's recipe
-must accept uploaded trajectories. If it does not, Reef refuses the upload with
-400. For the recipe side, see
-`Uploaded trajectories <../developer-guide/processors.rst#uploaded-trajectories>`__.
+Reef keeps the data that scenarios train on as data items, in one data store
+for the deployment (RFC #1028). An item is content and metadata:
 
-The route uses the usual Bearer token and ``x-reef-scenario`` header. Send 1
-to 1000 trajectories in one request to ``POST /reef/trajectories``. Each one
-has a ``trajectory_id`` that you choose. Each document must have an ``ATIF-v``
-``schema_version``, an ``agent`` object and at least one step. Reef saves all
-of them in one transaction, or none. The request body can be at most 10 MiB:
+- The content is an ATIF trajectory, a Harbor task directory, or a record. It
+  never changes. To change data, create a new item.
+- The metadata is a JSON object. Reef reads ``kind`` (``trajectory``,
+  ``task`` or ``record``), ``owner``, ``scenarios`` and, for a record,
+  ``origin``. ``kind``, ``owner`` and ``origin`` never change. You can add
+  other keys.
+
+Each item belongs to one owner. The routes have the owner in the path:
+``/reef/namespaces/{owner}/data``. ``scenarios`` maps each scenario that uses
+the item to its split, ``train`` or ``eval``. A trajectory is always
+``train``.
+
+A scenario uses only the items of its owner. A scenario's owner is the
+scenario's name, or the ``owner`` that ``POST /reef/scenarios`` gave when it
+created the scenario. Reef refuses an item that names a scenario of another
+owner. Archiving a scenario does not delete its items. It removes the
+scenario from their ``scenarios``, except from the record items that the
+scenario made.
+
+Training reads the items in the scenario's sample store: Reef copies each item
+that a scenario uses into it, and removes the copy when the item leaves the
+scenario. Each trajectory counts as one sample toward ``job_samples`` and
+``buffer_size``. Job data takes the samples in the order they joined the
+scenario. A train task trains like a trajectory. In ``sft`` it trains only in
+``manual`` mode, for an instruction that gives the job's parameters (see
+`Manual training <#manual-training>`__). For the recipe side, see `Uploaded
+trajectories <../developer-guide/processors.rst#uploaded-trajectories>`__.
+
+Create trajectory items
+~~~~~~~~~~~~~~~~~~~~~~~
+
+Send 1 to 1000 items in one request to ``POST
+/reef/namespaces/{owner}/data``. The body is at most 10 MiB. Each item has an
+``id`` that you choose, its ``content`` and its ``metadata``. A trajectory
+must have an ``ATIF-v`` ``schema_version``, an ``agent`` object and one or
+more steps:
 
 .. code:: bash
 
-   curl -f http://127.0.0.1:8900/reef/trajectories \
+   curl -f http://127.0.0.1:8900/reef/namespaces/my-agent/data \
      -H "Authorization: Bearer $REEF_TOKEN" \
-     -H 'x-reef-scenario: my-agent' \
      -H 'Content-Type: application/json' \
-     -d '{"trajectories": [{
-       "trajectory_id": "trajectory-0001",
-       "trajectory": {
+     -d '{"items": [{
+       "id": "trajectory-0001",
+       "content": {
          "schema_version": "ATIF-v1.4",
          "session_id": "trajectory-0001",
          "agent": {"name": "my-agent", "version": "1"},
          "steps": [{"step_id": 1, "source": "user", "message": "What is 2 + 2?"}]
-       }
+       },
+       "metadata": {"kind": "trajectory", "scenarios": {"my-agent": "train"}}
      }]}'
 
-The response is ``{"scenario": "my-agent", "trajectory_ids":
-["trajectory-0001"]}``. An identical retry returns the same receipt, also
-after training. The same ID with a different trajectory returns 409. An
-invalid upload returns 400 and saves nothing. The recipe also checks each
-trajectory: a trajectory that it cannot turn into a training sample refuses
-the upload with 400, and the message names the trajectory. The SFT recipe
-renders each upload with every agent turn trained, except the steps marked
-``is_copied_context: true`` (`SFT
-<../user-guide/recipes/sft.rst#train-on-whole-conversations>`__).
+The response has status 201: ``{"owner", "items": [{"id", "sequence",
+"digest", "metadata"}]}``. Reef stores all of the items in one transaction,
+or none. An identical retry changes nothing. The same ID with other content
+returns 409.
 
-Each uploaded trajectory counts as one sample toward the pipeline's
-``job_samples`` and ``buffer_size``. Reef keeps it in the scenario's sample
-store with the samples that it makes from recorded traffic, and job data takes
-the samples in store order. Thus an upload trains after the samples stored
-before it, and before the samples stored after it. A large upload delays the
-training of the traffic that arrives after it, until the jobs use all of the
-upload. Archiving the scenario retires its uploaded trajectories with its
-records. Record retention does not delete them.
+Before Reef stores the items, it checks each scenario that they name. The
+scenario must have the owner, and its recipe must train on the items:
 
-Upload Harbor tasks
--------------------
+- A trajectory needs a recipe that accepts uploaded trajectories, and the
+  recipe must turn it into a training sample. The SFT recipe trains every
+  agent turn, except the steps marked ``is_copied_context: true`` (`SFT
+  <../user-guide/recipes/sft.rst#train-on-whole-conversations>`__).
+- A task in the ``train`` split needs a recipe that trains imported tasks
+  (``Sample2Job.accepts_imported_tasks``), such as ``sft`` or the
+  generated-task recipe. The ``eval`` split takes tasks for any recipe,
+  because an `artifact evaluation <#evaluate-an-artifact>`__ runs them.
 
-Use this route to give a scenario your own Harbor tasks, for training or as
-held-out tasks. It adds the tasks to the scenario's imported tasks, which the
-`task-import section <../user-guide/operate.rst#import-harbor-tasks>`__ also
-adds to. A task's name is its ID among the scenario's training samples, so it
-cannot be the ID of an uploaded trajectory. An upload to the
-``train`` split needs a recipe that trains imported tasks
-(``Sample2Job.accepts_imported_tasks``), such as ``sft`` or the generated-task
-recipe. If no trainer of the scenario does, Reef refuses the upload with 400.
-A train task then trains from the buffer like an uploaded trajectory. In
-``sft`` it trains only in ``manual`` mode, for an instruction that gives its
-job's parameters (see `Manual training <#manual-training>`__). The ``eval`` split takes
-tasks for any recipe, because an `artifact evaluation <#evaluate-an-artifact>`__
-runs them.
+A refusal returns 400, names the item, and stores nothing. Reef checks a
+scenario that does not exist yet when the scenario opens.
 
-The body is a gzip-compressed tar archive with ``Content-Type:
-application/gzip``. The archive and the files it unpacks to are each at most
-256 MiB, in at most 10,000 entries. Each top-level entry is one Harbor task
-directory, named by its task name: a lowercase letter or a digit, then
-lowercase letters, digits, ``.``, ``_`` and ``-``. The query parameter
-``split`` is ``train`` or ``eval``, for every task of the archive:
+Create task items
+~~~~~~~~~~~~~~~~~
+
+Send a gzip-compressed tar archive to ``POST
+/reef/namespaces/{owner}/data/tasks`` with ``Content-Type:
+application/gzip``. Each top-level entry is one Harbor task directory, named
+by its task name: a lowercase letter or a digit, then lowercase letters,
+digits, ``.``, ``_`` and ``-``. The task name is the item's ID. The query
+parameter ``metadata`` is the JSON metadata of every task of the archive:
 
 .. code:: bash
 
    tar -czf tasks.tar.gz -C /data/benchmark/tasks sum-391 sort-17
-   curl -f "http://127.0.0.1:8900/reef/scenarios/my-agent/tasks?split=train" \
+   curl -f "http://127.0.0.1:8900/reef/namespaces/my-agent/data/tasks" \
+     --get --data-urlencode 'metadata={"scenarios": {"my-agent": "train"}}' \
+     -X POST \
      -H "Authorization: Bearer $REEF_TOKEN" \
      -H 'Content-Type: application/gzip' \
      --data-binary @tasks.tar.gz
 
-The response is ``{"scenario": "my-agent", "split": "train", "tasks":
-[{"name": "sort-17", "files_digest": "..."}, {"name": "sum-391",
-"files_digest": "..."}]}``, in name order. An identical retry returns the
-same receipt. Reef returns:
+The response is the same as for trajectory items, in name order. Reef
+returns:
 
-- 400, and adds nothing, for an archive that is not tar.gz, a link or a device
-  in it, a path outside its task directories, a file at the top level, a name
-  that is not a task name, more than 1000 tasks or 10,000 entries, more than
-  256 MiB unpacked, or a directory that Harbor's task loader refuses;
+- 400, and stores nothing, for an archive that is not tar.gz, a link or a
+  device in it, a path outside its task directories, a file at the top level,
+  a name that is not a task name, more than 1000 tasks or 10,000 entries, more
+  than 256 MiB unpacked, a directory that Harbor's task loader refuses, or
+  metadata that is not a JSON object of kind ``task``;
 - 413 for a body larger than 256 MiB;
-- 409, and adds nothing, for a task name that the scenario holds with other
-  files, in the other split, or as an uploaded trajectory. To change a task,
-  give it a new name;
+- 409, and stores nothing, for a task name that the owner holds with other
+  files. To change a task, give it a new name;
 - 415 for another content type.
 
+Record items
+~~~~~~~~~~~~
+
+Reef makes a record item from each inference call and report of a scenario.
+A training instruction gets no item. The item belongs to the scenario's
+owner:
+
+- Its ID is ``<scenario>/<agent_record_id>``.
+- Its content is ``{"agent_record_id", "request_type", "payload",
+  "created_at", "references", "artifact_ref"}``: the record as the scenario
+  stores it.
+- Its metadata is ``{"kind": "record", "scenarios": {"<scenario>": "train"},
+  "origin": {"scenario", "release_id", "load_id"}}``. ``release_id`` is the
+  release that the record names, and ``load_id`` the runtime load that served
+  the call. Each is null when the record names none.
+
+A background job makes the items after the records are stored, so an item
+can arrive a short time after its record. When a scenario loads for the first
+time after an upgrade, the job also makes items from its older records, in
+pages. The scenario serves while the job runs.
+
+The scenario that made a record trains on its own record store, as before.
+To train another scenario of the same owner on a record, add that scenario to
+the item's ``scenarios``. Reef then appends a copy of the record to the other
+scenario's record store, with the item ID as its record ID. Each reference
+``x`` of a report becomes ``<origin scenario>/x``, so add a report together
+with the inferences that it references. The copy is not the other scenario's
+own traffic: its recipe decides whether it trains on it. For example, ``sft``
+trains on it, and an on-policy recipe skips an inference that another runtime
+load served.
+
+A record store keeps what it holds. When an item leaves a scenario that
+holds its copy, the copy stays and can still train. The scenario that made a
+record always uses its item: a patch that removes it returns 400.
+
+You can also create record items with ``POST /reef/namespaces/{owner}/data``,
+for example records that you keep from an older system. The content must have
+the keys above, ``request_type`` must be ``inference`` or ``report``, and the
+ID must be ``<origin scenario>/<agent_record_id>``. Otherwise Reef returns 400.
+
+Read, query, update and delete items
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+- ``GET /reef/namespaces/{owner}/data?kind=&scenario=&after=&limit=`` lists
+  the owner's items in the order they arrived, without content: ``{"owner",
+  "items", "next"}``. ``kind`` and ``scenario`` filter the items. ``after``
+  is the ``sequence`` of the last item of the previous page, 0 by default.
+  ``limit`` is 1 to 1000, 1000 by default. ``next`` is the ``after`` of the
+  next page, or null after the last item.
+- ``GET /reef/namespaces/{owner}/data/{id}`` returns one item with its
+  ``content``. A task's ``content`` is null.
+- ``POST /reef/namespaces/{owner}/data/metadata`` takes ``{"ids": [...],
+  "patch": {...}}``. Reef applies the JSON merge patch (RFC 7386) to the
+  metadata of each item, all or none. A null value removes a key. For
+  example, ``{"scenarios": {"my-agent": null}}`` removes the items from
+  ``my-agent``, and ``{"scenarios": {"my-agent": "eval"}}`` moves tasks to the
+  ``eval`` split. Reef checks the new uses as for a create call. A patch that
+  changes ``kind``, ``owner`` or ``origin`` returns 400.
+- ``DELETE /reef/namespaces/{owner}/data/{id}`` deletes one item. The
+  scenarios that used a trajectory or a task lose its copy. A record stays in
+  each record store that holds it.
+
+An unknown ID returns 404. A deployment without a data store returns 503.
+An item that leaves a scenario keeps its train counts there, so ``auto`` does
+not train it again if it comes back.
+
 ``GET /reef/scenarios/{scenario}/tasks`` returns ``{"scenario", "tasks":
-[{"name", "split", "files_digest", "trained"}]}`` in the order the tasks were
-added. ``trained`` is true once a committed task job of any trainer of the
-scenario trained the task.
+[{"name", "split", "files_digest", "trained"}]}``: the tasks that the
+scenario uses, in the order they joined it. ``trained`` is true once a
+committed task job of any trainer of the scenario trained the task.
 
 Choose the samples that train
 -----------------------------
@@ -516,8 +609,8 @@ request: the Tinker runtime. Reef refuses a harness artifact, a model artifact
 on another runtime, and a scenario whose artifacts also hold a harness, with
 400.
 
-First upload the tasks to the ``eval`` split (`Upload Harbor tasks
-<#upload-harbor-tasks>`__). Then start the evaluation:
+First create the tasks as task items in the scenario's ``eval`` split
+(`Create task items <#create-task-items>`__). Then start the evaluation:
 
 .. code:: bash
 
