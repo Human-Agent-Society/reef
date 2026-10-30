@@ -26,6 +26,7 @@ import urllib.parse
 import urllib.request
 import uuid
 from abc import ABC, abstractmethod
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -65,7 +66,12 @@ class RolloutRow:
 
 
 class TaskLab(ABC):
-    """What runs one rollout of a Harbor task under one agent: reef-eval's Lab, behind an interface a test can stand in for."""
+    """What runs one rollout of a Harbor task under one agent: reef-eval's Lab, behind an interface a test can stand in for.
+
+    ``run`` runs one rollout of a task. ``build_environment`` starts the task's environment and stops it, with no
+    agent run and no verifier, so the environment's build (an image, a template) exists before the task's
+    rollouts start; it returns the error that stopped the start, or "" when the environment started.
+    """
 
     @abstractmethod
     async def run(
@@ -78,9 +84,16 @@ class TaskLab(ABC):
         overrides: Mapping[str, object],
     ) -> RolloutRow: ...
 
+    @abstractmethod
+    async def build_environment(self, task_path: Path, *, overrides: Mapping[str, object]) -> str: ...
+
 
 class ReefEvalLab(TaskLab):
-    """reef-eval's Lab under ``work_dir``: Harbor trials under ``trials/``, results in ``results.sqlite``."""
+    """reef-eval's Lab under ``work_dir``: Harbor trials under ``trials/``, results in ``results.sqlite``.
+
+    ``build_environment`` runs Harbor's ``install_only`` trial of its nop agent: Harbor starts the task's
+    environment, sets up the agent, which does nothing, and stops the environment.
+    """
 
     def __init__(self, work_dir: Path) -> None:
         self.work_dir = Path(work_dir)
@@ -107,6 +120,12 @@ class ReefEvalLab(TaskLab):
         row_tags = dict(row.tags)
         rewards = {str(name): float(value) for name, value in dict(row.rewards).items()}
         return RolloutRow(rewards=rewards, error=str(row_tags.get("error") or ""), trial_uri=row.uri)
+
+    async def build_environment(self, task_path: Path, *, overrides: Mapping[str, object]) -> str:
+        row = await self.run(
+            task_path, {"name": "nop"}, key=uuid.uuid4().hex, tags={}, overrides={**overrides, "install_only": True}
+        )
+        return row.error
 
 
 def verifier_timed_out(trial_uri: str | None) -> bool:
@@ -369,8 +388,15 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
     ) -> list[TaskRollout]:
         """``run_rollouts`` in a running event loop: each rollout holds one of ``slots`` while it runs.
 
+        A task directory that two or more requests name gets one ``TaskLab.build_environment`` first, which holds
+        one slot, and the task's rollouts start when it ends. So they never build the task's environment at the
+        same time, which E2B refuses: it cancels all but one build of a template. Rollouts of other tasks do not
+        wait for it. When the build fails, no rollout of the task runs: each comes back as an infrastructure
+        failure with the build's error.
+
         Raise ``ValueError`` before any rollout runs when a request names another harness or model than this
-        runner's, or a record directory: Harbor keeps each trial under ``work_dir``.
+        runner's, or a record directory: Harbor keeps each trial under ``work_dir``. Raise ``TaskRolloutError``
+        before any rollout runs when a request's task directory has no ``task.toml``.
         """
         for request in requests:
             if request.harness != self.harness:
@@ -379,12 +405,41 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
                 raise ValueError(f"this runner serves {self.served_model}, not {request.model}")
             if request.record_dir is not None:
                 raise ValueError("this runner keeps each trial under its work_dir, not in a request's record_dir")
+            if not (Path(request.task) / "task.toml").is_file():
+                raise TaskRolloutError(f"{request.task} is not a Harbor task directory: no task.toml")
+        task_paths = [Path(request.task) for request in requests]
 
-        async def run_one(request: RolloutRequest) -> TaskRollout:
+        async def build(task_path: Path) -> str:
             async with slots:
-                return await self.run_async(Path(request.task))
+                return await self.lab.build_environment(
+                    task_path, overrides={"environment": {"type": self.environment}}
+                )
 
-        return list(await asyncio.gather(*(run_one(request) for request in requests)))
+        builds = {
+            task_path: asyncio.ensure_future(build(task_path))
+            for task_path, count in Counter(task_paths).items()
+            if count > 1
+        }
+
+        async def run_one(task_path: Path) -> TaskRollout:
+            build_error = await builds[task_path] if task_path in builds else ""
+            if build_error:
+                return TaskRollout(
+                    task_path=task_path,
+                    name=task_path.name,
+                    rollout_id=uuid.uuid4().hex,
+                    reward=None,
+                    rewards={},
+                    error=f"the environment of {task_path.name} did not start: {build_error}",
+                    receipts=(),
+                    failed_calls=0,
+                    report_agent_record_ids=(),
+                    trial_uri=None,
+                )
+            async with slots:
+                return await self.run_async(task_path)
+
+        return list(await asyncio.gather(*(run_one(task_path) for task_path in task_paths)))
 
     def rollout_score(self, rollout: TaskRollout) -> RolloutScore:
         """Failed when the environment could not run the rollout, else its reward, 0 when it ran without one."""

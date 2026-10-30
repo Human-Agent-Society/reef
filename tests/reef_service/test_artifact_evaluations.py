@@ -125,6 +125,9 @@ class ModelCallingLab(TaskLab):
         await asyncio.to_thread(lambda: urllib.request.urlopen(request, timeout=10).read())
         return RolloutRow(rewards={"reward": self.rewards[task_path.name]})
 
+    async def build_environment(self, task_path, *, overrides) -> str:
+        return ""
+
 
 def dispatcher_for(tmp_path: Path, recipe: Recipe) -> Dispatcher:
     initial = tmp_path / "initial"
