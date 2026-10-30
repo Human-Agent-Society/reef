@@ -30,13 +30,16 @@ from recipes.beta.autoenvscaling import (
     SessionSource,
     SourceError,
     TaskAuthor,
-    load_sources,
-    workspace_reply,
+    VariantAuthor,
 )
-from recipes.beta.autoenvscaling.author import AgentTools, ModelCalls, RecordingGateway
+from recipes.beta.autoenvscaling import author as author_module
+from recipes.beta.autoenvscaling import load_sources, workspace_reply
+from recipes.beta.autoenvscaling.author import AgentTools, ModelCalls, RecordingGateway, TaskVariant
+from recipes.beta.autoenvscaling.checks import PassRateBand
 from reef.core.tasks import HarborTask
 from reef.execution.sandbox.e2b import E2BExecutor, E2BSession
 from reef.execution.sandbox.process import ProcessOutcome, ProgramExecutor, RolloutLaunchError, SandboxProgram
+from reef.harness.client.tasks import TaskRollout
 from reef.recipe.generated_tasks.generator import GeneratedTaskResult, RejectedTask, RolledOutTask
 from reef.record2sample.generator import GeneratorError, WrittenTask
 from reef.record2sample.generator.inputs import TaskGenerationRequest
@@ -73,13 +76,14 @@ class NoChecks(CandidateChecks):
 
 
 class ScriptedSession(E2BSession):
-    """A sandbox that runs no pi: launch writes a scripted session log; with ``stop``, it sets the stop signal (a
-    cancellation mid run) and waits for the sandbox to be closed."""
+    """A sandbox that runs no pi: launch writes a scripted session log and keeps the command it was given; with
+    ``stop``, it sets the stop signal (a cancellation mid run) and waits for the sandbox to be closed."""
 
     def __init__(self, events: list[dict[str, object]], *, stop: threading.Event | None = None) -> None:
         self.events = events
         self.stop = stop
         self.is_closed = threading.Event()
+        self.argv: list[str] = []
 
     def launch(
         self,
@@ -92,6 +96,7 @@ class ScriptedSession(E2BSession):
         writable_paths: Sequence[Path] = (),
         readonly_paths: Sequence[Path] = (),
     ) -> ProcessOutcome:
+        self.argv = list(argv)
         if self.stop is not None:
             self.stop.set()
             self.is_closed.wait(10)
@@ -130,6 +135,7 @@ def run_agent(
     *,
     checks: CandidateChecks | None = None,
     has_behaviour_rule: bool = True,
+    variant: TaskVariant | None = None,
 ) -> None:
     """The agent's run in ``tmp_path / "run"`` over a scripted sandbox, its calls through a gateway to no Reef."""
     author = AgentAuthor(
@@ -148,7 +154,19 @@ def run_agent(
     gateway = RecordingGateway(author.upstream, calls, tools, headers={})
     gateway.start()
     try:
-        author.run(tmp_path / "run", gateway, tools, calls, stop)
+        author.run(
+            tmp_path / "run",
+            gateway,
+            tools,
+            calls,
+            stop,
+            extra_rules="" if variant is None else author_module.VARIANT_INPUTS_TEXT,
+            prompt=(
+                author_module.AGENT_PROMPT
+                if variant is None
+                else author_module.VARIANT_PROMPT.format(direction=variant.direction)
+            ),
+        )
     finally:
         gateway.stop()
 
@@ -211,15 +229,23 @@ def fenced(document: Mapping[str, object]) -> str:
     return "Here is the task.\n```json\n" + json.dumps(document) + "\n```"
 
 
-def agent_files(tmp_path: Path, *, has_behaviour_rule: bool, checks: CandidateChecks) -> str:
+def agent_files(
+    tmp_path: Path,
+    *,
+    has_behaviour_rule: bool,
+    checks: CandidateChecks,
+    session: ScriptedSession | None = None,
+    variant: TaskVariant | None = None,
+) -> str:
     """Everything the agent's run wrote beside its workspace, its rules among them."""
     run_agent(
         tmp_path,
-        ScriptedSession([]),
+        session if session is not None else ScriptedSession([]),
         ModelCalls(5),
         threading.Event(),
         checks=checks,
         has_behaviour_rule=has_behaviour_rule,
+        variant=variant,
     )
     return "\n".join(path.read_text(errors="replace") for path in (tmp_path / "run").rglob("*") if path.is_file())
 
@@ -243,7 +269,7 @@ def write_workspace_task(task_dir: Path, port: int, *, has_tmux: bool = True) ->
     return task_dir
 
 
-class StandInAuthor(TaskAuthor):
+class StandInAuthor(VariantAuthor):
     """Writes a task as the agent would, checks it once through the generator's checks, and returns its receipts.
 
     A source named in ``unusable`` holds no session; one named in ``unreachable`` is an outage.
@@ -263,6 +289,18 @@ class StandInAuthor(TaskAuthor):
         self.unreachable = unreachable
         self.calls: list[dict[str, Any]] = []
 
+    def vary(
+        self,
+        source: SessionSource,
+        work_dir: Path,
+        checks: CandidateChecks,
+        *,
+        tags: Mapping[str, str],
+        stop: threading.Event,
+        variant: TaskVariant,
+    ) -> AuthoredTask:
+        return self.author(source, work_dir, checks, tags=tags, stop=stop, variant=variant)
+
     def author(
         self,
         source: SessionSource,
@@ -271,8 +309,9 @@ class StandInAuthor(TaskAuthor):
         *,
         tags: Mapping[str, str],
         stop: threading.Event,
+        variant: TaskVariant | None = None,
     ) -> AuthoredTask:
-        self.calls.append({"source": source.record_id, "tags": dict(tags), "work_dir": work_dir})
+        self.calls.append({"source": source.record_id, "tags": dict(tags), "work_dir": work_dir, "variant": variant})
         if source.record_id in self.unusable:
             raise SourceError(f"the record {source.record_id} holds no session messages")
         if source.record_id in self.unreachable:
@@ -299,6 +338,7 @@ def autoenvscaling(
     source_count: int = 2,
     **fields: Any,
 ) -> AutoEnvScalingGenerator:
+    fields["band"] = PassRateBand(fields.pop("band_low", 0.25), fields.pop("band_high", 0.75))
     return AutoEnvScalingGenerator(
         scenario="autoenvscaling",
         service=service if service is not None else StandInGenerator(tmp_path / "tasks"),
@@ -332,6 +372,65 @@ def report(tmp_path: Path, generation: int = 0) -> dict[str, Any]:
 
 def cursor(tmp_path: Path) -> dict[str, int]:
     return json.loads((tmp_path / "state" / "cursor.json").read_text())
+
+
+class ScriptedRollouts(StandInGenerator):
+    """A generator service whose rollouts take ``outcomes`` in turn: a reward, or None for a rollout that could not
+    run (no reward, the error ``rollout_error``). With ``error``, each rollout request fails with it instead.
+
+    Each request is recorded in ``rollout_requests``.
+    """
+
+    def __init__(
+        self,
+        root: Path,
+        outcomes: Sequence[float | None],
+        *,
+        is_solvable: bool = True,
+        error: str = "",
+        rollout_error: str = "sandbox failed",
+    ) -> None:
+        super().__init__(root, is_solvable=is_solvable)
+        self.outcomes = list(outcomes)
+        self.error = error
+        self.rollout_error = rollout_error
+
+    async def run_rollouts(
+        self,
+        task_path: Path,
+        *,
+        scenario: str,
+        arm: str,
+        count: int,
+        extra_instruction_files: Sequence[str],
+        tags: Mapping[str, str],
+        model: str | None = None,
+    ) -> tuple[TaskRollout, ...]:
+        self.rollout_requests.append(
+            {"task": task_path.name, "arm": arm, "count": count, "tags": dict(tags), "model": model}
+        )
+        if self.error:
+            raise GeneratorError(self.error)
+        rewards = [self.outcomes.pop(0) for _ in range(count)]
+        return tuple(
+            TaskRollout(
+                task_path=task_path,
+                name=task_path.name,
+                rollout_id=f"rollout-{len(self.rollout_requests)}-{number}",
+                reward=reward,
+                rewards={} if reward is None else {"reward": reward},
+                error=self.rollout_error if reward is None else "",
+                receipts=(),
+                failed_calls=0,
+                report_agent_record_ids=(),
+                trial_uri=None,
+            )
+            for number, reward in enumerate(rewards)
+        )
+
+    @property
+    def requested_counts(self) -> list[object]:
+        return [request["count"] for request in self.rollout_requests]
 
 
 class RefusingGenerator(StandInGenerator):
