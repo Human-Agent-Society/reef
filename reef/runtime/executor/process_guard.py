@@ -81,13 +81,29 @@ def _in_group(process: Any, group: int) -> bool:
         return False
 
 
+def _worker_alive(group: int) -> bool:
+    """Whether the worker that leads ``group`` still runs in it; an exited worker that nobody reaped has not."""
+    import psutil
+
+    try:
+        return _in_group(psutil.Process(group), group)
+    except psutil.NoSuchProcess:
+        return False
+
+
 def _group_alive(group: int) -> bool:
     import psutil
 
     return any(_in_group(process, group) for process in psutil.process_iter())
 
 
-def _retire_group(group: int, owner_started: float) -> None:
+def _retire_group(group: int, owner_started: float | None) -> None:
+    """SIGKILL the process group ``group`` and wait until no process of it is left.
+
+    ``owner_started`` is the creation time of the group's leader, the worker; a live leader of another start time
+    is a reused PID, whose group is left alone. ``None`` says the leader has exited: a group ID stays reserved while
+    any member lives, so the group's other processes are the worker's.
+    """
     import psutil
 
     try:
@@ -96,7 +112,7 @@ def _retire_group(group: int, owner_started: float) -> None:
         leader_started = None
     # A live group reserves its numeric ID. A reused leader PID means that
     # the old group has vanished; never signal the new process's group.
-    if leader_started is not None and leader_started != owner_started:
+    if leader_started is not None and owner_started is not None and leader_started != owner_started:
         return
     try:
         os.killpg(group, signal.SIGKILL)
@@ -140,7 +156,14 @@ def retire(token: str, timeout_s: float = 30) -> None:
             except psutil.NoSuchProcess as exc:
                 if record.with_suffix(".done").exists():
                     continue
-                raise RuntimeError("model process guard disappeared before confirming cleanup") from exc
+                # Ray kills an exiting worker's children, its guard among them, before the guard retires the
+                # worker's group, whose other processes then outlive both. With the worker gone, retire them here.
+                group = int(record.stem)
+                if _worker_alive(group):
+                    raise RuntimeError("model process guard disappeared before confirming cleanup") from exc
+                _retire_group(group, None)
+                record.with_suffix(".done").touch()
+                continue
             pending = True
         if not pending:
             return

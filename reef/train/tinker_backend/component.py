@@ -39,10 +39,11 @@ from reef.tinker.sampling import TinkerSampler
 from reef.train.algos.registry import job_training
 from reef.train.algos.schedule import StepScheduling
 from reef.train.local_jobs import LocalJobComponent
+from reef.train.task_rollouts import RolloutSettings, TaskJobRollouts, roll_out, task_name
 from reef.train.tinker_backend.client import TinkerClient
 from reef.train.tinker_backend.config import TinkerConfig, TinkerServiceConfig
 from reef.train.tinker_backend.preparation import prepare_tinker_job
-from reef.train.tinker_backend.rollout import RolloutSettings, TaskJobRollouts, roll_out, task_name
+from reef.train.tinker_backend.rollout import SamplerChat
 
 #: The rollouts of a task job, in its job directory.
 ROLLOUTS_FILE = "rollouts.json"
@@ -100,7 +101,7 @@ class TinkerJobComponent(LocalJobComponent, ABC):
     tasks (``TaskSample``), a task job. A task job needs the ``rollout``
     parameter (``RolloutSettings``) and a ``sampler``: before it trains, the
     component runs the tasks' rollouts on the sampler of the job's start
-    (``reef.train.tinker_backend.rollout``) and trains the samples of their
+    (``reef.train.task_rollouts``) and trains the samples of their
     groups. The tasks of a job have distinct names (``task_name``), each of
     which names its group. The component keeps the rollouts in
     ``rollouts.json`` in the job's directory, so a resumed job trains the same
@@ -275,15 +276,20 @@ class TinkerJobComponent(LocalJobComponent, ABC):
         if self._sampler is None:
             raise RuntimeError("this Tinker component has no sampler, so it cannot roll tasks out")
         tasks = tuple(item for item in job.data.samples if isinstance(item, TaskSample))
-        rollouts = roll_out(
-            tasks,
-            settings,
+        chat = SamplerChat(
             self._sampler,
             start.sampler_path,
             model=self._model,
             # A fresh start names no sampler: its rollouts sample the base model.
             runtime_load_id=f"tinker:{start.sampler_path or f'base:{self._model}'}",
+        )
+        rollouts = roll_out(
+            tasks,
+            settings,
+            chat,
+            model=self._model,
             work_dir=directory / "rollouts",
+            model_adapter=start.sampler_path,
         )
         write_json(
             record,

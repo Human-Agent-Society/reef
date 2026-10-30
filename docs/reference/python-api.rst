@@ -1385,9 +1385,9 @@ with ``task_path: Path``: the directory contains the instruction, environment
 and verifier configuration/files. The path is interpreted in the consuming
 algorithm's execution environment. The value also accepts optional ``metadata``.
 It performs no file I/O or rollout. Algorithms supporting tasks own validation,
-environment execution and conversion to trajectories. The Tinker component
-rolls task samples out in task jobs; the Slime component and the harness
-backends refuse them. Accepting ``JobData`` does not imply that every algorithm
+environment execution and conversion to trajectories. The Tinker component,
+and the Slime component with its own rollout engines, roll task samples out in
+task jobs; the harness backends refuse them. Accepting ``JobData`` does not imply that every algorithm
 supports both sample kinds.
 
 Both sample kinds may carry ``source_agent_record_ids``. These record derivation
