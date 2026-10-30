@@ -2,7 +2,7 @@
 
 ``SlimeTrainingComponent`` starts the driver for each job, with the job's
 directory: ``job.json`` (the submitted job) and ``driver.json`` (the
-deployment's Slime settings). A task job's driver creates or attaches to the
+deployment's Slime settings). A task job's driver, and a dataset job's, creates or attaches to the
 component's Slime serving session, which holds the rollout engines and their
 GPUs across jobs; a driver of another job does so while a session runs, and
 otherwise places the job with Slime's own placement and starts no engines
@@ -65,10 +65,11 @@ def main(argv: Sequence[str] | None = None) -> None:
         directory.name, "slime", submitted["start"], JobData.from_dict(submitted["data"]), submitted["parameters"]
     )
     settings = settings_from_json(settings_value)
-    # A task job rolls out on the serving session's engines; another job trains on the session's GPUs while
-    # a session holds them, else on GPUs of its own, without engines.
+    # A task job and a dataset job roll out on the serving session's engines; another job trains on the
+    # session's GPUs while a session holds them, else on GPUs of its own, without engines.
     serving = (
         any(isinstance(item, TaskSample) for item in job.data.samples)
+        or "dataset" in job.parameters
         or (directory.parent.parent / SERVING_FILE).exists()
     )
     if not serving:
