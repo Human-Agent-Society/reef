@@ -185,6 +185,12 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance):
             )
             self.workers.add(publisher)
             self.publisher = publisher
+            if runtime is not None:
+                # Control does not activate again at start-up what the engines still serve: the runtime takes over
+                # each value that served_models names for its engine, before any scenario loads.
+                for served in coordination.served_models.all_served():
+                    if served.url == runtime.base_url:
+                        runtime.adopt(served)
             # The publisher extends the lease; it starts now, so a slow start-up does not let the lease expire.
             publisher.start()
             self.workers.add(StoreChangesWatcher(self.registry, coordination.work_queue, self))

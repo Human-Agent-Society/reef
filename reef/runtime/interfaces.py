@@ -553,6 +553,18 @@ class InferenceRuntime(AdapterWeightRuntime):
             # The base URL is no HTTP(S) URL that another process can call.
             return None
 
+    def adopt(self, served: ServedArtifact) -> None:
+        """Take over ``served``, which a ``served_models`` row names for this runtime's engine, from before this
+        runtime existed (a control restart): when the engine still serves it, the next activation of the same
+        artifact loads nothing. The default can tell nothing about the engine, so the next activation loads."""
+        return
+
+    def stop_serving(self, served: ServedArtifact) -> None:
+        """Stop serving ``served``, which no ``served_models`` row names any more: the engine frees what it holds
+        for it. A value the runtime does not know is no error. The default holds nothing per value: a runtime that
+        loads full weights in place replaced them at the next activation."""
+        return
+
     def shutdown(self) -> None:
         """Release owned resources after all users of this runtime have stopped.
 

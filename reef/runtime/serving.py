@@ -28,6 +28,7 @@ from reef.artifact.sources import HuggingFaceSource, download_huggingface_snapsh
 from reef.core.errors import ReefError
 from reef.core.evaluation import ArtifactKind
 from reef.core.plugins import ConfiguredPlugin
+from reef.core.served_models import ServedArtifact
 from reef.core.weight_layout import ADAPTER_DIR, WeightLayout
 from reef.runtime.deployment import InferenceService
 from reef.runtime.interfaces import (
@@ -142,6 +143,9 @@ class SavedWeightServingRuntime(InferenceRuntime):
         self._next_sequence = 1
         self.base_version = str(RuntimeLoadId(self._incarnation, 0))
         self._version = self.base_version
+        #: The versions the engines served before this runtime stamped its own: what they kept from before a
+        #: control restart, which ``adopt`` takes over.
+        self.versions_at_start = frozenset(backend.runtime_load_ids())
         backend.initialize_version(self._version)
         backend.resume()
         self._stopping = threading.Event()
@@ -255,6 +259,9 @@ class AdapterServingRuntime(SavedWeightServingRuntime):
     ) -> None:
         self._engine = BackendAdapterEngine(backend)
         self._residency = AdapterResidencyManager(adapter_capacity)
+        #: The adapter that the engines still serve for each scenario from before this runtime (``adopt``), by
+        #: scenario: its runtime load ID and the artifact it serves.
+        self._adopted: dict[str, tuple[str, str]] = {}
         #: The content ID of the release that each current adapter was loaded from, by its runtime load ID.
         self._content_ids: dict[str, str] = {}
         super().__init__(
@@ -291,6 +298,25 @@ class AdapterServingRuntime(SavedWeightServingRuntime):
     def adapter_residency_status(self) -> Mapping[str, Any]:
         return self._residency.status()
 
+    def adopt(self, served: ServedArtifact) -> None:
+        """Take over the adapter that ``served`` names when the engines still report its version."""
+        try:
+            scenario, version = parse_adapter_name(served.model_name)
+        except ValueError:
+            return
+        if version in self.versions_at_start:
+            with self._lock:
+                self._adopted[scenario] = (version, served.artifact_id)
+
+    def stop_serving(self, served: ServedArtifact) -> None:
+        """Unload the adapter that ``served`` names, unless a scenario serves it again."""
+        try:
+            parse_adapter_name(served.model_name)
+        except ValueError:
+            return
+        with self._lock:
+            self._residency.retire(served.model_name, self._engine)
+
     def activate_checkpoint(self, artifact: Artifact, *, scenario: str | None = None) -> str:
         """Serve the release ``artifact`` of ``scenario``; return the version that serves it.
 
@@ -310,6 +336,16 @@ class AdapterServingRuntime(SavedWeightServingRuntime):
             raise ReefError("per-scenario adapters are served for a named scenario")
         content_id = artifact.ref.content_id
         with self._lock:
+            adopted = self._adopted.pop(scenario, None)
+            if adopted is not None and adopted[1] == artifact.artifact_id:
+                # The engines still serve this artifact's adapter from before a control restart: load nothing.
+                path = artifact.materialize().local_path
+                if path is None:
+                    raise ReefError("serving a release requires a materialized artifact")
+                version = adopted[0]
+                self._residency.adopt(scenario, version, files=self._weights.weight_files(path, "adapter"))
+                self._content_ids[version] = content_id
+                return version
             current = self._residency.current_adapter(scenario)
             if current is not None and self._content_ids.get(current.runtime_load_id) == content_id:
                 return current.runtime_load_id

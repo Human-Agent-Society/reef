@@ -417,3 +417,42 @@ def test_recovery_that_replaces_no_engine_loads_nothing(engines, tmp_path):
     calls = len(engines.events)
     serving.recover_engines()
     assert engines.events[calls:] == ["pause", ("recover", 0), "resume"]
+
+
+def test_a_restarted_runtime_takes_over_the_adapter_the_engines_kept_and_stops_a_replaced_one(engines, tmp_path):
+    first = AdapterServingRuntime(engines, Handler(), adapter_capacity=2)
+    checkpoint = saved_adapter(tmp_path / "math")
+    artifact = Artifact(ArtifactRef("m", "release-m", None), None, local_path=checkpoint, artifact_id="artifact-m")
+    version = first.activate_checkpoint(artifact, scenario="math")
+    served = first.served_artifact("artifact-m", "math")
+    assert served is not None and served.model_name == adapter_name("math", version)
+
+    # Control restarts; the engines keep serving. The new runtime takes the adapter over and loads nothing.
+    restarted = AdapterServingRuntime(engines, Handler(), adapter_capacity=2)
+    restarted.adopt(served)
+    loads = len(engines.loads())
+    assert restarted.activate_checkpoint(artifact, scenario="math") == version
+    assert len(engines.loads()) == loads
+    assert restarted.served_model_name("math") == served.model_name
+
+    # A newer release replaces it; when its stop is due, the engines unload the old adapter.
+    restarted.activate_checkpoint(release(saved_adapter(tmp_path / "newer"), "n"), scenario="math")
+    restarted.stop_serving(served)
+    assert ("unload", served.model_name) in engines.events
+    # The current adapter never stops.
+    restarted.stop_serving(restarted.served_artifact("artifact-n", "math"))
+    assert ("unload", restarted.served_model_name("math")) not in engines.events
+
+
+def test_a_value_the_engines_did_not_keep_loads_again(tmp_path):
+    first = AdapterServingRuntime(Engines(), Handler(), adapter_capacity=2)
+    artifact = Artifact(
+        ArtifactRef("m", "release-m", None), None, local_path=saved_adapter(tmp_path / "m"), artifact_id="artifact-m"
+    )
+    first.activate_checkpoint(artifact, scenario="math")
+    served = first.served_artifact("artifact-m", "math")
+    fresh = Engines()  # new engines: they kept nothing
+    restarted = AdapterServingRuntime(fresh, Handler(), adapter_capacity=2)
+    restarted.adopt(served)
+    restarted.activate_checkpoint(artifact, scenario="math")
+    assert len(fresh.loads()) == 1

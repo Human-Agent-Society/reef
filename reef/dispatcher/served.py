@@ -21,7 +21,7 @@ from abc import ABC, abstractmethod
 
 from reef.core.served_models import ACTIVE, ScenarioModel, ScheduledStop, ServedArtifact
 from reef.execution.workers import ServiceWorker
-from reef.runtime.interfaces import EngineClients, InferenceHandler
+from reef.runtime.interfaces import EngineClients, InferenceHandler, InferenceRuntime
 from reef.scenario.registry import ScenarioRegistry
 from reef.scenario.scenario import Scenario
 from reef.storage.control_lease import ControlLease, ControlLeaseState
@@ -108,6 +108,8 @@ class ServedModelsPublisher(ServiceWorker):
         self.lock = threading.Lock()
         #: The handler of the runtime that serves each row's engine, by URL, for the inference routes of this process.
         self.engines: dict[str, InferenceHandler] = {}
+        #: The runtime that serves each row's engine, by URL: it stops serving a value when its stop is due.
+        self.runtimes: dict[str, InferenceRuntime] = {}
         self.stopped = threading.Event()
         self.thread: threading.Thread | None = None
 
@@ -185,6 +187,7 @@ class ServedModelsPublisher(ServiceWorker):
             # In one process, the inference routes reach each row's engine through the runtime that serves it.
             for served in wanted.values():
                 self.engines[served.url] = current.runtime.inference_handler
+                self.runtimes[served.url] = current.runtime
         present = table.read_scenario(current.name)
         for name in sorted(set(present) | set(wanted)):
             old, new = present.get(name), wanted.get(name)
@@ -232,7 +235,9 @@ class ServedModelsPublisher(ServiceWorker):
             self.publish(current, now=moment)
         table = self.coordination.served_models
         for stop in table.due_stops(moment):
-            # A runtime frees the weights it replaced when it loads new ones, so the stop only clears the row.
+            runtime = self.runtimes.get(stop.served.url)
+            if runtime is not None and not table.is_referenced(stop.served):
+                runtime.stop_serving(stop.served)
             table.delete_stop(stop.served, control_lease_number=self.lease_number)
         return True
 

@@ -415,6 +415,12 @@ answer from ``served_models`` and to record. Training jobs, sample requests and
 evaluation rollouts that are already queued continue; new ones wait for control,
 because control adds them.
 
+When control starts, it does not load again what the engines still serve. A
+runtime that serves one adapter per scenario takes over each adapter that
+``served_models`` names and that the engines still report, and loads only what
+they lost. A runtime that loads full weights in place loads the active artifact
+again. When a replaced value's stop is due, the engines unload its adapter.
+
 Control runs as one active instance and any number of standby instances on the
 same store. The active instance holds the control lease and extends it. A
 standby instance waits at start-up until it can take the lease: it loads no

@@ -25,9 +25,13 @@ class Runtime:
     def __init__(self) -> None:
         self.release = "release-1"
         self.inference_handler = object()
+        self.stopped: list[ServedArtifact] = []
 
     def served_artifact(self, artifact_id: str, scenario: str) -> ServedArtifact | None:
         return ServedArtifact(artifact_id, "http://engine:8000", f"{scenario}-{artifact_id}")
+
+    def stop_serving(self, served: ServedArtifact) -> None:
+        self.stopped.append(served)
 
 
 class Registry:
@@ -82,6 +86,8 @@ def test_the_active_artifact_is_published_and_a_replaced_value_is_stopped_after_
     assert store.served_models.due_stops(110.0) == ()
     publisher.run_once(now=116.0)
     assert store.served_models.due_stops(116.0) == ()
+    # The engine stops serving the replaced value when its stop is due.
+    assert runtime.stopped == [first]
 
 
 @pytest.mark.unit
