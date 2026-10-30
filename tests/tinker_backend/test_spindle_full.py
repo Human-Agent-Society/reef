@@ -193,6 +193,16 @@ def test_the_base_is_a_reference_to_the_base_revision_and_a_job_from_it_starts_f
 
 
 @pytest.mark.unit
+def test_a_new_base_commit_replaces_the_base_reference_in_the_state_dir(tmp_path, client, exporter):
+    # The deployment restarts with a later commit of the same repo in its config.
+    SpindleFullTrainingComponent(MODEL, settings(tmp_path), client, exporter).close_resources()
+    later = "f" * 40
+    component = SpindleFullTrainingComponent(MODEL, settings(tmp_path, base=f"hf://{MODEL}@{later}"), client, exporter)
+    assert read_reference(component.base_artifact_source().model_directory) == HuggingFaceRevision(MODEL, later)
+    assert component.start_at(Path(component.base_start)) == FreshStart(MODEL)
+
+
+@pytest.mark.unit
 def test_an_import_is_a_full_parameter_manifest_or_the_bases_files(component, client, hub, tmp_path):
     full = TinkerCheckpoint(MODEL, None, "tinker://f/state", "tinker://f/sampler", service=SPINDLE)
     full.write(tmp_path / "full")
@@ -356,6 +366,7 @@ def test_the_export_commits_exactly_the_checkpoints_weights_and_the_bases_tokeni
     base.mkdir()
     (base / "tokenizer.json").write_text("{}")
     (base / "config.json").write_text('{"base": true}')
+    (base / "generation_config.json").write_text('{"eos_token_id": [1, 8]}')
     uploads = []
 
     class Hub:
@@ -367,16 +378,27 @@ def test_the_export_commits_exactly_the_checkpoints_weights_and_the_bases_tokeni
             assert (
                 Path(folder_path) / "config.json"
             ).read_text() == "{}", "the checkpoint's config replaces the base's"
+            assert (Path(folder_path) / "generation_config.json").read_text() == '{"eos_token_id": [1, 8]}'
             return SimpleNamespace(oid="c" * 40)
 
     monkeypatch.setattr("huggingface_hub.HfApi", Hub)
-    monkeypatch.setattr("huggingface_hub.snapshot_download", lambda repo, revision, allow_patterns: str(base))
+    patterns = []
+
+    def snapshot_download(repo, revision, allow_patterns):
+        patterns.extend(allow_patterns)
+        return str(base)
+
+    monkeypatch.setattr("huggingface_hub.snapshot_download", snapshot_download)
     upload = checkpoint_upload()
     commit = upload(
         str(tmp_path / "volume"), "step-2/model-7", RELEASES, MODEL, COMMIT, "tinker://model-7/weights/step-2"
     )
     assert commit == "c" * 40
-    # The training state stays behind, and the commit replaces every file of the previous one.
-    assert uploads == [(RELEASES, ["config.json", "model.safetensors", "tokenizer.json"], ["*"])]
+    # The training state stays behind, the base's generation config comes along since Spindle saves none, and the
+    # commit replaces every file of the previous one.
+    assert "generation_config.json" in patterns
+    assert uploads == [
+        (RELEASES, ["config.json", "generation_config.json", "model.safetensors", "tokenizer.json"], ["*"])
+    ]
     with pytest.raises(FileNotFoundError, match="holds no Hugging Face weights"):
         upload(str(tmp_path / "volume"), "step-3/model-7", RELEASES, MODEL, COMMIT, "tinker://model-7/weights/step-3")

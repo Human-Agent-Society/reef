@@ -182,6 +182,9 @@ def test_dispatcher_does_not_select_a_record_backend() -> None:
         any(
             target == contract or target.startswith(contract + ".")
             for contract in (
+                "reef.storage.data",
+                "reef.storage.data_sync",
+                "reef.storage.record_items",
                 "reef.storage.records",
                 "reef.storage.samples",
                 "reef.storage.scenario",
@@ -215,9 +218,11 @@ def test_scenario_storage_contract_and_state_have_only_domain_dependencies() -> 
         "reef.storage.commits": ("reef.core",),
         "reef.storage.tasks": ("reef.core",),
         "reef.storage.samples": ("reef.core", "reef.storage.tasks"),
+        "reef.storage.data": ("reef.core", "reef.storage.tasks"),
         "reef.storage.evaluations": ("reef.core",),
         "reef.storage.scenario": (
             "reef.core",
+            "reef.storage.data",
             "reef.storage.records",
             "reef.storage.commits",
             "reef.storage.tasks",

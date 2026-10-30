@@ -369,7 +369,7 @@ Train without an inference engine
 
 ``inference.backend: none`` runs no inference engine. Use it for supervised
 fine-tuning on data that does not come from the served model, such as uploaded
-trajectories (``POST /reef/trajectories``) or imported records
+trajectory items (``POST /reef/namespaces/{owner}/data``) or imported records
 (``POST /reef/records``). Only the Slime backend supports it. The trainer
 takes every GPU that ``training.options.actor-*`` names:
 
@@ -785,6 +785,7 @@ persistent.
    storage.agent-record-dir | .reef/agent-record | the SQLite scenario storage: records, commits and settings
    storage.record-backend | sqlite | where scenario records, commits and settings live: ``sqlite``, ``postgres``, or a ``ScenarioStorage`` plugin reference
    storage.task-file-backend | local | where the files of generated tasks live: ``local``, or a ``TaskFileStore`` plugin reference
+   storage.data-store | follows ``record-backend`` | where the deployment's data items live: ``sqlite``, ``postgres`` (``record-database-url``, schema ``reef_data``), or a ``DataStore`` plugin reference
    storage.task-file-dir | .reef/task-files | the files of generated tasks for ``local``, or the local cache of a plugin store
    storage.agent-record-retention-max-bytes | 21474836480 | 20 GiB shared across all record bodies, including unconsumed records
 

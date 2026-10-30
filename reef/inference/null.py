@@ -1,7 +1,7 @@
 """The inference runtime of a deployment that runs no engine: ``inference.backend: none``.
 
 A deployment selects it to train on data that does not come from its own model,
-such as uploaded trajectories (``POST /reef/trajectories``) or imported records
+such as trajectory items (``POST /reef/namespaces/{owner}/data``) or imported records
 (``POST /reef/records``). It takes no GPUs and serves no requests: every
 inference request fails with :class:`~reef.core.errors.InferenceUnavailable`,
 which the HTTP service returns as 503. Reef still publishes and commits every
