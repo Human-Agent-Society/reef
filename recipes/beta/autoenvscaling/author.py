@@ -24,13 +24,14 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from reef_client.client import ReefClient, ReefClientError
 from reef_client.serve import RECEIPT_HEADER
 
 from recipes.beta.autoenvscaling.sources import SESSION_BUDGET_CHARS, SessionSource, render_session
 from reef.core.prompts import untrusted_text
+from reef.core.tasks.harbor import TASK_NAME_PATTERN
 from reef.execution.sandbox.environment import download_directory
 from reef.execution.sandbox.process import ProgramExecutor, RolloutLaunchError, RolloutTimeout
 from reef.harness.adapters import get_adapter
@@ -159,8 +160,8 @@ VARIANT_PROMPT = (
 VARIANT_TEXT = """The solver passed the task in ../inputs/parent/ ({parent}) in {pass_rate:.0%} of {rollouts} rollouts.
 Write a {direction} task: {why}"""
 
-VARIANT_HARDER = "harder"
-VARIANT_SIMPLER = "simpler"
+VARIANT_HARDER: Literal["harder"] = "harder"
+VARIANT_SIMPLER: Literal["simpler"] = "simpler"
 VARIANT_REASONS = {
     VARIANT_HARDER: "the solver passes the parent too often to learn from it.",
     VARIANT_SIMPLER: "the solver passes the parent too rarely to learn from it.",
@@ -200,33 +201,40 @@ class SourceError(ValueError):
     is not there. A data error, not an outage."""
 
 
+VariantDirection = Literal["harder", "simpler"]
+"""The direction of a variant: harder adds requirements; simpler reduces their scope."""
+
+
 @dataclass(frozen=True)
 class TaskVariant:
     """An admitted task to vary, in place of a session to rebuild from scratch.
 
-    Values: ``parent`` is the name of an admitted task that the recipe ran, and ``parent_dir`` a directory that
-    holds its files. ``direction`` is ``harder`` or ``simpler``. ``pass_rate`` is a float in [0, 1], the mean
-    reward of the parent's rollouts, and ``rollouts`` a positive int, how many rollouts it is over.
-    Purpose: the generator makes one for a variant slot of an adaptive generation; ``AgentAuthor.author`` puts the
+    Values: ``parent`` is a Harbor task name and ``parent_dir`` is a Path locating its files.
+    File existence is checked when read. ``direction`` is harder or simpler. ``pass_rate``
+    is a non-boolean number in [0, 1]; ``rollouts`` is a positive, non-boolean integer.
+    The rate represents the mean reward over that many rollouts of the parent.
+    Purpose: the generator makes one for a variant slot of an adaptive generation; ``VariantAuthor.vary`` puts the
     parent and the pass rate in the agent's inputs and asks for a task that keeps the parent's requirements.
     """
 
     parent: str
     parent_dir: Path
-    direction: str
+    direction: VariantDirection
     pass_rate: float
     rollouts: int
 
     def __post_init__(self) -> None:
-        if not isinstance(self.parent, str) or not self.parent:
+        if not isinstance(self.parent, str) or not TASK_NAME_PATTERN.fullmatch(self.parent) or ".." in self.parent:
             raise ValueError("a variant's parent must be a task name")
-        if self.direction not in VARIANT_REASONS:
+        if not isinstance(self.parent_dir, Path):
+            raise ValueError("a variant's parent_dir must be a Path")
+        if self.direction not in (VARIANT_HARDER, VARIANT_SIMPLER):
             raise ValueError(f"a variant's direction must be {VARIANT_HARDER} or {VARIANT_SIMPLER}")
-        if isinstance(self.pass_rate, bool) or not isinstance(self.pass_rate, (int, float)):
+        if type(self.pass_rate) not in (int, float):
             raise ValueError("a variant's pass rate must be a number")
         if not 0 <= self.pass_rate <= 1:
             raise ValueError("a variant's pass rate must be in [0, 1]")
-        if isinstance(self.rollouts, bool) or not isinstance(self.rollouts, int) or self.rollouts < 1:
+        if type(self.rollouts) is not int or self.rollouts < 1:
             raise ValueError("a variant's rollouts must be a positive int")
 
 
@@ -255,7 +263,12 @@ class CandidateChecks(ABC):
 
 
 class TaskAuthor(ABC):
-    """Who writes one task from one recorded session."""
+    """An implementation that rebuilds any valid SessionSource as one AuthoredTask.
+
+    ``author`` reads a session and writes run files to a new work directory. It returns
+    the task reply and ordered model receipts, or raises SourceError or AuthorError.
+    Implementations may use CandidateChecks; tags label model calls and stop requests cancellation.
+    """
 
     @abstractmethod
     def author(
@@ -266,15 +279,31 @@ class TaskAuthor(ABC):
         *,
         tags: Mapping[str, str],
         stop: threading.Event,
-        variant: TaskVariant | None = None,
     ) -> AuthoredTask:
-        """A task from ``source``; ``work_dir``, a new directory, keeps the run's files. An author that checks its
-        candidates checks them with ``checks``.
+        """Rebuild source; raise SourceError for an unusable source or AuthorError for an outage."""
 
-        ``tags`` label the author's model calls on Reef; ``stop``, once set, ends the run early. With ``variant``
-        the task varies an admitted task of the same session instead. Raises :class:`SourceError` for a source it
-        cannot rebuild and :class:`AuthorError` when it could not run.
-        """
+
+class VariantAuthor(TaskAuthor):
+    """A task author that also accepts every valid TaskVariant through ``vary``.
+
+    ``vary`` has the same output, checks, cancellation and failure contract as ``author``.
+    Its additional input is a parent from the supplied session. The returned task keeps
+    the parent's requirements, extended for harder or reduced for simpler.
+    The adaptive generator accepts only authors implementing this interface.
+    """
+
+    @abstractmethod
+    def vary(
+        self,
+        source: SessionSource,
+        work_dir: Path,
+        checks: CandidateChecks,
+        *,
+        tags: Mapping[str, str],
+        stop: threading.Event,
+        variant: TaskVariant,
+    ) -> AuthoredTask:
+        """Write a variant from source and variant, returning its reply and model receipts."""
 
 
 class ModelCalls(ProposerCalls):
@@ -513,7 +542,7 @@ def repository_snapshot(source: SessionSource, cache_dir: Path) -> Path:
     return target
 
 
-class AgentAuthor(TaskAuthor):
+class AgentAuthor(VariantAuthor):
     """pi in a cloud sandbox, its model calls recorded on the Reef at ``reef_url`` under ``scenario``.
 
     ``reef_url`` and ``token`` also read the source sessions; ``cache_dir`` keeps the repository snapshots.
@@ -548,6 +577,29 @@ class AgentAuthor(TaskAuthor):
         self.descriptor = get_adapter("pi")
 
     def author(
+        self,
+        source: SessionSource,
+        work_dir: Path,
+        checks: CandidateChecks,
+        *,
+        tags: Mapping[str, str],
+        stop: threading.Event,
+    ) -> AuthoredTask:
+        return self.write_task(source, work_dir, checks, tags=tags, stop=stop)
+
+    def vary(
+        self,
+        source: SessionSource,
+        work_dir: Path,
+        checks: CandidateChecks,
+        *,
+        tags: Mapping[str, str],
+        stop: threading.Event,
+        variant: TaskVariant,
+    ) -> AuthoredTask:
+        return self.write_task(source, work_dir, checks, tags=tags, stop=stop, variant=variant)
+
+    def write_task(
         self,
         source: SessionSource,
         work_dir: Path,
@@ -592,7 +644,15 @@ class AgentAuthor(TaskAuthor):
             gateway = RecordingGateway(self.upstream, calls, tools, headers=headers)
             gateway.start()
             try:
-                self.run(work_dir, gateway, tools, calls, stop, variant=variant)
+                self.run(
+                    work_dir,
+                    gateway,
+                    tools,
+                    calls,
+                    stop,
+                    extra_rules="" if variant is None else VARIANT_INPUTS_TEXT,
+                    prompt=AGENT_PROMPT if variant is None else VARIANT_PROMPT.format(direction=variant.direction),
+                )
             finally:
                 gateway.stop()
         finally:
@@ -608,10 +668,11 @@ class AgentAuthor(TaskAuthor):
         calls: ModelCalls,
         stop: threading.Event,
         *,
-        variant: TaskVariant | None = None,
+        extra_rules: str = "",
+        prompt: str = AGENT_PROMPT,
     ) -> None:
-        """pi in a sandbox over the workspace until it stops, its time runs out or ``stop`` is set; with ``variant``,
-        the rules and the prompt ask for a variant of the parent in the inputs.
+        """pi in a sandbox over the workspace until it stops, its time runs out or ``stop`` is set; ``extra_rules`` extends
+        the authoring rules and ``prompt`` states the task to write.
 
         Raises :class:`AuthorError` when the run could not start or was stopped, and when the model failed with
         the budget unspent: an outage (a spent plan, a lost sign-in) must not pass for the agent's failure.
@@ -634,7 +695,7 @@ class AgentAuthor(TaskAuthor):
             rules=rebuild_rules(self.has_behaviour_rule),
             max_checks=tools.checks.max_checks,
             review=REVIEW_TEXT if tools.checks.is_reviewing else "",
-            variant="" if variant is None else VARIANT_INPUTS_TEXT,
+            variant=extra_rules,
         )
         nodes = (
             ("rules", {"text": rules}),
@@ -662,7 +723,7 @@ class AgentAuthor(TaskAuthor):
                 host,
                 session,
                 rendered_files(nodes, binding, host),
-                AGENT_PROMPT if variant is None else VARIANT_PROMPT.format(direction=variant.direction),
+                prompt,
                 env,
                 root=work_dir,
                 timeout=self.timeout_seconds,
@@ -787,10 +848,7 @@ class PromptAuthor(TaskAuthor):
         *,
         tags: Mapping[str, str],
         stop: threading.Event,
-        variant: TaskVariant | None = None,
     ) -> AuthoredTask:
-        if variant is not None:
-            raise ValueError("the prompt Designer rebuilds sessions only; adaptive generation needs author: agent")
         repository = source.repository
         prompt = PROMPT_TEXT.format(
             repository=REPOSITORY_TEXT.format(url=repository.url, commit=repository.commit, path=repository.path),

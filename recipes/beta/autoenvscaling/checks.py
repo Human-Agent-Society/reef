@@ -20,12 +20,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import re
 import statistics
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from typing import Literal
 
 from recipes.beta.autoenvscaling.author import ModelReplies
 from reef.core.prompts import untrusted_text
@@ -44,17 +46,23 @@ REVIEW_FILE_CHARS = 20_000
 ERROR_CHARS = 1500
 FENCED_REPLY = re.compile(r"```(?:json)?\s*\n(.*)\n```", re.DOTALL)
 # Where a pass rate falls against the band.
-BAND_BELOW = "below"
-BAND_INSIDE = "inside"
-BAND_ABOVE = "above"
+BandPlace = Literal["below", "inside", "above"]
+"""A mean below the lower bound, inside both inclusive bounds, or above the upper bound."""
+
+BAND_BELOW: Literal["below"] = "below"
+BAND_INSIDE: Literal["inside"] = "inside"
+BAND_ABOVE: Literal["above"] = "above"
 # The generator service's arm of the calibration rollouts. Reef keeps no record of them.
 CALIBRATION_ARM = "calibration"
 # What the calibration found, besides a mean reward below or above the band: the task is kept, its rewards vary
 # too little, or the calibration did not finish (fewer than CALIBRATION_MIN_SCORED rollouts scored, or the
 # generator service failed).
-CALIBRATION_KEPT = "kept"
-CALIBRATION_NO_VARIANCE = "no_variance"
-CALIBRATION_OUTAGE = "outage"
+CalibrationResult = Literal["kept", "below", "above", "no_variance", "outage"]
+"""Admission, an out-of-band mean, insufficient variance, or an unmeasured task, respectively."""
+
+CALIBRATION_KEPT: Literal["kept"] = "kept"
+CALIBRATION_NO_VARIANCE: Literal["no_variance"] = "no_variance"
+CALIBRATION_OUTAGE: Literal["outage"] = "outage"
 # The calibration's result keeps the errors of this many rollouts.
 CALIBRATION_ERRORS = 3
 # The fewest scored rollouts that measure a task: the std of one reward is 0, whatever the task.
@@ -137,11 +145,17 @@ class ReviewFinding:
 class TaskCheck(ABC):
     """One check that ``validate`` runs on a task's copy under the generator service's tasks root.
 
-    With ``is_refusing``, a defect or a check that could not run keeps the task out; without it, the check only
-    measures.
+    Values: name is non-empty text, is_refusing is a bool, and stage is check or calibration.
+    Subclasses implement run(task, written), returning a CheckResult for that task's written copy.
+    Purpose: validate records the result. When is_refusing is true, defects or failure to run
+    reject the task; otherwise the check only measures. Stage labels defects in the report.
     """
 
+    stage: Literal["check", "calibration"] = "check"
+
     def __init__(self, name: str, *, is_refusing: bool = True) -> None:
+        if not name.strip() or type(is_refusing) is not bool or self.stage not in ("check", "calibration"):
+            raise ValueError("a task check needs a name, a refusing bool and a valid stage")
         self.name = name
         self.is_refusing = is_refusing
 
@@ -258,16 +272,7 @@ def check_mode(value: object, label: str) -> str:
     return str(mode)
 
 
-def validate_band(low: float | None, high: float | None) -> None:
-    """Raise ``ValueError`` unless each bound is in [0, 1] or null and ``low`` does not exceed ``high``."""
-    for label, bound in (("band_low", low), ("band_high", high)):
-        if bound is not None and not 0 <= bound <= 1:
-            raise ValueError(f"{label} must be in [0, 1] or null")
-    if low is not None and high is not None and low > high:
-        raise ValueError("band_low must not exceed band_high")
-
-
-def band_place(pass_rate: float, low: float | None, high: float | None) -> str:
+def band_place(pass_rate: float, low: float | None, high: float | None) -> BandPlace:
     """Where ``pass_rate`` falls against the band ``[low, high]``: below, inside or above. A null bound is no bound."""
     if low is not None and pass_rate < low:
         return BAND_BELOW
@@ -276,12 +281,124 @@ def band_place(pass_rate: float, low: float | None, high: float | None) -> str:
     return BAND_INSIDE
 
 
+@dataclass(frozen=True)
+class PassRateBand:
+    """The inclusive interval shared by training reports and solver calibration.
+
+    Values: low and high are non-boolean numbers in [0, 1] or None, with low <= high
+    when both exist. None removes that bound. Configuration constructs the value;
+    calibration and record_results read the same value to classify a mean reward.
+    """
+
+    low: float | None
+    high: float | None
+
+    def __post_init__(self) -> None:
+        for label, bound in (("band_low", self.low), ("band_high", self.high)):
+            if bound is not None and (type(bound) not in (int, float) or not 0 <= bound <= 1):
+                raise ValueError(f"{label} must be in [0, 1] or null")
+        if self.low is not None and self.high is not None and self.low > self.high:
+            raise ValueError("band_low must not exceed band_high")
+
+
+@dataclass(frozen=True)
+class CalibrationSample:
+    """The ordered observations from one calibration attempt.
+
+    Values: rewards is a possibly empty tuple of finite numbers, with duplicates allowed.
+    Verifiers can return rewards outside [0, 1]; these remain visible in the report.
+    Asked and unscored are non-negative integers; len(rewards) + unscored <= asked.
+    Expanded is a bool indicating an edge-triggered request. Errors are rollout error
+    strings in arrival order. Failure is empty or the service error that ended sampling.
+    Purpose: sample returns these observations; CalibrationOutcome classifies them.
+    """
+
+    rewards: tuple[float, ...]
+    asked: int
+    unscored: int
+    expanded: bool
+    errors: tuple[str, ...]
+    failure: str = ""
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.rewards, tuple) or any(
+            type(reward) not in (int, float) or not math.isfinite(reward) for reward in self.rewards
+        ):
+            raise ValueError("calibration rewards must be a tuple of finite numbers")
+        if (
+            type(self.asked) is not int
+            or type(self.unscored) is not int
+            or self.unscored < 0
+            or self.asked < len(self.rewards) + self.unscored
+        ):
+            raise ValueError("calibration counts must cover every observed rollout")
+        if type(self.expanded) is not bool or not isinstance(self.failure, str):
+            raise ValueError("calibration needs an expanded bool and failure text")
+        if not isinstance(self.errors, tuple) or any(not isinstance(error, str) for error in self.errors):
+            raise ValueError("calibration errors must be a tuple of strings")
+
+
+@dataclass(frozen=True)
+class CalibrationOutcome:
+    """A sample classified against a band and a minimum population standard deviation.
+
+    Values: sample is a CalibrationSample, band a PassRateBand, and min_std a number in [0, 0.5].
+    All remaining fields are derived. Failure or fewer than two rewards implies outage
+    and mean, std and place are None. Otherwise mean and std are the sample statistics;
+    place classifies mean against band. Below/above implies the same result. Inside
+    implies no_variance when round(std, 9) < min_std, otherwise kept.
+    Purpose: CalibrationCheck.run constructs the outcome and serializes its derived fields.
+    """
+
+    sample: CalibrationSample
+    band: PassRateBand
+    min_std: float
+    mean: float | None = field(init=False, default=None)
+    std: float | None = field(init=False, default=None)
+    place: BandPlace | None = field(init=False, default=None)
+    result: CalibrationResult = field(init=False, default=CALIBRATION_OUTAGE)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.sample, CalibrationSample) or not isinstance(self.band, PassRateBand):
+            raise ValueError("a calibration outcome needs a sample and band")
+        if type(self.min_std) not in (int, float) or not 0 <= self.min_std <= 0.5:
+            raise ValueError("calibration_min_std must be in [0, 0.5]")
+        if self.sample.failure or len(self.sample.rewards) < CALIBRATION_MIN_SCORED:
+            return
+        mean = statistics.fmean(self.sample.rewards)
+        std = statistics.pstdev(self.sample.rewards)
+        place = band_place(mean, self.band.low, self.band.high)
+        result: CalibrationResult
+        if place in (BAND_BELOW, BAND_ABOVE):
+            result = place
+        elif round(std, COMPARISON_DECIMALS) < self.min_std:
+            result = CALIBRATION_NO_VARIANCE
+        else:
+            result = CALIBRATION_KEPT
+        object.__setattr__(self, "mean", mean)
+        object.__setattr__(self, "std", std)
+        object.__setattr__(self, "place", place)
+        object.__setattr__(self, "result", result)
+
+
+def validate_calibration(rollouts: int, max_rollouts: int, margin: float, min_std: float) -> None:
+    """Validate the sampling rule, including configurations whose calibration mode is off."""
+    if rollouts < CALIBRATION_MIN_SCORED:
+        raise ValueError(f"calibration_rollouts must be at least {CALIBRATION_MIN_SCORED}")
+    if max_rollouts < rollouts:
+        raise ValueError("calibration_max_rollouts must be at least calibration_rollouts")
+    if not 0 <= margin <= 1:
+        raise ValueError("calibration_margin must be in [0, 1]")
+    if not 0 <= min_std <= 0.5:
+        raise ValueError("calibration_min_std must be in [0, 0.5]")
+
+
 class CalibrationCheck(TaskCheck):
     """Rollouts of the current solver on the task: their mean reward must lie inside the band, and must vary.
 
     Values: ``rollouts`` is at least :data:`CALIBRATION_MIN_SCORED`, ``max_rollouts`` at least ``rollouts``,
-    ``margin`` in [0, 1] and ``min_std`` in [0, 0.5]. ``band_low`` and ``band_high`` are each in [0, 1] or null, and
-    ``band_low`` does not exceed ``band_high``; a null bound is no bound and no edge. The rollouts run on the
+    ``margin`` in [0, 1] and ``min_std`` in [0, 0.5]. ``band`` is the generator's immutable PassRateBand;
+    a null bound is no bound and no edge. The rollouts run on the
     generator service ``service`` under ``scenario``, on the arm :data:`CALIBRATION_ARM`, with ``model``: a model
     name, or None for the service's default model.
     Purpose: ``from_config`` builds it from the ``calibration`` keys and puts it last in ``task_checks``.
@@ -297,6 +414,8 @@ class CalibrationCheck(TaskCheck):
     measures could not run.
     """
 
+    stage: Literal["check", "calibration"] = "calibration"
+
     def __init__(
         self,
         service: Generator,
@@ -306,21 +425,11 @@ class CalibrationCheck(TaskCheck):
         max_rollouts: int,
         margin: float,
         min_std: float,
-        band_low: float | None,
-        band_high: float | None,
+        band: PassRateBand,
         model: str | None = None,
         is_refusing: bool = True,
     ) -> None:
-        if rollouts < CALIBRATION_MIN_SCORED:
-            raise ValueError(f"calibration_rollouts must be at least {CALIBRATION_MIN_SCORED}")
-        if max_rollouts < rollouts:
-            raise ValueError("calibration_max_rollouts must be at least calibration_rollouts")
-        if not 0 <= margin <= 1:
-            raise ValueError("calibration_margin must be in [0, 1]")
-        # The population standard deviation of rewards in [0, 1] is at most 0.5.
-        if not 0 <= min_std <= 0.5:
-            raise ValueError("calibration_min_std must be in [0, 0.5]")
-        validate_band(band_low, band_high)
+        validate_calibration(rollouts, max_rollouts, margin, min_std)
         super().__init__("calibration", is_refusing=is_refusing)
         self.service = service
         self.scenario = scenario
@@ -328,8 +437,7 @@ class CalibrationCheck(TaskCheck):
         self.max_rollouts = max_rollouts
         self.margin = margin
         self.min_std = min_std
-        self.band_low = band_low
-        self.band_high = band_high
+        self.band = band
         self.model = model
 
     def settings(self) -> dict[str, object]:
@@ -347,85 +455,89 @@ class CalibrationCheck(TaskCheck):
         """Whether ``mean`` is within ``margin`` of a band edge, on either side of it."""
         return any(
             round(abs(mean - edge), COMPARISON_DECIMALS) <= self.margin
-            for edge in (self.band_low, self.band_high)
+            for edge in (self.band.low, self.band.high)
             if edge is not None
         )
 
-    async def run(self, task: HarborTask, written: WrittenTask) -> CheckResult:
+    async def sample(self, task: HarborTask, written: WrittenTask) -> CalibrationSample:
+        """Sample, retry unscored rollouts once per batch, and expand near either band edge."""
         rollouts: list[TaskRollout] = []
-        asked: list[int] = []
-
-        async def play(count: int) -> None:
-            # count rollouts, then once more as many as could not run.
-            for _ in range(2):
-                asked.append(count)
-                played = await self.service.run_rollouts(
-                    written.path,
-                    scenario=self.scenario,
-                    arm=CALIBRATION_ARM,
-                    count=count,
-                    extra_instruction_files=(),
-                    tags={"role": "calibration"},
-                    model=self.model,
-                )
-                rollouts.extend(played)
-                count = sum(rollout.is_infrastructure_failure for rollout in played)
-                if count == 0:
-                    return
-
+        asked = 0
         is_expanded = False
         failure = ""
+        count = self.rollouts
         try:
-            await play(self.rollouts)
-            rewards = rewards_of(tuple(rollouts))
-            if rewards and len(rewards) < self.max_rollouts and self.is_near_an_edge(statistics.fmean(rewards)):
+            for batch in range(2):
+                for _ in range(2):
+                    asked += count
+                    played = await self.service.run_rollouts(
+                        written.path,
+                        scenario=self.scenario,
+                        arm=CALIBRATION_ARM,
+                        count=count,
+                        extra_instruction_files=(),
+                        tags={"role": "calibration"},
+                        model=self.model,
+                    )
+                    rollouts.extend(played)
+                    count = sum(rollout.is_infrastructure_failure for rollout in played)
+                    if count == 0:
+                        break
+                rewards = rewards_of(tuple(rollouts))
+                if batch == 1 or not rewards or len(rewards) >= self.max_rollouts:
+                    break
+                if not self.is_near_an_edge(statistics.fmean(rewards)):
+                    break
                 is_expanded = True
-                await play(self.max_rollouts - len(rewards))
+                count = self.max_rollouts - len(rewards)
         except GeneratorError as exc:
             if self.is_refusing:
                 raise
             failure = f"the calibration rollouts of {task.name} could not run: {exc}"
-        rewards = rewards_of(tuple(rollouts))
-        rollout_errors = [rollout.error for rollout in rollouts if rollout.error]
-        details: dict[str, object] = {
-            # The mode this result was made under: the report's calibration settings are those at its close.
+        return CalibrationSample(
+            rewards=rewards_of(tuple(rollouts)),
+            asked=asked,
+            unscored=sum(rollout.is_infrastructure_failure for rollout in rollouts),
+            expanded=is_expanded,
+            errors=tuple(rollout.error for rollout in rollouts if rollout.error),
+            failure=failure,
+        )
+
+    async def run(self, task: HarborTask, written: WrittenTask) -> CheckResult:
+        sample = await self.sample(task, written)
+        outcome = CalibrationOutcome(sample, self.band, self.min_std)
+        details = {
             "mode": "refuse" if self.is_refusing else "measure",
-            "rewards": list(rewards),
-            "mean": None,
-            "std": None,
-            "rollouts_asked": sum(asked),
-            "unscored": sum(rollout.is_infrastructure_failure for rollout in rollouts),
-            "expanded": is_expanded,
-            "place": None,
-            "result": CALIBRATION_OUTAGE,
-            "rollout_errors": [error[:ERROR_CHARS] for error in rollout_errors[:CALIBRATION_ERRORS]],
+            "rewards": list(sample.rewards),
+            "mean": outcome.mean,
+            "std": outcome.std,
+            "rollouts_asked": sample.asked,
+            "unscored": sample.unscored,
+            "expanded": sample.expanded,
+            "place": outcome.place,
+            "result": outcome.result,
+            "rollout_errors": [error[:ERROR_CHARS] for error in sample.errors[:CALIBRATION_ERRORS]],
         }
-        if failure:
-            return CheckResult(self.name, could_not_run=failure[:ERROR_CHARS], details=details)
-        if len(rewards) < CALIBRATION_MIN_SCORED:
-            # The task itself may keep its rollouts from running, so too few scores end this task's check, not the round.
-            first_error = rollout_errors[0] if rollout_errors else "no rollout came back"
+        if sample.failure:
+            return CheckResult(self.name, could_not_run=sample.failure[:ERROR_CHARS], details=details)
+        if outcome.result == CALIBRATION_OUTAGE:
+            first_error = sample.errors[0] if sample.errors else "no rollout came back"
             reason = (
-                f"{len(rewards)} of {sum(asked)} calibration rollouts of {task.name} scored, too few to measure its "
+                f"{len(sample.rewards)} of {sample.asked} calibration rollouts of {task.name} scored, too few to measure its "
                 f"difficulty: {first_error[:ERROR_CHARS]}"
             )
             return CheckResult(self.name, could_not_run=reason, details=details)
-        mean = statistics.fmean(rewards)
-        std = statistics.pstdev(rewards)
-        place = band_place(mean, self.band_low, self.band_high)
-        measured = f"over {len(rewards)} calibration rollouts"
-        if place == BAND_BELOW:
-            result = place
-            error = f"the solver's mean reward {measured}, {mean:.2f}, is below band_low {self.band_low}"
-        elif place == BAND_ABOVE:
-            result = place
-            error = f"the solver's mean reward {measured}, {mean:.2f}, is above band_high {self.band_high}"
-        elif round(std, COMPARISON_DECIMALS) < self.min_std:
-            result = CALIBRATION_NO_VARIANCE
-            error = f"the population std of the solver's rewards {measured}, {std:.3f}, is below {self.min_std}"
+        measured = f"over {len(sample.rewards)} calibration rollouts"
+        if outcome.result == BAND_BELOW:
+            error = f"the solver's mean reward {measured}, {outcome.mean:.2f}, is below band_low {self.band.low}"
+        elif outcome.result == BAND_ABOVE:
+            error = f"the solver's mean reward {measured}, {outcome.mean:.2f}, is above band_high {self.band.high}"
+        elif outcome.result == CALIBRATION_NO_VARIANCE:
+            error = (
+                f"the population std of the solver's rewards {measured}, {outcome.std:.3f}, is below {self.min_std}"
+            )
         else:
-            result, error = CALIBRATION_KEPT, ""
-        details = {**details, "mean": mean, "std": std, "place": place, "result": result}
+            error = ""
         return CheckResult(self.name, (error,) if error else (), details=details)
 
 
@@ -463,16 +575,17 @@ def reference_instructions(root: Path) -> dict[str, str]:
 class ContaminationCheck(TaskCheck):
     """The task's instruction must share no n-gram of word tokens with the instruction of a reference task.
 
-    Values: ``n`` is at least 1. ``index`` maps each n-gram of a reference instruction to the reference tasks
-    whose instruction holds it, in name order. Each reference task is indexed on its own, so no n-gram spans two
+    Values: ``n`` is at least 1. ``index`` maps each n-gram of a reference instruction to the first reference task
+    by name whose instruction holds it. Each reference task is indexed on its own, so no n-gram spans two
     tasks. ``reference_task_count`` is the number of reference tasks, and ``tasks_path`` the directory they were
     read from, as the config gives it.
     Purpose: ``from_config`` builds it from the ``contamination`` keys and puts it in ``task_checks`` right after
     the oracle check. ``validate`` runs it on each task, and the generation report keeps its result.
 
-    The rule is upstream's, after Tmax: the tokens are :func:`instruction_tokens`, and the n-grams
-    :func:`instruction_ngrams`. Any shared n-gram is a defect. The index is built once, so the check never fails
-    to run. It makes no model call and runs no sandbox.
+    Tokens follow :func:`instruction_tokens` and windows follow :func:`instruction_ngrams`.
+    The recipe README's Contamination section gives the source of the default window size.
+    Any shared n-gram is a defect. The index is built once, so the check never fails to run.
+    It makes no model call and runs no sandbox.
     """
 
     def __init__(self, instructions: Mapping[str, str], *, n: int, tasks_path: str, is_refusing: bool = True) -> None:
@@ -482,18 +595,17 @@ class ContaminationCheck(TaskCheck):
         self.n = n
         self.tasks_path = tasks_path
         self.reference_task_count = len(instructions)
-        index: dict[str, list[str]] = {}
+        self.index: dict[str, str] = {}
         for name in sorted(instructions):
             for ngram in set(instruction_ngrams(instruction_tokens(instructions[name]), n)):
-                index.setdefault(ngram, []).append(name)
-        self.index: dict[str, tuple[str, ...]] = {ngram: tuple(names) for ngram, names in index.items()}
+                self.index.setdefault(ngram, name)
 
     async def run(self, task: HarborTask, written: WrittenTask) -> CheckResult:
         # Each distinct shared n-gram, in the instruction's order, and the first reference task that holds it.
         shared: dict[str, str] = {}
         for ngram in instruction_ngrams(instruction_tokens(task.instruction), self.n):
             if ngram in self.index and ngram not in shared:
-                shared[ngram] = self.index[ngram][0]
+                shared[ngram] = self.index[ngram]
         hits = [
             {"reference_task": name, "ngram": ngram[:CONTAMINATION_NGRAM_CHARS]}
             for ngram, name in list(shared.items())[:CONTAMINATION_HITS]
