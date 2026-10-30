@@ -4,7 +4,7 @@ Reproduction of [Self-Distillation Fine-Tuning](https://arxiv.org/abs/2601.19897
 
 - Paper: [arXiv:2601.19897](https://arxiv.org/abs/2601.19897)
 - Reference implementation: [idanshen/Self-Distillation](https://github.com/idanshen/Self-Distillation) at `d77573212fa0`; the recipe's processor maps onto its `main.py` (the demonstration prompt) and the Slime backend's distillation base (`reef/train/slime_backend/distill/`, which the `sdft` family configures) onto `distil_trainer.py` (the loss). Forward KL is the default, as the authors' 2026-04-07 note says the paper's results used it; reverse KL is a switch.
-- Pins: `slime` pinned to `THUDM/slime@41014d1f29e201137fdffce737bb8bac65bc5219` (via `pyproject.toml` `dependency-groups.runtime`)
+- Pins: `slime` pinned to `THUDM/slime@540ea919e45b8b929198abce008a103be9cfc779` (via `pyproject.toml` `dependency-groups.runtime`)
 - Claim scope: [SDFT on a skill stream](examples/skill_stream/README.md), the paper's Figure 3 protocol (Tool Use, then Science Q&A) against an SFT control on the same demonstrations. The CEO-Bench comparison is the roadmap's next item ([#502](https://github.com/Human-Agent-Society/reef/issues/502)).
 
 ## Layout

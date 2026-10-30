@@ -14,10 +14,15 @@ engines load its weights from files.
 |                          | Slime training component, which queues the    |
 |                          | jobs and starts their drivers                 |
 +--------------------------+-----------------------------------------------+
-| Slime driver (one per    | the job's GPUs, Slime's training workers and, |
-| job, while it trains)    | for a task job, its rollout engines; it       |
-|                          | continues the latest checkpoint, with its     |
-|                          | optimizer state, and saves the job's own      |
+| Slime driver (one per    | Slime's training workers; it continues the    |
+| job, while it trains)    | latest checkpoint, with its optimizer state,  |
+|                          | and saves the job's own. Without a serving    |
+|                          | session, it also reserves the job's GPUs      |
++--------------------------+-----------------------------------------------+
+| Slime serving session    | the rollout engines of task jobs, their       |
+| (from the first task job | router and the training GPUs, across jobs     |
+| until the component      |                                               |
+| closes)                  |                                               |
 +--------------------------+-----------------------------------------------+
 | Inference component      | SGLang or vLLM engines on their own GPUs,     |
 | (service ``inference``)  | serving the published weights                 |

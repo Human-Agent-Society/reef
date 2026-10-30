@@ -212,3 +212,27 @@ def test_checkpoint_preflight_preserves_invalid_interval_for_validation(tmp_path
     with pytest.raises(ValueError, match="critic_save_interval"):
         prepare_checkpoint_storage(args, RetentionConfig())
     assert not (tmp_path / "megatron").exists()
+
+
+@pytest.mark.unit
+def test_slime_parses_tensor_parallel_arguments_without_the_workers_cuda_variable(monkeypatch) -> None:
+    """Megatron's check wants CUDA_DEVICE_MAX_CONNECTIONS=1 in the parsing process: the HTTP service and each driver."""
+    slime_parser = pytest.importorskip("slime.utils.arguments")
+
+    from reef.train.slime_backend.reef_adapters import slime_arguments, startup
+    from reef.train.slime_backend.reef_adapters.megatron import hf_arguments
+
+    seen: list[str | None] = []
+
+    def parse_args(add_custom_arguments):
+        import os
+
+        seen.append(os.environ.get("CUDA_DEVICE_MAX_CONNECTIONS"))
+        return argparse.Namespace()
+
+    monkeypatch.delenv("CUDA_DEVICE_MAX_CONNECTIONS", raising=False)
+    monkeypatch.setattr(slime_parser, "parse_args", parse_args)
+    monkeypatch.setattr(hf_arguments, "add_hf_architecture_arguments", lambda arguments: list(arguments))
+    monkeypatch.setattr(slime_arguments, "finalize_reef_slime_args", lambda args, arguments: None)
+    startup.parse_slime_args(["--tensor-model-parallel-size=4"])
+    assert seen == ["1"]
