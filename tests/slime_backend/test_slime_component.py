@@ -457,32 +457,6 @@ def test_the_base_artifact_is_the_startup_model_and_the_base_start_names_the_sta
 
 
 @pytest.mark.unit
-def test_a_fresh_start_resets_the_workers_training_state_once_and_keeps_the_weights(tmp_path, stacks) -> None:
-    stack = stacks(tmp_path, critic=True)
-    first = stack.run(TrainingMethod("sft"), step=0)
-
-    fresh = stack.component.fresh_start(first.checkpoints[0].path)
-
-    assert fresh == str(tmp_path / "reef-starts" / "fresh_rollout_0")
-    assert SlimeStart.read(Path(fresh)) == SlimeStart(0, None, {}, None, fresh=True)
-    stack.start = fresh
-    second = stack.run(TrainingMethod("sft"), step=1)
-    # The workers reset before the job trained, and the objective's state started empty.
-    assert (stack.group.events, stack.critic.events) == (["reset"], ["reset"])
-    assert second.metrics["rollout_id"] == 1
-    assert SlimeStart.read(Path(second.checkpoints[0].path)) == SlimeStart(1, "sft", {"steps": 1}, None)
-    # The next job continues from the checkpoint and does not reset again.
-    stack.run(TrainingMethod("sft"), step=2)
-    assert stack.group.events == ["reset"]
-    # The same start gives the same fresh start; a job from it is refused once the workers moved on.
-    assert stack.component.fresh_start(first.checkpoints[0].path) == fresh
-    job = TrainingJob("late", "slime", fresh, batch_for(3), parameters(TrainingMethod("sft")))
-    with pytest.raises(ValueError, match="hold the weights of rollout 2"):
-        stack.component.submit(job)
-    assert stack.component.fresh_start(stack.component.base_start) == str(tmp_path / "reef-starts" / "fresh_startup")
-
-
-@pytest.mark.unit
 def test_a_job_of_another_objective_starts_with_an_empty_objective_state(tmp_path, stacks) -> None:
     stack = stacks(tmp_path)
     stack.run(TrainingMethod("sft"), step=0)
@@ -1043,16 +1017,10 @@ def test_a_slime_start_and_the_worker_settings_check_their_values() -> None:
         SlimeStart(0, None, {"steps": 1}, None)
     with pytest.raises(ValueError, match="objective of a non-empty state, and only of one"):
         SlimeStart(0, "sft", {}, None)
-    with pytest.raises(ValueError, match="a fresh SlimeStart has no objective state and no schedule progress"):
-        SlimeStart(0, None, {}, LearningRateScheduleState(WARMUP, 1), fresh=True)
-    with pytest.raises(ValueError, match="a fresh SlimeStart has no objective state and no schedule progress"):
-        SlimeStart(0, "sft", {"steps": 1}, None, fresh=True)
     with pytest.raises(ValueError, match="algorithm_state must encode as JSON"):
         SlimeStart(0, "sft", {"steps": float("nan")}, None)
     with pytest.raises(TypeError, match="schedule_state must be a LearningRateScheduleState"):
         SlimeStart(0, None, {}, {"completed_steps": 1})  # type: ignore[arg-type]
-    with pytest.raises(TypeError, match="fresh must be a bool"):
-        SlimeStart(0, None, {}, None, fresh=1)  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="loss_family must be a non-empty string"):
         WorkerTrainingSettings("", None)
     with pytest.raises(TypeError, match="schedule_state must be a LearningRateScheduleState"):
@@ -1067,7 +1035,6 @@ def test_a_slime_start_and_the_worker_settings_check_their_values() -> None:
         ({"step": True}, ValueError, "step must be a positive int"),
         ({"step": 0}, ValueError, "step must be a positive int"),
         ({"next_schedule": LearningRateScheduleState(WARMUP, 1)}, ValueError, "before and after the rollout"),
-        ({"fresh": None}, TypeError, "fresh must be a bool"),
         ({"objective": None, "algorithm_state": {"steps": 1}}, ValueError, "objective of a non-empty state"),
     ],
 )
@@ -1077,7 +1044,6 @@ def test_a_slime_rollout_checks_its_values(values, error, message) -> None:
         "step": 1,
         "schedule_state": None,
         "next_schedule": None,
-        "fresh": False,
         "objective": "sft",
         "algorithm_state": {"steps": 1},
     }

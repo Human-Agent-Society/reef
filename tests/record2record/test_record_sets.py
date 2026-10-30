@@ -1,8 +1,7 @@
-"""Record sets, record set units and their pool: the type definitions, selection order, reservations, and staleness."""
+"""Record sets and record set units: the type definitions, the one-set-per-record rule, ready units, and staleness."""
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -14,21 +13,17 @@ from reef.core.artifact_ref import RuntimeLoadSpan
 from reef.core.job_data import TaskSample
 from reef.core.plugins import PluginConfigError
 from reef.record2record import (
-    ArrivalOrder,
-    GroupKeyOrder,
     InferenceRecord2Record,
     Record2RecordSettings,
     RecordSet,
     RecordSetUnit,
-    RecordSetUnitPool,
     ReportGrouping,
     ReportRecord2Record,
     SampleStatus,
-    SelectionPolicy,
     SingleRecordSet,
     SingleSetUnit,
 )
-from reef.record2record.staleness import producing_runtime_load_ids, stale_units
+from reef.record2record.staleness import is_stale, producing_runtime_load_ids
 from reef.record2sample import SampleResult
 from reef.train import PipelineContext
 
@@ -59,49 +54,37 @@ class ManySetUnit(RecordSetUnit):
         return self.held
 
 
-def single(record_id: str, arrival_index: int) -> SingleRecordSet:
-    return SingleRecordSet(set_id=record_id, arrival_index=arrival_index, record=inference(record_id))
-
-
-def named(unit_id: str, arrival_index: int, group_key: int | None = None) -> RecordSetUnit:
-    """A unit of one inference record whose ID is ``unit_id``."""
-    return ManySetUnit(
-        unit_id=unit_id, arrival_index=arrival_index, group_key=group_key, held=(single(unit_id, arrival_index),)
-    )
-
-
-class ForeignUnit(SelectionPolicy):
-    def select(self, candidates: Sequence[RecordSetUnit], max_unit_count: int) -> tuple[RecordSetUnit, ...]:
-        return (named("not-held", 1),)
+def single(record_id: str) -> SingleRecordSet:
+    return SingleRecordSet(set_id=record_id, record=inference(record_id))
 
 
 def test_a_record_set_holds_one_or_more_records_and_every_record_they_reference() -> None:
-    assert RecordsSet(set_id="r", arrival_index=1, held=(inference("i"), report("r", "i"))).record_ids() == ("i", "r")
+    assert RecordsSet(set_id="r", held=(inference("i"), report("r", "i"))).record_ids() == ("i", "r")
     with pytest.raises(ValueError, match="one or more records"):
-        RecordsSet(set_id="empty", arrival_index=1, held=())
+        RecordsSet(set_id="empty", held=())
     with pytest.raises(ValueError, match=r"does not hold the referenced records \['i'\]"):
-        RecordsSet(set_id="r", arrival_index=1, held=(report("r", "i"),))
+        RecordsSet(set_id="r", held=(report("r", "i"),))
 
 
 def test_a_record_set_unit_holds_one_or_more_record_sets_and_consumes_all_their_records() -> None:
-    unit = ManySetUnit(unit_id="u", arrival_index=1, held=(single("a", 1), single("b", 2)))
+    unit = ManySetUnit(unit_id="u", held=(single("a"), single("b")))
     assert unit.set_ids() == ("a", "b")
     assert unit.consumed_ids() == frozenset({"a", "b"})
-    record_set = single("c", 3)
-    assert SingleSetUnit.of(record_set) == SingleSetUnit(unit_id="c", arrival_index=3, record_set=record_set)
+    record_set = single("c")
+    assert SingleSetUnit.of(record_set) == SingleSetUnit(unit_id="c", record_set=record_set)
     with pytest.raises(ValueError, match="one or more record sets"):
-        ManySetUnit(unit_id="empty", arrival_index=1, held=())
+        ManySetUnit(unit_id="empty", held=())
 
 
 def test_a_stage_puts_a_record_in_one_record_set_only() -> None:
     stage = InferenceRecord2Record()
-    stage.form(RecordsSet(set_id="first", arrival_index=1, held=(inference("i"), report("r1", "i"))))
+    stage.form(RecordsSet(set_id="first", held=(inference("i"), report("r1", "i"))))
     # A retry of a set takes its records again.
-    stage.form(RecordsSet(set_id="first", arrival_index=1, held=(inference("i"), report("r1", "i"))))
+    stage.form(RecordsSet(set_id="first", held=(inference("i"), report("r1", "i"))))
     with pytest.raises(ValueError, match=r"records \['i'\] are in another record set"):
-        stage.form(RecordsSet(set_id="second", arrival_index=2, held=(inference("i"), report("r2", "i"))))
+        stage.form(RecordsSet(set_id="second", held=(inference("i"), report("r2", "i"))))
     stage.release_records(frozenset({"i", "r1"}))
-    stage.form(RecordsSet(set_id="second", arrival_index=2, held=(inference("i"), report("r2", "i"))))
+    stage.form(RecordsSet(set_id="second", held=(inference("i"), report("r2", "i"))))
 
 
 def test_a_ready_result_holds_one_or_more_samples_and_a_skipped_result_none() -> None:
@@ -112,57 +95,16 @@ def test_a_ready_result_holds_one_or_more_samples_and_a_skipped_result_none() ->
             SampleResult(status, samples)
 
 
-def test_arrival_order_takes_the_oldest_units_up_to_the_maximum_count() -> None:
-    candidates = (named("c", 3), named("a", 1), named("b", 2))
-    assert [selected.unit_id for selected in ArrivalOrder().select(candidates, 2)] == ["a", "b"]
-
-
-def test_group_key_order_takes_ungrouped_units_before_groups_in_key_order() -> None:
-    candidates = (named("late-group", 1, group_key=2), named("single", 3), named("early-group", 2, group_key=1))
-    selected = GroupKeyOrder().select(candidates, 3)
-    assert [chosen.unit_id for chosen in selected] == ["single", "early-group", "late-group"]
-
-
-def test_a_reservation_does_not_change_until_it_is_consumed() -> None:
-    pool = RecordSetUnitPool()
-    for name in ("a", "b", "c"):
-        pool.put(named(name, pool.next_arrival_index()))
-    reserved = pool.reserve(pool.ordered_units()[:2])
-    pool.remove("a")
-    pool.put(named("d", pool.next_arrival_index()))
-    assert pool.reserved_units() == reserved
-    # The consumed batch includes a reserved unit that was removed after the reservation.
-    assert [consumed.unit_id for consumed in pool.consume_reserved()] == ["a", "b"]
-    assert [remaining.unit_id for remaining in pool.units()] == ["c", "d"]
-    assert pool.reserved_units() == ()
-
-
-def test_a_reservation_refuses_a_repeated_unit_and_units_the_pool_does_not_hold() -> None:
-    pool = RecordSetUnitPool()
-    held = named("held", pool.next_arrival_index())
-    pool.put(held)
-    with pytest.raises(ValueError, match="more than one time"):
-        pool.reserve((held, held))
-    with pytest.raises(ValueError, match="units that the pool holds"):
-        pool.reserve((named("not-held", 2),))
-    assert pool.reserved_units() == ()
-
-
-def test_the_pool_refuses_a_selection_policy_that_returns_units_it_does_not_hold() -> None:
-    pool = RecordSetUnitPool(ForeignUnit())
-    pool.put(named("held", pool.next_arrival_index()))
-    with pytest.raises(ValueError, match="does not hold"):
-        pool.ordered_units()
+def test_a_stage_hands_out_each_ready_unit_once_in_the_order_it_first_became_ready() -> None:
+    stage = InferenceRecord2Record()
+    for name in ("a", "b", "a"):
+        stage.settle(single(name), SampleStatus.READY)
+    assert [unit.unit_id for unit in stage.take_ready_units()] == ["a", "b"]
+    assert stage.take_ready_units() == ()
 
 
 def test_staleness_check_measures_lag_in_versions_the_scenario_served() -> None:
-    units = tuple(
-        named(name, index)
-        for index, name in enumerate(
-            ("current", "one-behind", "two-behind", "never-served", "unknown", "mixed", "rolled-out"), start=1
-        )
-    )
-    producing_runtime_load_ids_by_set = {
+    versions = {
         "current": frozenset({"e:5"}),
         "one-behind": frozenset({"e:4"}),
         "two-behind": frozenset({"e:3"}),
@@ -174,13 +116,11 @@ def test_staleness_check_measures_lag_in_versions_the_scenario_served() -> None:
     # The engine sequence skips e:2: lag counts the scenario's own versions, not sequence numbers.
     served = ("e:1", "e:3", "e:4", "e:5")
     stale = {"two-behind", "never-served", "unknown", "mixed"}
-    assert {unit.unit_id for unit in stale_units(units, producing_runtime_load_ids_by_set, served, 1)} == stale
+    assert {name for name, produced in versions.items() if is_stale(produced, served, 1)} == stale
     # Window 0 keeps only data of the current version, and data that the algorithm rolls out.
-    assert {unit.unit_id for unit in stale_units(units, producing_runtime_load_ids_by_set, served, 0)} == stale | {
-        "one-behind"
-    }
+    assert {name for name, produced in versions.items() if is_stale(produced, served, 0)} == stale | {"one-behind"}
     # An unknown serving version checks nothing.
-    assert stale_units(units, producing_runtime_load_ids_by_set, (), 0) == ()
+    assert not any(is_stale(produced, (), 0) for produced in versions.values())
 
 
 def test_producing_runtime_load_ids_come_from_every_sample_and_token_span() -> None:
@@ -197,22 +137,19 @@ def test_producing_runtime_load_ids_come_from_every_sample_and_token_span() -> N
     assert producing_runtime_load_ids(tasks) == frozenset({"e:1", "e:2", "e:3", None})
 
 
-def test_the_stage_drops_held_units_behind_the_serving_version_but_not_a_reserved_batch() -> None:
+def test_the_stage_finds_samples_behind_the_serving_version_stale() -> None:
     stage = InferenceRecord2Record()
-    for record_id, version in (("old", "e:1"), ("new", "e:2")):
-        stage.settle(single(record_id, stage.pool.next_arrival_index()), SampleStatus.READY, frozenset({version}))
+    old = policy_trajectory("old", (1, 2), (1,), (-0.1,), 1.0, runtime_load_id="e:1")
+    new = policy_trajectory("new", (1, 2), (1,), (-0.1,), 1.0, runtime_load_id="e:2")
+    unversioned = policy_trajectory("unversioned", (1, 2), (1,), (-0.1,), 1.0)
+    # Before the serving version is known, no sample is stale.
+    assert not stage.is_stale((old, unversioned))
     stage.observe_serving_runtime_load_id("e:1")
     stage.observe_serving_runtime_load_id("e:2")
-    stage.pool.reserve(stage.pool.ordered_units())
-    stage.drop_stale_units()
-    assert len(stage.pool) == 2
-
-    stage.pool.release_reservation()
-    stage.drop_stale_units()
-    assert [held.unit_id for held in stage.pool.units()] == ["new"]
-    assert stage.take_ended() == frozenset({"old"})
-    assert "old" in stage.releasable_record_ids()
-    assert set(stage.producing_runtime_load_ids) == {"new"}
+    assert stage.is_stale((old,)) and not stage.is_stale((new,))
+    assert stage.is_stale((new, old)), "one stale sample makes the samples stale"
+    assert stage.is_stale((unversioned,)), "a sample without a producing version is stale"
+    assert not stage.is_stale((TaskSample(Path("task")),)), "a task rolls out with the weights it trains"
 
 
 def test_record_stage_settings_default_to_zero_and_refuse_a_negative_limit() -> None:
@@ -224,15 +161,15 @@ def test_record_stage_settings_default_to_zero_and_refuse_a_negative_limit() -> 
         InferenceRecord2Record.from_config({"max_staleness": -1}, context=PipelineContext("s"), environ={})
 
 
-def test_a_stage_drops_only_the_units_more_than_its_configured_limit_behind() -> None:
+def test_a_stage_finds_only_the_samples_more_than_its_configured_limit_behind_stale() -> None:
     stage = InferenceRecord2Record.from_config({"max-staleness": 1}, context=PipelineContext("s"), environ={})
-    for record_id, version in (("two-behind", "e:1"), ("one-behind", "e:2"), ("current", "e:3")):
-        stage.settle(single(record_id, stage.pool.next_arrival_index()), SampleStatus.READY, frozenset({version}))
     for version in ("e:1", "e:2", "e:3"):
         stage.observe_serving_runtime_load_id(version)
-    stage.drop_stale_units()
-    assert [held.unit_id for held in stage.pool.units()] == ["one-behind", "current"]
-    assert stage.take_ended() == frozenset({"two-behind"})
+    stale = {
+        name: stage.is_stale((policy_trajectory(name, (1, 2), (1,), (-0.1,), 1.0, runtime_load_id=version),))
+        for name, version in (("two-behind", "e:1"), ("one-behind", "e:2"), ("current", "e:3"))
+    }
+    assert stale == {"two-behind": True, "one-behind": False, "current": False}
 
 
 def test_a_serving_version_of_another_incarnation_restarts_the_served_versions() -> None:

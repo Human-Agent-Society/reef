@@ -32,12 +32,13 @@ from reef.runtime.interfaces import InferenceHandler, InferenceRuntime, Multimod
 from reef.runtime.jobs import ReleaseLayout, TrainingComponent
 from reef.sample2job import NoJobData
 from reef.storage.records import RecordStore
+from reef.storage.samples import SAMPLE_KINDS, SampleKind, SampleStore, TrainerSamples
 from reef.storage.tasks import TaskStorage
 from reef.surface.base import AcceptAnyArtifact, Surface
 from reef.surface.weights import create_weight_surface
 from reef.train.algos.registry import resolve_objective
 from reef.train.backend import CommittedReleases, ComponentReleases
-from reef.train.jobs import FixedJobPlan, JobLoop, JobPlan, JobRequest
+from reef.train.jobs import JobLoop
 from reef.train.pipeline import PipelineConfig, PipelineSpec, TrainingPipeline
 from reef.train.trainer import ComponentTrainer, Trainer
 
@@ -105,8 +106,8 @@ class Recipe:
     activation: PluginReference | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
-        if self.training_mode not in ("auto", "manual", "hybrid"):
-            raise ValueError("training_mode must be 'auto', 'manual' or 'hybrid'")
+        if self.training_mode not in ("auto", "manual"):
+            raise ValueError("training_mode must be 'auto' or 'manual'")
         # The stages' classes fail the deployment here, not the first scenario.
         self.stages()
 
@@ -253,6 +254,7 @@ class Recipe:
         experiment_logger: ExperimentLogger | None = None,
         task_storage: TaskStorage | None = None,
         releases: ComponentReleases | None = None,
+        samples: TrainerSamples | None = None,
     ) -> Trainer:
         return Trainer.build(
             scenario,
@@ -263,6 +265,7 @@ class Recipe:
             experiment_logger=experiment_logger,
             training_mode=self.training_mode,
             task_storage=task_storage,
+            samples=samples,
         )
 
     def build_trainers(
@@ -275,6 +278,7 @@ class Recipe:
         experiment_logger: ExperimentLogger | None = None,
         task_storage: TaskStorage | None = None,
         releases: CommittedReleases | None = None,
+        samples: SampleStore | None = None,
     ) -> tuple[ComponentTrainer, ...]:
         """Build every trainer of the named scenario, each bound to the component it evolves.
 
@@ -285,7 +289,11 @@ class Recipe:
         separate workers that take turns, one step at a time.
         ``algorithm_states`` carries each one's recovered state under its
         component name. ``task_storage`` opens the generated task stores of
-        the scenario session. Each trainer gives it to its pipeline.
+        the scenario session, and ``samples`` is its sample store. Each trainer
+        gives them to its pipeline; a trainer reads the samples as
+        ``TrainerSamples`` of its key (``""`` for the only trainer).
+        ``releases`` reads the scenario's committed releases; each trainer
+        reads those of its own component.
         """
         if len(surface.names) > 1:
             raise RecipeConfigError(
@@ -303,6 +311,7 @@ class Recipe:
                     experiment_logger=experiment_logger,
                     task_storage=task_storage,
                     releases=None if releases is None else ComponentReleases(releases, component),
+                    samples=None if samples is None else TrainerSamples(samples),
                 ),
             ),
         )
@@ -396,7 +405,7 @@ class WeightTrainingSpec:
 
     ``objective`` is the recipe's objective: a registered name or a dotted
     ``package.module:Objective`` reference. Every job trains with it unless
-    the recipe overrides :meth:`WeightTrainingRecipe.job_plan`. How a job's
+    the recipe overrides :meth:`WeightTrainingRecipe.parameters_by_kind`. How a job's
     data is cut into optimizer steps belongs to the training component.
     """
 
@@ -439,8 +448,8 @@ class WeightTrainingRecipe(Recipe):
     job_parameters: Mapping[str, Any] | None = config_field(
         None,
         help=(
-            "Job parameters that the default job plan sends with every job, beside method; the training "
-            "component refuses a parameter it does not take."
+            "Job parameters that the recipe sends with every job, beside method; the training component "
+            "refuses a parameter it does not take."
         ),
     )
 
@@ -452,23 +461,22 @@ class WeightTrainingRecipe(Recipe):
         """
         return WeightTrainingSpec(objective="")
 
-    def job_plan(self) -> JobPlan:
-        """How this recipe chooses each training job.
+    def parameters_by_kind(self) -> Mapping[SampleKind, Mapping[str, Any]]:
+        """The parameters of each training job, by the kind of the job's samples.
 
-        The default submits one job each time job data is ready to the recipe's
-        training component, with ``training_spec()``'s objective (the
-        parameter ``method``) and the ``job_parameters`` config, such as a
-        ``scheduling`` or a ``save_interval``. The component's own defaults
-        fill the rest, such as its learning rate. A recipe that switches methods
-        within one run (a supervised phase before policy training, a
-        distillation phase after it) returns its own plan, built from its
-        config fields; the training component switches the objective from one
-        job to the next.
+        The pipeline's sample-to-job stage gives a job the parameters of its
+        samples' kind (``Sample2Job.job_parameters``). The default gives every
+        job ``training_spec()``'s objective (the parameter ``method``) and the
+        ``job_parameters`` config, such as a ``scheduling`` or a
+        ``save_interval``. The component's own defaults fill the rest, such as
+        its learning rate. A recipe that trains each kind with its own method,
+        such as SFT on trajectories and a policy objective on tasks, overrides
+        it; the training component switches the objective from one job to the
+        next. The result must be the same at every call: it is part of each
+        job's identity.
         """
-        spec = type(self).training_spec()
-        parameters = dict(self.job_parameters or {})
-        parameters["method"] = TrainingMethod(spec.objective).to_dict()
-        return FixedJobPlan(JobRequest(parameters))
+        method = TrainingMethod(type(self).training_spec().objective).to_dict()
+        return {kind: {**(self.job_parameters or {}), "method": method} for kind in SAMPLE_KINDS}
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -568,6 +576,7 @@ class WeightTrainingRecipe(Recipe):
         experiment_logger: ExperimentLogger | None = None,
         task_storage: TaskStorage | None = None,
         releases: ComponentReleases | None = None,
+        samples: TrainerSamples | None = None,
     ) -> Trainer:
         """Build a trainer from this recipe's pipeline, objective, and report contract.
 
@@ -581,6 +590,7 @@ class WeightTrainingRecipe(Recipe):
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
             task_storage=task_storage,
+            samples=samples,
         )
 
     def _build_trainer(
@@ -591,6 +601,7 @@ class WeightTrainingRecipe(Recipe):
         algorithm_state: Mapping[str, Any] | None,
         experiment_logger: ExperimentLogger | None = None,
         task_storage: TaskStorage | None = None,
+        samples: TrainerSamples | None = None,
     ) -> Trainer:
         """Build the shared weight trainer with this recipe's report contract."""
         spec = type(self).training_spec()
@@ -613,12 +624,14 @@ class WeightTrainingRecipe(Recipe):
                 scenario,
                 records,
                 pipeline_factory=self.build_pipeline,
-                job_loop=JobLoop(self.training_component, self.job_plan(), scenario=scenario),
+                job_loop=JobLoop(self.training_component, scenario=scenario),
+                job_parameters=self.parameters_by_kind(),
                 algorithm_state=algorithm_state,
                 report_type=self.report_type,
                 experiment_logger=experiment_logger,
                 training_mode=self.training_mode,
                 task_storage=task_storage,
+                samples=samples,
             )
         except PluginConfigError as exc:
             raise RecipeConfigError(str(exc)) from exc

@@ -83,3 +83,20 @@ def test_client_command_report_is_bounded() -> None:
         {"text": "Improve the harness", "session": "s", "release_id": "r", "client": {"commands": commands}}
     )
     assert normalized["client"] == {"commands": {f"tool-{index}": True for index in range(64)}}
+
+
+def test_an_instruction_carries_json_job_parameters_and_omits_empty_ones() -> None:
+    base = {"text": "train", "session": "s", "release_id": "r"}
+    parameters = {"method": {"objective": "task_group"}, "learning_rate": 1e-5}
+    request = TrainingRequest.from_dict({**base, "parameters": parameters}, request_id="train-1")
+    assert request.parameters == parameters
+    assert TrainingRequest.from_dict(request.to_dict()) == replace(request, id="")
+    assert "parameters" not in normalize_training_request_payload({**base, "parameters": {}})
+    for bad, message in (
+        (["learning_rate"], "a JSON object"),
+        ({1: "x"}, "a JSON object"),
+        ({"learning_rate": float("nan")}, "must be JSON"),
+        ({"text": "x" * 20000}, "must not exceed"),
+    ):
+        with pytest.raises(ValueError, match=message):
+            normalize_training_request_payload({**base, "parameters": bad})

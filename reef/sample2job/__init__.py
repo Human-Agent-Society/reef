@@ -1,14 +1,14 @@
-"""Sample to job: the stage that buffers samples and shapes the samples of the selected record sets into one job's data.
+"""Sample to job: the stage that sizes the buffer and shapes the samples of the buffer into one job's data.
 
 Reef reuses records in a pipeline of three stages::
 
     record ─► record2record ─► record set ─► record2sample ─► sample ─► sample2job ─► job data
 
-The samples of the record sets that wait for a job form this stage's buffer, which
-holds at most ``buffer_size`` samples. When it holds at least ``job_samples``
-samples, the training pipeline (``reef.train.pipeline.TrainingPipeline``)
-reserves whole record sets from ``reef.record2record`` and gives their
-samples to this stage. The stage makes one ``JobData`` value, and Reef submits
+The training pipeline (``reef.train.pipeline.TrainingPipeline``) stores the
+samples of each ready record set unit in the scenario's sample store. The
+buffer is the first ``buffer_size`` untrained samples in store order, and the
+rest of each group that those touch. When it holds at least ``job_samples``
+samples, the pipeline gives its samples to this stage. The stage makes one ``JobData`` value, and Reef submits
 one training job for it. The training framework cuts the job's data into its
 own optimizer batches.
 
@@ -20,10 +20,7 @@ and names the class in its ``pipeline_spec()``.
   recipes and the SFT recipe use it.
 * ``TraceJobData`` (``traces.py``): harness evolution's trace samples as they
   come, in every training mode, and ``TrainTaskRollouts``: offline harness
-  evolution, whose steps roll out the scenario's imported train tasks.
-
-``imported_task_sample`` (``base.py``) turns one of the scenario's imported
-tasks into the task sample that a job rolls out.
+  evolution, which also trains the scenario's imported train tasks.
 
 Everything numeric about a method, such as advantages and the loss family,
 lives in its backend training objective, not here. The package depends only
@@ -32,14 +29,12 @@ on ``reef.core``, ``reef.observability``, ``reef.pipeline_context``,
 ``Sample2Job.from_config`` receives.
 """
 
-from reef.sample2job.base import DEFAULT_BUFFER_JOBS, NoJobData, Sample2Job, Sample2JobSettings, imported_task_sample
+from reef.sample2job.base import NoJobData, Sample2Job, Sample2JobSettings
 from reef.sample2job.distill import DistillJobData
 
 __all__ = [
-    "DEFAULT_BUFFER_JOBS",
     "DistillJobData",
     "NoJobData",
     "Sample2Job",
     "Sample2JobSettings",
-    "imported_task_sample",
 ]

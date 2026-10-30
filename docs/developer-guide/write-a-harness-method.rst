@@ -517,15 +517,16 @@ population from the history: every candidate, its scores and its notes.
 Answer a training request
 -------------------------
 
-In ``manual`` and ``hybrid`` training mode, a step can answer a training
-request from ``POST /reef/train`` (see `Manual training
+In ``manual`` training mode, each step answers a training request from
+``POST /reef/train`` (see `Manual training
 <../reference/http-api.rst#manual-training>`__). Every method takes such a
 step. ``workspace.request()`` returns the ``TrainingRequest``: ``id``,
 ``text``, ``session``, ``release_id``, ``requires``, and ``client``, the
 requesting client's report of its machine. The text is client text (see
-`Untrusted input`_). In ``manual`` mode the step has no traces. In ``hybrid``
-mode it has up to ``job_samples`` traces from the next automatic job data, or
-none.
+`Untrusted input`_). The step's traces are the samples in the manual buffer,
+which a client fills (see `Choose the samples that train
+<../reference/http-api.rst#choose-the-samples-that-train>`__). The buffer may
+be empty.
 
 Return ``requires`` when the change needs something on the person's machine
 that the request did not name: an ``env`` variable, a ``permission``, a

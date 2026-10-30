@@ -3,123 +3,23 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
-from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
+from tests.support.trajectory_uploads import (
+    HEADERS,
+    TOKEN,
+    RecordOnlyJobData,
+    RenderingSamples,
+    UploadRecipe,
+    atif,
+    dispatcher_for,
+    uploaded,
+)
 
-from reef.artifact import InMemoryRepositoryBackend
-from reef.core.evaluation import EvaluationResult, SelectionDecision, UpdateCandidate
 from reef.dispatcher import Dispatcher
-from reef.recipe import Recipe
-from reef.record2sample import NoSamples
-from reef.sample2job import Sample2Job
 from reef.service.app import create_app
-from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.train import CandidateBackend, JobData, PreparedStep, Trainer, TrainStepResult
-from reef.train.pipeline import TrainingPipeline
 from reef.train.types import TrajectorySample
-
-TOKEN = "upload-test-token"
-HEADERS = {"x-reef-scenario": "s", "Authorization": f"Bearer {TOKEN}"}
-
-
-def atif(text: str) -> dict[str, Any]:
-    return {
-        "schema_version": "ATIF-v1.4",
-        "session_id": text,
-        "agent": {"name": "fixture", "version": "1"},
-        "steps": [{"step_id": 1, "source": "user", "message": text}],
-    }
-
-
-def uploaded(*trajectory_ids: str) -> dict[str, Any]:
-    return {
-        "trajectories": [
-            {"trajectory_id": trajectory_id, "trajectory": atif(trajectory_id)} for trajectory_id in trajectory_ids
-        ]
-    }
-
-
-class CountingBackend(CandidateBackend):
-    """Keeps every batch and skips its step, so the trainer commits it."""
-
-    def __init__(self, batches: list[JobData]) -> None:
-        self.batches = batches
-
-    def initial_state(self) -> Mapping[str, Any]:
-        return {"trained": 0}
-
-    def prepare_step(self, batch: JobData, state: Mapping[str, Any], scenario_step: int) -> PreparedStep:
-        self.batches.append(batch)
-        return PreparedStep.skipped(state={"trained": int(state["trained"]) + len(batch.samples)})
-
-    def evaluate(self, candidate: UpdateCandidate) -> EvaluationResult:
-        raise NotImplementedError
-
-    def settle_step(self, prepared: PreparedStep, decision: SelectionDecision) -> TrainStepResult:
-        raise NotImplementedError
-
-    def abort_step(self, prepared: PreparedStep) -> None:
-        pass
-
-
-class UploadJobData(Sample2Job):
-    accepts_trajectories = True
-
-    def make_job_data(self, samples, data_id):
-        return JobData(data_id, samples)
-
-
-class RecordOnlyJobData(UploadJobData):
-    accepts_trajectories = False
-
-
-class RenderingSamples(NoSamples):
-    """Renders an uploaded trajectory by marking it, and refuses one whose session is ``bad``."""
-
-    def uploaded_sample(self, trajectory):
-        if trajectory.trajectory["session_id"] == "bad":
-            raise ValueError("it has no agent step")
-        return trajectory.with_training(tokens=[1, 2], loss_mask=[1], rollout_log_probs=[])
-
-
-@dataclass(frozen=True, kw_only=True)
-class UploadRecipe(Recipe):
-    batch_stage: type[Sample2Job] = UploadJobData
-    task_stage: type[NoSamples] = NoSamples
-    batches: list[JobData] = field(default_factory=list)
-
-    def build(
-        self, scenario, records, *, algorithm_state=None, experiment_logger=None, task_storage=None, releases=None
-    ):
-        return Trainer.build(
-            scenario,
-            records,
-            pipeline_factory=lambda context: TrainingPipeline(
-                context, record2sample=self.task_stage(), sample2job=self.batch_stage(context, None, None)
-            ),
-            candidate_backend=CountingBackend(self.batches),
-            algorithm_state=algorithm_state,
-            experiment_logger=experiment_logger,
-            training_mode=self.training_mode,
-            task_storage=task_storage,
-            # An uploaded trajectory is one sample, so two uploads make one job's data.
-            default_job_samples=2,
-        )
-
-
-def dispatcher_for(tmp_path: Path, recipe: Recipe) -> Dispatcher:
-    initial = tmp_path / "initial"
-    initial.mkdir(exist_ok=True)
-    return Dispatcher(
-        recipe,
-        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
-        scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
-    )
 
 
 async def wait_for_batches(recipe: UploadRecipe, count: int) -> None:
@@ -177,7 +77,7 @@ def test_an_upload_needs_a_recipe_that_accepts_uploaded_trajectories(tmp_path):
             response = await client.post("/reef/trajectories", headers=HEADERS, json=uploaded("trajectory-1"))
             assert response.status == 400
             assert "does not accept uploaded trajectories" in await response.text()
-            assert dispatcher.get_or_create_scenario("s").store.trajectories.count() == 0
+            assert len(dispatcher.get_or_create_scenario("s").store.samples.page()) == 0
 
     try:
         asyncio.run(run())
@@ -208,7 +108,7 @@ def test_an_invalid_upload_is_refused_and_saves_nothing(tmp_path):
                 "/reef/trajectories", headers={"Authorization": f"Bearer {TOKEN}"}, json=uploaded("t")
             )
             assert response.status == 400
-            assert dispatcher.get_or_create_scenario("s").store.trajectories.count() == 0
+            assert len(dispatcher.get_or_create_scenario("s").store.samples.page()) == 0
 
     try:
         asyncio.run(run())
@@ -242,7 +142,7 @@ def test_admission_refuses_an_upload_that_cannot_train_and_jobs_get_the_rendered
             response = await client.post("/reef/trajectories", headers=HEADERS, json=uploaded("good", "bad"))
             assert response.status == 400
             assert "trajectory 'bad' cannot train: it has no agent step" in await response.text()
-            assert dispatcher.get_or_create_scenario("s").store.trajectories.count() == 0, "nothing of it is saved"
+            assert len(dispatcher.get_or_create_scenario("s").store.samples.page()) == 0, "nothing of it is saved"
             response = await client.post("/reef/trajectories", headers=HEADERS, json=uploaded("t1", "t2"))
             assert response.status == 200, await response.text()
             await wait_for_batches(recipe, 1)

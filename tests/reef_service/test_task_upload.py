@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import io
 import tarfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pytest
@@ -22,7 +22,6 @@ from reef.record2sample import NoSamples
 from reef.sample2job import Sample2Job
 from reef.service.app import create_app
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.storage.tasks import IMPORTED_TASK_STORE
 from reef.train import JobData, Trainer
 from reef.train.pipeline import TrainingPipeline
 
@@ -47,7 +46,15 @@ class TaskRecipe(Recipe):
     batch_stage: type[Sample2Job] = TaskReadingJobData
 
     def build(
-        self, scenario, records, *, algorithm_state=None, experiment_logger=None, task_storage=None, releases=None
+        self,
+        scenario,
+        records,
+        *,
+        algorithm_state=None,
+        experiment_logger=None,
+        task_storage=None,
+        releases=None,
+        samples=None,
     ):
         return Trainer.build(
             scenario,
@@ -58,6 +65,7 @@ class TaskRecipe(Recipe):
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
             task_storage=task_storage,
+            samples=samples,
         )
 
 
@@ -139,14 +147,14 @@ def test_a_train_upload_needs_a_recipe_that_reads_imported_tasks_and_an_eval_upl
             )
             assert response.status == 400
             assert "does not train on imported tasks" in await response.text()
-            store = dispatcher.get_or_create_scenario("s").store.tasks.open(IMPORTED_TASK_STORE)
-            assert store.tasks() == ()
+            samples = dispatcher.get_or_create_scenario("s").store.samples
+            assert samples.imported_tasks() == ()
             # Artifact evaluations run the eval split, so it takes tasks whatever the recipe trains on.
             evaluated = await client.post(
                 "/reef/scenarios/s/tasks?split=eval", headers=GZIP, data=archive(tmp_path, "t")
             )
             assert evaluated.status == 200
-            assert [task.name for task in store.tasks(split="eval")] == ["t"]
+            assert [task.sample_id for task in samples.imported_tasks(split="eval")] == ["t"]
 
     try:
         asyncio.run(run())
@@ -154,29 +162,39 @@ def test_a_train_upload_needs_a_recipe_that_reads_imported_tasks_and_an_eval_upl
         dispatcher.close()
 
 
-@pytest.mark.parametrize(
-    ("evaluation", "published"),
-    [({"tasks": [], "task_store": IMPORTED_TASK_STORE}, ["held-out"]), ({}, [])],
-    ids=["evaluation-reads-imported-tasks", "nothing-reads-them"],
-)
-def test_a_harness_scenario_takes_a_train_upload_when_it_reads_imported_tasks(
-    tmp_path: Path, evaluation: dict, published: list[str]
-) -> None:
-    """Harness evolution's default job data reads no imported task: only an evaluation on them takes a train upload.
+OFFLINE_STAGE = {"pipeline": {"sample2job": {"module": "reef.sample2job.traces:TrainTaskRollouts"}}}
 
-    An eval upload is open to every recipe, because an artifact evaluation runs it."""
-    config = evolution_config(evaluation=evaluation, adapter="terminus", state_dir=str(tmp_path / "state"))
-    dispatcher = dispatcher_for(
-        tmp_path, HarnessEvolutionRecipe.from_environment({}, config=config, runtime=runtime())
-    )
+
+@pytest.mark.parametrize(
+    ("pipeline", "published"),
+    [(OFFLINE_STAGE, ["task-a"]), ({}, [])],
+    ids=["offline-rollouts", "traces-only"],
+)
+def test_a_harness_scenario_takes_a_train_upload_when_its_stage_trains_imported_tasks(
+    tmp_path: Path, pipeline: dict, published: list[str]
+) -> None:
+    """Only the offline stage trains imported tasks, so only it takes a train upload, even when the evaluation reads
+    the imported eval split. An eval upload is open to every recipe, because an evaluation runs it."""
+    evaluation = {"tasks": [], "imported_tasks": True}
+    config = {
+        **evolution_config(evaluation=evaluation, adapter="terminus", state_dir=str(tmp_path / "state")),
+        **pipeline,
+    }
+    # In manual mode no train task starts a step while the test runs.
+    recipe = HarnessEvolutionRecipe.from_environment({}, config=config, runtime=runtime())
+    dispatcher = dispatcher_for(tmp_path, replace(recipe, training_mode="manual"))
 
     async def run() -> None:
         async with TestClient(TestServer(create_app(dispatcher, tokens=TOKEN))) as client:
-            body = archive(tmp_path, "held-out")
-            response = await client.post("/reef/scenarios/s/tasks?split=train", headers=GZIP, data=body)
+            response = await client.post(
+                "/reef/scenarios/s/tasks?split=train", headers=GZIP, data=archive(tmp_path, "task-a")
+            )
             assert response.status == (200 if published else 400), await response.text()
-            store = dispatcher.get_or_create_scenario("s").store.tasks.open(IMPORTED_TASK_STORE)
-            assert [task.name for task in store.tasks(split="train")] == published
+            held_out = archive(tmp_path, "held-out", port=9100)
+            assert (await client.post("/reef/scenarios/s/tasks?split=eval", headers=GZIP, data=held_out)).status == 200
+            samples = dispatcher.get_or_create_scenario("s").store.samples
+            assert [task.sample_id for task in samples.imported_tasks(split="train")] == published
+            assert [task.sample_id for task in samples.imported_tasks(split="eval")] == ["held-out"]
 
     try:
         asyncio.run(run())
@@ -212,8 +230,8 @@ def test_an_invalid_upload_is_refused_and_publishes_nothing(tmp_path: Path) -> N
                 response = await client.post("/reef/scenarios/s/tasks?split=train", headers=GZIP, data=body)
                 assert response.status == 400, reason
                 assert reason in await response.text()
-            listing = await (await client.get("/reef/scenarios/s/tasks", headers=AUTH)).json()
-            assert listing == {"scenario": "s", "tasks": []}
+            listing = await client.get("/reef/scenarios/s/tasks", headers=AUTH)
+            assert listing.status == 404, "a refused upload creates no scenario"
 
     try:
         asyncio.run(run())

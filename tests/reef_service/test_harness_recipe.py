@@ -72,8 +72,8 @@ from reef.recipe.registry import recipe_class_for
 from reef.runtime.executor.config import ExecutorSettings
 from reef.sample2job.traces import TrainTaskRollouts
 from reef.service.app import create_app
+from reef.storage.samples import TrainerSamples
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
-from reef.storage.tasks import IMPORTED_TASK_STORE
 from reef.train.backend import ComponentReleases
 from reef.train.harness_backend.backend import HarnessBackend
 from reef.train.harness_backend.state import HarnessState
@@ -212,7 +212,7 @@ INVALID_SETTINGS = {
     ),
     "no-tasks": (
         {"evaluation": {"tasks": []}},
-        "needs tasks, a task_manifest or a task_store unless its policy is none",
+        "needs tasks, a task_manifest or imported_tasks unless its policy is none",
     ),
     "no-scorer": ({"evaluation": {"scorer": None}}, "requires a scorer unless the evaluation policy is none"),
 }
@@ -392,36 +392,38 @@ def test_a_split_manifest_gives_the_evaluation_its_eval_task_directories(tmp_pat
         boot()
 
 
-def test_each_step_evaluates_on_the_eval_split_of_a_task_store_as_the_step_reads_it(
+def test_each_step_evaluates_on_the_eval_split_of_the_imported_tasks_as_the_step_reads_it(
     tmp_path: Path,
 ) -> None:
-    store_settings = {"tasks": [], "task_store": IMPORTED_TASK_STORE}
+    imported_settings = {"tasks": [], "imported_tasks": True}
     built = from_config(
-        evolution_config(evaluation=store_settings, adapter="terminus", state_dir=str(tmp_path / "state")),
+        evolution_config(evaluation=imported_settings, adapter="terminus", state_dir=str(tmp_path / "state")),
         runtime=runtime(),
     )
     assert built.configured_tasks() == ()
     root = tmp_path / "tasks"
     with closing(SQLiteScenarioStorage(None)) as storage, closing(storage.open("s")) as session:
-        store = session.tasks.open(IMPORTED_TASK_STORE)
-        backend = built.build_backend("s", releases_for(built), session.tasks)
+        backend = built.build_backend("s", releases_for(built), TrainerSamples(session.samples))
         batch = JobData("s:1", (recorded_trajectory("a1", {"messages": []}, 0.0),))
 
         def task_count() -> int:
             return backend.prepare_step(batch, backend.initial_state(), 0).metrics["evaluation_task_count"]
 
-        # The store opens empty; a task it gets after the build is in the next step's list, and a train task is not.
+        # The sample store opens empty; a task it gets after the build is in the next step's list, and a train task is not.
         assert task_count() == 0
-        first = store.add_task(directory=write_task(root, "held-1"), split="eval")
-        store.add_task(directory=write_task(root, "train-1"), split="train")
+        (first,) = session.samples.add_tasks((write_task(root, "held-1"),), "eval")
+        session.samples.add_tasks((write_task(root, "train-1"),), "train")
         assert task_count() == 1
-        second = store.add_task(directory=write_task(root, "held-2"), split="eval")
+        (second,) = session.samples.add_tasks((write_task(root, "held-2"),), "eval")
         assert task_count() == 2
-        assert backend.tasks.seed() == (str(store.path(first.files_digest)), str(store.path(second.files_digest)))
-        with pytest.raises(RecipeConfigError, match="needs the task storage"):
+        assert backend.tasks.seed() == tuple(str(task.sample.task_path) for task in (first, second))
+        with pytest.raises(RecipeConfigError, match="imported_tasks needs the sample store of a scenario session"):
             built.build_backend("s", releases_for(built), None)
     with pytest.raises(RecipeConfigError, match="'pi' takes a prompt"):
-        from_config(evolution_config(evaluation=store_settings), runtime=runtime())
+        from_config(evolution_config(evaluation=imported_settings), runtime=runtime())
+    retired = {"tasks": [], "task_store": "imported-tasks"}
+    with pytest.raises(RecipeConfigError, match=r"evolution\.evaluation\.task_store is gone: .*imported_tasks: true"):
+        from_config(evolution_config(evaluation=retired, adapter="terminus"), runtime=runtime())
 
 
 def test_offline_rollouts_need_an_adapter_that_plays_task_directories_and_a_scorer() -> None:
@@ -477,13 +479,13 @@ def test_recipe_builds_the_stages_its_pipeline_section_names(tmp_path: Path) -> 
     reported = trainer_of(from_config(settings(), runtime=proxy))
     stages = (reported.pipeline.record2record, reported.pipeline.record2sample, reported.pipeline.sample2job)
     assert [type(stage).__name__ for stage in stages] == ["ReportRecord2Record", "TraceSamples", "TraceJobData"]
-    # The default buffer holds the data of four jobs.
-    assert (reported.job_samples, reported.pipeline.buffer_size) == (1, 4)
+    # The default buffer holds the data of one job.
+    assert (reported.job_samples, reported.pipeline.buffer_size) == (1, 1)
     # The stage config sets job_samples over evolution.batch_size.
     sized = trainer_of(
         from_config(settings(pipeline={"sample2job": {"config": {"job_samples": 3}}}, batch_size=2), runtime=proxy)
     )
-    assert (sized.job_samples, sized.pipeline.buffer_size) == (3, 12)
+    assert (sized.job_samples, sized.pipeline.buffer_size) == (3, 3)
 
     with pytest.raises(RecipeConfigError, match="does not consume"):
         from_config(settings({"batch_size": 2}))

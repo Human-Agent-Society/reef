@@ -219,17 +219,14 @@ request (i.e. ``POST /reef/train`` requests). ``data.training_mode`` in the reci
 decides which of the two a deployment accepts.
 
 - ``auto`` (the default): steps start from job data of recorded traffic
-  alone. Training requests are ignored.
-- ``manual``: steps start from training requests alone. Ordinary
-  traffic never starts evolution.
-- ``hybrid``: steps start from either, as the tutorial's ``deployment.yaml``
-  sets. Training requests are queued and take precedence, and automatic steps continue
-  between those requests.
+  alone. Training requests are refused.
+- ``manual``: steps start from training requests alone, as the tutorial's
+  ``deployment.yaml`` sets. Each request step also reads the traces of the
+  manual buffer, which a client fills. Ordinary traffic never starts evolution.
 
 ``POST /reef/scenarios/{scenario}/update`` switches a running deployment
-between the three. An offline deployment also starts steps from its uploaded
-train tasks, in ``auto`` and ``hybrid`` mode (see `Offline runs on uploaded
-tasks`_).
+between the two. An offline deployment also starts steps from its uploaded
+train tasks (see `Offline runs on uploaded tasks`_).
 
 Trigger of step
 ~~~~~~~~~~~~~~~
@@ -269,10 +266,10 @@ traffic alone trains, unscored, for methods that judge for themselves.
      record2sample:
        module: reef.record2sample.traces:InferenceSamples
 
-Reef holds the traces that wait for a step in a buffer. The buffer keeps at
-most ``pipeline.sample2job.config.buffer_size`` traces (default four times
-``job_samples``). When more traces arrive, Reef releases the oldest ones. This
-limit applies in every mode.
+Reef keeps the traces that wait for a step in the scenario's sample store. An
+automatic step takes the oldest waiting traces: at most
+``pipeline.sample2job.config.buffer_size`` traces (default ``job_samples``).
+Later traces wait for the next steps.
 
 Under ``auto`` mode, training requests are rejected.
 
@@ -287,37 +284,28 @@ e.g. what fields a request carries, the screens its text passes, and what
 happens to a request whose step fails.
 
 The ``pipeline`` stages trigger no evolution in this mode, but traces are
-still collected while training requests run. However, these traces are never
-used in evolution until ``data.training_mode`` is switched to ``auto`` or
-``hybrid``. The buffer limit still applies: Reef releases the oldest traces
-beyond ``buffer_size``.
-
-``hybrid`` mode
-^^^^^^^^^^^^^^^
-
-In ``hybrid`` mode, either condition starts a step: ``job_samples`` traces
-collected by the ``pipeline`` stages, or a training request received.
-
-When both conditions are met, the training request takes precedence for the
-next step. Reef builds one step that uses both, whether or not
-``job_samples`` is met. The method then
-receives the training request and the traces that automatic job data would
-take next. It gets up to ``job_samples`` traces, or none, and uses both
-to make its change.
+still collected in the sample store. A request step does not wait for
+``job_samples`` traces. The method receives the training request and the
+traces of the manual buffer, or none. New traces do not join the manual buffer
+by themselves: a client lists them (``GET /reef/scenarios/{scenario}/samples``)
+and adds the ones that the step should read (`Choose the samples that train
+<../reference/http-api.rst#choose-the-samples-that-train>`__). A switch from
+``auto`` to ``manual`` starts the manual buffer with the traces that the next
+automatic step would take. The method uses the request and the traces to
+make its change.
 
 Offline runs on uploaded tasks
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 A deployment that has tasks instead of users runs offline. The sample-to-job
-stage ``reef.sample2job.traces:TrainTaskRollouts`` makes each step from the
-train split of the scenario's ``imported-tasks`` store. The step rolls out the
-next ``tasks_per_step`` train tasks on the head tree, and the method reads
-those rollouts as its traces, each with ``source: rollout`` and the task's
-instruction as its ``task``. The run goes
-through the train split ``epochs`` times, in an order shuffled for each epoch,
-and then stops. The eval split stays the evaluation's task source, so a method
-such as GEPA or Meta-Harness can evaluate as many trees as it needs on the
-same tasks.
+stage ``reef.sample2job.traces:TrainTaskRollouts`` accepts the scenario's
+imported train tasks: each train task is a sample in the buffer, as a trace
+is. One step holds one kind of sample, so it trains either traces or train
+tasks. A step of train tasks rolls each task out on the head tree, and the
+method reads those rollouts as its traces, each with ``source: rollout`` and
+the task's instruction as its ``task``. The eval split stays the evaluation's
+task source, so a method such as GEPA or Meta-Harness can evaluate as many
+trees as it needs on the same tasks.
 
 .. code-block:: yaml
 
@@ -327,33 +315,32 @@ same tasks.
          adapter: terminus
          method: recipes.gepa:GEPA
          evaluation:
-           task_store: imported-tasks
+           imported_tasks: true
            scorer: reef.evaluation.harness:VerifierRewardScorer
            policy: compare
            statistic: mean
    pipeline:
      sample2job:
        module: reef.sample2job.traces:TrainTaskRollouts
-       config: {tasks_per_step: 8, epochs: 2}
+       config: {job_samples: 8}
 
 Upload the tasks while the service runs, with
 ``POST /reef/scenarios/{scenario}/tasks?split=train`` and ``?split=eval`` (see
 `Upload Harbor tasks <../reference/http-api.rst#upload-harbor-tasks>`__), or
-import them with the deployment's ``task-import`` section. The first train
-task starts the run: an offline step needs no traffic and no request. The stage
-runs in ``auto`` and ``hybrid`` training mode; a ``manual`` scenario, which
-steps only on a request, refuses it. Recorded traffic and training requests
-still start steps as the training mode decides, and they go first.
+import them with the deployment's ``task-import`` section. In ``auto`` mode,
+the train tasks start steps as traces do: an offline step needs no traffic and
+no request. ``job_samples`` and ``buffer_size`` set how many tasks one step
+rolls out. Each train task trains once; upload more tasks to continue the run.
+In ``manual`` mode, a client adds train tasks to the manual buffer, and a
+training request rolls them out.
 
 An offline step always runs the method: a recheck and a client's proposal wait
 for a step without rollouts. A rollout goes through the score cache, as an
-evaluation does (see `Evaluation: the publication policy`_). So a later epoch
-on an unchanged head tree reads the same rollouts again. The stage saves its
-place once a step's commit is durable. After a restart the run continues after
-the last durable step, and a step whose commit did not become durable rolls
-its tasks out again. A task uploaded during an epoch joins the next epoch. The
-rollouts need an adapter that plays task directories (``terminus``) and a
-scorer; startup refuses the stage without them.
+evaluation does (see `Evaluation: the publication policy`_). The scenario's
+sample store counts the steps that trained each task in the step's commit. So
+after a restart, the run continues with the tasks that no durable step
+trained. The rollouts need an adapter that plays task directories
+(``terminus``) and a scorer; startup refuses the stage without them.
 
 The method: a candidate tree
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -384,13 +371,14 @@ becomes the next head.
 - The tasks come from one source: ``evolution.evaluation.tasks`` (a list of
   prompts or task directories), ``evolution.evaluation.task_manifest`` with
   ``evolution.evaluation.tasks_root`` (the eval split of a task manifest), or
-  ``evolution.evaluation.task_store`` (the eval split of a task store, such
-  as ``imported-tasks``). A manifest or a store holds task directories. Task
-  directories need an adapter that plays them, such as ``terminus``. A
-  scenario whose evaluation reads ``imported-tasks`` takes task uploads
-  (``POST /reef/scenarios/{scenario}/tasks?split=eval``). Until the eval split
-  holds a task, ``compare`` and ``floor`` reject every candidate. Promotion
-  can add prompts to the tasks (see `Promotion: growing evaluation suite`_).
+  ``evolution.evaluation.imported_tasks: true`` (the eval split of the
+  scenario's `imported tasks <operate.rst#import-harbor-tasks>`__). A manifest
+  and the imported tasks hold task directories. Task directories need an
+  adapter that plays them, such as ``terminus``. A scenario takes task uploads
+  to the eval split (``POST /reef/scenarios/{scenario}/tasks?split=eval``).
+  Until the eval split holds a task, ``compare`` and ``floor`` reject every
+  candidate. Promotion can add prompts to the tasks (see `Promotion: growing
+  evaluation suite`_).
 - ``evolution.evaluation.scorer`` names the ``RolloutScorer`` that scores
   each rollout.
 - ``evolution.evaluation.policy`` is one of three policies:
@@ -585,8 +573,8 @@ default. To grow it automatically from traffic, configure
 ``evolution.evaluation.promote_failures: true``, which adds the prompts of the
 step's traces to the evaluation set permanently. This also means the
 rollout scorer must be able to score any arbitrary prompt. A
-request step in ``hybrid`` promotes the traces it carries the same way.
-Promotion adds prompts, so it needs an adapter whose task is a prompt.
+request step in ``manual`` promotes the traces of its manual buffer the same
+way. Promotion adds prompts, so it needs an adapter whose task is a prompt.
 
 A promoted prompt is real client traffic, so it is screened before it
 becomes a task. A prompt carrying a key-shaped literal meets the tree's own
@@ -945,14 +933,14 @@ Ask for a harness change
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
 You can also ask for a harness change in plain words. A scenario in ``manual``
-or ``hybrid`` takes training requests; the tutorial's ``deployment.yaml``
-runs in ``hybrid``, and a scenario in ``auto`` takes them after a switch:
+takes training requests; the tutorial's ``deployment.yaml`` runs in
+``manual``, and a scenario in ``auto`` takes them after a switch:
 
 .. code:: bash
 
    curl -sS -X POST -H "Authorization: Bearer $REEF_TOKEN" \
      -H "Content-Type: application/json" \
-     -d '{"training_mode": "hybrid"}' \
+     -d '{"training_mode": "manual"}' \
      "$REEF_URL/reef/scenarios/code-repair/update"
    curl -sS -X POST -H "Authorization: Bearer $REEF_TOKEN" \
      -H "x-reef-scenario: code-repair" -H "Content-Type: application/json" \

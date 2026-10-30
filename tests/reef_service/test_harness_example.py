@@ -357,12 +357,12 @@ def test_deployment_yaml_names_directories_that_exist_and_boots_its_named_recipe
     assert service.upstream_model == model_id
     assert built.model_binding().model == model_id
     assert built.build_surface("demo").harness.served_model == model_id
-    # The person asks while it keeps learning from failures; the method reads the request beside the traces.
-    assert built.training_mode == "hybrid" and type(built.method).__name__ == "RulesMethod"
+    # Only a person's ask starts a step; the method reads the request beside the traces in the manual buffer.
+    assert built.training_mode == "manual" and type(built.method).__name__ == "RulesMethod"
     records = SQLiteRecordStore()
     local = replace(built.evolution, binary=str(tmp_path / "fake-pi"), state_dir=str(tmp_path / "harness"))
     trainer = replace(built, evolution=local).build("demo", records, releases=releases_for(built))
-    assert trainer.pipeline.training_mode == "hybrid"
+    assert trainer.pipeline.training_mode == "manual"
     # Each report is one job's data: the deployment sets evolution.batch_size 1, the default job_samples.
     assert trainer.job_samples == 1
     trainer.close()
@@ -379,7 +379,7 @@ def test_deployment_yaml_holds_evolved_extensions_for_review(monkeypatch) -> Non
     monkeypatch.setenv("PWD", str(REPO_ROOT))
     monkeypatch.chdir(REPO_ROOT)
     config = load_config(EXAMPLE_DIR / "configs" / "deployment.yaml")
-    assert config["data"]["training_mode"] == "hybrid"
+    assert config["data"]["training_mode"] == "manual"
     assert config["activation"] == {"module": "always", "config": {"review_kinds": ["extension"]}}
     for name in ("serve", "serve-native"):
         demo = load_config(EXAMPLE_DIR / "configs" / f"{name}.yaml")

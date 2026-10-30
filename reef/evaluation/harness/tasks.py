@@ -2,11 +2,11 @@
 
 A step evaluates the candidate and the head tree on the same tasks: the
 configured tasks (``evolution.evaluation.tasks``, or a task manifest), or the
-eval split of a task store as the step reads it, then the prompts promoted
-from failing traffic. Promotion is off by default. When it is on, a
-``Promoter`` picks the prompts (every trace's user prompt without one), and
-Reef screens out credentials and instruction overrides, skips duplicates, and
-caps the total and each tagged client's share.
+eval split of the scenario's imported tasks as the step reads it, then the
+prompts promoted from failing traffic. Promotion is off by default. When it
+is on, a ``Promoter`` picks the prompts (every trace's user prompt without
+one), and Reef screens out credentials and instruction overrides, skips
+duplicates, and caps the total and each tagged client's share.
 """
 
 from __future__ import annotations
@@ -15,11 +15,11 @@ from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
-from reef.core.job_data import TrajectorySample
+from reef.core.job_data import TaskSample, TrajectorySample
 from reef.core.plugins import ConfiguredPlugin
 from reef.core.trajectories import recorded_payload
 from reef.harness.tree.checks import directive_shaped, secret_shaped
-from reef.storage.tasks import TaskStore
+from reef.storage.samples import TrainerSamples
 
 
 class Promoter(ConfiguredPlugin, ABC):
@@ -90,18 +90,18 @@ class StepTasks:
 class EvaluationTasks:
     """The source of every step's evaluation tasks.
 
-    ``seed_tasks`` are the configured tasks; with ``task_store`` set, each
-    step reads the store's eval split instead. With ``promote_failures``, a
-    step promotes up to ``max_promoted`` prompts in total and
-    ``max_promoted_per_client`` per tagged client, chosen by ``promoter``
-    (every trace's prompt without one).
+    ``seed_tasks`` are the configured tasks; with ``eval_samples`` set, each
+    step reads the eval split of the imported tasks in that sample store
+    instead. With ``promote_failures``, a step promotes up to
+    ``max_promoted`` prompts in total and ``max_promoted_per_client`` per
+    tagged client, chosen by ``promoter`` (every trace's prompt without one).
     """
 
     def __init__(
         self,
         *,
         seed_tasks: tuple[str, ...],
-        task_store: TaskStore | None = None,
+        eval_samples: TrainerSamples | None = None,
         promote_failures: bool = False,
         promoter: Promoter | None = None,
         max_promoted: int = 50,
@@ -110,17 +110,21 @@ class EvaluationTasks:
         if max_promoted < 0 or max_promoted_per_client < 0:
             raise ValueError("max_promoted_tasks and max_promoted_per_client must be at least 0")
         self.seed_tasks = seed_tasks
-        self.task_store = task_store
+        self.eval_samples = eval_samples
         self.promote_failures = promote_failures
         self.promoter = promoter
         self.max_promoted = max_promoted
         self.max_promoted_per_client = max_promoted_per_client
 
     def seed(self) -> tuple[str, ...]:
-        """The seed tasks as of now: the store's eval split when a store is set, in publication order."""
-        if self.task_store is None:
+        """The seed tasks as of now: with ``eval_samples``, the eval split of its imported tasks, in arrival order."""
+        if self.eval_samples is None:
             return self.seed_tasks
-        return tuple(str(self.task_store.path(task.files_digest)) for task in self.task_store.tasks(split="eval"))
+        return tuple(
+            str(stored.sample.task_path)
+            for stored in self.eval_samples.imported_tasks(split="eval")
+            if isinstance(stored.sample, TaskSample)
+        )
 
     def for_step(
         self,
