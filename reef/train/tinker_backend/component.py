@@ -41,7 +41,7 @@ from reef.train.algos.schedule import StepScheduling
 from reef.train.local_jobs import LocalJobComponent
 from reef.train.task_rollouts import RolloutSettings, TaskJobRollouts, roll_out, task_name
 from reef.train.tinker_backend.client import TinkerClient
-from reef.train.tinker_backend.config import TinkerConfig, TinkerServiceConfig
+from reef.train.tinker_backend.config import ScoreCentering, TinkerConfig, TinkerServiceConfig
 from reef.train.tinker_backend.preparation import prepare_tinker_job
 from reef.train.tinker_backend.rollout import SamplerChat
 
@@ -108,6 +108,11 @@ class TinkerJobComponent(LocalJobComponent, ABC):
     samples, and reports in the job's metrics each task's rewards of the
     rollouts that ran (``rollout_rewards``, by task name).
 
+    With a ``score_centering``, a policy-gradient job trains as score-centered
+    ``cispo`` (``prepare_tinker_job``), and a task job's rollouts record the
+    sampler's top-k at each sampled token, so they sample at temperature 1
+    without truncation (``sample_chat``).
+
     A job's last checkpoint carries the objective's state after the job's
     data; an intermediate checkpoint (``save_interval``) carries the state of
     the job's start, since the objective computes its state for the whole data.
@@ -129,8 +134,11 @@ class TinkerJobComponent(LocalJobComponent, ABC):
         client: TinkerClient,
         *,
         sampler: TinkerSampler | None = None,
+        score_centering: ScoreCentering | None = None,
     ) -> None:
         self._model = base_model
+        #: The score centering of this component's policy-gradient jobs, or None for none.
+        self.score_centering = score_centering
         self._config = config
         self._client = client
         self._sampler = sampler
@@ -282,6 +290,7 @@ class TinkerJobComponent(LocalJobComponent, ABC):
             model=self._model,
             # A fresh start names no sampler: its rollouts sample the base model.
             runtime_load_id=f"tinker:{start.sampler_path or f'base:{self._model}'}",
+            topk_logprobs=0 if self.score_centering is None else self.score_centering.top_k,
         )
         rollouts = roll_out(
             tasks,
@@ -323,6 +332,7 @@ class TinkerJobComponent(LocalJobComponent, ABC):
             parameters.scheduling,
             batch_size=parameters.batch_size,
             kl_coef=parameters.kl_coef,
+            score_centering=self.score_centering,
         )
         if prepared.loss is None:
             # The objective skipped the job's data: the job trains nothing and saves no checkpoint.

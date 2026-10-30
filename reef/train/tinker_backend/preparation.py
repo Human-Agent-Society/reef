@@ -10,7 +10,8 @@ from reef.core.job_data import JobData, trajectories
 from reef.runtime.interfaces import TrainingMethod
 from reef.train.algos.registry import resolve_objective
 from reef.train.algos.schedule import StepScheduling, schedule_job_data
-from reef.train.tinker_backend.losses import TinkerLoss, TokenRow, resolve_tinker_loss
+from reef.train.tinker_backend.config import ScoreCentering
+from reef.train.tinker_backend.losses import ScoreCenteredLoss, TinkerLoss, TokenRow, resolve_tinker_loss
 
 
 @dataclass(frozen=True)
@@ -45,19 +46,29 @@ def prepare_tinker_job(
     *,
     batch_size: int,
     kl_coef: float,
+    score_centering: ScoreCentering | None,
 ) -> TinkerSteps:
     """The optimizer steps of ``data`` under ``scheduling``, at most ``batch_size`` rollouts each.
 
     The job trains ``method``'s objective with that objective's Tinker loss, which must be registered in this
-    process and accept ``kl_coef``. The record-to-record stage already dropped stale samples. ``ValueError``:
-    the loss refuses ``kl_coef``, the objective gives no advantage for each trajectory of a policy loss, or a
-    row is not trainable.
+    process and accept ``kl_coef``. With ``score_centering``, a policy loss trains as ``ScoreCenteredLoss``, which
+    only ``importance_sampling`` may; a loss without advantages, such as ``sft``, trains as it is. The
+    record-to-record stage already dropped stale samples. ``ValueError``: the loss refuses ``kl_coef``, score
+    centering meets another policy loss, the objective gives no advantage for each trajectory of a policy loss,
+    or a row is not trainable.
     """
     objective = resolve_objective(method.objective)
     signal = objective.prepare(data, state)
     if signal.action == "skip":
         return TinkerSteps(None, (), signal.next_algorithm_state, signal.metrics)
     loss = resolve_tinker_loss(objective.loss_family)
+    if score_centering is not None and loss.uses_advantages:
+        if objective.loss_family != "importance_sampling":
+            raise ValueError(
+                f"score centering trains the importance_sampling family only, not {objective.loss_family!r}: it "
+                "must match the policy gradient it corrects"
+            )
+        loss = ScoreCenteredLoss(score_centering)
     loss.check_kl_coef(kl_coef)
     items = trajectories(data)
     if not loss.uses_advantages:
@@ -67,7 +78,9 @@ def prepare_tinker_job(
     else:
         advantages = signal.advantages
     rows = [
-        TokenRow.from_item(item, advantage, rollout_log_probs=loss.uses_rollout_log_probs)
+        TokenRow.from_item(
+            item, advantage, rollout_log_probs=loss.uses_rollout_log_probs, sampler_topk=loss.sampler_topk
+        )
         for item, advantage in zip(items, advantages, strict=True)
     ]
     schedule = schedule_job_data(data, objective.rollout_unit, scheduling, step_size=batch_size)

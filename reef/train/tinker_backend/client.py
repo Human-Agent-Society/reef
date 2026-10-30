@@ -14,7 +14,7 @@ from typing import Any
 from reef.tinker.checkpoint import FreshStart, TinkerCheckpoint
 from reef.tinker.service import close_service, tinker_sdk
 from reef.train.tinker_backend.config import TinkerServiceConfig
-from reef.train.tinker_backend.losses import TinkerCustomLoss, TinkerLoss, TokenRow
+from reef.train.tinker_backend.losses import MatrixInput, TinkerCustomLoss, TinkerLoss, TokenRow
 
 logger = logging.getLogger(__name__)
 
@@ -226,7 +226,19 @@ class TinkerSDKClient(TinkerClient):
                     raise ValueError("Tinker loss adapter must return one input per training row")
                 data = [
                     self._sdk.Datum(
-                        model_input=self._sdk.ModelInput.from_ints(list(row.tokens[:-1])), loss_fn_inputs=value
+                        model_input=self._sdk.ModelInput.from_ints(list(row.tokens[:-1])),
+                        loss_fn_inputs={
+                            key: (
+                                self._sdk.TensorData(
+                                    data=[number for row_values in item.rows for number in row_values],
+                                    dtype=item.dtype,
+                                    shape=[len(item.rows), len(item.rows[0])],
+                                )
+                                if isinstance(item, MatrixInput)
+                                else item
+                            )
+                            for key, item in value.items()
+                        },
                     )
                     for row, value in zip(rows, inputs, strict=True)
                 ]
@@ -234,7 +246,9 @@ class TinkerSDKClient(TinkerClient):
                     # Tinker returns logprobs; the family computes the loss here and Tinker runs backward.
                     future = trainer.forward_backward_custom(data, loss.loss)
                 else:
-                    future = trainer.forward_backward(data, loss_fn=loss.loss_fn)
+                    future = trainer.forward_backward(
+                        data, loss_fn=loss.loss_fn, loss_fn_config=dict(loss.loss_fn_config) or None
+                    )
                 result = future.result(timeout=self._config.train_timeout_s)
                 metrics.update(result.metrics)
                 trainer.optim_step(self._sdk.AdamParams(learning_rate=learning_rate)).result(

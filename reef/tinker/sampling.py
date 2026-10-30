@@ -4,7 +4,7 @@ The serving runtime ``reef.inference.tinker`` and the training component's rollo
 (``reef.train.tinker_backend.rollout``) both sample through these. ``chat_request`` validates an
 OpenAI text chat request into messages and sampling parameters, ``TinkerSampler`` renders and samples,
 and ``chat_completion`` shapes the answer with the training capture that Reef records: the token IDs,
-the loss mask and the sampled log probabilities.
+the loss mask, the sampled log probabilities and, when asked, the sampler's top-k at each sampled token.
 """
 
 from __future__ import annotations
@@ -27,13 +27,16 @@ class SampleResult:
 
     Values: ``tokens`` are the sampled token IDs and ``logprobs`` the sampler's log probability of each, finite
     and as many as the tokens; ``stop_reason`` is the sampler's non-empty reason to stop, such as ``stop`` or
-    ``length``. Purpose: ``TinkerSampler.sample`` makes it; ``chat_completion`` shapes the answer and its
+    ``length``. ``topk`` is empty, or holds one row per sampled token of the same width ``k >= 1``: the ``k``
+    most likely ``(token ID, log probability)`` pairs at that position, with distinct non-negative IDs and finite
+    log probabilities. Purpose: ``TinkerSampler.sample`` makes it; ``chat_completion`` shapes the answer and its
     training capture from it.
     """
 
     tokens: tuple[int, ...]
     logprobs: tuple[float, ...]
     stop_reason: str
+    topk: tuple[tuple[tuple[int, float], ...], ...] = ()
 
     def __post_init__(self) -> None:
         if len(self.tokens) != len(self.logprobs):
@@ -42,6 +45,17 @@ class SampleResult:
             raise ValueError("Tinker returned non-finite sampled log probabilities")
         if not isinstance(self.stop_reason, str) or not self.stop_reason:
             raise ValueError("a sample needs the sampler's stop reason")
+        if not self.topk:
+            return
+        widths = {len(row) for row in self.topk}
+        if len(self.topk) != len(self.tokens) or len(widths) != 1 or 0 in widths:
+            raise ValueError("Tinker must return top-k log probabilities of one width for every sampled token")
+        for row in self.topk:
+            ids = [token for token, _ in row]
+            if len(set(ids)) != len(ids) or any(token < 0 for token in ids):
+                raise ValueError("Tinker returned top-k token IDs that are not distinct and non-negative")
+            if any(not math.isfinite(logprob) for _, logprob in row):
+                raise ValueError("Tinker returned non-finite top-k log probabilities")
 
 
 class TinkerSampler(ABC):
@@ -58,7 +72,11 @@ class TinkerSampler(ABC):
     def decode(self, tokens: Sequence[int]) -> str: ...
 
     @abstractmethod
-    def sample(self, sampler_path: str | None, prompt: list[int], params: Mapping[str, Any]) -> SampleResult: ...
+    def sample(
+        self, sampler_path: str | None, prompt: list[int], params: Mapping[str, Any], *, topk_logprobs: int
+    ) -> SampleResult:
+        """One continuation of ``prompt`` with the SDK's ``SamplingParams`` ``params``; a positive ``topk_logprobs``
+        also returns that many top log probabilities at each sampled token (``SampleResult.topk``)."""
 
     @abstractmethod
     def close(self) -> None: ...
@@ -126,7 +144,9 @@ class TinkerSDKSampler(TinkerSampler):
     def decode(self, tokens: Sequence[int]) -> str:
         return str(self.base_tokenizer().decode(list(tokens), skip_special_tokens=True))
 
-    def sample(self, sampler_path: str | None, prompt: list[int], params: Mapping[str, Any]) -> SampleResult:
+    def sample(
+        self, sampler_path: str | None, prompt: list[int], params: Mapping[str, Any], *, topk_logprobs: int
+    ) -> SampleResult:
         if sampler_path is None:
             sampler = self.base_sampler()
         elif sampler_path in self.clients:
@@ -141,6 +161,7 @@ class TinkerSDKSampler(TinkerSampler):
                 prompt=self._sdk.ModelInput.from_ints(prompt),
                 num_samples=1,
                 sampling_params=self._sdk.SamplingParams(**params),
+                topk_sample_logprobs=topk_logprobs,
             ).result(timeout=self._timeout_s)
         except self._sdk.BadRequestError as exc:
             # An overflow carries OpenAI's code and wording, which agents match to compact their history.
@@ -153,7 +174,13 @@ class TinkerSDKSampler(TinkerSampler):
         sequence = result.sequences[0]
         if sequence.logprobs is None:
             raise ValueError("Tinker must return exact log probabilities for every sampled token")
-        return SampleResult(tuple(sequence.tokens), tuple(sequence.logprobs), sequence.stop_reason)
+        topk: tuple[tuple[tuple[int, float], ...], ...] = ()
+        if topk_logprobs:
+            rows = sequence.topk_logprobs
+            if rows is None or any(row is None for row in rows):
+                raise ValueError("Tinker returned no top-k log probabilities for every sampled token")
+            topk = tuple(tuple((int(token), float(logprob)) for token, logprob in row) for row in rows)
+        return SampleResult(tuple(sequence.tokens), tuple(sequence.logprobs), sequence.stop_reason, topk)
 
     def close(self) -> None:
         close_service(self._sdk, self._service, "success", timeout_s=self._timeout_s)
@@ -191,6 +218,14 @@ def chat_completion(
             "request_messages": messages,
             "response_message": message,
             "finish_reason": finish,
+            **(
+                {
+                    "topk_indices": [[token for token, _ in row] for row in result.topk],
+                    "topk_log_probs": [[logprob for _, logprob in row] for row in result.topk],
+                }
+                if result.topk
+                else {}
+            ),
         },
     }
 
@@ -265,16 +300,34 @@ def chat_request(payload: dict[str, Any]) -> tuple[list[dict[str, str]], dict[st
 
 
 def sample_chat(
-    sampler: TinkerSampler, sampler_path: str | None, payload: dict[str, Any], *, model: str, runtime_load_id: str
+    sampler: TinkerSampler,
+    sampler_path: str | None,
+    payload: dict[str, Any],
+    *,
+    model: str,
+    runtime_load_id: str,
+    topk_logprobs: int = 0,
 ) -> dict[str, Any]:
     """Answer one OpenAI text chat request from ``sampler_path`` (None: the base model), with its training capture.
 
-    Raise ``UpstreamStatusError`` (400) for a request that Tinker cannot serve.
+    A positive ``topk_logprobs`` records the sampler's top ``topk_logprobs`` log probabilities at each sampled
+    token in the capture (``topk_indices``, ``topk_log_probs``). Those must be the log probabilities that the
+    trainer reads, of the untruncated distribution at temperature 1, so such a request may set ``temperature``
+    only to 1, ``top_p`` only to 1 and ``top_k`` only to -1. Raise ``UpstreamStatusError`` (400) for a request
+    that Tinker cannot serve or that sets another value.
     """
     messages, params = chat_request(payload)
+    if topk_logprobs and (
+        params.get("temperature", 1.0) != 1 or params.get("top_p", 1.0) != 1 or params.get("top_k", -1) != -1
+    ):
+        raise UpstreamStatusError(
+            "this sampler records the top-k log probabilities of the untruncated distribution at temperature 1: "
+            "send temperature 1, top_p 1 and top_k -1, or leave them unset",
+            status=400,
+        )
     prompt = sampler.render(messages, template_kwargs=payload.get("chat_template_kwargs") or {})
     if not prompt:
         raise ValueError("Tinker chat template produced an empty prompt")
-    result = sampler.sample(sampler_path, prompt, params)
+    result = sampler.sample(sampler_path, prompt, params, topk_logprobs=topk_logprobs)
     content = sampler.decode(result.tokens)
     return chat_completion(payload.get("model", model), messages, prompt, result, content, runtime_load_id)
