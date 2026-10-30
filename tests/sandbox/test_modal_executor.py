@@ -236,7 +236,7 @@ def test_a_process_runs_in_the_jail_under_its_limit_with_the_deployments_environ
     jailed = command[-1]
     assert "| exec bwrap" in jailed and f"{REMOTE_BASE}/rollout/workspace/out.txt" in jailed
     assert options["workdir"] == f"{REMOTE_BASE}/rollout/workspace"
-    assert options["env"] == {"REEF_PROCESS_ENV_CALLER": "1", "REEF_PROCESS_ENV_DEPLOYMENT": "yes"}
+    assert options["env"] == {"CALLER": "1", "DEPLOYMENT": "yes"}
 
 
 @pytest.mark.unit
@@ -257,12 +257,12 @@ def test_a_secret_reaches_the_process_environment_and_no_command_line(tmp_path, 
     ((args, options),) = sandbox.commands
     assert not any("sk-ant-oat01-secret-value" in argument for argument in args)
     jailed = shlex.split(args[-1])[-1]
-    assert '--setenv CLAUDE_CODE_OAUTH_TOKEN "$REEF_PROCESS_ENV_CLAUDE_CODE_OAUTH_TOKEN"' in jailed
+    assert '--setenv CLAUDE_CODE_OAUTH_TOKEN "$CLAUDE_CODE_OAUTH_TOKEN"' in jailed
     assert "| exec bwrap" in jailed
     assert options["env"] == {
-        "REEF_PROCESS_ENV_CALLER": "1",
-        "REEF_PROCESS_ENV_DEPLOYMENT": "yes",
-        "REEF_PROCESS_ENV_CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat01-secret-value",
+        "CALLER": "1",
+        "DEPLOYMENT": "yes",
+        "CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat01-secret-value",
     }
 
 
