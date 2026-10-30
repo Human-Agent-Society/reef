@@ -281,7 +281,9 @@ rollout. Thus one scenario runs SFT first and then RL:
    ``{"method": {"objective": "task_group"}, "rollout": {"rollouts_per_task": 4}}``
    in ``parameters``. The job rolls the tasks out and trains on the rollouts.
 
-The training component must run task jobs: Tinker does, Slime does not. See
+The training component must run task jobs: Tinker does, and Slime does with
+its own rollout engines (`Task jobs on Slime
+<../../reference/configuration.rst#task-jobs-on-slime>`__). See
 `Manual training <../../reference/http-api.rst#manual-training>`__ for the
 instruction and `Choose the samples that train
 <../../reference/http-api.rst#choose-the-samples-that-train>`__ for the buffer.

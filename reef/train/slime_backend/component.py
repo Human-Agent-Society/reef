@@ -1,17 +1,28 @@
-"""Slime as a training component in the HTTP service's process.
+"""Slime as a training component: each job runs in its own driver process, on Slime's own placement.
 
-``SlimeTrainingComponent`` owns one Ray session, the training GPUs it reserves
-there, and Slime's actor (and critic) workers. A job trains as Slime
-rollouts, one by default or one per ``save_interval`` optimizer steps: Reef's
-job data becomes Slime's rollout data, the workers train its optimizer steps,
-and the component saves the paired Hugging Face and Megatron checkpoints of
-each rollout. No serving engine takes part; Reef serves the Hugging Face export
-(or, with LoRA, the PEFT adapter) of a checkpoint that passes evaluation.
+``SlimeTrainingComponent`` lives in the HTTP service's process and keeps the
+job contract: it checks and queues jobs, and for each job starts a driver
+(``reef.train.slime_backend.driver``) on the Ray cluster, which reports the
+job's checkpoints in the job's directory. It holds no GPU between jobs.
 
-Training continues from the workers' own weights. A job therefore starts from
-the component's latest checkpoint; after a restart, the workers load that
-checkpoint again. A new training start from another release (``train-from``)
-is refused, as Slime cannot load a published release back into its workers.
+The driver runs ``SlimeJobRunner``: it places the job with Slime's own
+placement logic, starts Slime's actor (and critic) workers and, for a job of
+tasks (a task job), Slime's own rollout engines
+(``reef.train.slime_backend.rollout_group``). A job trains as Slime rollouts,
+one by default or one per ``save_interval`` optimizer steps: Reef's job data
+becomes Slime's rollout data, the workers train its optimizer steps, and the
+runner saves the paired Hugging Face and Megatron checkpoints of each
+rollout. A task job first rolls its tasks out on the engines, synced to the
+weights the job trains; with ``--colocate`` the engines share the training
+GPUs, and Slime moves the GPU memory between them and the workers. Reef's
+serving engines take no part; Reef serves the Hugging Face export (or, with
+LoRA, the PEFT adapter) of a checkpoint that passes evaluation.
+
+Training continues from Slime's latest checkpoint: every driver loads the
+latest Megatron checkpoint of one save root. A job therefore starts from the
+component's latest checkpoint. A new training start from another release
+(``train-from``) is refused, as Slime cannot load a published release back
+into its workers.
 
 Every job trains the loss family and learning-rate schedule its parameters
 name. The workers start with the recipe's startup family; a job of another
@@ -24,14 +35,21 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import shutil
+import signal
+import subprocess
+import sys
+import time
+from abc import abstractmethod
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 
 from reef.artifact.repository import BaseArtifactSource
-from reef.core.job_data import TaskSample
+from reef.core.evaluation import RolloutScores
+from reef.core.job_data import JobData, TaskSample, trajectories
 from reef.core.weight_layout import ADAPTER_DIR
 from reef.runtime.durable_files import read_json, write_json
 from reef.runtime.executor import resolve
@@ -60,12 +78,28 @@ from reef.train.slime_backend.reef_adapters.train_groups import (
 )
 from reef.train.slime_backend.reef_adapters.training_job.storage import CheckpointStorage, critic_checkpoint_due
 from reef.train.slime_backend.resources import SlimeDeploymentResources
+from reef.train.slime_backend.rollout_group import SGLANG_PLUGIN_ENV, EngineChat, SlimeRolloutGroup
 from reef.train.slime_backend.score_centering import ScoreCenteringSettings, settings_from_args
+from reef.train.task_rollouts import RolloutSettings, TaskJobRollouts, roll_out, task_name
 
 #: A start directory's description of the weights a later job continues from.
 START_STATE = "start.json"
 #: The rollout a job trains and the job's optimizer steps through it, written before the workers train it.
 ROLLOUT_FILE = "rollout.json"
+#: The rollouts of a task job, in its job directory.
+ROLLOUTS_FILE = "rollouts.json"
+#: A job's parameters; ``rollout`` applies only to a task job.
+JOB_PARAMETER_NAMES = frozenset({"method", "scheduling", "save_interval", "rollout"})
+#: The settings a job's driver starts with, in the job's directory.
+DRIVER_FILE = "driver.json"
+#: The metrics of a job whose driver finished, in the job's directory.
+DRIVER_RESULT_FILE = "driver-result.json"
+#: The output of a job's drivers, in the job's directory.
+DRIVER_LOG = "driver.log"
+#: Seconds a driver has to stop after SIGTERM before it is killed.
+DRIVER_STOP_TIMEOUT_S = 60
+#: The Slime option that starts no rollout engine, for a job that rolls nothing out.
+NO_ROLLOUT_ENGINES = "--rollout-num-gpus=0"
 
 
 def check_objective_state(objective: str | None, algorithm_state: Mapping[str, Any], owner: str) -> None:
@@ -202,92 +236,35 @@ class SlimeRound:
         check_objective_state(self.objective, self.algorithm_state, "SlimeRound")
 
 
-class SlimeTrainingComponent(LocalJobComponent):
-    """Train each job as Slime rollouts on the component's own workers, from its latest checkpoint.
+class SlimeJobs(LocalJobComponent):
+    """The jobs of one Slime save root: their directories, the starts they continue from, and the releases.
 
-    A job's parameters are ``method`` (a ``TrainingMethod`` as a dict),
-    optionally ``scheduling`` (a ``StepScheduling`` as a dict, see
-    ``job_training``), and optionally ``save_interval``, a positive int: the
-    optimizer steps between two saved checkpoints. ``submit`` refuses any
-    other parameter. Each run of ``save_interval`` steps trains as one Slime
-    rollout and saves one checkpoint; without it, the job is one rollout with
-    one checkpoint. A checkpoint's step is the job's optimizer steps up to it.
-    The job's last checkpoint records the objective's state after the job's
-    data; an earlier checkpoint records the state of the job's start, since
-    the objective computes its state for the whole data. A job whose objective
-    skips its data saves no checkpoint, so the next job continues the start's
-    weights and objective state, as on every training component.
-
-    The workers hold one set of weights, so the component accepts only a job
-    whose start names the weights the workers hold: the latest saved
-    rollout's start, or, until the workers save their first rollout, a
-    ``None`` start, which names the weights the workers loaded at startup. ``submit`` checks the start, and
-    ``run`` checks it again, since a job queued behind another job runs after
-    that job moved the workers on. The component refuses every release as a
-    start, and it trains the jobs of one scenario.
-
-    ``args`` are the arguments the workers started with; ``storage`` bounds
-    the paired checkpoints on disk, and has a critic root exactly when a
-    critic group trains. Beside the checkpoint roots,
-    ``reef-jobs/`` holds the jobs (see ``LocalJobComponent``) and
-    ``reef-starts/rollout_<id>/`` the start of each saved rollout: its
-    ``start.json`` and, with LoRA, the published release in
-    ``release/adapter/``. Without LoRA, the release is the rollout's Hugging
-    Face export.
+    ``args`` are Slime's parsed arguments of the deployment, ``lora`` whether
+    the actor trains a LoRA adapter. Beside the checkpoint roots, ``reef-jobs/``
+    holds the jobs (see ``LocalJobComponent``) and ``reef-starts/rollout_<id>/``
+    the start of each saved rollout: its ``start.json`` and, with LoRA, the
+    published release in ``release/adapter/``; ``reef-starts/base/`` is the
+    start of the untrained weights. ``SlimeTrainingComponent`` (the component
+    Reef calls) and ``SlimeJobRunner`` (the driver that trains a job) are the
+    two subclasses, over the same directories. A subclass names the rollout
+    whose weights the next job continues, ``held_rollout_id``.
     """
 
-    def __init__(
-        self,
-        args: SlimeArguments,
-        actor_group: SlimeTrainGroup,
-        critic_group: SlimeTrainGroup | None,
-        *,
-        batch_processor: TrainingBatchProcessor,
-        storage: CheckpointStorage,
-        lora: bool,
-        loss_family: str,
-        loss_family_config: object | None = None,
-        score_centering: ScoreCenteringSettings | None = None,
-        train_timeout_s: float = DEFAULT_TRAIN_TIMEOUT_S,
-        resources: SlimeDeploymentResources | None = None,
-    ) -> None:
+    def __init__(self, args: SlimeArguments, *, lora: bool) -> None:
         self.args = args
-        self.train_timeout_s = train_timeout_s
-        self.group = actor_group
-        if (critic_group is None) != (storage.critic_root is None):
-            raise ValueError("the critic group saves into the storage's critic root: give both or neither")
-        self.critic_group = critic_group
-        self.batch_processor = batch_processor
-        self.storage = storage
         self.lora = lora
-        self.score_centering = score_centering
-        self.resources = resources
-        self.critic_steps_per_actor = args.critic_steps_per_actor
-        self.critic_only_steps = args.num_critic_only_steps
-        algorithm = resolve_loss_family(loss_family).bind(
-            loss_family_config,
-            critic_steps_per_actor=self.critic_steps_per_actor,
-            critic_only_steps=self.critic_only_steps,
-        )
-        # Bound algorithms and each family's worker arguments, by family name;
-        # the startup family's arguments are the workers' own.
-        self.algorithms_by_loss_family: dict[str, SlimeAlgorithm] = {algorithm.loss_family: algorithm}
-        self.args_by_loss_family: dict[str, SlimeArguments] = {algorithm.loss_family: args}
-        # Arguments some family changes from the startup ones: a worker switch sends all of them.
-        self.switched_arg_names: set[str] = set()
-        self.worker_settings = WorkerTrainingSettings(algorithm.loss_family, None)
         root = Path(args.save_hf.format(rollout_id=0)).expanduser().resolve().parent.parent
         self.starts_root = root / "reef-starts"
-        self.next_rollout_id = int(args.start_rollout_id or 0)
-        # The workers loaded the checkpoint of the rollout before the next one, or the startup weights. A job
-        # that a restart stopped after Megatron saved that rollout writes that rollout's start when it resumes.
-        self.loaded_rollout_id: int | None = self.next_rollout_id - 1 if self.next_rollout_id > 0 else None
         # The start of the startup weights, the untrained checkpoint that the base artifact holds.
         self.base_start_dir = self.starts_root / "base"
-        if not (self.base_start_dir / "start.json").exists():
+        if not (self.base_start_dir / START_STATE).exists():
             SlimeStart(None, None, {}, None).write(self.base_start_dir)
         super().__init__(root / "reef-jobs")
-        self.start_jobs()
+
+    @property
+    @abstractmethod
+    def held_rollout_id(self) -> int | None:
+        """The rollout whose weights the next job continues, or ``None`` for the untrained weights."""
 
     @property
     def name(self) -> str:
@@ -342,11 +319,19 @@ class SlimeTrainingComponent(LocalJobComponent):
         )
 
     def check_job(self, job: TrainingJob) -> None:
-        if any(isinstance(item, TaskSample) for item in job.data.samples):
-            raise ValueError("Slime trains trajectories; it does not roll tasks out (task jobs) yet")
-        unknown = set(job.parameters) - {"method", "scheduling", "save_interval"}
+        unknown = set(job.parameters) - JOB_PARAMETER_NAMES
         if unknown:
             raise ValueError(f"Slime jobs accept no parameters {sorted(unknown)}")
+        tasks = [item for item in job.data.samples if isinstance(item, TaskSample)]
+        if tasks and len(tasks) != len(job.data.samples):
+            raise ValueError("a Slime job trains either trajectories or tasks, not both")
+        if tasks:
+            self.check_task_jobs(job.parameters)
+            names = [task_name(task) for task in tasks]
+            if len(set(names)) != len(names):
+                raise ValueError("the tasks of one job need distinct names: each name groups its task's samples")
+        elif "rollout" in job.parameters:
+            raise ValueError("the rollout parameter applies only to a job of tasks")
         interval = job.parameters.get("save_interval")
         if interval is not None and (isinstance(interval, bool) or not isinstance(interval, int) or interval <= 0):
             raise ValueError("save_interval must be a positive int")
@@ -354,22 +339,159 @@ class SlimeTrainingComponent(LocalJobComponent):
         self.check_held_weights(SlimeStart.read(Path(job.start)).rollout_id, job.start)
 
     def check_held_weights(self, rollout_id: int | None, start: str) -> None:
-        """Raise ``ValueError`` unless the workers hold the weights of ``rollout_id``, which ``start`` names.
+        """Raise ``ValueError`` unless the next job continues the weights of ``rollout_id``, which ``start`` names.
 
-        ``None`` names the weights the workers loaded at startup, which they
-        hold only until they save their first rollout.
+        ``None`` names the untrained weights, which a job continues only until the first rollout is saved.
         """
-        if rollout_id != self.loaded_rollout_id:
-            held = (
-                "the startup weights"
-                if self.loaded_rollout_id is None
-                else f"the weights of rollout {self.loaded_rollout_id}"
-            )
+        held_rollout_id = self.held_rollout_id
+        if rollout_id != held_rollout_id:
+            held = "the startup weights" if held_rollout_id is None else f"the weights of rollout {held_rollout_id}"
             wanted = "the startup weights" if rollout_id is None else f"rollout {rollout_id}"
-            raise ValueError(f"Slime's workers hold {held}; a job cannot start from {wanted} ({start})")
+            raise ValueError(f"Slime continues {held}; a job cannot start from {wanted} ({start})")
+
+    def check_task_jobs(self, parameters: Mapping[str, Any]) -> None:
+        """A task job rolls its tasks out on Slime's own engines, as the ``rollout`` parameter says."""
+        RolloutSettings.from_parameters(parameters)
+
+
+class SlimeJobRunner(SlimeJobs):
+    """Train a job as Slime rollouts on the runner's workers, from Slime's latest checkpoint.
+
+    A job's driver makes one runner and calls ``run`` for its job; the CPU
+    tests run it as an in-process component. A job's parameters are
+    ``method`` (a ``TrainingMethod`` as a dict), optionally ``scheduling`` (a
+    ``StepScheduling`` as a dict, see ``job_training``), optionally
+    ``save_interval``, a positive int: the optimizer steps between two saved
+    checkpoints, and, for a task job, ``rollout`` (``RolloutSettings``). Each
+    run of ``save_interval`` steps trains as one Slime rollout and saves one
+    checkpoint; without it, the job is one rollout with one checkpoint. A
+    checkpoint's step is the job's optimizer steps up to it. The job's last
+    checkpoint records the objective's state after the job's data; an
+    earlier checkpoint records the state of the job's start, since the
+    objective computes its state for the whole data. A job whose objective
+    skips its data saves no checkpoint, so the next job continues the start's
+    weights and objective state, as on every training component.
+
+    The workers load Slime's latest checkpoint, so a job's start must name
+    it: the latest saved rollout's start, or, before the first rollout, the
+    base start. ``run`` checks it again, since a job queued behind another
+    job runs after that job moved the checkpoint on.
+
+    A task job needs ``rollout_group``: the runner syncs its engines to the
+    workers' weights, runs the tasks' rollouts on them, releases their GPU
+    memory, and trains the samples of the groups that formed, each sample
+    with its task's name as ``group_id``. It keeps the rollouts in
+    ``rollouts.json`` in the job's directory, so a resumed job trains the
+    same ones, and reports each task's rewards of the rollouts that ran
+    (``rollout_rewards``, by task name).
+
+    ``args`` are the arguments the workers started with; ``storage`` bounds
+    the paired checkpoints on disk, and has a critic root exactly when a
+    critic group trains. ``rollout_group`` is Slime's rollout engines of a
+    task job, or None. ``resources`` is the job's Ray session and GPUs, which
+    ``close`` releases.
+    """
+
+    def __init__(
+        self,
+        args: SlimeArguments,
+        actor_group: SlimeTrainGroup,
+        critic_group: SlimeTrainGroup | None,
+        *,
+        batch_processor: TrainingBatchProcessor,
+        storage: CheckpointStorage,
+        lora: bool,
+        loss_family: str,
+        loss_family_config: object | None = None,
+        score_centering: ScoreCenteringSettings | None = None,
+        train_timeout_s: float = DEFAULT_TRAIN_TIMEOUT_S,
+        resources: SlimeDeploymentResources | None = None,
+        rollout_group: SlimeRolloutGroup | None = None,
+    ) -> None:
+        self.rollout_group = rollout_group
+        self.train_timeout_s = train_timeout_s
+        self.group = actor_group
+        if (critic_group is None) != (storage.critic_root is None):
+            raise ValueError("the critic group saves into the storage's critic root: give both or neither")
+        self.critic_group = critic_group
+        self.batch_processor = batch_processor
+        self.storage = storage
+        self.score_centering = score_centering
+        self.resources = resources
+        self.critic_steps_per_actor = args.critic_steps_per_actor
+        self.critic_only_steps = args.num_critic_only_steps
+        algorithm = resolve_loss_family(loss_family).bind(
+            loss_family_config,
+            critic_steps_per_actor=self.critic_steps_per_actor,
+            critic_only_steps=self.critic_only_steps,
+        )
+        # Bound algorithms and each family's worker arguments, by family name;
+        # the startup family's arguments are the workers' own.
+        self.algorithms_by_loss_family: dict[str, SlimeAlgorithm] = {algorithm.loss_family: algorithm}
+        self.args_by_loss_family: dict[str, SlimeArguments] = {algorithm.loss_family: args}
+        # Arguments some family changes from the startup ones: a worker switch sends all of them.
+        self.switched_arg_names: set[str] = set()
+        self.worker_settings = WorkerTrainingSettings(algorithm.loss_family, None)
+        self.next_rollout_id = int(args.start_rollout_id or 0)
+        # The workers loaded the checkpoint of the rollout before the next one, or the startup weights. A job
+        # that a restart stopped after Megatron saved that rollout writes that rollout's start when it resumes.
+        self.loaded_rollout_id: int | None = self.next_rollout_id - 1 if self.next_rollout_id > 0 else None
+        super().__init__(args, lora=lora)
+
+    def check_task_jobs(self, parameters: Mapping[str, Any]) -> None:
+        """A task job rolls its tasks out on this runner's rollout engines, as the ``rollout`` parameter says."""
+        if self.rollout_group is None:
+            raise ValueError(
+                "Slime started no rollout engines for this task job; set training.options.colocate or "
+                "rollout-num-gpus"
+            )
+        super().check_task_jobs(parameters)
+
+    @property
+    def held_rollout_id(self) -> int | None:
+        return self.loaded_rollout_id
+
+    def task_rollouts(self, job: TrainingJob, directory: Path, settings: RolloutSettings) -> TaskJobRollouts:
+        """The rollouts of a task job: those of an earlier attempt, else new ones on the workers' weights.
+
+        The rollout group serves the actor's weights from its sync to its release; colocated engines hold the
+        training GPUs only for that span.
+        """
+        record = directory / ROLLOUTS_FILE
+        kept = read_json(record)
+        if kept is not None:
+            samples = JobData.from_dict(kept["samples"]).samples
+            return TaskJobRollouts(
+                trajectories(JobData(job.data.data_id, samples)), RolloutScores.from_json(kept["scores"])
+            )
+        if self.rollout_group is None:
+            raise RuntimeError("this Slime component has no rollout engines, so it cannot roll tasks out")
+        held = "base" if self.loaded_rollout_id is None else f"rollout_{self.loaded_rollout_id}"
+        chat = EngineChat(
+            self.rollout_group.router_url,
+            model_path=self.args.hf_checkpoint,
+            timeout_s=self.train_timeout_s,
+            runtime_load_id=f"slime:{held}",
+        )
+        tasks = tuple(item for item in job.data.samples if isinstance(item, TaskSample))
+        self.rollout_group.sync(self.group)
+        try:
+            rollouts = roll_out(tasks, settings, chat, model=self.args.hf_checkpoint, work_dir=directory / "rollouts")
+        finally:
+            self.rollout_group.release()
+        write_json(
+            record,
+            {"samples": JobData(job.data.data_id, rollouts.samples).to_dict(), "scores": rollouts.scores.to_json()},
+        )
+        return rollouts
 
     def close_resources(self) -> None:
         errors = []
+        if self.rollout_group is not None:
+            try:
+                self.rollout_group.close()
+            except Exception as exc:
+                errors.append(exc)
         for group in (self.critic_group, self.group):
             if group is not None:
                 try:
@@ -396,9 +518,21 @@ class SlimeTrainingComponent(LocalJobComponent):
         if started is None or started["rollout_id"] != self.loaded_rollout_id:
             held = SlimeStart.read(Path(saved[-1].path)) if saved else start
             self.check_held_weights(held.rollout_id, job.start)
+        data = job.data
+        rollout_metrics: dict[str, Any] = {}
+        if "rollout" in job.parameters:
+            rollouts = self.task_rollouts(job, directory, RolloutSettings.from_parameters(job.parameters))
+            rollout_metrics = {
+                "rollout_rewards": {name: list(values) for name, values in rollouts.rewards().items()},
+                "rollout_samples": len(rollouts.samples),
+            }
+            if not rollouts.samples:
+                # No task has a group of two samples to compare, so the job trains nothing.
+                return rollout_metrics
+            data = JobData(data.data_id, rollouts.samples)
         start_state = start.state_for(method.objective)
         prepared = prepare_slime_job(
-            job.data,
+            data,
             method,
             start_state,
             scheduling,
@@ -409,7 +543,7 @@ class SlimeTrainingComponent(LocalJobComponent):
         payload = prepared.payload
         if payload is None:
             # The objective skipped the job's data: the job saves no checkpoint.
-            return prepared.metrics
+            return {**prepared.metrics, **rollout_metrics}
         algorithm = self.algorithm_for_loss_family(payload["loss"])
         algorithm.validate_payload(payload)
         if saved:
@@ -423,7 +557,7 @@ class SlimeTrainingComponent(LocalJobComponent):
         interval = job.parameters.get("save_interval") or step_count
         done = saved[-1].step if saved else 0
         runs = [(first, min(first + interval, step_count)) for first in range(done, step_count, interval)]
-        metrics: dict[str, Any] = dict(prepared.metrics)
+        metrics: dict[str, Any] = {**prepared.metrics, **rollout_metrics}
         for first, last in runs:
             if self.stopping(directory):
                 break
@@ -634,7 +768,8 @@ class SlimeSettings:
     and ``namespace`` name the Ray cluster the workers run on.
     ``train_timeout_s`` bounds one worker call, in seconds. The strings are
     non-empty and the timeout is positive. ``SlimeComponentFactory`` makes the
-    value; ``create_slime_component`` reads it.
+    value; ``SlimeTrainingComponent`` reads it and hands it to each job's driver, whose
+    ``start_slime_runner`` reads it.
     """
 
     arguments: tuple[str, ...]
@@ -662,31 +797,141 @@ class SlimeSettings:
             raise ValueError("SlimeSettings.train_timeout_s must be positive")
 
 
-def create_slime_component(settings: SlimeSettings) -> SlimeTrainingComponent:
-    """Prepare the arguments, reserve the training GPUs, start the workers and return the component."""
+class SlimeTrainingComponent(SlimeJobs):
+    """The Slime component that Reef calls: it runs each job in a driver process of its own.
+
+    ``settings`` are the deployment's Slime settings. Building the component
+    parses the Slime arguments once, without starting anything, so a
+    malformed option fails at deployment, and checks the checkpoint storage.
+    ``run`` writes the settings to the job's ``driver.json`` and starts
+    ``python -m reef.train.slime_backend.driver`` on the job's directory,
+    with its output in ``driver.log``; the driver records the job's
+    checkpoints there and its metrics in ``driver-result.json``. A cancel or
+    ``close`` stops the driver (SIGTERM, then SIGKILL after
+    ``DRIVER_STOP_TIMEOUT_S``); a closed job resumes in a new driver after a
+    restart. The next job continues the latest rollout that a driver saved.
+    """
+
+    def __init__(self, settings: SlimeSettings) -> None:
+        self.settings = settings
+        args, _, retention = prepare_slime_arguments(
+            (*settings.arguments, NO_ROLLOUT_ENGINES),
+            loss_family=settings.loss_family,
+            recipe=settings.recipe,
+            execution=settings.execution,
+        )
+        prepare_checkpoint_storage(args, retention)
+        # Imported here: the LoRA module loads Megatron's LoRA stack.
+        from reef.train.slime_backend.reef_adapters.megatron.lora import megatron_lora_enabled
+
+        super().__init__(args, lora=megatron_lora_enabled(args))
+        self.start_jobs()
+
+    @property
+    def held_rollout_id(self) -> int | None:
+        """The latest rollout whose start a driver recorded, or ``None`` before the first."""
+        rollouts = [
+            int(path.name.removeprefix("rollout_"))
+            for path in self.starts_root.glob("rollout_*")
+            if (path / START_STATE).is_file()
+        ]
+        return max(rollouts, default=None)
+
+    def driver_command(self, directory: Path) -> list[str]:
+        """The command that runs the driver of the job in ``directory``."""
+        python = os.environ.get("REEF_PYTHON", sys.executable)
+        return [python, "-m", "reef.train.slime_backend.driver", str(directory)]
+
+    def run(self, job: TrainingJob, directory: Path) -> Mapping[str, Any]:
+        write_json(directory / DRIVER_FILE, settings_to_json(self.settings))
+        (directory / DRIVER_RESULT_FILE).unlink(missing_ok=True)
+        with open(directory / DRIVER_LOG, "ab") as log:
+            # The job's directory as the working directory: ``python -m`` puts it first on the import path, where
+            # no other ``reef`` package can shadow the installed one.
+            driver = subprocess.Popen(
+                self.driver_command(directory),
+                cwd=directory,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+        try:
+            while driver.poll() is None:
+                if self.stopping(directory):
+                    # A cancelled job already has its result; a closed one resumes after a restart.
+                    return {}
+                time.sleep(1)
+        finally:
+            stop_driver(driver)
+        if driver.returncode != 0:
+            tail = (directory / DRIVER_LOG).read_text(errors="replace")[-2000:]
+            raise RuntimeError(f"the Slime driver exited with {driver.returncode}; the end of {DRIVER_LOG}:\n{tail}")
+        result = read_json(directory / DRIVER_RESULT_FILE)
+        if result is None:
+            raise RuntimeError(f"the Slime driver exited without {DRIVER_RESULT_FILE}")
+        return result["metrics"]
+
+
+def stop_driver(driver: subprocess.Popen[bytes]) -> None:
+    """Stop a driver that still runs: SIGTERM to its process group, then SIGKILL after ``DRIVER_STOP_TIMEOUT_S``."""
+    if driver.poll() is not None:
+        return
+    os.killpg(driver.pid, signal.SIGTERM)
+    try:
+        driver.wait(timeout=DRIVER_STOP_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        os.killpg(driver.pid, signal.SIGKILL)
+        driver.wait()
+
+
+def settings_to_json(settings: SlimeSettings) -> dict[str, Any]:
+    """``settings`` as a JSON object, which ``settings_from_json`` reads back."""
+    value = asdict(settings)
+    return {**value, "arguments": list(settings.arguments), "execution": dict(settings.execution)}
+
+
+def settings_from_json(value: Mapping[str, Any]) -> SlimeSettings:
+    return SlimeSettings(**{**value, "arguments": tuple(value["arguments"])})
+
+
+def start_slime_runner(settings: SlimeSettings) -> SlimeJobRunner:
+    """Prepare the arguments, place the job with Slime's own placement, start its engines and workers, and return the runner.
+
+    Slime's rollout engines start when the arguments give them GPUs, before the workers, as in Slime's own
+    training loop: colocated engines take their GPU memory and release it before the workers load the model
+    on the same GPUs.
+    """
     args, loss_family_config, retention = prepare_slime_arguments(
         settings.arguments, loss_family=settings.loss_family, recipe=settings.recipe, execution=settings.execution
     )
     storage = prepare_checkpoint_storage(args, retention)
+    runtime_env = job_runtime_env()
+    if args.rollout_num_gpus:
+        runtime_env["env_vars"][SGLANG_PLUGIN_ENV] = "1"
     resources = SlimeDeploymentResources(
-        args,
-        ray_address=settings.ray_address,
-        namespace=settings.namespace,
-        runtime_env=job_runtime_env(),
+        args, ray_address=settings.ray_address, namespace=settings.namespace, runtime_env=runtime_env
     )
     resources.start()
+    rollout_group: SlimeRolloutGroup | None = None
     try:
         # Imported here: the worker class loads torch, Megatron and Slime's Ray actor.
         from reef.train.slime_backend.reef_adapters.megatron.lora import megatron_lora_enabled
         from reef.train.slime_backend.reef_adapters.megatron.train_actor import ReefMegatronTrainRayActor
 
+        rollout_bundles = resources.placement_groups["rollout"]
+        if args.rollout_num_gpus:
+            if rollout_bundles is None:
+                raise RuntimeError("Slime placed no GPUs for the rollout engines its arguments name")
+            rollout_group = SlimeRolloutGroup.start(args, rollout_bundles)
         actor_group, critic_group = create_train_groups(
             args,
             resources.placement_groups,
             actor_cls=ReefMegatronTrainRayActor,
             train_timeout_s=settings.train_timeout_s,
         )
-        return SlimeTrainingComponent(
+        if rollout_group is not None:
+            actor_group.set_rollout_manager(rollout_group.manager)
+        return SlimeJobRunner(
             args,
             actor_group,
             critic_group,
@@ -698,10 +943,13 @@ def create_slime_component(settings: SlimeSettings) -> SlimeTrainingComponent:
             score_centering=settings_from_args(args),
             train_timeout_s=settings.train_timeout_s,
             resources=resources,
+            rollout_group=rollout_group,
         )
     except BaseException:
+        if rollout_group is not None:
+            rollout_group.close()
         resources.close()
         raise
 
 
-__all__ = ["SlimeSettings", "SlimeStart", "SlimeTrainingComponent", "create_slime_component"]
+__all__ = ["SlimeJobRunner", "SlimeSettings", "SlimeStart", "SlimeTrainingComponent", "start_slime_runner"]

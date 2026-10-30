@@ -1,7 +1,7 @@
 """Container-only tests for SAO on Slime: its wire rows and its jobs on the Slime training component.
 
 These exercise the SAO payload builder (``build_sao_rollout_data`` in
-``recipes.sao.slime``), SAO jobs on ``SlimeTrainingComponent`` over fake
+``recipes.sao.slime``), SAO jobs on ``SlimeJobRunner`` over fake
 actor and critic groups, the critic's arguments and its checkpoint storage.
 They transitively import ``ray`` and ``torch`` and touch no GPU.
 """
@@ -16,7 +16,7 @@ from tests.support.slime_component import FakeTrainGroup, RecordingBatchProcesso
 
 from reef.runtime.interfaces import TrainingMethod
 from reef.runtime.jobs import JobStatus, TrainingJob
-from reef.train.slime_backend.component import SlimeTrainingComponent
+from reef.train.slime_backend.component import SlimeJobRunner
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
 from reef.train.slime_backend.loss_families import resolve_loss_family
 from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
@@ -224,7 +224,7 @@ class SaoStack:
         if self.critic is not None:
             self.critic.train_result = [{"values": [0.25]}]
         self.critic_external_data: list[object] = []
-        self.component = SlimeTrainingComponent(
+        self.component = SlimeJobRunner(
             args,
             self.actor,
             self.critic,
@@ -233,6 +233,7 @@ class SaoStack:
             lora=False,
             loss_family="sao",
         )
+        self.component.start_jobs()
         self.start = self.component.base_start
 
     def run(self, step: int = 0) -> JobStatus:
