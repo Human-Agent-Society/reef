@@ -8,8 +8,8 @@ command, which reaches a loopback gateway (:class:`CheckGateway`) that runs the 
 route with 404.
 
 The token stays out of every command line, log, error text, file of the run's directory and task. The sandbox
-gets it through :meth:`~reef.execution.sandbox.process.ProgramExecutor.set_secret_env`. Claude Code removes it from the
-environment of its Bash, hook and MCP subprocesses (``CLAUDE_CODE_SUBPROCESS_ENV_SCRUB``). The host redacts every
+gets it through the sandbox process environment, without placing values in command arguments. Claude Code removes it
+from the environment of its Bash, hook and MCP subprocesses (``CLAUDE_CODE_SUBPROCESS_ENV_SCRUB``). The host redacts every
 text it logs or raises and every file and file name of the run's directory, refuses a check of a task that holds
 the token, and admits no such task (:class:`CredentialHeld`).
 """
@@ -283,6 +283,7 @@ class ClaudeCodeAuthor(VariantAuthor):
         env = {key: value.replace("{root}", str(work_dir)) for key, value in self.descriptor.env.items()}
         env.update(
             {
+                TOKEN_VARIABLE: self.claude_token,
                 "HOME": str(work_dir / "home"),
                 "DISABLE_ERROR_REPORTING": "1",
                 # Claude Code removes its token from its Bash, hook and MCP subprocesses.
@@ -318,7 +319,6 @@ class ClaudeCodeAuthor(VariantAuthor):
         try:
             session = executor.open_session(forward_ports=(gateway.port,), timeout_s=self.timeout_seconds)
             tools.session = session
-            session.set_secret_env({TOKEN_VARIABLE: self.claude_token})
             threading.Thread(
                 target=close_when_stopped, args=(stop, finished, session), name="autoenvscaling-stop", daemon=True
             ).start()
