@@ -78,7 +78,7 @@ Both ways feed the same training step (4 to 8).
      - sessions that people run and score
      - runs of the next train tasks, run on the head
    * - Evaluation tasks
-     - instructions in ``evolution.evaluation.tasks``, or none (``policy: none``)
+     - instruction tasks in ``evolution.evaluation.tasks``, or none (``policy: none``)
      - the eval split of the uploaded tasks
    * - Agents
      - ``claude``, ``pi``, ``opencode``, ``codex`` (the adapters with a plugin)
@@ -316,11 +316,26 @@ deployment's ``task-import`` section.
 Evaluation: the publication policy
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-``evolution.evaluation`` names the tasks, the ``scorer`` (an
-``TaskScorer``) and the ``policy``. The tasks come from ``tasks`` (prompts
-or task directories), ``task_manifest`` with ``tasks_root``, or
-``imported_tasks``. A prompt run starts in an empty root, so a prompt must
-state the whole problem.
+``evolution.evaluation`` names the tasks, the ``scorer`` (a
+``TaskScorer``) and the ``policy``. The tasks come from one source:
+
+- ``tasks`` or ``task_file`` (JSONL): instruction tasks. Each one has an
+  ``id``, the ``instruction`` the agent reads, and an optional ``answer``
+  and ``metadata`` that only the scorer reads.
+- ``harbor_tasks``, ``task_manifest`` with ``tasks_root``, or
+  ``imported_tasks``: Harbor task directories (see `Task directories`_).
+
+.. code:: yaml
+
+   evaluation:
+     tasks:
+       - id: fib
+         instruction: Compute fib(90) exactly. Reply with the number alone on the last line.
+         answer: "2880067194370816120"
+
+An instruction run starts in an empty root, so an instruction must state the
+whole problem. The method's workspace lists each task's id and instruction,
+never its answer, so a proposal cannot copy the answer into the tree.
 
 .. list-table::
    :header-rows: 1
@@ -389,12 +404,14 @@ run's evaluation tasks must be directories too.
 Collection: growing evaluation suite
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-``collect_failures: true`` makes the prompts of each step's traces permanent
-evaluation tasks, so a later candidate cannot bring an old failure back. Reef
-screens each prompt, and caps them at ``max_collected_per_client`` (5) and
-``max_collected_tasks`` (50). A ``TaskCollector`` chooses which prompts
-(`Collect traffic prompts
-<../developer-guide/write-a-harness-method.rst#collect-traffic-prompts>`__).
+``collect_failures: true`` makes the last user message of each step's traces
+a permanent instruction task, so a later candidate cannot bring an old
+failure back. A collected task has no answer, so its scorer must grade
+without one, for example with a model judge. Reef screens each instruction,
+and caps them at ``max_collected_per_client`` (5) and
+``max_collected_tasks`` (50). A ``TaskCollector`` chooses which instructions
+(`Collect traffic instructions
+<../developer-guide/write-a-harness-method.rst#collect-traffic-instructions>`__).
 
 History
 ~~~~~~~

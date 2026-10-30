@@ -80,13 +80,12 @@ def main():
             SCENARIO,
             "/v1/chat/completions",
             # A cap on the reply: a local single slot server stalls behind one unbounded generation.
-            {"model": MODEL, "messages": [{"role": "user", "content": task}], "max_tokens": 2048},
+            {"model": MODEL, "messages": [{"role": "user", "content": task["instruction"]}], "max_tokens": 2048},
         )
-        prefix = task.split(maxsplit=1)[0]  # keys evolution.py's ANSWERS table
-        score = evolution.grade_text(task, body["choices"][0]["message"]["content"])
+        score = evolution.grade_text(task["answer"], body["choices"][0]["message"]["content"])
         client.report(
             SCENARIO,
-            {"agent_record_id": f"harness-evolve-{index}", "score": score, "feedback": prefix},
+            {"agent_record_id": f"harness-evolve-{index}", "score": score, "feedback": task["id"]},
             references=[receipt],
         )
         # The recipe's default stages batch valid scored reports, passing ones included, and
@@ -95,7 +94,7 @@ def main():
         batched += 1
         if score == 0.0:
             failures += 1
-        print(f"task {index} {prefix}: score {score} (receipt {receipt})")
+        print(f"task {index} {task['id']}: score {score} (receipt {receipt})")
 
     print(
         f"{batched} report(s) batched ({failures} of them failing); "
@@ -256,17 +255,16 @@ def native_main():
     batched = 0
     failures = 0
     for index, task in enumerate(tasks, start=1):
-        _, result = turn(task)
-        prefix = task.split(maxsplit=1)[0]
-        score = evolution.grade_text(task, result["text"])
-        report(client, result, score, prefix)
+        _, result = turn(task["instruction"])
+        score = evolution.grade_text(task["answer"], result["text"])
+        report(client, result, score, task["id"])
         # The recipe's default stages batch valid scored reports, passing ones included, and
         # evolution.batch_size: 1 makes each report its own batch: one submitted report is one
         # step this run triggers.
         batched += 1
         if score == 0.0:
             failures += 1
-        print(f"task {index} {prefix}: score {score} (session {result['session']}, exit {result['exit']})")
+        print(f"task {index} {task['id']}: score {score} (session {result['session']}, exit {result['exit']})")
 
     print(
         f"{batched} report(s) batched ({failures} of them failing); "
@@ -311,11 +309,11 @@ def native_main():
 
     # The same process, the first task again: the new session runs the mounted tree.
     task = tasks[0]
-    events, result = turn(task)
+    events, result = turn(task["instruction"])
     stages = [event["data"]["stage"] for event in events if event["type"] == "stage/enter"]
-    print(f"second pass {task.split(maxsplit=1)[0]}: stages {' -> '.join(stages)}")
+    print(f"second pass {task['id']}: stages {' -> '.join(stages)}")
     print(f"second pass answer: {result['text'].strip().splitlines()[-1] if result['text'].strip() else ''}")
-    print(f"second pass score: {evolution.grade_text(task, result['text'])} (session {result['session']})")
+    print(f"second pass score: {evolution.grade_text(task['answer'], result['text'])} (session {result['session']})")
 
 
 def replay():

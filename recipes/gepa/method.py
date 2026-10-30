@@ -36,7 +36,7 @@ from typing import Any, Self
 
 from reef.core.config import config_option
 from reef.core.plugins import ConfiguredPlugin, PluginSettings
-from reef.evaluation.harness import History
+from reef.evaluation.harness import EvaluationTask, History
 from reef.harness.adapters import get_adapter
 from reef.harness.tree import HarnessTree
 from reef.train.harness_backend import Method, Services, StepContext, Trace, Workspace
@@ -181,7 +181,7 @@ class GEPA(Method):
         archive = archive_for_step(
             path.read_text(encoding="utf-8") if path.is_file() else None,
             workspace.history(),
-            tasks,
+            [task.id for task in tasks],
             texts_of(head, get_adapter(str(workspace.host()["adapter"])).layout, self.settings.components),
             # The evaluation's runs per task and tree: 0 without a scorer, and GEPA's count needs at least 1.
             repeats=max(1, workspace.evaluation_repeats()),
@@ -244,7 +244,7 @@ class GEPA(Method):
             record["problems"] = list(validation.problems)
             archive.log_proposal(record)
             return f"the child fails validation: {validation.message()}", record
-        task_runs = services.evaluate(child, [example.task for example in minibatch])
+        task_runs = services.evaluate(child, [EvaluationTask.of_instruction(example.task) for example in minibatch])
         archive.charge(len(task_runs))
         child_scores = task_scores([task_run.score.value for task_run in task_runs], repeats=1)
         record["child_scores"] = child_scores
@@ -282,7 +282,10 @@ class GEPA(Method):
                 for task, trace in traces
             ]
         tasks = [task for task, _ in traces]
-        task_runs = services.evaluate(candidate_tree(head, archive.candidates[parent].texts), tasks)
+        task_runs = services.evaluate(
+            candidate_tree(head, archive.candidates[parent].texts),
+            [EvaluationTask.of_instruction(task) for task in tasks],
+        )
         archive.charge(len(task_runs))
         return [
             Example(
@@ -309,7 +312,7 @@ class GEPA(Method):
 def archive_for_step(
     text: str | None,
     history: History,
-    tasks: Sequence[str],
+    task_ids: Sequence[str],
     served_texts: Mapping[str, str],
     *,
     repeats: int,
@@ -319,7 +322,7 @@ def archive_for_step(
 
     ``text`` is the committed ``archive.json``, ``None`` before the first
     step. The pending candidate's validation pass is the evaluation of the
-    step that proposed it: ``history`` holds its scores on ``tasks``, the
+    step that proposed it: ``history`` holds its scores on the tasks of ``task_ids``, the
     scores of the tree that step served, and the step's decision. The
     evaluation runs ``repeats`` ≥ 1 runs per task and tree, so a task's
     score is the mean of its repeats, and a failed run reads as a zero,
@@ -331,7 +334,7 @@ def archive_for_step(
     method: a first boot, an operator edit or a new training start. It becomes a new
     parentless candidate, never a descendant of the last served one, and it
     costs GEPA's seed validation, one metric call per run:
-    ``len(tasks) * repeats``. A driver that plans an iteration reads the same
+    ``len(task_ids) * repeats``. A driver that plans an iteration reads the same
     inputs, so it draws the plan the method draws.
     """
     if repeats < 1:
@@ -343,8 +346,8 @@ def archive_for_step(
             archive.clear_pending()
         else:
             archive.settle(
-                task_scores(history.scores(decision.tree, tasks, repeats=repeats), repeats=repeats),
-                task_scores(history.scores(decision.head, tasks, repeats=repeats), repeats=repeats),
+                task_scores(history.scores(decision.tree, task_ids, repeats=repeats), repeats=repeats),
+                task_scores(history.scores(decision.head, task_ids, repeats=repeats), repeats=repeats),
                 decision.selected,
                 repeats=repeats,
             )
@@ -352,7 +355,7 @@ def archive_for_step(
         # GEPA scores its seed on the validation set before its first iteration; the step's evaluation runs that
         # pass later, at the same price.
         archive.seed(served_texts)
-        archive.charge(len(tasks) * repeats)
+        archive.charge(len(task_ids) * repeats)
     return archive
 
 

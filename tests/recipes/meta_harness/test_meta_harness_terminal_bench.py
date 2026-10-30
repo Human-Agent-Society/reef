@@ -109,7 +109,7 @@ def test_task_pin_and_drift_checks(driver, tmp_path, monkeypatch):
 
 def test_configuration_scales_budgets_and_isolates_campaigns(driver, monkeypatch):
     full = driver.configuration(tuple(driver.benchmark.MANIFEST["tasks"]), None, None)
-    tasks = full["evolution"]["evaluation"]["tasks"]
+    tasks = full["evolution"]["evaluation"]["harbor_tasks"]
     assert len(tasks) == len(set(tasks)) == 89
     # The seed and four candidates, each evaluated once on 89 tasks with two repeats.
     assert full["evolution"]["method"]["config"]["max_target_runs"] == 890

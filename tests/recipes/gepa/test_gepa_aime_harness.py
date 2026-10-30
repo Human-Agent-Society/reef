@@ -21,6 +21,7 @@ import pytest
 from tests.support.harness_steps import TreeReleases
 
 from reef.core.evaluation import PolicyHarness, RolloutRequest
+from reef.evaluation.harness import EvaluationTask
 from reef.harness import TaskResult
 from reef.harness.adapters import get_adapter
 from reef.harness.tasks.model_binding import ModelBinding
@@ -38,6 +39,8 @@ def run_requests(evaluator, *pairings):
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 EXAMPLE_DIR = REPO_ROOT / "recipes" / "gepa" / "examples" / "aime"
+#: One validation task record, as run.py fills ``evolution.evaluation.tasks``.
+PROBLEM_TASK = {"id": "aime-validation-00", "instruction": "problem", "answer": "### 17"}
 
 
 def purge_example_modules() -> None:
@@ -111,12 +114,17 @@ def test_scorer_snapshot_and_feedback_survive_serialization_without_registry(aim
     evaluate, feedback = pickle.loads(pickle.dumps((scorer.score, scorer.feedback)))
     aime.ANSWERS.clear()
     aime.CONTEXTS.clear()
-    assert evaluate("problem", pi_run("### 17")) == 1.0
+    # A training problem's traffic carries no answer: the snapshot answers it.
+    assert evaluate(EvaluationTask.of_instruction("problem"), pi_run("### 17")) == 1.0
     assert "solution: explanation" in feedback("problem", "wrong", 0.0)
-    assert evaluate("problem", pi_run("### 17", exit_code=1)) == 0.0
-    assert evaluate("problem", pi_run("### 17", residue=("stray",))) == 0.0
+    assert evaluate(EvaluationTask.of_instruction("problem"), pi_run("### 17", exit_code=1)) == 0.0
+    assert evaluate(EvaluationTask.of_instruction("problem"), pi_run("### 17", residue=("stray",))) == 0.0
     with pytest.raises(RuntimeError, match="no AIME answer is registered"):
-        evaluate("unknown", pi_run("### 17"))
+        evaluate(EvaluationTask.of_instruction("unknown"), pi_run("### 17"))
+    # A validation task carries its own answer, which the snapshot need not hold.
+    assert (
+        evaluate(EvaluationTask.parse(PROBLEM_TASK | {"instruction": "unknown"}, setting="t"), pi_run("### 17")) == 1.0
+    )
 
 
 def test_driver_preserves_executor_profiles(load, monkeypatch, tmp_path):
@@ -125,7 +133,7 @@ def test_driver_preserves_executor_profiles(load, monkeypatch, tmp_path):
     config["executors"] = {"cpu-pool": {"backend": "mp", "workers": 2}}
     config["execution"] = {"evolution": "cpu-pool"}
     monkeypatch.setattr(driver, "load_config", lambda path: config)
-    _, recipe = driver.load_recipe(["problem"], api_key="dummy", trainset_size=45)
+    _, recipe = driver.load_recipe([PROBLEM_TASK], api_key="dummy", trainset_size=45)
     assert recipe.worker_executor.backend == "mp"
     # One --seed drives both draws, and the method plans over the training split.
     assert (recipe.method.settings.seed, recipe.method.settings.trainset_size) == (0, 45)
@@ -141,7 +149,7 @@ def test_default_driver_pool_uses_a_stable_answer_snapshot(load, monkeypatch, tm
     config["execution"]["evolution"]["workers"] = 1
     monkeypatch.setattr(driver, "load_config", lambda path: config)
     monkeypatch.setattr("reef.evaluation.harness.runner.run_task", lambda *args, **kwargs: pi_run("### 17"))
-    _, recipe = driver.load_recipe(["problem"], api_key="dummy", trainset_size=45)
+    _, recipe = driver.load_recipe([PROBLEM_TASK], api_key="dummy", trainset_size=45)
     with SQLiteRecordStore() as records:
         trainer = recipe.build("test", records, releases=releases_of(recipe))
         try:
@@ -190,7 +198,7 @@ def test_driver_evaluates_with_isolated_workers(load, monkeypatch, tmp_path, exe
     )
     binary.chmod(0o755)
     monkeypatch.setenv("REEF_PI_BINARY", str(binary))
-    _, recipe = driver.load_recipe(["problem"], api_key="dummy", trainset_size=45)
+    _, recipe = driver.load_recipe([PROBLEM_TASK], api_key="dummy", trainset_size=45)
     # Validation workers use the runtime's upstream, not the loopback service
     # used by the driver's minibatch and held-out passes.
     assert recipe.model_binding().base_url == driver.aime.OPENAI_BASE_URL
@@ -213,14 +221,14 @@ def test_driver_binds_the_example_hooks_to_one_snapshot_and_keeps_other_hooks(lo
     from reef.evaluation.harness import VerifierRewardScorer
 
     driver = load("run")
-    _, recipe = driver.load_recipe(["problem"], api_key="dummy", trainset_size=45)
+    _, recipe = driver.load_recipe([PROBLEM_TASK], api_key="dummy", trainset_size=45)
     assert isinstance(recipe.scorer, driver.aime.AIMEScorer) and recipe.method.feedback is recipe.scorer
     config = driver.load_config(EXAMPLE_DIR / "gepa.yaml")
     evolution = config["recipe"]["config"]["evolution"]
     evolution["evaluation"]["scorer"] = "reef.evaluation.harness:VerifierRewardScorer"
     evolution["method"]["config"]["feedback"] = "recipes.gepa:ScoreFeedback"
     monkeypatch.setattr(driver, "load_config", lambda path: config)
-    _, recipe = driver.load_recipe(["problem"], api_key="dummy", trainset_size=45)
+    _, recipe = driver.load_recipe([PROBLEM_TASK], api_key="dummy", trainset_size=45)
     assert isinstance(recipe.scorer, VerifierRewardScorer) and isinstance(recipe.method.feedback, ScoreFeedback)
 
 
@@ -228,7 +236,7 @@ def test_driver_binds_the_example_hooks_to_one_snapshot_and_keeps_other_hooks(lo
 def test_worker_runtime_owns_only_its_own_ray_session(load, monkeypatch, already_initialized):
     monkeypatch.setenv("REEF_GEPA_EXECUTOR", "ray")
     driver = load("run")
-    _, recipe = driver.load_recipe(["problem"], api_key="dummy", trainset_size=45)
+    _, recipe = driver.load_recipe([PROBLEM_TASK], api_key="dummy", trainset_size=45)
     calls = []
     fake_ray = SimpleNamespace(
         is_initialized=lambda: already_initialized,
@@ -248,7 +256,7 @@ def test_worker_runtime_owns_only_its_own_ray_session(load, monkeypatch, already
 def test_local_worker_runtime_does_not_require_ray(load, monkeypatch):
     monkeypatch.setenv("REEF_GEPA_EXECUTOR", "auto")
     driver = load("run")
-    _, recipe = driver.load_recipe(["problem"], api_key="dummy", trainset_size=45)
+    _, recipe = driver.load_recipe([PROBLEM_TASK], api_key="dummy", trainset_size=45)
     monkeypatch.setitem(sys.modules, "ray", None)
     with driver.worker_runtime(recipe):
         pass
@@ -362,7 +370,8 @@ def test_driver_reports_each_problem_against_its_recorded_request(load, monkeypa
     monkeypatch.setenv("REEF_MODEL", "task-model")
     driver = load("run")
     problems = ["Find n such that ...", "Let ABC be a triangle ..."]
-    recipe_name, recipe = driver.load_recipe(problems, api_key="dummy", trainset_size=45)
+    tasks = driver.aime.validation_tasks([{"input": problem, "answer": "### 42"} for problem in problems])
+    recipe_name, recipe = driver.load_recipe(tasks, api_key="dummy", trainset_size=45)
     # The base release holds the source tree, as every harness release does.
     bootstrap = tmp_path / "bootstrap"
     recipe.seed.write(bootstrap)
@@ -388,7 +397,7 @@ def test_driver_reports_each_problem_against_its_recorded_request(load, monkeypa
         # holds the seed alone, charged GEPA's seed validation.
         backend = service.dispatcher.get_or_create_scenario(service.scenario).trainer.candidate_backend
         assert service.history().root == backend.history.root
-        archive = driver.committed_archive(service, problems, recipe.seed, 0)
+        archive = driver.committed_archive(service, [task["id"] for task in tasks], recipe.seed, 0)
         assert (len(archive.candidates), archive.served, archive.metric_calls) == (1, 0, len(problems))
 
         floor = driver.max_sequence(service.records(), service.scenario)

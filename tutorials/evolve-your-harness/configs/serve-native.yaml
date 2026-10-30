@@ -40,26 +40,31 @@ recipe:
         policy: compare
         # The pi variant's three tasks, so the two runs are comparable.
         tasks:
-          - >-
-            [sieve] Write and mentally run a prime sieve: how many primes are below 100000? Reply with the count as a
-            plain integer alone on the last line.
-          - >-
-            [fib] With fib(1) = 1 and fib(2) = 1, compute fib(90) exactly (memoize, do not approximate). Reply with the
-            value as a plain integer alone on the last line.
-          - |-
-            [csv] Compute the median of the value column in this csv:
-            id,value
-            1,12
-            2,47
-            3,3
-            4,88
-            5,21
-            6,56
-            7,9
-            8,74
-            9,30
-            Reply with the median as a plain integer alone on the last line.
-
+          - id: sieve
+            instruction: >-
+              Write and mentally run a prime sieve: how many primes are below 100000? Reply with the count as a plain
+              integer alone on the last line.
+            answer: "9592"
+          - id: fib
+            instruction: >-
+              With fib(1) = 1 and fib(2) = 1, compute fib(90) exactly (memoize, do not approximate). Reply with the
+              value as a plain integer alone on the last line.
+            answer: "2880067194370816120"
+          - id: csv
+            instruction: |-
+              Compute the median of the value column in this csv:
+              id,value
+              1,12
+              2,47
+              3,3
+              4,88
+              5,21
+              6,56
+              7,9
+              8,74
+              9,30
+              Reply with the median as a plain integer alone on the last line.
+            answer: "30"
 inference:
   upstream-url: http://127.0.0.1:8000
   upstream-api-key: ${REEF_UPSTREAM_API_KEY}

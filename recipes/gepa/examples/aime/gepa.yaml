@@ -1,5 +1,5 @@
 # The recipe the AIME driver boots: run.py loads this file, fills
-# evolution.evaluation.tasks with the pinned validation split, builds the
+# evolution.evaluation.tasks with the pinned validation split's task records, builds the
 # implementation below, and serves it from its own embedded Reef service. The
 # Pi runs the driver runs point at that service, so the problems it solves
 # are recorded traffic and the method reflects on the served tree's own
@@ -59,7 +59,8 @@ recipe:
       evaluation:
         # The validation set, which the evaluation scores every candidate on.
         # Left empty here because it is data, not configuration: run.py fills it
-        # with the 45 validation problems from the pinned split before build_recipe.
+        # with the 45 validation problems from the pinned split, each a task
+        # record with its id and answer, before build_recipe.
         tasks: []
         # The quickstart's containment score over one run, in the harness/
         # package. run.py binds this scorer and the feedback hook to a

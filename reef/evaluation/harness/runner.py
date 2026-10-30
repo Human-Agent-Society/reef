@@ -22,6 +22,7 @@ from threading import Lock
 
 from reef.core.evaluation import RolloutScore
 from reef.evaluation.harness.scoring import FailureObservation, ScoredRun, TaskScorer
+from reef.evaluation.harness.tasks import EvaluationTask
 from reef.execution.sandbox.process import RUN_OWNER_LEASE, ProgramExecutor
 from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.tasks.harbor_task import run_harbor_task
@@ -56,7 +57,7 @@ class TaskRun:
     """One run to run: a rendered tree, the task, and the directory that keeps its record.
 
     Values: ``files`` maps each rendered path to its text; ``task`` is the
-    prompt or the task directory the run plays; ``record_dir`` is ``None``,
+    task the run plays, with what its scorer reads; ``record_dir`` is ``None``,
     which keeps no record, or an absent or empty directory that receives the
     run's trajectory files and ``run.json``.
     Purpose: the evaluator makes one per ``RolloutRequest`` it runs; the worker
@@ -64,7 +65,7 @@ class TaskRun:
     """
 
     files: Mapping[str, str]
-    task: str
+    task: EvaluationTask
     record_dir: Path | None
 
 
@@ -112,7 +113,7 @@ class TaskEvaluationWorker:
             return replace(scored, record_archive=buffer.getvalue())
 
     def run_and_score(
-        self, files: Mapping[str, str], task: str, record_dir: Path | None, models: ModelBindings
+        self, files: Mapping[str, str], task: EvaluationTask, record_dir: Path | None, models: ModelBindings
     ) -> ScoredRun:
         """Score one run; a failed score marks a run that the environment could not run.
 
@@ -127,24 +128,26 @@ class TaskEvaluationWorker:
         token = RUN_OWNER_LEASE.set(self.owner_lease)
         try:
             if self.task_containers:
-                result = run_harbor_task(self.descriptor, files, task, timeout=self.timeout, keep_dir=record_dir)
+                result = run_harbor_task(self.descriptor, files, task.text, timeout=self.timeout, keep_dir=record_dir)
             else:
                 result = run_task(
                     self.descriptor,
                     files,
-                    task,
+                    task.text,
                     binary=self.binary,
                     timeout=self.timeout,
                     executor=self.executor,
                     keep_dir=record_dir,
                 )
         except TaskRunError as error:
-            scored = ScoredRun(RolloutScore.failed(), FailureObservation(task=task, stage="launch", cause=str(error)))
+            scored = ScoredRun(
+                RolloutScore.failed(), FailureObservation(task=task.id, stage="launch", cause=str(error))
+            )
             write_run_record(record_dir, task, None, scored)
             return scored
         except TrajectoryError as error:
             scored = ScoredRun(
-                RolloutScore.failed(), FailureObservation(task=task, stage="trajectory", cause=str(error))
+                RolloutScore.failed(), FailureObservation(task=task.id, stage="trajectory", cause=str(error))
             )
             write_run_record(record_dir, task, None, scored)
             return scored
@@ -154,7 +157,7 @@ class TaskEvaluationWorker:
         write_run_record(record_dir, task, result, scored)
         return scored
 
-    def score_result(self, result: TaskResult, task: str, models: ModelBindings) -> ScoredRun:
+    def score_result(self, result: TaskResult, task: EvaluationTask, models: ModelBindings) -> ScoredRun:
         """The score and the observations of a run that completed."""
         residue = len(result.residue)
         agents = agent_work(result.trajectory)
@@ -163,7 +166,7 @@ class TaskEvaluationWorker:
             cause = f"{residue} file(s) outside the cleanup whitelist: {result.residue[0]}"
             return ScoredRun(
                 RolloutScore.scored(0.0),
-                FailureObservation(task=task, stage="residue", cause=cause),
+                FailureObservation(task=task.id, stage="residue", cause=cause),
                 residue,
                 agents,
                 path,
@@ -174,7 +177,7 @@ class TaskEvaluationWorker:
             # start): the environment did not run it, so it counts for neither side.
             return ScoredRun(
                 RolloutScore.failed(),
-                FailureObservation(task=task, stage="trial", cause=trial_error),
+                FailureObservation(task=task.id, stage="trial", cause=trial_error),
                 residue,
                 agents,
                 path,
@@ -191,21 +194,21 @@ class TaskEvaluationWorker:
             stage = "loop" if root_header(result.trajectory).get("loop") else "graph"
             return ScoredRun(
                 RolloutScore.scored(0.0),
-                FailureObservation(task=task, stage=stage, cause=cause),
+                FailureObservation(task=task.id, stage=stage, cause=cause),
                 residue,
                 agents,
                 path,
             )
         score = float(self.scorer.score_with_models(task, result, models))
         if not math.isfinite(score):
-            raise ValueError(f"run scorer returned a non-finite score {score!r} for task {task!r}")
+            raise ValueError(f"run scorer returned a non-finite score {score!r} for task {task.id!r}")
         reply = final_assistant_text(result.trajectory)
         if result.exit_code != 0:
             stderr_lines = result.stderr.strip().splitlines()
             cause = f"exit {result.exit_code}: {stderr_lines[-1] if stderr_lines else ''}".strip()
             return ScoredRun(
                 RolloutScore.scored(score),
-                FailureObservation(task=task, stage="exit", cause=cause),
+                FailureObservation(task=task.id, stage="exit", cause=cause),
                 residue,
                 agents,
                 path,
@@ -218,14 +221,18 @@ class TaskEvaluationWorker:
         )
 
 
-def write_run_record(record_dir: Path | None, task: str, result: TaskResult | None, scored: ScoredRun) -> None:
+def write_run_record(
+    record_dir: Path | None, task: EvaluationTask, result: TaskResult | None, scored: ScoredRun
+) -> None:
     """``run.json`` beside the kept trajectory: what the scorer saw, so a result can be derived again.
 
-    A run without a record directory keeps no record."""
+    The record names the task by its id and what the run played; it leaves out the answer and the metadata,
+    because a method reads it. A run without a record directory keeps no record."""
     if record_dir is None:
         return
     record = {
-        "task": clip_record_text(task),
+        "task_id": task.id,
+        "task": clip_record_text(task.text),
         "score": scored.score.to_json(),
         "failure": None if scored.failure is None else scored.failure.to_dict(),
         "path": scored.path,

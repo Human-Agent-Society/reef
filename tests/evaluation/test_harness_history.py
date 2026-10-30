@@ -16,7 +16,7 @@ def task_run(history: History, score: float | None, *, repeat: int = 0) -> RunRe
     identifier, _ = history.new_run()
     failure = None if score is not None else FailureObservation("task", "launch", "the binary is missing")
     value = RolloutScore.failed() if score is None else RolloutScore.scored(score)
-    return RunRecord(identifier, TREE.checksum(), "task", "key", repeat, "context", 1, value, failure)
+    return RunRecord(identifier, TREE.checksum(), "task", "task", "key", repeat, "context", 1, value, failure)
 
 
 def test_the_cache_reuses_scored_runs_only_and_survives_a_reopen(tmp_path: Path) -> None:

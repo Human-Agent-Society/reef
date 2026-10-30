@@ -27,7 +27,7 @@ recipe:
           api_key_env: REEF_PROPOSER_API_KEY
           timeout_s: 1800
       evaluation:
-        tasks: []  # Filled from the pinned manifest and --tasks-root by run.py.
+        harbor_tasks: []  # Filled from the pinned manifest and --tasks-root by run.py.
         scorer: harness.benchmark:VerifierScorer
         policy: compare
         statistic: mean

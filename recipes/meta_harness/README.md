@@ -53,9 +53,13 @@ recipe:
           api_key_env: OPENAI_API_KEY
       evaluation:
         tasks:
-          - First validation task
-          - Second validation task
-        scorer: my_harness.scoring:RolloutScore
+          - id: first
+            instruction: First validation task
+            answer: first answer
+          - id: second
+            instruction: Second validation task
+            answer: second answer
+        scorer: my_harness.scoring:ValidationScorer
         policy: compare
         statistic: mean
 
@@ -64,11 +68,13 @@ inference:
 ```
 
 `seed` is a directory of tree files, such as `rules.md` with the starting
-rules. `evaluation.scorer` names a standard Reef run scorer class:
+rules. `evaluation.scorer` names a standard Reef run scorer class. It reads
+each task's `answer`; the proposer sees each task's id and instruction, never
+its answer:
 
 ```python
-class RolloutScore(TaskScorer):
-    def score(self, task: str, result: TaskResult) -> float:
+class ValidationScorer(TaskScorer):
+    def score(self, task: EvaluationTask, result: TaskResult) -> float:
         ...
 ```
 

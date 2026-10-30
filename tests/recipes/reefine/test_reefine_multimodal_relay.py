@@ -168,7 +168,7 @@ def test_reefine_hands_its_gateway_to_the_relay_and_the_agent() -> None:
 
     settings = {
         "evolution": {
-            "evaluation": {"tasks": ["[health] reply reef-ok"]},
+            "evaluation": {"tasks": [{"id": "health", "instruction": "reply reef-ok", "answer": "reef-ok"}]},
             "multimodal": {"preset": "openrouter"},
             "agent": None,
         }

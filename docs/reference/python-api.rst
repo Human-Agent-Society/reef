@@ -1509,7 +1509,7 @@ skipped or fails.
 
 .. code:: python
 
-   from reef.evaluation.harness import TaskScorer, History, TaskCollector
+   from reef.evaluation.harness import EvaluationTask, TaskScorer, History, TaskCollector
    from reef.harness.adapters import get_adapter
    from reef.harness.adapters.parts import Format, Part, TreeLayout
    from reef.harness.tree import HarnessTree, TreePatch
@@ -1521,7 +1521,7 @@ skipped or fails.
        def step(self, context: StepContext) -> None: ...
 
    class MyScorer(TaskScorer):
-       def score(self, task, result) -> float: ...
+       def score(self, task: EvaluationTask, result) -> float: ...
 
 .. list-table::
    :header-rows: 1
@@ -1550,7 +1550,8 @@ skipped or fails.
      - ``root``, ``history_dir`` and ``step`` (1 or more); the directory
        paths ``harness``, ``material``, ``state``, ``scratch`` and ``output``;
        ``tree()``, ``write_tree(tree)``, ``traces()``, ``request()`` (a
-       ``TrainingRequest`` or ``None``), ``tasks()``,
+       ``TrainingRequest`` or ``None``), ``tasks()`` (the step's
+       ``EvaluationTask`` values without their answers and metadata),
        ``evaluation_repeats()`` (the runs per task and tree, 0 when the
        deployment configured no scorer), ``host()`` (the host facts of
        ``material/host.json``: ``adapter``, ``parts``, ``config_targets`` and
@@ -1592,12 +1593,15 @@ skipped or fails.
      - the ``ValidationResult`` of ``tree`` for the adapter: ``passed``,
        ``problems`` and ``message()``
    * - ``Services.evaluate(tree, tasks, *, repeats=1)``
-     - ``repeats`` ``RunRecord`` values per task of the list ``tasks``
-       (a single string is refused), task by task; reuses the scored
-       runs the history holds; ``RuntimeError`` without a scorer, or
-       when the call needs more runs than
+     - ``repeats`` ``RunRecord`` values per ``EvaluationTask`` of the list
+       ``tasks``, task by task; a task with the id of a step task runs as
+       that task, with its answer, and any other task runs as given; reuses
+       the scored runs the history holds; ``RuntimeError`` without a
+       scorer, or when the call needs more runs than
        ``evolution.max_runs_per_step`` leaves, and then no task runs;
-       ``ValueError`` for a tree that fails ``check``
+       ``ValueError`` for a tree that fails ``check`` or a task with a step
+       task's id but another instruction or directory; ``TypeError`` when
+       ``tasks`` holds anything but ``EvaluationTask`` values
    * - ``Services.run_agent(prompt, *, tree, model)``
      - one run of the deployment's coding agent in the workspace, its own
        harness ``tree`` rendered after Reef's protocol rules and its model
@@ -1612,13 +1616,14 @@ skipped or fails.
    * - ``History``
      - ``candidates`` (``CandidateRecord`` by tree checksum), ``runs``
        and ``decisions`` in file order; ``tree(checksum)``,
-       ``runs_of(checksum)``, ``scores(checksum, tasks, *, repeats=1)``,
+       ``runs_of(checksum)``, ``scores(checksum, task_ids, *, repeats=1)``,
        ``decision(step)`` and ``run_dir(run)``
    * - ``CandidateRecord``
      - ``tree``, ``step``, ``origin`` (``seed``, ``method``, ``proposal`` or
        ``release``), ``parent``, ``summary`` and ``notes``
    * - ``RunRecord``
-     - ``run``, ``tree``, ``task``, ``task_key``, ``repeat``,
+     - ``run``, ``tree``, ``task`` (what the run played: an instruction or a
+       task directory's path), ``task_id``, ``task_key``, ``repeat``,
        ``context``, ``step``, ``score`` (a ``RolloutScore``: a finite value, or
        failed when the environment could not run the task), ``failure``,
        ``reply``, ``residue``, ``agents``, ``path`` and ``transcript_read``
@@ -1627,8 +1632,16 @@ skipped or fails.
        of the head tree that the step started from), ``selected``
        (published; the activation rule decides whether it serves),
        ``policy`` and ``reason``
+   * - ``EvaluationTask``
+     - ``id``; exactly one of ``instruction`` (text) and ``directory`` (a
+       Harbor task directory); ``answer`` (text or ``None``, always ``None``
+       for a directory) and ``metadata`` (JSON values). ``text`` is what the
+       run plays. ``of_instruction(text)`` makes a task without an answer,
+       named ``instruction-`` and a SHA-256 prefix; ``of_directory(path)``
+       one named by its path
    * - ``TaskScorer.score(task, result)``
-     - a finite float for one finished run, higher is better; ``result``
+     - a finite float for one finished run of the ``EvaluationTask``
+       ``task``, higher is better; ``result``
        holds ``exit_code``, ``stdout``, ``stderr``, the parsed
        ``trajectory`` and ``residue``. The evaluation calls
        ``score_with_models(task, result, models)``, whose default calls
@@ -1637,7 +1650,7 @@ skipped or fails.
        ``score``, for example by raising. A scorer that needs a local GPU
        overrides ``execution_requirements()``
    * - ``TaskCollector.collect(samples)``
-     - the prompts to collect from the step's trace samples, with
+     - the instructions to collect from the step's trace samples, with
        ``evolution.evaluation.collect_failures``
    * - ``evaluation.metrics``
      - holds ``candidate_scores`` and ``current_scores`` under

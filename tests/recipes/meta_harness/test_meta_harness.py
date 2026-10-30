@@ -351,7 +351,7 @@ def test_terminus_extension_uses_shared_recipe_run_runner_and_publication(tmp_pa
         executor="sandbox",
         sandbox={"egress_hosts": ["api.e2b.dev"], "env_from": ["REEF_TERMINUS_ENVIRONMENT", "E2B_API_KEY"]},
     )
-    evolution["evaluation"].update(task_timeout_s=17, forbid_residue=True, tasks=["test/hello-world"])
+    evolution["evaluation"].update(task_timeout_s=17, forbid_residue=True, tasks=[], harbor_tasks=["test/hello-world"])
     recipe = build_recipe(
         config["implementation"],
         {"REEF_TERMINUS_ENVIRONMENT": "e2b", "E2B_API_KEY": "test-only"},

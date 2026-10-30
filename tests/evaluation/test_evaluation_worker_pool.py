@@ -104,7 +104,7 @@ class IsolationScorer(TaskScorer):
 
     def score(self, task, result):
         row = result.trajectory[-1]
-        if Path(row["workspace"]).exists() or row["rules"] != task:
+        if Path(row["workspace"]).exists() or row["rules"] != task.text:
             raise ValueError("run files leaked or were not cleaned")
         self.calls += 1
         return float(self.calls)

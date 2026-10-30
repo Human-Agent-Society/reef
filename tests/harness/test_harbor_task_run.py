@@ -11,6 +11,7 @@ import pytest
 
 from reef.evaluation.harness.evaluator import container_binding
 from reef.evaluation.harness.scoring import verifier_reward
+from reef.evaluation.harness.tasks import EvaluationTask
 from reef.harness.adapters import get_adapter
 from reef.harness.tasks.harbor_task import CONTAINER_ROOT, can_run_in_task_container, run_harbor_task
 from reef.harness.tasks.model_binding import ModelBinding
@@ -62,7 +63,7 @@ def test_the_agent_plays_the_task_in_its_container_and_the_verifier_reward_score
 
     assert result.exit_code == 0
     assert result.trajectory[0]["type"] == "verifier" and result.trajectory[1:] == (SESSION_EVENT,)
-    assert verifier_reward(str(task), result) == 1.0
+    assert verifier_reward(EvaluationTask.of_directory(task), result) == 1.0
     assert (tmp_path / "kept" / "session.jsonl").is_file()
     (agent,) = lab.agents
     kwargs = agent["kwargs"]

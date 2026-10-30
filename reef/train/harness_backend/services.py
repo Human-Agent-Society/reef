@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from reef.evaluation.harness import HarnessTaskEvaluator, History, RunRecord
+from reef.evaluation.harness import EvaluationTask, HarnessTaskEvaluator, History, RunRecord
 from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.gateway import ModelCalls
 from reef.harness.tasks.model_binding import ModelBindings
@@ -25,7 +25,9 @@ class StepServices(Services):
     """The services of one step.
 
     Values: ``workspace`` is the step's workspace. ``descriptor`` is the
-    adapter the trees render for. ``evaluator`` scores trees, ``None`` when
+    adapter the trees render for. ``tasks`` are the step's evaluation tasks
+    with their answers, by id, which ``evaluate`` runs in place of a task
+    with the same id. ``evaluator`` scores trees, ``None`` when
     the deployment configured no scorer. ``agent`` is the deployment's
     coding agent, ``None`` when it configured none or the method does not
     run it. ``history`` is the scenario's history; a tree the method
@@ -43,6 +45,7 @@ class StepServices(Services):
         *,
         workspace: Workspace,
         descriptor: AdapterDescriptor,
+        tasks: Sequence[EvaluationTask],
         evaluator: HarnessTaskEvaluator | None,
         history: History,
         head: str,
@@ -53,6 +56,7 @@ class StepServices(Services):
     ) -> None:
         self.workspace = workspace
         self.descriptor = descriptor
+        self.tasks = {task.id: task for task in tasks}
         self.evaluator = evaluator
         self.history = history
         self.head = head
@@ -73,11 +77,14 @@ class StepServices(Services):
     def check(self, tree: HarnessTree) -> ValidationResult:
         return validate_tree(tree, self.descriptor)
 
-    def evaluate(self, tree: HarnessTree, tasks: Sequence[str], *, repeats: int = 1) -> tuple[RunRecord, ...]:
+    def evaluate(
+        self, tree: HarnessTree, tasks: Sequence[EvaluationTask], *, repeats: int = 1
+    ) -> tuple[RunRecord, ...]:
         if self.evaluator is None:
             raise RuntimeError("the deployment configured no evolution.evaluation.scorer, so no tree can be scored")
-        if isinstance(tasks, str):
-            raise TypeError("tasks must be a sequence of tasks, not one string")
+        if isinstance(tasks, str) or not all(isinstance(task, EvaluationTask) for task in tasks):
+            raise TypeError("tasks must be a sequence of EvaluationTask values")
+        tasks = [self.step_task(task) for task in tasks]
         validation = self.check(tree)
         if not validation.passed:
             raise ValueError(f"the tree fails validation: {validation.message()}")
@@ -94,6 +101,15 @@ class StepServices(Services):
         finally:
             # Each run that started counts, also in a batch that raised: a retry spends the same budget.
             self.runs_run += self.history.next_run - started
+
+    def step_task(self, task: EvaluationTask) -> EvaluationTask:
+        """The step's own task for ``task``'s id, with its answer; ``task`` itself when the step has none."""
+        known = self.tasks.get(task.id)
+        if known is None:
+            return task
+        if known.text != task.text:
+            raise ValueError(f"task {task.id!r} is a step task with another instruction or directory")
+        return known
 
     def run_agent(self, prompt: str, *, tree: HarnessTree, model: str) -> AgentOutcome:
         if self.agent is None:

@@ -32,8 +32,10 @@ recipe:
         policy: floor
         scorer: recipes.beta.reefine.scorer:AnswerScorer
         tasks:
-          - '[health] Run the shell command `echo reef-ok` with your shell tool and reply with its exact output
-            as a plain word alone on the last line.'
+          - id: health
+            instruction: Run the shell command `echo reef-ok` with your shell tool and reply with its exact output
+              as a plain word alone on the last line.
+            answer: reef-ok
       # No seed: the first tree is the recipe's own (recipes/beta/reefine/seed), the starter skill.
     # One step per instruction and no failure driven step between them: the measurement counts a step per request.
     training-mode: manual

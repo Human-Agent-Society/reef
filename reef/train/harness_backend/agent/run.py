@@ -26,6 +26,7 @@ from typing import Any, ClassVar
 
 from reef.core.errors import ReefError
 from reef.evaluation.harness.history import RUNS_DIR
+from reef.evaluation.harness.tasks import EvaluationTask
 from reef.execution.sandbox.environment import download_directory
 from reef.execution.sandbox.process import ProgramExecutor, ProgramLaunchError, ProgramTimeout
 from reef.harness.adapters.descriptor import AdapterDescriptor
@@ -153,16 +154,32 @@ class EvaluateTool(AgentTool):
 
     name = "evaluate"
     description = (
-        "Score a tree of the step's workspace on tasks, repeats runs each. A scored run in the history is "
-        "reused; new runs spend the step's run budget. Answers tree (its checksum) and runs: one "
-        "record per run with its task, repeat, score (null when it could not run), failure, reply, and "
-        "directory (its files, from the workspace)."
+        "Score a tree of the step's workspace on tasks, repeats runs each. A task is the id of a task in "
+        "material/evaluation.json, or an object with an instruction or a directory for any other task. A scored "
+        "run in the history is reused; new runs spend the step's run budget. Answers tree (its checksum) and "
+        "runs: one record per run with its task, task_id, repeat, score (null when it could not run), failure, "
+        "reply, and directory (its files, from the workspace)."
     )
     input_schema: ClassVar[Mapping[str, Any]] = {
         "type": "object",
         "properties": {
             "tree": {"type": "string", "description": "A directory of the step's workspace.", "default": "harness"},
-            "tasks": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+            "tasks": {
+                "type": "array",
+                "items": {
+                    "oneOf": [
+                        {"type": "string", "description": "The id of a task in material/evaluation.json."},
+                        {
+                            "type": "object",
+                            "properties": {"instruction": {"type": "string"}, "directory": {"type": "string"}},
+                            "minProperties": 1,
+                            "maxProperties": 1,
+                            "additionalProperties": False,
+                        },
+                    ]
+                },
+                "minItems": 1,
+            },
             "repeats": {"type": "integer", "minimum": 1, "default": 1},
         },
         "required": ["tasks"],
@@ -177,18 +194,22 @@ class EvaluateTool(AgentTool):
         if unknown:
             raise ValueError(f"evaluate takes tree, tasks and repeats, not {', '.join(sorted(unknown))}")
         tasks = arguments.get("tasks")
-        if not isinstance(tasks, list) or not tasks or not all(isinstance(task, str) for task in tasks):
+        if not isinstance(tasks, list) or not tasks:
             raise ValueError("tasks must be a non-empty list of tasks")
         repeats = arguments.get("repeats", 1)
         if isinstance(repeats, bool) or not isinstance(repeats, int) or repeats < 1:
             raise ValueError("repeats must be an integer of at least 1")
         with self.run.lock:
             tree = self.run.read_tree(arguments)
-            records = self.run.services.evaluate(tree, tasks, repeats=repeats)
+            step_tasks = {task.id: task for task in self.run.workspace.tasks()}
+            records = self.run.services.evaluate(
+                tree, [named_task(task, step_tasks) for task in tasks], repeats=repeats
+            )
         history = self.run.workspace.history_dir / RUNS_DIR
         task_runs = [
             {
                 "task": record.task,
+                "task_id": record.task_id,
                 "repeat": record.repeat,
                 "score": record.score.to_json(),
                 "failure": None if record.failure is None else record.failure.cause,
@@ -198,6 +219,22 @@ class EvaluateTool(AgentTool):
             for record in records
         ]
         return {"tree": tree.checksum(), "runs": task_runs}
+
+
+def named_task(value: object, step_tasks: Mapping[str, EvaluationTask]) -> EvaluationTask:
+    """The task an ``evaluate`` call names: a step task's id, or ``{"instruction": ...}`` or ``{"directory": ...}``."""
+    if isinstance(value, str):
+        if value not in step_tasks:
+            raise ValueError(
+                f'{value!r} is no task id of material/evaluation.json; pass {{"instruction": ...}} for another task'
+            )
+        return step_tasks[value]
+    if isinstance(value, Mapping) and len(value) == 1:
+        if isinstance(value.get("instruction"), str) and value["instruction"].strip():
+            return EvaluationTask.of_instruction(value["instruction"])
+        if isinstance(value.get("directory"), str) and value["directory"].strip():
+            return EvaluationTask.of_directory(value["directory"])
+    raise ValueError("a task is a task id, or an object with one non-empty instruction or directory")
 
 
 def run_agent(

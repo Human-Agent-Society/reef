@@ -3,10 +3,12 @@
 Everything the method needs to know about AIME lives here, and nothing here
 knows about GEPA beyond its ``Feedback`` hook: ``gepa.yaml`` names the scorer
 as ``evolution.evaluation.scorer`` and the feedback as the method's
-``feedback``, and Reef calls them with a task prompt and a run result.
-The answer table is keyed by the prompt text because that is all a run
-carries - ``evolution.evaluation.tasks`` is a list of strings - so the splits
-are loaded once and indexed by problem statement.
+``feedback``, and Reef calls them with a task and a run result.
+The validation problems are evaluation task records that carry their answers
+(``validation_tasks``). The training problems reach the method as recorded
+traffic, whose instruction is all a run of them carries, so the splits are
+also loaded once and indexed by problem statement for those runs and for the
+feedback.
 
 The upstream quickstart's scoring rule and its feedback wording are
 reproduced here rather than imported: this example exists to show the Reef
@@ -28,7 +30,7 @@ from dataclasses import dataclass, field
 from typing import Any, TypedDict, cast
 
 from recipes.gepa import Feedback
-from reef.evaluation.harness import TaskScorer
+from reef.evaluation.harness import EvaluationTask, TaskScorer
 from reef.harness.tasks.run import TaskResult
 
 # The Pi release the retained record ran and the example still targets; run.py
@@ -94,8 +96,8 @@ class AIMEScorer(Feedback, TaskScorer):
     def answer_for(self, task: str) -> str:
         return _answer_for(self.answers, task)
 
-    def score(self, task: str, result: TaskResult) -> float:
-        return _evaluate(self.answers, task, result)
+    def score(self, task: EvaluationTask, result: TaskResult) -> float:
+        return _evaluate(task_answer(self.answers, task), result)
 
     def feedback(self, task: str, output: str, score: float) -> str:
         return _feedback(self.answers, self.contexts, task, output, score)
@@ -104,8 +106,8 @@ class AIMEScorer(Feedback, TaskScorer):
 class AIMEAnswerScorer(TaskScorer):
     """:func:`evaluate` over the splits registered in this process; ``evolution.evaluation.scorer`` names it."""
 
-    def score(self, task: str, result: TaskResult) -> float:
-        return _evaluate(ANSWERS, task, result)
+    def score(self, task: EvaluationTask, result: TaskResult) -> float:
+        return _evaluate(task_answer(ANSWERS, task), result)
 
 
 class AIMEFeedback(Feedback):
@@ -153,6 +155,14 @@ def load_aime_splits() -> tuple[list[AIMEExample], list[AIMEExample], list[AIMEE
     return cast(list[AIMEExample], trainset), cast(list[AIMEExample], valset), cast(list[AIMEExample], testset)
 
 
+def validation_tasks(valset: Sequence[Mapping[str, Any]]) -> list[dict[str, str]]:
+    """The validation split as ``evolution.evaluation.tasks`` records, each with its answer, named by position."""
+    return [
+        {"id": f"aime-validation-{index:02d}", "instruction": str(example["input"]), "answer": str(example["answer"])}
+        for index, example in enumerate(valset)
+    ]
+
+
 def dataset_sha256(trainset, valset, testset) -> str:
     splits = {"train": trainset, "validation": valset, "test": testset}
     return hashlib.sha256((json.dumps(splits, indent=2, sort_keys=True) + "\n").encode()).hexdigest()
@@ -180,6 +190,11 @@ def _answer_for(answers: Mapping[str, str], task: str) -> str:
         raise RuntimeError(f"no AIME answer is registered for this task: {task[:120]!r}") from None
 
 
+def task_answer(answers: Mapping[str, str], task: EvaluationTask) -> str:
+    """A validation task's own answer; for a training problem's traffic, which carries none, the registered one."""
+    return task.answer if task.answer is not None else _answer_for(answers, task.text)
+
+
 def evaluate(task: str, result: TaskResult) -> float:
     """The quickstart's containment score over one Pi run.
 
@@ -187,14 +202,14 @@ def evaluate(task: str, result: TaskResult) -> float:
     scores zero rather than being read for an answer, so a broken harness can
     never be selected on the strength of stdout it happened to leave behind.
     """
-    return _evaluate(ANSWERS, task, result)
+    return _evaluate(_answer_for(ANSWERS, task), result)
 
 
-def _evaluate(answers: Mapping[str, str], task: str, result: TaskResult) -> float:
+def _evaluate(answer: str, result: TaskResult) -> float:
     if result.exit_code != 0 or result.residue:
         return 0.0
     response = final_assistant_text(result.trajectory) or result.stdout
-    return 1.0 if _answer_for(answers, task) in response else 0.0
+    return 1.0 if answer in response else 0.0
 
 
 def feedback(task: str, output: str, score: float) -> str:

@@ -31,8 +31,8 @@ evolve-your-harness/
                  NativeMethod (native) and the scorers of both variants
     rules_prompt.md
                  the prompt RulesMethod sends
-    evolution.py the shared grader (exact last-line answer grading) and
-                 its answer table
+    evolution.py the shared grader: exact last-line grading against
+                 each task's answer
     native_evolution.py
                  the native variant's change: the prompt over skills,
                  tools, hooks, the loop graph and its agents, the reply

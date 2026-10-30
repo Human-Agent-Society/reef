@@ -22,6 +22,7 @@ from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingCompon
 from reef.artifact import Artifact, GitLFSRepositoryBackendFactory, InMemoryRepositoryBackend, RepositoryBackendContext
 from reef.dispatcher import Dispatcher
 from reef.evaluation.activation import NeverActivate
+from reef.evaluation.harness import EvaluationTask
 from reef.pipeline_context import PipelineContext
 from reef.recipe.errors import RecipeConfigError
 from reef.runtime.jobs import JobStatus, TrainingJob
@@ -319,7 +320,7 @@ def test_build_dispatcher_passes_recipe_settings_to_a_dotted_reference(stub_repo
 
     recipe = dispatcher.recipe
     assert recipe.evolution.adapter == "pi" and isinstance(recipe.method, IdleMethod)
-    assert recipe.configured_tasks() == ("t",)
+    assert recipe.configured_tasks() == (EvaluationTask("t", instruction="t"),)
 
 
 @pytest.mark.unit

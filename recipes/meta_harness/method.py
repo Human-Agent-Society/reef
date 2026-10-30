@@ -184,9 +184,14 @@ class MetaHarness(Method):
         head = workspace.tree().checksum()
         tasks = workspace.tasks()
         members = search_population(
-            history, head, workspace.step, tasks, incumbent_only=settings.mode == "incumbent_only"
+            history,
+            head,
+            workspace.step,
+            [task.id for task in tasks],
+            incumbent_only=settings.mode == "incumbent_only",
         )
-        task_ids = {task: f"t{number}" for number, task in enumerate(tasks, start=1)}
+        # Short labels for the prompt, by task id: a Harbor task's id is its directory's path.
+        task_ids = {task.id: f"t{number}" for number, task in enumerate(tasks, start=1)}
         search_state: dict[str, Any] = {
             "mode": settings.mode,
             "adapter": host["adapter"],
@@ -195,7 +200,7 @@ class MetaHarness(Method):
             "evolvable_parts": list(parts),
             "max_files": settings.max_files,
             "served_candidate_id": head,
-            "evaluation_tasks": {task_id: task for task, task_id in task_ids.items()},
+            "evaluation_tasks": {task_ids[task.id]: task.text for task in tasks},
             "population": [member_json(member, task_ids) for member in members],
             "traces": self.traces(workspace, history, members, task_ids),
             "attempts": read_attempts(workspace)[-RECENT_ATTEMPTS:],
@@ -332,7 +337,7 @@ class MetaHarness(Method):
                 {
                     "source": "evaluation",
                     "candidate_id": task_run.tree,
-                    "task": task_ids[task_run.task],
+                    "task": task_ids[task_run.task_id],
                     "repeat": task_run.repeat,
                     "score": task_run.score.to_json(),
                     "failure": None if failure is None else clipped(failure, self.settings.trace_chars),
@@ -343,7 +348,7 @@ class MetaHarness(Method):
 
 
 def search_population(
-    history: History, head: str, step: int, tasks: Sequence[str], *, incumbent_only: bool = False
+    history: History, head: str, step: int, task_ids: Sequence[str], *, incumbent_only: bool = False
 ) -> tuple[Member, ...]:
     """The candidates a proposal at ``step`` may branch from, in the order the history first saw them.
 
@@ -353,10 +358,10 @@ def search_population(
     ``step`` are members too. A tree that an earlier attempt of ``step``
     proposed is not: that attempt never committed. Outcomes read the final
     decision of each step before ``step``, the latest one the history holds
-    for it. The runs are those on ``tasks``.
+    for it. The runs are those on the tasks of ``task_ids``.
     """
     decisions = {decision.step: decision for decision in history.decisions if decision.step < step}
-    order = {task: index for index, task in enumerate(tasks)}
+    order = {task_id: index for index, task_id in enumerate(task_ids)}
     members = []
     for record in history.candidates.values():
         searched = record.origin == "seed" or (record.origin == "method" and not uncommitted(record, step))
@@ -371,10 +376,10 @@ def search_population(
             outcome = "rejected"
         else:
             outcome = "undecided"
-        latest = {(task_run.task, task_run.repeat): task_run for task_run in history.runs_of(record.tree)}
+        latest = {(task_run.task_id, task_run.repeat): task_run for task_run in history.runs_of(record.tree)}
         task_runs = sorted(
-            (task_run for (task, _), task_run in latest.items() if task in order),
-            key=lambda task_run: (order[task_run.task], task_run.repeat),
+            (task_run for (task_id, _), task_run in latest.items() if task_id in order),
+            key=lambda task_run: (order[task_run.task_id], task_run.repeat),
         )
         members.append(Member(record, history.tree(record.tree), outcome, tuple(task_runs)))
     return tuple(members)
@@ -390,10 +395,10 @@ def uncommitted(record: CandidateRecord, step: int) -> bool:
 
 
 def member_json(member: Member, task_ids: Mapping[str, str]) -> dict[str, Any]:
-    """What a prompt shows of one member; ``task_ids`` names each evaluation task."""
+    """What a prompt shows of one member; ``task_ids`` labels each evaluation task by its id."""
     scores: dict[str, list[float | str]] = {}
     for task_run in member.runs:
-        scores.setdefault(task_ids[task_run.task], []).append(task_run.score.to_json())
+        scores.setdefault(task_ids[task_run.task_id], []).append(task_run.score.to_json())
     return {
         "candidate_id": member.record.tree,
         "parent_id": member.parent,

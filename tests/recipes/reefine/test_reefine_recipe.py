@@ -14,6 +14,7 @@ from recipes.beta.reefine.recipe import SEED_DIRECTORY
 from recipes.beta.reefine.scorer import HEALTH_TASK_DIRECTORY, AnswerScorer
 from reef.core.config import config_arguments
 from reef.evaluation.activation import AlwaysActivate, NeverActivate
+from reef.evaluation.harness import EvaluationTask
 from reef.execution.sandbox.process import LocalExecutor
 from reef.harness.tasks.run import TaskResult
 from reef.harness.tree import HarnessTree
@@ -22,7 +23,7 @@ from reef.recipe.errors import RecipeConfigError
 from reef.recipe.registry import build_recipe, recipe_class_for
 from reef.train.backend import ComponentReleases
 
-HEALTH = "[health] Run `echo reef-ok` and reply with its output."
+HEALTH = {"id": "health", "instruction": "Run `echo reef-ok` and reply with its output.", "answer": "reef-ok"}
 
 
 def evolution(**section: object) -> dict[str, object]:
@@ -61,7 +62,10 @@ def test_evolution_overrides_and_training_fields_remain_available(tmp_path: Path
             "data": {"training_mode": "manual"},
             "pipeline": {"sample2job": {"config": {"batch_size": 3}}},
             "evolution": {
-                "evaluation": {"tasks": ["[fib] Compute fib(90)."], "policy": "compare"},
+                "evaluation": {
+                    "tasks": [{"id": "fib", "instruction": "Compute fib(90).", "answer": "2880067194370816120"}],
+                    "policy": "compare",
+                },
                 "seed": str(seed),
                 "agent": None,
             },
@@ -82,12 +86,12 @@ def test_evolution_overrides_and_training_fields_remain_available(tmp_path: Path
         [],
         {"evaluation": {"tasks": []}},
         {"evaluation": "floor"},
-        {"evaluation": {"tasks": ["task"]}, "seed": 3},
-        {"evaluation": {"tasks": ["task"]}, "seed": "/no/such/seed"},
-        {"evaluation": {"tasks": ["task"]}, "multimodal": "openrouter"},
-        {"evaluation": {"tasks": ["task"]}, "agent": "bwrap"},
+        {"evaluation": {"tasks": [{"id": "task", "instruction": "task"}]}, "seed": 3},
+        {"evaluation": {"tasks": [{"id": "task", "instruction": "task"}]}, "seed": "/no/such/seed"},
+        {"evaluation": {"tasks": [{"id": "task", "instruction": "task"}]}, "multimodal": "openrouter"},
+        {"evaluation": {"tasks": [{"id": "task", "instruction": "task"}]}, "agent": "bwrap"},
         # The key's old name is an unknown field.
-        {"evaluation": {"tasks": ["task"]}, "proposer_agent": None},
+        {"evaluation": {"tasks": [{"id": "task", "instruction": "task"}]}, "proposer_agent": None},
     ],
 )
 def test_invalid_evolution_config_is_rejected(section: object) -> None:
@@ -102,18 +106,18 @@ def test_a_seed_that_fails_validation_is_refused_at_startup(tmp_path: Path) -> N
 
 
 def test_on_terminus_the_health_task_runs_as_the_shipped_task_directory(tmp_path: Path) -> None:
-    """reef-terminus runs a Harbor task directory, not a prompt: the profile's health prompt becomes the same check
-    as the directory beside the recipe, and the bundled scorer reads that directory's verifier reward."""
-    section = {"adapter": "terminus", "evaluation": {"tasks": [HEALTH, "/tasks/own-task"]}}
+    """reef-terminus runs a Harbor task directory, not an instruction: the profile's health task becomes the same
+    check as the directory beside the recipe, and the bundled scorer reads that directory's verifier reward."""
+    section = {"adapter": "terminus", "evaluation": {"tasks": [HEALTH], "harbor_tasks": ["/tasks/own-task"]}}
     built = ReefineRecipe.from_environment({}, config={"evolution": section})
-    assert isinstance(built, ReefineRecipe)
-    assert built.evaluation.tasks == (HEALTH_TASK_DIRECTORY, "/tasks/own-task")
+    assert isinstance(built, ReefineRecipe) and built.evaluation.tasks == ()
+    assert built.evaluation.harbor_tasks == (HEALTH_TASK_DIRECTORY, "/tasks/own-task")
     health = Path(HEALTH_TASK_DIRECTORY)
     for name in ("instruction.md", "task.toml", "tests/test.sh", "environment/Dockerfile"):
         assert (health / name).is_file(), name
     assert "reef-ok" in (health / "tests/test.sh").read_text()
-    # A prompt adapter keeps the prompt.
-    pi = ReefineRecipe.from_environment({}, config={"evolution": {**section, "adapter": "pi", "agent": None}})
+    # An adapter that takes text keeps the instruction task.
+    pi = ReefineRecipe.from_environment({}, config={"evolution": evolution(adapter="pi", agent=None)})
     assert isinstance(pi, ReefineRecipe) and pi.evaluation.tasks[0] == HEALTH
 
     def ran(rewards: dict[str, float], error: str = "") -> TaskResult:
@@ -122,11 +126,12 @@ def test_on_terminus_the_health_task_runs_as_the_shipped_task_directory(tmp_path
         return TaskResult(exit_code=0, stdout="", stderr="", trajectory=events, residue=())
 
     scorer = AnswerScorer()
-    assert scorer.score(HEALTH_TASK_DIRECTORY, ran({"reward": 1.0})) == 1.0
-    assert scorer.score(HEALTH_TASK_DIRECTORY, ran({"reward": 0.0})) == 0.0
-    assert scorer.score(HEALTH_TASK_DIRECTORY, ran({}, "the container never built")) == 0.0
+    directory = EvaluationTask.of_directory(HEALTH_TASK_DIRECTORY)
+    assert scorer.score(directory, ran({"reward": 1.0})) == 1.0
+    assert scorer.score(directory, ran({"reward": 0.0})) == 0.0
+    assert scorer.score(directory, ran({}, "the container never built")) == 0.0
     # The reply's last line is not the score of a task directory: a Harbor run has no assistant reply.
-    assert scorer.score("[health] x", ran({"reward": 1.0})) == 0.0
+    assert scorer.score(EvaluationTask.parse(HEALTH, setting="health"), ran({"reward": 1.0})) == 0.0
 
 
 def test_an_unknown_adapter_is_a_config_error() -> None:

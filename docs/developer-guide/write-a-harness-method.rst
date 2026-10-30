@@ -135,8 +135,9 @@ step record.
    * - ``material/``
      - read-only
      - the step's traces (``traces()``), its evaluation tasks and repeats
-       (``tasks()``, ``evaluation_repeats()``), and the adapter's parts
-       (``host()``)
+       (``tasks()``: ``EvaluationTask`` values with their ``id`` and
+       ``instruction`` or ``directory``, never their ``answer``;
+       ``evaluation_repeats()``), and the adapter's parts (``host()``)
    * - ``state/``
      - read-write
      - the method's own files, carried to the next step (`Keep state between steps`_)
@@ -157,7 +158,7 @@ of an offline step (``run``):
    * - Field
      - Value
    * - ``task``
-     - the last user prompt, or the run's instruction; ``None`` without one
+     - the last user message, or the run's instruction; ``None`` without one
    * - ``reply``
      - the final assistant text, else ``None``
    * - ``score``
@@ -190,8 +191,11 @@ The services
    * - ``check(tree)``
      - the ``ValidationResult``: ``passed``, ``problems``, ``message()``
    * - ``evaluate(tree, tasks, repeats=1)``
-     - scored ``RunRecord`` values (``task``, ``repeat``, ``score``,
-       ``reply``, ``failure``), run like the step's evaluation. ``score`` is
+     - scored ``RunRecord`` values (``task``, ``task_id``, ``repeat``,
+       ``score``, ``reply``, ``failure``), run like the step's evaluation.
+       ``tasks`` are ``EvaluationTask`` values: a task with a step task's
+       id runs as that task, with its answer; any other task, such as
+       ``EvaluationTask.of_instruction(trace.task)``, runs as given. ``score`` is
        a ``RolloutScore``: ``score.value`` is the scorer's value, or 0 when
        the tree gave no answer; it is ``None`` for a failed run, which the
        environment could not run, and then ``failure`` says why
@@ -295,7 +299,7 @@ Read the history
    history = workspace.history()
    decision = history.decision(workspace.step - 1)
    if decision is not None:
-       scores = history.scores(decision.tree, workspace.tasks())
+       scores = history.scores(decision.tree, [task.id for task in workspace.tasks()])
 
 A failed attempt reuses its step number, so skip records whose ``step`` is
 ``workspace.step`` or more.
@@ -312,32 +316,34 @@ the evaluation reuses them.
 Score a run
 ~~~~~~~~~~~~~~~~
 
-An ``TaskScorer`` returns a finite score for one finished run;
-higher is better:
+A ``TaskScorer`` returns a finite score for one finished run; higher is
+better. It receives the ``EvaluationTask``: an instruction task's
+``instruction``, ``answer`` and ``metadata``, or a Harbor task's
+``directory``:
 
 .. code:: python
 
-   from reef.evaluation.harness import TaskScorer
+   from reef.evaluation.harness import EvaluationTask, TaskScorer
+   from reef.harness.tasks.run import TaskResult
    from reef.harness.tasks.trajectory import final_assistant_text
-
-   EXPECTED = {"[fib]": "2880067194370816120"}
 
 
    class ExactAnswer(TaskScorer):
-       def score(self, task, result):
-           """1.0 when the final assistant text ends with the task's expected answer."""
+       def score(self, task: EvaluationTask, result: TaskResult) -> float:
+           """1.0 when the final assistant text ends with the task's answer."""
            text = final_assistant_text(result.trajectory) or ""
-           return 1.0 if text.strip().endswith(EXPECTED[task.split()[0]]) else 0.0
+           return 1.0 if task.answer is not None and text.strip().endswith(task.answer) else 0.0
 
 A judge that calls a model overrides ``score_with_models(task, result,
 models)``. ``VerifierRewardScorer`` takes a Harbor task's reward.
 
-Collect traffic prompts
-~~~~~~~~~~~~~~~~~~~~~~~
+Collect traffic instructions
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 With ``collect_failures: true``, a ``TaskCollector`` in
-``evolution.evaluation.collector`` returns the prompts of a step's traces to
-keep as evaluation tasks. Without one, Reef keeps every trace's prompt.
+``evolution.evaluation.collector`` returns the instructions of a step's
+traces to keep as evaluation tasks. Without one, Reef keeps every trace's
+last user message. A collected task has no answer.
 
 Configure a deployment
 ----------------------

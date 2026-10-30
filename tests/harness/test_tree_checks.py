@@ -110,17 +110,17 @@ def test_an_extension_keeps_console_output_for_the_session_without_a_ui() -> Non
         assert not problems({"extensions/voice.ts": code})
 
 
-def task_prompts(node: object) -> list[str]:
+def task_instructions(node: object) -> list[str]:
     if isinstance(node, dict):
         found: list[str] = []
         for key, value in node.items():
             if key == "tasks" and isinstance(value, list):
-                found.extend(item for item in value if isinstance(item, str))
+                found.extend(item["instruction"] for item in value if isinstance(item, dict) and "instruction" in item)
             else:
-                found.extend(task_prompts(value))
+                found.extend(task_instructions(value))
         return found
     if isinstance(node, list):
-        return [prompt for item in node for prompt in task_prompts(item)]
+        return [instruction for item in node for instruction in task_instructions(item)]
     return []
 
 
@@ -129,9 +129,9 @@ def test_instruction_overrides_and_control_tokens_trip(text: str) -> None:
     assert directive_shaped(text)
 
 
-def test_repo_task_prompts_and_topic_prose_pass() -> None:
+def test_repo_task_instructions_and_topic_prose_pass() -> None:
     corpus = list(BENIGN_BODIES)
     for relative in TASK_SOURCES:
-        corpus.extend(task_prompts(yaml.safe_load((REPO_ROOT / relative).read_text(encoding="utf-8"))))
+        corpus.extend(task_instructions(yaml.safe_load((REPO_ROOT / relative).read_text(encoding="utf-8"))))
     assert len(corpus) >= 20
     assert [text for text in corpus if directive_shaped(text)] == []

@@ -38,7 +38,7 @@ from reef.core.activation import MadeArtifact
 from reef.core.evaluation import RolloutScore
 from reef.core.plugins import PluginReference
 from reef.evaluation.activation import AlwaysActivate
-from reef.evaluation.harness import TaskEvaluationWorker
+from reef.evaluation.harness import EvaluationTask, TaskEvaluationWorker
 from reef.execution.sandbox.process import LocalExecutor
 from reef.harness.adapters import get_adapter
 from reef.harness.runners.native import LoadError, load_loop, run_loop, serve
@@ -982,7 +982,7 @@ def test_a_loop_error_failure_is_observed_at_stage_loop() -> None:
     observed = {}
     for loop in ("main", None):
         result = TaskResult(exit_code=1, stdout="", stderr="", trajectory=_loop_error_trajectory(loop), residue=())
-        scored = worker.score_result(result, "task one", ModelBindings(MODEL))
+        scored = worker.score_result(result, EvaluationTask.of_instruction("task one"), ModelBindings(MODEL))
         assert scored.score == RolloutScore.scored(0.0) and scored.failure is not None
         observed[loop] = (scored.failure.stage, scored.failure.cause)
     assert observed == {

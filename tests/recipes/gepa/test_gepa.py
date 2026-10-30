@@ -322,7 +322,9 @@ def test_with_repeats_a_tasks_validation_is_the_mean_of_its_runs_and_each_run_is
         for (task, repeat), score in zip(runs, values, strict=True):
             failure = None if score is not None else FailureObservation(task, "launch", "the binary is missing")
             task_run, _ = history.new_run()
-            record = RunRecord(task_run, tree.checksum(), task, task, repeat, "ctx", 1, RolloutScore(score), failure)
+            record = RunRecord(
+                task_run, tree.checksum(), task, task, task, repeat, "ctx", 1, RolloutScore(score), failure
+            )
             history.add_run(record)
     history.add_decision(DecisionRecord(1, child.checksum(), seed.checksum(), True, "compare", "a higher mean"))
 

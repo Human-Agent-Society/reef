@@ -123,9 +123,9 @@ def route_through_agent(tree, name):
     return {**graph, "stages": stages, "edges": edges}
 
 
-def evaluate(task: str, result) -> float:
-    """Grade the last line of the run's final assistant text, 1.0 exact."""
-    return grade_text(task, final_assistant_text(result.trajectory))
+def evaluate(task, result) -> float:
+    """Grade the last line of the run's final assistant text against the task's answer, 1.0 exact."""
+    return grade_text(task.answer, final_assistant_text(result.trajectory))
 
 
 def has_text(value) -> bool:

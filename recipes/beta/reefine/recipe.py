@@ -29,7 +29,7 @@ from recipes.beta.reefine.agent import ReefineAgent
 from recipes.beta.reefine.answer import EXTENSION_ADAPTER
 from recipes.beta.reefine.method import ReefineMethod
 from recipes.beta.reefine.multimodal import MultimodalProvider, MultimodalSettings, ProviderRelay
-from recipes.beta.reefine.scorer import HEALTH_TASK_DIRECTORY, AnswerScorer
+from recipes.beta.reefine.scorer import HEALTH_TASK_DIRECTORY, HEALTH_TASK_ID, AnswerScorer
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import DescriptorError
 from reef.recipe.config_fields import config_field
@@ -113,11 +113,12 @@ class ReefineRecipe(HarnessEvolutionRecipe):
         evaluation = {**EVALUATION_DEFAULTS, **evaluation}
         tasks = evaluation.get("tasks")
         if descriptor.takes_task_directory and isinstance(tasks, Sequence) and not isinstance(tasks, str):
-            # The adapter's prompt is a Harbor task directory, so the health prompt runs as the same check in
-            # that form, scored by its verifier.
-            evaluation["tasks"] = [
-                HEALTH_TASK_DIRECTORY if str(task).startswith("[health]") else task for task in tasks
-            ]
+            # The adapter runs Harbor task directories, so the health task runs as the same check in that form,
+            # scored by its verifier. Any other instruction task stays, and the recipe refuses it.
+            health = [task for task in tasks if isinstance(task, Mapping) and task.get("id") == HEALTH_TASK_ID]
+            if health:
+                evaluation["tasks"] = [task for task in tasks if task not in health]
+                evaluation["harbor_tasks"] = [HEALTH_TASK_DIRECTORY, *evaluation.get("harbor_tasks", ())]
         own = {key: value for key, value in section.items() if key not in ("agent", "multimodal")}
         # The agent answers requests on pi alone; on another adapter the served model does, so no agent is
         # built, jailed or warned about. On pi it runs unless the section is null, on the harness's own binary.

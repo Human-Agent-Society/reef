@@ -17,6 +17,7 @@ from typing import Any
 from reef.core.evaluation import RolloutScore
 from reef.core.plugins import ConfiguredPlugin
 from reef.core.tasks import primary_reward
+from reef.evaluation.harness.tasks import EvaluationTask
 from reef.harness.tasks.model_binding import ModelBindings
 from reef.harness.tasks.run import TaskResult
 from reef.runtime.executor.requirements import ExecutionRequirements
@@ -26,15 +27,17 @@ class TaskScorer(ConfiguredPlugin, ABC):
     """Base class for scoring one harness-evolution run.
 
     Implement:
-        ``score`` — given a task name and its run result, return a
-        float score. Higher is better; non-finite values raise.
+        ``score`` — given the ``EvaluationTask`` (its ``instruction`` and
+        ``answer``, or its Harbor ``directory``, and its ``metadata``) and
+        its run result, return a float score. Higher is better; non-finite
+        values raise.
     A model-based judge also overrides ``score_with_models``, which receives
     the step's model bindings. ``score`` stays abstract, so a judge
     implements it too, for example to raise because it needs the bindings.
     """
 
     @abstractmethod
-    def score(self, task: str, result: TaskResult) -> float:
+    def score(self, task: EvaluationTask, result: TaskResult) -> float:
         """Score one run result for a task."""
 
     def execution_requirements(self) -> ExecutionRequirements:
@@ -45,13 +48,13 @@ class TaskScorer(ConfiguredPlugin, ABC):
         """
         return ExecutionRequirements()
 
-    def score_with_models(self, task: str, result: TaskResult, models: ModelBindings) -> float:
+    def score_with_models(self, task: EvaluationTask, result: TaskResult, models: ModelBindings) -> float:
         """The score that the evaluation records for one run: ``score(task, result)`` unless a judge overrides
         it to call ``models``, the step's bindings."""
         return self.score(task, result)
 
 
-def verifier_reward(task: str, result: TaskResult) -> float:
+def verifier_reward(task: EvaluationTask, result: TaskResult) -> float:
     """The Harbor verifier's reward for a task directory run; :class:`VerifierRewardScorer` scores with it.
 
     A task directory run's trajectory holds one ``verifier`` row with the task it ran and the rewards
@@ -61,31 +64,32 @@ def verifier_reward(task: str, result: TaskResult) -> float:
     trial never ran as failed); a run that exited without a row scores 0; a row for another task, several
     rewards without a ``reward`` entry, or a reward that is not a finite number is an error.
     """
+    played = task.text
     rows = [event for event in result.trajectory if event.get("type") == "verifier"]
     if not rows and result.exit_code:
         return 0.0
     if len(rows) != 1:
-        raise ValueError(f"expected one verifier record for {task!r}, found {len(rows)}")
+        raise ValueError(f"expected one verifier record for {played!r}, found {len(rows)}")
     row = rows[0]
-    if row.get("task") != task:
-        raise ValueError(f"the verifier record names {row.get('task')!r}, not {task!r}")
+    if row.get("task") != played:
+        raise ValueError(f"the verifier record names {row.get('task')!r}, not {played!r}")
     if row.get("failed"):
         return 0.0
     rewards = row.get("rewards")
     reward = primary_reward(rewards) if isinstance(rewards, Mapping) else row.get("reward")
     if reward is None:
         if isinstance(rewards, Mapping) and rewards:
-            raise ValueError(f"the verifier for {task!r} wrote {sorted(rewards)} and no 'reward' entry")
+            raise ValueError(f"the verifier for {played!r} wrote {sorted(rewards)} and no 'reward' entry")
         return 0.0
     if isinstance(reward, bool) or not isinstance(reward, (int, float)) or not math.isfinite(reward):
-        raise ValueError(f"the verifier reward for {task!r} must be a finite number, not {reward!r}")
+        raise ValueError(f"the verifier reward for {played!r} must be a finite number, not {reward!r}")
     return float(reward)
 
 
 class VerifierRewardScorer(TaskScorer):
     """Score a run by its Harbor verifier's reward (:func:`verifier_reward`); for a task manifest evaluation."""
 
-    def score(self, task: str, result: TaskResult) -> float:
+    def score(self, task: EvaluationTask, result: TaskResult) -> float:
         return verifier_reward(task, result)
 
 
@@ -93,7 +97,7 @@ class VerifierRewardScorer(TaskScorer):
 class FailureObservation:
     """Why one run failed, as the evaluation saw it.
 
-    Values: ``task`` is the task the run completed; ``stage`` names where it
+    Values: ``task`` is the id of the task the run played; ``stage`` names where it
     failed (``launch``, ``trajectory``, ``residue``, ``trial``, ``graph``,
     ``loop`` or ``exit``); ``cause`` is the error text.
     Purpose: the evaluation makes one per failed run; the history keeps

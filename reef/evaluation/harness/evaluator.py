@@ -41,6 +41,7 @@ from reef.core.evaluation import (
 from reef.evaluation.harness.history import History, RunRecord
 from reef.evaluation.harness.runner import EvaluationWorkerPool, TaskEvaluationWorker, TaskRun
 from reef.evaluation.harness.scoring import ScoredRun, TaskScorer
+from reef.evaluation.harness.tasks import EvaluationTask
 from reef.execution.sandbox.process import ProgramExecutor
 from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.tasks.harbor_task import can_run_in_task_container
@@ -52,7 +53,6 @@ from reef.harness.tree.checks import clip_record_text
 from reef.runtime.executor import WorkerSpec
 from reef.runtime.executor.config import ExecutorSelection
 from reef.runtime.executor.requirements import ExecutionRequirements
-from reef.storage.tasks import files_digest
 
 #: The trees a candidate evaluation runs, in pairing order; a policy that evaluates the candidate alone names the
 #: first.
@@ -123,7 +123,7 @@ class HarnessCandidate(UpdateCandidate):
 
     candidate_tree: HarnessTree
     current_tree: HarnessTree
-    evaluation_tasks: tuple[str, ...]
+    evaluation_tasks: tuple[EvaluationTask, ...]
     step: int
 
     def __post_init__(self) -> None:
@@ -297,7 +297,14 @@ class HarnessTaskEvaluator(HarnessCandidateEvaluator, RolloutRunner[ScoredRun]):
                 )
             if request.model != served:
                 raise ValueError(f"this runner serves {served}, not {request.model}")
-        runs = [TaskRun(dict(request.harness.plugin), request.task, request.record_dir) for request in requests]
+        # A request names the task by what it plays; the shared contract carries no answer.
+        task_of = EvaluationTask.of_directory if self.task_directories else EvaluationTask.of_instruction
+        return self.run_in_pool(
+            [TaskRun(dict(request.harness.plugin), task_of(request.task), request.record_dir) for request in requests]
+        )
+
+    def run_in_pool(self, runs: list[TaskRun]) -> list[ScoredRun]:
+        """Run and score ``runs`` in the worker pool, in order; a remote worker's kept record is extracted here."""
         scored = self.worker_pool.run(runs, self.models)
         for run, result in zip(runs, scored, strict=True):
             # A worker returns an archive only for a run that keeps its record.
@@ -308,23 +315,21 @@ class HarnessTaskEvaluator(HarnessCandidateEvaluator, RolloutRunner[ScoredRun]):
     def rollout_score(self, task_run: ScoredRun) -> RolloutScore:
         return task_run.score
 
-    def task_key(self, task: str) -> str:
-        """What identifies a task's content: the digest of a task directory's files, or of a prompt's text."""
-        key = self.task_keys.get(task)
+    def task_key(self, task: EvaluationTask) -> str:
+        """``task.key()``; a task directory's digest is computed once per directory."""
+        if task.directory is None:
+            return task.key()
+        key = self.task_keys.get(task.text)
         if key is None:
-            if self.task_directories:
-                key = files_digest(Path(task))
-            else:
-                key = hashlib.sha256(task.encode("utf-8")).hexdigest()
-            self.task_keys[task] = key
+            key = self.task_keys[task.text] = task.key()
         return key
 
-    def run(self, requests: Sequence[tuple[HarnessTree, str, int]], *, step: int) -> list[RunRecord]:
+    def run(self, requests: Sequence[tuple[HarnessTree, EvaluationTask, int]], *, step: int) -> list[RunRecord]:
         """One run record per ``(tree, task, repeat)`` request, in request order.
 
         Every tree must be a candidate of the history. A request that the
         cache holds takes the cached record. The other requests run as one
-        wave of ``run_rollouts``, in request order, and their records join the
+        wave in the worker pool, in request order, and their records join the
         history.
         """
         context = self.context().key()
@@ -338,23 +343,24 @@ class HarnessTaskEvaluator(HarnessCandidateEvaluator, RolloutRunner[ScoredRun]):
             if cached is not None:
                 records[index] = cached
         missing = [index for index in range(len(requests)) if index not in records]
-        harnesses: dict[str, PolicyHarness] = {}
-        task_runs: list[str] = []
-        to_run: list[RolloutRequest] = []
+        rendered: dict[str, dict[str, str]] = {}
+        run_ids: list[str] = []
+        to_run: list[TaskRun] = []
         for index in missing:
             tree, task, _ = requests[index]
-            if checksums[index] not in harnesses:
-                harnesses[checksums[index]] = self.policy_harness(tree)
-            task_run, record_dir = self.history.new_run()
-            task_runs.append(task_run)
-            to_run.append(RolloutRequest(harnesses[checksums[index]], self.served_model, task, record_dir))
-        scored = self.run_rollouts(to_run)
-        for index, task_run, request, result in zip(missing, task_runs, to_run, scored, strict=True):
+            if checksums[index] not in rendered:
+                rendered[checksums[index]] = dict(self.render(tree))
+            run_id, record_dir = self.history.new_run()
+            run_ids.append(run_id)
+            to_run.append(TaskRun(rendered[checksums[index]], task, record_dir))
+        scored = self.run_in_pool(to_run)
+        for index, run_id, task_run, result in zip(missing, run_ids, to_run, scored, strict=True):
             record = RunRecord.from_scored(
                 result,
-                run_id=task_run,
+                run_id=run_id,
                 tree=checksums[index],
-                task=request.task,
+                task=task_run.task.text,
+                task_id=task_run.task.id,
                 task_key=keys[index],
                 repeat=requests[index][2],
                 context=context,
@@ -364,11 +370,13 @@ class HarnessTaskEvaluator(HarnessCandidateEvaluator, RolloutRunner[ScoredRun]):
             records[index] = record
         return [records[index] for index in range(len(requests))]
 
-    def runs(self, tree: HarnessTree, tasks: Sequence[str], *, repeats: int, step: int) -> tuple[RunRecord, ...]:
+    def runs(
+        self, tree: HarnessTree, tasks: Sequence[EvaluationTask], *, repeats: int, step: int
+    ) -> tuple[RunRecord, ...]:
         """``repeats`` run records of ``tree`` on each task, task by task; cached ones are reused."""
         return tuple(self.run(run_requests(tree, tasks, repeats), step=step))
 
-    def runs_to_run(self, tree: HarnessTree, tasks: Sequence[str], *, repeats: int) -> int:
+    def runs_to_run(self, tree: HarnessTree, tasks: Sequence[EvaluationTask], *, repeats: int) -> int:
         """How many of the runs that :meth:`runs` asks for the cache does not hold, so they would run."""
         context = self.context().key()
         checksum = tree.checksum()
@@ -416,7 +424,9 @@ class HarnessTaskEvaluator(HarnessCandidateEvaluator, RolloutRunner[ScoredRun]):
             # The run scores of each side, by task.
             **{
                 f"{side}_scores": (
-                    RolloutScores.by_task(tasks, scores[side]).to_json() if side in scores and tasks else []
+                    RolloutScores.by_task([task.id for task in tasks], scores[side]).to_json()
+                    if side in scores and tasks
+                    else []
                 )
                 for side in EVALUATION_SIDES
             },
@@ -458,7 +468,9 @@ class HarnessTaskEvaluator(HarnessCandidateEvaluator, RolloutRunner[ScoredRun]):
         return EvaluationResult(evaluator="harness_runs", evaluator_version="2", metrics=metrics)
 
 
-def run_requests(tree: HarnessTree, tasks: Sequence[str], repeats: int) -> list[tuple[HarnessTree, str, int]]:
+def run_requests(
+    tree: HarnessTree, tasks: Sequence[EvaluationTask], repeats: int
+) -> list[tuple[HarnessTree, EvaluationTask, int]]:
     """The ``(tree, task, repeat)`` requests of ``repeats`` runs of ``tree`` on each task, task by task.
 
     ``ValueError`` when ``repeats`` is below 1.

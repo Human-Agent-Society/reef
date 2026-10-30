@@ -24,7 +24,7 @@ from tests.support.harness_steps import harness_backend
 from recipes.beta.reefine.answer import EXTENSION_ADAPTER, Answer, answer_request
 from reef.core.job_data import TrajectorySample
 from reef.core.training_request import TrainingRequest
-from reef.evaluation.harness import NoEvaluationPolicy
+from reef.evaluation.harness import EvaluationTask, NoEvaluationPolicy
 from reef.harness.adapters import get_adapter
 from reef.harness.tasks.model_binding import ModelBinding, ModelBindings
 from reef.harness.tree import HarnessTree, ValidationResult, validate_tree
@@ -199,7 +199,7 @@ def step_workspace(
         step=1,
         tree=TREE,
         descriptor=get_adapter(adapter),
-        tasks=("[health] reply reef-ok",),
+        tasks=(EvaluationTask("health", instruction="reply reef-ok", answer="reef-ok"),),
         repeats=0,
         task_directories=False,
         samples=samples,

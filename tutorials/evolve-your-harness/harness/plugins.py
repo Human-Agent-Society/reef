@@ -17,7 +17,7 @@ from pathlib import Path
 from string import Template
 
 from reef.core.prompts import untrusted_text
-from reef.evaluation.harness import TaskScorer
+from reef.evaluation.harness import EvaluationTask, TaskScorer
 from reef.harness.tasks.model_binding import ModelBindingError
 from reef.harness.tasks.run import TaskResult
 from reef.harness.tree import TreePatch
@@ -136,12 +136,12 @@ class NativeMethod(Method):
 class AnswerScorer(TaskScorer):
     """``evolution.evaluate``: exact last-line answer grading of the run's final assistant text."""
 
-    def score(self, task: str, result: TaskResult) -> float:
+    def score(self, task: EvaluationTask, result: TaskResult) -> float:
         return evolution.evaluate(task, result)
 
 
 class NativeAnswerScorer(TaskScorer):
     """``native_evolution.evaluate``: the same grading over the native-jsonl trajectory."""
 
-    def score(self, task: str, result: TaskResult) -> float:
+    def score(self, task: EvaluationTask, result: TaskResult) -> float:
         return native_evolution.evaluate(task, result)

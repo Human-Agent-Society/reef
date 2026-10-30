@@ -14,6 +14,7 @@ import pytest
 from tests.support._strategies import resolve_method, resolve_task_scorer
 from tests.support._trajectories import recorded_trajectory
 from tests.support.harness_service import harness_repository
+from tests.support.harness_steps import instruction_tasks
 
 from reef.artifact import Artifact, InMemoryRepositoryBackend
 from reef.dispatcher import Dispatcher
@@ -120,7 +121,7 @@ def make_recipe(platform, tmp_path):
     return HarnessEvolutionRecipe(
         method=resolve_method(method),
         evolution=EvolutionSettings(binary=str(binary), state_dir=str(tmp_path / "harness")),
-        evaluation=EvaluationSettings(tasks=("test task",)),
+        evaluation=EvaluationSettings(tasks=instruction_tasks("test task")),
         scorer=resolve_task_scorer(judge),
         runtime=InferenceProxyRuntime(base_url=managed.base_url, api_key=managed.api_key, model_path=managed.model),
         models={"teacher": managed, "judge": managed},

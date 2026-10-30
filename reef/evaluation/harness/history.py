@@ -98,9 +98,10 @@ class RunRecord:
     """One run that completed, and its scored result.
 
     Values: ``run_id`` names its record directory under ``runs/``.
-    ``tree`` is the checksum of the tree it ran. ``task`` is the task as the
-    evaluation names it (a prompt or a task directory) and ``task_key``
-    identifies its content. ``repeat`` ≥ 0 is the sample index of the
+    ``tree`` is the checksum of the tree it ran. ``task`` is what the run
+    played (an instruction or a task directory's path), ``task_id`` is the
+    task's ``EvaluationTask.id``, and ``task_key`` identifies its content,
+    the answer included. ``repeat`` ≥ 0 is the sample index of the
     (tree, task) pair. ``context`` is the key of the evaluation context
     (``EvaluationContext``: the served and the named models, the adapter, the
     binary, the run executor, the scorer and the run settings).
@@ -117,6 +118,7 @@ class RunRecord:
     run_id: str
     tree: str
     task: str
+    task_id: str
     task_key: str
     repeat: int
     context: str
@@ -130,8 +132,8 @@ class RunRecord:
     transcript_read: bool = True
 
     def __post_init__(self) -> None:
-        if not (self.run_id and self.tree and self.task_key and self.context):
-            raise ValueError("RunRecord needs a run id, a tree, a task key and a context")
+        if not (self.run_id and self.tree and self.task_id and self.task_key and self.context):
+            raise ValueError("RunRecord needs a run id, a tree, a task id, a task key and a context")
         for label, value, least in (("repeat", self.repeat, 0), ("step", self.step, 1), ("residue", self.residue, 0)):
             if isinstance(value, bool) or not isinstance(value, int) or value < least:
                 raise ValueError(f"RunRecord.{label} must be an integer of at least {least}")
@@ -148,6 +150,7 @@ class RunRecord:
         run_id: str,
         tree: str,
         task: str,
+        task_id: str,
         task_key: str,
         repeat: int,
         context: str,
@@ -158,6 +161,7 @@ class RunRecord:
             run_id=run_id,
             tree=tree,
             task=task,
+            task_id=task_id,
             task_key=task_key,
             repeat=repeat,
             context=context,
@@ -184,6 +188,8 @@ class RunRecord:
         failure = row.get("failure")
         return cls(
             **{
+                # A row written before task records named the task by what it played.
+                "task_id": row["task"],
                 **row,
                 "score": RolloutScore.from_json(row["score"]),
                 "failure": None if failure is None else FailureObservation.from_dict(failure),
@@ -313,14 +319,17 @@ class History:
         """The runs of one tree, in the order they ran."""
         return tuple(record for record in self.runs if record.tree == checksum)
 
-    def scores(self, checksum: str, tasks: Sequence[str], *, repeats: int = 1) -> tuple[float | None, ...]:
-        """The score values of one tree on ``tasks``, task by task and repeat by repeat, as a method reads them.
+    def scores(self, checksum: str, task_ids: Sequence[str], *, repeats: int = 1) -> tuple[float | None, ...]:
+        """The score values of one tree on the tasks of ``task_ids``, task by task and repeat by repeat, as a
+        method reads them.
 
         Each (task, repeat) takes the value of its latest run in any context; ``None`` where no run completed
         or the latest one failed.
         """
-        latest = {(record.task, record.repeat): record.score.value for record in self.runs if record.tree == checksum}
-        return tuple(latest.get((task, repeat)) for task in tasks for repeat in range(repeats))
+        latest = {
+            (record.task_id, record.repeat): record.score.value for record in self.runs if record.tree == checksum
+        }
+        return tuple(latest.get((task_id, repeat)) for task_id in task_ids for repeat in range(repeats))
 
     def decision(self, step: int) -> DecisionRecord | None:
         """The decision on the candidate of ``step``; ``None`` when the step decided no candidate."""

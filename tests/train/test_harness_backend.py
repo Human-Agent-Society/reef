@@ -33,7 +33,7 @@ from reef.core.evaluation import RolloutScore
 from reef.core.job_data import TaskSample
 from reef.core.tasks import HarborTask, write_harbor_task
 from reef.core.training_request import TrainingRequest
-from reef.evaluation.harness import FloorPolicy, RunRecord
+from reef.evaluation.harness import EvaluationTask, FloorPolicy, RunRecord
 from reef.harness.adapters import get_adapter
 from reef.harness.tasks.model_binding import ModelBinding
 from reef.harness.tree import HarnessTree, TreePatch
@@ -215,7 +215,8 @@ def test_the_workspace_holds_the_head_the_material_and_the_step_record(tmp_path:
     backend, _ = harness_backend(tmp_path, step)
     result = backend_step(backend, data(1, sample, request=REQUEST), backend.initial_state())
     trace = seen["traces"][0]
-    assert seen["tree"] == PI_SEED and seen["tasks"] == ("task one",) and seen["request"] == REQUEST
+    assert seen["tree"] == PI_SEED and seen["request"] == REQUEST
+    assert seen["tasks"] == (EvaluationTask("task one", instruction="task one"),)
     assert (trace.source, trace.task, trace.reply, trace.score, trace.feedback, trace.record) == (
         "traffic",
         "q",
@@ -256,15 +257,19 @@ def test_a_trace_that_ends_on_a_tool_call_has_no_reply(tmp_path: Path) -> None:
     assert trace.task == "q" and trace.reply is None and trace.score is None
 
 
+#: Two instructions that are not step tasks, as a method would pass a trace's instruction.
+ONE_TWO = (EvaluationTask.of_instruction("one"), EvaluationTask.of_instruction("two"))
+
+
 def test_a_method_scores_trees_through_the_cache_within_its_run_budget(tmp_path: Path) -> None:
     runs: list[list[float | None]] = []
 
     def step(workspace, services):
         tree = workspace.tree().apply(MARKER)
-        runs.append([record.score.value for record in services.evaluate(tree, ("one", "two"))])
-        runs.append([record.score.value for record in services.evaluate(tree, ("one", "two"))])
+        runs.append([record.score.value for record in services.evaluate(tree, ONE_TWO)])
+        runs.append([record.score.value for record in services.evaluate(tree, ONE_TWO)])
         with pytest.raises(RuntimeError, match="budget has 1 left"):
-            services.evaluate(tree, ("one", "two"), repeats=2)
+            services.evaluate(tree, ONE_TWO, repeats=2)
         return
 
     backend, _ = harness_backend(tmp_path, step, max_runs_per_step=3)
@@ -275,16 +280,23 @@ def test_a_method_scores_trees_through_the_cache_within_its_run_budget(tmp_path:
 #: Calls ``services.evaluate`` refuses whole, by why: whether the deployment has a scorer, the tree, the tasks, and the
 #: start of the refusal.
 REFUSED_CALLS = {
-    "no-scorer": (False, PI_SEED.apply(MARKER), ("one",), "RuntimeError: the deployment configured no"),
-    "invalid-tree": (True, PI_SEED.apply(TreePatch({"notes.txt": "x"})), ("one",), "ValueError: the tree fails"),
-    "one-string": (True, PI_SEED.apply(MARKER), "one", "TypeError: tasks must be a sequence of tasks"),
-    "over-budget": (True, PI_SEED.apply(MARKER), ("one", "two"), "RuntimeError: 2 runs must run, and the step's"),
+    "no-scorer": (False, PI_SEED.apply(MARKER), ONE_TWO[:1], "RuntimeError: the deployment configured no"),
+    "invalid-tree": (True, PI_SEED.apply(TreePatch({"notes.txt": "x"})), ONE_TWO[:1], "ValueError: the tree fails"),
+    "one-string": (True, PI_SEED.apply(MARKER), "one", "TypeError: tasks must be a sequence of EvaluationTask"),
+    "a-string-task": (True, PI_SEED.apply(MARKER), ("one",), "TypeError: tasks must be a sequence of EvaluationTask"),
+    "a-step-id-with-another-instruction": (
+        True,
+        PI_SEED.apply(MARKER),
+        (EvaluationTask("task one", instruction="another"),),
+        "ValueError: task 'task one' is a step task with another instruction",
+    ),
+    "over-budget": (True, PI_SEED.apply(MARKER), ONE_TWO, "RuntimeError: 2 runs must run, and the step's"),
 }
 
 
 @pytest.mark.parametrize(("scored", "tree", "tasks", "refusal"), REFUSED_CALLS.values(), ids=REFUSED_CALLS.keys())
 def test_a_refused_evaluate_call_adds_no_candidate(
-    tmp_path: Path, scored: bool, tree: HarnessTree, tasks: tuple[str, ...] | str, refusal: str
+    tmp_path: Path, scored: bool, tree: HarnessTree, tasks: tuple[object, ...] | str, refusal: str
 ) -> None:
     refusals: list[str] = []
 
@@ -309,13 +321,13 @@ def test_a_method_that_retries_after_a_scorer_error_stays_within_its_run_budget(
     errors: list[str] = []
 
     def score(task, result):
-        scored.append(task)
+        scored.append(task.text)
         raise ValueError("the scorer broke")
 
     def step(workspace, services):
         for _ in range(3):
             try:
-                services.evaluate(workspace.tree().apply(MARKER), ["one"])
+                services.evaluate(workspace.tree().apply(MARKER), ONE_TWO[:1])
             except (RuntimeError, ValueError) as exc:
                 errors.append(str(exc))
         return
@@ -325,6 +337,25 @@ def test_a_method_that_retries_after_a_scorer_error_stays_within_its_run_budget(
     # The run whose scorer raised spent the budget, so the retries run nothing.
     assert scored == ["one"] and result.metrics["method_runs"] == 1
     assert errors == ["the scorer broke"] + ["1 runs must run, and the step's run budget has 0 left"] * 2
+
+
+def test_a_method_sees_no_answer_and_its_run_of_a_step_task_is_scored_with_the_answer(tmp_path: Path) -> None:
+    answers: list[str | None] = []
+
+    def score(task, result):
+        answers.append(task.answer)
+        return 1.0
+
+    def step(workspace, services):
+        evaluation = json.loads((workspace.material / "evaluation.json").read_text(encoding="utf-8"))
+        assert evaluation["tasks"] == [{"id": "fib", "instruction": "fib(90)?"}]
+        services.evaluate(workspace.tree().apply(MARKER), workspace.tasks())
+
+    task = {"id": "fib", "instruction": "fib(90)?", "answer": "2880067194370816120"}
+    recipe = harness_recipe(tmp_path, step, score=score, tasks=(task,))
+    backend = recipe.build_backend("demo", ComponentReleases(TreeReleases(recipe.seed), COMPONENT), None)
+    backend_step(backend, data(1), backend.initial_state())
+    assert answers == ["2880067194370816120"]
 
 
 def test_an_aborted_step_keeps_what_changed_for_the_failed_row(tmp_path: Path) -> None:
@@ -412,7 +443,9 @@ def test_a_run_of_a_task_directory_gives_the_method_the_task_instruction(tmp_pat
         environment={"Dockerfile": "FROM python:3.12-slim\n"},
     )
     directory = write_harbor_task(task, tmp_path / "tasks")
-    record = RunRecord("e1", PI_SEED.checksum(), str(directory), "key", 0, "context", 1, RolloutScore.scored(1.0))
+    record = RunRecord(
+        "e1", PI_SEED.checksum(), str(directory), str(directory), "key", 0, "context", 1, RolloutScore.scored(1.0)
+    )
     workspace = Workspace.create(
         tmp_path / "step",
         history_dir=tmp_path / "history",
