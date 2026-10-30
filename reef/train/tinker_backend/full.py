@@ -36,6 +36,9 @@ class SpindleFullTrainingComponent(TinkerJobComponent):
       configured service, whose ``state_path`` a job restores, beside a reference to the commit of
       ``config.release_repo`` that holds the checkpoint's weights, which ``exporter`` made.
 
+    With ``config.score_centering``, its policy-gradient jobs train with score centering on Spindle's ``cispo``
+    (``TinkerJobComponent``).
+
     So every release refers to its weights on the Hub (``release_format`` ``"full"``): Spindle's sampler serves a
     manifest's ``sampler_path``, and any other runtime loads the referenced weights. An import takes exactly these
     forms: a manifest that ``validated`` takes beside a reference that resolves to full weights, or files that are
@@ -59,7 +62,7 @@ class SpindleFullTrainingComponent(TinkerJobComponent):
             raise ValueError(f"the base model {base_model} is not the repo of the base {self._revision.uri}")
         #: The content ID of the base's files, read from the Hub at the first import.
         self.base_content_id: str | None = None
-        super().__init__(base_model, config, client, sampler=sampler)
+        super().__init__(base_model, config, client, sampler=sampler, score_centering=config.score_centering_settings)
 
     @property
     def name(self) -> str:

@@ -40,7 +40,7 @@ class Sampler(TinkerSampler):
     def decode(self, tokens):
         return "done"
 
-    def sample(self, sampler_path, prompt, params):
+    def sample(self, sampler_path, prompt, params, *, topk_logprobs):
         self.paths.append(sampler_path)
         return SampleResult((7, 8), (-0.1, -0.2), "stop")
 
@@ -92,7 +92,7 @@ def test_a_rollout_samples_each_task_on_the_start_sampler_and_groups_its_samples
     rollouts = roll_out(
         tasks,
         RolloutSettings.from_parameters({"rollout": ROLLOUT}),
-        SamplerChat(sampler, "tinker://start/sampler", model=MODEL, runtime_load_id="tinker:start"),
+        SamplerChat(sampler, "tinker://start/sampler", model=MODEL, runtime_load_id="tinker:start", topk_logprobs=0),
         model=MODEL,
         work_dir=tmp_path / "work",
         model_adapter="tinker://start/sampler",
@@ -119,7 +119,9 @@ def test_a_rollout_samples_each_task_on_the_start_sampler_and_groups_its_samples
 
 @pytest.mark.unit
 def test_the_sampler_chat_refuses_a_request_that_tinker_cannot_serve():
-    with ChatEndpoint(SamplerChat(Sampler(), None, model=MODEL, runtime_load_id="tinker:base")) as endpoint:
+    with ChatEndpoint(
+        SamplerChat(Sampler(), None, model=MODEL, runtime_load_id="tinker:base", topk_logprobs=0)
+    ) as endpoint:
         body = json.dumps({"messages": [{"role": "user", "content": "hi"}], "tools": [{"type": "function"}]})
         request = urllib.request.Request(f"{endpoint.url}/v1/chat/completions", data=body.encode(), method="POST")
         with pytest.raises(urllib.error.HTTPError) as refused:
@@ -130,7 +132,7 @@ def test_the_sampler_chat_refuses_a_request_that_tinker_cannot_serve():
 @pytest.mark.unit
 def test_the_sampler_chat_answers_a_bad_request_and_a_sampler_failure_with_their_status():
     class Failing(Sampler):
-        def sample(self, sampler_path, prompt, params):
+        def sample(self, sampler_path, prompt, params, *, topk_logprobs):
             raise ValueError("Tinker returned non-finite sampled log probabilities")
 
     def post(url: str, body: bytes) -> tuple[int, str]:
@@ -142,7 +144,9 @@ def test_the_sampler_chat_answers_a_bad_request_and_a_sampler_failure_with_their
             return error.code, error.read().decode()
 
     chat = json.dumps({"messages": [{"role": "user", "content": "hi"}]}).encode()
-    with ChatEndpoint(SamplerChat(Failing(), None, model=MODEL, runtime_load_id="tinker:base")) as endpoint:
+    with ChatEndpoint(
+        SamplerChat(Failing(), None, model=MODEL, runtime_load_id="tinker:base", topk_logprobs=0)
+    ) as endpoint:
         assert post(endpoint.url, b"{not json")[0] == 400
         status, body = post(endpoint.url, chat)
     assert status == 502 and "non-finite" in body

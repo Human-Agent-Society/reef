@@ -87,7 +87,7 @@ class RemoteClient(TinkerClient, TinkerSampler):
     def decode(self, tokens):
         return "hello"
 
-    def sample(self, sampler_path, prompt, params):
+    def sample(self, sampler_path, prompt, params, *, topk_logprobs):
         self.sampled.append((sampler_path, prompt, params))
         return SampleResult((201, 202), (-0.2, -0.3), "stop")
 
@@ -532,7 +532,9 @@ def test_schedule_keeps_comparison_sets_and_handles_epochs(objective):
     objective.rollout_unit = "comparison_set"
     scheduling = StepScheduling(epochs=2, remainder="partial")
     data = JobData("schedule", tuple(item("v", group) for group in ("a", "a", "b", "c")))
-    step = prepare_tinker_job(data, TrainingMethod(objective.name), {}, scheduling, batch_size=2, kl_coef=0.0)
+    step = prepare_tinker_job(
+        data, TrainingMethod(objective.name), {}, scheduling, batch_size=2, kl_coef=0.0, score_centering=None
+    )
     assert [len(rows) for rows in step.steps] == [3, 1, 3, 1]
     assert step.metrics["optimizer_steps"] == 4
     assert step.next_algorithm_state == {"steps": 1}
@@ -541,7 +543,9 @@ def test_schedule_keeps_comparison_sets_and_handles_epochs(objective):
 def test_a_packed_tinker_step_trains_batch_size_packs(objective):
     # Each sample has 4 tokens, so packs of 8 tokens hold two samples, and one step trains one pack.
     scheduling = StepScheduling(packing_length=8)
-    step = prepare_tinker_job(batch(3), TrainingMethod(objective.name), {}, scheduling, batch_size=1, kl_coef=0.0)
+    step = prepare_tinker_job(
+        batch(3), TrainingMethod(objective.name), {}, scheduling, batch_size=1, kl_coef=0.0, score_centering=None
+    )
     assert [len(rows) for rows in step.steps] == [2, 1]
 
 
@@ -554,6 +558,7 @@ def test_step_size_respects_error_remainder(objective):
             StepScheduling(remainder="error"),
             batch_size=2,
             kl_coef=0.0,
+            score_centering=None,
         )
 
 
@@ -956,7 +961,9 @@ def sft_item(name: str) -> TrajectorySample:
 
 def test_sft_trains_tinker_cross_entropy_on_the_target_tokens_without_rollout_log_probs():
     data = JobData("sft", (sft_item("a"), sft_item("b")))
-    step = prepare_tinker_job(data, TrainingMethod(SftObjective.name), {}, StepScheduling(), batch_size=2, kl_coef=0.0)
+    step = prepare_tinker_job(
+        data, TrainingMethod(SftObjective.name), {}, StepScheduling(), batch_size=2, kl_coef=0.0, score_centering=None
+    )
 
     loss = resolve_tinker_loss("sft")
     (rows,) = step.steps
@@ -967,7 +974,15 @@ def test_sft_trains_tinker_cross_entropy_on_the_target_tokens_without_rollout_lo
         "weights": [0.0, 0.0, 1.0, 1.0],
     }
     with pytest.raises(ValueError, match="sft trains no KL penalty"):
-        prepare_tinker_job(data, TrainingMethod(SftObjective.name), {}, StepScheduling(), batch_size=2, kl_coef=0.1)
+        prepare_tinker_job(
+            data,
+            TrainingMethod(SftObjective.name),
+            {},
+            StepScheduling(),
+            batch_size=2,
+            kl_coef=0.1,
+            score_centering=None,
+        )
 
 
 def test_an_sft_job_trains_cross_entropy_on_the_component_and_saves_its_checkpoint(component, client):
