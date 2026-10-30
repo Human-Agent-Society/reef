@@ -94,7 +94,7 @@ class TrainingBatchProcessor:
         return self._split_train_data_by_dp(dict(data))
 
     def _split_train_data_by_dp(self, data):
-        from slime.ray.rollout import _tensorize_rollout_data_for_training
+        from slime.observability.rollout_data_utils import tensorize_rollout_data_for_training
         from slime.utils.misc import Box
 
         dp_size = self.train_parallel_config["dp_size"]
@@ -120,7 +120,7 @@ class TrainingBatchProcessor:
                 num_microbatches=num_microbatches,
                 micro_batch_indices=micro_batch_indices[rank],
             )
-            _tensorize_rollout_data_for_training(rollout_data)
+            tensorize_rollout_data_for_training(rollout_data)
             tensorize_external_fields(rollout_data, self.tensor_dtypes)
             transport = self.args.rollout_data_transport
             if transport == "nixl":

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -16,6 +17,7 @@ from tests.support.slime_component import finished
 
 from reef.core.evaluation import RolloutScore, RolloutScores
 from reef.core.job_data import JobData, TaskSample
+from reef.runtime.executor.placement import GpuBundles
 from reef.runtime.interfaces import TrainingMethod
 from reef.runtime.jobs import TrainingJob
 from reef.train.slime_backend import component as slime_component
@@ -31,7 +33,7 @@ class FakeRolloutGroup(SlimeRolloutGroup):
     """A rollout group that records when the engines take the workers' weights, release them, and close."""
 
     def __init__(self, events: list[str]) -> None:
-        super().__init__(None, colocated=True, router_url="http://router:3000")
+        super().__init__(SimpleNamespace(manager=None), colocated=True, router_url="http://router:3000")
         self.events = events
 
     def sync(self, actor_group) -> None:
@@ -179,12 +181,30 @@ class ActorGroup:
 def test_the_rollout_group_holds_gpu_memory_only_between_sync_and_release(monkeypatch, colocated, synced, released):
     events: list[str] = []
     monkeypatch.setattr(rollout_group_module.ray, "get", lambda value: value)
-    group = SlimeRolloutGroup(FakeManager(events), colocated=colocated, router_url="http://router:3000")
+    group = SlimeRolloutGroup(
+        SimpleNamespace(manager=FakeManager(events)), colocated=colocated, router_url="http://router:3000"
+    )
     group.sync(ActorGroup(events))
     assert events == synced
     events.clear()
     group.release()
     assert events == released
+
+
+@pytest.mark.unit
+def test_closing_the_rollout_group_detaches_the_driver_and_keeps_the_session() -> None:
+    closes: list[bool] = []
+    startup = SimpleNamespace(
+        manager=None,
+        placements={"actor": ("pg", [0, 1], [0, 1]), "critic": None, "rollout": ("pg", [0, 1], [0, 1])},
+        close=lambda *, failed: closes.append(failed),
+    )
+    group = SlimeRolloutGroup(startup, colocated=True, router_url="http://router:3000")
+    # The workers train on the session's GPUs.
+    assert group.placements["actor"] == GpuBundles("pg", [0, 1], [0, 1]) and group.placements["critic"] is None
+    group.close()
+    # Slime's failure cleanup detaches the driver; its success cleanup would dispose the session.
+    assert closes == [True]
 
 
 class Chat(EngineChat):

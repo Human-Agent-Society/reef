@@ -18,14 +18,10 @@ dependencies. Having the runtime in the image does not start it: `reef serve`
 starts only the `services` that your config lists and the ones that its
 training backend needs.
 
-The default image pins the SGLang revision that Reef's serving engines run,
-so LoRA training (`--megatron-lora-rank`) works on any weight-training recipe
-without a separate image. Override the revision with
-`--build-arg SGLANG_COMMIT=<sha>`. The build also applies
-`docker/patch/sglang_qwen3_5_mrope_rope.patch`, which fixes how Qwen3.5
-vision-language models rotate image tokens (sgl-project/sglang#34446). It
-skips the patch when the revision already has the fix. If the revision has
-no fix and the patch does not apply to it, the build fails.
+Reef's serving engines run the base image's SGLang, so LoRA training
+(`--megatron-lora-rank`) works on any weight-training recipe without a
+separate image. The build fails if that SGLang lacks the fix for how Qwen3.5
+vision-language models rotate image tokens (sgl-project/sglang#34446).
 
 The build also changes Slime's Qwen3.5 trainer so that its vision tower
 computes the same image features as SGLang. It copies
@@ -43,8 +39,8 @@ bit-identical to the engine's only when all of these are true:
   encodes images itself: with no `encoder` worker (EPD) and with
   `mm-enable-dp-encoder` off. The EPD encoder merges the images of up to
   `SGLANG_ENCODER_MAX_BATCH_SIZE` (default 8) requests in one call.
-* SGLang is the default pin. With another `SGLANG_COMMIT`, check the features
-  again.
+* SGLang is the base image's. With another `SLIME_IMAGE_TAG`, check the
+  features again.
 
 The change was tested with transformers 5.12.1 and 5.13.0. The image
 installs 5.12.1. The build fails if the image has a version outside 5.12 and
