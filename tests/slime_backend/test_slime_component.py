@@ -188,6 +188,7 @@ class Stack:
         loss_family: str = "sft",
         rank_metrics: list[dict[str, Any]] | None = None,
         train_timeout_s: float = 600.0,
+        rollout_group: Any = None,
         **overrides: object,
     ) -> None:
         self.args = worker_args(tmp_path, **overrides)
@@ -209,6 +210,7 @@ class Stack:
             lora=lora,
             loss_family=loss_family,
             train_timeout_s=train_timeout_s,
+            rollout_group=rollout_group,
         )
         start_rollout_id = int(self.args.start_rollout_id or 0)
         self.start = (
@@ -483,13 +485,15 @@ def test_a_job_of_another_objective_starts_with_an_empty_objective_state(tmp_pat
         ({**parameters(TrainingMethod(REWARD_OBJECTIVE)), "scheduling": {"epochs": 2}}, "does not support 2 epochs"),
         ({**parameters(TrainingMethod("sft")), "save_interval": 0}, "save_interval must be a positive int"),
         ({**parameters(TrainingMethod("sft")), "save_interval": True}, "save_interval must be a positive int"),
-        # A job of tasks: Slime rolls no task out.
-        (parameters(TrainingMethod("sft")), "does not roll tasks out"),
+        # A job of tasks, on a component without rollout engines.
+        ({**parameters(TrainingMethod("sft")), "rollout": {"rollouts_per_task": 2}}, "no rollout engines"),
+        # A job of trajectories takes no rollout parameter.
+        ({**parameters(TrainingMethod("sft")), "rollout": {"rollouts_per_task": 2}}, "only to a job of tasks"),
     ],
 )
 def test_a_job_slime_cannot_run_is_refused_and_records_nothing(tmp_path, stacks, job_parameters, message) -> None:
     stack = stacks(tmp_path)
-    data = JobData("tasks", (TaskSample(tmp_path / "task"),)) if "tasks" in message else batch_for(0)
+    data = JobData("tasks", (TaskSample(tmp_path / "task"),)) if "rollout engines" in message else batch_for(0)
     with pytest.raises(ValueError, match=message):
         stack.component.submit(TrainingJob("job-0", "slime", stack.component.base_start, data, job_parameters))
     with pytest.raises(KeyError):
@@ -912,6 +916,9 @@ def build_calls(tmp_path, monkeypatch):
         debug_rollout_only=False,
         colocate=False,
         offload_rollout=False,
+        rollout_num_gpus=0,
+        actor_num_nodes=1,
+        actor_num_gpus_per_node=2,
         reef_executor_backend="ray",
         custom_megatron_init_path=None,
         custom_critic_args_hook_path=None,
@@ -932,7 +939,7 @@ def build_calls(tmp_path, monkeypatch):
         def __init__(self, received, **options):
             assert received is args
             calls["resources"] = options
-            self.placement_groups = {"actor": "training-bundles", "critic": "training-bundles"}
+            self.placement_groups = {"actor": "training-bundles", "critic": "training-bundles", "rollout": None}
 
         def start(self):
             calls["events"].append("start")
@@ -964,6 +971,7 @@ def build_calls(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(startup, "slime_executor_class", lambda backend: None)
     monkeypatch.setattr(slime_component, "SlimeDeploymentResources", Resources)
+    calls["resources_class"] = Resources
     monkeypatch.setattr(slime_component, "create_train_groups", create_groups)
     monkeypatch.setattr(slime_component, "prepare_checkpoint_storage", storage)
     monkeypatch.setattr(slime_arguments, "configure_reef_loss_args", lambda received: None)
@@ -1068,7 +1076,7 @@ def test_the_batch_processor_registers_a_familys_keys_and_refuses_another_dtype(
 
 
 @pytest.mark.unit
-def test_the_component_starts_its_workers_on_the_training_gpus_without_serving_engines(build_calls) -> None:
+def test_the_component_starts_its_workers_on_the_training_gpus_without_rollout_engines(build_calls) -> None:
     component = create_slime_component(settings())
     try:
         # Reef's retention options never reach Slime's parser.
@@ -1093,6 +1101,47 @@ def test_the_component_starts_its_workers_on_the_training_gpus_without_serving_e
 
 
 @pytest.mark.unit
+def test_the_rollout_group_starts_before_the_workers_and_they_get_its_manager(build_calls, monkeypatch) -> None:
+    events = build_calls["events"]
+
+    class RolloutGroup:
+        manager = "manager"
+
+        @classmethod
+        def start(cls, args, bundles):
+            events.append(f"rollout-start:{bundles}")
+            return cls()
+
+        def close(self):
+            events.append("rollout-close")
+
+    original = build_calls["resources_class"]
+
+    class Resources(original):
+        def __init__(self, received, **options):
+            super().__init__(received, **options)
+            self.placement_groups = {**self.placement_groups, "rollout": "rollout-bundles"}
+
+    monkeypatch.setattr(slime_component, "SlimeDeploymentResources", Resources)
+    monkeypatch.setattr(slime_component, "SlimeRolloutGroup", RolloutGroup)
+    component = create_slime_component(settings())
+    try:
+        # Colocated engines take and release their GPU memory before the workers load the model.
+        assert events == ["start", "rollout-start:rollout-bundles"]
+        assert build_calls["groups"][0].events == ["set_rollout_manager:manager"]
+        assert isinstance(component.rollout_group, RolloutGroup)
+    finally:
+        component.close()
+    # The engines close before the workers and the reservation.
+    assert events == ["start", "rollout-start:rollout-bundles", "rollout-close", "close"]
+    build_calls["group_error"] = True
+    events.clear()
+    with pytest.raises(RuntimeError, match="workers failed to start"):
+        create_slime_component(settings())
+    assert events == ["start", "rollout-start:rollout-bundles", "rollout-close", "close"]
+
+
+@pytest.mark.unit
 def test_a_failed_worker_start_closes_the_resources(build_calls) -> None:
     build_calls["group_error"] = True
     with pytest.raises(RuntimeError, match="workers failed to start"):
@@ -1113,8 +1162,8 @@ def test_a_recipe_with_an_unknown_loss_family_is_refused_before_slime_parses(bui
     [
         ({"debug_train_only": True}, "debug-train-only"),
         ({"debug_rollout_only": True}, "debug-rollout-only"),
-        ({"colocate": True}, "remove --colocate"),
-        ({"offload_rollout": True}, "remove --offload-rollout"),
+        ({"colocate": True, "rollout_num_gpus": 8}, "1 to 4 of the training GPUs"),
+        ({"rollout_num_gpus": 2, "megatron_lora_rank": 8}, "remove --megatron-lora-rank"),
         ({"num_rollout": 0}, "positive --num-rollout"),
         ({"save_hf": "/checkpoints/hf"}, "rollout_id"),
         ({"compute_advantages_and_returns": True}, "disable-compute-advantages-and-returns"),
@@ -1131,6 +1180,10 @@ def test_slime_arguments_the_training_component_cannot_run_are_refused(overrides
         "colocate": False,
         "offload_rollout": False,
         "release_train": False,
+        "rollout_num_gpus": 0,
+        "megatron_lora_rank": 0,
+        "actor_num_nodes": 1,
+        "actor_num_gpus_per_node": 4,
     }
     validate_slime_args(SlimeArguments(**values), resolve_loss_family("sft"))
     with pytest.raises(ValueError, match=message):

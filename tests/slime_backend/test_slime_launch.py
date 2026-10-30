@@ -54,6 +54,23 @@ def test_native_training_options_become_slime_flags_and_slime_starts_no_engine()
     ]
 
 
+@pytest.mark.parametrize(
+    ("options", "flags"),
+    [
+        ({"colocate": True, "sglang-mem-fraction-static": 0.5}, {"--colocate", "--sglang-mem-fraction-static=0.5"}),
+        (
+            {"rollout-num-gpus": 2, "rollout-num-gpus-per-engine": 1},
+            {"--rollout-num-gpus=2", "--rollout-num-gpus-per-engine=1"},
+        ),
+    ],
+)
+def test_a_rollout_group_gets_slimes_own_engine_options(tmp_path, options, flags):
+    # Slime's own options configure the component's rollout engines, which only task jobs call.
+    config = deployment_config(tmp_path, training={"options": {"global-batch-size": 4, **options}})
+    arguments = slime_arguments(settings_of(config), loss_family="sao", environ={})
+    assert flags <= set(arguments) and "--rollout-num-gpus=0" not in arguments
+
+
 def test_slime_trains_and_the_inference_section_serves_its_checkpoints_on_an_inference_component(tmp_path):
     config = deployment_config(tmp_path)
     assert [service["name"] for service in config["services"]] == ["inference", "reef"]
@@ -86,11 +103,22 @@ def test_slime_trains_and_the_inference_section_serves_its_checkpoints_on_an_inf
 @pytest.mark.parametrize(
     ("inference", "training", "message"),
     [
-        # Training and serving never share GPUs: there is no colocation option.
+        # Reef's serving shares no GPUs with training: colocation is Slime's own, for its rollout engines.
         ({}, {"colocate": True}, "unknown config fields: training.colocate"),
-        ({}, {"options": {"global-batch-size": 4, "offload-rollout": True}}, "shares GPUs"),
-        ({}, {"options": {"global-batch-size": 4, "sglang-mem-fraction-static": 0.5}}, "configures inference"),
-        ({}, {"options": {"global-batch-size": 4, "rollout-num-gpus": 2}}, "configures inference"),
+        # Slime's engine options need its rollout engines.
+        ({}, {"options": {"global-batch-size": 4, "offload-rollout": True}}, "configures Slime's rollout engines"),
+        (
+            {},
+            {"options": {"global-batch-size": 4, "sglang-mem-fraction-static": 0.5}},
+            "configures Slime's rollout engines",
+        ),
+        (
+            {},
+            {"options": {"global-batch-size": 4, "rollout-num-gpus": 0, "router-policy": "random"}},
+            "rollout engines",
+        ),
+        ({}, {"options": {"global-batch-size": 4, "rollout-external": True}}, "Slime does not start"),
+        ({}, {"options": {"global-batch-size": 4, "colo": True}}, "abbreviates a rollout group option"),
         ({"backend": "vllm", "num-gpus": 2, "tensor-parallel-size": 1}, {}, "vllm serves one engine"),
         ({}, {"options": {"global-batch-size": 4, "hf-checkpoint": "/models/other"}}, "must match"),
         ({}, {"options": {"lr": 1e-6}}, "global-batch-size"),

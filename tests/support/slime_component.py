@@ -53,6 +53,9 @@ class FakeTrainGroup:
     def async_pop_metrics(self):
         return list(self.rank_metrics)
 
+    def set_rollout_manager(self, rollout_manager: Any) -> None:
+        self.events.append(f"set_rollout_manager:{rollout_manager}")
+
     def save_model(self, rollout_id: int, force_sync: bool = False) -> None:
         self.saved.append((rollout_id, force_sync))
         if self.megatron_root is not None:

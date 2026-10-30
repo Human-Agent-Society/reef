@@ -220,12 +220,13 @@ Slime integration
 -----------------
 
 ``reef.train.slime_backend.component.SlimeTrainingComponent`` runs in the
-HTTP service's process. It owns one Ray session, the training GPUs it
-reserves there, and Slime's actor (and critic) workers. It starts no serving
-engine, and training and serving never share GPUs. The component therefore
-refuses ``--colocate``, ``--offload-rollout`` and
-``--keep-lora-base-resident``. Its workers keep running between jobs, so it
-also refuses ``--release-train``.
+HTTP service's process. It owns one Ray session, the GPUs it reserves there,
+Slime's actor (and critic) workers and, for task jobs, Slime's own rollout
+engines (``reef.train.slime_backend.rollout_group``). It starts no serving
+engine, and serving never shares GPUs with training; with ``--colocate`` the
+rollout engines share the training GPUs, and Slime moves the memory between
+them. Its workers keep running between jobs, so it refuses
+``--release-train``.
 
 A job trains its data as Slime rollouts (a ``rollout_id`` is Slime's unit of
 training). Without the job parameter ``save_interval``, the job is one

@@ -229,8 +229,8 @@ CLI overrides use the same parser, for example
 ``--inference.num-gpus 4 --inference.tensor-parallel-size 2`` or
 ``--inference.options.mem-fraction-static 0.7``. Native engine options use
 SGLang's names without a ``sglang-`` prefix. Reef builds the engines' input
-from the ``inference`` section and the release format; Slime starts no engine
-(``--rollout-num-gpus 0``). ``router-port`` binds the first router's HTTP
+from the ``inference`` section and the release format; Slime starts no serving
+engine. ``router-port`` binds the first router's HTTP
 port, and other supported router flags keep their native ``router-*`` names.
 ``router-ip`` is refused, because the serving engines use no external
 router. The standalone engine launcher does not include a router.
@@ -259,11 +259,15 @@ Encoder engines keep the weights they started with. Published weights load
 only into the other engines of the model. When a model with an encoder group
 trains, keep its vision encoder frozen.
 
-Managed launches reject inference flags in ``training.options``, such as
-``rollout-num-gpus``, ``rollout-num-gpus-per-engine`` and ``sglang-*``, even
-if their values agree with the ``inference`` fields. Training and serving use
-separate GPUs, so Slime refuses ``training.colocate`` and the native
-``colocate`` and ``offload-rollout`` options. Native options cannot override
+Slime's engine options in ``training.options`` (``rollout-num-gpus``,
+``colocate``, ``rollout-num-gpus-per-engine``, ``offload-rollout``,
+``sglang-*`` and ``router-*``) configure the training component's own rollout
+engines, which only task jobs call (see `Task jobs on Slime`_); they never
+configure serving. Without ``rollout-num-gpus`` or ``colocate`` the component
+has no rollout engines, and the other engine options are refused, as are
+``rollout-external`` and abbreviations of ``rollout-num-gpus`` and
+``colocate``. Reef's serving never shares GPUs with training, so
+``training.colocate`` is refused. Native options cannot override
 managed model, placement or parallelism settings. Pipeline/data parallel and
 prefill/decode-disaggregated inference topologies are not supported by this
 managed path yet. Reef binds ``training.options.hf-checkpoint`` to
@@ -1177,7 +1181,7 @@ Read by the weight-training stack. See `Evolve your model
 .. config::
 
    training.backend | slime | built-in (slime or tinker), installed entry-point name, or dotted TrainingDeployment class
-   training.colocate | false | must stay false: training and serving use separate GPUs, and Slime and Tinker refuse ``true``
+   training.colocate | false | must stay false: Reef's serving never shares GPUs with training, and Slime and Tinker refuse ``true``; Slime's own rollout engines share the training GPUs with ``training.options.colocate``
    training.ready-timeout | 3600 | startup deadline of the services the training backend adds, such as the inference component and the teacher engine; Slime, and every deployment that Reef's engines serve, also raise ``reef.ready-timeout`` to at least this value
    training.config.num_gpus | example-specific GPU count passed to Slime's model topology flags; does not set the Ray cluster's capacity
    training.config.global_batch_size | samples in one optimizer step, passed to Slime as ``--global-batch-size``. The examples also pass it to ``pipeline.sample2job.config.job_samples``, so one job is one optimizer step. Reef reads ``training.options.global-batch-size`` itself and refuses a Slime deployment without it, even when ``num-steps-per-rollout`` could derive it.
@@ -1440,7 +1444,8 @@ whatever Tinker's batch size (``training.options.batch-size``) is:
    pipeline.sample2job.config.buffer_size | 4 | the most saved tasks of one task job; at least ``job_samples``, and ``job_samples`` when it is more than 4
 
 The Tinker component runs a task job's rollouts on Tinker's sampler at the
-job's start weights. The ``rollout`` job parameter configures them:
+job's start weights, and the Slime component on its own rollout engines (see
+`Task jobs on Slime`_). The ``rollout`` job parameter configures them:
 
 .. config::
 
@@ -1451,6 +1456,35 @@ job's start weights. The ``rollout`` job parameter configures them:
    rollout.concurrency | 2 | rollouts in flight
    rollout.verifier_timeout_reward | 0.0 | the reward of a rollout whose verifier timed out; ``null`` leaves it unscored
    rollout.scaffold_tolerance | 8 | masked tokens the sample assembly may realign before a response, for a thinking template's scaffold
+
+Task jobs on Slime
+~~~~~~~~~~~~~~~~~~
+
+The Slime component runs task jobs on its own rollout engines: Slime's
+``RolloutManager`` and its SGLang engines, which the component starts with its
+workers and drives as Slime's own training loop does. Reef's serving never
+calls them. ``training.options.rollout-num-gpus`` gives the engines GPUs of
+their own; ``training.options.colocate`` puts them on the training GPUs (all
+of them, unless ``rollout-num-gpus`` names fewer), and Slime moves the GPU
+memory between the engines and the workers. Slime's ``sglang-*``,
+``router-*`` and ``rollout-num-gpus-per-engine`` options configure the
+engines.
+
+.. code:: yaml
+
+   training:
+     backend: slime
+     options:
+       colocate: true
+       rollout-num-gpus-per-engine: 1
+       sglang-mem-fraction-static: 0.5
+
+A task job loads the workers' weights into the engines, runs the rollouts the
+``rollout`` parameter describes, frees the colocated engines' memory, and
+trains the samples of each task's group with the job's objective. The
+engines answer OpenAI text chat: system, user and assistant text messages, no
+tools. A LoRA actor cannot have rollout engines, since Reef's adapters do not
+reach Slime's weight transfer.
 
 Reef calls the generator class's ``from_config(config, *, scenario, environ)``
 once for each scenario. A generator that calls a remote service reads its

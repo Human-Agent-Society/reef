@@ -22,8 +22,9 @@ REEF_ROLLOUT_DATA_KEYS = (
 def validate_slime_args(args: SlimeArguments, spec: SlimeAlgorithm | None) -> None:
     """Reject Slime arguments the training component cannot run with.
 
-    The component trains only: Slime starts no engines, and training and
-    serving never share GPUs.
+    Slime's engines are the component's own rollout group, which only task
+    jobs call; with ``--colocate`` they share the training GPUs, so they may
+    not need more GPUs than training has. Reef's serving engines are separate.
     """
     num_rollout = args.num_rollout
     if not isinstance(num_rollout, int) or isinstance(num_rollout, bool) or num_rollout <= 0:
@@ -36,12 +37,17 @@ def validate_slime_args(args: SlimeArguments, spec: SlimeAlgorithm | None) -> No
         raise ValueError("Reef runs Slime's training for every job; remove --debug-train-only")
     if args.debug_rollout_only:
         raise ValueError("Slime has no rollout loop in Reef; remove --debug-rollout-only")
-    for name, value in (
-        ("--colocate", args.colocate),
-        ("--offload-rollout", args.offload_rollout),
-    ):
-        if value:
-            raise ValueError(f"training and serving use separate GPUs; remove {name}")
+    if args.rollout_num_gpus and args.megatron_lora_rank:
+        # Reef's LoRA adapters are not wired into Slime's weight transfer to its engines.
+        raise ValueError(
+            "rollout engines need a full-weight actor; remove --megatron-lora-rank or the rollout engines"
+        )
+    training_gpus = args.actor_num_nodes * args.actor_num_gpus_per_node
+    if args.colocate and not 0 < args.rollout_num_gpus <= training_gpus:
+        raise ValueError(
+            f"colocated rollout engines run on 1 to {training_gpus} of the training GPUs, "
+            f"not --rollout-num-gpus {args.rollout_num_gpus}"
+        )
     if args.release_train:
         raise ValueError("the training workers keep running between jobs; remove --release-train")
 

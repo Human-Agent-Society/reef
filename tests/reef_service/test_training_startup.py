@@ -133,14 +133,16 @@ def test_cli_and_yaml_share_selected_recipe_and_native_option_parsing(tmp_path):
             "remove inference.handler-factory",
         ),
         ({"inference.backend": "none", "teacher.model-path": "/models/teacher"}, "remove teacher.model-path"),
-        ({"inference.backend": "none", "training.options.rollout-num-gpus": "1"}, "configures inference"),
+        (
+            {"inference.backend": "none", "training.options.sglang-context-length": "1024"},
+            "configures Slime's rollout engines",
+        ),
         ({"inference.tensor-parallel-size": "-1"}, "must be positive"),
         ({"inference.num-gpus": "1.5"}, "valid int"),
-        ({"training.options.rollout_num_gpus": "2"}, "configures inference"),
-        ({"training.options.rollout-num": "2"}, "configures inference"),
-        ({"training.options.sglang-context-length": "1024"}, "configures inference"),
-        ({"training.options.sglang-config": "engines.yaml"}, "configures inference"),
-        ({"training.options.rollout-external": "true"}, "configures inference"),
+        ({"training.options.rollout-num": "2"}, "abbreviates a rollout group option"),
+        ({"training.options.sglang-context-length": "1024"}, "configures Slime's rollout engines"),
+        ({"training.options.sglang-config": "engines.yaml"}, "configures Slime's rollout engines"),
+        ({"training.options.rollout-external": "true"}, "Slime does not start"),
         ({"inference.options.config": "engines.yaml"}, "managed by Reef"),
         ({"inference.options.pp-size": "2"}, "managed by Reef"),
         ({"inference.options.sglang-context-length": "1024"}, "without the sglang- prefix"),
@@ -524,12 +526,17 @@ def test_inference_cli_over_yaml_reaches_the_serving_engines_and_not_slime(tmp_p
     assert serving["options"] == {"mem-fraction-static": "0.6", "router-port": 30000, "disable-cuda-graph": False}
 
 
-@pytest.mark.parametrize("option", ["colocate", "offload-rollout"])
-def test_native_placement_flags_are_rejected_in_training_options(tmp_path, option):
+def test_colocation_is_slimes_own_and_its_engine_options_need_a_rollout_group(tmp_path):
     raw = training_config()
-    raw["training"]["options"][option] = True
-    with pytest.raises(DeployConfigError, match=f"training.options.{option} shares GPUs between training and serving"):
+    raw["training"]["options"]["offload-rollout"] = True
+    with pytest.raises(
+        DeployConfigError, match=r"training\.options\.offload-rollout configures Slime's rollout engines"
+    ):
         resolve_deployment_config(raw, None, tmp_path / "serve.yaml")
+    # With colocate, the engine options configure the component's own rollout engines on its training GPUs.
+    raw["training"]["options"]["colocate"] = True
+    config, _ = resolve_deployment_config(raw, None, tmp_path / "serve.yaml")
+    assert config["reef"]["training_backend_options"]["colocate"] is True
 
 
 @pytest.mark.parametrize("batch_size", [None, 0, "0", "1.5", "two", True])

@@ -1,8 +1,10 @@
 """Reef-owned Ray session and training GPU reservation for the Slime training component.
 
 Reef reserves the training GPUs itself from the parsed Slime topology; the
-actor and critic groups borrow their bundles from that one reservation. The
-serving engines reserve their own GPUs on the inference component.
+actor and critic groups borrow their bundles from that one reservation, and so
+does the component's own rollout group: colocated engines take the first
+training bundles, and other engines the bundles after them. The serving
+engines reserve their own GPUs on the inference component.
 """
 
 from __future__ import annotations
@@ -19,9 +21,13 @@ from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
 
 
 def model_gpu_layout(args: SlimeArguments) -> ModelGpuLayout:
-    """The training GPUs from Slime's parsed topology flags: actor nodes times GPUs per node."""
+    """The GPUs from Slime's parsed topology flags: actor nodes times GPUs per node, then the rollout engines' own.
+
+    Colocated rollout engines run on training GPUs, so they add none.
+    """
     return ModelGpuLayout(
-        training_gpus=int(args.actor_num_nodes) * int(args.actor_num_gpus_per_node), inference_gpus=0
+        training_gpus=args.actor_num_nodes * args.actor_num_gpus_per_node,
+        inference_gpus=0 if args.colocate else args.rollout_num_gpus,
     )
 
 
@@ -40,7 +46,8 @@ class SlimeDeploymentResources(DeploymentResources):
         self.ray_address = ray_address
         self.namespace = namespace
         self.runtime_env = runtime_env
-        #: Slime's view of the reservation: the actor and critic groups share the training bundles.
+        #: Slime's view of the reservation: the actor and critic groups share the training bundles, and
+        #: ``rollout`` holds the rollout engines' bundles, or None without a rollout group.
         self.placement_groups: dict[str, GpuBundles | None] = {}
         self._reservation: ModelGpuReservation | None = None
         self._started = False
@@ -62,9 +69,15 @@ class SlimeDeploymentResources(DeploymentResources):
         ray.init(address=self.ray_address, namespace=self.namespace, runtime_env=runtime_env)
         self._nodes = [node["NodeID"] for node in ray.nodes() if node["Alive"]]
         self._reservation = reserve_model_gpus(model_gpu_layout(self.args))
+        rollout: GpuBundles | None = None
+        if self.args.colocate:
+            rollout = self._reservation.training.slice(0, self.args.rollout_num_gpus)
+        elif self.args.rollout_num_gpus:
+            rollout = self._reservation.inference
         self.placement_groups = {
             "actor": self._reservation.training,
             "critic": self._reservation.training if self.args.use_critic else None,
+            "rollout": rollout,
         }
 
     def close(self) -> None:

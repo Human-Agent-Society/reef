@@ -21,6 +21,10 @@ class SlimeArguments(Namespace):
     colocate: bool
     offload_train: bool
     offload_rollout: bool
+    # The GPUs of the component's own rollout engines; 0 without a rollout group.
+    rollout_num_gpus: int
+    actor_num_nodes: int
+    actor_num_gpus_per_node: int
     megatron_lora_rank: int
     megatron_lora_alpha: int | None
     megatron_lora_target_modules: list[str] | None

@@ -4,7 +4,10 @@ Slime trains in the HTTP service's process: the runtime factory builds a
 ``SlimeTrainingComponent`` that owns its Ray session and training workers.
 Serving is not Slime's: the deployment's ``inference`` section configures it
 (``reef.service.deploy.serving``), and an activated checkpoint reaches the
-serving engines as files. A distillation teacher runs as its own service.
+serving engines as files. The rollout engines that a task job's rollouts call
+are the component's own, configured by Slime's native options
+(``rollout-num-gpus``, ``colocate``, ``sglang-*``) as in Slime's own training
+loop. A distillation teacher runs as its own service.
 """
 
 from __future__ import annotations
@@ -22,41 +25,57 @@ from reef.runtime.executor.config import role_executor_settings, select_executor
 from reef.runtime.jobs import TrainingComponent
 from reef.train.deployment import TrainingDeployment
 
-# These alter engine creation or topology outside Reef's inference request.
-# Reject argparse abbreviations as well as full names, even for omitted values.
-INFERENCE_LAUNCH_OPTIONS = frozenset(
-    {
-        "rollout-num-gpus",
-        "rollout-num-gpus-per-engine",
-        "rollout-external",
-        "rollout-external-engine-addrs",
-        "prefill-num-servers",
-    }
-)
-# Training and serving never share GPUs; these native options would make them.
-PLACEMENT_OPTIONS = frozenset({"colocate", "offload-rollout"})
+# Engines that Slime would reach instead of starting its own.
+EXTERNAL_ENGINE_OPTIONS = frozenset({"rollout-external", "rollout-external-engine-addrs"})
+# The options that give the component its own rollout group; Reef reads them, so they are spelled in full.
+ROLLOUT_GROUP_OPTIONS = frozenset({"rollout-num-gpus", "colocate"})
+# Options of Slime's rollout engines, which configure nothing without a rollout group.
+ROLLOUT_ENGINE_OPTIONS = frozenset({"rollout-num-gpus-per-engine", "prefill-num-servers", "offload-rollout"})
+
+
+def has_rollout_group(training_options: Mapping[str, Any]) -> bool:
+    """Whether normalized ``training_options`` give the component its own rollout engines.
+
+    ``colocate`` puts them on the training GPUs (all of them, unless
+    ``rollout-num-gpus`` names fewer), and a positive ``rollout-num-gpus``
+    without it on GPUs of their own.
+    """
+    if training_options.get("colocate"):
+        return True
+    gpus = training_options.get("rollout-num-gpus")
+    return gpus is not None and int(gpus) > 0
 
 
 def refuse_serving_options(training_options: Mapping[str, Any]) -> None:
-    """Refuse native training options that would configure serving engines or share GPUs with them.
+    """Refuse native training options that reach engines Slime does not start, or configure engines it has none of.
 
-    Serving engines are configured by the ``inference`` section alone, and
-    training and serving never share GPUs. Raise ``DeployConfigError`` for an
-    option (or an abbreviation of one) that does either.
+    Serving engines are configured by the ``inference`` section alone. Slime's
+    engine options (``sglang-*``, ``router-*``, ``rollout-num-gpus-per-engine``,
+    ``prefill-num-servers``, ``offload-rollout``) configure the component's own
+    rollout group (``has_rollout_group``), which only task jobs call. Raise
+    ``DeployConfigError`` for an external engine option, an abbreviation of
+    ``rollout-num-gpus`` or ``colocate``, and an engine option without a
+    rollout group; argparse abbreviations count as the options they abbreviate.
     """
+    rollout_group = has_rollout_group(training_options)
     for name in training_options:
-        if (
+        if any(flag.startswith(name) for flag in EXTERNAL_ENGINE_OPTIONS):
+            raise DeployConfigError(
+                f"training.options.{name} reaches engines that Slime does not start: the serving engines are the "
+                "inference section's, and the component's rollout engines are its own"
+            )
+        if name not in ROLLOUT_GROUP_OPTIONS and any(flag.startswith(name) for flag in ROLLOUT_GROUP_OPTIONS):
+            raise DeployConfigError(f"training.options.{name} abbreviates a rollout group option; spell it out")
+        if not rollout_group and (
             name.startswith(("sglang-", "router-"))
             or "sglang".startswith(name)
             or "router".startswith(name)
-            or any(flag.startswith(name) for flag in INFERENCE_LAUNCH_OPTIONS)
+            or any(flag.startswith(name) for flag in ROLLOUT_ENGINE_OPTIONS)
         ):
             raise DeployConfigError(
-                f"training.options.{name} configures inference; use inference.num-gpus, "
-                "inference.tensor-parallel-size or inference.options instead"
+                f"training.options.{name} configures Slime's rollout engines, which run only with "
+                "training.options.rollout-num-gpus or colocate; Reef's serving engines take inference.options"
             )
-        if any(flag.startswith(name) for flag in PLACEMENT_OPTIONS):
-            raise DeployConfigError(f"training.options.{name} shares GPUs between training and serving; remove it")
 
 
 def require_ray_roles(config: dict[str, Any], *roles: str, backend: str) -> None:
@@ -114,8 +133,9 @@ TEACHER_URL_ENV = "REEF_DISTILL_TEACHER_URL"
 def slime_arguments(settings: Mapping[str, Any], *, loss_family: str, environ: Mapping[str, str]) -> list[str]:
     """Adapt the resolved service settings to the pinned Slime parser.
 
-    Slime starts no rollout engine (``--rollout-num-gpus 0``); the serving
-    engines are the inference section's. References such as
+    Without a rollout group (``has_rollout_group``), Slime starts no rollout
+    engine (``--rollout-num-gpus 0``); the serving engines are the inference
+    section's. References such as
     ``${reef.model_path}`` in the options resolve against ``settings``, and the
     teacher's URL comes from ``TEACHER_URL_ENV`` in ``environ``.
     """
@@ -132,6 +152,8 @@ def slime_arguments(settings: Mapping[str, Any], *, loss_family: str, environ: M
         if any(name in training_options for name in (*managed, f"{loss_family}-teacher-checkpoint")):
             raise DeployConfigError("teacher section replaces native teacher URL, model path, timeout and checkpoint")
         training_options.update(managed)
+    if has_rollout_group(training_options):
+        return native_arguments(training_options)
     return [*native_arguments(training_options), *native_arguments({"rollout-num-gpus": 0})]
 
 
