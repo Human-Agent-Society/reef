@@ -114,8 +114,8 @@ commits in a ``scenario_commit`` table of the record database.
 ``SQLiteScenarioStorage`` keeps one database file per scenario;
 ``PostgresScenarioStorage`` keeps every scenario in one schema. The committed
 row is the commit point. A committed step records its step number, artifact
-ref, checkpoint flag, algorithm state, record high-water mark, consumed record
-IDs, metrics, training job ID, and, in a scenario of several trainers, the
+ref, checkpoint flag, algorithm state, record high-water mark, consumed IDs
+(record IDs, and ``sample:<sample id>`` for each sample that its job trained), metrics, training job ID, and, in a scenario of several trainers, the
 component that made it.
 
 ``commit_step(expected_step=..., commit=...)`` validates the expected scenario
@@ -202,7 +202,8 @@ reconciles it with the store before restoring the trainer. Initial registration
 has no commit and passes ``None``. A committed checkpoint ahead of the backend pointer
 repairs that pointer. An older checkpoint ahead of the commit history can
 be adopted into the history. Recovery replays retained records through the
-committed watermark while excluding every committed step's consumed IDs, and
+committed watermark while excluding every committed step's consumed IDs and
+the records of every sample that the trainer saved to the sample store, and
 restores the read cursor. The watermark is a read position:
 retained records behind it can still belong to incomplete job data.
 

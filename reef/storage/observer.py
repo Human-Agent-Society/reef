@@ -20,9 +20,9 @@ from reef.core.records_types import AgentRecord, RequestType
 from reef.storage.commits import CommitRecord
 from reef.storage.evaluations import EvaluationStore
 from reef.storage.records import AppendResult, ConsumptionReceipt, RecordLoss, RecordStore, StoredRecord
+from reef.storage.samples import SampleStore
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage, ScenarioStore
 from reef.storage.tasks import TaskFileStore, TaskStorage
-from reef.storage.trajectories import TrajectoryStore
 
 logger = logging.getLogger(__name__)
 
@@ -129,8 +129,8 @@ class ObservedScenarioStore(ScenarioStore):
         return self._inner.tasks
 
     @property
-    def trajectories(self) -> TrajectoryStore:
-        return self._inner.trajectories
+    def samples(self) -> SampleStore:
+        return self._inner.samples
 
     @property
     def evaluations(self) -> EvaluationStore:

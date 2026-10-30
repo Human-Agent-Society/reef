@@ -132,7 +132,7 @@ Defaults: port `8901`, no Reef access token unless `REEF_TOKEN` is set, state
 under `work/deployment/`. Use `--reef.port` and `--reef.token` to override the
 port and access token. The `run.sh` demo keeps its separate configuration and state.
 
-`data.training_mode` has three values. `deployment.yaml` sets `hybrid`: the deployment keeps learning from failures, and a person asks for a change with `POST /reef/train` (the [manual training API](https://reefinfra.ai/docs/reference/http-api/)); the next step that reads it runs it first, with no mode switch. `serve.yaml` and `serve-native.yaml` stay `auto`, the default: the `./run.sh` demo is failure driven, nobody asks there, and an ask is refused. `manual` runs instructions only and never trains on traffic; no file here selects it, because a measurement that wants one step per instruction and no failure driven step between them sets it, in its `data` section or on a running deployment with `POST /reef/scenarios/{scenario}/update`.
+`data.training_mode` has two values. `deployment.yaml` sets `manual`: a person asks for a change with `POST /reef/train` (the [manual training API](https://reefinfra.ai/docs/reference/http-api/)), and each ask runs one step that reads the ask beside the traces in the manual buffer. New failures do not join that buffer by themselves: add the ones a step should read with `POST /reef/scenarios/{scenario}/buffer/insert` ([Choose the samples that train](../../docs/reference/http-api.rst#choose-the-samples-that-train)). No step starts without an ask. `serve.yaml` and `serve-native.yaml` stay `auto`, the default: the `./run.sh` demo is failure driven, nobody asks there, and an ask is refused. `POST /reef/scenarios/{scenario}/update` switches a running deployment between the two.
 
 Pull the tree from this service with `GET /reef/harness` and report feedback
 against the receipts of its model calls with `POST /reef/report`, as
@@ -285,7 +285,7 @@ The model name is set in two places, `inference.upstream-model` in the serve fil
 [18] The same request on the fixed parser: the proposer took 15 s, the candidate won the sieve task and tied the other two, the release published and the request settled `selected`; the commit's `request` names its id, session and text. Launch to result is from the ask to the commit, in 5 s polls.
 [19] The notebook prints the evaluation's total scores, not the per task ones; W / L / T carries the per task pairings.
 
-The current ask path is `POST /reef/train`, which `deployment.yaml` takes in `data.training_mode: hybrid` (`manual` takes it too; `auto` refuses it, and `POST /reef/scenarios/{scenario}/update` switches a running scenario). It needs no inference receipts; commits carry the request under `training_request` in their metrics. Runs [16] to [18] used the earlier request path and have not been repeated against this one.
+The current ask path is `POST /reef/train`, which `deployment.yaml` takes in `data.training_mode: manual` (`auto` refuses it, and `POST /reef/scenarios/{scenario}/update` switches a running scenario). It needs no inference receipts; commits carry the request under `training_request` in their metrics. Runs [16] to [18] used the earlier request path and have not been repeated against this one.
 
 ### Known limitations
 

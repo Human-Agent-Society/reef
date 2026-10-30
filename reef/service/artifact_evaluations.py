@@ -10,7 +10,7 @@ on a thread of its own, at most ``MAX_RUNNING_EVALUATIONS`` at a time. When the 
 
 This version evaluates a model artifact (a ``model`` or ``model_adapter`` component) on a runtime that serves an
 artifact on request (``InferenceRuntime.artifact_model``), with a Harbor agent, on the Harbor tasks of the eval
-split of the scenario's ``imported-tasks`` store. It refuses a harness artifact, and a model artifact on any
+split of the scenario's imported tasks (its sample store). It refuses a harness artifact, and a model artifact on any
 other runtime.
 """
 
@@ -39,6 +39,7 @@ from reef.core.evaluation import (
     RolloutRequest,
     RolloutScores,
 )
+from reef.core.job_data import TaskSample
 from reef.dispatcher import Dispatcher
 from reef.evaluation.artifact_endpoint import ArtifactEndpoint
 from reef.harness.rollouts.tasks import DEFAULT_AGENT, TaskLab, TaskRolloutRunner
@@ -46,7 +47,6 @@ from reef.scenario.scenario import Scenario
 from reef.storage.commits import CommitRecord
 from reef.storage.evaluations import EvaluationStateConflict, EvaluationStore, StoredEvaluation
 from reef.storage.observer import RecordObserver
-from reef.storage.tasks import IMPORTED_TASK_STORE
 
 logger = logging.getLogger(__name__)
 
@@ -317,15 +317,18 @@ class ArtifactEvaluations:
         """
         with self.dispatcher.locked_scenario(scenario) as current:
             request, artifact, model = self.checked(current, artifact_id, settings)
-            store = current.store.tasks.open(IMPORTED_TASK_STORE)
-            held = {task.name: task for task in store.tasks(split="eval")}
+            held = {
+                stored.sample_id: stored.sample.task_path
+                for stored in current.store.samples.imported_tasks(split="eval")
+                if isinstance(stored.sample, TaskSample)
+            }
             unknown = sorted(set(request.task_names) - set(held))
             if unknown:
-                raise ValueError(f"the eval split of {IMPORTED_TASK_STORE!r} holds no tasks {unknown}")
+                raise ValueError(f"the eval split of the imported tasks holds no tasks {unknown}")
             names = request.task_names or tuple(held)
             if not names:
-                raise ValueError(f"the eval split of {IMPORTED_TASK_STORE!r} holds no task to evaluate on")
-            tasks = tuple((name, store.path(held[name].files_digest)) for name in names)
+                raise ValueError("the eval split of the imported tasks holds no task to evaluate on")
+            tasks = tuple((name, held[name]) for name in names)
             evaluation_id = uuid.uuid4().hex
             run = EvaluationRun(scenario, evaluation_id, request, artifact, model, tasks)
             with self.lock:

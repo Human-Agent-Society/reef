@@ -1,4 +1,4 @@
-"""Record sets and record set units: the input of the record-to-sample stage, and the unit that job data takes.
+"""Record sets and record set units: the input of the record-to-sample stage, and the sets whose samples are stored together.
 
 Notation: ``refs(r)`` is the set of records that a record ``r`` references.
 """
@@ -14,20 +14,18 @@ from reef.core.records_types import AgentRecord
 
 @dataclass(frozen=True, kw_only=True)
 class RecordSet(ABC):
-    """The records that the record-to-sample stage makes tasks from, together.
+    """The records that the record-to-sample stage makes samples from, together.
 
     Values: ``X`` is a record set if and only if ``records(X)`` is not empty and
     ``refs(r) ⊆ records(X)`` for each record ``r`` in ``records(X)``. ``set_id``
-    identifies ``X`` among the sets of its record stage. ``arrival_index`` is
-    the position in which the stage formed ``X``. No record is in two record
-    sets of one stage (``Record2Record.form``).
+    identifies ``X`` among the sets of its record stage. No record is in two
+    record sets of one stage (``Record2Record.form``).
 
     Purpose: the record stage forms it, and the pipeline pushes it to the
     record-to-sample stage. Its one result settles all records of the set together.
     """
 
     set_id: Hashable
-    arrival_index: int
 
     def __post_init__(self) -> None:
         records = self.records()
@@ -58,23 +56,20 @@ class SingleRecordSet(RecordSet):
 
 @dataclass(frozen=True, kw_only=True)
 class RecordSetUnit(ABC):
-    """Record sets that must train in the same job.
+    """Record sets whose samples train together.
 
     Values: ``U`` is a record set unit if and only if ``record_sets(U)`` is not
     empty. Its record sets are distinct and share no record, because a record
-    stage forms each record into one set only. ``unit_id`` identifies ``U`` in
-    its pool. ``arrival_index`` orders the units of a pool. ``group_key`` names
-    the group of a unit that is a group. It is None for any other unit.
+    stage forms each record into one set only. ``unit_id`` identifies ``U`` among
+    the ready units of its record stage; a ready unit replaces the one with its ID.
 
-    Purpose: the record stage puts it in its pool when the tasks of its record
-    sets are ready. Job data takes all its tasks or none of them, and the
-    ``job_samples`` counts each of its tasks as one sample. Consuming ``U`` writes
-    ``consumed_ids(U)``, the IDs of the records of its record sets, to the commit.
+    Purpose: the record stage makes it ready when the samples of its record sets
+    are ready (``Record2Record.take_ready_units``). The pipeline stores those
+    samples as one group in one transaction, which consumes ``consumed_ids(U)``,
+    the IDs of the records of its record sets. Then the stage ends it (``consume``).
     """
 
     unit_id: Hashable
-    arrival_index: int
-    group_key: Hashable | None = None
 
     def __post_init__(self) -> None:
         if not self.record_sets():
@@ -82,27 +77,27 @@ class RecordSetUnit(ABC):
 
     @abstractmethod
     def record_sets(self) -> tuple[RecordSet, ...]:
-        """Return the record sets of the unit, in selection order."""
+        """Return the record sets of the unit, in the order that their samples train."""
 
     def set_ids(self) -> tuple[Hashable, ...]:
-        """Return the IDs of the record sets of the unit, in selection order."""
+        """Return the IDs of the record sets of the unit, in the order of ``record_sets``."""
         return tuple(record_set.set_id for record_set in self.record_sets())
 
     def consumed_ids(self) -> frozenset[str]:
-        """Return the record IDs that consuming the unit writes to the commit."""
+        """Return the record IDs that storing the unit's samples consumes."""
         return frozenset(record_id for record_set in self.record_sets() for record_id in record_set.record_ids())
 
 
 @dataclass(frozen=True, kw_only=True)
 class SingleSetUnit(RecordSetUnit):
-    """A record set unit of one record set, with the ID and the arrival index of that set. ``of`` makes it."""
+    """A record set unit of one record set, with the ID of that set. ``of`` makes it."""
 
     record_set: RecordSet
 
     @classmethod
     def of(cls, record_set: RecordSet) -> SingleSetUnit:
         """Return the unit of ``record_set``."""
-        return cls(unit_id=record_set.set_id, arrival_index=record_set.arrival_index, record_set=record_set)
+        return cls(unit_id=record_set.set_id, record_set=record_set)
 
     def record_sets(self) -> tuple[RecordSet, ...]:
         return (self.record_set,)

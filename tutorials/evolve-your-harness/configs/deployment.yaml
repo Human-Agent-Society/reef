@@ -1,7 +1,7 @@
 # Run from the repository root:
 # reef serve -c tutorials/evolve-your-harness/configs/deployment.yaml
 # This is the long-running pi deployment: it takes training requests
-# (hybrid) and holds extensions until a person activates them. The separate
+# (manual) and holds extensions until a person activates them. The separate
 # serve.yaml and serve-native.yaml files remain inputs to the short-lived
 # ./run.sh demo for its pi and native variants.
 reef:
@@ -54,8 +54,8 @@ recipe:
           Reply with the median as a plain integer alone on the last line.'
       # The first tree: the starter skill (run from the repository root).
       seed: tutorials/evolve-your-harness/seeds/pi
-    # The person asks with POST /reef/train while the deployment keeps learning from failures.
-    training-mode: hybrid
+    # A person asks with POST /reef/train; each step reads the ask and the samples in the manual buffer.
+    training-mode: manual
 
 # Every kept tree serves at once, except one that changes an extension: an evolved extension runs in pi's process
 # with your privileges, so a person activates it (POST /reef/scenarios/{scenario}/activate).

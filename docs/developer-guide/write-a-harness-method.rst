@@ -267,7 +267,7 @@ after it. ``reef.recipe.reefine.agent`` is a complete agent proposer.
 Manual requests
 ---------------
 
-In ``manual`` or ``hybrid`` training mode, the proposer must override
+In ``manual`` training mode, the proposer must override
 ``reads_requests`` to return ``True``. Otherwise the recipe fails at startup
 with ``RecipeConfigError``. See `Manual training
 <../reference/http-api.rst#manual-training>`__ for the request route.
@@ -275,9 +275,10 @@ with ``RecipeConfigError``. See `Manual training
 ``context.request`` is a ``TrainingRequest`` with ``id``, ``text``,
 ``session``, ``release_id``, ``requires``, and ``client``, the requesting
 client's report of its machine. The text is client text: see `Untrusted
-input`_. In ``manual`` mode, ``samples`` is empty. In ``hybrid`` mode, it
-holds up to ``job_samples`` samples from the next automatic job data, and
-may be empty.
+input`_. ``context.samples`` holds the samples in the manual buffer, which a
+client fills (`Choose the samples that train
+<../reference/http-api.rst#choose-the-samples-that-train>`__). It may be
+empty.
 
 Return ``requires`` in the proposal when the change needs something on the
 person's machine that the request did not name: an ``env`` variable, a

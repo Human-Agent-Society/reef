@@ -96,7 +96,7 @@ def test_the_default_stages_train_reports_and_the_inference_stages_train_records
         InferenceSamples,
         TraceJobData,
     )
-    assert recorded.buffer_size == 8
+    assert recorded.buffer_size == 2, "the buffer takes one job's data"
 
 
 def test_trace_processor_batches_a_failed_trace() -> None:
@@ -222,13 +222,12 @@ def test_record_driven_processor_batches_every_n_inferences_unscored() -> None:
     assert [recorded_payload(s) for s in batch.samples] == [first, second]
     assert {s.metadata.get("reward") for s in batch.samples} == {None}
 
-    retention = processor.releasable_record_ids()
-    assert retention.isdisjoint(frozenset({"inf-1", "inf-2"}))
-
-    consumed = processor.acknowledge(batch.data_id)
-    assert consumed == frozenset({"inf-1", "inf-2"})
+    # The stored samples consume their records; the job data consumes the samples.
     retention = processor.releasable_record_ids()
     assert retention == frozenset({"inf-1", "inf-2"})
+
+    consumed = processor.acknowledge(batch.data_id)
+    assert consumed == frozenset({"sample:inf-1:0", "sample:inf-2:0"})
     assert not processor.ready(2)
 
 
@@ -247,12 +246,14 @@ def test_record_driven_processor_releases_reports_untouched() -> None:
 
 
 def test_record_driven_processor_overflow_stays_pending_for_the_next_batch() -> None:
-    processor = _record_processor()
+    processor = harness_stages(inference=True).build(PipelineContext("s", default_job_samples=2))
     for index in range(3):
         processor.push(_inference(f"inf-{index}", {"messages": []}))
     batch = processor.build_job_data(2)
     assert [source_record_id(s) for s in batch.samples] == ["inf-0", "inf-1"]
-    processor.acknowledge(batch.data_id)
-    retention = processor.releasable_record_ids()
-    assert retention.isdisjoint(frozenset({"inf-2"}))
+    assert processor.acknowledge(batch.data_id) == {"sample:inf-0:0", "sample:inf-1:0"}
+    # The overflow sample waits for the next job data.
+    assert processor.status()["ready_samples"] == 1
     assert not processor.ready(2)
+    processor.push(_inference("inf-3", {"messages": []}))
+    assert [source_record_id(s) for s in processor.build_job_data(2).samples] == ["inf-2", "inf-3"]

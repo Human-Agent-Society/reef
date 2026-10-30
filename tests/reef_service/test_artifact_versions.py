@@ -437,8 +437,7 @@ def test_commit_preserves_experiment_metadata_and_isolates_tracker_failures(
         for event in tracker.events:
             assert event.context.backend == "stub"
             assert event.context.backend_config == {
-                "job_plan": "fixed",
-                "parameters": {"method": {"objective": "sft"}},
+                "job_parameters": {kind: {"method": {"objective": "sft"}} for kind in ("trajectory", "task")},
             }
         for commit in commits:
             if tracker_fails:

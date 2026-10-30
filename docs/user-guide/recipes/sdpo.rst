@@ -139,11 +139,13 @@ in ``pipeline``.
 
 ``SDPOSamples`` also takes the sample assembly's keys
 (``accept_multi_turn_policy_samples``, ``realign_threshold`` and
-``scaffold_tolerance``). One job's data is always one grid. ``job_samples``
+``scaffold_tolerance``). One job's data is one grid. ``job_samples``
 must not exceed the grid's rollouts (``groups_per_step x rollouts_per_group``);
 with a larger one the scenario's pipeline fails to build. Set it and Slime's
 ``--global-batch-size`` equal to the grid to train one optimizer step per
-grid, as the example does.
+grid, as the example does. Leave ``pipeline.sample2job.config.buffer_size``
+at its default, ``job_samples``: a larger value can put two grids in one
+job's data.
 
 Slime takes ``--loss-type custom_loss`` and
 ``--use-rollout-logprobs`` and ``--disable-compute-advantages-and-returns``.

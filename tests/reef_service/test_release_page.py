@@ -2,11 +2,11 @@
 
 ``GET /reef/harness/releases/{step}/page`` renders it from the releases row,
 the step being the row's position oldest first with the creation row as 0. The
-chain driven here runs in ``training_mode: hybrid``: one published win and one
+chain driven here runs in ``training_mode: manual``: one published win and one
 rejected candidate answering requests posted to ``POST /reef/train``, one
-rejected automatic step from a scored report with no request, and one inactive
-extension update, again from a request, whose page diffs the source file
-against the head's.
+rejected automatic step from a scored report with no request, run after a switch
+to ``auto``, and one inactive extension update, again from a request in
+``manual``, whose page diffs the source file against the head's.
 """
 
 from __future__ import annotations
@@ -96,7 +96,7 @@ def _dispatcher(tmp_path: Path) -> Dispatcher:
         score=evaluate,
         reads_requests=True,
         activation=PluginReference(AlwaysActivate, {"review_kinds": ["code_extension"]}),
-        training_mode="hybrid",
+        training_mode="manual",
     )
     return harness_dispatcher(tmp_path, recipe)
 
@@ -117,9 +117,11 @@ def _chain(tmp_path: Path) -> Dispatcher:
                 response = await client.post("/reef/train", headers=headers, json=body)
                 assert response.status == 200, await response.text()
                 await wait_for_rows(scenario, count)
+            dispatcher.set_training_mode(SCENARIO, "auto")
             for record in report_records(SCENARIO, "3"):
                 dispatcher.accept_record(record)
             await wait_for_rows(scenario, 4)
+            dispatcher.set_training_mode(SCENARIO, "manual")
             body = train_request(FOURTH, session="s4", release_id="rel-1")
             response = await client.post("/reef/train", headers=headers, json=body)
             assert response.status == 200, await response.text()
