@@ -113,8 +113,10 @@ services:
 - ``distill-teacher``: a frozen SGLang teacher engine, only when a ``teacher``
   section is set.
 - ``reef``: the HTTP service. It hosts the Slime training component, which
-  starts a Slime driver on Ray for each job. The driver reserves the job's
-  GPUs, starts Slime's workers and releases the GPUs when the job ends.
+  starts a Slime driver on Ray for each job. The driver starts Slime's workers
+  on the GPUs of Slime's serving session when one runs (see `Task jobs on
+  Slime`_), and otherwise reserves the job's GPUs and releases them when the
+  job ends.
 
 The inference component and the HTTP service join the same Ray cluster
 (``RAY_ADDRESS`` or ``training.ray-address``), so the engines and the training
@@ -262,9 +264,10 @@ trains, keep its vision encoder frozen.
 
 Slime's own engine and placement options in ``training.options``
 (``rollout-num-gpus``, ``colocate``, ``sglang-*``, ``router-*`` and the rest)
-reach each job's Slime driver unread. They configure the rollout engines that a
-task job's driver starts (see `Task jobs on Slime`_), never the serving
-engines; a driver of any other job starts no rollout engines. Reef's serving
+reach each job's Slime driver unread. They configure the rollout engines of
+Slime's serving session, which the first task job starts (see `Task jobs on
+Slime`_), never the serving engines; before that session runs, a driver of any
+other job starts no rollout engines. Reef's serving
 never shares GPUs with training, so ``training.colocate`` is refused. Native
 options cannot override
 managed model, placement or parallelism settings. Pipeline/data parallel and
@@ -285,9 +288,11 @@ boundary.
 
 Training GPU capacity is set in ``training.options.actor-num-*`` (and, for
 rollout engines on GPUs of their own, ``rollout-num-gpus``); the physical node
-size is ``training.options.num-gpus-per-node``. Each job's driver reserves those
-GPUs while it runs, so between jobs they are free, and a job waits while
-another reservation holds them. The inference component reserves
+size is ``training.options.num-gpus-per-node``. Until the first task job, each
+job's driver reserves those GPUs while it runs, so between jobs they are free,
+and a job waits while another reservation holds them. From the first task job
+on, Slime's serving session holds them until the component closes. The
+inference component reserves
 ``inference.num-gpus`` GPUs on the same Ray cluster, and the inference control
 process takes one Ray CPU and no GPU. When a training worker fails, the running
 job fails, and the next job's driver starts again from the latest checkpoint.
@@ -1461,10 +1466,15 @@ job's start weights, and the Slime component on its own rollout engines (see
 Task jobs on Slime
 ~~~~~~~~~~~~~~~~~~
 
-The Slime component runs task jobs on Slime's own rollout engines: Slime's
-``RolloutManager`` and its SGLang engines, which a task job's driver starts with
-its workers and drives as Slime's own training loop does. Reef's serving never
-calls them. ``training.options.rollout-num-gpus`` gives the engines GPUs of
+The Slime component runs task jobs on Slime's own rollout engines: the SGLang
+engines of Slime's serving session (Slime's ``ServingCluster``), which a task
+job's driver drives through Slime's ``RolloutManager`` as Slime's own training
+loop does. Reef's serving never calls them. The first task job starts the
+session; it holds the engines, their router and the training GPUs until the
+component closes, so the next jobs attach to the started engines, and every job
+trains on the session's GPUs. A failed or cancelled job leaves the session
+running for the next job. The save root's ``reef-serving.json`` records the
+session, which the component disposes when it closes. ``training.options.rollout-num-gpus`` gives the engines GPUs of
 their own; ``training.options.colocate`` puts them on the training GPUs (all
 of them, unless ``rollout-num-gpus`` names fewer), and Slime moves the GPU
 memory between the engines and the workers. Slime's ``sglang-*``,
@@ -1487,6 +1497,60 @@ engines answer OpenAI text chat: system, user and assistant text messages, no
 tools. A task job whose options give the engines no GPUs fails. A LoRA actor
 cannot have rollout engines, since Reef's adapters do not reach Slime's weight
 transfer.
+
+Dataset jobs on Slime
+~~~~~~~~~~~~~~~~~~~~~
+
+A dataset job trains a prompt dataset the way Slime trains on its own (RFC
+#1041). Slime rolls the prompts out on its serving session's engines, scores
+them with its reward model, computes the advantages and trains its loss; Reef
+records each saved rollout as a candidate. The deployment selects the built-in
+recipe ``reef.recipe.dataset:DatasetRecipe`` with ``data.training_mode:
+manual``. Its loss family, ``slime``, leaves the training signal to Slime and
+refuses every other job. Each training instruction (``POST /reef/train``)
+whose ``parameters`` hold ``dataset`` is one job:
+
+.. code:: json
+
+   {"text": "GRPO on the prompts", "session": "s", "release_id": "r",
+    "parameters": {"dataset": {"path": "/data/prompts.jsonl", "epochs": 1}, "save_interval": 10}}
+
+``dataset.path`` is an absolute path, on the Ray cluster, to a JSONL file in
+Slime's prompt-data format. ``dataset.epochs`` (default 1) is the passes over
+it. The job trains ``len(dataset) // rollout-batch-size`` rollouts per epoch,
+and ``save_interval`` counts rollouts between checkpoints (default: one
+checkpoint at the end). A checkpoint's step is the job's rollouts up to it,
+and its reward is the rollout's mean raw reward. A resumed job continues after
+its last checkpoint and skips the prompts of the rollouts it saved. The
+recipe's ``job_parameters`` can set a default ``dataset``.
+
+Slime's own options in ``training.options`` configure the rest:
+
+.. code:: yaml
+
+   training:
+     backend: slime
+     options:
+       colocate: true
+       input-key: messages
+       label-key: label
+       apply-chat-template: true
+       rollout-batch-size: 32
+       n-samples-per-prompt: 8
+       global-batch-size: 256
+       rollout-max-response-len: 1024
+       rollout-temperature: 1.0
+       advantage-estimator: grpo
+       custom-rm-path: my_package.reward.reward
+       loss-type: policy_loss
+
+A rollout function (``rollout-function-path``, ``custom-generate-function-path``),
+a reward model (``custom-rm-path`` or ``rm-type``) and a hook on the rollout data
+after the advantages (``rollout-data-postprocess-path``) are Slime's plugins and
+run in Slime's processes. Reef sets ``data-source-path`` itself: its data source
+serves each job's dataset to the serving session's rollout manager, which
+outlives the jobs, so the option is refused. ``disable-compute-advantages-and-returns``
+is refused too.
 
 Reef calls the generator class's ``from_config(config, *, scenario, environ)``
 once for each scenario. A generator that calls a remote service reads its

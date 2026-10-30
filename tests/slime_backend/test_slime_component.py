@@ -933,6 +933,10 @@ def build_calls(tmp_path, monkeypatch):
         def start(self):
             calls["events"].append("start")
 
+        def adopt(self, placement_groups):
+            calls["events"].append(f"adopt:{placement_groups['actor']}")
+            self.placement_groups = placement_groups
+
         def close(self):
             calls["events"].append("close")
 
@@ -941,6 +945,7 @@ def build_calls(tmp_path, monkeypatch):
     def create_groups(received, placement_groups, *, actor_cls, train_timeout_s):
         assert received is args and actor_cls is worker_class
         calls["timeout"] = train_timeout_s
+        calls["placement_groups"] = placement_groups
         if calls.get("group_error"):
             raise RuntimeError("workers failed to start")
         calls["groups"] = (FakeTrainGroup(args.save_hf), FakeTrainGroup(None))
@@ -1077,6 +1082,7 @@ def test_the_component_starts_its_workers_on_the_training_gpus_without_rollout_e
             "runtime_env": {
                 "env_vars": {"CUDA_DEVICE_MAX_CONNECTIONS": "1", "NCCL_NVLS_ENABLE": "0", "PYTHONPATH": "/repo"}
             },
+            "place": True,
         }
         # The deployment's execution sections select the training executor.
         assert build_calls["execution"] == {"execution": {"training": "ray"}}
@@ -1090,48 +1096,56 @@ def test_the_component_starts_its_workers_on_the_training_gpus_without_rollout_e
 
 
 @pytest.mark.unit
-def test_the_rollout_group_starts_before_the_workers_and_they_get_its_manager(build_calls, monkeypatch) -> None:
+def test_the_rollout_group_starts_before_the_workers_and_they_train_on_its_gpus(build_calls, monkeypatch) -> None:
     events = build_calls["events"]
 
     class RolloutGroup:
         manager = "manager"
+        placements = {"actor": "session-bundles", "critic": None, "rollout": "session-bundles"}
 
         @classmethod
-        def start(cls, args, bundles):
-            events.append(f"rollout-start:{bundles}")
+        def start(cls, args, lease):
+            events.append(f"rollout-start:{lease}")
             return cls()
 
         def close(self):
             events.append("rollout-close")
 
-    original = build_calls["resources_class"]
-
-    class Resources(original):
-        def __init__(self, received, **options):
-            super().__init__(received, **options)
-            self.placement_groups = {**self.placement_groups, "rollout": "rollout-bundles"}
-
-    monkeypatch.setattr(slime_component, "SlimeDeploymentResources", Resources)
     monkeypatch.setattr(slime_component, "SlimeRolloutGroup", RolloutGroup)
-    # A task job's arguments give Slime's rollout engines GPUs.
+    monkeypatch.setattr(slime_component, "serving_record", lambda args, root: "session-lease")
+    # The arguments give Slime's rollout engines GPUs.
     build_calls["args"].rollout_num_gpus = 2
-    component = start_slime_runner(settings())
+    component = start_slime_runner(settings(), serving=True)
     try:
-        # Colocated engines take and release their GPU memory before the workers load the model.
-        assert events == ["start", "rollout-start:rollout-bundles"]
+        # The session holds the GPUs: the driver places nothing and trains on the session's placements.
+        assert build_calls["resources"]["place"] is False
+        assert events == ["start", "rollout-start:session-lease", "adopt:session-bundles"]
+        assert build_calls["placement_groups"] == RolloutGroup.placements
         # The engines load Reef's SGLang plugin, which opens the weight-update session Slime's transfer needs.
         assert build_calls["resources"]["runtime_env"]["env_vars"]["SGLANG_REEF_PLUGIN"] == "1"
         assert build_calls["groups"][0].events == ["set_rollout_manager:manager"]
         assert isinstance(component.rollout_group, RolloutGroup)
     finally:
         component.close()
-    # The engines close before the workers and the reservation.
-    assert events == ["start", "rollout-start:rollout-bundles", "rollout-close", "close"]
+    # The workers release first; the driver then detaches from the session and closes its Ray session.
+    assert events[-2:] == ["rollout-close", "close"]
     build_calls["group_error"] = True
     events.clear()
     with pytest.raises(RuntimeError, match="workers failed to start"):
-        start_slime_runner(settings())
-    assert events == ["start", "rollout-start:rollout-bundles", "rollout-close", "close"]
+        start_slime_runner(settings(), serving=True)
+    assert events == ["start", "rollout-start:session-lease", "adopt:session-bundles", "rollout-close", "close"]
+
+
+@pytest.mark.unit
+def test_a_job_without_the_serving_session_places_itself_and_starts_no_engines(build_calls, monkeypatch) -> None:
+    monkeypatch.setattr(slime_component, "SlimeRolloutGroup", None)
+    build_calls["args"].rollout_num_gpus = 2
+    component = start_slime_runner(settings())
+    try:
+        assert build_calls["resources"]["place"] is True and component.rollout_group is None
+        assert "SGLANG_REEF_PLUGIN" not in build_calls["resources"]["runtime_env"]["env_vars"]
+    finally:
+        component.close()
 
 
 @pytest.mark.unit

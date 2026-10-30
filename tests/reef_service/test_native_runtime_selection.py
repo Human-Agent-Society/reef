@@ -62,7 +62,11 @@ def test_slime_without_serving_builds_the_component_and_a_null_runtime(created):
         assert component is built
         assert isinstance(runtime, NullInferenceRuntime)
         assert settings.arguments == ("--global-batch-size=8",)
-        assert (settings.loss_family, settings.recipe) == ("sao", "recipes.sao.recipe:SAORecipe")
+        # The recipe registered sao by name; each job's driver, a new process, gets its reference.
+        assert (settings.loss_family, settings.recipe) == (
+            "recipes.sao.slime:SaoAlgorithm",
+            "recipes.sao.recipe:SAORecipe",
+        )
         assert (settings.ray_address, settings.namespace) == ("ray://head:10001", "training-cluster")
         assert settings.train_timeout_s == 14400.0
         # The deployment's execution section selects the workers' executors.

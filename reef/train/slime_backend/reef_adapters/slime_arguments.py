@@ -90,12 +90,7 @@ def add_reef_slime_arguments(parser: argparse.ArgumentParser) -> argparse.Argume
             "declare its policy-gradient weight; records need the sampler's top-K (capture_topk)."
         ),
     )
-    parser.add_argument(
-        "--score-centering-top-k",
-        type=int,
-        default=defaults.top_k,
-        help=f"Sampler log-probs read per response position. Default {defaults.top_k}.",
-    )
+    # Slime registers --score-centering-top-k (its own score centering's top-K, also 128); the term reads it.
     parser.add_argument(
         "--score-centering-min-tail-mass",
         type=float,

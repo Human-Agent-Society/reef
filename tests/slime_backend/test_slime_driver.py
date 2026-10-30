@@ -27,11 +27,13 @@ from reef.train.slime_backend.component import (
     DRIVER_FILE,
     DRIVER_RESULT_FILE,
     NO_ROLLOUT_ENGINES,
+    SERVING_LOG,
     SlimeSettings,
     SlimeStart,
     SlimeTrainingComponent,
     settings_to_json,
 )
+from reef.train.slime_backend.rollout_group import SERVING_FILE
 
 SETTINGS = SlimeSettings(
     arguments=("--lr=1e-06",),
@@ -175,11 +177,31 @@ def test_a_cancel_stops_the_driver_and_a_close_leaves_the_job_to_resume(tmp_path
         component.close()
 
 
+@pytest.mark.unit
+def test_closing_the_component_disposes_the_serving_session_that_a_driver_left(tmp_path, parsed):
+    component = Component(SETTINGS)
+    root = component.root
+    # No session: closing starts no disposal.
+    component.dispose_command = lambda: [sys.executable, "-c", "raise SystemExit(5)"]  # type: ignore[method-assign]
+    component.close()
+    component = Component(SETTINGS)
+    write_json(root / SERVING_FILE, {"session": "rollout:abc", "lease": "0" * 32})
+    component.dispose_command = lambda: [  # type: ignore[method-assign]
+        sys.executable,
+        "-c",
+        f"import pathlib; print('disposed'); pathlib.Path({str(root / SERVING_FILE)!r}).unlink()",
+    ]
+    component.close()
+    assert not (root / SERVING_FILE).exists()
+    assert "disposed" in (root / SERVING_LOG).read_text()
+
+
 class Runner:
     """The runner a driver starts: records its settings, the job it ran, and its close."""
 
-    def __init__(self, settings: SlimeSettings, calls: dict[str, Any]) -> None:
+    def __init__(self, settings: SlimeSettings, calls: dict[str, Any], serving: bool = False) -> None:
         calls["settings"] = settings
+        calls["serving"] = serving
         self.calls = calls
 
     def run(self, job: TrainingJob, directory: Path) -> dict[str, Any]:
@@ -205,19 +227,26 @@ def job_directory(root: Path, data: JobData, rollout: bool) -> Path:
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("task_job", [False, True])
-def test_the_driver_trains_its_job_and_starts_rollout_engines_only_for_a_task_job(tmp_path, monkeypatch, task_job):
+@pytest.mark.parametrize(("task_job", "session"), [(False, False), (True, False), (False, True)])
+def test_the_driver_uses_the_serving_session_for_a_task_job_and_while_one_runs(
+    tmp_path, monkeypatch, task_job, session
+):
     calls: dict[str, Any] = {}
-    monkeypatch.setattr(driver, "start_slime_runner", lambda settings: Runner(settings, calls))
+    monkeypatch.setattr(driver, "start_slime_runner", lambda settings, *, serving: Runner(settings, calls, serving))
     (tmp_path / "add").mkdir()
     data = JobData("tasks", (TaskSample(tmp_path / "add"),)) if task_job else batch_for(0)
     directory = job_directory(tmp_path, data, task_job)
+    if session:
+        write_json(tmp_path / SERVING_FILE, {"session": "rollout:abc", "lease": "0" * 32})
 
     driver.main([str(directory)])
 
     arguments = calls["settings"].arguments
-    # A trajectory job starts no rollout engines; a task job keeps the deployment's options.
-    assert arguments == (("--lr=1e-06",) if task_job else ("--lr=1e-06", NO_ROLLOUT_ENGINES))
+    # A trajectory job without a session starts no rollout engines; a job on the session keeps the
+    # deployment's options, which the session's engines started with.
+    serving = task_job or session
+    assert calls["serving"] is serving
+    assert arguments == (("--lr=1e-06",) if serving else ("--lr=1e-06", NO_ROLLOUT_ENGINES))
     assert calls["job"].job_id == "job-0" and calls["closed"]
     assert json.loads((directory / DRIVER_RESULT_FILE).read_text()) == {"metrics": {"train/loss": 0.25}}
 
@@ -230,7 +259,7 @@ def test_a_failed_job_still_closes_the_driver(tmp_path, monkeypatch):
         def run(self, job, directory):
             raise RuntimeError("the workers died")
 
-    monkeypatch.setattr(driver, "start_slime_runner", lambda settings: Failing(settings, calls))
+    monkeypatch.setattr(driver, "start_slime_runner", lambda settings, *, serving: Failing(settings, calls))
     directory = job_directory(tmp_path, batch_for(0), False)
     with pytest.raises(RuntimeError, match="the workers died"):
         driver.main([str(directory)])
