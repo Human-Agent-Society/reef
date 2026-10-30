@@ -3,12 +3,15 @@
 ``SlimeTrainingComponent`` lives in the HTTP service's process and keeps the
 job contract: it checks and queues jobs, and for each job starts a driver
 (``reef.train.slime_backend.driver``) on the Ray cluster, which reports the
-job's checkpoints in the job's directory. It holds no GPU between jobs.
+job's checkpoints in the job's directory. It holds no GPU itself.
 
-The driver runs ``SlimeJobRunner``: it places the job with Slime's own
-placement logic, starts Slime's actor (and critic) workers and, for a job of
-tasks (a task job), Slime's own rollout engines
-(``reef.train.slime_backend.rollout_group``). A job trains as Slime rollouts,
+The driver runs ``SlimeJobRunner``: it starts Slime's actor (and critic)
+workers and, for a job of tasks (a task job), attaches them to Slime's own
+rollout engines (``reef.train.slime_backend.rollout_group``). The engines are
+those of Slime's serving session, which the first task job starts and which
+holds the engines and their GPUs until the component closes; while it runs,
+every job trains on its GPUs. Without a session, a job places itself with
+Slime's own placement logic and holds its GPUs only while it runs. A job trains as Slime rollouts,
 one by default or one per ``save_interval`` optimizer steps: Reef's job data
 becomes Slime's rollout data, the workers train its optimizer steps, and the
 runner saves the paired Hugging Face and Megatron checkpoints of each
@@ -41,6 +44,7 @@ import signal
 import subprocess
 import sys
 import time
+import uuid
 from abc import abstractmethod
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, replace
@@ -77,8 +81,16 @@ from reef.train.slime_backend.reef_adapters.train_groups import (
     merge_rank_metrics,
 )
 from reef.train.slime_backend.reef_adapters.training_job.storage import CheckpointStorage, critic_checkpoint_due
-from reef.train.slime_backend.resources import SlimeDeploymentResources
-from reef.train.slime_backend.rollout_group import SGLANG_PLUGIN_ENV, EngineChat, SlimeRolloutGroup
+from reef.train.slime_backend.resources import SlimeDeploymentResources, retire_lease
+from reef.train.slime_backend.rollout_group import (
+    SERVING_FILE,
+    SGLANG_PLUGIN_ENV,
+    EngineChat,
+    SlimeRolloutGroup,
+    dispose_serving,
+    serving_exists,
+    serving_session,
+)
 from reef.train.slime_backend.score_centering import ScoreCenteringSettings, settings_from_args
 from reef.train.task_rollouts import RolloutSettings, TaskJobRollouts, roll_out, task_name
 
@@ -98,6 +110,8 @@ DRIVER_RESULT_FILE = "driver-result.json"
 DRIVER_LOG = "driver.log"
 #: Seconds a driver has to stop after SIGTERM before it is killed.
 DRIVER_STOP_TIMEOUT_S = 60
+#: The output of the disposal of the component's Slime serving session, in the save root.
+SERVING_LOG = "reef-serving.log"
 #: The Slime option that starts no rollout engine, for a job that rolls nothing out.
 NO_ROLLOUT_ENGINES = "--rollout-num-gpus=0"
 
@@ -253,13 +267,19 @@ class SlimeJobs(LocalJobComponent):
     def __init__(self, args: SlimeArguments, *, lora: bool) -> None:
         self.args = args
         self.lora = lora
-        root = Path(args.save_hf.format(rollout_id=0)).expanduser().resolve().parent.parent
+        root = self.root_of(args)
+        self.root = root
         self.starts_root = root / "reef-starts"
         # The start of the startup weights, the untrained checkpoint that the base artifact holds.
         self.base_start_dir = self.starts_root / "base"
         if not (self.base_start_dir / START_STATE).exists():
             SlimeStart(None, None, {}, None).write(self.base_start_dir)
         super().__init__(root / "reef-jobs")
+
+    @staticmethod
+    def root_of(args: SlimeArguments) -> Path:
+        """The save root of ``args``: the directory of the checkpoint roots, the jobs and the starts."""
+        return Path(args.save_hf.format(rollout_id=0)).expanduser().resolve().parent.parent
 
     @property
     @abstractmethod
@@ -487,17 +507,18 @@ class SlimeJobRunner(SlimeJobs):
 
     def close_resources(self) -> None:
         errors = []
-        if self.rollout_group is not None:
-            try:
-                self.rollout_group.close()
-            except Exception as exc:
-                errors.append(exc)
         for group in (self.critic_group, self.group):
             if group is not None:
                 try:
                     group.release()
                 except Exception as exc:
                     errors.append(exc)
+        # After the workers: the serving session releases whatever trainers are still attached to it.
+        if self.rollout_group is not None:
+            try:
+                self.rollout_group.close()
+            except Exception as exc:
+                errors.append(exc)
         if self.resources is not None:
             try:
                 self.resources.close()
@@ -842,6 +863,27 @@ class SlimeTrainingComponent(SlimeJobs):
         python = os.environ.get("REEF_PYTHON", sys.executable)
         return [python, "-m", "reef.train.slime_backend.driver", str(directory)]
 
+    def dispose_command(self) -> list[str]:
+        """The command that disposes the component's Slime serving session, in a Ray session of its own."""
+        python = os.environ.get("REEF_PYTHON", sys.executable)
+        settings = self.settings
+        return [
+            python,
+            "-m",
+            "reef.train.slime_backend.driver",
+            "--dispose",
+            str(self.root),
+            settings.ray_address,
+            settings.namespace,
+        ]
+
+    def close_resources(self) -> None:
+        """Dispose the serving session that a task job's driver left: its engines, router and GPUs."""
+        if not (self.root / SERVING_FILE).exists():
+            return
+        with open(self.root / SERVING_LOG, "ab") as log:
+            subprocess.run(self.dispose_command(), cwd=self.root, stdout=log, stderr=subprocess.STDOUT, check=True)
+
     def run(self, job: TrainingJob, directory: Path) -> Mapping[str, Any]:
         write_json(directory / DRIVER_FILE, settings_to_json(self.settings))
         (directory / DRIVER_RESULT_FILE).unlink(missing_ok=True)
@@ -894,22 +936,29 @@ def settings_from_json(value: Mapping[str, Any]) -> SlimeSettings:
     return SlimeSettings(**{**value, "arguments": tuple(value["arguments"])})
 
 
-def start_slime_runner(settings: SlimeSettings) -> SlimeJobRunner:
-    """Prepare the arguments, place the job with Slime's own placement, start its engines and workers, and return the runner.
+def start_slime_runner(settings: SlimeSettings, *, serving: bool = False) -> SlimeJobRunner:
+    """Prepare the arguments, place the job, start its workers (and engines) and return the runner.
 
-    Slime's rollout engines start when the arguments give them GPUs, before the workers, as in Slime's own
-    training loop: colocated engines take their GPU memory and release it before the workers load the model
-    on the same GPUs.
+    With ``serving``, and arguments that give the rollout engines GPUs, the driver creates or attaches to the
+    component's Slime serving session (``SlimeRolloutGroup``), which holds the GPUs and the engines across jobs,
+    and trains on its placements; otherwise it places the job with Slime's own placement and starts no engines.
+    The engines start before the workers, as in Slime's own training loop: colocated engines take their GPU
+    memory and release it before the workers load the model on the same GPUs.
     """
     args, loss_family_config, retention = prepare_slime_arguments(
         settings.arguments, loss_family=settings.loss_family, recipe=settings.recipe, execution=settings.execution
     )
     storage = prepare_checkpoint_storage(args, retention)
+    with_engines = serving and bool(args.rollout_num_gpus)
     runtime_env = job_runtime_env()
-    if args.rollout_num_gpus:
+    if with_engines:
         runtime_env["env_vars"][SGLANG_PLUGIN_ENV] = "1"
     resources = SlimeDeploymentResources(
-        args, ray_address=settings.ray_address, namespace=settings.namespace, runtime_env=runtime_env
+        args,
+        ray_address=settings.ray_address,
+        namespace=settings.namespace,
+        runtime_env=runtime_env,
+        place=not with_engines,
     )
     resources.start()
     rollout_group: SlimeRolloutGroup | None = None
@@ -918,11 +967,9 @@ def start_slime_runner(settings: SlimeSettings) -> SlimeJobRunner:
         from reef.train.slime_backend.reef_adapters.megatron.lora import megatron_lora_enabled
         from reef.train.slime_backend.reef_adapters.megatron.train_actor import ReefMegatronTrainRayActor
 
-        rollout_bundles = resources.placement_groups["rollout"]
-        if args.rollout_num_gpus:
-            if rollout_bundles is None:
-                raise RuntimeError("Slime placed no GPUs for the rollout engines its arguments name")
-            rollout_group = SlimeRolloutGroup.start(args, rollout_bundles)
+        if with_engines:
+            rollout_group = SlimeRolloutGroup.start(args, serving_record(args, SlimeJobs.root_of(args)))
+            resources.adopt(rollout_group.placements)
         actor_group, critic_group = create_train_groups(
             args,
             resources.placement_groups,
@@ -950,6 +997,37 @@ def start_slime_runner(settings: SlimeSettings) -> SlimeJobRunner:
             rollout_group.close()
         resources.close()
         raise
+
+
+def serving_record(args: SlimeArguments, root: Path) -> str:
+    """The process lease of the serving session of ``args``: the recorded one while the session runs, else a new one.
+
+    A new lease is recorded in ``root``'s ``SERVING_FILE`` before the session starts, so the component disposes a
+    session whose driver failed while starting it.
+    """
+    session = serving_session(args)
+    record = read_json(root / SERVING_FILE)
+    if record is not None and record["session"] == session and serving_exists(session):
+        return record["lease"]
+    lease = uuid.uuid4().hex
+    write_json(root / SERVING_FILE, {"session": session, "lease": lease})
+    return lease
+
+
+def dispose_component_serving(root: Path, *, ray_address: str, namespace: str, timeout_s: float) -> None:
+    """Dispose the serving session that ``root``'s ``SERVING_FILE`` records, and retire its processes."""
+    import ray
+
+    record = read_json(root / SERVING_FILE)
+    if record is None:
+        return
+    ray.init(address=ray_address, namespace=namespace)
+    try:
+        dispose_serving(record["session"], timeout_s)
+        retire_lease(record["lease"], [])
+    finally:
+        ray.shutdown()
+    (root / SERVING_FILE).unlink()
 
 
 __all__ = ["SlimeJobRunner", "SlimeSettings", "SlimeStart", "SlimeTrainingComponent", "start_slime_runner"]

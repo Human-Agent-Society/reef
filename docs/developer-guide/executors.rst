@@ -223,14 +223,25 @@ Slime integration
 HTTP service's process and holds no GPU. It parses Slime's arguments once at
 startup and, for each job, starts a driver process
 (``reef.train.slime_backend.driver``) with the job's directory. The driver owns
-one Ray session and the placement group that Slime's own placement makes, and
-runs ``SlimeJobRunner``: Slime's actor (and critic) workers and, for a task job,
-Slime's own rollout engines (``reef.train.slime_backend.rollout_group``). It
-records each saved checkpoint in the job's directory, where the component
-reports it, and releases its workers, engines and GPUs when it exits. Serving
-never shares GPUs with training; with ``--colocate`` the rollout engines share
-the training GPUs, and Slime moves the memory between them. A cancel or a
-close stops the driver; a restarted component starts the job's driver again.
+one Ray session and runs ``SlimeJobRunner``: Slime's actor (and critic) workers
+and, for a task job, Slime's own rollout engines
+(``reef.train.slime_backend.rollout_group``). The engines belong to Slime's
+serving session, a detached ``ServingCluster`` named after the save root, which
+the first task job's driver creates and the next drivers attach to through
+Slime's ``create_rollout_manager``. The session holds the engines, their router
+and the placement group of the training GPUs; while it runs, every driver
+trains on its placements, and a driver detaches from it when it exits, also
+after a failure. Without a session, a driver places its job with Slime's own
+placement and starts no engines. A driver records each saved checkpoint in the
+job's directory, where the component reports it, and releases its workers (and
+the GPUs it placed) when it exits. The session's actors run under a process
+lease of their own, recorded with the session's name in the save root's
+``reef-serving.json``, so a driver's process cleanup leaves them running; the
+component disposes the session and retires that lease when it closes
+(``driver --dispose``). Serving never shares GPUs with training; with
+``--colocate`` the rollout engines share the training GPUs, and Slime moves the
+memory between them. A cancel or a close stops the driver; a restarted
+component starts the job's driver again.
 
 A job trains its data as Slime rollouts (a ``rollout_id`` is Slime's unit of
 training). Without the job parameter ``save_interval``, the job is one

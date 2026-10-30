@@ -14,6 +14,7 @@ from reef.service.deploy.orchestrator import resolve_deployment_config
 from reef.service.deploy.service_config import service_config_from_mapping
 from reef.service.deploy.serving import serving_runtime_config
 from reef.train.slime_backend import component as slime_component
+from reef.train.slime_backend import launch
 from reef.train.slime_backend.launch import SlimeDeployment, component_factory, slime_arguments
 
 MODEL = "/models/demo"
@@ -125,8 +126,9 @@ def test_the_factory_builds_only_the_training_component(tmp_path, created_compon
     component = component_factory({**runtime, "train_timeout_s": 600}, MODEL, {})
     assert component is created_components["components"][0]
     (settings,) = created_components["settings"]
+    # The recipe registered sao by name; the drivers get its reference.
     assert (settings.loss_family, settings.ray_address, settings.train_timeout_s) == (
-        "sao",
+        "recipes.sao.slime:SaoAlgorithm",
         "ray://head:10001",
         600,
     )
@@ -136,6 +138,16 @@ def test_the_factory_builds_only_the_training_component(tmp_path, created_compon
     # Without a configured timeout the component keeps its default worker timeout.
     component_factory(runtime, MODEL, {})
     assert created_components["settings"][1].train_timeout_s == slime_component.DEFAULT_TRAIN_TIMEOUT_S
+
+
+def test_the_factory_hands_the_drivers_a_family_that_a_recipe_registered_by_name(
+    tmp_path, created_components, monkeypatch
+) -> None:
+    # The recipe's package registered the family in this process; a job's driver is a new process.
+    monkeypatch.setattr(launch, "loss_family_refs", lambda: {"sft": "reef.train.slime_backend.sft:SftAlgorithm"})
+    runtime = SlimeDeployment().component_config(settings_of(deployment_config(tmp_path)), loss_family="sft")
+    component_factory(runtime, MODEL, {})
+    assert created_components["settings"][0].loss_family == "reef.train.slime_backend.sft:SftAlgorithm"
 
 
 @pytest.mark.parametrize("value", [0, -1])

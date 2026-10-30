@@ -4,7 +4,7 @@ Reproduction of [Self-Distillation Policy Optimization](https://arxiv.org/abs/26
 
 - Paper: [arXiv:2601.20802](https://arxiv.org/abs/2601.20802)
 - Reference implementation: [lasgroup/SDPO](https://github.com/lasgroup/SDPO) at `7c457fc1b1f6`. The recipe's processor maps onto its reprompt templates and the Slime backend's distillation base (`reef/train/slime_backend/distill/`, which the `sdpo` family configures) onto its loss.
-- Pins: `slime` pinned to `THUDM/slime@41014d1f29e201137fdffce737bb8bac65bc5219` (via `pyproject.toml` `dependency-groups.runtime`)
+- Pins: `slime` pinned to `THUDM/slime@540ea919e45b8b929198abce008a103be9cfc779` (via `pyproject.toml` `dependency-groups.runtime`)
 - Claim scope: [SDPO on SciKnowEval Chemistry](examples/sciknoweval/README.md), the paper's Chemistry run on Qwen3-8B.
 
 ## Layout
