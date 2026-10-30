@@ -24,16 +24,30 @@ def register_routes(
     evaluations: ArtifactEvaluations,
     imports: ArtifactImports,
 ) -> None:
+    """The routes of control's app. It serves the data routes too when its process runs the data service."""
     register_health_route(app)
     add_inference_routes(app, replica)
     register_scenario_routes(app, request_service=request_service, evaluations=evaluations)
     register_system_routes(app, request_service=request_service)
     register_record_routes(app, request_service=request_service)
-    register_data_routes(app, request_service=request_service)
+    if "data" in request_service.dispatcher.components:
+        register_data_routes(app, request_service=request_service)
     register_task_routes(app, request_service=request_service)
     register_sample_routes(app, request_service=request_service)
     register_artifact_import_routes(app, request_service=request_service, imports=imports)
     register_evaluation_routes(app, evaluations=evaluations)
 
 
-__all__ = ["register_routes"]
+def register_data_service_routes(
+    app: web.Application, *, request_service: RequestService, evaluations: ArtifactEvaluations
+) -> None:
+    """The routes of the data service's app: the data routes and the reads of what each scenario stores."""
+    register_health_route(app)
+    register_data_routes(app, request_service=request_service)
+    register_scenario_routes(app, request_service=request_service, evaluations=evaluations, writes=False)
+    register_task_routes(app, request_service=request_service)
+    register_sample_routes(app, request_service=request_service, writes=False)
+    register_evaluation_routes(app, evaluations=evaluations, writes=False)
+
+
+__all__ = ["register_data_service_routes", "register_routes"]

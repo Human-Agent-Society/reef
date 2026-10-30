@@ -25,6 +25,7 @@ from aiohttp import web
 from reef.evaluation.rollout_worker import EvaluationRolloutWorker
 from reef.execution.workers import SERVICE_COMPONENTS, ServiceWorkers
 from reef.observability import build_record_observer
+from reef.service.app import create_data_app
 from reef.service.artifact_evaluations import LOCAL_ROLLOUT_WORKERS, LocalCandidateEndpoints
 from reef.service.assembly import build_app, build_dispatcher, open_scenario_storage, open_service_coordination
 from reef.service.auth import create_authentication_middleware
@@ -98,7 +99,15 @@ def build_component_app(
 
         app.on_cleanup.append(close_inference)
         return app
-    if component in ("samples", "training", "data"):
+    if component == "data":
+        # The data service is a dispatcher too: it loads each scenario on demand, for the checks of a write and for
+        # the reads, and runs the data workers.
+        return create_data_app(
+            build_dispatcher(settings, environ=env, components=frozenset({"data"})),
+            tokens=settings.tokens,
+            console_origins=settings.console_origins,
+        )
+    if component in ("samples", "training"):
         # A queue service is a dispatcher that runs only its own workers on the shared store.
         dispatcher = build_dispatcher(settings, environ=env, components=frozenset({component}))
         if component == "training" and dispatcher.recipe.training_component is None:

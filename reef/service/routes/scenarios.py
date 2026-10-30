@@ -13,8 +13,10 @@ from reef.storage.data import check_owner
 
 
 def register_scenario_routes(
-    app: web.Application, *, request_service: RequestService, evaluations: ArtifactEvaluations
+    app: web.Application, *, request_service: RequestService, evaluations: ArtifactEvaluations, writes: bool = True
 ) -> None:
+    """The scenario routes; without ``writes``, only the reads of what the scenario stores."""
+
     async def list_scenarios(request: web.Request) -> web.Response:
         return web.json_response({"scenarios": list(request_service.dispatcher.list_scenarios())})
 
@@ -209,15 +211,17 @@ def register_scenario_routes(
         )
 
     app.router.add_get("/reef/scenarios", list_scenarios)
-    app.router.add_post("/reef/scenarios", create_scenario)
-    app.router.add_post("/reef/scenarios/{scenario}/update", update_scenario)
     app.router.add_get("/reef/scenarios/{scenario}/settings", scenario_settings)
-    app.router.add_delete("/reef/scenarios/{scenario}", delete_scenario)
     app.router.add_get("/reef/scenarios/{scenario}/contract", scenario_contract)
     app.router.add_get("/reef/scenarios/{scenario}/records", record_list)
     app.router.add_get("/reef/scenarios/{scenario}/commits", commit_list)
     app.router.add_get("/reef/scenarios/{scenario}/records/{record_id}", record_detail)
     app.router.add_get("/reef/scenarios/{scenario}/artifacts", list_artifacts)
+    if not writes:
+        return
+    app.router.add_post("/reef/scenarios", create_scenario)
+    app.router.add_post("/reef/scenarios/{scenario}/update", update_scenario)
+    app.router.add_delete("/reef/scenarios/{scenario}", delete_scenario)
     app.router.add_post("/reef/scenarios/{scenario}/activate", activate_artifact)
     app.router.add_post("/reef/scenarios/{scenario}/train-from", train_from_artifact)
     app.router.add_post("/reef/scenarios/{scenario}/serve", serve_artifact)

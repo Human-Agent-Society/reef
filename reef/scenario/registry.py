@@ -136,6 +136,7 @@ class ScenarioRegistry:
         scenario_storage: ScenarioStorage,
         admission: ScenarioAdmission | None = None,
         lifecycle: ScenarioLifecycle | None = None,
+        activates_runtime: bool = True,
     ) -> None:
         self._model_configs: dict[str, ModelConfig] = {}
         self._storage = scenario_storage
@@ -149,6 +150,7 @@ class ScenarioRegistry:
             scenario_storage=scenario_storage,
             experiment_reports=self.experiment_reports,
             experiment_tracker=tracker,
+            activates_runtime=activates_runtime,
         )
         self._backend_factory = backend_factory
         self._recipe = recipe

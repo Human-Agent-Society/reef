@@ -21,7 +21,7 @@ from reef.service.cors import configure_browser_access
 from reef.service.errors import translate_errors
 from reef.service.inference_service import InferenceReplica, ServedModelsCache
 from reef.service.request_service import RequestService
-from reef.service.routes import register_routes
+from reef.service.routes import register_data_service_routes, register_routes
 from reef.storage.records import RecordRetention
 
 logger = logging.getLogger(__name__)
@@ -53,6 +53,34 @@ async def _maintain_records(dispatcher: Dispatcher, retention: RecordRetention, 
             await asyncio.wait_for(stopped.wait(), timeout=_RECORD_RETENTION_INTERVAL_SECONDS)
         except TimeoutError:
             continue
+
+
+def create_data_app(
+    dispatcher: Dispatcher,
+    *,
+    tokens: str | Iterable[str] | None = None,
+    console_origins: Iterable[str] = (),
+) -> web.Application:
+    """The HTTP app of the data service: the data routes and the reads of what each scenario stores.
+
+    ``dispatcher`` runs the data service and no control (``reef serve --component data``): it loads each scenario
+    on demand, for the checks of a data write and for the reads. The app closes it on cleanup.
+    """
+    if "data" not in dispatcher.components:
+        raise ValueError("the data app runs the data service: build its dispatcher with the data service")
+    request_service = RequestService(dispatcher)
+    app = web.Application(
+        middlewares=[create_authentication_middleware(tokens), translate_errors], client_max_size=MAX_REQUEST_BYTES
+    )
+    configure_browser_access(app, console_origins)
+    app[REQUEST_SERVICE_KEY] = request_service
+    register_data_service_routes(app, request_service=request_service, evaluations=ArtifactEvaluations(dispatcher))
+
+    async def cleanup(app: web.Application) -> None:
+        await asyncio.to_thread(dispatcher.close)
+
+    app.on_cleanup.append(cleanup)
+    return app
 
 
 def create_app(
@@ -179,5 +207,6 @@ def create_app(
 __all__ = [
     "RequestService",
     "create_app",
+    "create_data_app",
     "get_dispatcher",
 ]

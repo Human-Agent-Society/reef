@@ -169,6 +169,8 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync):
             experiment_tracker=self.experiment_tracker,
             admission=scenario_admission,
             lifecycle=self,
+            # Only control activates a scenario's artifact on the engines when it loads the scenario.
+            activates_runtime=self.runs_control,
         )
         self.errors = TrainingErrors()
         self.background_threads = BackgroundThreads()

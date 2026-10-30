@@ -9,7 +9,9 @@ from reef.service.routes.payload import read_object
 from reef.service.samples import MAX_SAMPLES_PER_PAGE, change_buffer, list_samples, read_buffer
 
 
-def register_sample_routes(app: web.Application, *, request_service: RequestService) -> None:
+def register_sample_routes(app: web.Application, *, request_service: RequestService, writes: bool = True) -> None:
+    """The sample routes. Without ``writes``, only the list of the sample store: the buffer is the trainer's state,
+    which control holds."""
     dispatcher = request_service.dispatcher
 
     async def samples(request: web.Request) -> web.Response:
@@ -42,6 +44,8 @@ def register_sample_routes(app: web.Application, *, request_service: RequestServ
         return web.json_response(listing)
 
     app.router.add_get("/reef/scenarios/{scenario}/samples", samples)
+    if not writes:
+        return
     app.router.add_get("/reef/scenarios/{scenario}/buffer", buffer)
     app.router.add_post("/reef/scenarios/{scenario}/buffer/insert", insert)
     app.router.add_post("/reef/scenarios/{scenario}/buffer/remove", remove)

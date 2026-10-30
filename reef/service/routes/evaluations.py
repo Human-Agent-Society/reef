@@ -8,7 +8,9 @@ from reef.service.artifact_evaluations import ArtifactEvaluations
 from reef.service.routes.payload import read_object
 
 
-def register_evaluation_routes(app: web.Application, *, evaluations: ArtifactEvaluations) -> None:
+def register_evaluation_routes(app: web.Application, *, evaluations: ArtifactEvaluations, writes: bool = True) -> None:
+    """The evaluation routes; without ``writes``, only the reads of stored evaluations."""
+
     async def start(request: web.Request) -> web.Response:
         body = await read_object(request)
         stored = await asyncio.to_thread(evaluations.start, request.match_info["scenario"], body)
@@ -30,9 +32,10 @@ def register_evaluation_routes(app: web.Application, *, evaluations: ArtifactEva
             headers={"Cache-Control": "no-store"},
         )
 
-    app.router.add_post("/reef/scenarios/{scenario}/evaluations", start)
     app.router.add_get("/reef/scenarios/{scenario}/evaluations", newest)
     app.router.add_get("/reef/scenarios/{scenario}/evaluations/{evaluation_id}", evaluation)
+    if writes:
+        app.router.add_post("/reef/scenarios/{scenario}/evaluations", start)
 
 
 __all__ = ["register_evaluation_routes"]

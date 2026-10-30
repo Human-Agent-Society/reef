@@ -9,6 +9,12 @@ from types import SimpleNamespace
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
+from tests.support._policy_recipe import TestPolicyRecipe
+from tests.support.artifact_versions import ImportingComponent
+from tests.support.runtime_stubs import runtime_bindings
+
+from reef.artifact import InMemoryRepositoryBackend
+from reef.dispatcher import Dispatcher
 from reef.dispatcher.data_sync_worker import DataSyncWorker
 from reef.dispatcher.samples import LocalSampleProducers
 from reef.dispatcher.served import ServedModelsPublisher
@@ -16,11 +22,14 @@ from reef.dispatcher.store_changes import StoreChanges, StoreChangesWatcher
 from reef.execution.workers import SERVICE_COMPONENTS, service_components
 from reef.record2sample.service import RECORD_SELECTION_KIND, SAMPLES_QUEUE, SamplesWorker, request_selection
 from reef.service import assembly
+from reef.service.app import create_data_app
 from reef.service.components import build_component_app
 from reef.service.data_service import DataWorker
 from reef.service.deploy.cli import build_serve_parser
 from reef.service.deploy.service_config import ServiceConfig
 from reef.storage.coordination import memory_coordination
+from reef.storage.sql_coordination import open_coordination
+from reef.storage.sqlite import SQLiteScenarioStorage
 
 MEMORY_BACKEND = "tests.support.artifact_backend_plugin:MemoryArtifactBackend"
 TOKEN = "service-token"
@@ -143,3 +152,62 @@ def test_reef_serve_names_one_service_with_component() -> None:
     assert parser.parse_args([]).component is None
     with pytest.raises(SystemExit):
         parser.parse_args(["--component", "router"])
+
+
+@pytest.mark.unit
+def test_a_process_without_control_loads_a_scenario_without_activating_it(tmp_path: Path) -> None:
+    # The engines are control's: a process that loads a scenario for its reads or its samples loads no weights.
+    initial = tmp_path / "initial"
+    initial.mkdir()
+    (initial / "model.txt").write_text("w0")
+    component = ImportingComponent(tmp_path / "checkpoints")
+    # Both processes reach the same artifact repository.
+    repository = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
+
+    def dispatcher(components: frozenset[str]) -> Dispatcher:
+        return Dispatcher(
+            TestPolicyRecipe(**runtime_bindings(component, component.inference)),
+            repository,
+            scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
+            coordination=open_coordination("sqlite", agent_record_dir=str(tmp_path), record_database_url=None),
+            components=components,
+        )
+
+    control = dispatcher(frozenset({"control"}))
+    try:
+        control.get_or_create_scenario("math")
+    finally:
+        control.close()
+    activated = list(component.inference.activated)
+    assert activated, "control activates the scenario it loads"
+    data = dispatcher(frozenset({"data"}))
+    try:
+        with data.locked_scenario("math") as current:
+            assert current.name == "math"
+    finally:
+        data.close()
+    assert component.inference.activated == activated
+
+
+@pytest.mark.unit
+def test_the_data_service_serves_the_data_routes_and_the_reads_and_control_alone_serves_neither_data_nor_writes(
+    tmp_path: Path,
+) -> None:
+    auth = {"Authorization": f"Bearer {TOKEN}"}
+
+    async def run() -> None:
+        data_app = create_data_app(
+            assembly.build_dispatcher(settings(tmp_path / "data"), environ={}, components=frozenset({"data"})),
+            tokens=(TOKEN,),
+        )
+        async with TestClient(TestServer(data_app)) as client:
+            assert (await client.get("/reef/scenarios", headers=auth)).status == 200
+            assert (await client.get("/reef/namespaces/o/data", headers=auth)).status == 200
+            # Writes to a scenario and the trainer's buffer are control's.
+            assert (await client.post("/reef/scenarios", headers=auth, json={"name": "s"})).status == 405
+            assert (await client.get("/reef/scenarios/s/buffer", headers=auth)).status == 404
+        control_app = assembly.build_app(settings(tmp_path / "control"), environ={}, components=frozenset({"control"}))
+        async with TestClient(TestServer(control_app)) as client:
+            assert (await client.get("/reef/namespaces/o/data", headers=auth)).status == 404
+
+    asyncio.run(run())
