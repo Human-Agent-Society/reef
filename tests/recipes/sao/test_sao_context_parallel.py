@@ -1,5 +1,6 @@
 """Run the pinned Slime CP gather on two CPU/Gloo ranks with integer masks."""
 
+import gc
 import sys
 import types
 from datetime import timedelta
@@ -47,6 +48,9 @@ def context_parallel_worker(rank, rendezvous):
             assert not advantages.requires_grad
     finally:
         dist.destroy_process_group()
+        # A leftover reference to the Gloo group is otherwise freed at interpreter exit, where its threads can abort the
+        # rank with "terminate called without an active exception" after the test body passed.
+        gc.collect()
 
 
 @pytest.mark.integration
