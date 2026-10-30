@@ -22,7 +22,7 @@ from reef.runtime.interfaces import InferenceHandler, InferenceRuntime
 from reef.runtime.jobs import TrainingComponent
 from reef.scenario.binding import ScenarioBinding
 from reef.scenario.committer import ComponentArtifact, ScenarioCommitter
-from reef.scenario.releases import ServedArtifact
+from reef.scenario.releases import ServedBesideArtifact
 from reef.storage.commits import SCENARIO_METADATA_KEY, CommitRecord
 from reef.storage.records import RecordStore
 from reef.storage.scenario import ScenarioStore
@@ -284,7 +284,7 @@ class Scenario:
         """Serve ``artifact_id`` beside the active release; see :meth:`ScenarioCommitter.serve`."""
         return self._committer.serve(artifact_id, component)
 
-    def stop_serving(self, artifact_id: str) -> ServedArtifact:
+    def stop_serving(self, artifact_id: str) -> ServedBesideArtifact:
         """Stop serving ``artifact_id`` beside the active release; see :meth:`ScenarioCommitter.stop_serving`."""
         return self._committer.stop_serving(artifact_id)
 

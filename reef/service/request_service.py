@@ -222,7 +222,7 @@ class RequestService:
         item = AgentRecord.create(
             scenario=parsed.scenario,
             request_type=parsed.request_type,
-            payload=_with_tags(normalized, parsed),
+            payload=with_request_tags(normalized, parsed),
             agent_record_id=record_id,
             references=references,
         )
@@ -404,7 +404,7 @@ class RequestService:
                 item=AgentRecord.create(
                     scenario=prepared.parsed.scenario,
                     request_type=RequestType.INFERENCE,
-                    payload=_with_tags(payload, prepared.parsed),
+                    payload=with_request_tags(payload, prepared.parsed),
                     artifact_ref=prepared.record_ref,
                 ),
                 release_id=prepared.parsed.release_id,
@@ -1161,7 +1161,7 @@ class RequestService:
         artifact_ref: ArtifactRef | None = None,
     ) -> AgentRecord:
         normalized_payload, references = normalize_request_payload(parsed.request_type, payload)
-        normalized_payload = _with_tags(normalized_payload, parsed)
+        normalized_payload = with_request_tags(normalized_payload, parsed)
         item = AgentRecord.create(
             scenario=parsed.scenario,
             request_type=parsed.request_type,
@@ -1211,7 +1211,7 @@ def recorded_ref(scenario: Scenario, parsed: RequestHeaders, served: ArtifactRef
     return scenario.release_queries.ref_for_version(claimed) or served
 
 
-def _with_tags(payload: Mapping[str, Any], parsed: RequestHeaders) -> Mapping[str, Any]:
+def with_request_tags(payload: Mapping[str, Any], parsed: RequestHeaders) -> Mapping[str, Any]:
     """Carry ``x-reef-tag-*`` through to the INFERENCE record's metadata.
 
     Only inference: a tag is context about a served exchange, and the

@@ -41,7 +41,7 @@ from reef.runtime.interfaces import (
     new_runtime_load_id_incarnation,
 )
 from reef.runtime.residency import AdapterResidencyError, AdapterResidencyManager
-from reef.surface.adapter import parse_adapter_name
+from reef.surface.adapter import adapter_name, parse_adapter_name
 
 logger = logging.getLogger(__name__)
 
@@ -278,6 +278,11 @@ class AdapterServingRuntime(SavedWeightServingRuntime):
     @property
     def shared_by_training_scenarios(self) -> bool:
         return True
+
+    def served_model_name(self, scenario: str) -> str:
+        """The adapter that serves ``scenario`` now, by its engine name; the base model before any adapter."""
+        version = self.serving_adapter_runtime_load_id(scenario)
+        return self.model_path if version is None else adapter_name(scenario, version)
 
     def serving_adapter_runtime_load_id(self, scenario: str) -> str | None:
         current = self._residency.current_adapter(scenario)

@@ -1034,7 +1034,7 @@ def test_tag_headers_ride_the_inference_record_and_nothing_else() -> None:
     The streaming path builds its own record and carries the tags as well: a streaming agent-loop call is exactly
     the one a correlating processor needs.
     """
-    from reef.service.request_service import _with_tags
+    from reef.service.request_service import with_request_tags
     from reef.service.wire import parse_request_headers
 
     headers = {
@@ -1044,12 +1044,12 @@ def test_tag_headers_ride_the_inference_record_and_nothing_else() -> None:
     }
     parsed = parse_request_headers(headers, RequestType.INFERENCE)
     assert dict(parsed.tags) == {"session": "hw-3"}  # blank values are not tags
-    assert _with_tags({"messages": []}, parsed) == {"messages": [], "metadata": {"tags": {"session": "hw-3"}}}
-    assert _with_tags({"messages": [], "stream": True}, parsed)["metadata"]["tags"] == {"session": "hw-3"}
+    assert with_request_tags({"messages": []}, parsed) == {"messages": [], "metadata": {"tags": {"session": "hw-3"}}}
+    assert with_request_tags({"messages": [], "stream": True}, parsed)["metadata"]["tags"] == {"session": "hw-3"}
 
     # A report is a judgment about turns, not a served exchange: no tags.
     reported = parse_request_headers(headers, RequestType.REPORT)
-    assert _with_tags({"score": 1.0}, reported) == {"score": 1.0}
+    assert with_request_tags({"score": 1.0}, reported) == {"score": 1.0}
 
 
 class HarnessRecipe(Recipe):

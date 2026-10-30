@@ -31,6 +31,7 @@ from typing import Any, Literal
 from reef.artifact.artifact import Artifact
 from reef.core.errors import InferenceUnavailable, ReefError
 from reef.core.evaluation import ArtifactKind, PolicyModel
+from reef.core.served_models import ServedArtifact
 from reef.core.weight_layout import WEIGHT_LAYOUTS, WeightLayout
 from reef.surface.base import AdapterWeightRuntime, InferenceLease
 
@@ -511,6 +512,27 @@ class InferenceRuntime(AdapterWeightRuntime):
     @abstractmethod
     def inference_handler(self) -> InferenceHandler:
         """The inference request handler owned by this runtime."""
+
+    def served_model_name(self, scenario: str) -> str:
+        """The name under which the engine serves ``scenario``'s weights now; ``model_path`` unless a runtime serves
+        each scenario under its own name."""
+        return self.model_path
+
+    def served_artifact(self, artifact_id: str, scenario: str) -> ServedArtifact | None:
+        """The ``ServedArtifact`` that reaches ``artifact_id``, the artifact that serves ``scenario`` now, from
+        outside this process: the engine's HTTP(S) ``base_url`` and ``served_model_name``.
+
+        None when the engine has no such address or name, so an inference service cannot reach it without this
+        runtime; control then writes no ``served_models`` row for it.
+        """
+        name = self.served_model_name(scenario)
+        if not name:
+            return None
+        try:
+            return ServedArtifact(artifact_id, self.base_url, name)
+        except ValueError:
+            # The base URL is no HTTP(S) URL that another process can call.
+            return None
 
     def shutdown(self) -> None:
         """Release owned resources after all users of this runtime have stopped.

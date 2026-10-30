@@ -21,22 +21,23 @@ from reef.core.errors import ReefError, ScenarioCapacityFull, UnknownScenario
 from reef.core.job_data import TrajectorySample
 from reef.core.records_types import AgentRecord, RequestType
 from reef.dispatcher import ingest
-from reef.execution.workers import ServiceWorkers
-from reef.record2sample.service import SamplesWorker, request_selection
-from reef.storage.coordination import Coordination, instance_id
 from reef.dispatcher.errors import TrainingErrors
 from reef.dispatcher.local_workers import LocalTrainingWorkers
-from reef.dispatcher.samples import LocalSampleProducers
 from reef.dispatcher.record_item_copier import RecordItemCopier
+from reef.dispatcher.samples import LocalSampleProducers
+from reef.dispatcher.served import CACHE_SECONDS, ServedModelsPublisher
 from reef.dispatcher.status import TrainingStatus
+from reef.execution.workers import ServiceWorkers
 from reef.observability import ExperimentTracker, NullExperimentTracker
 from reef.recipe.base import Recipe
+from reef.record2sample.service import SamplesWorker, request_selection
 from reef.runtime.deployment import close_runtimes
 from reef.scenario.admission import ScenarioAdmission
 from reef.scenario.committer import ComponentArtifact
 from reef.scenario.registry import ScenarioLifecycle, ScenarioRegistry
-from reef.scenario.releases import ServedArtifact
+from reef.scenario.releases import ServedBesideArtifact
 from reef.scenario.scenario import Scenario
+from reef.storage.coordination import Coordination, instance_id
 from reef.storage.data import DataStore, check_owner
 from reef.storage.data_sync import sync_scenario_samples, uploads
 from reef.storage.record_items import sync_scenario_records
@@ -137,6 +138,17 @@ class Dispatcher(ScenarioLifecycle):
         self.errors = TrainingErrors()
         self.background_threads = BackgroundThreads()
         self.local_workers = LocalTrainingWorkers(self.registry, self.errors, held=hold_local_cycles)
+        if coordination is not None:
+            runtime = recipe.runtime
+            request_timeout_seconds = 300.0 if runtime is None else runtime.inference_timeout_s
+            self.workers.add(
+                ServedModelsPublisher(
+                    self.registry,
+                    coordination,
+                    instance_id=instance_id("control"),
+                    stop_delay_seconds=CACHE_SECONDS + request_timeout_seconds,
+                )
+            )
         if self.samples_queue is not None:
             self.workers.add(
                 SamplesWorker(
@@ -399,7 +411,7 @@ class Dispatcher(ScenarioLifecycle):
         with self.registry.lock_for(scenario):
             return self.registry.require(scenario).serve(artifact_id, component)
 
-    def stop_serving(self, scenario: str, artifact_id: str) -> ServedArtifact:
+    def stop_serving(self, scenario: str, artifact_id: str) -> ServedBesideArtifact:
         """Stop serving ``artifact_id`` beside the active release of ``scenario``; the active release stays."""
         with self.registry.lock_for(scenario):
             return self.registry.require(scenario).stop_serving(artifact_id)

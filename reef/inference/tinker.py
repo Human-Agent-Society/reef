@@ -24,6 +24,7 @@ from reef.artifact.artifact import Artifact
 from reef.artifact.sources import read_reference
 from reef.core.config import config_option
 from reef.core.evaluation import ArtifactKind, PolicyModel
+from reef.core.served_models import ServedArtifact
 from reef.runtime.deployment import RuntimeFactory, config_secret
 from reef.runtime.interfaces import (
     InferenceHandler,
@@ -108,6 +109,11 @@ class TinkerInferenceRuntime(InferenceRuntime):
     def sampler_path(self, artifact: Artifact) -> str | None:
         """The sampler that serves ``artifact``; ``None`` for the base model (``checkpoint_sampler_path``)."""
         return checkpoint_sampler_path(artifact, self._model, self._service, full=self._kind == "model")
+
+    def served_artifact(self, artifact_id: str, scenario: str) -> ServedArtifact | None:
+        """None: Tinker's sampler answers through its SDK, so only the Reef service that holds this runtime reaches
+        it."""
+        return None
 
     def artifact_model(self, artifact: Artifact) -> PolicyModel:
         """The model that serves ``artifact``: each call samples its own artifact.

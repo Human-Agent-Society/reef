@@ -27,7 +27,7 @@ from reef.core.errors import CommitPending, ReefError
 from reef.observability.base import TrainingExperimentContext
 from reef.observability.commits import CommitExperimentObserver
 from reef.scenario.binding import ScenarioBinding
-from reef.scenario.releases import ScenarioReleases, ServedArtifact
+from reef.scenario.releases import ScenarioReleases, ServedBesideArtifact
 from reef.storage.commits import (
     SCENARIO_METADATA_KEY,
     CommitOperation,
@@ -465,7 +465,7 @@ class ScenarioCommitter:
             self.advance_to(record.step)
             return replace(selected, release_id=target.ref.release_id)
 
-    def stop_serving(self, artifact_id: str) -> ServedArtifact:
+    def stop_serving(self, artifact_id: str) -> ServedBesideArtifact:
         """Stop serving ``artifact_id`` beside the active release; return it with the release that served it.
 
         The ``"stop_serving"`` record names the release, the component and the
