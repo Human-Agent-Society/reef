@@ -33,6 +33,7 @@ import json
 import logging
 import math
 import os
+import re
 import shlex
 import shutil
 import statistics
@@ -51,6 +52,7 @@ from recipes.beta.autoenvscaling.author import (
     AuthorError,
     CandidateChecks,
     PromptAuthor,
+    SeedVariantAuthor,
     SourceError,
     TaskAuthor,
     TaskVariant,
@@ -128,6 +130,7 @@ VARIANT_POSITION = -1
 # A seed's one source record id: this prefix and the first SEED_ID_DIGITS hex digits of its digest.
 SEED_ID_PREFIX = "seed-"
 SEED_ID_DIGITS = 16
+SEED_RECORD_ID = re.compile(f"{re.escape(SEED_ID_PREFIX)}[0-9a-f]{{{SEED_ID_DIGITS}}}")
 DEFAULT_BAND_LOW = 0.25
 DEFAULT_BAND_HIGH = 0.75
 DEFAULT_BAND = PassRateBand(DEFAULT_BAND_LOW, DEFAULT_BAND_HIGH)
@@ -422,7 +425,10 @@ class SessionProposal:
 
     Values: index is a non-negative integer; source_record_id is non-empty text.
     Position is a non-negative walk index or -1 exactly when parent_task and direction
-    identify a variant. Designer_record_id and refusal are text, empty when unavailable.
+    identify a variant, or seed_task alone identifies a seed; a seed is neither a variant nor a session proposal.
+    A session proposal has no parent_task, direction or seed_task. Seed_task is empty or a Harbor task name, and a
+    proposal with one has a seed id (``seed-`` and 16 hex digits) as its source_record_id. Designer_record_id and
+    refusal are text, empty when unavailable.
     Purpose: generate saves proposals; record_results updates them for the generation report.
     ``task_name`` is a Harbor name or None, set once the author's task was admitted.
     ``stage`` says where a session that became no task inside the band stopped (``STAGE_*``); it is empty for a task inside the band. ``designer_record_id`` is
@@ -451,16 +457,32 @@ class SessionProposal:
             raise ValueError("a proposal needs a source_record_id")
         if not all(
             isinstance(value, str)
-            for value in (self.designer_record_id, self.refusal, self.parent_task, self.direction, self.stage)
+            for value in (
+                self.designer_record_id,
+                self.refusal,
+                self.parent_task,
+                self.direction,
+                self.stage,
+                self.seed_task,
+            )
         ):
-            raise ValueError("proposal record, refusal, variant and stage fields must be text")
-        if self.position == VARIANT_POSITION:
+            raise ValueError("proposal record, refusal, variant, seed and stage fields must be text")
+        if self.seed_task and (
+            not TASK_NAME_PATTERN.fullmatch(self.seed_task)
+            or ".." in self.seed_task
+            or not SEED_RECORD_ID.fullmatch(self.source_record_id)
+        ):
+            raise ValueError("a proposal's seed_task must be a task name, and its source_record_id the seed's id")
+        if self.position == VARIANT_POSITION and not self.parent_task and not self.direction:
+            if not self.seed_task:
+                raise ValueError("a proposal at position -1 needs a parent task and a direction, or a seed_task")
+        elif self.position == VARIANT_POSITION:
             if not TASK_NAME_PATTERN.fullmatch(self.parent_task) or ".." in self.parent_task:
                 raise ValueError("a variant proposal needs a parent task name")
             if self.direction not in (VARIANT_HARDER, VARIANT_SIMPLER):
                 raise ValueError("a variant proposal needs direction harder or simpler")
-        elif self.position < 0 or self.parent_task or self.direction:
-            raise ValueError("a session proposal needs a non-negative position and no variant fields")
+        elif self.position < 0 or self.parent_task or self.direction or self.seed_task:
+            raise ValueError("a session proposal needs a non-negative position and no variant or seed fields")
         if self.stage not in (
             "",
             STAGE_SOURCE,
@@ -513,12 +535,13 @@ class ParentTask:
     """A training task retained for an adaptive generation to vary.
 
     Values: ``name`` is the task's name (a Harbor task name) and ``source_record_id`` its session's record id, or
-    for a task from a seed the seed's id.
+    for a task from a seed the seed's id (``seed-`` and 16 hex digits).
     ``source_record_id`` must be non-empty. ``generation`` is a non-negative integer;
     ``rollouts`` is a positive integer. Neither accepts bool. ``pass_rate`` is a non-boolean
     number in [0, 1], representing the mean rollout reward. ``direction`` is harder or simpler.
-    ``varied`` is a bool, true once a generation gave this parent a variant slot. ``seed_task`` is the directory
-    name of the seed the task comes from, the seed itself or a variant of it, and is empty for a task from a session.
+    ``varied`` is a bool, true once a generation gave this parent a variant slot. ``seed_task`` is the Harbor task
+    name (the directory name) of the seed the task comes from, the seed itself or a variant of it; a parent with one
+    has the seed's id as its ``source_record_id``. It is empty for a task from a session.
     Purpose: ``record_results`` adds one per training task outside the band and keeps the task's files under
     ``parents/<name>``; ``generate`` picks the newest unvaried parents for its variant slots, and varies a parent
     with a ``seed_task`` without a session.
@@ -537,12 +560,19 @@ class ParentTask:
         # The name names the parent's directory, which a bounded list removes.
         if not isinstance(self.name, str) or not TASK_NAME_PATTERN.fullmatch(self.name) or ".." in self.name:
             raise ValueError(f"a parent's name must be a task name matching {TASK_NAME_PATTERN.pattern}")
-        if not isinstance(self.seed_task, str):
-            raise ValueError("a parent's seed_task must be a directory name or empty")
         if self.direction not in (VARIANT_HARDER, VARIANT_SIMPLER):
             raise ValueError(f"a parent's direction must be {VARIANT_HARDER} or {VARIANT_SIMPLER}")
         if not isinstance(self.source_record_id, str) or not self.source_record_id.strip():
             raise ValueError("a parent needs a non-empty source_record_id")
+        if not isinstance(self.seed_task, str) or (
+            self.seed_task
+            and (
+                not TASK_NAME_PATTERN.fullmatch(self.seed_task)
+                or ".." in self.seed_task
+                or not SEED_RECORD_ID.fullmatch(self.source_record_id)
+            )
+        ):
+            raise ValueError("a parent's seed_task must be empty or a task name, with the seed's id as its source")
         if type(self.varied) is not bool:
             raise ValueError("a parent's varied flag must be a bool")
         if (
@@ -864,8 +894,9 @@ class AutoEnvScalingGenerator(TaskGenerator):
     saved in ``adaptive.json``, in insertion order, with unique names and at most
     MAX_PARENTS entries; empty unless ``is_adaptive``. ``seeds`` are the seed
     tasks in directory-name order, empty unless ``is_adaptive``; ``sources`` and ``seeds`` are not both empty.
-    ``seed_checks`` is the :class:`SeedCheck`, then the contamination checks among the given checks: the checks a
-    seed runs.
+    ``seed_author`` is ``author`` when it is a :class:`SeedVariantAuthor`, or None; it is set when there are seeds
+    or a parent has a ``seed_task``. ``seed_checks`` is the :class:`SeedCheck`, then the contamination checks among
+    the given checks: the checks a seed runs.
     Purpose: the generated-task recipe builds it with ``from_config`` and calls ``generate``, ``validate`` and
     ``record_results`` in each round.
     """
@@ -907,6 +938,9 @@ class AutoEnvScalingGenerator(TaskGenerator):
         if is_adaptive and not isinstance(author, VariantAuthor):
             raise ValueError("adaptive generation needs a VariantAuthor")
         self.variant_author = author if isinstance(author, VariantAuthor) else None
+        if seeds and not isinstance(author, SeedVariantAuthor):
+            raise ValueError("seed tasks need a SeedVariantAuthor")
+        self.seed_author = author if isinstance(author, SeedVariantAuthor) else None
         self.sources = sources
         self.state_dir = state_dir
         self.count = count
@@ -945,6 +979,8 @@ class AutoEnvScalingGenerator(TaskGenerator):
         )
         if len(self.parents) > MAX_PARENTS or len({parent.name for parent in self.parents}) != len(self.parents):
             raise ValueError(f"adaptive.json must hold at most {MAX_PARENTS} parents with unique names")
+        if self.seed_author is None and any(parent.seed_task for parent in self.parents):
+            raise ValueError("adaptive.json holds seeded parents, which need a SeedVariantAuthor")
 
     @classmethod
     def from_config(cls, config: Mapping[str, Any], *, scenario: str, environ: Mapping[str, str]) -> Self:
@@ -1235,7 +1271,14 @@ class AutoEnvScalingGenerator(TaskGenerator):
         work_dir = self.state_dir / "runs" / f"{self.generation:05d}-{index:03d}"
         stop = threading.Event()
         try:
-            if variant is None:
+            if source is None:
+                # The check above gave a task without a session a variant.
+                if self.seed_author is None or variant is None:
+                    raise ValueError("a variant of a seeded parent needs a SeedVariantAuthor")
+                authored = await asyncio.to_thread(
+                    self.seed_author.vary_seed, work_dir, checks, tags=tags, stop=stop, variant=variant
+                )
+            elif variant is None:
                 authored = await asyncio.to_thread(self.author.author, source, work_dir, checks, tags=tags, stop=stop)
             else:
                 if self.variant_author is None:

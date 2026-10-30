@@ -39,8 +39,8 @@ from recipes.beta.autoenvscaling.author import (
     AuthorError,
     CandidateChecks,
     ModelCalls,
+    SeedVariantAuthor,
     TaskVariant,
-    VariantAuthor,
     agent_prompt,
     agent_rules,
     close_when_stopped,
@@ -258,7 +258,7 @@ class CheckTools(AgentTools):
                 self.running_id = None
 
 
-class ClaudeCodeAuthor(VariantAuthor):
+class ClaudeCodeAuthor(SeedVariantAuthor):
     """Reef's pinned Claude Code in a cloud sandbox, signed in with ``claude_token`` and asking for ``model``.
 
     Values: ``reef_url`` and ``token`` read the source sessions, and ``cache_dir`` keeps the repository snapshots.
@@ -266,8 +266,8 @@ class ClaudeCodeAuthor(VariantAuthor):
     ``timeout_seconds`` (positive) and at most ``max_turns`` (positive) agent turns, Claude Code's ``--max-turns``.
     With ``has_behaviour_rule`` the rules include the behaviour rule.
     Purpose: the generator builds one for ``author_harness: claude-code``; :meth:`author` runs Claude Code on one
-    session, and :meth:`vary` on a parent of that session, and each returns its task with no recorded model call
-    and the path of its transcript.
+    session, :meth:`vary` on a parent of that session and :meth:`vary_seed` on a seeded parent, and each returns its
+    task with no recorded model call and the path of its transcript.
     """
 
     def __init__(
@@ -299,7 +299,7 @@ class ClaudeCodeAuthor(VariantAuthor):
 
     def author(
         self,
-        source: SessionSource | None,
+        source: SessionSource,
         work_dir: Path,
         checks: CandidateChecks,
         *,
@@ -320,9 +320,20 @@ class ClaudeCodeAuthor(VariantAuthor):
     ) -> AuthoredTask:
         return self.write_task(source, work_dir, checks, tags=tags, stop=stop, variant=variant)
 
+    def vary_seed(
+        self,
+        work_dir: Path,
+        checks: CandidateChecks,
+        *,
+        tags: Mapping[str, str],
+        stop: threading.Event,
+        variant: TaskVariant,
+    ) -> AuthoredTask:
+        return self.write_task(None, work_dir, checks, tags=tags, stop=stop, variant=variant)
+
     def write_task(
         self,
-        source: SessionSource,
+        source: SessionSource | None,
         work_dir: Path,
         checks: CandidateChecks,
         *,
@@ -330,8 +341,9 @@ class ClaudeCodeAuthor(VariantAuthor):
         stop: threading.Event,
         variant: TaskVariant | None = None,
     ) -> AuthoredTask:
-        """Claude Code's task from ``source``, or with ``variant`` a variant of its parent; ``tags`` go unused,
-        since Reef records none of its model calls.
+        """Claude Code's task from ``source``, or with ``variant`` a variant of its parent; a ``source`` of None is a
+        variant of a seeded parent, written from the parent alone. ``tags`` go unused, since Reef records none of its
+        model calls.
 
         Raises :class:`CredentialHeld` when the task holds the token: the task is not admitted.
         """

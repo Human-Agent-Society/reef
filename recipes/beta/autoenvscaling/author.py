@@ -7,8 +7,8 @@ one tool, ``task_check``. Its model calls and checks go through a loopback gatew
 holds the credentials and records each model call on Reef. :class:`PromptAuthor` is the baseline: the generator
 service's one-reply prompt Designer, one recorded model call whose reply is the task.
 
-A variant of a seeded parent has no session: the agent then reads the parent and ``variant.md`` alone, by the seed
-rules (:data:`SEED_AGENT_RULES`).
+A variant of a seeded parent has no session: a :class:`SeedVariantAuthor` writes it with ``vary_seed``, and the agent
+then reads the parent and ``variant.md`` alone, by the seed rules (:data:`SEED_AGENT_RULES`).
 """
 
 from __future__ import annotations
@@ -304,11 +304,12 @@ class TaskVariant:
     Values: ``parent`` is a Harbor task name and ``parent_dir`` is a Path locating its files.
     File existence is checked when read. ``direction`` is harder or simpler. ``pass_rate``
     is a non-boolean number in [0, 1]; ``rollouts`` is a positive, non-boolean integer.
-    The rate represents the mean reward over that many rollouts of the parent. ``seed_task``
-    is the directory name of the seed task the parent comes from, or empty for a parent rebuilt from a session.
+    The rate represents the mean reward over that many rollouts of the parent. ``seed_task`` is empty for a parent
+    from a session, or the Harbor task name of the seed (its directory name) that a seeded parent comes from.
     Purpose: the generator makes one for a variant slot of an adaptive generation; ``VariantAuthor.vary`` puts the
-    parent and the pass rate in the agent's inputs and asks for a task that keeps the parent's requirements. The
-    generator names ``seed_task`` in the variant's metadata.
+    parent and the pass rate in the agent's inputs and asks for a task that keeps the parent's requirements.
+    ``SeedVariantAuthor.vary_seed`` does so for a seeded parent, without a session. The generator names
+    ``seed_task`` in the variant's metadata.
     """
 
     parent: str
@@ -323,8 +324,10 @@ class TaskVariant:
             raise ValueError("a variant's parent must be a task name")
         if not isinstance(self.parent_dir, Path):
             raise ValueError("a variant's parent_dir must be a Path")
-        if not isinstance(self.seed_task, str):
-            raise ValueError("a variant's seed_task must be a directory name or empty")
+        if not isinstance(self.seed_task, str) or (
+            self.seed_task and (not TASK_NAME_PATTERN.fullmatch(self.seed_task) or ".." in self.seed_task)
+        ):
+            raise ValueError("a variant's seed_task must be empty or a task name")
         if self.direction not in (VARIANT_HARDER, VARIANT_SIMPLER):
             raise ValueError(f"a variant's direction must be {VARIANT_HARDER} or {VARIANT_SIMPLER}")
         if type(self.pass_rate) not in (int, float):
@@ -378,7 +381,7 @@ class TaskAuthor(ABC):
     @abstractmethod
     def author(
         self,
-        source: SessionSource | None,
+        source: SessionSource,
         work_dir: Path,
         checks: CandidateChecks,
         *,
@@ -409,6 +412,28 @@ class VariantAuthor(TaskAuthor):
         variant: TaskVariant,
     ) -> AuthoredTask:
         """Write a variant from source and variant, returning its reply and model receipts."""
+
+
+class SeedVariantAuthor(VariantAuthor):
+    """A variant author that also varies a seeded parent, which has no session, through ``vary_seed``.
+
+    ``vary_seed`` has the same output, checks, cancellation and failure contract as ``vary``. Its input is a
+    TaskVariant with a ``seed_task``, and it raises ``ValueError`` for one without. It reads no session and no
+    repository: only the parent and its pass rate. The returned task keeps the parent's domain, harder or simpler.
+    A generator with seed tasks accepts only authors implementing this interface.
+    """
+
+    @abstractmethod
+    def vary_seed(
+        self,
+        work_dir: Path,
+        checks: CandidateChecks,
+        *,
+        tags: Mapping[str, str],
+        stop: threading.Event,
+        variant: TaskVariant,
+    ) -> AuthoredTask:
+        """Write a variant of a seeded parent from variant alone, returning its reply and model receipts."""
 
 
 class ModelCalls(ProposerCalls):
@@ -654,9 +679,9 @@ def write_inputs(reef: ReefClient, source: SessionSource | None, work_dir: Path,
     files and its pass rate. The repository's files are copied in later, from the snapshot cache. Without a
     ``source`` (a variant of a seeded parent), the inputs are the parent and its pass rate alone, nothing is read
     from Reef, and ``workspace/task/environment`` starts as a copy of the parent's. Raises ``ValueError`` for a
-    None ``source`` without a ``variant``.
+    None ``source`` without a ``variant`` that names a ``seed_task``.
     """
-    if source is None and variant is None:
+    if source is None and (variant is None or not variant.seed_task):
         raise ValueError("an author's run without a session needs a variant of a seeded parent")
     inputs = work_dir / "inputs"
     (work_dir / "workspace" / "task").mkdir(parents=True)
@@ -689,7 +714,7 @@ def write_inputs(reef: ReefClient, source: SessionSource | None, work_dir: Path,
             )
 
 
-class AgentAuthor(VariantAuthor):
+class AgentAuthor(SeedVariantAuthor):
     """pi in a cloud sandbox, its model calls recorded on the Reef at ``reef_url`` under ``scenario``.
 
     ``reef_url`` and ``token`` also read the source sessions; ``cache_dir`` keeps the repository snapshots.
@@ -725,7 +750,7 @@ class AgentAuthor(VariantAuthor):
 
     def author(
         self,
-        source: SessionSource | None,
+        source: SessionSource,
         work_dir: Path,
         checks: CandidateChecks,
         *,
@@ -746,9 +771,20 @@ class AgentAuthor(VariantAuthor):
     ) -> AuthoredTask:
         return self.write_task(source, work_dir, checks, tags=tags, stop=stop, variant=variant)
 
+    def vary_seed(
+        self,
+        work_dir: Path,
+        checks: CandidateChecks,
+        *,
+        tags: Mapping[str, str],
+        stop: threading.Event,
+        variant: TaskVariant,
+    ) -> AuthoredTask:
+        return self.write_task(None, work_dir, checks, tags=tags, stop=stop, variant=variant)
+
     def write_task(
         self,
-        source: SessionSource,
+        source: SessionSource | None,
         work_dir: Path,
         checks: CandidateChecks,
         *,
@@ -756,6 +792,8 @@ class AgentAuthor(VariantAuthor):
         stop: threading.Event,
         variant: TaskVariant | None = None,
     ) -> AuthoredTask:
+        """pi's task from ``source``, or with ``variant`` a variant of its parent; a ``source`` of None is a variant
+        of a seeded parent, written from the parent alone (:func:`write_inputs`)."""
         inputs = work_dir / "inputs"
         task_dir = work_dir / "workspace" / "task"
         write_inputs(self.reef, source, work_dir, variant)
@@ -965,7 +1003,7 @@ class PromptAuthor(TaskAuthor):
 
     def author(
         self,
-        source: SessionSource | None,
+        source: SessionSource,
         work_dir: Path,
         checks: CandidateChecks,
         *,

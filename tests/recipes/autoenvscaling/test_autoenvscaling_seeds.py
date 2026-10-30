@@ -18,6 +18,7 @@ from tests.recipes.autoenvscaling.autoenvscaling_stubs import (
     ScriptedExecutor,
     ScriptedRollouts,
     ScriptedSession,
+    StandInAuthor,
     cursor,
     generating_config,
     report,
@@ -40,6 +41,7 @@ from recipes.beta.autoenvscaling import (
     ClaudeCodeAuthor,
     ContaminationCheck,
     ReviewCheck,
+    SeedVariantAuthor,
     SessionSource,
     TaskAuthor,
     TaskVariant,
@@ -48,9 +50,10 @@ from recipes.beta.autoenvscaling import (
 from recipes.beta.autoenvscaling import author as author_module
 from recipes.beta.autoenvscaling import claude_author as claude_author_module
 from recipes.beta.autoenvscaling import load_sources, workspace_reply
-from recipes.beta.autoenvscaling.author import SEED_VARIANT_PROMPT, agent_prompt, agent_rules
+from recipes.beta.autoenvscaling.author import SEED_VARIANT_PROMPT, VARIANT_INPUTS_TEXT, agent_prompt, agent_rules
+from recipes.beta.autoenvscaling.checks import PassRateBand
 from recipes.beta.autoenvscaling.claude_author import CLAUDE_CHECK_TEXT
-from recipes.beta.autoenvscaling.generator import seed_record_id, seed_tasks
+from recipes.beta.autoenvscaling.generator import ParentTask, SessionProposal, seed_record_id, seed_tasks
 from reef.core.plugins import PluginConfigError
 from reef.core.tasks import HarborTask, read_harbor_task, write_harbor_task
 from reef.core.tasks.split import TaskSplit, extend_split_by_source
@@ -63,6 +66,8 @@ from reef.record2sample.generator import OracleResult
 SESSION_RULES_SHA256 = "98840322e47c9f267ef5fe41b23439225ed2565f58b58e46979881f20aed4047"
 SESSION_PROMPTS_SHA256 = "e52fc63542fedbb4958efd3f87824252ee549820f6364887549c7806e205ee2d"
 HISTORY_MARK = "keeps its history up to the checked-out commit"
+# A seed's source record id: "seed-" and 16 hex digits of its digest.
+SEED_ID = "seed-0123456789abcdef"
 
 
 @pytest.fixture(autouse=True)
@@ -89,7 +94,7 @@ def write_seeds(root: Path, count: int) -> Path:
     return root
 
 
-class SeedAuthor(TaskAuthor):
+class SeedAuthor(SeedVariantAuthor):
     """Writes a task as the agent would, from a session or, without one, from the parent alone; it checks the task
     once through the generator's checks and returns two receipts. ``sources``, ``variants`` and ``checks`` keep
     what each run got and what its check answered."""
@@ -101,13 +106,46 @@ class SeedAuthor(TaskAuthor):
 
     def author(
         self,
-        source: SessionSource | None,
+        source: SessionSource,
         work_dir: Path,
         checks: CandidateChecks,
         *,
         tags: Mapping[str, str],
         stop: threading.Event,
-        variant: TaskVariant | None = None,
+    ) -> AuthoredTask:
+        return self.write(source, work_dir, checks, tags=tags, variant=None)
+
+    def vary(
+        self,
+        source: SessionSource,
+        work_dir: Path,
+        checks: CandidateChecks,
+        *,
+        tags: Mapping[str, str],
+        stop: threading.Event,
+        variant: TaskVariant,
+    ) -> AuthoredTask:
+        return self.write(source, work_dir, checks, tags=tags, variant=variant)
+
+    def vary_seed(
+        self,
+        work_dir: Path,
+        checks: CandidateChecks,
+        *,
+        tags: Mapping[str, str],
+        stop: threading.Event,
+        variant: TaskVariant,
+    ) -> AuthoredTask:
+        return self.write(None, work_dir, checks, tags=tags, variant=variant)
+
+    def write(
+        self,
+        source: SessionSource | None,
+        work_dir: Path,
+        checks: CandidateChecks,
+        *,
+        tags: Mapping[str, str],
+        variant: TaskVariant | None,
     ) -> AuthoredTask:
         self.sources.append(None if source is None else source.record_id)
         self.variants.append(variant)
@@ -137,7 +175,8 @@ def seeded(
     seed_count: int = 2,
     source_count: int = 0,
     count: int = 2,
-    task_checks: Sequence[CalibrationCheck | ContaminationCheck | ReviewCheck] = (),
+    task_checks: Sequence[ContaminationCheck | ReviewCheck] = (),
+    calibration: CalibrationCheck | None = None,
 ) -> AutoEnvScalingGenerator:
     """An adaptive generator with ``seed_count`` seeds and ``source_count`` sessions, half its slots for variants."""
     return AutoEnvScalingGenerator(
@@ -148,6 +187,7 @@ def seeded(
         state_dir=tmp_path / "state",
         count=count,
         task_checks=tuple(task_checks),
+        calibration=calibration,
         is_adaptive=True,
         seeds=seed_tasks(write_seeds(tmp_path / "seeds", seed_count)),
     )
@@ -253,14 +293,13 @@ def test_a_seed_skips_the_review_and_the_calibration(tmp_path: Path) -> None:
             max_rollouts=2,
             margin=0.1,
             min_std=0.0,
-            band_low=0.25,
-            band_high=0.75,
+            band=PassRateBand(0.25, 0.75),
         )
         contamination = ContaminationCheck(
             {"reference": "a reference task about something else"}, n=5, tasks_path="refs"
         )
         generator = seeded(
-            tmp_path, SeedAuthor(), service, seed_count=1, task_checks=(contamination, review, calibration)
+            tmp_path, SeedAuthor(), service, seed_count=1, task_checks=(contamination, review), calibration=calibration
         )
         [task] = asyncio.run(generator.generate(REQUEST))
         assert asyncio.run(generator.validate(task)).is_valid
@@ -371,13 +410,12 @@ def test_an_attempt_that_raises_or_is_cancelled_takes_no_seed(tmp_path: Path, is
 
         def author(
             self,
-            source: SessionSource | None,
+            source: SessionSource,
             work_dir: Path,
             checks: CandidateChecks,
             *,
             tags: Mapping[str, str],
             stop: threading.Event,
-            variant: TaskVariant | None = None,
         ) -> AuthoredTask:
             self.started.set()
             if not is_cancelled:
@@ -512,7 +550,7 @@ def test_a_seed_variant_gets_only_the_parent_and_variant_md_and_the_parents_envi
         )
     run = tmp_path / "run"
     checks = NoChecks(1)
-    author.author(None, run, checks, tags={}, stop=threading.Event(), variant=variant)
+    author.vary_seed(run, checks, tags={}, stop=threading.Event(), variant=variant)
 
     assert {name for name in session.seen if name.startswith("inputs/")} == {
         "inputs/variant.md",
@@ -524,22 +562,25 @@ def test_a_seed_variant_gets_only_the_parent_and_variant_md_and_the_parents_envi
     assert {name: text for name, text in session.seen.items() if name.startswith("workspace/")} == {
         f"workspace/task/environment/{name}": text for name, text in parent.environment.items()
     }
-    rules = agent_rules(checks, True, variant, True)
+    rules = agent_rules(checks, True, "", True)
     assert "session" not in rules.lower() and "../inputs/repo" not in rules and "history" not in rules
     written = "\n".join(text for name, text in files_under(run, ".").items() if not name.startswith("inputs/"))
     assert rules in written
     if harness == "claude-code":
         assert CLAUDE_CHECK_TEXT in (run / "claude" / "CLAUDE.md").read_text()
     assert session.argv[session.argv.index("-p") + 1] == SEED_VARIANT_PROMPT.format(direction="simpler")
+    with pytest.raises(ValueError, match="needs a variant of a seeded parent"):
+        author.vary_seed(
+            tmp_path / "other", checks, tags={}, stop=threading.Event(), variant=replace(variant, seed_task="")
+        )
 
 
 @pytest.mark.parametrize("is_reviewing", [True, False])
 @pytest.mark.parametrize("has_behaviour_rule", [True, False])
 def test_the_seed_rules_name_no_session_with_the_review_on_or_off(
-    tmp_path: Path, is_reviewing: bool, has_behaviour_rule: bool
+    is_reviewing: bool, has_behaviour_rule: bool
 ) -> None:
-    variant = TaskVariant(parent="tmax-0", parent_dir=tmp_path, direction="harder", pass_rate=1.0, rollouts=2)
-    rules = agent_rules(NoChecks(6, is_reviewing=is_reviewing), has_behaviour_rule, variant, True)
+    rules = agent_rules(NoChecks(6, is_reviewing=is_reviewing), has_behaviour_rule, "", True)
     assert "session" not in rules.lower() and "../inputs/repo" not in rules and "history" not in rules
     assert ("the check also reviews the tests" in rules) is is_reviewing
     assert "write a real one" in rules and "at most 6 checks" in rules
@@ -574,7 +615,10 @@ def test_the_session_rules_and_prompts_are_unchanged(tmp_path: Path) -> None:
     variant = TaskVariant(parent="t-0", parent_dir=tmp_path, direction="harder", pass_rate=1.0, rollouts=2)
     rules = [
         agent_rules(
-            NoChecks(6, is_reviewing=is_reviewing), has_behaviour_rule, variant if has_variant else None, False
+            NoChecks(6, is_reviewing=is_reviewing),
+            has_behaviour_rule,
+            VARIANT_INPUTS_TEXT if has_variant else "",
+            False,
         )
         for has_behaviour_rule in (True, False)
         for is_reviewing in (True, False)
@@ -647,3 +691,75 @@ def test_from_config_refuses_seeds_without_adaptive_or_with_an_unreadable_seed(
         environ=environ,
     )
     assert generator.sources == () and [seed.name for seed in generator.seeds] == ["tmax-0", "tmax-1"]
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"seed_task": "tmax-0"},
+        {"seed_task": "tmax-0", "parent_task": "harbor-00000-000-autoenvscaling", "direction": "harder"},
+    ],
+    ids=("seed", "variant-of-a-seed"),
+)
+def test_a_proposal_at_position_minus_one_is_a_seed_or_a_variant(fields: dict[str, str]) -> None:
+    proposal = SessionProposal(0, -1, SEED_ID, **fields)
+    assert (proposal.position, proposal.seed_task) == (-1, "tmax-0")
+
+
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    [
+        ({"source_record_id": "session-1"}, "its source_record_id the seed's id"),
+        ({"seed_task": "../tmax-0"}, "seed_task must be a task name"),
+        ({"seed_task": 7}, "seed and stage fields must be text"),
+        ({"seed_task": ""}, "needs a parent task and a direction, or a seed_task"),
+        ({"position": 0}, "no variant or seed fields"),
+        ({"direction": "harder"}, "a variant proposal needs a parent task name"),
+        ({"parent_task": "harbor-00000-000-autoenvscaling"}, "a variant proposal needs direction"),
+    ],
+)
+def test_a_seed_proposal_is_neither_a_variant_nor_a_session_proposal(changes: dict[str, object], message: str) -> None:
+    fields: dict[str, object] = {"index": 0, "position": -1, "source_record_id": SEED_ID, "seed_task": "tmax-0"}
+    with pytest.raises(ValueError, match=message):
+        SessionProposal(**{**fields, **changes})  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("source_record_id", "seed_task"),
+    [("session-1", "tmax-0"), (SEED_ID, "Upper"), (SEED_ID, "../tmax-0"), (SEED_ID, 7)],
+)
+def test_a_seeded_parent_names_a_seed_task_and_has_the_seeds_id(source_record_id: str, seed_task: object) -> None:
+    with pytest.raises(ValueError, match="a parent's seed_task"):
+        ParentTask("t-0", source_record_id, 0, 1.0, 2, "harder", seed_task=seed_task)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("seed_task", ["Upper", "../tmax-0", 7])
+def test_a_variants_seed_task_is_empty_or_a_task_name(seed_task: object) -> None:
+    with pytest.raises(ValueError, match="a variant's seed_task"):
+        TaskVariant(
+            parent="t-0",
+            parent_dir=Path("parents"),
+            direction="harder",
+            pass_rate=1.0,
+            rollouts=2,
+            seed_task=seed_task,  # type: ignore[arg-type]
+        )
+
+
+def test_seeds_and_seeded_parents_need_an_author_that_varies_seeds(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="seed tasks need a SeedVariantAuthor"):
+        seeded(tmp_path, StandInAuthor())
+    generator = seeded(tmp_path, SeedAuthor())
+    asyncio.run(generator.record_results(run_tasks(generator, (1.0, 1.0), (0.5, 0.5)), generation=0))
+    assert [parent["seed_task"] for parent in parents(tmp_path)] == [generator.seeds[0].name]
+    # Without seeds, the state's seeded parents still need an author that can vary them.
+    with pytest.raises(ValueError, match="seeded parents, which need a SeedVariantAuthor"):
+        AutoEnvScalingGenerator(
+            scenario="autoenvscaling",
+            service=StandInGenerator(tmp_path / "tasks"),
+            author=StandInAuthor(),
+            sources=load_sources(sources_file(tmp_path, 1)),
+            state_dir=tmp_path / "state",
+            count=2,
+            is_adaptive=True,
+        )
