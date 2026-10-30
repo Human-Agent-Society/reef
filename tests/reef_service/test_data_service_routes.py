@@ -145,6 +145,12 @@ def test_an_artifacts_files_list_and_download_and_the_jobs_of_a_scenario_read_fr
         downloaded = await client.get(signed["url"])
         assert downloaded.status == 200
         assert (await client.get(f"{files_route}?path=missing", headers=AUTH)).status == 404
+        # The signature covers what the download reads, the component too.
+        named = await (
+            await client.get(f"{files_route}?path={paths[0]}&component=weights&signed=1", headers=AUTH)
+        ).json()
+        assert "component=weights" in named["url"]
+        assert (await client.get(named["url"].replace("component=weights", "component=other"))).status == 401
 
         jobs = await (await client.get("/reef/scenarios/s/jobs", headers=AUTH)).json()
         assert [(job["id"], job["state"]) for job in jobs["jobs"]] == [("job-1", "queued")]

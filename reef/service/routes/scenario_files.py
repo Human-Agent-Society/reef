@@ -24,7 +24,7 @@ def register_scenario_file_routes(app: web.Application, *, request_service: Requ
         component = request.query.get("component") or None
         path = request.query.get("path", "")
         if request.query.get("signed") == "1":
-            url, expires_at = signed_download_url(request, path, download_seconds(request))
+            url, expires_at = signed_download_url(request, download_seconds(request))
             return web.json_response({"url": url, "expires_at": expires_at})
         if not path:
             listing = await asyncio.to_thread(artifact_files, dispatcher, scenario, artifact_id, component)

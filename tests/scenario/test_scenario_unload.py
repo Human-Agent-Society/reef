@@ -144,7 +144,8 @@ def test_idle_scenario_unloads_and_loads_again_with_its_history_and_model(tmp_pa
         before = trained(dispatcher, "math", 1)
         releases = before.releases()
 
-        assert dispatcher.unload_if_idle("math")
+        # The samples of the step's records come from the samples queue, so the scenario is idle a moment later.
+        wait_for(lambda: dispatcher.unload_if_idle("math"))
         assert loaded_names(dispatcher) == []
         assert [row["scenario"] for row in dispatcher.list_scenarios()] == ["math"]
         assert dispatcher.build_training_status()["loaded_scenarios"] == 0

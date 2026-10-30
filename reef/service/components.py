@@ -3,13 +3,15 @@
 Each service reads and writes the shared store of the deployment (``storage.record_backend``): PostgreSQL for
 processes on several hosts, SQLite for processes on one host. The services are:
 
-- ``control``: the Reef HTTP API, scenarios, commits and activation. It writes ``served_models``, adds the
-  training jobs, and serves candidates beside the active artifact for evaluation.
+- ``control``: the Reef HTTP API except the data routes, scenarios, commits and activation. It writes
+  ``served_models``, adds the work of the queues, and syncs loaded scenarios after data writes.
 - ``inference``: answers model requests from ``served_models`` and appends their records
   (``reef.service.inference_service``).
 - ``samples``: makes the samples of record selections from the samples queue.
 - ``training``: runs the jobs of the jobs queue on the training component.
-- ``evaluation``: runs the evaluation rollouts of the evaluations queue against control's candidate route.
+- ``evaluation``: runs the evaluation rollouts of the evaluations queue; it serves each candidate itself.
+- ``data``: the data routes and the reads of each scenario, record copies, imports and exports
+  (``reef.service.data_service``). It needs no control lease.
 
 A service that only takes work from a queue answers ``/healthz`` alone. ``reef serve`` without ``--component`` runs
 all of them in one process, on the same interfaces.

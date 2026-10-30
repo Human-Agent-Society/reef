@@ -69,6 +69,17 @@ Routes
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``DELETE /reef/namespaces/{owner}/data/{id}``                                    | delete one item                                   |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/namespaces/{owner}/data/{id}/archive``                               | one item to download: a task's files as tar.gz,   |
+|                                                                                  | another item's content as JSON                    |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/namespaces/{owner}/data/imports``                                   | import the files at a URI as items                |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/namespaces/{owner}/data/imports/{id}``                               | the status of one import                          |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/namespaces/{owner}/data/exports``                                   | export items to a tar.gz at a URI                 |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/namespaces/{owner}/data/exports/{id}``                               | the status of one export                          |
++----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/report``                                                            | submit feedback about one or more receipts        |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/train``                                                             | enqueue one training instruction                  |
@@ -92,6 +103,9 @@ Routes
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/scenarios/{scenario}/artifacts``                                     | ``{scenario, artifacts}``, newest first           |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/scenarios/{scenario}/artifacts/{artifact_id}/files``                 | an artifact's file list, or one file with         |
+|                                                                                  | ``?path=``                                        |
++----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/scenarios/{scenario}/artifacts``                                    | import a directory as a new artifact              |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/scenarios/{scenario}/activate``                                     | make an existing artifact the one that serves     |
@@ -105,6 +119,8 @@ Routes
 |                                                                                  | release                                           |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/scenarios/{scenario}/tasks``                                         | the tasks the scenario uses, which trained        |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/scenarios/{scenario}/jobs``                                          | the scenario's training jobs in the jobs queue    |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/scenarios/{scenario}/samples``                                       | the scenario's training samples, in store order   |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
@@ -358,6 +374,12 @@ Each item belongs to one owner. The routes have the owner in the path:
 the item to its split, ``train`` or ``eval``. A trajectory is always
 ``train``.
 
+The data service answers the data routes. A one-process ``reef serve`` runs
+it with the other services. When the services run in separate processes,
+send the data routes to the data service: control does not answer them (`Run
+the services in separate processes
+<../user-guide/operate.rst#run-the-services-in-separate-processes>`__).
+
 A scenario uses only the items of its owner. A scenario's owner is the
 scenario's name, or the ``owner`` that ``POST /reef/scenarios`` gave when it
 created the scenario. Reef refuses an item that names a scenario of another
@@ -373,6 +395,12 @@ scenario. A train task trains like a trajectory. In ``sft`` it trains only in
 ``manual`` mode, for an instruction that gives the job's parameters (see
 `Manual training <#manual-training>`__). For the recipe side, see `Uploaded
 trajectories <../developer-guide/processors.rst#uploaded-trajectories>`__.
+
+After each write that adds items to a scenario or removes them, the data
+service asks control to sync the scenarios that the write touched. It waits up
+to 30 seconds for the syncs. Each create, update and delete response has
+``synced``: true when every sync ended, false when one still waits. A sync that
+waits runs when control takes it, or when the scenario loads.
 
 Create trajectory items
 ~~~~~~~~~~~~~~~~~~~~~~~
@@ -400,7 +428,7 @@ more steps:
      }]}'
 
 The response has status 201: ``{"owner", "items": [{"id", "sequence",
-"digest", "metadata"}]}``. Reef stores all of the items in one transaction,
+"digest", "metadata"}], "synced"}``. Reef stores all of the items in one transaction,
 or none. An identical retry changes nothing. The same ID with other content
 returns 409.
 
@@ -468,10 +496,10 @@ owner:
   release that the record names, and ``artifact_id`` the artifact that answered
   the call. Each is null when the record names none.
 
-A background job makes the items after the records are stored, so an item
+The data service makes the items after the records are stored, so an item
 can arrive a short time after its record. When a scenario loads for the first
-time after an upgrade, the job also makes items from its older records, in
-pages. The scenario serves while the job runs.
+time after an upgrade, the data service also makes items from its older
+records, in pages. The scenario serves while it copies them.
 
 The scenario that made a record trains on its own record store, as before.
 To train another scenario of the same owner on a record, add that scenario to
@@ -509,10 +537,12 @@ Read, query, update and delete items
   example, ``{"scenarios": {"my-agent": null}}`` removes the items from
   ``my-agent``, and ``{"scenarios": {"my-agent": "eval"}}`` moves tasks to the
   ``eval`` split. Reef checks the new uses as for a create call. A patch that
-  changes ``kind``, ``owner`` or ``origin`` returns 400.
-- ``DELETE /reef/namespaces/{owner}/data/{id}`` deletes one item. The
-  scenarios that used a trajectory or a task lose its copy. A record stays in
-  each record store that holds it.
+  changes ``kind``, ``owner`` or ``origin`` returns 400. The response is
+  ``{"owner", "items", "synced"}``, without content.
+- ``DELETE /reef/namespaces/{owner}/data/{id}`` deletes one item and returns
+  ``{"owner", "id", "deleted": true, "synced"}``. The scenarios that used a
+  trajectory or a task lose its copy. A record stays in each record store that
+  holds it.
 
 An unknown ID returns 404. A deployment without a data store returns 503.
 An item that leaves a scenario keeps its train counts there, so ``auto`` does
@@ -522,6 +552,117 @@ not train it again if it comes back.
 [{"name", "split", "files_digest", "trained"}]}``: the tasks that the
 scenario uses, in the order they joined it. ``trained`` is true once a
 committed task job of any trainer of the scenario trained the task.
+
+Two GET routes come before the item routes, because an item ID can hold
+``/``. A GET of ``.../data/<id>/archive`` downloads the item ``<id>``, and a
+GET of ``.../data/imports/<x>`` or ``.../data/exports/<x>`` reads a transfer.
+So GET cannot read an item whose ID ends in ``/archive``, or whose ID is
+``imports/<x>`` or ``exports/<x>`` with ``<x>`` one path segment. Give such
+items other IDs.
+
+Download an item
+~~~~~~~~~~~~~~~~
+
+``GET /reef/namespaces/{owner}/data/{id}/archive`` downloads one item as an
+attachment, named after the last segment of its ID:
+
+- A task downloads as ``<name>.tar.gz`` (``application/gzip``), with its files
+  in the directory ``<name>``.
+- Another item downloads as ``<name>.json`` (``application/json``): its
+  content.
+
+An unknown ID returns 404. To let a browser or another service download the
+item without the token, ask for a `signed download URL
+<#signed-download-urls>`__.
+
+Import and export items
+~~~~~~~~~~~~~~~~~~~~~~~
+
+An import stores the files at a URI as items of the owner. An export writes
+items of the owner to a tar.gz at a URI. Each runs in the background on a
+data service worker:
+
+- ``POST /reef/namespaces/{owner}/data/imports`` and ``POST
+  /reef/namespaces/{owner}/data/exports`` start one and return 202 with its
+  status. A body that is not valid returns 400.
+- ``GET /reef/namespaces/{owner}/data/imports/{id}`` and ``GET
+  /reef/namespaces/{owner}/data/exports/{id}`` read the status. An unknown
+  ID, or the ID of another owner's transfer, returns 404.
+
+The status is ``{"id", "kind", "state", "request", "result", "error"}``:
+
+- ``kind`` is ``data_import`` or ``data_export``.
+- ``state`` is ``queued``, ``assigned``, ``running``, ``finished`` or
+  ``failed``.
+- ``request`` is the body that started the transfer.
+- ``result`` is set when the transfer finished: ``{"items"}``, the item count,
+  for an import, and ``{"items", "bytes"}`` for an export.
+- ``error`` tells why a run failed.
+
+An import body is ``{"uri", "metadata"}``. Every item gets ``metadata``, whose
+``kind`` is ``task`` or ``trajectory``. The data service reads the URI with
+the readers of `artifact imports <#import-an-artifact>`__: ``hf://``,
+``s3://``, ``file://`` and the schemes that ``storage.artifact-sources``
+adds. It finds the items as follows:
+
+- ``task``: when the URI's root holds ``task.toml``, the root is one task,
+  named after the last segment of the URI's path. Otherwise each directory
+  directly under the root that holds ``task.toml`` is one task, named after
+  the directory.
+- ``trajectory``: each ``*.json`` file at the root is an ATIF document. Its
+  item ID is the file name without ``.json``.
+
+The import checks and stores the items as the create routes do. It does not
+wait for the syncs of the scenarios that it touched.
+
+.. code:: bash
+
+   curl -f http://127.0.0.1:8900/reef/namespaces/my-agent/data/imports \
+     -H "Authorization: Bearer $REEF_TOKEN" \
+     -H 'Content-Type: application/json' \
+     -d '{"uri": "s3://my-bucket/benchmark/tasks/",
+          "metadata": {"kind": "task", "scenarios": {"my-agent": "eval"}}}'
+
+An export body is ``{"uri"}`` and one of these selections:
+
+- ``ids``: 1 to 1000 item IDs. An unknown ID fails the export.
+- ``kind`` and ``scenario``, each optional: the items that match, as for the
+  list route. With neither, the export writes every item of the owner.
+
+The archive holds ``manifest.jsonl``, one line ``{"id", "kind", "metadata",
+"path"}`` for each item, in export order. The content of a trajectory or a
+record is at ``items/<n>.json``, and the files of a task are under
+``items/<n>/``, where ``<n>`` counts the items from 0. The export writes these
+URIs:
+
+- ``file:///absolute/path``: a new file on the data service's machine. The
+  parent directory must exist. The export never replaces a file: when the file
+  exists, the export fails.
+- ``s3://bucket/key``: one object, written with boto3's standard credentials.
+  It needs the ``s3`` extra (``uv pip install 'reef-infra[s3]'``).
+
+Another scheme fails the export.
+
+Signed download URLs
+~~~~~~~~~~~~~~~~~~~~
+
+Add ``?signed=1`` to ``GET /reef/namespaces/{owner}/data/{id}/archive`` or to
+``GET /reef/scenarios/{scenario}/artifacts/{artifact_id}/files`` (`Artifacts`_)
+to get a URL that opens the download without the token. The response is
+``{"url", "expires_at"}``:
+
+- ``url`` is the path and query of the download on the same service. It
+  carries ``expires`` and a ``signature``, which Reef computes from the token
+  that the request presented.
+- ``expires_at`` is the time, in Unix seconds, after which the URL returns 401.
+
+``expires_in`` sets the life of the URL in seconds: 1 to 86400, 3600 by
+default. Another value returns 400. Send the URL with GET and without an
+Authorization header. It keeps the request's ``path`` and ``component``
+queries, and it opens only that download: another path, or another ``path`` or
+``component`` query, returns 401. When the service no longer accepts the token that
+signed it, the URL returns 401. A service without tokens returns the URL
+without a signature, because the download needs none.
 
 Choose the samples that train
 -----------------------------
@@ -890,6 +1031,14 @@ returns HTTP 404, and you create the scenario first:
 |                                             | status}``                                   |
 +---------------------------------------------+---------------------------------------------+
 | ``DELETE /reef/scenarios/{scenario}``       | → ``{scenario, archived}``; 404 unknown     |
++---------------------------------------------+---------------------------------------------+
+| ``GET /reef/scenarios/{scenario}/jobs``     | → ``{scenario, jobs}``: the scenario's      |
+|                                             | training jobs in the jobs queue, oldest     |
+|                                             | first, each ``{id, state, attempt_count,    |
+|                                             | checkpoints, result, error}``;              |
+|                                             | ``checkpoints`` are the saved checkpoints   |
+|                                             | that the job reported. Read only, from the  |
+|                                             | data service; 404 unknown                   |
 +---------------------------------------------+---------------------------------------------+
 
 Deleting a scenario
@@ -1426,6 +1575,15 @@ as a rejected or skipped step, a job submission or a job's end, has no row;
 ``GET /reef/scenarios/{scenario}/commits`` holds its record (see `Record and
 commit history`_). Activations, train-from operations and serves have no rows
 either.
+
+``GET /reef/scenarios/{scenario}/artifacts/{artifact_id}/files`` answers
+``{scenario, artifact_id, files}``: each file of the artifact as ``{path,
+bytes}``, in path order. With ``?path=<path>``, it downloads that file. In a
+scenario of several components, name the component with ``?component=``. An
+artifact that the scenario does not list, or a path that is not one of its
+files, returns 404. ``?signed=1`` returns a `signed download URL
+<#signed-download-urls>`__ of the list or the file. The data service answers
+this route.
 
 Import an artifact
 ~~~~~~~~~~~~~~~~~~

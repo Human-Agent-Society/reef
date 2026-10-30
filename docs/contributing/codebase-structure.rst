@@ -346,19 +346,35 @@ The extension points those packages expose are in `Python API
   not reimplement it.
 - Does one service tell another what to do? Do it through the shared store,
   not a call. ``reef/storage/work_queue.py`` defines the ``WorkQueue`` contract
-  of the jobs, samples and evaluations queues;
+  of the jobs, samples, evaluations and data queues;
   ``reef/storage/served_models.py`` the ``served_models`` table, which control
-  writes and the inference service reads; and
+  writes and the inference service reads;
   ``reef/storage/control_lease.py`` the lease that makes one control instance
-  active. ``reef/storage/sql_coordination.py`` keeps these tables in SQLite or
-  PostgreSQL. The workers that take queue items live with their service:
-  ``reef/train/job_queue.py`` (training), ``reef/record2sample/service/``
-  (samples) and ``reef/evaluation/rollout_worker.py`` (evaluation). Control's
-  writer of ``served_models`` and its watcher of the store are in
-  ``reef/dispatcher/served.py`` and ``reef/dispatcher/store_changes.py``.
+  active; and ``reef/storage/marks.py`` the named positions that a service
+  keeps, such as how far the data service copied each scenario's records.
+  ``reef/storage/sql_coordination.py`` keeps these tables in SQLite or
+  PostgreSQL. ``reef/execution/workers.py`` holds ``QueueWorker``, the loop
+  that takes, leases and finishes queue items. The workers that take queue
+  items live with their service: ``reef/train/job_queue.py`` (training),
+  ``reef/record2sample/service/`` (samples),
+  ``reef/evaluation/rollout_worker.py`` (evaluation) and
+  ``reef/service/data_service.py`` (data). Control's writer of
+  ``served_models``, its watcher of the store and its worker of the
+  ``data_sync`` items are in ``reef/dispatcher/served.py``,
+  ``reef/dispatcher/store_changes.py`` and
+  ``reef/dispatcher/data_sync_worker.py``.
   ``reef/service/inference_service.py`` is the inference service, and
   ``reef/service/components.py`` builds the app of each service for
   ``reef serve --component``.
+- Does it handle the data routes? ``reef/service/data.py`` creates, reads,
+  updates and deletes data items and asks control to sync the touched
+  scenarios (``reef/storage/data_sync.py``). ``reef/service/data_transfer.py``
+  runs imports, exports and item archives, and
+  ``reef/service/scenario_files.py`` reads an artifact's files and a
+  scenario's training jobs. ``reef/storage/record_items.py`` copies records
+  to record items. ``create_data_app`` in ``reef/service/app.py`` builds the
+  data service's app; the aiohttp adapters are ``reef/service/routes/data.py``
+  and ``reef/service/routes/scenario_files.py``.
 - Is it HTTP-specific? Keep the aiohttp adapter in ``reef/service/routes/``
   and put transport-independent behavior in a service or domain object.
 - Does it orchestrate a benchmark, task, grader, or external environment?

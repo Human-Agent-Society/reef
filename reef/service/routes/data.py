@@ -69,7 +69,7 @@ def register_data_routes(app: web.Application, *, request_service: RequestServic
     async def archive(request: web.Request) -> web.StreamResponse:
         """A task's files as tar.gz, or another item's content as JSON; with ``signed=1``, a signed URL of it."""
         if request.query.get("signed") == "1":
-            url, expires_at = signed_download_url(request, "", download_seconds(request))
+            url, expires_at = signed_download_url(request, download_seconds(request))
             return web.json_response({"url": url, "expires_at": expires_at})
         with tempfile.TemporaryDirectory(prefix="reef-item-archive-") as work:
             file, media_type = await asyncio.to_thread(

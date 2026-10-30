@@ -5,7 +5,7 @@ import hmac
 import re
 import secrets
 import time
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from urllib.parse import urlencode
 
 from aiohttp import web
@@ -74,29 +74,35 @@ MAX_DOWNLOAD_URL_SECONDS = 24 * 3600
 DOWNLOAD_ROUTES = re.compile(r"^/reef/(namespaces/[^/]+/data/.+/archive|scenarios/[^/]+/artifacts/[^/]+/files)$")
 
 
-def download_signature(digest: bytes, raw_path: str, file_path: str, expires_at: int) -> str:
-    """The signature of a download of ``raw_path`` (and ``file_path`` within it, or "") until ``expires_at``, keyed
-    by the digest of an accepted token, as hex. It opens that one download until then, and the token cannot be read
-    back from it."""
-    message = f"{raw_path}\n{file_path}\n{expires_at}".encode()
+#: The query parameters of a download that its signature covers: what the download reads.
+DOWNLOAD_PARAMETERS = ("path", "component")
+
+
+def download_signature(digest: bytes, raw_path: str, parameters: Mapping[str, str], expires_at: int) -> str:
+    """The signature of a download of ``raw_path`` with the query ``parameters`` (``DOWNLOAD_PARAMETERS``) until
+    ``expires_at``, keyed by the digest of an accepted token, as hex. It opens that one download until then, and the
+    token cannot be read back from it."""
+    query = urlencode(sorted((name, parameters[name]) for name in DOWNLOAD_PARAMETERS if parameters.get(name)))
+    message = f"{raw_path}\n{query}\n{expires_at}".encode()
     return hmac.new(digest, DOWNLOAD_SIGNATURE_CONTEXT + message, hashlib.sha256).hexdigest()
 
 
-def signed_download_url(request: web.Request, file_path: str, expires_in_seconds: int) -> tuple[str, int]:
+def signed_download_url(request: web.Request, expires_in_seconds: int) -> tuple[str, int]:
     """The signed URL of the download that ``request`` asks for, and when it expires, for a request that
     presented a service token. A service without tokens needs no signature, so its URL carries none.
 
-    The URL is the request's raw path with ``path`` (when ``file_path`` is not empty), ``expires`` and
-    ``signature``. Raise ``ValueError`` for an ``expires_in_seconds`` outside 1 to ``MAX_DOWNLOAD_URL_SECONDS``.
+    The URL is the request's raw path with its ``DOWNLOAD_PARAMETERS``, ``expires`` and ``signature``. Raise
+    ``ValueError`` for an ``expires_in_seconds`` outside 1 to ``MAX_DOWNLOAD_URL_SECONDS``.
     """
     if not 1 <= expires_in_seconds <= MAX_DOWNLOAD_URL_SECONDS:
         raise ValueError(f"expires_in must be 1 to {MAX_DOWNLOAD_URL_SECONDS} seconds")
     expires_at = int(time.time()) + expires_in_seconds
     raw_path = request.rel_url.raw_path
-    query: dict[str, str] = {"path": file_path} if file_path else {}
+    parameters = {name: request.query[name] for name in DOWNLOAD_PARAMETERS if request.query.get(name)}
+    query = dict(parameters)
     digest = request.get(TOKEN_DIGEST)
     if digest is not None:
-        query.update(expires=str(expires_at), signature=download_signature(digest, raw_path, file_path, expires_at))
+        query.update(expires=str(expires_at), signature=download_signature(digest, raw_path, parameters, expires_at))
     return (f"{raw_path}?{urlencode(query)}" if query else raw_path), expires_at
 
 
@@ -134,7 +140,7 @@ def create_authentication_middleware(
 
     A download (``DOWNLOAD_ROUTES``) also opens on a GET with no Authorization
     header that carries ``expires`` in the future and the ``signature`` of
-    its raw path, ``path`` query and ``expires`` for an accepted token
+    its raw path, its ``DOWNLOAD_PARAMETERS`` and ``expires`` for an accepted token
     (``download_signature``): a signed URL that a browser or another service
     fetches without the token (``signed_download_url``).
 
@@ -198,10 +204,9 @@ def create_authentication_middleware(
         if not signature or expires_at < time.time():
             return False
         presented = signature.encode("utf-8")
-        file_path = request.query.get("path", "")
         matched = False
         for digest in accepted:
-            expected = download_signature(digest, raw_path, file_path, expires_at)
+            expected = download_signature(digest, raw_path, request.query, expires_at)
             matched |= secrets.compare_digest(presented, expected.encode("utf-8"))
         return matched
 

@@ -27,7 +27,7 @@ to forced cleanup of the managed service processes.
    -c, --config | optional config file. No file is loaded unless explicitly selected.
    --recipe NAME | start a built in recipe's profile instead of a config file. Today: ``reefine``.
    --model [PROVIDER/]MODEL | the upstream model. An ``ollama/`` or ``openai/`` prefix fills the endpoint and the key; any other spelling is the model ID as is.
-   --component NAME | run one service of the deployment in this process: ``control``, ``inference``, ``samples``, ``training`` or ``evaluation``. The process starts no other child. Without it, one process runs all services. See `Run the services in separate processes <../user-guide/operate.rst#run-the-services-in-separate-processes>`__.
+   --component NAME | run one service of the deployment in this process: ``control``, ``inference``, ``samples``, ``training``, ``evaluation`` or ``data``. The process starts no other child. Without it, one process runs all services. See `Run the services in separate processes <../user-guide/operate.rst#run-the-services-in-separate-processes>`__.
    --print-config | print every resolved setting with its source (file, command line, environment, automatic, default) and exit without downloading models or starting services. Credentials are masked.
    --help | the command list
    -V, --version | the installed reef version. Takes no command: ``reef --version``.
@@ -98,7 +98,8 @@ store:
    reef serve -c deploy.yaml --component samples --reef.port 8903
 
 A service that only takes work from a queue (``samples``, ``training`` and
-``evaluation``) answers ``/healthz`` and nothing else.
+``evaluation``) answers ``/healthz`` and nothing else. The ``data`` service
+answers the data routes and the scenario reads.
 
 Where it writes
 ---------------

@@ -323,7 +323,7 @@ The scenario storage and the repository live under ``.reef/`` by default (``agen
 Run the services in separate processes
 --------------------------------------
 
-A deployment has five services. By default, ``reef serve`` runs all of them in
+A deployment has six services. By default, ``reef serve`` runs all of them in
 one process. Run them in separate processes when inference must stay up while
 control restarts or deploys a new version, or when one service needs more
 replicas than the others. The services do not send work to each other: each one
@@ -338,8 +338,10 @@ goes from evaluation to control, for the candidate that a rollout evaluates.
      - What it does
      - What it writes
    * - ``control``
-     - The HTTP API, scenarios, commits and activation
-     - ``served_models``, training jobs, sample requests, evaluations, commits
+     - The HTTP API except the data routes; scenarios, commits and activation.
+       It syncs each loaded scenario after a data write
+     - ``served_models``, training jobs, sample requests, record copy
+       requests, evaluations, commits
    * - ``inference``
      - Answers model requests with the model that ``served_models`` names
      - records
@@ -353,6 +355,11 @@ goes from evaluation to control, for the candidate that a rollout evaluates.
      - Runs the rollouts of artifact evaluations. It serves each candidate
        artifact itself, from the artifact repository
      - rollout results
+   * - ``data``
+     - Serves the `data routes <../reference/http-api.rst#data-items>`__ and
+       the reads of what each scenario stores, copies new records to record
+       items, and runs data imports and exports
+     - data items, record items, data sync requests
 
 Start each service with the same config and ``--component``:
 
@@ -364,6 +371,7 @@ Start each service with the same config and ``--component``:
    reef serve -c deploy.yaml --component samples --reef.port 8903
    reef serve -c deploy.yaml --component training --reef.port 8904
    reef serve -c deploy.yaml --component evaluation --reef.port 8905
+   reef serve -c deploy.yaml --component data --reef.port 8906
 
 A ``--component`` process starts no other child. Start the inference engines
 and the training backend that the config names on their own. All processes
@@ -376,7 +384,28 @@ must reach the same store:
   (``reef_records_coordination`` by default), so deployments with their own
   record schemas share no tables.
 
-Control, training and evaluation must also reach the same artifact backend.
+Every service except inference must also reach the same data store
+(``storage.data-store``, which follows the record backend by default; see
+`Choose the data store`_). Control, training, evaluation and data must reach
+the same artifact backend.
+
+**Data requests.** Send the data routes (``/reef/namespaces/{owner}/data...``),
+``GET /reef/scenarios/{scenario}/artifacts/{artifact_id}/files`` and
+``GET /reef/scenarios/{scenario}/jobs`` to the data service. In the split
+layout, control does not serve these routes. The data service also answers the
+reads of what each scenario stores: the scenario list, settings, contract,
+records, commits, artifacts, samples, tasks and evaluations. Control answers
+these reads too. Writes to a scenario, the buffer routes, ``/reef/status`` and
+the harness routes stay with control. The data service needs no control lease,
+so you can run several replicas of it behind one address.
+
+After each data write, the data service asks control to sync the scenarios
+that the write touched, and waits up to 30 seconds for the syncs. The response
+says whether they ended (``synced``). A sync that did not end runs when control
+takes it, or when the scenario next loads.
+
+Only control activates a scenario's artifact on the engines. The samples,
+evaluation and data services load a scenario without activating it.
 
 **Inference requests.** Send model requests to the inference service, with the
 scenario in ``x-reef-scenario``. The inference service answers
@@ -412,7 +441,9 @@ inference service never creates a scenario: create it first with
 **Control restarts.** While control is down, the inference service continues to
 answer from ``served_models`` and to record. Training jobs, sample requests and
 evaluation rollouts that are already queued continue; new ones wait for control,
-because control adds them.
+because control adds them. The data service continues to take data writes, but
+their syncs wait for control: each write waits 30 seconds and then answers
+``"synced": false``.
 
 When control starts, it does not load again what the engines still serve. A
 runtime that serves one adapter per scenario takes over each adapter that
@@ -652,9 +683,11 @@ scenario.
 When Reef opens a scenario for the first time after an upgrade, it moves the
 scenario's uploaded trajectories and tasks into the data store. They become
 items of the owner with the scenario's name, which the scenario uses in their
-split. A background job then makes record items from the scenario's stored
-records, in pages of 256, while the scenario serves. The job continues from
-its last page after a restart.
+split. The data service makes record items from the scenario's records, in
+pages of 256, while the scenario serves. It keeps how far it copied each
+scenario in the deployment's shared store, so it continues from its last page
+after a restart. A deployment that copied its records before this mark existed
+copies them once more, which changes no item.
 
 Import Harbor tasks
 -------------------
