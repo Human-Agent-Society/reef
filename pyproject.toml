@@ -103,7 +103,7 @@ dev = [
 # them out of package metadata lets GPU environments install them with
 # `--no-deps` without replacing their CUDA-matched dependency stack.
 runtime = [
-    "slime @ git+https://github.com/THUDM/slime.git@41014d1f29e201137fdffce737bb8bac65bc5219",
+    "slime @ git+https://github.com/THUDM/slime.git@540ea919e45b8b929198abce008a103be9cfc779",
 ]
 
 [project.urls]

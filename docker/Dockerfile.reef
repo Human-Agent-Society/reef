@@ -1,13 +1,12 @@
-# check=skip=UndefinedVar
-# UndefinedVar is skipped because PYTHONPATH comes from the slimerl/slime base
-# image, which docker build --check cannot see without pulling the base.
 # TTT-as-a-Service image — built ON TOP of slime's published training image.
 #
-# The base (slimerl/slime) ships the full serving + RL-training stack:
-# CUDA 12.9, torch 2.11, slime-patched sglang, Megatron-Core, flash-attention,
-# ray. Reef installs its reviewed runtime pin over the image copy — including
-# its own SGLang revision, which its serving engines run — and keeps all
-# Reef-specific behavior in its own adapter package.
+# The base (slimerl/slime) ships the full serving + RL-training stack in the
+# /opt/sglang virtual environment: CUDA 13.0, torch 2.13, Slime-patched SGLang
+# 0.5.21 (/sgl-workspace/sglang), Megatron-Core 0.19.2 (/root/Megatron-LM),
+# Transformer Engine 2.18, flash-attention and ray, all pinned by the
+# constraints file that the base's PIP_CONSTRAINT names for every pip install.
+# Reef installs its reviewed Slime pin over the
+# image copy and keeps all Reef-specific behavior in its own adapter package.
 #
 # One image serves every role (pick by command):
 #   sglang         python -m sglang.launch_server --model-path <M> ...
@@ -24,21 +23,19 @@
 #
 # NOTE: Qwen3.5 hybrid (linear-attention) models produced garbage at tp>1 on
 # sglang v0.5.9 (upstream #20763; fixed by #19070, merged 2026-02-25 — one day
-# after the v0.5.9 tag). The SGLANG_COMMIT pinned below contains the fix, so
+# after the v0.5.9 tag). The base image's SGLang 0.5.21 contains the fix, so
 # tp>1 is expected to work; it has not yet been re-validated on this image.
 
-ARG SLIME_IMAGE_TAG=latest
+# The base that Slime's pin (pyproject.toml, dependency group runtime) was released with.
+ARG SLIME_IMAGE_TAG=nightly-dev-20261027a-cu130
 FROM slimerl/slime:${SLIME_IMAGE_TAG} AS reef-common
 
 WORKDIR /workspace/Reef
 
-# On top of the base:
-#  * transformers==5.12.1 — first release line with the qwen3_5 architecture,
-#    and the last before qwen3_asr (which collides with the base sglang's own
-#    qwen3_asr registration: newer transformers make sglang fail at import)
-#  * peft                 — LoRA adapters for the HF trainer backend
-# (torchao in the base is already >=0.16, which peft's LoRA dispatch requires)
-RUN pip install --no-cache-dir "transformers==5.12.1" peft
+# The base already has transformers 5.12.1 (the first release line with the
+# qwen3_5 architecture, and the last before qwen3_asr, which collides with
+# SGLang's own registration) and peft, which the HF trainer backend's LoRA uses.
+RUN python -c "import transformers, peft; assert transformers.__version__ == '5.12.1', transformers.__version__"
 
 # opencode CLI — AI coding agent available inside the container.
 # Pinned GitHub release, x86_64 build (verified against the base image).
@@ -48,113 +45,69 @@ RUN curl -fsSL "https://github.com/sst/opencode/releases/download/v${OPENCODE_VE
       | tar -xzf - -C /usr/local/bin \
     && opencode --version
 
-# The reviewed SGLang pin, replacing the base image's copy. Reef's serving
-# engines run it: they load each published checkpoint from disk (full weights
-# or a LoRA adapter) and report the runtime load ID through the weight-version
-# plugin hooks. This is in the common layer because LoRA is a runtime option
-# on any weight-training recipe, not a property of one example. Kept above
-# COPY so repo changes don't re-clone.
-ARG SGLANG_COMMIT=f7ea06e1e519c569c1d6cb7e1c7b1128cbdbc39f
-# Newer slimerl/slime bases ship their own sglang checkout at /opt/sglang;
-# clear it so the clone of Reef's reviewed pin replaces it instead of
-# colliding with it (observed 2026-08-24 on slimerl/slime:latest).
-RUN rm -rf /opt/sglang && \
-    git clone --filter=blob:none https://github.com/sgl-project/sglang.git /opt/sglang && \
-    cd /opt/sglang && \
-    git checkout "${SGLANG_COMMIT}" && \
-    pip install -e "python[all]" --no-deps
+# Reef's serving engines run the base image's SGLang, with Slime's own patch:
+# they load each published checkpoint from disk (full weights or a LoRA
+# adapter) and report the runtime load ID through Reef's SGLang plugin
+# (reef.inference.sglang.plugin), which also opens the weight-update session
+# that this SGLang requires around Slime's weight transfer.
 
-# FlashInfer 0.7.0 over the base image's 0.6.12. Before 0.7.0 FlashInfer's
-# attention used a finite -5e4 as "minus infinity" (upstream issue #2896, fixed
-# by PR #4401), which silently corrupts attention for some prompts: on RTX PRO
-# 6000 (sm_120), SGLang's flashinfer backend scored Qwen2.5-1.5B tokens up to
-# 11 nats away from HF and Megatron, so rollout log-probs no longer matched the
-# trained policy and every correction that reads them (SAO's ratio, TIS, score
-# centering) trained on the error. In one SAO run, the mean train/rollout
-# log-prob gap was 0.007 before the fix and 1e-6 after it. The pins below are
-# the lowest versions 0.7.0 accepts; apache-tvm-ffi stays at 0.1.11 because
-# sgl-deep-gemm pins it exactly. The cubin package ends at 0.6.13, so kernels
-# come from the per-arch JIT caches instead. --no-deps keeps the base's torch
-# and CUDA stack.
+# FlashInfer 0.7.2.post1 over the base image's 0.6.18. Before 0.7.0
+# FlashInfer's attention used a finite 5e4 as "infinity" (upstream issue
+# #2896, fixed by PR #4401), which silently corrupts attention for some
+# prompts: on RTX PRO 6000 (sm_120), SGLang's flashinfer backend scored
+# Qwen2.5-1.5B tokens up to 11 nats away from HF and Megatron, so rollout
+# log-probs no longer matched the trained policy and every correction that
+# reads them (SAO's ratio, TIS, score centering) trained on the error. In one
+# SAO run, the mean train/rollout log-prob gap was 0.007 before the fix and
+# 1e-6 after it. The JIT cache holds the kernels for every architecture.
+# The base's constraints pin 0.6.18, so this step lifts them; --no-deps keeps
+# the base's torch and CUDA stack.
 RUN pip uninstall -y flashinfer-cubin flashinfer-jit-cache flashinfer-python && \
-    pip install --no-cache-dir --no-deps "flashinfer-python==0.7.0" \
-        "apache-tvm-ffi==0.1.11" "cuda-tile>=1.4.0,<2" "nvidia-cudnn-frontend>=1.29.0,<2" \
-        "nvidia-cutlass-dsl==4.6.3" "nvidia-cutlass-dsl-libs-base==4.6.3" \
-        "nccl4py==0.6.0" "nccl-extensions==0.1.0" "cuda-pathfinder>=1.5.4,<2" && \
-    pip install --no-cache-dir --no-deps --index-url https://flashinfer.ai/whl/cu129 \
-        "flashinfer-jit-cache==0.7.0+cu129" "flashinfer-jit-cache-sm80==0.7.0+cu129" \
-        "flashinfer-jit-cache-sm89==0.7.0+cu129" "flashinfer-jit-cache-sm90a==0.7.0+cu129" \
-        "flashinfer-jit-cache-sm100a==0.7.0+cu129" "flashinfer-jit-cache-sm103a==0.7.0+cu129" \
-        "flashinfer-jit-cache-sm120f==0.7.0+cu129" && \
+    PIP_CONSTRAINT= pip install --no-cache-dir --no-deps "flashinfer-python==0.7.2.post1" && \
+    PIP_CONSTRAINT= pip install --no-cache-dir --no-deps --index-url https://flashinfer.ai/whl/cu130 \
+        "flashinfer-jit-cache==0.7.2.post1+cu130" && \
     grep -q "numeric_limits<float>::infinity()" \
         "$(python -c 'import flashinfer, pathlib; print(pathlib.Path(flashinfer.__file__).parent)')/data/include/flashinfer/math.cuh"
 
 COPY . .
 
 # Replace the image's Slime distribution with Reef's exact pin. Install Slime
-# with --no-deps to keep the base image's CUDA-matched dependency set. Install
-# Reef with its core dependencies. pyproject.toml keeps GPU packages out of
-# that list.
+# with --no-deps, and without the base's constraints, which name the image's
+# own Slime, to keep the base image's CUDA-matched dependency set. Install
+# Reef with its core dependencies under the base's constraints, so no core
+# dependency moves a package the stack pinned. pyproject.toml keeps GPU
+# packages out of that list.
 RUN pip uninstall -y slime && \
-    pip install --no-cache-dir --no-deps --group runtime && \
+    PIP_CONSTRAINT= pip install --no-cache-dir --no-deps --group runtime && \
     pip install --no-cache-dir -e .
 
-# An earlier layer's dependency resolution can leave numpy 2.x debris behind
-# after pip downgrades (dist-info says 1.26.4 while 2.x submodules such as
-# numpy/_core survive in the package dir), which breaks every compiled
-# consumer at import time with "numpy._core.multiarray failed to import";
-# observed on a fresh 2026-08-03 build. Purge to a clean tree.
-RUN pip uninstall -y numpy && \
-    rm -rf /usr/local/lib/python3.12/dist-packages/numpy \
-           /usr/local/lib/python3.12/dist-packages/numpy.libs \
-           /usr/local/lib/python3.12/dist-packages/numpy-* && \
-    pip install --no-cache-dir "numpy==1.26.4" scipy && \
-    python -c "import numpy, scipy.linalg; assert numpy.__version__ == '1.26.4', numpy.__version__"
-
-# Prepend the pinned SGLang and the base image's Megatron-LM source checkout
-# (megatron.training is NOT pip-installed; the base ships it at
-# /root/Megatron-LM without exporting PYTHONPATH as an ENV, so the
-# ${PYTHONPATH:+...} preserve-trick expands to nothing at build time and
-# Slime's training workers die on `import megatron.training` — verified 2026-07-28 on
-# slimerl/slime:latest).
-# /workspace/Reef stays OFF this path: the editable install above already
-# resolves `reef`, and a PYTHONPATH entry would win over any `pip install -e`
-# of a mounted checkout, silently running the baked-in copy instead (observed
-# 2026-09-01). The `recipes` cookbook resolves from the working directory the
-# stack runs in, matching a from-checkout deployment.
-# The base ships uv but no uv-side counterpart to its /etc/pip.conf
-# (`break-system-packages = true`), so `uv pip install` fails on the PEP 668
-# marker of the system interpreter unless told otherwise. These two mirror
-# the pip setting: install into the system interpreter (and never into a
-# `.venv` that happens to be bind-mounted with a checkout) and ignore the
-# marker, so the README's `uv pip install ...` lines work unmodified.
-ENV PYTHONPATH=/opt/sglang/python:/root/Megatron-LM${PYTHONPATH:+:${PYTHONPATH}} \
-    PYTHONUNBUFFERED=1 \
+# The base installs SGLang, Megatron-Core (with megatron.training) and Slime
+# editable into its environment, so nothing goes on PYTHONPATH: an entry
+# would also win over a ``pip install -e`` of a mounted checkout, silently
+# running the baked-in copy instead (observed 2026-09-01). The `recipes`
+# cookbook resolves from the working directory the stack runs in, matching a
+# from-checkout deployment.
+# VIRTUAL_ENV makes the README's `uv pip install ...` lines install into the
+# base environment, never into a `.venv` bind-mounted with a checkout.
+ENV PYTHONUNBUFFERED=1 \
     SGLANG_DISABLE_CUDNN_CHECK=1 \
-    UV_SYSTEM_PYTHON=1 \
-    UV_BREAK_SYSTEM_PACKAGES=1
+    VIRTUAL_ENV=/opt/sglang
 
 # Slime's first import chain (sglang server args -> transformers ->
 # scipy) is exactly where a broken compiled stack surfaces at runtime; walking
 # it here turns that class of drift into a build failure.
-RUN python -c "from sglang.srt.server_args import ServerArgs; import transformers, scipy.linalg"
+RUN python -c "from sglang.srt.server_args import ServerArgs; import transformers, scipy.linalg, importlib.util; \
+               assert importlib.util.find_spec('megatron.training'), 'megatron.training is not importable'"
 
 # `reef serve --help` loads the CLI, the deployment config and the record
 # storage modules without a GPU. A missing core dependency fails the build here.
 RUN reef serve --help > /dev/null
 
-# Qwen3.5's fused Q/K norm + RoPE + gate kernel in the SGLang pin reads only the
-# temporal row of the [3, T] M-RoPE positions, so it rotates image tokens wrong.
-# The patch backports the upstream fix (sgl-project/sglang#34446, e635577431).
-# It is skipped when the call site already passes the axis map, which upstream
-# SGLang does from that commit on. On another SGLang without the fix, git apply
-# can fail. Then rebase the patch to that revision. Remove the patch, this step
-# and tests/inference/test_sglang_qwen3_5_mrope.py when the pin has the fix.
-RUN SGLANG_QWEN3_5=/opt/sglang/python/sglang/srt/models/qwen3_5.py && \
-    if ! grep -q "mrope_axis_map=" "$SGLANG_QWEN3_5"; then \
-        git -C /opt/sglang apply "$PWD/docker/patch/sglang_qwen3_5_mrope_rope.patch"; \
-    fi && \
-    python -c "import inspect, torch; from types import SimpleNamespace; \
+# Qwen3.5's fused Q/K norm + RoPE + gate kernel must rotate image tokens with
+# all three M-RoPE rows, as SGLang does from sgl-project/sglang#34446
+# (e635577431) on; before it, the kernel read only the temporal row. The base
+# image's SGLang has the fix; the build fails on a base without it.
+RUN python -c "import inspect, torch; from types import SimpleNamespace; \
                from sglang.srt.models.qwen3_5 import Qwen3_5AttentionDecoderLayer; \
                from sglang.srt.layers.rotary_embedding.mrope import MRotaryEmbedding; \
                assert 'mrope_axis_map=' in inspect.getsource(Qwen3_5AttentionDecoderLayer.forward_prepare_cuda_fused); \
@@ -205,29 +158,20 @@ RUN SLIME_MODELS=$(python -c "import importlib.util, pathlib; \
 
 # Megatron-Bridge supplies the PEFT LoRA implementation reef's LoRA path
 # applies (reef_adapters/megatron/lora.py) and the HF export that publishes
-# adapters. Earlier slime bases bundled it; newer ones do not (observed
-# 2026-08-24). The base pins Megatron-LM 1dcf0dafa (megatron-core 0.16.0rc0,
-# still true of slimerl/slime:latest on 2026-08-25), which bounds the Bridge
-# release:
-#  * 0.4.2 is the newest that imports against this tree, needing only
-#    `parse_hybrid_pattern` (added upstream in core 0.17); the backport below
-#    appends it to the module verbatim when the tree lacks it.
-#  * 0.5.x moved its providers onto Megatron-LM's `megatron.training.models`
-#    package (core >= 0.18) and cannot import here.
-# 0.4.2 knows Qwen3_5ForConditionalGeneration; reef overrides that
-# registration with a bridge for the layout slime builds
+# adapters. The base does not bundle it. 0.6.2 is the newest release that
+# imports against the base's Megatron-Core 0.19.2 (0.7.0 needs a newer core);
+# reef overrides its Qwen3_5ForConditionalGeneration registration with a
+# bridge for the layout slime builds
 # (reef_adapters/megatron/bridges/qwen3_5.py), which is what makes Qwen3.5
 # LoRA work. --no-deps because Bridge's newer dependency pins
 # (fast-hadamard-transform et al.) neither build here nor matter for LoRA.
-RUN MCORE_SSM=/root/Megatron-LM/megatron/core/ssm/mamba_hybrid_layer_allocation.py && \
-    if ! grep -q "def parse_hybrid_pattern" "$MCORE_SSM"; then \
-        cat docker/patch/mcore_parse_hybrid_pattern.py >> "$MCORE_SSM"; \
-    fi && \
-    pip install --no-cache-dir --no-deps "megatron-bridge==0.4.2" && \
-    python -c "from megatron.core.ssm.mamba_hybrid_layer_allocation import parse_hybrid_pattern; \
-               assert parse_hybrid_pattern('M*M*/MM/MM').mtp_num_depths == 2; \
-               from megatron.bridge.peft.lora import LoRA; \
-               from megatron.bridge.models.conversion.param_mapping import ReplicatedMapping"
+# Transformer Engine loads the CUDA driver at import, which a build has none of:
+# the check imports against the CUDA toolkit's driver stub.
+RUN pip install --no-cache-dir --no-deps "megatron-bridge==0.6.2" && \
+    DRIVER_STUB=$(mktemp -d) && ln -s /usr/local/cuda/lib64/stubs/libcuda.so "$DRIVER_STUB/libcuda.so.1" && \
+    LD_LIBRARY_PATH="$DRIVER_STUB:$LD_LIBRARY_PATH" python -c "from megatron.bridge.peft.lora import LoRA; \
+               from megatron.bridge.models.conversion.param_mapping import ReplicatedMapping" && \
+    rm -rf "$DRIVER_STUB"
 
 # Optional TTT-Discover target. It adds only the generated-program solver
 # dependencies used by recipes/tttd/examples/tttd/deployments/qwen3_8b_lora; LoRA serving
@@ -238,10 +182,9 @@ RUN MCORE_SSM=/root/Megatron-LM/megatron/core/ssm/mamba_hybrid_layer_allocation.
 # Reef image after running their own GPU qualification.
 FROM reef-common AS tttd
 
-# CVXPY 1.9+ requires NumPy 2.x. Constrain both packages so the resolver
-# preserves the common layer's NumPy pin and CUDA-matched dependency stack.
-RUN pip install --no-cache-dir "cvxpy<1.9" "numpy==1.26.4" && \
-    python -c "import cvxpy, numpy; assert numpy.__version__ == '1.26.4', numpy.__version__"
+# The base's constraints keep its NumPy and CUDA-matched dependency stack.
+RUN pip install --no-cache-dir cvxpy && \
+    python -c "import cvxpy, numpy"
 
 CMD ["bash", "-c", "echo 'reef TTT-Discover image. Run python -m recipes.tttd.examples.tttd.deployments.qwen3_8b_lora.cluster'"]
 

@@ -82,7 +82,10 @@ def test_flags_are_off_by_default_and_travel_onto_args() -> None:
     pytest.importorskip("torch")
     from reef.train.slime_backend.reef_adapters.slime_arguments import add_reef_slime_arguments
 
-    parser = add_reef_slime_arguments(argparse.ArgumentParser())
+    parser = argparse.ArgumentParser()
+    # Slime's own parser registers the top-K.
+    parser.add_argument("--score-centering-top-k", type=int, default=128)
+    parser = add_reef_slime_arguments(parser)
     assert settings_from_args(parser.parse_args([])) is None
     args = parser.parse_args(["--score-centering", "--score-centering-top-k", "32"])
     assert settings_from_args(args) == ScoreCenteringSettings(top_k=32, min_tail_mass=1e-6)
