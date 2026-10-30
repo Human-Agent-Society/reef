@@ -56,8 +56,9 @@ class QueueWorker(ServiceWorker):
 
     Purpose: a service subclasses it and defines ``run_item``. Each round requeues the expired items, takes one
     item, starts it, extends its lease while ``run_item`` runs, and finishes the item with what ``run_item``
-    returns. An error that ``run_item`` raises fails the item as retryable; a lost lease leaves the item to the
-    worker that holds it now. A store error ends the round, and the worker looks again after ``poll_seconds``.
+    returns. A ``ValueError`` that ``run_item`` raises fails the item for good, since its input does not change on a
+    retry; any other error fails it as retryable. A lost lease leaves the item to the worker that holds it now. A
+    store error ends the round, and the worker looks again after ``poll_seconds``.
     """
 
     def __init__(
@@ -125,7 +126,11 @@ class QueueWorker(ServiceWorker):
             logger.exception("worker %s could not run %s", self.worker_id, item.id)
             try:
                 self.queue.fail(
-                    self.queue_name, item.id, self.worker_id, f"{type(exc).__name__}: {exc}", retryable=True
+                    self.queue_name,
+                    item.id,
+                    self.worker_id,
+                    f"{type(exc).__name__}: {exc}",
+                    retryable=not isinstance(exc, ValueError),
                 )
             except WorkLeaseLost:
                 logger.warning("worker %s lost %s", self.worker_id, item.id)

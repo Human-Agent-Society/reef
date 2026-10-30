@@ -17,6 +17,7 @@ from tests.support.trajectory_uploads import TOKEN, UploadRecipe, atif, dispatch
 from reef.core.tasks import write_harbor_task
 from reef.dispatcher import Dispatcher
 from reef.service.app import create_app
+from reef.storage.data import DATA_QUEUE
 from reef.storage.work_queue import NewWork
 from reef.train.job_queue import JOBS_QUEUE
 
@@ -55,6 +56,7 @@ def test_an_import_from_a_uri_stores_tasks_and_trajectories_and_an_export_writes
         (trajectories / f"{name}.json").write_text(json.dumps(atif(name)))
     exported = tmp_path / "out" / "export.tar.gz"
     exported.parent.mkdir()
+    dispatcher = dispatcher_for(tmp_path, UploadRecipe())
 
     async def check(client: TestClient) -> None:
         started = []
@@ -89,10 +91,19 @@ def test_an_import_from_a_uri_stores_tasks_and_trajectories_and_an_export_writes
         failed = await finished(client, f"{DATA}/exports/{(await again.json())['id']}")
         assert failed["state"] == "failed" and "FileExistsError" in failed["error"]
         assert (await client.get(f"{DATA}/imports/data_import:nothing", headers=AUTH)).status == 404
+        # An import that cannot succeed fails at its first attempt: a retry reads the same input.
+        missing = await client.post(
+            f"{DATA}/imports",
+            headers=AUTH,
+            json={"uri": (tmp_path / "missing").as_uri(), "metadata": {"kind": "trajectory"}},
+        )
+        missing_id = (await missing.json())["id"]
+        assert (await finished(client, f"{DATA}/imports/{missing_id}"))["state"] == "failed"
+        assert dispatcher.queue.get(DATA_QUEUE, missing_id).attempt_count == 1
         refused = await client.post(f"{DATA}/imports", headers=AUTH, json={"uri": "x", "metadata": {"kind": "task"}})
         assert refused.status == 400
 
-    served(dispatcher_for(tmp_path, UploadRecipe()), check)
+    served(dispatcher, check)
 
 
 def test_an_item_archive_downloads_with_the_token_or_with_a_signed_url_alone(tmp_path: Path) -> None:
