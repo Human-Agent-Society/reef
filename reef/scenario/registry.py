@@ -61,6 +61,17 @@ class ScenarioLifecycle(ABC):
         """
 
     @abstractmethod
+    def scenario_reloaded(self, instance: Scenario) -> None:
+        """React to ``instance``, which a reload built from durable state after a failure. It holds only the
+        progress of the commit history, so the records after it need the samples service again."""
+
+    @abstractmethod
+    def scenario_committed(self, instance: Scenario) -> None:
+        """React to a commit of ``instance`` that can change what it serves: a training step, an activation, a
+        served or stopped artifact. The commit is durable already, so this does not raise. The caller holds the
+        scenario's lock."""
+
+    @abstractmethod
     def close_replaced(self, instance: Scenario) -> None:
         """Close the instance that a reload replaced, now or once nothing runs on it any more."""
 
@@ -79,6 +90,12 @@ class StandaloneLifecycle(ScenarioLifecycle):
     """
 
     def scenario_loaded(self, instance: Scenario) -> None:
+        return None
+
+    def scenario_reloaded(self, instance: Scenario) -> None:
+        return None
+
+    def scenario_committed(self, instance: Scenario) -> None:
         return None
 
     def close_replaced(self, instance: Scenario) -> None:
@@ -119,6 +136,7 @@ class ScenarioRegistry:
         scenario_storage: ScenarioStorage,
         admission: ScenarioAdmission | None = None,
         lifecycle: ScenarioLifecycle | None = None,
+        activates_runtime: bool = True,
     ) -> None:
         self._model_configs: dict[str, ModelConfig] = {}
         self._storage = scenario_storage
@@ -132,6 +150,7 @@ class ScenarioRegistry:
             scenario_storage=scenario_storage,
             experiment_reports=self.experiment_reports,
             experiment_tracker=tracker,
+            activates_runtime=activates_runtime,
         )
         self._backend_factory = backend_factory
         self._recipe = recipe
@@ -379,7 +398,7 @@ class ScenarioRegistry:
                 self.check_creation(scenario)
             # Creating an existing scenario never overwrites its configuration.
             if not create or not exists:
-                candidate = ModelConfig.from_value(value)
+                candidate = ModelConfig.from_value(value, api_key=self.provider_key())
                 self._recipe.with_model_config(candidate)
                 current = self._model_config(scenario)
                 # A validated value is an object or null.
@@ -393,7 +412,9 @@ class ScenarioRegistry:
         """Rebuild a scenario from durable state after a training failure.
 
         Accepts and inference reach the new instance at once; the replaced
-        instance goes to the lifecycle's ``close_replaced``.
+        instance goes to the lifecycle's ``close_replaced``. The new instance
+        goes to ``scenario_reloaded``, so its trainers ask the samples service
+        for the records after their recovered progress.
         """
         with self.lock_for(scenario):
             recovered = self._scenario_factory.load_or_create(
@@ -409,6 +430,7 @@ class ScenarioRegistry:
                 # worker threads. Accepts reach the recovered instance, so
                 # nothing observes the dropped instance mid-close.
                 self.lifecycle.close_replaced(dropped)
+            self.lifecycle.scenario_reloaded(recovered)
             return recovered
 
     def remove(self, scenario: str) -> Scenario | None:
@@ -459,8 +481,14 @@ class ScenarioRegistry:
     def _model_config(self, scenario: str) -> ModelConfig:
         if scenario not in self._model_configs:
             value = self._storage.read_settings(scenario).model_config
-            self._model_configs[scenario] = ModelConfig.from_value(value)
+            self._model_configs[scenario] = ModelConfig.from_value(value, api_key=self.provider_key())
         return self._model_configs[scenario]
+
+    def provider_key(self) -> str | None:
+        """The deployment's provider key, which a scenario's own model is called with: the key of the recipe's
+        runtime (``InferenceRuntime.provider_key``), or None without a runtime."""
+        runtime = self._recipe.runtime
+        return None if runtime is None else runtime.provider_key
 
     def apply_stored_settings(self, instance: Scenario) -> None:
         """Select the training mode and the activation rule a person stored for the scenario on a newly built

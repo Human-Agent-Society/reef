@@ -474,10 +474,12 @@ def test_adapter_runtime_starts_the_engines_and_loads_each_published_adapter_thr
     )
     assert isinstance(runtime, AdapterServingRuntime)
     assert runtime.per_scenario_adapters and runtime.shared_by_training_scenarios
-    # The engines start paused, then serve the base model under the runtime's first version.
+    # Building the runtime touches no engine; control opens it. The engines start paused, then serve the base
+    # model under the runtime's first version.
+    assert events == []
+    runtime.open()
     assert started_engines(events[0]) == ("sglang", "Qwen/Qwen3-8B", 1, 2, "placement-2")
     assert events[1:4] == ["health", "pause", "resume"]
-    assert runtime.current_runtime_load_id() == runtime.base_version
     version = runtime.activate_checkpoint(Artifact.local(saved_adapter(tmp_path / "job-1")), scenario="math")
     _, layout, name, loaded, contents, served = events[-2]
     assert (layout, name, loaded, contents) == (
@@ -487,7 +489,6 @@ def test_adapter_runtime_starts_the_engines_and_loads_each_published_adapter_thr
         {"adapter_config.json": '{"r": 16}'},
     )
     assert served.parent == work_dir and events[-1] == "resume"
-    assert runtime.current_runtime_load_id() == version
     assert runtime.serving_adapter_runtime_load_id("math") == version
     arguments = runtime.inference_handler._post_arguments(Artifact.local(tmp_path), "/generate", {"input_ids": [1]})
     assert (arguments["url"], arguments["headers"]["Authorization"]) == (
@@ -495,8 +496,9 @@ def test_adapter_runtime_starts_the_engines_and_loads_each_published_adapter_thr
         f"Bearer {INFERENCE_TOKEN}",
     )
     assert isinstance(runtime.inference_handler, SGLangInferenceHandler)
+    # The engines are the inference component's: a control that stops leaves them serving.
     runtime.shutdown()
-    assert events[-2:] == ["close", "release"]
+    assert "close" not in events
 
 
 def test_full_weight_runtime_loads_a_published_checkpoint_through_the_component(component, tmp_path):
@@ -504,6 +506,7 @@ def test_full_weight_runtime_loads_a_published_checkpoint_through_the_component(
     runtime = RuntimeRegistry().build(
         serving_config(url, release_format=ReleaseFormat("full").to_dict()), model_path="Qwen/Qwen3-8B", environ=TOKENS
     )
+    runtime.open()
     assert started_engines(events[0]) == ("sglang", "Qwen/Qwen3-8B", 1, None, "placement-2")
     assert isinstance(runtime, FullWeightServingRuntime)
     assert not runtime.per_scenario_adapters and not runtime.shared_by_training_scenarios
@@ -513,12 +516,11 @@ def test_full_weight_runtime_loads_a_published_checkpoint_through_the_component(
     version = runtime.activate_checkpoint(Artifact.local(weights))
     _, layout, name, loaded, contents, _ = events[-2]
     assert (layout, name, loaded, contents) == ("full", None, version, {"config.json": "{}"})
-    assert runtime.current_runtime_load_id() == version
     runtime.shutdown()
-    assert events[-2:] == ["close", "release"]
+    assert "close" not in events
 
 
-def test_a_failed_runtime_start_stops_the_engines_it_started(component, tmp_path):
+def test_a_runtime_whose_handler_fails_starts_no_engine(component, tmp_path):
     url, events, _, _ = component
 
     class BrokenHandler(SGLangInferenceHandler):
@@ -530,7 +532,7 @@ def test_a_failed_runtime_start_stops_the_engines_it_started(component, tmp_path
         RuntimeRegistry().build(
             serving_config(url, inference_handler_factory=BrokenHandler), model_path="Qwen/Qwen3-8B", environ=TOKENS
         )
-    assert [event for event in events if isinstance(event, str)][-2:] == ["close", "release"]
+    assert events == []
 
 
 def test_the_serving_runtime_reloads_its_release_into_the_engines_of_a_restarted_component(
@@ -540,6 +542,7 @@ def test_the_serving_runtime_reloads_its_release_into_the_engines_of_a_restarted
     runtime = RuntimeRegistry().build(
         serving_config(url, release_format=ReleaseFormat("full").to_dict()), model_path="Qwen/Qwen3-8B", environ=TOKENS
     )
+    runtime.open()
     weights = tmp_path / "hf"
     weights.mkdir()
     (weights / "config.json").write_text("{}")
@@ -551,3 +554,24 @@ def test_the_serving_runtime_reloads_its_release_into_the_engines_of_a_restarted
     assert (layout, loaded, contents) == ("full", version, {"config.json": "{}"})
     assert services[1].engines.versions == [version] and events[-1] == "resume"
     runtime.shutdown()
+
+
+def test_a_control_that_opens_while_the_engines_run_attaches_to_them_without_a_restart(component, tmp_path):
+    url, events, _, _ = component
+    first = RuntimeRegistry().build(
+        serving_config(url, adapter_capacity=2), model_path="Qwen/Qwen3-8B", environ=TOKENS
+    )
+    first.open()
+    version = first.activate_checkpoint(Artifact.local(saved_adapter(tmp_path / "job-1")), scenario="math")
+    first.shutdown()
+    starts = [event for event in events if event[0] == "start"]
+    # A control restart, or a standby that takes over: the engines and their adapter stay.
+    second = RuntimeRegistry().build(
+        serving_config(url, adapter_capacity=2), model_path="Qwen/Qwen3-8B", environ=TOKENS
+    )
+    second.open()
+    assert [event for event in events if event[0] == "start"] == starts
+    assert version in second.versions_at_start
+    # The engines keep the version that they serve, so the new control adopts it.
+    assert second._backend.runtime_load_ids() == [version] * len(second._backend.runtime_load_ids())
+    second.shutdown()

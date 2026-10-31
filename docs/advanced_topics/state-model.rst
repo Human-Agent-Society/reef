@@ -33,7 +33,9 @@ A scenario's first release holds the *creation artifact* of each component.
 Every later release has a parent. A release binds one *artifact*, the content
 of one component, for each component. Four identities stay separate: ``release_id`` names the release, ``artifact_id``
 names an artifact, ``content_id`` names the model or harness content, and
-``runtime_load_id`` names a concrete serving-engine weight load. In a
+``runtime_load_id`` names a concrete serving-engine weight load. A runtime
+load ID stays inside the engines and training: a record names the artifact
+that answered it by ``artifact_id``. In a
 scenario of one component, ``artifact_id`` is the ``release_id`` of the
 release that made the artifact; in a scenario of several components, it is
 ``<release_id>:<component>``. A release that carries a component forward

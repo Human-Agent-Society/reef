@@ -281,7 +281,7 @@ def test_training_recipe_resolves_fields_once_before_connecting(extension, monke
         resolved.append(values)
         return values
 
-    def connect(settings, *, model_path, loss_family):
+    def connect(settings, *, model_path, loss_family, services=None):
         assert len(resolved) == 1
         assert model_path == "model"
         return StubTrainingComponent(), StubInferenceRuntime()

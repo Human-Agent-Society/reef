@@ -27,6 +27,7 @@ from reef.recipe.config import recipe_config_from_file_layout
 from reef.recipe.registry import build_recipe
 from reef.scenario.scenario import Scenario
 from reef.service.deploy.config_utils import load_config
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 
 HERE = Path(__file__).resolve().parent
@@ -90,6 +91,7 @@ def open_campaign(recipe: MetaHarnessRecipe, directory: Path) -> Dispatcher:
         ),
         scenario_storage=SQLiteScenarioStorage(directory / "reef-data"),
         hold_local_cycles=True,
+        coordination=memory_coordination(),
     )
 
 
@@ -195,9 +197,11 @@ def search(scenario: Scenario, recipe: MetaHarnessRecipe, directory: Path) -> di
             break
         # A previous process may have recorded the report but not committed its
         # step. Let Reef replay it before spending on another rollout.
+        scenario.produce_samples()
         result = scenario.prepare_training_step()
         if result is None:
             record_rollout(scenario, recipe)
+            scenario.produce_samples()
             result = scenario.prepare_training_step()
         if result is None:
             raise RuntimeError("the recorded rollout did not produce a training step")

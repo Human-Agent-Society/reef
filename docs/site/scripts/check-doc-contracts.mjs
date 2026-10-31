@@ -55,7 +55,8 @@ function readTerminologyFiles(directory, extensions) {
   });
 }
 
-const routeFiles = readRouteFiles(routesDirectory);
+// The routes of every app, and the routes that every app shares (``reef/service/web.py``: ``/healthz``).
+const routeFiles = [...readRouteFiles(routesDirectory), resolve(repoRoot, "reef/service/web.py")];
 const routeSource = routeFiles.map(read).join("\n");
 
 const serviceConfig = configSource.match(/^reef:\s*\n((?:[ \t]+.*\n?)*)/m)?.[1];
@@ -65,9 +66,14 @@ if (!port) {
 }
 
 // A raw string route with a matcher, {step:\d{1,9}}, is the docs row's {step}.
-const routes = [...routeSource.matchAll(/app\.router\.add_(get|post)\(r?"([^"]+)"/g)].map(
-  ([, method, path]) => ({ method: method.toUpperCase(), path: path.replace(/\{(\w+):(?:[^{}]|\{[^{}]*\})*\}/g, "{$1}") }),
-);
+// A signed download (``add_signed_download(app, "...", handler)``) is a GET route too.
+const routes = [
+  ...routeSource.matchAll(/app\.router\.add_(get|post)\(r?"([^"]+)"/g),
+  ...[...routeSource.matchAll(/add_signed_download\(app, r?"([^"]+)"/g)].map(([match, path]) => [match, "get", path]),
+].map(([, method, path]) => ({
+  method: method.toUpperCase(),
+  path: path.replace(/\{(\w+):(?:[^{}]|\{[^{}]*\})*\}/g, "{$1}"),
+}));
 if (!routes.length) throw new Error("Could not derive aiohttp routes from reef/service/routes");
 
 const health = routes.find(({ method, path }) => method === "GET" && path.includes("health"))?.path;

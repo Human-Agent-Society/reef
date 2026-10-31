@@ -55,7 +55,7 @@ def toy_family():
 
 
 def _sample() -> TrajectorySample:
-    sample = policy_trajectory("i1", STUDENT_TOKENS, STUDENT_LOSS_MASK, STUDENT_LOG_PROBS, 0.0, "v0")
+    sample = policy_trajectory("i1", STUDENT_TOKENS, STUDENT_LOSS_MASK, STUDENT_LOG_PROBS, 0.0, artifact_id="v0")
     return sample.with_training(teacher_tokens=TEACHER_TOKENS)
 
 

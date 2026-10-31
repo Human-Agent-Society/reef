@@ -13,10 +13,7 @@ from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
 from reef.train.slime_backend.reef_adapters.training_job.storage import CheckpointStorage, RetentionConfig
 
 CRITIC_ARGS_HOOK_PATH = "reef.train.slime_backend.reef_adapters.worker_hooks.configure_critic_objective"
-REEF_ROLLOUT_DATA_KEYS = (
-    "producing_runtime_load_spans",
-    "producing_runtime_load_ids",
-)
+REEF_ROLLOUT_DATA_KEYS = ("producing_artifact_ids",)
 
 
 def validate_slime_args(args: SlimeArguments, spec: SlimeAlgorithm | None) -> None:
@@ -82,8 +79,7 @@ def validate_advantage_computation(args: SlimeArguments, spec: SlimeAlgorithm | 
         if any(LOSS_FAMILIES.resolve(name).allows_slime_advantage_computation for name in LOSS_FAMILIES.names):
             return
     raise ValueError(
-        "Reef supplies training signals externally; pass "
-        "--disable-compute-advantages-and-returns in training.options"
+        "Reef supplies training signals externally; pass --disable-compute-advantages-and-returns in training.options"
     )
 
 

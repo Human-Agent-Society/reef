@@ -27,7 +27,7 @@ Check health and status
 It reports these values for every scenario:
 
 - the step counter and the latest committed step outcome
-- the runtime load ID that the engines serve
+- the artifact that answers the scenario's requests (``served_artifact_id``)
 - whether a job's data is waiting, and the processor's state
 - whether inference is admitted or paused while a release loads
 - for a weight-training scenario, its running training job (``training_job``) and the number of jobs that ended, finished or failed (``finished_jobs``)
@@ -117,7 +117,7 @@ Choose a starting release
 
 The default inference routes answer from the scenario's active release. No request header keeps a client on an older release. To keep an older artifact answering, serve it beside the active release (`Serve an artifact beside the active release`_).
 
-A new scenario starts from the base artifact. A request can carry ``x-reef-release-id: <id>``. If the request creates the scenario, Reef binds the new scenario to that starting release instead. On a scenario that already exists, the header must name the bound starting release. Otherwise, Reef refuses the request with HTTP 409. `Headers <../reference/http-api.rst#headers>`__ in the HTTP API lists this header.
+A new scenario starts from the base artifact. To start it from another release, create it with ``POST /reef/scenarios`` and ``{"name": "<scenario>", "release_id": "<id>"}``. A report or a record import that creates the scenario can carry ``x-reef-release-id: <id>`` instead. On a scenario that already exists, the header must name the bound starting release. Otherwise, Reef refuses the request with HTTP 409. `Headers <../reference/http-api.rst#headers>`__ in the HTTP API lists this header. An inference request never creates a scenario.
 
 To install a specific harness release, add ``?release_id=<id>`` to the harness manifest or install route. To serve an earlier artifact again, activate it as `Activate an artifact`_ describes.
 
@@ -304,6 +304,10 @@ What survives a restart, provided the storage paths are persistent:
        recipe open once the service answers on its own address, and the
        rows train then, with no new record needed
 
+A process that stops normally releases the control lease. After a crash, the
+next process waits until the old lease expires (at most 30 seconds) before it
+loads scenarios; see `Run the services in separate processes`_.
+
 After a step commits, ``/reef/status`` reports its scenario's
 ``artifact_head_sync`` with the ``release_id`` of the `chain tip
 <../advanced_topics/state-model.rst#the-release-chain>`__ and any ``error``.
@@ -314,7 +318,164 @@ Reef retries synchronization; if it still fails, the new commit stops before
 publishing or writing its commit record. A conflict never overwrites the other
 writer's head. Restart also synchronizes the head before loading the scenario.
 
-The scenario storage and the repository live under ``.reef/`` by default (``agent_record_dir``, ``task_file_dir``, ``artifact_repository``, ``artifact_work_dir``, ``artifact_cache_dir``). On ephemeral storage none of the guarantees above hold past its loss. Each scenario needs one Reef writer; run a second deployment on other ports and storage paths rather than two services on one store. `State model <../advanced_topics/state-model.rst#commit-ordering>`__ describes the commit ordering behind the table. ``DELETE /reef/scenarios/{scenario}`` retires a scenario: the storage backend archives its records, commits, settings and task files, its proposal inbox and step records move under an ``archived/`` sibling and its repository ref is renamed into ``refs/reef/archived/``, so a name can be reused without the old chain. Deleting a weight-training scenario cancels its running training job.
+The scenario storage and the repository live under ``.reef/`` by default (``agent_record_dir``, ``task_file_dir``, ``artifact_repository``, ``artifact_work_dir``, ``artifact_cache_dir``). On ephemeral storage none of the guarantees above hold past its loss. Each scenario needs one control service; run a second deployment on other ports and storage paths rather than two deployments on one store. The services of one deployment share its store; see `Run the services in separate processes`_. `State model <../advanced_topics/state-model.rst#commit-ordering>`__ describes the commit ordering behind the table. ``DELETE /reef/scenarios/{scenario}`` retires a scenario: the storage backend archives its records, commits, settings and task files, its proposal inbox and step records move under an ``archived/`` sibling and its repository ref is renamed into ``refs/reef/archived/``, so a name can be reused without the old chain. Deleting a weight-training scenario cancels its running training job.
+
+Run the services in separate processes
+--------------------------------------
+
+A deployment has six services. By default, ``reef serve`` runs all of them in
+one process. Run them in separate processes when inference must stay up while
+control restarts or deploys a new version, or when one service needs more
+replicas than the others. The services do not send work to each other: each one
+reads and writes the deployment's shared store. The one call between services
+goes from evaluation to control, for the candidate that a rollout evaluates.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 15 45 40
+
+   * - Service
+     - What it does
+     - What it writes
+   * - ``control``
+     - The HTTP API except the data routes; scenarios, commits and activation.
+       It syncs each loaded scenario after a data write
+     - ``served_models``, training jobs, sample requests, record copy
+       requests, evaluations, commits
+   * - ``inference``
+     - Answers model requests with the model that ``served_models`` names
+     - records
+   * - ``samples``
+     - Makes training samples from new records
+     - samples
+   * - ``training``
+     - Runs training jobs on the training component
+     - job progress, trained artifacts
+   * - ``evaluation``
+     - Runs the rollouts of artifact evaluations. It serves each candidate
+       artifact itself, from the artifact repository
+     - rollout results
+   * - ``data``
+     - Serves the `data routes <../reference/http-api.rst#data-items>`__ and
+       the reads of what each scenario stores, copies new records to record
+       items and new artifacts to artifact items, and runs data imports and
+       exports
+     - data items, record items, artifact items, data sync requests
+
+Start each service with the same config and ``--component``:
+
+.. code:: bash
+
+   export REEF_TOKEN="$(openssl rand -hex 16)"
+   reef serve -c deploy.yaml --component control --reef.port 8901
+   reef serve -c deploy.yaml --component inference --reef.port 8902
+   reef serve -c deploy.yaml --component samples --reef.port 8903
+   reef serve -c deploy.yaml --component training --reef.port 8904
+   reef serve -c deploy.yaml --component evaluation --reef.port 8905
+   reef serve -c deploy.yaml --component data --reef.port 8906
+
+A ``--component`` process starts no other child. Start the inference engines
+and the training backend that the config names on their own. All processes
+must reach the same store:
+
+* On one host, the default ``sqlite`` record backend works. The processes share
+  the files under ``storage.agent-record-dir``.
+* On several hosts, use ``storage.record-backend: postgres``. The services keep
+  their shared tables in the schema ``<record schema>_coordination``
+  (``reef_records_coordination`` by default), so deployments with their own
+  record schemas share no tables.
+
+Every service except inference must also reach the same data store
+(``storage.data-store``, which follows the record backend by default; see
+`Choose the data store`_). Control, training, evaluation and data must reach
+the same artifact backend.
+
+**Data requests.** Send the data routes (``/reef/namespaces/{owner}/data...``),
+``GET /reef/scenarios/{scenario}/artifacts/{artifact_id}/files`` and
+``GET /reef/scenarios/{scenario}/jobs`` to the data service. In the split
+layout, control does not serve these routes. The data service also answers the
+reads of what each scenario stores: the scenario list, settings, contract,
+records, commits, artifacts, samples, tasks, and evaluations with their
+rollouts. Control answers these reads too. Writes to a scenario, the buffer
+routes, the cancel of a training job, ``/reef/status`` and the harness routes
+stay with control. The data service needs no control lease,
+so you can run several replicas of it behind one address.
+
+After each data write, the data service asks control to sync the scenarios
+that the write touched, and waits up to 30 seconds for the syncs. The response
+says whether they ended (``synced``). A sync that did not end runs when control
+takes it, or when the scenario next loads.
+
+Only control activates a scenario's artifact on the engines. The samples,
+evaluation and data services load a scenario without activating it.
+
+**Inference requests.** Send model requests to the inference service, with the
+scenario in ``x-reef-scenario``. The inference service answers
+``/v1/chat/completions``, ``/v1/responses``, ``/v1/messages``,
+``/v1/messages/count_tokens``, the evaluation routes and the routes of an
+artifact served beside the active release. A one-process ``reef serve`` answers
+the same routes in the same way, in control's process.
+
+For each request, the inference service reads the scenario's rows in
+``served_models``. The request's ``model`` selects the row of an artifact
+served beside the active release when it names one; any other ``model`` selects
+the active row. The service sends the request to the engine at the row's URL,
+under the row's model name. The only credential that it sends is the
+deployment's provider key (``inference.upstream-api-key``), when one is set.
+No artifact changes the request on its way to the engine. The service
+appends the record to the scenario's record store and returns the record ID in
+``x-reef-agent-record-id``, and the ID of the artifact that answered in
+``x-reef-release-id``. ``x-reef-tag-*`` headers go into the record. The
+inference service never creates a scenario: create it first with
+``POST /reef/scenarios`` or a harness install. The inference service answers:
+
+* ``404`` when the scenario is unknown or serves no model.
+* ``502`` when the engine fails or cannot be reached, and ``504`` when it does
+  not answer within ``inference.timeout-s``.
+* ``409`` when the engine answers with another model name or aborts the
+  request twice. The service reads the row again and retries once, for
+  example during a change of the served model.
+* ``503`` when it cannot read ``served_models`` and has no earlier read from
+  the last 300 seconds, or when the record store does not take the record. The
+  service never returns a buffered answer without its record. A stream goes
+  out as the engine sends it, and its record is appended when it ends.
+
+**Control restarts.** While control is down, the inference service continues to
+answer from ``served_models`` and to record. Training jobs, sample requests and
+evaluation rollouts that are already queued continue; new ones wait for control,
+because control adds them. The data service continues to take data writes, but
+their syncs wait for control: each write waits 30 seconds and then answers
+``"synced": false``.
+
+When control starts, it does not load again what the engines still serve. A
+runtime that serves one adapter per scenario takes over each adapter that
+``served_models`` names and that the engines still report, and loads only what
+they lost. A runtime that loads full weights in place loads the active artifact
+again. When a replaced value's stop is due, the engines unload its adapter.
+
+Control runs as one active instance and any number of standby instances on the
+same store. The active instance holds the control lease and extends it. A
+standby instance waits at start-up until it can take the lease: it loads no
+scenario and answers no request, ``/healthz`` included, so a load balancer that
+checks ``/healthz`` sends requests to the active instance alone. When the active
+instance stops, it releases the lease, and a standby takes over within 10
+seconds. When the active instance crashes, a standby takes over after the lease
+expires (30 seconds). An instance that loses the lease stops its training work
+and ends its process, so that its supervisor starts it again as a standby. Each
+``served_models`` write carries the lease number, so an old instance cannot
+overwrite the table. To deploy a new control version, start the new
+instance as a standby, then stop the old one.
+
+**Limits.** The inference service serves what ``served_models`` names: the
+active artifact of each scenario and the artifacts served beside it. A
+candidate under evaluation is not one of them: the evaluation service loads the
+candidate from the artifact repository and answers its rollouts with the
+scenario's runtime, so it needs no other service. A record of the
+artifact that a scenario started from carries no ``artifact_ref``. A runtime
+that loads full weights in place serves the next artifact under the same model
+name after an activation, so a request in flight at that moment can be answered
+by the next artifact while its record names the old one. Adapter runtimes serve
+each artifact under its own name and do not have this limit.
 
 Choose the storage backend
 --------------------------
@@ -341,10 +502,6 @@ Select the backend with ``storage.record-backend``:
      - Tables in one PostgreSQL schema; ``agent_record_dir`` holds no scenario state
    * - a plugin reference
      - The ``ScenarioStorage`` subclass that the reference names
-
-A model configuration can hold an upstream ``api_key``. Thus only the owner
-can read a SQLite database that holds settings. Responses never return the
-key; they report only ``has_api_key``.
 
 To use PostgreSQL, install the driver with ``uv pip install 'reef-infra[postgres]'``
 (or ``uv pip install -e '.[postgres]'`` from a checkout), then configure:
@@ -392,10 +549,13 @@ Give its name as ``package.module:ClassName``, or give the name and a configurat
        module: my_package.storage:ObjectStoreScenarioStorage
        config:
          bucket: reef-state
+     coordination-backend: sqlite
      agent-record-dir: .reef/agent-record
 
 Reef calls ``from_config(config, directory=...)`` with the ``config`` mapping and
-``agent_record_dir``. The `Python storage contract
+``agent_record_dir``. A plugin holds no tables of the services, so name where
+they share them: ``coordination-backend: sqlite`` for processes on one host, or
+``postgres`` with ``record-database-url`` for several hosts. The `Python storage contract
 <../reference/python-api.rst#scenario-stores>`__ gives the necessary behavior.
 An embedded deployment gives a ``ScenarioStorage`` instance to
 ``Dispatcher(..., scenario_storage=...)`` instead.
@@ -528,9 +688,11 @@ scenario.
 When Reef opens a scenario for the first time after an upgrade, it moves the
 scenario's uploaded trajectories and tasks into the data store. They become
 items of the owner with the scenario's name, which the scenario uses in their
-split. A background job then makes record items from the scenario's stored
-records, in pages of 256, while the scenario serves. The job continues from
-its last page after a restart.
+split. The data service makes record items from the scenario's records, in
+pages of 256, while the scenario serves. It keeps how far it copied each
+scenario in the deployment's shared store, so it continues from its last page
+after a restart. A deployment that copied its records before this mark existed
+copies them once more, which changes no item.
 
 Import Harbor tasks
 -------------------

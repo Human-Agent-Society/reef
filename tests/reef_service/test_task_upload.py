@@ -142,7 +142,7 @@ def test_a_train_use_needs_a_recipe_that_reads_imported_tasks_and_an_eval_use_do
             response = await client.post(tasks_url("train"), headers=GZIP, data=archive(tmp_path, "t"))
             assert response.status == 400
             assert "does not train on imported tasks" in await response.text()
-            assert dispatcher.data_store.query("s") == ()
+            assert dispatcher.data_store.query("s", kind="task") == ()
             # Artifact evaluations run the eval split, so it takes tasks whatever the recipe trains on.
             evaluated = await client.post(tasks_url("eval"), headers=GZIP, data=archive(tmp_path, "t"))
             assert evaluated.status == 201
@@ -187,7 +187,7 @@ def test_an_invalid_task_create_is_refused_and_stores_nothing(tmp_path: Path) ->
                 response = await client.post(tasks_url(), headers=GZIP, data=body)
                 assert response.status == 400, reason
                 assert reason in await response.text()
-            assert dispatcher.data_store.query("s") == ()
+            assert dispatcher.data_store.query("s", kind="task") == ()
 
     try:
         asyncio.run(run())

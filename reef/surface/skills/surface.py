@@ -5,13 +5,12 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 from reef.artifact.artifact import Artifact
 from reef.core.errors import ReefError
-from reef.surface.base import ArtifactValidator, ComponentSurface, InferenceHooks, Surface
+from reef.surface.base import ArtifactValidator, ComponentSurface, Surface
 from reef.surface.files import TextFileTree
-from reef.surface.skills.modules import RequestSkillLayer, SkillLayer
+from reef.surface.skills.modules import SkillLayer
 
 #: The component name a skill surface binds.
 SKILLS_COMPONENT = "skills"
@@ -48,33 +47,14 @@ class SkillValidator(ArtifactValidator):
         validate_tree(files or {}, self.layers)
 
 
-@dataclass(frozen=True)
-class SkillInferenceHooks(InferenceHooks):
-    """Inject request-aware skill layers in declaration order."""
-
-    layers: tuple[RequestSkillLayer, ...]
-
-    def prepare_request(self, artifact: Artifact, path: str, request: dict[str, Any]) -> dict[str, Any]:
-        local_path = artifact.materialize().local_path
-        if local_path is None:
-            return request
-        for layer in self.layers:
-            request = layer.prepare_request(_layer_files(local_path, layer.layer), path, request)
-        return request
-
-    def verify_response(self, artifact: Artifact, path: str, response: Mapping[str, Any]) -> None:
-        return None
-
-
 def create_skill_surface(layers: Sequence[SkillLayer]) -> Surface:
-    """Build the ``skills`` component: layer validation, optional request injection, and client-pulled files."""
+    """Build the ``skills`` component: layer validation and client-pulled files. The client applies the skills;
+    no request is changed on the way to the model."""
     layer_tuple = _skill_layers(layers)
-    request_layers = tuple(item for item in layer_tuple if isinstance(item, RequestSkillLayer))
     return Surface(
         components={
             SKILLS_COMPONENT: ComponentSurface(
                 validator=SkillValidator(layer_tuple),
-                inference=SkillInferenceHooks(request_layers) if request_layers else None,
                 files=TextFileTree(),
                 kind="harness_plugin",
             )
@@ -107,4 +87,4 @@ def _layer_files(local_path: Path, layer: str) -> dict[str, str]:
     return files
 
 
-__all__ = ["SKILLS_COMPONENT", "SkillInferenceHooks", "SkillValidator", "create_skill_surface", "validate_tree"]
+__all__ = ["SKILLS_COMPONENT", "SkillValidator", "create_skill_surface", "validate_tree"]

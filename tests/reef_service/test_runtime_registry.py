@@ -13,6 +13,7 @@ from reef.recipe.registry import build_named_recipe
 from reef.runtime.deployment import RuntimeConfigError, RuntimeRegistry
 from reef.runtime.interfaces import InferenceHandler, InferenceRuntime
 from reef.service.app import create_app
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 
 
@@ -98,6 +99,7 @@ inference:
         build_named_recipe("qwen", config_directory=recipes),
         InMemoryRepositoryBackend.factory(initial),
         scenario_storage=SQLiteScenarioStorage(),
+        coordination=memory_coordination(),
     )
 
     scenario = dispatcher.get_or_create_scenario("math")
@@ -114,6 +116,11 @@ def test_http_app_routes_scenarios_to_runtime_specific_inference_services(tmp_pa
                 self.recipe = recipe
 
             @property
+            def model_path(self) -> str:
+                # A served model name: control writes a scenario's served_models row only for a named model.
+                return f"{self.recipe}-model"
+
+            @property
             def inference_handler(self) -> InferenceHandler:
                 class _Backend(InferenceHandler):
                     async def inference(self, artifact, path, payload):
@@ -121,9 +128,6 @@ def test_http_app_routes_scenarios_to_runtime_specific_inference_services(tmp_pa
                         return {"runtime": recipe}
 
                 return _Backend()
-
-            def current_runtime_load_id(self) -> str | None:
-                return None
 
             def activate_checkpoint(self, artifact, *, scenario=None) -> str:
                 return artifact.ref.release_id
@@ -136,6 +140,7 @@ def test_http_app_routes_scenarios_to_runtime_specific_inference_services(tmp_pa
                 Recipe(name=recipe, runtime=RoutingRuntime(recipe)),
                 backend_factory,
                 scenario_storage=SQLiteScenarioStorage(),
+                coordination=memory_coordination(),
             )
             for recipe in ("qwen", "gemma")
         }
@@ -161,7 +166,9 @@ def test_http_app_routes_scenarios_to_runtime_specific_inference_services(tmp_pa
 
 @pytest.mark.unit
 @pytest.mark.parametrize("path", ["/v1/chat/completions", "/v1/responses", "/v1/messages"])
-def test_a_deployment_without_an_inference_engine_answers_inference_with_503(tmp_path, path) -> None:
+def test_a_deployment_without_an_inference_engine_serves_no_model(tmp_path, path) -> None:
+    """The ``none`` runtime has no HTTP engine address, so control writes no served_models row: every call is 404."""
+
     async def run() -> None:
         runtime = RuntimeRegistry().build({"type": "none"}, model_path="model")
         initial = tmp_path / "initial"
@@ -170,14 +177,15 @@ def test_a_deployment_without_an_inference_engine_answers_inference_with_503(tmp
             Recipe(name="sft", runtime=runtime),
             InMemoryRepositoryBackend.factory(initial),
             scenario_storage=SQLiteScenarioStorage(),
+            coordination=memory_coordination(),
         )
         dispatcher.get_or_create_scenario("roleplay")
         client = TestClient(TestServer(create_app(dispatcher)))
         await client.start_server()
         try:
             response = await client.post(path, headers={"x-reef-scenario": "roleplay"}, json={"messages": []})
-            assert response.status == 503
-            assert "inference.backend: none" in await response.text()
+            assert response.status == 404, await response.text()
+            assert "scenario 'roleplay' serves no model 'active'" in await response.text()
         finally:
             await client.close()
 

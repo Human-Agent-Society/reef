@@ -1304,8 +1304,8 @@ Both modes use the same entries, plugins, and interpreter.
 loads ``native/tree.json`` into a compose ``Loader`` over
 ``NATIVE_PLUGINS`` and keeps a ``Run`` per session across turns. It starts
 ``client.wrapper.CaptureProxy`` in process. ``release_client.HeadWatch``
-follows the active release by polling the catalog and reading the
-``x-reef-release-id`` header on inference responses.
+follows the active release by polling the catalog
+(``GET /reef/harness/releases``).
 
 The interpreter calls ``loop.before_step(run)`` before each model stage.
 In rollout mode it does nothing. In serve mode it applies queued mounts

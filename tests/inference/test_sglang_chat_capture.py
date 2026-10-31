@@ -13,7 +13,7 @@ from reef.artifact import Artifact, ArtifactRef
 from reef.inference.chat import ReasoningStreamSplitter
 from reef.inference.sglang.chat import NativeStreamCapture, SGLangGenerateClient, SGLangInferenceHandler
 from reef.runtime.interfaces import inference_aborted
-from reef.service.request_service import client_inference_response
+from reef.service.inference_service import client_response
 from reef.service.streaming import stream_record
 
 
@@ -703,7 +703,7 @@ def test_anthropic_count_tokens_uses_the_exact_template_without_exposing_trainin
     )
     assert response["input_tokens"] == 2
     assert response["training"]["runtime_load_id"].startswith("local:")
-    assert client_inference_response(response) == {"input_tokens": 2}
+    assert client_response(response) == {"input_tokens": 2}
 
 
 @pytest.mark.unit

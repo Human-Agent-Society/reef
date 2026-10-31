@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -13,18 +14,20 @@ from tests.support.component_trainers import _records
 from tests.support.component_trainers import _scenario as two_trainer_scenario
 from tests.support.component_trainers import _TwoTrainerRecipe, component_files, stop_workers
 from tests.support.runtime_stubs import StubInferenceRuntime
+from tests.support.samples_service import make_samples
 
 from reef.artifact import InMemoryRepositoryBackend
 from reef.artifact.artifact import ArtifactNotFound
 from reef.artifact.files import ArtifactFiles
 from reef.artifact.sources import REFERENCE_FILE, DirectorySource, HuggingFaceRevision
 from reef.core.errors import CommitPending, ReefError, TrainingStartRefused
-from reef.core.evaluation import PolicyModel
 from reef.dispatcher import Dispatcher
 from reef.dispatcher.errors import local_error_source
+from reef.execution.workers import SERVICE_COMPONENTS
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.surface import ArtifactLayout, ComponentSurface, Surface, TextFileTree
-from reef.surface.weights import WeightInferenceHooks, WeightLoader
+from reef.surface.weights import WeightLoader
 
 
 @dataclass(frozen=True)
@@ -34,7 +37,7 @@ class _LoadedRecipe(_TwoTrainerRecipe):
     def build_surface(self, scenario: str) -> Surface:
         return Surface(
             components={
-                WEIGHTS: ComponentSurface(loader=WeightLoader(), inference=WeightInferenceHooks()),
+                WEIGHTS: ComponentSurface(loader=WeightLoader()),
                 HARNESS: ComponentSurface(files=TextFileTree()),
             }
         )
@@ -59,6 +62,10 @@ def _dispatcher(tmp_path: Path, recipe: type[_LoadedRecipe] = _LoadedRecipe) -> 
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(records),
+        coordination=memory_coordination(),
+        # No samples worker: the test makes the samples and commits each step itself, so no worker that the store
+        # watcher wakes commits the same result.
+        components=frozenset(SERVICE_COMPONENTS) - {"samples"},
     )
 
 
@@ -74,12 +81,22 @@ def _scenario(dispatcher: Dispatcher, runtime: StubInferenceRuntime):
 
 
 def _step(scenario, component: str, step: int) -> str:
-    for record in _records(step):
+    for record in _records(step, scenario.serving_artifact_id()):
         scenario.records.append(record)
+    make_samples(scenario)
     result = scenario.prepare_training_step(component)
     assert result is not None
     scenario.commit(result, component=component)
     return scenario.current_artifact_ref().release_id
+
+
+def _job_step(scenario, component: str):
+    """The next prepared step of ``component``'s job loop; the training worker runs each job on its own thread."""
+    deadline = time.monotonic() + 10
+    while (result := scenario.prepare_training_step(component)) is None:
+        assert time.monotonic() < deadline, "the training job did not move"
+        time.sleep(0.01)
+    return result
 
 
 @pytest.mark.unit
@@ -89,8 +106,9 @@ def test_a_local_cycle_clears_only_the_errors_it_recorded(tmp_path: Path) -> Non
     dispatcher = _dispatcher(tmp_path)
     try:
         scenario = _scenario(dispatcher, runtime)
-        for record in _records(1):
+        for record in _records(1, scenario.serving_artifact_id()):
             scenario.records.append(record)
+        make_samples(scenario)
         dispatcher.errors.record("agent", "RuntimeError: training job away", local_error_source(WEIGHTS))
         assert dispatcher.local_workers.process_step("agent", HARNESS) is True
         assert dispatcher.training_status.training_errors() == ["agent: RuntimeError: training job away"]
@@ -99,8 +117,9 @@ def test_a_local_cycle_clears_only_the_errors_it_recorded(tmp_path: Path) -> Non
             "agent: RuntimeError: training job away",
             "agent: harness away",
         ]
-        for record in _records(2):
+        for record in _records(2, scenario.serving_artifact_id()):
             scenario.records.append(record)
+        make_samples(scenario)
         # The harness cycle clears its own error; the weights worker's stays until that worker clears it.
         assert dispatcher.local_workers.process_step("agent", HARNESS) is True
         assert dispatcher.training_status.training_errors() == ["agent: RuntimeError: training job away"]
@@ -132,7 +151,7 @@ def test_activating_a_held_harness_release_leaves_held_admission_closed(tmp_path
             HARNESS: "harness step 1",
         }
         assert not runtime.inference_admission_status["open"]
-        assert runtime.current_runtime_load_id() == "before"
+        assert runtime.served == "before"
     finally:
         dispatcher.close()
 
@@ -152,7 +171,7 @@ def test_a_harness_only_activation_leaves_held_admission_closed(tmp_path: Path) 
         scenario.activate(f"{first}:{HARNESS}", HARNESS)
         assert component_files(scenario, scenario.current_artifact_ref())[HARNESS] == "harness step 1"
         assert not runtime.inference_admission_status["open"]
-        assert runtime.current_runtime_load_id() == "before"
+        assert runtime.served == "before"
     finally:
         dispatcher.close()
 
@@ -201,10 +220,10 @@ def test_a_weights_start_the_training_component_refuses_is_refused_before_anythi
     )
     try:
         scenario = two_trainer_scenario(dispatcher, 1)
+        make_samples(scenario)
         base = scenario.current_artifact_ref().release_id
         for _ in range(3):
-            result = scenario.prepare_training_step(WEIGHTS)
-            assert result is not None
+            result = _job_step(scenario, WEIGHTS)
             scenario.commit(result, component=WEIGHTS)
         served = scenario.current_artifact_ref().release_id
         steps = scenario.scenario_step
@@ -229,16 +248,16 @@ def test_activation_and_a_new_start_wait_while_the_weight_trainer_has_a_prepared
     )
     try:
         scenario = two_trainer_scenario(dispatcher, 1, 2)
+        make_samples(scenario)
         base = scenario.current_artifact_ref().release_id
         # The first job's submission, checkpoint and end; then the second job's submission.
         for _ in range(4):
-            result = scenario.prepare_training_step(WEIGHTS)
-            assert result is not None
+            result = _job_step(scenario, WEIGHTS)
             scenario.commit(result, component=WEIGHTS)
         served = scenario.current_artifact_ref().release_id
         assert served != base
-        decided = scenario.prepare_training_step(WEIGHTS)
-        assert decided is not None and decided.metrics["training_job"]["event"] == "checkpoint"
+        decided = _job_step(scenario, WEIGHTS)
+        assert decided.metrics["training_job"]["event"] == "checkpoint"
         trainer = scenario.trainer_for(WEIGHTS)
         assert trainer.pending_job_data is None and trainer.has_pending_commit
         with pytest.raises(CommitPending, match="waits for its commit"):
@@ -393,7 +412,7 @@ def test_a_served_harness_binds_the_weights_served_now_and_leaves_the_active_rel
         with pytest.raises(ReefError, match="answers only from the release it has loaded"):
             scenario.serve(artifact_id, HARNESS)
 
-        runtime.artifact_model = lambda artifact: PolicyModel("base", artifact.ref.release_id)
+        runtime.answers_each_release = True
         served = scenario.serve(artifact_id, HARNESS)
         assert served.artifact_id == artifact_id and served.release_id != first
         release = scenario.served_release(artifact_id)

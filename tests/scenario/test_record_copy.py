@@ -1,4 +1,4 @@
-"""The record item copier (RFC #1028): a scenario's records follow into the data store, also after a restart."""
+"""The record copy (RFC #1028): the data service copies a scenario's records into the data store, in pages."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from tests.support.trajectory_uploads import UploadRecipe, dispatcher_for
 from reef.core.records_types import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher
 from reef.storage import record_items
+from reef.storage.record_items import record_copy_mark
 from reef.storage.sqlite import SQLiteScenarioStorage
 
 
@@ -40,8 +41,8 @@ def test_each_accepted_report_becomes_a_record_item(tmp_path: Path) -> None:
         (item,) = dispatcher.data_store.query("s", kind="record", limit=1)
         assert item.scenarios == {"s": "train"}
         deadline = time.monotonic() + 10
-        while dispatcher.stored_settings("s").record_items_sequence < 2:
-            assert time.monotonic() < deadline, "the copier did not store its sequence"
+        while dispatcher.coordination.marks.read(record_copy_mark("s")) < 2:
+            assert time.monotonic() < deadline, "the copy did not advance its mark"
             time.sleep(0.02)
     finally:
         dispatcher.close()

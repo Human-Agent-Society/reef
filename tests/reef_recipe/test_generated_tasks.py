@@ -75,7 +75,7 @@ def inference(record_id: str) -> AgentRecord:
             "tokens": [1, 2, 3],
             "loss_mask": [0, 1, 1],
             "rollout_log_probs": [0.0, -0.5, -0.7],
-            "runtime_load_id": "r1",
+            "artifact_id": "r1",
         },
     }
     return AgentRecord.create(
@@ -145,7 +145,7 @@ def handed_out_names(p: TrainingPipeline) -> list[str]:
 
 def sample(task: str, index: int, reward: float) -> TrajectorySample:
     """One rollout's sample in the task group ``task``, as the training component's rollout makes it."""
-    trajectory = policy_trajectory(f"{task}-{index}", (1, 2, 3), (1, 1), (-0.1, -0.2), reward, "r1")
+    trajectory = policy_trajectory(f"{task}-{index}", (1, 2, 3), (1, 1), (-0.1, -0.2), reward, artifact_id="r1")
     return dataclasses.replace(trajectory, group_id=task)
 
 
@@ -351,11 +351,16 @@ def task_storage(tmp_path: Path, scenario: str = "tasks") -> TaskStorage:
 
 class CommittingPipeline(TrainingPipeline):
     """A pipeline whose ``acknowledge`` also commits what the job data consumed, as the trainer's commit of a
-    job's submission does: the commit counts the stored samples trained."""
+    job's submission does: the commit counts the stored samples trained. Each look also makes the samples first,
+    as the samples service does before the trainer reads the sample store."""
 
     def __init__(self, context: PipelineContext, session: CommitHistoryScenarioStore, **stages: Any) -> None:
         super().__init__(context, **stages)
         self.session = session
+
+    def advance(self) -> None:
+        self.produce()
+        super().advance()
 
     def acknowledge(self, data_id: str) -> frozenset[str]:
         consumed = super().acknowledge(data_id)

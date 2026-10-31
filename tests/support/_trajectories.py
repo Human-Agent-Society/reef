@@ -1,7 +1,5 @@
 """ATIF fixtures shared by backend and recipe contract tests."""
 
-from dataclasses import asdict
-
 from reef.core import AgentRecord, RequestType
 from reef.core.trajectories import make_trajectory
 from reef.train.types import TrajectorySample
@@ -13,28 +11,26 @@ def policy_trajectory(
     loss_mask,
     rollout_log_probs,
     reward,
-    runtime_load_id=None,
     action_mask=(),
     rollout_created_at=None,
     turn_count=1,
     topk_indices=(),
     topk_log_probs=(),
     extras=None,
-    runtime_load_spans=(),
+    artifact_id=None,
 ) -> TrajectorySample:
     item = recorded_trajectory(source_agent_record_id, {}, reward)
     return item.with_training(
         tokens=list(tokens),
         loss_mask=list(loss_mask),
         rollout_log_probs=list(rollout_log_probs),
-        runtime_load_id=runtime_load_id,
         action_mask=list(action_mask),
         rollout_created_at=rollout_created_at,
         turn_count=turn_count,
         topk_indices=[list(row) for row in topk_indices],
         topk_log_probs=[list(row) for row in topk_log_probs],
         extras=extras or {},
-        runtime_load_spans=[asdict(span) for span in runtime_load_spans],
+        artifact_id=artifact_id,
     )
 
 

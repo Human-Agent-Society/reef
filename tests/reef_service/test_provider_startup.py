@@ -326,6 +326,11 @@ def test_provider_cli_serves_and_records_feedback_without_yaml_or_gpu_imports(tm
                     "Authorization": "Bearer test-token",
                     "x-reef-scenario": "demo",
                 }
+                # An inference call never creates a scenario: create it first.
+                with urlopen(
+                    Request(f"{base_url}/reef/scenarios", json.dumps({"name": "demo"}).encode(), headers), timeout=15
+                ) as response:
+                    assert response.status == 201
                 payload = {"model": "demo", "messages": [{"role": "user", "content": "hello"}], "temperature": 0.3}
                 with urlopen(
                     Request(f"{base_url}/v1/chat/completions", json.dumps(payload).encode(), headers), timeout=15
