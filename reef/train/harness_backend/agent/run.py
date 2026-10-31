@@ -143,8 +143,8 @@ class CheckTool(AgentTool):
             raise ValueError(f"check takes tree, not {', '.join(sorted(unknown))}")
         with self.run.lock:
             result = self.run.services.check(self.run.read_tree(arguments))
-        verdict = "passed" if result.passed else f"refused: {result.message()}"
-        self.run.services.calls.note("check", f"the agent's tree {verdict}", failed=not result.passed)
+        check_outcome = "passed" if result.passed else f"refused: {result.message()}"
+        self.run.services.calls.note("check", f"the agent's tree {check_outcome}", failed=not result.passed)
         return {"passed": result.passed, "problems": list(result.problems)}
 
 

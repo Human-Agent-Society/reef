@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 from reef.harness.adapters import get_adapter
-from reef.harness.tasks.run import TaskRunError, _remove_run_root, run_task
+from reef.harness.tasks.run import TaskRunError, remove_run_root, run_task
 from reef.harness.tasks.trajectory import (
     ClaudeSessionReader,
     CodexSessionReader,
@@ -230,7 +230,7 @@ def test_run_cleanup_repairs_permissions(tmp_path: Path) -> None:
     (locked / "credential").write_text("secret")
     locked.chmod(0)
     try:
-        _remove_run_root(root)
+        remove_run_root(root)
     finally:
         if locked.exists():
             locked.chmod(stat.S_IRWXU)
@@ -246,7 +246,7 @@ def test_run_cleanup_failure_is_not_suppressed(tmp_path: Path, monkeypatch) -> N
 
     monkeypatch.setattr("reef.harness.tasks.run.shutil.rmtree", fail)
     with pytest.raises(TaskRunError, match=r"cannot remove run root.*locked"):
-        _remove_run_root(root)
+        remove_run_root(root)
 
 
 def test_nonzero_exit_code_is_reported_not_raised(tmp_path: Path) -> None:

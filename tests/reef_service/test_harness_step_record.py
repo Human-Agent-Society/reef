@@ -342,7 +342,7 @@ def test_an_run_record_that_cannot_be_kept_aborts_the_step_instead_of_scoring_it
     from reef.harness.tasks import run as run_module
 
     removed: list[Path] = []
-    remove = run_module._remove_run_root
+    remove = run_module.remove_run_root
 
     def observed(root: Path) -> None:
         removed.append(root)
@@ -353,7 +353,7 @@ def test_an_run_record_that_cannot_be_kept_aborts_the_step_instead_of_scoring_it
     blocker = tmp_path / "blocker"
     blocker.write_text("not a directory")
     with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(run_module, "_remove_run_root", observed)
+        patch.setattr(run_module, "remove_run_root", observed)
         with pytest.raises(TrajectoryKeepError) as caught:
             run_task(descriptor, files, "task", binary=str(make_pi_binary(tmp_path)), keep_dir=blocker / "kept")
     assert not isinstance(caught.value, TaskRunError)

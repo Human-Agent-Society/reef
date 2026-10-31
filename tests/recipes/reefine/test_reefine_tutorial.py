@@ -254,8 +254,8 @@ def test_install_renders_the_source_tree_for_pi_with_a_binding_at_this_reef(run_
             paths.append(path)
             return manifest
 
-    monkeypatch.setattr(run_module, "_client", Client)
-    monkeypatch.setattr(run_module, "_ensure_scenario", lambda client: None)
+    monkeypatch.setattr(run_module, "service_client", Client)
+    monkeypatch.setattr(run_module, "ensure_scenario", lambda client: None)
     monkeypatch.setattr(run_module, "INSTALL_ROOT", tmp_path / "harness")
     assert run_module.install() == "r1" and paths == ["/reef/harness?form=source"]
     rendered = tmp_path / "harness" / "pi-agent"

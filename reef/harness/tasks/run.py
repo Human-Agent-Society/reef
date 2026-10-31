@@ -67,7 +67,7 @@ class TaskResult:
     residue: tuple[str, ...]
 
 
-def _remove_run_root(root: Path) -> None:
+def remove_run_root(root: Path) -> None:
     """Remove a root, repairing ordinary permission damage once."""
 
     if not root.exists() and not root.is_symlink():
@@ -95,7 +95,7 @@ def _remove_run_root(root: Path) -> None:
             raise TaskRunError(f"cannot remove run root {root}: {exc}") from exc
 
 
-def _keep_trajectory(source: Path, target: Path) -> None:
+def keep_trajectory(source: Path, target: Path) -> None:
     """Copy the trajectory directory out of the root; a crash before any event leaves nothing to keep."""
     if not source.is_dir():
         return
@@ -110,7 +110,7 @@ def _keep_trajectory(source: Path, target: Path) -> None:
         raise TrajectoryKeepError(f"cannot keep run trajectory under {target}: {exc}") from exc
 
 
-def _whitelisted(path: str, patterns: tuple[str, ...]) -> bool:
+def whitelisted(path: str, patterns: tuple[str, ...]) -> bool:
     pure = PurePosixPath(path)
     for pattern in patterns:
         # "dir/**" whitelists a whole subtree; other patterns are plain
@@ -282,7 +282,7 @@ def run_task(
                 for relative in (str(path.relative_to(root).as_posix()) for path in root.rglob("*") if path.is_file())
                 if relative not in written
                 and not relative.startswith("workspace/")
-                and not _whitelisted(relative, descriptor.cleanup_whitelist)
+                and not whitelisted(relative, descriptor.cleanup_whitelist)
             )
         )
         return TaskResult(
@@ -295,6 +295,6 @@ def run_task(
     finally:
         try:
             if keep_dir is not None:
-                _keep_trajectory(root / descriptor.trajectory_path, keep_dir)
+                keep_trajectory(root / descriptor.trajectory_path, keep_dir)
         finally:
-            _remove_run_root(root)
+            remove_run_root(root)

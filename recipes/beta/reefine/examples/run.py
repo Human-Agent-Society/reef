@@ -120,51 +120,51 @@ def request_text(demo):
 # -- the service ----------------------------------------------------------------------------------------------
 
 
-def _client():
+def service_client():
     # The first call loads the model on a local server, minutes beside a model already resident.
     return ReefClient(SERVICE_URL, token=TOKEN, timeout_s=300.0)
 
 
-def _scenario_headers():
+def scenario_headers():
     return {"x-reef-scenario": SCENARIO}
 
 
-def _fetch_text(path):
+def fetch_text(path):
     """One raw read of a route that answers text, not JSON: a step's page."""
     request = urllib.request.Request(
-        f"{SERVICE_URL}{path}", headers={"Authorization": f"Bearer {TOKEN}", **_scenario_headers()}
+        f"{SERVICE_URL}{path}", headers={"Authorization": f"Bearer {TOKEN}", **scenario_headers()}
     )
     with urllib.request.urlopen(request, timeout=60) as response:
         return response.read().decode("utf-8")
 
 
-def _rows(client):
+def catalog_rows(client):
     """The catalog oldest first, as GET /reef/harness/releases lists it; empty before the scenario exists."""
     try:
-        return client.get("/reef/harness/releases", extra_headers=_scenario_headers())["releases"]
+        return client.get("/reef/harness/releases", extra_headers=scenario_headers())["releases"]
     except ReefClientError as exc:
         if exc.status != 404:
             raise
         return []
 
 
-def _training_rows(rows):
+def training_rows(rows):
     return [row for row in rows if row.get("operation") == "training"]
 
 
-def _request_text_of(row):
+def request_text_of(row):
     """The request the step answered, from the row the trainer writes for every instruction step; None otherwise."""
     return ((row.get("metrics") or {}).get("training_request") or {}).get("text")
 
 
-def _manifest(client):
-    return client.get("/reef/harness", extra_headers=_scenario_headers())
+def harness_manifest(client):
+    return client.get("/reef/harness", extra_headers=scenario_headers())
 
 
-def _ensure_scenario(client):
+def ensure_scenario(client):
     """Create the scenario on its base release if it does not exist yet; its harness manifest."""
     client.post("/reef/scenarios", SCENARIO, {"name": SCENARIO})
-    return _manifest(client)
+    return harness_manifest(client)
 
 
 def changes_of(metrics):
@@ -207,14 +207,14 @@ def evaluation_counts(metrics):
     return dict(zip(names, parts, strict=True))
 
 
-def _requires_of(items):
+def requires_of(items):
     return ", ".join(f"{item.get('name')} ({item.get('kind', '?')})" for item in items) or "nothing"
 
 
 # -- the client: ask, install --------------------------------------------------------------------------------
 
 
-def _installed_release():
+def installed_release():
     """The release id of the tree under work/harness, from the release metadata file the install wrote."""
     try:
         return json.loads((INSTALL_ROOT / RELEASE_FILE).read_text(encoding="utf-8")).get("release_id")
@@ -252,12 +252,12 @@ def install(release_id=None):
 
     Return the release id, or None when the release requires something this machine lacks.
     """
-    client = _client()
-    _ensure_scenario(client)
+    client = service_client()
+    ensure_scenario(client)
     query = "?form=source" + (f"&release_id={release_id}" if release_id else "")
-    manifest = client.get(f"/reef/harness{query}", extra_headers=_scenario_headers())
+    manifest = client.get(f"/reef/harness{query}", extra_headers=scenario_headers())
     requires = manifest.get("requires") or []
-    say(f"requires: {_requires_of(requires)}")
+    say(f"requires: {requires_of(requires)}")
     missing = unmet(requires)
     if missing:
         for item in missing:
@@ -269,7 +269,7 @@ def install(release_id=None):
     # Reef answers a model call only with the scenario header. The render refuses a tree that sets provider
     # headers, so the client adds its own to its binding after the render; pi sends them on every call.
     models = json.loads(files[PI_MODELS])
-    models["providers"]["reef"]["headers"] = _scenario_headers()
+    models["providers"]["reef"]["headers"] = scenario_headers()
     files[PI_MODELS] = json.dumps(models, indent=2, sort_keys=True) + "\n"
     shutil.rmtree(INSTALL_ROOT, ignore_errors=True)
     for relative, content in files.items():
@@ -290,9 +290,9 @@ def ask(text):
     screens, a mode that takes no instructions) is a stop, with the service's
     answer saying why."""
     say(f"ask: POST /reef/train {text!r}")
-    payload = {"text": text, "session": SCENARIO, "release_id": _installed_release() or ""}
+    payload = {"text": text, "session": SCENARIO, "release_id": installed_release() or ""}
     try:
-        answer, _ = _client().post("/reef/train", SCENARIO, payload)
+        answer, _ = service_client().post("/reef/train", SCENARIO, payload)
     except ReefClientError as exc:
         raise SystemExit(f"the request was not accepted: {exc}") from exc
     say(
@@ -313,7 +313,7 @@ def wait_for_step(client, text, before, deadline):
     rows = []
     while time.monotonic() < deadline:
         try:
-            rows = _rows(client)
+            rows = catalog_rows(client)
             error = client.get("/reef/status").get("error")
         except (TimeoutError, OSError) as exc:
             # A step in flight holds the catalog until it ends; a service that is gone does not answer /healthz.
@@ -325,15 +325,15 @@ def wait_for_step(client, text, before, deadline):
             continue
         if error:
             raise SystemExit(f"evolve step failed: {error}; check work/reef.log")
-        steps = _training_rows(rows)
+        steps = training_rows(rows)
         for row in steps[shown:]:
             metrics = row.get("metrics") or {}
-            whose = "" if _request_text_of(row) in (None, text) else "; an earlier request's step"
+            whose = "" if request_text_of(row) in (None, text) else "; an earlier request's step"
             release = str(row.get("release_id"))[:12]
             say(f"step {metrics.get('steps', '?')}: {result_of(row)} (release {release}){whose}")
         shown = max(shown, len(steps))
         for row in steps[before:]:
-            if _request_text_of(row) == text:
+            if request_text_of(row) == text:
                 return rows, row
         time.sleep(POLL_S)
     return rows, None
@@ -345,7 +345,7 @@ def activate(client, rows, row, run_dir):
     step = rows.index(row)
     page = f"/reef/harness/releases/{step}/page"
     saved = run_dir / f"step-{step}.html"
-    saved.write_text(_fetch_text(page), encoding="utf-8")
+    saved.write_text(fetch_text(page), encoding="utf-8")
     say(f"inactive: the page says why and what changed: {SERVICE_URL}{page} (saved as {saved.relative_to(HERE)})")
     say("activate: the demo is scripted; a person reads the page first")
     body = {"artifact_id": row["artifact_id"]}
@@ -397,12 +397,12 @@ def show(mode, run_dir):
 # -- the modes ------------------------------------------------------------------------------------------------
 
 
-def _write_record(path, record):
+def write_record(path, record):
     path.write_text(json.dumps(record, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8")
     say(f"record: {path.relative_to(HERE)}")
 
 
-def _print_table(headers, rows):
+def print_table(headers, rows):
     """A markdown table, so a row can go into the README as it is."""
     print("| " + " | ".join(headers) + " |")
     print("|" + "---|" * len(headers))
@@ -415,7 +415,7 @@ def was_evaluated(result):
     return result.get("passed") is not None or result.get("wins") is not None
 
 
-def _won(result):
+def met_floor(result):
     """Whether the row met the floor; on a row from before the floor, whether it had more wins than losses."""
     if result.get("passed") is not None:
         return result.get("failed") == 0
@@ -432,7 +432,7 @@ def totals_of(results):
         # A patch came back: a step that skipped on a refusal or on a failed step carries none.
         "answered": sum(1 for r in results if r.get("filed") and r.get("parts") not in (None, "-")),
         "admitted": sum(1 for r in results if was_evaluated(r)),
-        "won": sum(1 for r in results if _won(r)),
+        "won": sum(1 for r in results if met_floor(r)),
         "published": sum(1 for r in results if r.get("result") == "selected"),
         "inactive": sum(1 for r in results if r.get("result") == "inactive"),
     }
@@ -440,21 +440,21 @@ def totals_of(results):
 
 def demo(mode):
     text = request_text(mode)
-    client = _client()
+    client = service_client()
     stamp = time.strftime("%Y%m%d-%H%M%S")
     run_dir = WORK / f"{mode}-{stamp}"
     run_dir.mkdir(parents=True)
     record_path = WORK / f"{mode}-{stamp}.json"
     record = {"mode": mode, "model": MODEL, "scenario": SCENARIO, "request": text, "started_at": time.time()}
-    installed_before = _installed_release()
+    installed_before = installed_release()
     say(f"installed before the ask: release {installed_before}")
-    before = len(_training_rows(_rows(client)))
+    before = len(training_rows(catalog_rows(client)))
     started = time.monotonic()
     record["request_id"] = ask(text)
     rows, row = wait_for_step(client, text, before, started + STEP_TIMEOUT_S)
     record["rows"] = rows
     if row is None:
-        _write_record(record_path, record)
+        write_record(record_path, record)
         raise SystemExit(f"no step settled the request within {STEP_TIMEOUT_S:.0f} s; check work/reef.log")
     metrics = row.get("metrics") or {}
     selection_result = result_of(row)
@@ -464,7 +464,7 @@ def demo(mode):
     activated = None
     if selection_result == "inactive":
         activated = activate(client, rows, row, run_dir)
-    requires = _manifest(client).get("requires") or []
+    requires = harness_manifest(client).get("requires") or []
     result = {
         "request": text,
         "result": selection_result,
@@ -472,14 +472,14 @@ def demo(mode):
         "parts": ", ".join(parts_of(metrics)) or "-",
         "inactive": selection_result == "inactive",
         "activated": activated or "-",
-        "requires": _requires_of(requires),
+        "requires": requires_of(requires),
         "model_seconds": metrics.get("model_seconds", "-"),
     }
     if selection_result == "selected" or activated:
         installed = install()
         if installed is None:
             record["result"] = {**result, "installed": "-", "setup": "unmet requires"}
-            _write_record(record_path, record)
+            write_record(record_path, record)
             raise SystemExit(2)
     else:
         say(f"the active release did not change: release {installed_before} stays installed")
@@ -496,23 +496,23 @@ def demo(mode):
     )
     record["result"] = result
     record["show"] = shown
-    _write_record(record_path, record)
+    write_record(record_path, record)
     print()
-    _print_table(("Field", "Value"), list(result.items()))
+    print_table(("Field", "Value"), list(result.items()))
 
 
 def measure(n):
     texts = MEASURE_REQUESTS[: max(n, 0)]
     if n > len(MEASURE_REQUESTS):
         say(f"the fixed list holds {len(MEASURE_REQUESTS)} requests; filing them all")
-    client = _client()
+    client = service_client()
     stamp = time.strftime("%Y%m%d-%H%M%S")
     record_path = WORK / f"measure-{stamp}.json"
     record = {"mode": "measure", "model": MODEL, "scenario": SCENARIO, "started_at": time.time(), "results": []}
     results = record["results"]
     for index, text in enumerate(texts, start=1):
         say(f"request {index} of {len(texts)}: {text!r}")
-        before = len(_training_rows(_rows(client)))
+        before = len(training_rows(catalog_rows(client)))
         started = time.monotonic()
         try:
             request_id = ask(text)
@@ -543,9 +543,9 @@ def measure(n):
         record_path.write_text(json.dumps(record, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8")
     totals = totals_of(results)
     record["totals"] = totals
-    _write_record(record_path, record)
+    write_record(record_path, record)
     print()
-    _print_table(
+    print_table(
         ("Request", "Parts proposed", "Result", "Evaluation", "Seconds"),
         [
             (
@@ -559,7 +559,7 @@ def measure(n):
         ],
     )
     print()
-    _print_table(("Filed", "Answered", "Admitted", "Won", "Published", "Inactive"), [tuple(totals.values())])
+    print_table(("Filed", "Answered", "Admitted", "Won", "Published", "Inactive"), [tuple(totals.values())])
 
 
 def main(argv=None):

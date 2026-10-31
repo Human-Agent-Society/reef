@@ -411,6 +411,37 @@ def test_storage_preserves_paths_archives_and_recreates_without_old_history(tmp_
     factory.close()
 
 
+def test_an_archive_skips_a_wal_file_that_sqlite_removed_while_it_moved_the_files(tmp_path, monkeypatch):
+    """SQLite removes a WAL file only after it folded its frames into the database. When a reader of another
+    service makes it do so while the archive runs, the archive skips the file and the moved database keeps every
+    record."""
+    import sqlite3
+
+    import reef.storage.sqlite as sqlite_module
+
+    factory = SQLiteScenarioStorage(tmp_path)
+    reader = factory.open("math")
+    reader.records.append(record("record-1"))
+    database, wal, _ = factory.state_paths("math")
+    with closing(sqlite3.connect(database)) as connection:
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    move = sqlite_module.shutil.move
+
+    def move_after_sqlite_removed_the_wal(source: str, target: str) -> str:
+        if source == str(wal):
+            wal.unlink()
+        return move(source, target)
+
+    monkeypatch.setattr(sqlite_module.shutil, "move", move_after_sqlite_removed_the_wal)
+    archived = factory.archive("math")
+    monkeypatch.undo()
+    reader.close()
+    assert [Path(location).name for location in archived] == [database.name, f"{database.name}-shm"]
+    with closing(SQLiteRecordStore(Path(archived[0]))) as records:
+        assert records.count("math") == 1
+    factory.close()
+
+
 def test_storage_capacity_includes_unconsumed_archived_records(tmp_path):
     factory = SQLiteScenarioStorage(tmp_path)
     with closing(factory.open("math")) as session:
