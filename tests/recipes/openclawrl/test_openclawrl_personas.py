@@ -94,12 +94,12 @@ class _FakeWorker:
         self._verdicts.append(judgment)
 
 
-def _judged_turns(processor, worker, versions: list[str], score: float = 1.0) -> None:
-    """One single-turn session per version entry, judged with ``score``."""
+def _judged_turns(processor, worker, artifact_ids: list[str], score: float = 1.0) -> None:
+    """One single-turn session per producing artifact entry, judged with ``score``."""
     from recipes.openclawrl.turns import TurnJudgment
     from reef.core.records_types import AgentRecord, RequestType
 
-    for index, version in enumerate(versions):
+    for index, artifact_id in enumerate(artifact_ids):
         first = [{"role": "user", "content": f"q-{index}"}]
         for receipt, messages in (
             (f"i{index}", first),
@@ -120,7 +120,7 @@ def _judged_turns(processor, worker, versions: list[str], score: float = 1.0) ->
                                 "rollout_log_probs": [-0.3, -0.2],
                                 "topk_indices": [[1, 2], [3, 4]],
                                 "topk_log_probs": [[-0.1, -0.2], [-0.3, -0.4]],
-                                "runtime_load_id": version,
+                                "artifact_id": artifact_id,
                             },
                         },
                     },
@@ -138,7 +138,7 @@ def _judged_turns(processor, worker, versions: list[str], score: float = 1.0) ->
 
 
 @pytest.mark.unit
-def test_openclawrl_processor_drops_unfillable_stale_version_candidates() -> None:
+def test_openclawrl_processor_drops_unfillable_stale_artifact_candidates() -> None:
     from recipes.openclawrl import OpenClawRLJobData
     from reef.pipeline_context import PipelineContext
 
@@ -152,18 +152,19 @@ def test_openclawrl_processor_drops_unfillable_stale_version_candidates() -> Non
         sample2job=OpenClawRLJobData(context, OpenClawRLJobSettings(), stage),
     )
     # Two stale leftovers from before a weight swap, then a fresh generation.
-    processor.observe_serving_runtime_load_id("v1")
-    processor.observe_serving_runtime_load_id("v2")
+    processor.observe_serving_artifact_id("v1")
+    processor.observe_serving_artifact_id("v2")
     _judged_turns(processor, worker, ["v1", "v1", "v2", "v2", "v2"])
 
+    processor.produce()
     batch = processor.build_job_data(3)
-    versions = {sample.training.get("runtime_load_id", None) for sample in batch.samples}
-    assert versions == {"v2"}
+    artifact_ids = {sample.training.get("artifact_id", None) for sample in batch.samples}
+    assert artifact_ids == {"v2"}
     assert len(batch.samples) == 3
 
 
 @pytest.mark.unit
-def test_openclawrl_processor_keeps_single_version_queue_intact() -> None:
+def test_openclawrl_processor_keeps_single_artifact_queue_intact() -> None:
     from recipes.openclawrl import OpenClawRLJobData
     from reef.pipeline_context import PipelineContext
 
@@ -177,7 +178,8 @@ def test_openclawrl_processor_keeps_single_version_queue_intact() -> None:
         sample2job=OpenClawRLJobData(context, OpenClawRLJobSettings(), stage),
     )
     _judged_turns(processor, worker, ["v1", "v1"])
-    # All-one-version queue below batch size: nothing is dropped, not ready yet.
+    # All-one-artifact queue below batch size: nothing is dropped, not ready yet.
+    processor.produce()
     assert not processor.ready(3)
     assert processor.status()["ready_samples"] == 2
 

@@ -23,10 +23,8 @@ inference:
   num-gpus: "8"
   tensor-parallel-size: "8"
   # A 61k-token thinking rollout takes many minutes; the backend timeout must
-  # cover it, and the retry deadline must cover a retry of it.
+  # cover it.
   timeout-s: 1800
-  retry-timeout-s: 7200
-  retry-max-s: 60
   options:
     router-port: "30000"
     # Required by Reef's SGLang inference backend (#432).

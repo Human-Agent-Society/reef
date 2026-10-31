@@ -19,7 +19,7 @@ from reef.core.plugins import NoSettings, Plugin, PluginConfigError, PluginSetti
 from reef.core.records_types import AgentRecord, RequestType
 from reef.pipeline_context import PipelineContext
 from reef.record2record.sets import RecordSet, RecordSetUnit, SingleRecordSet, SingleSetUnit
-from reef.record2record.staleness import ServedVersions, is_stale, producing_runtime_load_ids
+from reef.record2record.staleness import ServedArtifacts, is_stale, producing_artifact_ids
 from reef.runtime.interfaces import inference_aborted
 
 
@@ -83,9 +83,9 @@ class Record2Record(ABC, Plugin):
 
     The stage also runs the staleness check. No other part of Reef checks how
     far the training data lags behind the weights. The pipeline gives the stage
-    each version that the scenario serves (``observe_serving_runtime_load_id``).
+    each artifact that the scenario serves (``observe_serving_artifact_id``).
     Then the pipeline asks the stage whether the data of a stored sample is
-    more than ``max_staleness`` versions behind (``is_stale``) before job data
+    more than ``max_staleness`` artifacts behind (``is_stale``) before job data
     takes it. ``max_staleness``
     is a non-negative int, from ``Record2RecordSettings``; the constructor
     refuses other values.
@@ -127,7 +127,7 @@ class Record2Record(ABC, Plugin):
         #: The set ID of each record that a formed set holds, until the record's release.
         self.set_of_record: dict[str, Hashable] = {}
         #: The versions that the scenario served, oldest first. The last one is the version that it serves now.
-        self.served_versions = ServedVersions()
+        self.served_artifacts = ServedArtifacts()
 
     @abstractmethod
     def push(self, record: AgentRecord) -> None:
@@ -199,19 +199,19 @@ class Record2Record(ABC, Plugin):
 
     # ------------------------------------------------------------- staleness
 
-    def observe_serving_runtime_load_id(self, runtime_load_id: str) -> None:
-        """Add the version that the scenario serves now, if the version changed (``ServedVersions.observe``)."""
-        self.served_versions.observe(runtime_load_id)
+    def observe_serving_artifact_id(self, artifact_id: str) -> None:
+        """Add the artifact that the scenario serves now, if it changed (``ServedArtifacts.observe``)."""
+        self.served_artifacts.observe(artifact_id)
 
     def is_stale(self, samples: Sequence[Sample]) -> bool:
-        """Whether the training data of ``samples`` is more than ``max_staleness`` versions behind the served one.
+        """Whether the training data of ``samples`` is more than ``max_staleness`` artifacts behind the served one.
 
-        ``is_stale`` of the versions that produced the samples (``producing_runtime_load_ids``) and the versions
-        that the scenario served since its engine started. The pipeline asks it for each sample that the record
+        ``is_stale`` of the artifacts that produced the samples (``producing_artifact_ids``) and the artifacts
+        that the scenario served. The pipeline asks it for each sample that the record
         stages made before job data takes it. A stage whose samples do not depend on the version that produced
         them, such as fixed SFT targets, returns False.
         """
-        return is_stale(producing_runtime_load_ids(samples), self.served_versions.versions, self.max_staleness)
+        return is_stale(producing_artifact_ids(samples), self.served_artifacts.artifact_ids, self.max_staleness)
 
     def consume(self, unit: RecordSetUnit) -> None:
         """End ``unit``, whose samples the pipeline stored: its records are releasable."""

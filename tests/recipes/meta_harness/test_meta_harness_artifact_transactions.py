@@ -22,6 +22,7 @@ from reef.artifact import GitLFSRepositoryBackend, InMemoryRepositoryBackend
 from reef.artifact.artifact import Artifact, ArtifactConflict, ArtifactPublicationError
 from reef.dispatcher import Dispatcher
 from reef.storage.commit_history import CommitHistoryScenarioStore
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 
 __all__ = ["fake_git_lfs"]
@@ -57,7 +58,13 @@ def publication_case(tmp_path, request):
 @pytest.mark.parametrize("recovery", ["retry", "restart"])
 def test_failed_selected_commit_never_serves_or_recovers_staged_artifact(publication_case, monkeypatch, recovery):
     recipe, factory, chat, records = publication_case
-    dispatcher = Dispatcher(recipe, factory(), scenario_storage=SQLiteScenarioStorage(records), hold_local_cycles=True)
+    dispatcher = Dispatcher(
+        recipe,
+        factory(),
+        scenario_storage=SQLiteScenarioStorage(records),
+        hold_local_cycles=True,
+        coordination=memory_coordination(),
+    )
     try:
         scenario = dispatcher.get_or_create_scenario("selected-commit")
         previous = copy.deepcopy(scenario.trainer.state)
@@ -96,7 +103,13 @@ def test_failed_selected_commit_never_serves_or_recovers_staged_artifact(publica
             assert len(scenario.store.history()) == 1
     finally:
         dispatcher.close()
-    restarted = Dispatcher(recipe, factory(), scenario_storage=SQLiteScenarioStorage(records), hold_local_cycles=True)
+    restarted = Dispatcher(
+        recipe,
+        factory(),
+        scenario_storage=SQLiteScenarioStorage(records),
+        hold_local_cycles=True,
+        coordination=memory_coordination(),
+    )
     try:
         scenario = restarted.get_or_create_scenario("selected-commit")
         assert scenario.trainer.state == (result.state if recovery == "retry" else previous)
@@ -109,7 +122,13 @@ def test_failed_selected_commit_never_serves_or_recovers_staged_artifact(publica
 
 def test_restart_repairs_artifact_head_from_successful_journal_commit(publication_case, monkeypatch):
     recipe, factory, chat, records = publication_case
-    dispatcher = Dispatcher(recipe, factory(), scenario_storage=SQLiteScenarioStorage(records), hold_local_cycles=True)
+    dispatcher = Dispatcher(
+        recipe,
+        factory(),
+        scenario_storage=SQLiteScenarioStorage(records),
+        hold_local_cycles=True,
+        coordination=memory_coordination(),
+    )
     try:
         scenario = dispatcher.get_or_create_scenario("stale-artifact-head")
         old_head = scenario.current_artifact_ref()
@@ -136,7 +155,13 @@ def test_restart_repairs_artifact_head_from_successful_journal_commit(publicatio
         assert scenario.store.history()[-1].artifact_ref == committed_head
     finally:
         dispatcher.close()
-    restarted = Dispatcher(recipe, factory(), scenario_storage=SQLiteScenarioStorage(records), hold_local_cycles=True)
+    restarted = Dispatcher(
+        recipe,
+        factory(),
+        scenario_storage=SQLiteScenarioStorage(records),
+        hold_local_cycles=True,
+        coordination=memory_coordination(),
+    )
     try:
         scenario = restarted.get_or_create_scenario("stale-artifact-head")
         assert scenario.scenario_step == 1 and scenario.trainer.state == result.state
@@ -148,7 +173,13 @@ def test_restart_repairs_artifact_head_from_successful_journal_commit(publicatio
 
 def test_without_a_journal_the_backend_publication_remains_the_commit(publication_case, monkeypatch):
     recipe, factory, _, _ = publication_case
-    dispatcher = Dispatcher(recipe, factory(), scenario_storage=SQLiteScenarioStorage(), hold_local_cycles=True)
+    dispatcher = Dispatcher(
+        recipe,
+        factory(),
+        scenario_storage=SQLiteScenarioStorage(),
+        hold_local_cycles=True,
+        coordination=memory_coordination(),
+    )
     try:
         scenario = dispatcher.get_or_create_scenario("no-journal")
         head = scenario.current_artifact_ref()
@@ -175,7 +206,13 @@ def test_without_a_journal_the_backend_publication_remains_the_commit(publicatio
 
 def test_lost_journal_ack_retries_the_committed_release_without_evaluating_again(publication_case, monkeypatch):
     recipe, factory, chat, records = publication_case
-    dispatcher = Dispatcher(recipe, factory(), scenario_storage=SQLiteScenarioStorage(records), hold_local_cycles=True)
+    dispatcher = Dispatcher(
+        recipe,
+        factory(),
+        scenario_storage=SQLiteScenarioStorage(records),
+        hold_local_cycles=True,
+        coordination=memory_coordination(),
+    )
     try:
         scenario = dispatcher.get_or_create_scenario("lost-journal-ack")
         _report_once(scenario, "lost-journal-ack", "1")
@@ -203,7 +240,13 @@ def test_lost_journal_ack_retries_the_committed_release_without_evaluating_again
 
 def test_postcommit_conflict_keeps_durable_step_and_rejects_unrelated_head(publication_case, monkeypatch):
     recipe, factory, chat, records = publication_case
-    dispatcher = Dispatcher(recipe, factory(), scenario_storage=SQLiteScenarioStorage(records), hold_local_cycles=True)
+    dispatcher = Dispatcher(
+        recipe,
+        factory(),
+        scenario_storage=SQLiteScenarioStorage(records),
+        hold_local_cycles=True,
+        coordination=memory_coordination(),
+    )
     try:
         scenario = dispatcher.get_or_create_scenario("postcommit-head-conflict")
         backend = scenario.repository.backend
@@ -241,7 +284,13 @@ def test_postcommit_conflict_keeps_durable_step_and_rejects_unrelated_head(publi
     finally:
         dispatcher.close()
 
-    restarted = Dispatcher(recipe, factory(), scenario_storage=SQLiteScenarioStorage(records), hold_local_cycles=True)
+    restarted = Dispatcher(
+        recipe,
+        factory(),
+        scenario_storage=SQLiteScenarioStorage(records),
+        hold_local_cycles=True,
+        coordination=memory_coordination(),
+    )
     try:
         with pytest.raises(ArtifactConflict):
             restarted.get_or_create_scenario("postcommit-head-conflict")

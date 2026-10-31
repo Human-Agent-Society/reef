@@ -226,9 +226,9 @@ def test_a_held_sample_never_becomes_stale(tokenizer: TurnTokenizer) -> None:
     pipeline = _pipeline()
     pipeline.push(_inference("i1"))
     pipeline.push(_report("r1", ("i1",)))
-    # Two later versions: with max_staleness 0 a sampled policy row would be dropped.
-    pipeline.observe_serving_runtime_load_id("slime-v4")
-    pipeline.observe_serving_runtime_load_id("slime-v5")
+    # Two later artifacts: with max_staleness 0 a sampled policy row would be dropped.
+    pipeline.observe_serving_artifact_id("slime-v4")
+    pipeline.observe_serving_artifact_id("slime-v5")
 
     assert pipeline.ready(1)
     assert len(pipeline.build_job_data(1).samples) == 1

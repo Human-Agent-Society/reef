@@ -25,7 +25,6 @@ def test_the_factory_builds_a_runtime_that_serves_nothing_and_loads_nothing(tmp_
     assert runtime.per_scenario_adapters is False
     release = Artifact.local(tmp_path)
     assert runtime.activate_checkpoint(release, scenario="math") == release.ref.release_id
-    assert runtime.current_runtime_load_id() is None
     runtime.shutdown()
 
 

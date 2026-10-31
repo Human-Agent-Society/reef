@@ -352,9 +352,11 @@ export REEF_AUTOENVSCALING_DESIGNER_URL=http://127.0.0.1:8901 REEF_AUTOENVSCALIN
 reef serve -c recipes/beta/autoenvscaling/examples/tinker/serve.yaml
 curl -s -X POST -H "Authorization: Bearer $REEF_TOKEN" -H "Content-Type: application/json" \
   -d '{"name": "autoenvscaling"}' http://127.0.0.1:8900/reef/scenarios
+curl -s -X POST -H "Authorization: Bearer $REEF_AUTOENVSCALING_DESIGNER_TOKEN" -H "Content-Type: application/json" \
+  -d '{"name": "autoenvscaling"}' "$REEF_AUTOENVSCALING_DESIGNER_URL/reef/scenarios"
 ```
 
-`reef serve` creates no scenario on its own. The `POST /reef/scenarios` above creates it, and round 0 starts when the recipe's pipeline first looks for job data after that. Each generation writes `generations/autoenvscaling/generation-<n>.json` under the state directory. The recipe keeps each task, its split and its rollout result in the scenario's task store.
+`reef serve` creates no scenario on its own. The first `POST /reef/scenarios` above creates the training scenario, and round 0 starts when the recipe's pipeline first looks for job data after that. The second one creates the same scenario on the Designer's Reef, which records the Designer's model calls under it and answers only a scenario that exists. Each generation writes `generations/autoenvscaling/generation-<n>.json` under the state directory. The recipe keeps each task, its split and its rollout result in the scenario's task store.
 
 Optional, for an upstream that serves only the Responses API (a ChatGPT plan): set `agent_api: responses` for the agent, and `model_name: "openai/responses/{model}"` in `generator.agent` for the Reasoning Agent's Harbor agent.
 

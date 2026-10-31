@@ -2,10 +2,10 @@
 
 A deployment selects it to train on data that does not come from its own model,
 such as trajectory items (``POST /reef/namespaces/{owner}/data``) or imported records
-(``POST /reef/records``). It takes no GPUs and serves no requests: every
-inference request fails with :class:`~reef.core.errors.InferenceUnavailable`,
-which the HTTP service returns as 503. Reef still publishes and commits every
-saved checkpoint as a release, which another deployment can serve.
+(``POST /reef/records``). It takes no GPUs and serves no requests: its base URL
+names no HTTP engine, so control writes no ``served_models`` row for it and the
+inference service answers every request 404. Reef still publishes and commits
+every saved checkpoint as a release, which another deployment can serve.
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ UNAVAILABLE_MESSAGE = (
     "this deployment runs no inference engine (inference.backend: none) and serves no inference requests; "
     "serve a published checkpoint from a separate deployment"
 )
-#: The base URL of the runtime. It names no endpoint: every request fails before it would reach one.
+#: The base URL of the runtime. It names no HTTP endpoint, so no ``served_models`` row names this runtime.
 NULL_INFERENCE_URL = "none://no-inference-engine"
 
 
@@ -57,10 +57,6 @@ class NullInferenceRuntime(InferenceRuntime):
 
     async def acquire_inference(self) -> InferenceAdmissionHandle:
         raise InferenceUnavailable(UNAVAILABLE_MESSAGE)
-
-    def current_runtime_load_id(self) -> str | None:
-        # The runtime loads nothing, so no load names what serves.
-        return None
 
     def activate_checkpoint(self, artifact: Artifact, *, scenario: str | None = None) -> str:
         return artifact.ref.release_id

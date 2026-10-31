@@ -32,9 +32,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 from reef.harness.rollouts.model_binding import ModelBinding, usage_of
-from reef.recipe.reefine.multimodal import MultimodalProvider
+from reef.recipe.reefine.multimodal import MULTIMODAL_ROUTES, MultimodalProvider
 from reef.recipe.reefine.trial import trial_script
-from reef.runtime.interfaces import MULTIMODAL_ROUTES
 from reef.train.cordis_backend.strategies import ProposerCalls
 
 logger = logging.getLogger(__name__)

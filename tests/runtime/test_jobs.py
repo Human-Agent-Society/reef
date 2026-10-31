@@ -29,9 +29,9 @@ from reef.train.types import JobData
 )
 def test_a_training_job_checks_its_values_at_construction(changes, error, message):
     values = {"job_id": "job", "backend": "tinker", "start": "/base", "data": JobData("b"), "parameters": {}}
-    TrainingJob(**values)
+    TrainingJob(**values, scenario="s")
     with pytest.raises(error, match=message):
-        TrainingJob(**{**values, **changes})
+        TrainingJob(**{**values, **changes}, scenario="s")
 
 
 @pytest.mark.unit

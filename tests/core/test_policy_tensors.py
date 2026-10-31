@@ -3,10 +3,9 @@ from __future__ import annotations
 import pytest
 
 from reef.core import AgentRecord, RequestType
-from reef.core.artifact_ref import parse_runtime_load_spans
 from reef.core.trajectories import source_record_id, trajectory_reward
 from reef.record2sample.samples import make_multi_turn_policy_trajectory, make_policy_trajectory
-from reef.service.request_service import client_inference_response
+from reef.service.inference_service import client_response
 
 
 def _inference(payload) -> AgentRecord:
@@ -19,14 +18,14 @@ def _turn(
     loss_mask: list[int],
     log_probs: list[float],
     *,
-    runtime_load_id: str = "wv-1",
+    artifact_id: str = "artifact-1",
     topk: list[tuple[list[int], list[float]]] | None = None,
 ) -> AgentRecord:
     training = {
         "tokens": tokens,
         "loss_mask": loss_mask,
         "rollout_log_probs": log_probs,
-        "runtime_load_id": runtime_load_id,
+        "artifact_id": artifact_id,
     }
     if topk is not None:
         training["topk_indices"] = [ids for ids, _ in topk]
@@ -48,7 +47,7 @@ def test_policy_sample_uses_engine_native_response_training() -> None:
                     "tokens": [10, 11, 20],
                     "loss_mask": [1],
                     "rollout_log_probs": [-0.25],
-                    "runtime_load_id": "wv-1",
+                    "artifact_id": "artifact-1",
                 }
             }
         }
@@ -59,62 +58,9 @@ def test_policy_sample_uses_engine_native_response_training() -> None:
     assert tuple(sample.training.get("tokens", [])) == (10, 11, 20)
     assert tuple(sample.training.get("loss_mask", [])) == (1,)
     assert tuple(sample.training.get("rollout_log_probs", [])) == (-0.25,)
-    assert sample.training.get("runtime_load_id", None) == "wv-1"
+    assert sample.training.get("artifact_id", None) == "artifact-1"
     assert sample.training.get("turn_count", 1) == 1
     assert (sample.training.get("turn_count", 1) > 1) is False
-
-
-@pytest.mark.unit
-def test_policy_sample_preserves_mixed_token_runtime_load_ids() -> None:
-    spans = [
-        {"start": 0, "end": 1, "runtime_load_id": "engine:6"},
-        {"start": 1, "end": 3, "runtime_load_id": "engine:7"},
-    ]
-    item = _inference(
-        {
-            "runtime_load_spans": spans,
-            "response": {
-                "training": {
-                    "tokens": [10, 20, 21, 22],
-                    "loss_mask": [1, 1, 1],
-                    "rollout_log_probs": [-0.1, -0.2, -0.3],
-                    "runtime_load_id": None,
-                    "runtime_load_spans": spans,
-                }
-            },
-        }
-    )
-
-    sample = make_policy_trajectory(item, 1.0)
-
-    assert sample.training.get("runtime_load_id", None) is None
-    assert [
-        (span.start, span.end, span.runtime_load_id)
-        for span in parse_runtime_load_spans(sample.training.get("runtime_load_spans", []))
-    ] == [
-        (0, 1, "engine:6"),
-        (1, 3, "engine:7"),
-    ]
-
-
-@pytest.mark.unit
-def test_policy_sample_rejects_conflicting_validated_and_training_runtime_load_ids() -> None:
-    item = _inference(
-        {
-            "runtime_load_id": "engine:3",
-            "response": {
-                "training": {
-                    "tokens": [10, 11, 20],
-                    "loss_mask": [1],
-                    "rollout_log_probs": [-0.25],
-                    "runtime_load_id": "engine:1",
-                }
-            },
-        }
-    )
-
-    with pytest.raises(ValueError, match="disagrees with the validated record"):
-        make_policy_trajectory(item, 1.0)
 
 
 @pytest.mark.unit
@@ -147,7 +93,7 @@ def test_policy_sample_accepts_exact_harness_tensors() -> None:
             "tokens": [1, 2, 3],
             "loss_mask": [1],
             "rollout_log_probs": [-0.5],
-            "runtime_load_id": "harness-v1",
+            "artifact_id": "artifact-2",
         }
     )
 
@@ -156,7 +102,7 @@ def test_policy_sample_accepts_exact_harness_tensors() -> None:
     assert tuple(sample.training.get("tokens", [])) == (1, 2, 3)
     assert tuple(sample.training.get("loss_mask", [])) == (1,)
     assert tuple(sample.training.get("rollout_log_probs", [])) == (-0.5,)
-    assert sample.training.get("runtime_load_id", None) == "harness-v1"
+    assert sample.training.get("artifact_id", None) == "artifact-2"
 
 
 @pytest.mark.unit
@@ -170,9 +116,9 @@ def test_client_response_hides_private_training_tensors() -> None:
         },
     }
 
-    client_response = client_inference_response(response)
+    answered = client_response(response)
 
-    assert "training" not in client_response
+    assert "training" not in answered
     assert response["training"]["rollout_log_probs"] == [-0.25]
 
 
@@ -194,7 +140,7 @@ def test_multi_turn_policy_sample_assembles_clean_linear_history() -> None:
     assert tuple(sample.training.get("loss_mask", [])) == (1, 1, 0, 1, 0, 1, 1)
     assert tuple(sample.training.get("rollout_log_probs", [])) == (-0.1, -0.2, 0.0, -0.3, 0.0, -0.4, -0.5)
     assert trajectory_reward(sample) == 0.75
-    assert sample.training.get("runtime_load_id", None) == "wv-1"
+    assert sample.training.get("artifact_id", None) == "artifact-1"
     assert sample.training.get("turn_count", 1) == 3
     assert (sample.training.get("turn_count", 1) > 1) is True
 
@@ -309,8 +255,8 @@ def test_multi_turn_policy_sample_rejects_replacement_over_threshold() -> None:
             _turn("i2", [1, 9, 3, 4], [1], [-0.4]),
         ],
         [
-            _turn("i1", [1, 2, 3], [1], [-0.3], runtime_load_id="wv-1"),
-            _turn("i2", [1, 2, 3, 4], [1], [-0.4], runtime_load_id="wv-2"),
+            _turn("i1", [1, 2, 3], [1], [-0.3], artifact_id="artifact-1"),
+            _turn("i2", [1, 2, 3, 4], [1], [-0.4], artifact_id="artifact-2"),
         ],
     ],
 )

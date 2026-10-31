@@ -186,6 +186,19 @@ class RemoteInferenceService(InferenceService):
         self.closed = False
         self.instance: str | None = None
 
+    def attach(self) -> InferenceConnection | None:
+        """Take over the engines that the component runs, without a restart, so requests in flight go on; None
+        when it runs none. A control restart attaches to the engines that the previous control started."""
+        if self.started or self.closed:
+            raise RuntimeError("inference service can only be started once")
+        answer = self.control.call("GET", "health", timeout_s=HEALTH_TIMEOUT_S)
+        instance = answer.get("instance") if isinstance(answer, Mapping) else None
+        if not isinstance(answer, Mapping) or answer.get("engines") is not True or not isinstance(instance, str):
+            return None
+        self.started = True
+        self.instance = instance
+        return InferenceConnection(self.connection_protocol, None)
+
     def start(self, resources: DeploymentResources | None = None) -> InferenceConnection:
         """Start the engines; ``resources`` are unused, since the component reserves its own GPUs."""
         if self.started or self.closed:

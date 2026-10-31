@@ -405,7 +405,11 @@ class HarborAgent(BaseAgent):
         return None
 
     async def setup(self, environment: BaseEnvironment) -> None:
-        """Nothing to install: the image carries the pinned checkout."""
+        """Create the scenario if it does not exist yet: the inference routes serve only a scenario that exists.
+
+        Nothing to install: the image carries the pinned checkout.
+        """
+        await asyncio.to_thread(self.client.post, "/reef/scenarios", self.scenario, {"name": self.scenario})
 
     async def run(self, instruction: str, environment: BaseEnvironment, context: AgentContext) -> None:
         # The rollout is a blocking loop of model calls and container

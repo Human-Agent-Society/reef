@@ -177,7 +177,7 @@ class JobLoop:
             raise ValueError("a weight trainer runs one job at a time")
         backend = self.component.name
         job_id = self.job_id(state, state.start, data, parameters)
-        self.component.submit(TrainingJob(job_id, backend, state.start, data, parameters))
+        self.component.submit(TrainingJob(job_id, backend, state.start, data, parameters, scenario=self.scenario))
         submitted = JobLoopState(state.start, RunningJob(job_id), state.finished_jobs, state.last_job)
         event: dict[str, Any] = {"job_id": job_id, "backend": backend, "event": "submitted"}
         return JobCommit(

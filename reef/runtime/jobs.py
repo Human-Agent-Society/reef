@@ -36,8 +36,9 @@ class TrainingJob:
     A value has a non-empty ``job_id``, a non-empty ``backend`` name, ``start``
     (the non-empty start that the component reads, ``TrainingComponent.base_start`` for the base artifact),
     ``data`` (the job data that the job trains; the component cuts it into
-    optimizer batches by its own batch size)
-    and ``parameters``, a mapping that encodes as JSON.
+    optimizer batches by its own batch size),
+    ``parameters``, a mapping that encodes as JSON, and ``scenario``, the non-empty name of the scenario whose
+    trainer submits the job. The jobs of one scenario run one at a time, in the order of their submission.
 
     Reef makes the value and names the job with ``job_id_for``, so a retry of
     the same request has the same ID. A component reads it in ``submit``.
@@ -48,10 +49,13 @@ class TrainingJob:
     start: str
     data: JobData
     parameters: Mapping[str, Any] = field(default_factory=dict)
+    scenario: str = field(kw_only=True)
 
     def __post_init__(self) -> None:
         if not isinstance(self.job_id, str) or not self.job_id:
             raise ValueError("TrainingJob.job_id must be a non-empty string")
+        if not isinstance(self.scenario, str) or not self.scenario:
+            raise ValueError("TrainingJob.scenario must be a non-empty string")
         if not isinstance(self.backend, str) or not self.backend:
             raise ValueError("TrainingJob.backend must be a non-empty string")
         if not isinstance(self.start, str) or not self.start:
@@ -242,13 +246,25 @@ class TrainingComponent(ABC):
         component trains. It has the layout of every other release
         (``release_format``), so serving and training read it as they read
         any release. Its ``inputs`` name the model and the settings that
-        decide its content.
+        decide its content. Every service process calls this method, so a
+        component whose model files cost a remote call gives them as
+        ``BaseModelFiles`` that make them on the first ``directory`` call.
         """
 
     @property
     @abstractmethod
     def base_start(self) -> str:
         """The start of a job from the untrained checkpoint; the first job of every trainer starts from it."""
+
+    @property
+    def starts_from_releases(self) -> bool:
+        """Whether ``import_start`` can take a published release as the start of later jobs.
+
+        False exactly when the component refuses every release, so no trainer of it can train from an artifact.
+        True, the default, when it takes some releases; ``import_start`` still refuses one whose weights it cannot
+        start from.
+        """
+        return True
 
     @property
     def shares_scenarios(self) -> bool:
@@ -262,6 +278,14 @@ class TrainingComponent(ABC):
         component. The default is False.
         """
         return False
+
+    def check_job(self, job: TrainingJob) -> None:
+        """Raise ``ValueError`` for a job this component cannot train. The default accepts every job.
+
+        A queue-backed component calls it before it adds the job to the jobs queue, so a refused job never waits
+        in the queue.
+        """
+        return
 
     def check_task_jobs(self, parameters: Mapping[str, Any]) -> None:
         """Raise ``ValueError`` unless the component can train jobs whose data are ``TaskSample`` values, with ``parameters``.
@@ -317,8 +341,8 @@ class TrainingComponent(ABC):
         (``train-from``). The component copies what it trains
         from into its own durable directory, since ``release`` can be
         discarded later. Raise ``ValueError``, and change nothing, when the
-        component cannot start from these weights; a component may refuse
-        every release.
+        component cannot start from these weights. A component whose
+        ``starts_from_releases`` is False refuses every release.
         """
 
     @abstractmethod
@@ -337,6 +361,15 @@ class TrainingComponent(ABC):
     @abstractmethod
     def cancel(self, job_id: str) -> None:
         """Stop the job, which then reports ``failed``; nothing for an unknown or ended job."""
+
+    def start_jobs(self) -> None:
+        """Start running jobs in this process: take the component's job state and resume the jobs that have not ended.
+
+        Only the process that runs the jobs calls it: the training service's ``TrainingJobWorker``, which a
+        one-process deployment runs too. Another process, such as control, uses the component to describe jobs and
+        to import starts, and never runs a job. A component whose jobs run elsewhere does nothing, the default.
+        """
+        return
 
     def close(self) -> None:
         """Release the component's resources; safe to call repeatedly."""

@@ -147,7 +147,7 @@ key's place in ``pipeline``.
    pipeline.record2sample.config.context_template | the reference's block | the text added to the final user message. ``{context}`` marks where the demonstration goes.
    pipeline.sample2job.config.job_samples | required | rollouts in one job. Set it to ``training.config.global_batch_size`` so that one job is one optimizer step.
    training.config.global_batch_size | rollouts in one optimizer step. Reef passes it to Slime as ``--global-batch-size``. Each sample is its own data-parallel unit.
-   pipeline.record2record.config.max_staleness | 0 | accepted lag, in versions, between the producing and serving version.
+   pipeline.record2record.config.max_staleness | 0 | accepted lag, in artifacts that the scenario served, between the producing and served artifact.
 
 ``SDFTSamples`` also takes the sample assembly's keys
 (``accept_multi_turn_policy_samples``, ``realign_threshold`` and

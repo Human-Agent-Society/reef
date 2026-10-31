@@ -44,7 +44,7 @@ def _inference(record_id, tokens, loss_mask, log_probs):
                     "tokens": tokens,
                     "loss_mask": loss_mask,
                     "rollout_log_probs": log_probs,
-                    "runtime_load_id": "wv-1",
+                    "artifact_id": "artifact-1",
                 }
             }
         },

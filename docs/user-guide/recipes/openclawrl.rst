@@ -121,7 +121,7 @@ one optimizer step.
    pipeline.record2record.config.prm_timeout_s | 120.0 | per-judge timeout in seconds
    pipeline.record2record.config.prm_concurrency | 8 | turns judged at once
    pipeline.record2record.config.prm_max_hint_candidates | 3 | hint candidates collected per turn
-   pipeline.record2record.config.max_staleness | 0 | accepted lag, in versions, between the producing and serving version.
+   pipeline.record2record.config.max_staleness | 0 | accepted lag, in artifacts that the scenario served, between the producing and served artifact.
    pipeline.sample2job.config.job_samples | required | judged turns per job. Set it to ``training.config.global_batch_size`` so that one job is one optimizer step.
    training.config.global_batch_size | judged turns per optimizer step. Reef passes it to Slime as ``--global-batch-size``.
    pipeline.sample2job.config.prm_record_file | "" | judged population, one JSON line per job; empty disables it

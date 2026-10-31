@@ -27,7 +27,9 @@ from reef.runtime.jobs import JobStatus, TrainingJob
 from reef.service import deploy
 from reef.service.app import create_app
 from reef.service.deploy.service_config import ServiceConfig
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.train.job_queue import JobQueueComponent
 
 OPENCLAWRL_RECIPE = "recipes.openclawrl.recipe:OpenClawRLRecipe"
 SAO_RECIPE = "recipes.sao.recipe:SAORecipe"
@@ -97,9 +99,6 @@ def _settings(**overrides) -> ServiceConfig:
         "inference_timeout_s": 30.0,
         "inference_handler_factory": None,
         "inference_handler_config": {},
-        "inference_retry_initial_s": 0.05,
-        "inference_retry_max_s": 1.0,
-        "inference_retry_timeout_s": 30.0,
         "artifact_repository": "/state/artifacts.git",
         "artifact_work_dir": "/state/work",
         "artifact_cache_dir": "/state/cache",
@@ -137,11 +136,6 @@ def test_service_config_exposes_shared_batch_controls() -> None:
     assert "groups_per_step" not in args.recipe_settings
     assert args.inference_handler_factory is None
     assert args.inference_handler_config == {}
-    assert (args.inference_retry_initial_s, args.inference_retry_max_s, args.inference_retry_timeout_s) == (
-        0.05,
-        1.0,
-        300.0,
-    )
 
 
 @pytest.mark.unit
@@ -285,7 +279,10 @@ def test_build_dispatcher_builds_the_training_component_and_injects_selected_rec
     )
 
     assert dispatcher.recipe.name == "openclawrl"
-    component = dispatcher.recipe.training_component
+    # The recipe's trainers add their jobs to the jobs queue; the training worker runs them on the component.
+    queued = dispatcher.recipe.training_component
+    assert isinstance(queued, JobQueueComponent)
+    component = queued.component
     assert component.received_model_path == "/models/demo"
     assert (component.config["inference_timeout_s"], component.config["train_timeout_s"]) == (30.0, None)
     assert component.config["batch_size"] == 4
@@ -474,7 +471,7 @@ def test_build_dispatcher_treats_sao_as_training_recipe(stub_repository, tmp_pat
 
     assert dispatcher.recipe.name == "sao"
     # The training backend built the component (the inference branch builds none).
-    component = dispatcher.recipe.training_component
+    component = dispatcher.recipe.training_component.component
     assert component.received_model_path == "/models/demo"
 
 
@@ -484,7 +481,7 @@ def test_build_dispatcher_gives_max_staleness_to_the_record_stage_only(stub_repo
     dispatcher = build(tmp_path, recipe=OPENCLAWRL_RECIPE, pipeline_settings=pipeline)
 
     # The window belongs to the record-to-record stage; the training component never receives it.
-    assert "max_staleness" not in dispatcher.recipe.training_component.config
+    assert "max_staleness" not in dispatcher.recipe.training_component.component.config
     assert dispatcher.recipe.build_pipeline(PipelineContext("s")).record2record.max_staleness == 2
 
 
@@ -542,6 +539,7 @@ def test_status_reports_the_running_job_the_finished_jobs_and_the_served_adapter
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
+        coordination=memory_coordination(),
     )
 
     async def math_status(client: TestClient) -> dict:
@@ -566,15 +564,21 @@ def test_status_reports_the_running_job_the_finished_jobs_and_the_served_adapter
             assert "last_drain_at" not in idle and "checkpoint_storage" not in idle
             assert ("adapter_runtime_load_id" in idle) is per_scenario_adapters
 
-            # A per-scenario adapter answers requests under its own version.
-            dispatcher.accept_record(inference(1, "adapter:math:w0" if per_scenario_adapters else "w0"))
+            dispatcher.accept_record(inference(1, idle["served_artifact_id"]))
             dispatcher.accept_record(report(1))
             running = await wait_for(client, finished_jobs=0, running=True)
+            # The training service hands the queued job to the component on its own thread.
+            deadline = time.monotonic() + 5
+            while not component.submitted and time.monotonic() < deadline:
+                await asyncio.sleep(0.01)
             (job,) = component.submitted
             assert running["training_job"] == {"job_id": job.job_id, "backend": "stub", "checkpoints_handled": 0}
 
             component.finish_jobs()
             finished = await wait_for(client, finished_jobs=1, running=False)
+            # The status names the artifact that serves the scenario: the job's checkpoint, once it is active.
+            (active,) = [row["artifact_id"] for row in dispatcher.list_artifacts("math") if row["active"]]
+            assert finished["served_artifact_id"] == active != idle["served_artifact_id"]
             if per_scenario_adapters:
                 assert finished["adapter_runtime_load_id"] == "adapter:math:w1"
             else:

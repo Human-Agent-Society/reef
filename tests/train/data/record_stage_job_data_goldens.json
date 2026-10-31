@@ -1,16 +1,18 @@
 {
  "computed_exact_version": [
   {
-   "data_id": "s:data:1",
    "consumed": [
     "a",
     "b",
     "bad-d",
     "c",
+    "closer",
     "e",
+    "f",
     "sample:c:0",
     "sample:e:0"
    ],
+   "data_id": "s:data:1",
    "items": [
     {
      "group": null,
@@ -26,7 +28,7 @@
       "rollout_log_probs": [
        -0.1
       ],
-      "runtime_load_id": "e:3",
+      "artifact_id": "e:3",
       "tokens": [
        1,
        2
@@ -47,7 +49,7 @@
       "rollout_log_probs": [
        -0.1
       ],
-      "runtime_load_id": "e:3",
+      "artifact_id": "e:3",
       "tokens": [
        1,
        2
@@ -60,23 +62,27 @@
     "b",
     "bad-d",
     "c",
-    "e"
+    "closer",
+    "e",
+    "f"
    ],
    "request": null
   }
  ],
  "computed_window": [
   {
-   "data_id": "s:data:1",
    "consumed": [
     "a",
     "b",
     "bad-d",
     "c",
+    "closer",
     "e",
+    "f",
     "sample:c:0",
     "sample:e:0"
    ],
+   "data_id": "s:data:1",
    "items": [
     {
      "group": null,
@@ -92,7 +98,7 @@
       "rollout_log_probs": [
        -0.1
       ],
-      "runtime_load_id": "e:3",
+      "artifact_id": "e:3",
       "tokens": [
        1,
        2
@@ -113,7 +119,7 @@
       "rollout_log_probs": [
        -0.1
       ],
-      "runtime_load_id": "e:3",
+      "artifact_id": "e:3",
       "tokens": [
        1,
        2
@@ -126,7 +132,9 @@
     "b",
     "bad-d",
     "c",
-    "e"
+    "closer",
+    "e",
+    "f"
    ],
    "request": null
   }
@@ -137,9 +145,13 @@
     "i1",
     "i1-retry",
     "i2",
+    "i3",
+    "i4",
     "r1",
     "r1-retry",
     "r2",
+    "r3",
+    "r4",
     "sample:r1:0",
     "sample:r2:0"
    ],
@@ -173,7 +185,7 @@
        -0.1,
        -0.2
       ],
-      "runtime_load_id": "wv-1",
+      "artifact_id": "wv-1",
       "tokens": [
        1,
        2,
@@ -209,7 +221,7 @@
        -0.1,
        -0.2
       ],
-      "runtime_load_id": "wv-1",
+      "artifact_id": "wv-1",
       "tokens": [
        1,
        2,
@@ -222,18 +234,18 @@
     "i1",
     "i1-retry",
     "i2",
+    "i3",
+    "i4",
     "r1",
     "r1-retry",
-    "r2"
+    "r2",
+    "r3",
+    "r4"
    ],
    "request": null
   },
   {
    "consumed": [
-    "i3",
-    "i4",
-    "r3",
-    "r4",
     "sample:r3:0",
     "sample:r4:0"
    ],
@@ -267,7 +279,7 @@
        -0.1,
        -0.2
       ],
-      "runtime_load_id": "wv-1",
+      "artifact_id": "wv-1",
       "tokens": [
        1,
        2,
@@ -303,7 +315,7 @@
        -0.1,
        -0.2
       ],
-      "runtime_load_id": "wv-1",
+      "artifact_id": "wv-1",
       "tokens": [
        1,
        2,
@@ -312,18 +324,12 @@
      }
     }
    ],
-   "released": [
-    "i3",
-    "i4",
-    "r3",
-    "r4"
-   ],
+   "released": [],
    "request": null
   }
  ],
  "cordis_manual_cap": [
   {
-   "data_id": "s:instruction:train-1",
    "consumed": [
     "i-c-0",
     "i-c-1",
@@ -340,6 +346,7 @@
     "sample:r-c-0:0",
     "train-1"
    ],
+   "data_id": "s:instruction:train-1",
    "items": [
     {
      "group": null,
@@ -370,13 +377,13 @@
    "request": "train-1"
   },
   {
-   "data_id": "s:instruction:train-2",
    "consumed": [
     "i-c-6",
     "r-c-6",
     "sample:r-c-1:0",
     "train-2"
    ],
+   "data_id": "s:instruction:train-2",
    "items": [
     {
      "group": null,
@@ -399,12 +406,16 @@
  ],
  "distill_overflow": [
   {
-   "data_id": "s:data:1",
    "consumed": [
     "i0",
+    "i1",
+    "i2",
     "r0",
+    "r1",
+    "r2",
     "sample:r0:0"
    ],
+   "data_id": "s:data:1",
    "items": [
     {
      "group": null,
@@ -425,7 +436,7 @@
        -0.2,
        -0.3
       ],
-      "runtime_load_id": null,
+      "artifact_id": null,
       "teacher_tokens": [
        100,
        101,
@@ -448,19 +459,19 @@
    ],
    "released": [
     "i0",
-    "r0"
+    "i1",
+    "i2",
+    "r0",
+    "r1",
+    "r2"
    ],
    "request": null
   },
   {
-   "data_id": "s:data:2",
    "consumed": [
-    "i1",
-    "i2",
-    "r1",
-    "r2",
     "sample:r2:0"
    ],
+   "data_id": "s:data:2",
    "items": [
     {
      "group": null,
@@ -481,7 +492,7 @@
        -0.2,
        -0.3
       ],
-      "runtime_load_id": null,
+      "artifact_id": null,
       "teacher_tokens": [
        100,
        101,
@@ -502,18 +513,12 @@
      }
     }
    ],
-   "released": [
-    "i1",
-    "i2",
-    "r1",
-    "r2"
-   ],
+   "released": [],
    "request": null
   }
  ],
  "keyed_groups": [
   {
-   "data_id": "s:data:1",
    "consumed": [
     "i-a-0",
     "i-single-0",
@@ -525,6 +530,7 @@
     "sample:r-single-0:0",
     "sample:r-z-0:0"
    ],
+   "data_id": "s:data:1",
    "items": [
     {
      "group": null,
@@ -544,7 +550,7 @@
        -0.1,
        -0.2
       ],
-      "runtime_load_id": null,
+      "artifact_id": null,
       "tokens": [
        1,
        2,
@@ -570,7 +576,7 @@
        -0.1,
        -0.2
       ],
-      "runtime_load_id": null,
+      "artifact_id": null,
       "tokens": [
        1,
        2,
@@ -596,7 +602,7 @@
        -0.1,
        -0.2
       ],
-      "runtime_load_id": null,
+      "artifact_id": null,
       "tokens": [
        1,
        2,
@@ -621,8 +627,16 @@
    "consumed": [
     "report-s0r0",
     "report-s0r1",
+    "report-s1r0",
+    "report-s1r1",
+    "report-s2r0",
+    "report-s2r1",
     "s0r0",
     "s0r1",
+    "s1r0",
+    "s1r1",
+    "s2r0",
+    "s2r1",
     "sample:report-s0r0:0",
     "sample:report-s0r1:0"
    ],
@@ -671,7 +685,7 @@
        -0.2,
        -0.3
       ],
-      "runtime_load_id": null,
+      "artifact_id": null,
       "teacher_tokens": [
        100,
        101,
@@ -732,7 +746,7 @@
        -0.2,
        -0.3
       ],
-      "runtime_load_id": null,
+      "artifact_id": null,
       "teacher_tokens": [
        100,
        101,
@@ -761,21 +775,21 @@
    "released": [
     "report-s0r0",
     "report-s0r1",
+    "report-s1r0",
+    "report-s1r1",
+    "report-s2r0",
+    "report-s2r1",
     "s0r0",
-    "s0r1"
+    "s0r1",
+    "s1r0",
+    "s1r1",
+    "s2r0",
+    "s2r1"
    ],
    "request": null
   },
   {
    "consumed": [
-    "report-s1r0",
-    "report-s1r1",
-    "report-s2r0",
-    "report-s2r1",
-    "s1r0",
-    "s1r1",
-    "s2r0",
-    "s2r1",
     "sample:report-s2r0:0",
     "sample:report-s2r1:0"
    ],
@@ -824,7 +838,7 @@
        -0.2,
        -0.3
       ],
-      "runtime_load_id": null,
+      "artifact_id": null,
       "teacher_tokens": [
        100,
        101,
@@ -885,7 +899,7 @@
        -0.2,
        -0.3
       ],
-      "runtime_load_id": null,
+      "artifact_id": null,
       "teacher_tokens": [
        100,
        101,
@@ -911,16 +925,7 @@
      }
     }
    ],
-   "released": [
-    "report-s1r0",
-    "report-s1r1",
-    "report-s2r0",
-    "report-s2r1",
-    "s1r0",
-    "s1r1",
-    "s2r0",
-    "s2r1"
-   ],
+   "released": [],
    "request": null
   }
  ],
@@ -930,9 +935,15 @@
     "i-g1-0",
     "i-g1-1",
     "i-g1-retry",
+    "i-g2-0",
+    "i-g2-1",
+    "i-g2-2",
     "r-g1-0",
     "r-g1-1",
     "r-g1-retry",
+    "r-g2-0",
+    "r-g2-1",
+    "r-g2-2",
     "sample:r-g1-0:0",
     "sample:r-g1-1:0"
    ],
@@ -956,7 +967,7 @@
        -0.1,
        -0.2
       ],
-      "runtime_load_id": null,
+      "artifact_id": null,
       "tokens": [
        1,
        2,
@@ -982,7 +993,7 @@
        -0.1,
        -0.2
       ],
-      "runtime_load_id": null,
+      "artifact_id": null,
       "tokens": [
        1,
        2,
@@ -995,9 +1006,15 @@
     "i-g1-0",
     "i-g1-1",
     "i-g1-retry",
+    "i-g2-0",
+    "i-g2-1",
+    "i-g2-2",
     "r-g1-0",
     "r-g1-1",
-    "r-g1-retry"
+    "r-g1-retry",
+    "r-g2-0",
+    "r-g2-1",
+    "r-g2-2"
    ],
    "request": null
   },
@@ -1005,14 +1022,8 @@
    "consumed": [
     "i-g1-2",
     "i-g1-3",
-    "i-g2-0",
-    "i-g2-1",
-    "i-g2-2",
     "r-g1-2",
     "r-g1-3",
-    "r-g2-0",
-    "r-g2-1",
-    "r-g2-2",
     "sample:r-g1-2:0",
     "sample:r-g1-3:0"
    ],
@@ -1036,7 +1047,7 @@
        -0.1,
        -0.2
       ],
-      "runtime_load_id": null,
+      "artifact_id": null,
       "tokens": [
        1,
        2,
@@ -1062,7 +1073,7 @@
        -0.1,
        -0.2
       ],
-      "runtime_load_id": null,
+      "artifact_id": null,
       "tokens": [
        1,
        2,
@@ -1074,21 +1085,14 @@
    "released": [
     "i-g1-2",
     "i-g1-3",
-    "i-g2-0",
-    "i-g2-1",
-    "i-g2-2",
     "r-g1-2",
-    "r-g1-3",
-    "r-g2-0",
-    "r-g2-1",
-    "r-g2-2"
+    "r-g1-3"
    ],
    "request": null
   }
  ],
  "tttd": [
   {
-   "data_id": "s:data:1",
    "consumed": [
     "i-0-0-0",
     "i-0-0-1",
@@ -1111,6 +1115,7 @@
     "sample:r-1-1-0:0",
     "sample:r-1-1-1:0"
    ],
+   "data_id": "s:data:1",
    "items": [
     {
      "group": "0",
@@ -1137,7 +1142,7 @@
        -0.1,
        -0.2
       ],
-      "runtime_load_id": null,
+      "artifact_id": null,
       "tokens": [
        1,
        2,
@@ -1170,7 +1175,7 @@
        -0.1,
        -0.2
       ],
-      "runtime_load_id": null,
+      "artifact_id": null,
       "tokens": [
        1,
        2,
@@ -1203,7 +1208,7 @@
        -0.1,
        -0.2
       ],
-      "runtime_load_id": null,
+      "artifact_id": null,
       "tokens": [
        1,
        2,
@@ -1236,7 +1241,7 @@
        -0.1,
        -0.2
       ],
-      "runtime_load_id": null,
+      "artifact_id": null,
       "tokens": [
        1,
        2,
@@ -1268,7 +1273,6 @@
  ],
  "ungrouped": [
   {
-   "data_id": "s:data:1",
    "consumed": [
     "i-a-0",
     "i-a-1",
@@ -1277,6 +1281,7 @@
     "sample:r-a-0:0",
     "sample:r-a-1:0"
    ],
+   "data_id": "s:data:1",
    "items": [
     {
      "group": null,
@@ -1296,7 +1301,7 @@
        -0.1,
        -0.2
       ],
-      "runtime_load_id": null,
+      "artifact_id": null,
       "tokens": [
        1,
        2,
@@ -1322,7 +1327,7 @@
        -0.1,
        -0.2
       ],
-      "runtime_load_id": null,
+      "artifact_id": null,
       "tokens": [
        1,
        2,
@@ -1340,15 +1345,17 @@
    "request": null
   },
   {
-   "data_id": "s:data:2",
    "consumed": [
     "i-a-2",
     "i-a-3",
+    "i-a-4",
     "r-a-2",
     "r-a-3",
+    "r-a-4",
     "sample:r-a-2:0",
     "sample:r-a-3:0"
    ],
+   "data_id": "s:data:2",
    "items": [
     {
      "group": null,
@@ -1368,7 +1375,7 @@
        -0.1,
        -0.2
       ],
-      "runtime_load_id": null,
+      "artifact_id": null,
       "tokens": [
        1,
        2,
@@ -1394,7 +1401,7 @@
        -0.1,
        -0.2
       ],
-      "runtime_load_id": null,
+      "artifact_id": null,
       "tokens": [
        1,
        2,
@@ -1406,15 +1413,16 @@
    "released": [
     "i-a-2",
     "i-a-3",
+    "i-a-4",
     "r-a-2",
-    "r-a-3"
+    "r-a-3",
+    "r-a-4"
    ],
    "request": null
   }
  ],
  "ungrouped_reload": [
   {
-   "data_id": "s:data:1",
    "consumed": [
     "i-a-0",
     "i-a-1",
@@ -1423,6 +1431,7 @@
     "sample:r-a-0:0",
     "sample:r-a-1:0"
    ],
+   "data_id": "s:data:1",
    "items": [
     {
      "group": null,
@@ -1442,7 +1451,7 @@
        -0.1,
        -0.2
       ],
-      "runtime_load_id": null,
+      "artifact_id": null,
       "tokens": [
        1,
        2,
@@ -1468,7 +1477,7 @@
        -0.1,
        -0.2
       ],
-      "runtime_load_id": null,
+      "artifact_id": null,
       "tokens": [
        1,
        2,
@@ -1486,15 +1495,17 @@
    "request": null
   },
   {
-   "data_id": "s:data:1",
    "consumed": [
     "i-a-2",
     "i-a-3",
+    "i-a-4",
     "r-a-2",
     "r-a-3",
+    "r-a-4",
     "sample:r-a-2:0",
     "sample:r-a-3:0"
    ],
+   "data_id": "s:data:1",
    "items": [
     {
      "group": null,
@@ -1514,7 +1525,7 @@
        -0.1,
        -0.2
       ],
-      "runtime_load_id": null,
+      "artifact_id": null,
       "tokens": [
        1,
        2,
@@ -1540,7 +1551,7 @@
        -0.1,
        -0.2
       ],
-      "runtime_load_id": null,
+      "artifact_id": null,
       "tokens": [
        1,
        2,
@@ -1552,8 +1563,10 @@
    "released": [
     "i-a-2",
     "i-a-3",
+    "i-a-4",
     "r-a-2",
-    "r-a-3"
+    "r-a-3",
+    "r-a-4"
    ],
    "request": null
   }

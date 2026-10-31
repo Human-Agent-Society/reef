@@ -342,7 +342,7 @@ def test_example_yaml_boots_the_recipe_with_the_paper_wiring(example, tmp_path, 
     from reef.service.deploy.config_utils import load_config
     from reef.storage.sqlite import SQLiteRecordStore
     from reef.surface import Surface
-    from reef.surface.skills import SkillInferenceHooks
+    from reef.surface.files import TextFileTree
     from reef.train.trainer import Trainer
 
     skills = tmp_path / "skills"
@@ -369,10 +369,9 @@ def test_example_yaml_boots_the_recipe_with_the_paper_wiring(example, tmp_path, 
 
     surface = built.build_surface("s")
     assert type(surface) is Surface
-    assert isinstance(surface.inference, SkillInferenceHooks)
-    assert [layer.layer for layer in surface.inference.layers] == ["pi-agent"]
+    assert isinstance(surface.files, TextFileTree)
     assert [layer.layer for layer in surface.components["skills"].validator.layers] == ["pi-agent"]
-    # The pool reaches traffic through the proxy; no harness tree is installed, so no adapter is named.
+    # The pool reaches clients as pulled files; no harness tree is installed, so no adapter is named.
     assert surface.harness is None and built.harness_adapter is None
     trainer = built.build("demo", SQLiteRecordStore())  # loads the seed; no rollouts
     assert isinstance(trainer, Trainer) and trainer.job_samples == 60
@@ -470,7 +469,7 @@ def _dry_recipe(example: dict[str, ModuleType], tmp_path: Path, batch_size: int)
 
 def test_replay_driver_dry_run(driver, skillclaw, example, tmp_path, monkeypatch) -> None:
     """One day end to end on the embedded service: the day's traffic records
-    with the served pool's catalog injected, the last report schedules the
+    as the client sent it, the last report schedules the
     background night (stubbed LLM, fake pi probes), selection always publishes
     the composite night, the driver pulls the evolved pool from GET /reef/harness,
     and a replayed report lands on its 409 without failing the day."""
@@ -566,19 +565,14 @@ def test_replay_driver_dry_run(driver, skillclaw, example, tmp_path, monkeypatch
         assert "Sort, take the middle." in mutation["options"]["config"]["text"]
         assert "Sort, take the middle." in manifest["files"]["pi-agent/skills/csv-median/SKILL.md"]
 
-        # The served pool's catalog section appears in the recorded request
-        # payload - the batch the night received is those recorded payloads,
-        # post-transform.
-        catalog_cls = importlib.import_module("harness.catalog").SkillCatalogModule
+        # The batch the night received is the recorded request payloads, as
+        # the client sent them: the service changes no request.
         recorded = [
             sample for sample in night_input["samples"] if "solve one" in json.dumps(dict(recorded_payload(sample)))
         ]
         assert recorded, "the day's traffic did not reach the night"
         payload = dict(recorded_payload(recorded[-1]))
-        system = payload["messages"][0]
-        assert system["role"] == "system"
-        assert "## Skills (mandatory)" in system["content"]
-        assert catalog_cls.catalog_names(payload) == ("answer-style",)
+        assert payload["messages"] == [{"role": "user", "content": "solve one"}]
 
         # The day reports read by the night step are on disk, keyed by reference.
         reports = sorted((round_dir / "reports").glob("*.json"))

@@ -648,6 +648,14 @@ class TokenNativeChatHandler(HttpInferenceHandler):
     def model_path(self) -> str:
         return self._model_path
 
+    def address_model(self, payload: Mapping[str, Any], model_name: str) -> dict[str, Any]:
+        """The engine serves the base model under its path and each adapter under its own name, which a native
+        request names in ``lora_path``."""
+        addressed = {key: value for key, value in payload.items() if key != "lora_path"}
+        if model_name == self._model_path:
+            return {**addressed, "model": model_name}
+        return {**addressed, "model": model_name, "lora_path": model_name}
+
     @property
     def capture_topk(self) -> int:
         return self._capture_topk

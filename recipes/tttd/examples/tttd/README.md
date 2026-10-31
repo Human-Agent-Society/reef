@@ -103,8 +103,8 @@ PUCT chooses G parents
   -> Slime applies frozen-base token KL and un-clipped importance sampling
   -> Megatron performs one optimizer step and synchronizes weights to SGLang
   -> valid children update the local PUCT archive
-  -> the Harbor controller waits for the durable scenario commit and new runtime load ID
-  -> the post-step PUCT archive is atomically paired with that committed version
+  -> the Harbor controller waits for the durable scenario commit and the new served artifact
+  -> the post-step PUCT archive is atomically paired with that committed artifact
 ```
 
 ## Included paper problems
@@ -209,13 +209,14 @@ per grid.
 scenario records, and PUCT state; a second problem needs its own directory so
 the two cannot mix. `work/erdos_min_overlap/tttd-search-state.json` records a
 pending archive immediately after a search step and marks it committed only
-after Reef's durable training transaction advances the scenario and publishes
-a new serving runtime load ID.
+after Reef's durable training transaction advances the scenario and serves
+a new artifact.
 Restarting with the same scenario, task instruction, and sampling settings
 resumes that paired state; a missing or mismatched step fails closed instead
-of silently restarting PUCT against a later model checkpoint. Serving weight
-versions are session scoped, so a correctly restored step may rebind the saved
-archive to the new engine version.
+of silently restarting PUCT against a later model checkpoint. Reef's scenario
+step is the check: when a correctly restored step serves another artifact, for
+example after an operator activated one, the controller records that artifact.
+The controller refuses a state file of an older format; start a fresh scenario.
 
 Use a fresh scenario for each discovery problem: TTT-Discover fine-tunes on one
 test problem rather than learning a general task policy.

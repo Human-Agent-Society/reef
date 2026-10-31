@@ -52,6 +52,9 @@ class StubReefClient:
     ``reads`` is every route read the runner makes, in order, as ``("catalog", {"rows": n, "published": bool})``
     for ``/reef/harness/releases`` and ``("manifest", release_id)`` for ``/reef/harness``. It says whether the
     manifest was read because a verdict was on the record, or polled before there was one to read.
+
+    ``posts`` is every low-level ``post`` the run makes, in order, as ``(path, scenario, payload)``; the run uses it
+    to create its scenario.
     """
 
     def __init__(
@@ -60,6 +63,7 @@ class StubReefClient:
         self.verdicts = list(verdicts)
         self.head = head
         self.reports: list[dict] = []
+        self.posts: list[tuple[str, str, dict]] = []
         self.requested: list[str] = []
         self.reads: list[tuple[str, dict | str]] = []
         self.turns: list[str] = []
@@ -71,6 +75,10 @@ class StubReefClient:
             {"release_id": f"release-{index}", "operation": "training", "metrics": {"steps": index, **verdict}}
             for index, verdict in enumerate(self.verdicts[: len(self.reports)], start=1)
         ]
+
+    def post(self, path: str, scenario: str, payload: dict, **kwargs: object) -> tuple[dict, dict[str, str]]:
+        self.posts.append((path, scenario, payload))
+        return {"scenario": payload["name"]}, {}
 
     def inference_with_record(self, scenario: str, path: str, payload: dict, **kwargs: object) -> tuple[dict, str]:
         return {"choices": [{"message": {"content": "9592"}}]}, "receipt-1"

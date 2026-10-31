@@ -9,7 +9,8 @@ from reef.service.routes.payload import read_object
 from reef.service.samples import MAX_SAMPLES_PER_PAGE, change_buffer, list_samples, read_buffer
 
 
-def register_sample_routes(app: web.Application, *, request_service: RequestService) -> None:
+def register_sample_reads(app: web.Application, *, request_service: RequestService) -> None:
+    """The list of a scenario's sample store."""
     dispatcher = request_service.dispatcher
 
     async def samples(request: web.Request) -> web.Response:
@@ -22,6 +23,13 @@ def register_sample_routes(app: web.Application, *, request_service: RequestServ
             list_samples, dispatcher, request.match_info["scenario"], after_sequence=after, limit=limit
         )
         return web.json_response(listing)
+
+    app.router.add_get("/reef/scenarios/{scenario}/samples", samples)
+
+
+def register_buffer_routes(app: web.Application, *, request_service: RequestService) -> None:
+    """The read and the changes of a trainer's buffer, which is the trainer's state that control holds."""
+    dispatcher = request_service.dispatcher
 
     async def buffer(request: web.Request) -> web.Response:
         listing = await asyncio.to_thread(
@@ -41,7 +49,9 @@ def register_sample_routes(app: web.Application, *, request_service: RequestServ
         )
         return web.json_response(listing)
 
-    app.router.add_get("/reef/scenarios/{scenario}/samples", samples)
     app.router.add_get("/reef/scenarios/{scenario}/buffer", buffer)
     app.router.add_post("/reef/scenarios/{scenario}/buffer/insert", insert)
     app.router.add_post("/reef/scenarios/{scenario}/buffer/remove", remove)
+
+
+__all__ = ["register_buffer_routes", "register_sample_reads"]

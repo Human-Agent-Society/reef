@@ -98,7 +98,7 @@ the optimizer batch in the training config:
    pipeline.sample2job.config.job_samples | required | rollouts (one per prompt) per job. Set it to ``training.config.global_batch_size`` so that one job is one optimizer step.
    training.config.global_batch_size | rollouts (one per prompt) per optimizer step; the paper uses 128. Reef passes it to Slime as ``--global-batch-size``. Each sample is its own data-parallel unit. 1 trains on every rollout as it lands and is a smoke setting only.
    pipeline.record2sample.config | {} | the sample-assembly keys: ``accept_multi_turn_policy_samples`` (default false) trains a report that references several model calls as one multi-turn sample; ``realign_threshold`` (1024) and ``scaffold_tolerance`` (0) bound the tokens that assembly may realign.
-   pipeline.record2record.config.max_staleness | 0 | accepted lag, in versions, between the producing and serving version.
+   pipeline.record2record.config.max_staleness | 0 | accepted lag, in artifacts that the scenario served, between the producing and served artifact.
 
 A ``batch-size`` key in ``recipe.config`` or in
 ``pipeline.sample2job.config`` is an unknown key: the recipe or the scenario's
@@ -133,8 +133,8 @@ rollout adds one ``training`` entry to the scenario's version chain:
 
 The runtime reports ``pg_clipfrac``, ``critic/explained_variance``, actor and
 critic ``grad_norm``, and the asynchrony metrics
-``sao/producing_version_spread_*``, ``sao/queue_age_s_*``, and
-``sao/effective_token_rate``.
+``sao/producing_artifacts`` (how many artifacts produced the job's samples),
+``sao/queue_age_s_*``, and ``sao/effective_token_rate``.
 
 CEO-Bench
 ~~~~~~~~~

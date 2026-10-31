@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
+from tests.support.samples_service import make_samples
 
 from reef.core import AgentRecord, RequestType
 from reef.evaluation import EvaluationResult, SelectionDecision, UpdateCandidate
@@ -164,6 +165,7 @@ def test_trainer_dispatches_only_required_data_types() -> None:
             scenario="math", request_type=RequestType.REPORT, payload={"score": 1}, agent_record_id="report"
         )
     )
+    make_samples(trainer)
     trainer.run_once()
 
     assert "push:report" in events
@@ -187,6 +189,7 @@ def test_trainer_waits_for_commit_before_acknowledging_batch() -> None:
             scenario="math", request_type=RequestType.REPORT, payload={"score": 1}, agent_record_id="report"
         )
     )
+    make_samples(trainer)
 
     result = trainer.run_once()
 
@@ -243,6 +246,7 @@ def test_trainer_finishes_a_skipped_preparation_without_selection() -> None:
         candidate_backend=SkippingBackend("math", []),
         default_job_samples=1,
     )
+    make_samples(trainer)
 
     result = trainer.run_once()
 
@@ -273,6 +277,7 @@ def test_trainer_keeps_pending_result_when_external_commit_fails() -> None:
             scenario="math", request_type=RequestType.REPORT, payload={"score": 1}, agent_record_id="report"
         )
     )
+    make_samples(trainer)
 
     result = trainer.run_once()
     assert result is not None
@@ -300,11 +305,13 @@ def test_trainer_reads_only_new_records() -> None:
         default_job_samples=1,
     )
 
+    make_samples(trainer)
     first = trainer.run_once()
     assert first is not None
     prepared = trainer.prepare_commit(first)
     trainer.commit(prepared)
     records.append(report)
+    make_samples(trainer)
     trainer.run_once()
 
     assert events.count("push:report") == 1

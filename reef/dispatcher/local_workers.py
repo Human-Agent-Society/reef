@@ -228,6 +228,7 @@ class LocalTrainingWorkers:
                     # in-memory step and append the same step number again.
                     self.reload_after_local_failure(current)
                     raise
+                self.registry.lifecycle.scenario_committed(current)
         return True
 
     def fail_instruction(self, current: Scenario, cause: Exception, component: str | None = None) -> None:
