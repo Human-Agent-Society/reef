@@ -1,3 +1,4 @@
+import sqlite3
 from contextlib import closing
 from dataclasses import dataclass
 
@@ -164,11 +165,79 @@ def test_an_item_waits_for_its_available_time_and_readers_follow_changes_in_orde
 
 
 @pytest.mark.unit
+def test_an_item_records_when_a_worker_first_took_it_and_when_it_ended(open_coordination):
+    queue = open_coordination(max_attempts={"jobs": 2}).queue
+    added = queue.add(job("a"), now=1)
+    assert (added.created_at, added.started_at, added.ended_at) == (1, None, None)
+    queue.take("jobs", "w1", ["training_job:tinker"], now=2)
+    retried = queue.fail("jobs", "a", "w1", "transient", retryable=True, now=3)
+    assert (retried.state, retried.started_at, retried.ended_at) == ("queued", 2, None)
+    # A second take keeps the time of the first one.
+    assert queue.take("jobs", "w2", ["training_job:tinker"], now=4).started_at == 2
+    done = queue.finish("jobs", "a", "w2", {}, now=5)
+    assert (done.started_at, done.ended_at) == (2, 5)
+
+    queue.add(job("b", serial_key=None), now=6)
+    queue.take("jobs", "w1", ["training_job:tinker"], now=7)
+    assert queue.requeue_expired(now=100)[0].ended_at is None
+    queue.take("jobs", "w1", ["training_job:tinker"], now=101)
+    assert queue.requeue_expired(now=200)[0].ended_at == 200
+    queue.add(job("c", serial_key=None), now=8)
+    cancelled = queue.cancel("jobs", "c", "cancelled")
+    assert cancelled.started_at is None and cancelled.ended_at is not None
+
+
+@pytest.mark.unit
+def test_a_reader_sets_metadata_on_any_item_and_an_equal_value_changes_nothing(open_coordination):
+    queue = open_coordination().queue
+    assert queue.set_metadata("jobs", "missing", "experiment", {"run_id": "r"}) is None
+    queue.add(job("a"), now=0)
+    queue.take("jobs", "w", ["training_job:tinker"], now=1)
+    done = queue.finish("jobs", "a", "w", {"ok": True}, now=2)
+
+    # A final item takes metadata too; its state, result and times stay.
+    noted = queue.set_metadata("jobs", "a", "experiment", {"run_id": "r"})
+    assert noted.metadata == {"experiment": {"run_id": "r"}}
+    assert (noted.state, noted.result, noted.ended_at) == ("finished", {"ok": True}, 2)
+    assert noted.changed_sequence > done.changed_sequence
+    assert queue.set_metadata("jobs", "a", "experiment", {"run_id": "r"}) == noted
+    assert queue.set_metadata("jobs", "a", "other", 1).metadata == {"experiment": {"run_id": "r"}, "other": 1}
+    # Retention counts from the end, not from the last metadata change.
+    assert queue.delete_final(finished_before=3) == 1
+
+
+@pytest.mark.unit
+def test_a_work_item_table_from_before_the_times_and_metadata_gets_them(tmp_path):
+    directory = tmp_path / "coordination"
+    with closing(SQLiteCoordinationDatabase(directory)) as database:
+        queue = SQLWorkQueue(database, lease_seconds=10)
+        queue.add(job("ended"), now=0)
+        queue.add(job("waiting", serial_key=None), now=0)
+        queue.take("jobs", "w", ["training_job:tinker"], now=1)
+        queue.finish("jobs", "ended", "w", {}, now=2)
+    with closing(sqlite3.connect(directory / "coordination.sqlite3")) as connection:
+        for column in ("started_at", "ended_at", "metadata_json"):
+            connection.execute(f"ALTER TABLE work_item DROP COLUMN {column}")
+        connection.commit()
+
+    with closing(SQLiteCoordinationDatabase(directory)) as database:
+        queue = SQLWorkQueue(database, lease_seconds=10)
+        ended, waiting = queue.get("jobs", "ended"), queue.get("jobs", "waiting")
+        # An ended item ended at its last change; the start of an earlier item is not known.
+        assert (ended.started_at, ended.ended_at, ended.metadata) == (None, 2, {})
+        assert (waiting.started_at, waiting.ended_at, waiting.metadata) == (None, None, {})
+
+
+@pytest.mark.unit
 def test_a_work_item_has_a_worker_exactly_while_it_is_held():
     with pytest.raises(ValueError, match="worker and a lease"):
         WorkItem("jobs", "a", "s", "k", {}, state="running")
     with pytest.raises(ValueError, match="result exactly"):
         WorkItem("jobs", "a", "s", "k", {}, state="finished")
+    with pytest.raises(ValueError, match="ended_at exactly"):
+        WorkItem("jobs", "a", "s", "k", {}, state="finished", result={})
+    with pytest.raises(ValueError, match="no started_at"):
+        WorkItem("jobs", "a", "s", "k", {}, started_at=1.0)
 
 
 @pytest.mark.unit
