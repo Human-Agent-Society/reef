@@ -19,8 +19,9 @@ English | [中文](README.zh.md)
 <div align="left">
 
 Reef is the first open-source infrastructure for continual self-improving agents.
-It connects agent inference, feedback, learning, and versioned delivery. Use it
-to train model weights with Slime and SGLang, or improve an agent's harness, including its prompts, rules, and skills.
+It connects agent inference, feedback, learning, and versioned delivery.
+Use it to train model weights with Slime and SGLang, or improve an agent's harness,
+including its prompts, rules, and skills.
 
 
 </div>
