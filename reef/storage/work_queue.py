@@ -57,16 +57,23 @@ class WorkItem:
     - ``payload`` is a JSON object, the input of the work.
     - ``serial_key`` is None or a non-empty string (see the module docstring).
     - ``available_at`` and ``created_at`` are finite times in seconds.
+    - ``started_at`` is None or a finite time: when a worker first took the item. It is None while
+      ``attempt_count`` is 0, and also for an item that a store took before it recorded this time.
+    - ``ended_at`` is a finite time set exactly when ``state`` is final: when the item finished or failed.
     - ``state`` is one of ``WORK_STATES``. ``worker_id`` and ``lease_expires_at`` are set exactly when ``state`` is
       ``assigned`` or ``running``.
     - ``attempt_count`` is the number of times a worker took the item, an integer from 0.
     - ``progress`` is a tuple of JSON objects in the order a worker added them.
     - ``result`` is set exactly when ``state`` is ``finished``; ``error`` is a non-empty string set exactly when
       ``state`` is ``failed``, or the last retryable error of a ``queued`` item.
+    - ``metadata`` is a JSON object of facts about the item that a reader of the item records after it exists
+      (``WorkQueue.set_metadata``), such as the experiment run that records a training job. It is not an input of
+      the work, so no worker reads it.
     - ``created_sequence`` and ``changed_sequence`` are positive integers; ``changed_sequence`` increases at each
       change.
 
-    Purpose: a ``WorkQueue`` makes it; workers read the payload and progress, and readers read the result.
+    Purpose: a ``WorkQueue`` makes it; workers read the payload and progress, and readers read the result, the
+    times and the metadata.
     """
 
     queue: str
@@ -78,12 +85,15 @@ class WorkItem:
     serial_key: str | None = None
     available_at: float = 0.0
     created_at: float = 0.0
+    started_at: float | None = None
+    ended_at: float | None = None
     attempt_count: int = 0
     worker_id: str | None = None
     lease_expires_at: float | None = None
     progress: tuple[Mapping[str, JsonValue], ...] = ()
     result: Mapping[str, JsonValue] | None = None
     error: str | None = None
+    metadata: Mapping[str, JsonValue] = field(default_factory=dict)
     created_sequence: int = 1
     changed_sequence: int = 1
 
@@ -97,14 +107,15 @@ class WorkItem:
         if self.serial_key is not None:
             require_text(self.serial_key, "serial_key")
         for time_value, name in ((self.available_at, "available_at"), (self.created_at, "created_at")):
-            if (
-                isinstance(time_value, bool)
-                or not isinstance(time_value, (int, float))
-                or not math.isfinite(time_value)
-            ):
+            if not is_finite_time(time_value):
                 raise ValueError(f"{name} is a finite time")
+        for optional_time, name in ((self.started_at, "started_at"), (self.ended_at, "ended_at")):
+            if optional_time is not None and not is_finite_time(optional_time):
+                raise ValueError(f"{name} is a finite time or None")
         if isinstance(self.attempt_count, bool) or not isinstance(self.attempt_count, int) or self.attempt_count < 0:
             raise ValueError("attempt_count is an integer from 0")
+        if self.attempt_count == 0 and self.started_at is not None:
+            raise ValueError("a work item that no worker took has no started_at")
         held = self.state in HELD_STATES
         if (self.worker_id is not None) != held or (self.lease_expires_at is not None) != held:
             raise ValueError("a work item has a worker and a lease exactly while it is assigned or running")
@@ -114,13 +125,22 @@ class WorkItem:
             raise ValueError("a failed work item has an error")
         if self.state in ("finished", "assigned", "running") and self.error is not None:
             raise ValueError("only a queued or failed work item carries an error")
+        if (self.ended_at is not None) != (self.state in FINAL_STATES):
+            raise ValueError("a work item has an ended_at exactly when it is final")
+        if not isinstance(self.metadata, Mapping):
+            raise TypeError("a work item's metadata is a JSON object")
         if self.created_sequence < 1 or self.changed_sequence < self.created_sequence:
             raise ValueError("sequences are positive and changed_sequence is not before created_sequence")
 
     @property
     def final(self) -> bool:
-        """Whether the item finished or failed, after which it does not change."""
+        """Whether the item finished or failed, after which only its ``metadata`` changes."""
         return self.state in FINAL_STATES
+
+
+def is_finite_time(value: object) -> bool:
+    """Whether ``value`` is a finite int or float that is not a bool: a time in seconds."""
+    return not isinstance(value, bool) and isinstance(value, (int, float)) and math.isfinite(value)
 
 
 @dataclass(frozen=True)
@@ -147,11 +167,7 @@ class NewWork:
             raise TypeError("a work item's payload is a JSON object")
         if self.serial_key is not None:
             require_text(self.serial_key, "serial_key")
-        if self.available_at is not None and (
-            isinstance(self.available_at, bool)
-            or not isinstance(self.available_at, (int, float))
-            or not math.isfinite(self.available_at)
-        ):
+        if self.available_at is not None and not is_finite_time(self.available_at):
             raise ValueError("available_at is a finite time or None")
 
 
@@ -164,8 +180,8 @@ class WorkQueue(ABC):
     ``default_attempts`` times for a queue that ``max_attempts`` does not name; each is a positive int.
 
     Purpose: control and the services add work (``add``, ``request``); workers take, extend, progress, finish and
-    fail it; any service returns expired work (``requeue_expired``); readers follow it (``read_changes``, ``get``);
-    control deletes old final items (``delete_final``).
+    fail it; any service returns expired work (``requeue_expired``); readers follow it (``read_changes``, ``get``)
+    and record facts about it (``set_metadata``); control deletes old final items (``delete_final``).
     """
 
     def __init__(
@@ -217,7 +233,7 @@ class WorkQueue(ABC):
 
     @abstractmethod
     def delete_final(self, *, finished_before: float) -> int:
-        """Delete every final item of every queue that changed last before ``finished_before``; return how many.
+        """Delete every final item of every queue whose ``ended_at`` is before ``finished_before``; return how many.
 
         A reader of a final item, such as the trainer of a job, reads it within the retention that control keeps,
         so a deleted item is one that no reader needs."""
@@ -229,7 +245,8 @@ class WorkQueue(ABC):
 
         A worker can take an item when its ``kind`` is in ``kinds``, its ``available_at`` is not after ``now``,
         and every item with the same ``serial_key`` and a lower ``created_sequence`` is final. The item becomes
-        ``assigned``, with ``worker_id``, ``lease_expires_at = now + lease_seconds``, and one more attempt.
+        ``assigned``, with ``worker_id``, ``lease_expires_at = now + lease_seconds``, and one more attempt. Its
+        ``started_at`` becomes ``now`` when it has none, so it stays the time of the first take.
         """
 
     @abstractmethod
@@ -261,7 +278,8 @@ class WorkQueue(ABC):
     def finish(
         self, queue: str, item_id: str, worker_id: str, result: Mapping[str, JsonValue], *, now: float | None = None
     ) -> WorkItem:
-        """Make the held item ``finished`` with ``result``; ``WorkLeaseLost`` when ``worker_id`` does not hold it."""
+        """Make the held item ``finished`` with ``result``, ended at ``now``; ``WorkLeaseLost`` when ``worker_id``
+        does not hold it."""
 
     @abstractmethod
     def fail(
@@ -275,18 +293,30 @@ class WorkQueue(ABC):
         now: float | None = None,
     ) -> WorkItem:
         """End the held attempt with ``error``: the item becomes ``queued`` when ``retryable`` and it has attempts
-        left, else ``failed``. ``WorkLeaseLost`` when ``worker_id`` does not hold it."""
+        left, else ``failed``, ended at ``now``. ``WorkLeaseLost`` when ``worker_id`` does not hold it."""
 
     @abstractmethod
     def cancel(self, queue: str, item_id: str, error: str) -> WorkItem | None:
-        """Make an item that is not final ``failed`` with ``error``, for the producer that added it. A worker that
-        held it gets ``WorkLeaseLost`` at its next call and stops. Return the item, or None when it does not exist;
-        a final item does not change."""
+        """Make an item that is not final ``failed`` with ``error``, ended now, for the producer that added it. A
+        worker that held it gets ``WorkLeaseLost`` at its next call and stops. Return the item, or None when it does
+        not exist; a final item does not change."""
+
+    @abstractmethod
+    def set_metadata(self, queue: str, item_id: str, name: str, value: JsonValue) -> WorkItem | None:
+        """Set ``metadata[name]`` of the item to ``value``, whatever the item's state, and return the item; None
+        when it does not exist.
+
+        A reader of the item uses it to record a fact about the work that it learns after the item exists, such as
+        the experiment run that records a training job (``reef.train.job_queue``). No lease is needed, and the
+        state, payload, progress, result, error and times do not change. When ``metadata[name]`` already equals
+        ``value``, nothing changes; otherwise the change gets the next change sequence. ``name`` is a non-empty
+        string.
+        """
 
     @abstractmethod
     def requeue_expired(self, *, now: float | None = None) -> tuple[WorkItem, ...]:
-        """Return each held item whose lease expired to ``queued``, or make it ``failed`` when it has no attempts
-        left; return the changed items."""
+        """Return each held item whose lease expired to ``queued``, or make it ``failed``, ended at ``now``, when it
+        has no attempts left; return the changed items."""
 
     @abstractmethod
     def get(self, queue: str, item_id: str) -> WorkItem | None:
@@ -361,4 +391,5 @@ __all__ = [
     "WorkQueue",
     "WorkState",
     "clock",
+    "is_finite_time",
 ]
