@@ -12,9 +12,9 @@ Accepting records, replaying them after a restart, holding a job's data until it
 acknowledged, committing algorithm state, submitting training jobs, and
 publishing the next version are Reef's job, not the method's.
 
-This page covers a **weight** recipe. For a harness-evolution method with a
-proposer, a rollout scorer, and a selection policy against a fixed model, see
-`Evolve your harness <../user-guide/evolve-your-harness.rst#write-a-method>`__.
+This page covers a **weight** recipe. For a harness evolution method, a
+``Method`` that edits a harness tree for a fixed model, see `Write a harness
+method <write-a-harness-method.rst>`__.
 
 .. code:: mermaid
 
@@ -242,8 +242,10 @@ training job saves goes onto the scenario's release chain. The next job
 starts from it. The deployment's activation rule decides whether the
 artifact also serves: at once, after an evaluation of it, or only when a
 person activates it. The rule applies to every recipe, so a recipe class
-has no evaluation or selection code. Name it in the top-level
-``activation`` section:
+has no evaluation or selection code. A harness step's evaluation in
+``evolution.evaluation`` decides only which candidate tree the step keeps
+(see `Write a harness method <write-a-harness-method.rst#evaluation>`__).
+Name the rule in the top-level ``activation`` section:
 
 .. code:: yaml
 

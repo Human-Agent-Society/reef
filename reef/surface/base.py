@@ -2,7 +2,7 @@
 
 A surface describes how one frozen release reaches inference or a
 client pulling files. A release binds named components (``weights``,
-``harness``, ``skills``, ...), and the surface binds each component's
+``harness``, ``config``, ...), and the surface binds each component's
 capabilities explicitly: record-only surfaces have no components, while
 model, adapter, and harness surfaces compose only the pieces they use.
 """
@@ -18,7 +18,6 @@ from reef.artifact.artifact import Artifact, ArtifactValidator
 from reef.artifact.files import ArtifactFiles
 from reef.core.components import validate_component_name
 from reef.core.evaluation import ARTIFACT_KINDS, ArtifactKind
-from reef.core.model_metadata import ModelMetadata
 
 
 @dataclass(frozen=True)
@@ -85,21 +84,6 @@ class FileTree(ABC):
 
     @abstractmethod
     def read_files(self, artifact: Artifact) -> Mapping[str, str] | None: ...
-
-
-@dataclass(frozen=True)
-class HarnessInfo:
-    """What the harness routes need beyond the file tree: the served model and the models a client may pick."""
-
-    served_model: str | None = None
-    #: The served model's API dialect: Reef forwards calls unchanged, so an installed client must speak it.
-    served_api: str = "openai"
-    #: Further models the installed client may pick from; the served one stays the default.
-    client_models: tuple[str, ...] = ()
-    #: Explicit overrides by exact name; never reuse discovered metadata for a different endpoint.
-    model_metadata: Mapping[str, ModelMetadata] = field(default_factory=dict)
-    #: Discovered metadata for served_model on the default deployment endpoint.
-    served_metadata: ModelMetadata | None = None
 
 
 class ArtifactLayout(ABC):
@@ -187,7 +171,6 @@ class Surface:
     """
 
     components: Mapping[str, ComponentSurface] = field(default_factory=dict)
-    harness: HarnessInfo | None = None
     #: The whole release's own admission check, run before each component's: on the release a step publishes and
     #: on a release an activation serves. A recipe binds its checks on ``ComponentSurface.validator``; this
     #: one carries the ``build_artifact_validator`` of a recipe that serves no component, which admits the release as
@@ -197,7 +180,6 @@ class Surface:
     def __init__(
         self,
         components: Mapping[str, ComponentSurface] | None = None,
-        harness: HarnessInfo | None = None,
         validator: ArtifactValidator | None = None,
         *,
         loader: ArtifactLoader | None = None,
@@ -223,7 +205,6 @@ class Surface:
             else:
                 raise ValueError(f"surface serves components {list(declared)}: set loader and files per component")
         object.__setattr__(self, "components", declared)
-        object.__setattr__(self, "harness", harness)
         object.__setattr__(self, "validator", AcceptAnyArtifact() if validator is None else validator)
         self.__post_init__()
 
@@ -337,7 +318,6 @@ __all__ = [
     "ArtifactLoader",
     "ComponentSurface",
     "FileTree",
-    "HarnessInfo",
     "ServingRuntime",
     "Surface",
     "WeightRuntime",

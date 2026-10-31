@@ -68,8 +68,6 @@ RESULT_POLL_SECONDS = 0.2
 #: and the seconds it waits after the first attempt, growing with each.
 ACTIVATION_ATTEMPTS = 5
 ACTIVATION_RETRY_SECONDS = 1.0
-#: The scenario name that an evaluation's model calls carry; the artifact endpoint serves no scenario.
-EVALUATION_SCENARIO = "artifact-evaluation"
 
 
 @dataclass(frozen=True)

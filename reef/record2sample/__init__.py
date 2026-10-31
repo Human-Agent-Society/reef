@@ -20,6 +20,9 @@ Implementations:
   records into one sample. A recipe writes ``make_sample``.
 * ``JudgedSamples`` (``judged.py``): one judged record into one sample. A recipe
   writes ``make_sample``.
+* ``TraceSamples`` and ``InferenceSamples`` (``traces.py``): the requests a
+  session sent, as served, into one trace sample for harness evolution, with
+  the reported score or unscored.
 * ``DistillSamples`` (``distill.py``): one report into one distillation sample,
   the student's sample plus the teacher sequence. ``TeacherRenderer`` renders
   the teacher's request with the served model's chat template.

@@ -1,217 +1,88 @@
-"""Update-channel guarantees of the harness read routes: the release catalog
-with its gate metrics, version-addressed pulls, the byte identity of a
-pulled tree with the composition the gate measured, and the one-command
-install script. Hermetic like test_harness_recipe.py (rollouts run a fake
-pi binary through the real adapter path); pulls go through the real HTTP
-app with the stdlib client, and the install-script tests execute the
-generated script under ``sh`` with the vendor tools shimmed on PATH."""
+"""Read-channel guarantees of the harness routes: the release catalog with each step's evaluation metrics,
+version-addressed pulls, served files that are byte for byte the evaluated source tree rendered for the
+adapter, the source form, and the routes the wrapper used that are gone. Hermetic: tasks run a fake pi
+binary through the real adapter path, and the reads go through the real HTTP app."""
 
 from __future__ import annotations
 
 import asyncio
-import dataclasses
-import hashlib
-import json
-import os
-import shutil
-import signal
-import subprocess
-import sys
+import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from pathlib import Path, PurePosixPath
+from dataclasses import replace
+from pathlib import Path
 from threading import Event
-from urllib.parse import quote
 
 import pytest
-import yaml
 from aiohttp.test_utils import TestClient, TestServer
-from reef_client.client import ReefClient
-from tests.support._strategies import resolve_proposer, resolve_rollout_scorer
-from tests.train.test_harness_evolve_processor import harness_stages
+from tests.support.harness_render import descriptor_data, write_descriptor
+from tests.support.harness_service import EchoInference, harness_dispatcher, job_backend
+from tests.support.harness_steps import changed_rules, harness_recipe
 
-import reef.harness.adapters
-import reef.service.routes.system as system_routes
-from reef.artifact import ArtifactNotFound, InMemoryRepositoryBackend
 from reef.core.evaluation import EvaluationResult, UpdateCandidate
-from reef.core.model_metadata import ModelMetadata
 from reef.dispatcher import Dispatcher
 from reef.harness.adapters import get_adapter
-from reef.harness.adapters.descriptor import NO_TOKEN_API_KEY, DescriptorError, load_descriptor
-from reef.harness.rollouts.model_binding import ModelBinding
-from reef.harness.rollouts.run import RolloutResult
-from reef.harness.rollouts.version_check import version_check_entry
-from reef.harness.tree.render import render_composition, tree_files
-from reef.inference.http import InferenceProxyRuntime
-from reef.recipe import Recipe
-from reef.recipe.cordis import CordisRecipe
-from reef.runtime.interfaces import InferenceHandler
+from reef.harness.adapters.descriptor import DescriptorError, load_descriptor
+from reef.harness.tasks.run import TaskResult
+from reef.harness.tree import HarnessTree, TreePatch, render_tree
+from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.service.app import create_app
-from reef.service.install_script import (
-    HARNESS_RELEASE_FILE,
-    PREAMBLE_MIN_BYTES,
-    TOKEN_PLACEHOLDER,
-    composition_checksum,
-    render_install_preamble,
-    render_install_script,
-    render_streamed_install,
-)
-from reef.service.request_service import RequestService
-from reef.storage.sql_coordination import memory_coordination
-from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.train.cordis_backend import Mutation
+from reef.train.pipeline import PipelineConfig
 
-# The fake harness scores itself, as in test_harness_recipe.py: its
-# trajectory carries the rules text, so the evaluator can rank a composition
-# by how often the marker appears and an update mutation can beat its parent.
-PI_FAKE = """\
-#!/usr/bin/env python3
-import json, os, sys
-from pathlib import Path
-
-prompt = sys.argv[sys.argv.index("-p") + 1]
-agent_dir = Path(os.environ["PI_CODING_AGENT_DIR"])
-session_dir = Path(os.environ["PI_CODING_AGENT_SESSION_DIR"])
-session_dir.mkdir(parents=True, exist_ok=True)
-rules_path = agent_dir / "AGENTS.md"
-event = {"type": "agent_end", "rules": rules_path.read_text() if rules_path.exists() else ""}
-(session_dir / "session.jsonl").write_text(json.dumps(event) + "\\n")
-"""
-
-#: Each mutation strictly improves the marker count, so every gated step wins
-#: and publishes: step one creates the rules node, step two rewrites it.
-MUTATIONS = (
-    Mutation("create", "r1", {"name": "rules", "config": {"text": "marker rules"}}),
-    Mutation("update", "r1", {"config": {"text": "marker marker rules"}}),
-)
-
-NODES_V1 = (("rules", {"text": "marker rules"}),)
-NODES_V2 = (("rules", {"text": "marker marker rules"}),)
-ENTRIES_V1 = ({"id": "r1", "name": "rules", "config": {"text": "marker rules"}},)
-#: A recipe seed that serves a base release before any step.
-SKILL_SEED = ({"id": "answer-style", "name": "skill", "config": {"name": "answer-style", "text": "# seed skill\n"}},)
-RULES_SEED = ({"id": "style", "name": "rules", "config": {"text": "Answer briefly."}},)
-DELIVERY = {"x-reef-scenario": "delivery"}
-
-_ASYNC_UPDATE_TIMEOUT_S = 5.0
-_ASYNC_UPDATE_POLL_S = 0.01
+#: Each patch strictly raises the marker count, so every evaluated step wins and publishes.
+PATCHES = (TreePatch(changed_rules("marker rules\n")), TreePatch(changed_rules("marker marker rules\n")))
+TREE_V1 = HarnessTree(changed_rules("marker rules\n"))
+TREE_V2 = HarnessTree(changed_rules("marker marker rules\n"))
+#: The default seed: no files, so nothing is served before the first publish.
+EMPTY_SEED = HarnessTree({})
+PI = get_adapter("pi")
+HEADERS = {"x-reef-scenario": "delivery"}
+UPDATE_TIMEOUT_S = 5.0
+UPDATE_POLL_S = 0.01
 
 
-class _ReleaseClient(ReefClient):
-    """Release/content-aware client used until the external client release lands."""
-
-    def harness_pull(self, scenario, destination, *, release_id=None, extra_headers=None):
-        path = "/reef/harness"
-        if release_id is not None:
-            path += f"?release_id={quote(release_id, safe='')}"
-        headers = {"x-reef-scenario": scenario, **dict(extra_headers or {})}
-        manifest = self.get(path, extra_headers=headers)
-        files = manifest.get("files", {})
-        for relative in files:
-            if PurePosixPath(relative).is_absolute() or ".." in PurePosixPath(relative).parts:
-                raise ValueError(f"served path {relative!r} escapes the destination")
-        root = Path(destination)
-        root.mkdir(parents=True, exist_ok=True)
-        release_file = root / HARNESS_RELEASE_FILE
-        if release_file.is_file():
-            try:
-                previous = json.loads(release_file.read_text(encoding="utf-8"))
-            except json.JSONDecodeError:
-                previous = {}
-            for relative in previous.get("files", ()):
-                if relative not in files:
-                    stale = root / relative
-                    if stale.is_file():
-                        stale.unlink()
-        for relative, content in files.items():
-            target = root / relative
-            target.parent.mkdir(parents=True, exist_ok=True)
-            with open(target, "w", encoding="utf-8", newline="") as handle:
-                handle.write(content)
-        release_id = str(manifest["release_id"])
-        release_file.write_text(
-            json.dumps(
-                {
-                    "release_id": release_id,
-                    "content_id": str(manifest["content_id"]),
-                    "files": sorted(files),
-                },
-                indent=2,
-            )
-            + "\n",
-            encoding="utf-8",
-        )
-        return release_id
-
-    def harness_releases(self, scenario, *, extra_headers=None):
-        headers = {"x-reef-scenario": scenario, **dict(extra_headers or {})}
-        return self.get("/reef/harness/releases", extra_headers=headers)["releases"]
-
-
-def evaluate(task: str, result: RolloutResult) -> float:
-    del task
+def evaluate(task: str, result: TaskResult) -> float:
     return float(result.trajectory[-1]["rules"].count("marker"))
 
 
-class _EchoBackend(InferenceHandler):
-    async def inference(self, artifact, path, payload):
-        del artifact, path, payload
-        return {"choices": [{"message": {"content": "ok"}}]}
-
-
-def _dispatcher(
+def channel_dispatcher(
     tmp_path: Path,
-    mutations: tuple[Mutation, ...],
+    patches,
     *,
-    bootstrap_files: dict[str, str] | None = None,
+    seed: HarnessTree = EMPTY_SEED,
     inference_stages: bool = False,
     batch_size: int = 1,
-    seed: tuple[dict, ...] = (),
-    api: str = "openai",
-    adapter: str = "pi",
-    model_metadata: dict[str, ModelMetadata] | None = None,
-    allow_implicit_creation: bool = True,
 ) -> Dispatcher:
-    proposals = iter(mutations)
-    binary = tmp_path / "fake-pi"
-    binary.write_text(PI_FAKE)
-    binary.chmod(0o755)
-    recipe = CordisRecipe(
-        resolve_proposer(lambda nodes, samples, model: next(proposals, None)),
-        resolve_rollout_scorer(evaluate),
-        ("task one",),
-        binary=str(binary),
-        adapter=adapter,
-        model_metadata=model_metadata or {},
-        runtime=InferenceProxyRuntime(model_path="demo-model", base_url="http://localhost:8000", api=api),
-        batch_size=batch_size,
-        pipeline_stages=harness_stages(inference=inference_stages),
-        seed=seed,
+    """A ``delivery`` scenario whose method makes ``patches`` in order, then nothing; its base release is
+    ``seed``."""
+    candidates = iter(patches)
+    stages = (
+        {
+            "record2record": {"module": "reef.record2record:InferenceRecord2Record"},
+            "record2sample": {"module": "reef.record2sample.traces:InferenceSamples"},
+        }
+        if inference_stages
+        else {}
     )
-    bootstrap = tmp_path / "bootstrap"
-    bootstrap.mkdir()
-    # What the service assembly does: the recipe's seed is the base artifact every scenario forks from.
-    for relative, text in {**recipe.base_artifact_source().files, **(bootstrap_files or {})}.items():
-        target = bootstrap / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(text, encoding="utf-8")
-    dispatcher = Dispatcher(
-        recipe,
-        InMemoryRepositoryBackend.factory(bootstrap, root=tmp_path / "repository"),
-        local_artifact_dir=tmp_path / "local",
-        # The commit history is what puts gate metrics on the release catalog.
-        scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
-        allow_implicit_creation=allow_implicit_creation,
-        coordination=memory_coordination(),
+    recipe = replace(
+        harness_recipe(
+            tmp_path,
+            lambda workspace, services: next(candidates, None),
+            seed=seed,
+            score=evaluate,
+            batch_size=batch_size,
+        ),
+        pipeline_stages=PipelineConfig.from_setting(stages, spec=HarnessEvolutionRecipe.pipeline_spec(), environ={}),
     )
+    dispatcher = harness_dispatcher(tmp_path, recipe)
     dispatcher.get_or_create_scenario("delivery")
     return dispatcher
 
 
 @asynccontextmanager
-async def served(dispatcher: Dispatcher, tokens: tuple[str, ...] = ()) -> AsyncIterator[TestClient]:
+async def served(dispatcher: Dispatcher) -> AsyncIterator[TestClient]:
     """A started test client for the real app over ``dispatcher``, closed on exit."""
-    client = TestClient(TestServer(create_app(dispatcher, tokens=tokens, inference_handler=_EchoBackend())))
+    client = TestClient(TestServer(create_app(dispatcher, inference_handler=EchoInference())))
     await client.start_server()
     try:
         yield client
@@ -219,93 +90,81 @@ async def served(dispatcher: Dispatcher, tokens: tuple[str, ...] = ()) -> AsyncI
         await client.close()
 
 
-async def report_one_failing_inference(client: TestClient) -> None:
-    """One traced inference plus its failing report: with batch_size 1 this fills the batch and schedules a step."""
-    response = await client.post(
-        "/v1/chat/completions", headers=DELIVERY, json={"messages": [{"role": "user", "content": "hi"}]}
-    )
+async def scored_exchange(client: TestClient) -> None:
+    """One inference and its failing report: a batch of one, which wakes one step."""
+    body = {"messages": [{"role": "user", "content": "hi"}]}
+    response = await client.post("/v1/chat/completions", headers=HEADERS, json=body)
     assert response.status == 200
     receipt = response.headers["x-reef-agent-record-id"]
-    response = await client.post("/reef/report", headers=DELIVERY, json={"score": 0.0, "references": [receipt]})
+    response = await client.post("/reef/report", headers=HEADERS, json={"score": 0.0, "references": [receipt]})
     assert response.status == 200
 
 
-async def wait_for_committed_step(client: TestClient) -> tuple[dict, dict]:
-    """The scenario's status row and its last committed step, once the background commit recorded one."""
-    deadline = asyncio.get_running_loop().time() + _ASYNC_UPDATE_TIMEOUT_S
+async def committed_step(client: TestClient) -> dict:
+    """The scenario's latest committed step, once one is committed: a commit of the step's job after its submission."""
+    deadline = asyncio.get_running_loop().time() + UPDATE_TIMEOUT_S
     while True:
-        response = await client.get("/reef/status")
-        assert response.status == 200
-        scenario = (await response.json())["scenarios"]["delivery"]
-        if scenario["last_committed_step"] is not None:
-            return scenario, scenario["last_committed_step"]
+        scenario = (await (await client.get("/reef/status")).json())["scenarios"]["delivery"]
+        committed = scenario["last_committed_step"]
+        if committed is not None and committed["metrics"]["training_job"]["event"] != "submitted":
+            return scenario
         if asyncio.get_running_loop().time() >= deadline:
             pytest.fail("the step did not commit")
-        await asyncio.sleep(_ASYNC_UPDATE_POLL_S)
+        await asyncio.sleep(UPDATE_POLL_S)
 
 
-async def _gate_step(client: TestClient) -> dict:
-    """Drive one gated evolution step through the wire; return the new manifest.
-
-    The report POST only records and schedules the step; the harness read
-    channel exposes the winner after the background commit.
-    """
-    response = await client.get("/reef/harness", headers=DELIVERY)
-    if response.status == 200:
-        previous_version = (await response.json())["release_id"]
-    else:
-        assert response.status == 404
-        await response.read()
-        previous_version = None
-    await report_one_failing_inference(client)
-    deadline = asyncio.get_running_loop().time() + _ASYNC_UPDATE_TIMEOUT_S
+async def evaluated_step(client: TestClient) -> dict:
+    """Drive one evaluated step through the wire; the manifest of the release it published."""
+    response = await client.get("/reef/harness", headers=HEADERS)
+    previous = (await response.json())["release_id"] if response.status == 200 else None
+    await scored_exchange(client)
+    deadline = asyncio.get_running_loop().time() + UPDATE_TIMEOUT_S
     while True:
-        response = await client.get("/reef/harness", headers=DELIVERY)
+        response = await client.get("/reef/harness", headers=HEADERS)
         if response.status == 200:
             manifest = await response.json()
-            if manifest["release_id"] != previous_version:
-                assert manifest["evaluation"]["published"] is True
+            if manifest["release_id"] != previous:
+                assert manifest["evaluation"]["selected"] is True
                 return manifest
         else:
             assert response.status == 404
             await response.read()
         if asyncio.get_running_loop().time() >= deadline:
-            pytest.fail("harness update did not commit")
-        await asyncio.sleep(_ASYNC_UPDATE_POLL_S)
+            pytest.fail("the harness update did not commit")
+        await asyncio.sleep(UPDATE_POLL_S)
 
 
 @pytest.mark.unit
 def test_status_reports_a_committed_step_that_published_no_harness(tmp_path) -> None:
     async def run() -> None:
-        async with served(_dispatcher(tmp_path, ())) as client:
-            response = await client.get("/reef/status")
-            assert response.status == 200
-            assert (await response.json())["scenarios"]["delivery"]["last_committed_step"] is None
-            await report_one_failing_inference(client)
-            scenario, committed = await wait_for_committed_step(client)
-            assert scenario["scenario_step"] == committed["step"] == 1
+        async with served(channel_dispatcher(tmp_path, ())) as client:
+            status = await (await client.get("/reef/status")).json()
+            assert status["scenarios"]["delivery"]["last_committed_step"] is None
+            await scored_exchange(client)
+            scenario = await committed_step(client)
+            committed = scenario["last_committed_step"]
+            # The step's job committed its submission, then its end.
+            assert scenario["scenario_step"] == committed["step"] == 2
             assert isinstance(committed["recorded_at"], float)
-            assert committed["metrics"]["skipped"] == "no proposal"
-            response = await client.get("/reef/harness", headers=DELIVERY)
-            assert response.status == 404
+            assert committed["metrics"]["skipped"] == "the method left the head tree unchanged"
+            # The empty seed serves nothing until a step publishes a tree.
+            response = await client.get("/reef/harness", headers=HEADERS)
+            assert response.status == 404 and "holds no harness tree" in await response.text()
 
     asyncio.run(run())
 
 
 @pytest.mark.unit
-def test_status_reports_a_committed_gate_rejection(tmp_path) -> None:
-    mutation = Mutation("create", "r1", {"name": "rules", "config": {"text": "no help"}})
-
+def test_status_reports_a_committed_rejection(tmp_path) -> None:
     async def run() -> None:
-        async with served(_dispatcher(tmp_path, (mutation,))) as client:
-            await report_one_failing_inference(client)
-            scenario, committed = await wait_for_committed_step(client)
-            assert scenario["scenario_step"] == committed["step"] == 1
-            assert committed["metrics"]["published"] is False
+        async with served(channel_dispatcher(tmp_path, (TreePatch(changed_rules("no help\n")),))) as client:
+            await scored_exchange(client)
+            scenario = await committed_step(client)
+            committed = scenario["last_committed_step"]
+            assert scenario["scenario_step"] == committed["step"] == 2
             assert committed["metrics"]["selected"] is False
             assert committed["metrics"]["selection"]["selected"] is False
-            response = await client.get("/reef/harness", headers=DELIVERY)
-            assert response.status == 404
+            assert (await client.get("/reef/harness", headers=HEADERS)).status == 404
 
     asyncio.run(run())
 
@@ -313,16 +172,14 @@ def test_status_reports_a_committed_gate_rejection(tmp_path) -> None:
 @pytest.mark.unit
 def test_adapters_endpoint_lists_bundled_adapters_with_install_pins(tmp_path) -> None:
     async def run() -> None:
-        async with served(_dispatcher(tmp_path, ())) as client:
+        async with served(channel_dispatcher(tmp_path, ())) as client:
             response = await client.get("/reef/harness/adapters")
             assert response.status == 200
-            payload = await response.json()
-            by_name = {entry["name"]: entry for entry in payload["adapters"]}
+            by_name = {entry["name"]: entry for entry in (await response.json())["adapters"]}
             # Bundled adapters must all appear with the fields the endpoint promises.
             assert {"claude", "opencode", "pi"}.issubset(by_name.keys())
             pi = by_name["pi"]
-            assert pi["binary"] == "pi"
-            assert pi["trajectory_format"] == "pi-session-jsonl"
+            assert pi["binary"] == "pi" and pi["trajectory_format"] == "pi-session-jsonl"
             assert pi["install"]["package"].startswith("@")
             assert isinstance(pi["model_bindings"], list) and pi["model_bindings"]
 
@@ -330,118 +187,73 @@ def test_adapters_endpoint_lists_bundled_adapters_with_install_pins(tmp_path) ->
 
 
 @pytest.mark.unit
-def test_a_published_step_reaches_the_catalog_and_the_pull(tmp_path) -> None:
-    """One gated step: the catalog row repeats the manifest's gate numbers, and the stdlib pull writes exactly the
-    composition the gate measured plus a release file outside the served tree."""
+def test_a_published_step_reaches_the_served_files_and_the_catalog(tmp_path) -> None:
+    """One evaluated step: the served files are exactly the evaluated tree rendered for the adapter, the source is
+    one query away, and the catalog row repeats the manifest's evaluation."""
 
     async def run() -> None:
-        async with served(_dispatcher(tmp_path, MUTATIONS[:1])) as client:
+        async with served(channel_dispatcher(tmp_path, PATCHES[:1])) as client:
             rows = (await (await client.get("/reef/scenarios/delivery/artifacts")).json())["artifacts"]
             current = next(row["release_id"] for row in rows if row["active"])
-            manifest = await _gate_step(client)
+            manifest = await evaluated_step(client)
             assert manifest["release_id"] != current
 
-            response = await client.get("/reef/harness/releases", headers=DELIVERY)
+            # The served files are exactly the tree the evaluation measured, rendered without a model binding.
+            assert manifest["files"] == render_tree(TREE_V1, PI)
+            source = await client.get("/reef/harness", params={"form": "source"}, headers=HEADERS)
+            assert source.status == 200
+            pulled = await source.json()
+            assert pulled["files"] == dict(TREE_V1.files) and pulled["release_id"] == manifest["release_id"]
+            invalid = await client.get("/reef/harness", params={"form": "zip"}, headers=HEADERS)
+            assert invalid.status == 400 and "form must be 'rendered', 'source' or 'client'" in await invalid.text()
+
+            response = await client.get("/reef/harness/releases", headers=HEADERS)
             assert response.status == 200
             catalog = await response.json()
             assert catalog["scenario"] == "delivery"
             rows = catalog["releases"]
-            # Newest last: the creation version opens the catalog, the gated
-            # head closes it and repeats the manifest's gate numbers.
+            # Newest last: the creation release opens the catalog, the published head closes it with the
+            # manifest's evaluation.
             assert rows[0]["operation"] == "creation"
             head = rows[-1]
-            assert head["release_id"] == manifest["release_id"]
-            assert head["active"] is True
+            assert head["release_id"] == manifest["release_id"] and head["active"] is True
             assert head["metrics"] == manifest["evaluation"]
-            assert head["metrics"]["published"] is True
-            assert head["metrics"]["wins"] == 1
-            puller = _ReleaseClient(str(client.server.make_url("")))
-            assert await asyncio.to_thread(puller.harness_releases, "delivery") == rows
-
-            assert HARNESS_RELEASE_FILE not in manifest["files"]
-            destination = tmp_path / "pulled"
-            written = await asyncio.to_thread(puller.harness_pull, "delivery", destination)
-            assert written == manifest["release_id"]
-            # Every pulled file carries exactly the bytes of the composition
-            # the gate measured, and nothing else was written.
-            expected = render_composition(NODES_V1, get_adapter("pi"))
-            pulled = {
-                str(path.relative_to(destination)): path.read_bytes()
-                for path in sorted(destination.rglob("*"))
-                if path.is_file() and path.name != HARNESS_RELEASE_FILE
-            }
-            assert pulled == {relative: text.encode("utf-8") for relative, text in expected.items()}
-            # The release file records the pulled version and file list for later checks and pruning.
-            record = json.loads((destination / HARNESS_RELEASE_FILE).read_text(encoding="utf-8"))
-            assert record["release_id"] == written
-            assert record["files"] == sorted(manifest["files"])
+            assert head["metrics"]["selected"] is True and head["metrics"]["wins"] == 1
 
     asyncio.run(run())
 
 
 @pytest.mark.unit
-def test_version_addressed_pull_and_install_return_the_superseded_tree(tmp_path) -> None:
+def test_version_addressed_pull_returns_the_superseded_tree(tmp_path) -> None:
     async def run() -> None:
-        async with served(_dispatcher(tmp_path, MUTATIONS)) as client:
-            first = await _gate_step(client)
-            second = await _gate_step(client)
+        async with served(channel_dispatcher(tmp_path, PATCHES)) as client:
+            first = await evaluated_step(client)
+            second = await evaluated_step(client)
             assert first["release_id"] != second["release_id"]
-            response = await client.get("/reef/harness", params={"release_id": first["release_id"]}, headers=DELIVERY)
-            assert response.status == 200
-            assert response.headers["x-reef-release-id"] == first["release_id"]
+            response = await client.get("/reef/harness", params={"release_id": first["release_id"]}, headers=HEADERS)
+            assert response.status == 200 and response.headers["x-reef-release-id"] == first["release_id"]
             manifest = await response.json()
             assert manifest["release_id"] == first["release_id"]
-            assert manifest["files"] == render_composition(NODES_V1, get_adapter("pi"))
-            assert second["files"] == render_composition(NODES_V2, get_adapter("pi"))
-            # The client's version-addressed pull writes the older bytes.
-            destination = tmp_path / "pinned"
-            puller = _ReleaseClient(str(client.server.make_url("")))
-            written = await asyncio.to_thread(
-                puller.harness_pull, "delivery", destination, release_id=first["release_id"]
+            assert manifest["files"] == render_tree(TREE_V1, PI)
+            assert second["files"] == render_tree(TREE_V2, PI)
+            source = await client.get(
+                "/reef/harness", params={"release_id": first["release_id"], "form": "source"}, headers=HEADERS
             )
-            assert written == first["release_id"]
-            assert (destination / "pi-agent" / "AGENTS.md").read_bytes() == b"marker rules\n"
-
-            # The install route serves the head by default and any release by id.
-            response = await client.get("/reef/harness/install", params={"adapter": "pi"}, headers=DELIVERY)
-            assert response.status == 200
-            assert response.content_type == "text/x-shellscript"
-            script = await response.text()
-            assert "npm install --prefix \"$PREFIX\" '@earendil-works/pi-coding-agent@0.84.2'" in script
-            assert composition_checksum(second["files"]) in script
-            assert "marker marker rules" in script  # the composition rides inline
-            # The binding at the Reef this request reached, the token left for the client's environment.
-            host = f"{client.host}:{client.port}"
-            assert f'"baseUrl": "http://{host}/v1"' in script
-            assert f'"apiKey": "{TOKEN_PLACEHOLDER}"' in script
-            assert f'os.environ.get("REEF_TOKEN") or {NO_TOKEN_API_KEY!r}' in script
-            response = await client.get(
-                "/reef/harness/install", params={"adapter": "pi", "release_id": first["release_id"]}, headers=DELIVERY
-            )
-            assert response.status == 200
-            assert composition_checksum(first["files"]) in await response.text()
+            assert (await source.json())["files"] == dict(TREE_V1.files)
 
     asyncio.run(run())
 
 
 @pytest.mark.unit
-def test_an_unknown_release_or_adapter_is_refused_naming_it(tmp_path) -> None:
+def test_an_unknown_version_is_a_404_naming_it_and_the_install_route_is_gone(tmp_path) -> None:
+    """A client renders or pulls the tree itself: the route that served the wrapper's install script is gone."""
+
     async def run() -> None:
-        async with served(_dispatcher(tmp_path, ())) as client:
-            response = await client.get("/reef/harness", params={"release_id": "no-such-version"}, headers=DELIVERY)
+        async with served(channel_dispatcher(tmp_path, ())) as client:
+            response = await client.get("/reef/harness", params={"release_id": "no-such-version"}, headers=HEADERS)
+            assert response.status == 404 and "no-such-version" in await response.text()
+            response = await client.get("/reef/harness/install", params={"adapter": "pi"}, headers=HEADERS)
             assert response.status == 404
-            assert "no-such-version" in await response.text()
-            response = await client.get(
-                "/reef/harness/install", params={"adapter": "pi", "release_id": "no-such-version"}, headers=DELIVERY
-            )
-            assert response.status == 404
-            assert "no-such-version" in await response.text()
-            response = await client.get("/reef/harness/install", params={"adapter": "acme"}, headers=DELIVERY)
-            assert response.status == 404
-            assert "acme" in await response.text()
-            # A missing adapter parameter is a caller error, not a lookup miss.
-            response = await client.get("/reef/harness/install", headers=DELIVERY)
-            assert response.status == 400
 
     asyncio.run(run())
 
@@ -452,36 +264,31 @@ def test_release_reads_stay_responsive_during_evaluation(tmp_path, monkeypatch) 
     finish_evaluation = Event()
 
     async def run() -> None:
-        dispatcher = _dispatcher(tmp_path, MUTATIONS)
-        scenario = dispatcher.get_or_create_scenario("delivery")
-        assert scenario is not None
-        backend = scenario.trainer.candidate_backend
-        assert backend is not None
+        dispatcher = channel_dispatcher(tmp_path, PATCHES)
+        backend = job_backend(dispatcher.get_or_create_scenario("delivery").trainer)
         evaluate_candidate = backend.evaluate
 
-        def blocked_evaluate(candidate: UpdateCandidate) -> EvaluationResult:
-            result = evaluate_candidate(candidate)
+        def blocked_evaluate(candidate: UpdateCandidate, **options) -> EvaluationResult:
+            result = evaluate_candidate(candidate, **options)
             evaluation_started.set()
-            assert finish_evaluation.wait(_ASYNC_UPDATE_TIMEOUT_S), "evaluation was not released"
+            assert finish_evaluation.wait(UPDATE_TIMEOUT_S), "evaluation was not released"
             return result
 
+        second_step = None
         async with served(dispatcher) as client:
-            second_step = None
             try:
-                first = await _gate_step(client)
+                first = await evaluated_step(client)
                 monkeypatch.setattr(backend, "evaluate", blocked_evaluate)
-                second_step = asyncio.create_task(_gate_step(client))
-                assert await asyncio.to_thread(evaluation_started.wait, _ASYNC_UPDATE_TIMEOUT_S)
+                second_step = asyncio.create_task(evaluated_step(client))
+                assert await asyncio.to_thread(evaluation_started.wait, UPDATE_TIMEOUT_S)
 
                 async def read_release(path: str, release_id: str | None = None) -> dict:
-                    response = await client.get(
-                        path, params={} if release_id is None else {"release_id": release_id}, headers=DELIVERY
-                    )
+                    params = {} if release_id is None else {"release_id": release_id}
+                    response = await client.get(path, params=params, headers=HEADERS)
                     assert response.status == 200
                     return await response.json()
 
-                # A resident client must keep seeing the committed tree and its
-                # matching gate metrics while the next candidate is being evaluated.
+                # A resident client keeps seeing the committed tree and its evaluation while the next candidate runs.
                 catalog, current, pinned = await asyncio.wait_for(
                     asyncio.gather(
                         read_release("/reef/harness/releases"),
@@ -492,22 +299,18 @@ def test_release_reads_stay_responsive_during_evaluation(tmp_path, monkeypatch) 
                 )
                 assert current == pinned == first
                 head = catalog["releases"][-1]
-                assert head["active"] is True
-                assert head["release_id"] == first["release_id"]
-                assert head["content_id"] == first["content_id"]
-                assert head["metrics"] == first["evaluation"]
+                assert head["active"] is True and head["release_id"] == first["release_id"]
+                assert head["content_id"] == first["content_id"] and head["metrics"] == first["evaluation"]
 
                 finish_evaluation.set()
-                second = await asyncio.wait_for(second_step, _ASYNC_UPDATE_TIMEOUT_S)
+                second = await asyncio.wait_for(second_step, UPDATE_TIMEOUT_S)
                 updated = await read_release("/reef/harness/releases")
                 assert len(updated["releases"]) == len(catalog["releases"]) + 1
                 assert updated["releases"][-2]["active"] is False
                 head = updated["releases"][-1]
-                assert head["active"] is True
-                assert head["release_id"] == second["release_id"] != first["release_id"]
-                assert head["content_id"] == second["content_id"]
-                assert head["metrics"] == second["evaluation"]
-                assert second["files"] == render_composition(NODES_V2, get_adapter("pi"))
+                assert head["active"] is True and head["release_id"] == second["release_id"] != first["release_id"]
+                assert head["content_id"] == second["content_id"] and head["metrics"] == second["evaluation"]
+                assert second["files"] == render_tree(TREE_V2, PI)
                 assert await read_release("/reef/harness", first["release_id"]) == first
             finally:
                 finish_evaluation.set()
@@ -518,1642 +321,78 @@ def test_release_reads_stay_responsive_during_evaluation(tmp_path, monkeypatch) 
 
 
 @pytest.mark.unit
-def test_crlf_content_survives_the_pull_byte_exact(tmp_path) -> None:
-    """Universal newline translation must never rewrite served bytes."""
-    crlf = Mutation("create", "r1", {"name": "rules", "config": {"text": "marker win\r\nrules"}})
+def test_crlf_content_survives_the_manifest_byte_exact(tmp_path) -> None:
+    """No newline translation ever rewrites served bytes."""
+    crlf = TreePatch(changed_rules("marker win\r\nrules\n"))
 
     async def run() -> None:
-        async with served(_dispatcher(tmp_path, (crlf,))) as client:
-            manifest = await _gate_step(client)
-            assert "marker win\r\nrules" in manifest["files"]["pi-agent/AGENTS.md"]
-            destination = tmp_path / "pulled"
-            puller = _ReleaseClient(str(client.server.make_url("")))
-            await asyncio.to_thread(puller.harness_pull, "delivery", destination)
-            assert b"marker win\r\nrules" in (destination / "pi-agent/AGENTS.md").read_bytes()
+        async with served(channel_dispatcher(tmp_path, (crlf,))) as client:
+            manifest = await evaluated_step(client)
+            assert "marker win\r\nrules" in manifest["files"]["plugin/rules.md"]
+            source = await (await client.get("/reef/harness", params={"form": "source"}, headers=HEADERS)).json()
+            assert source["files"]["rules.md"] == "marker win\r\nrules\n"
 
     asyncio.run(run())
 
 
 @pytest.mark.unit
-def test_pull_refuses_a_manifest_path_that_escapes_the_destination(tmp_path) -> None:
-    escape = {
-        "release_id": "v",
-        "content_id": "content-v",
-        "parent_release_id": None,
-        "files": {"../escape.txt": "x"},
-        "evaluation": None,
-    }
-    puller = _ReleaseClient("http://127.0.0.1:1")
-    puller.get = lambda path, extra_headers=None: escape  # type: ignore[method-assign]
-    with pytest.raises(ValueError, match="escapes the destination"):
-        puller.harness_pull("delivery", tmp_path / "pulled")
-    assert not (tmp_path / "escape.txt").exists()
+def test_a_seeded_recipe_serves_a_fresh_scenario_before_any_step(tmp_path) -> None:
+    """A fresh scenario against a recipe with a seed answers the manifest at once with the seed rendered for the
+    adapter, without a model binding; no step is needed."""
+    seed = HarnessTree({"skills/answer-style/SKILL.md": "# seed skill\n"})
+    dispatcher = channel_dispatcher(tmp_path, (), seed=seed)
 
-
-@pytest.mark.unit
-def test_pull_of_an_older_version_prunes_the_newer_versions_files(tmp_path) -> None:
-    """Rolling back into the same directory leaves exactly the older tree."""
-    v2 = {
-        "release_id": "v2",
-        "content_id": "content-v2",
-        "parent_release_id": "v1",
-        "evaluation": None,
-        "files": {"pi-agent/AGENTS.md": "new rules", "pi-agent/prompts/helper.md": "added in v2"},
-    }
-    v1 = {
-        "release_id": "v1",
-        "content_id": "content-v1",
-        "parent_release_id": None,
-        "evaluation": None,
-        "files": {"pi-agent/AGENTS.md": "old rules"},
-    }
-    manifests = {None: v2, "v1": v1}
-    puller = _ReleaseClient("http://127.0.0.1:1")
-    puller.get = (  # type: ignore[method-assign]
-        lambda path, extra_headers=None: manifests["v1" if "release_id=v1" in path else None]
-    )
-    destination = tmp_path / "pulled"
-    puller.harness_pull("delivery", destination)
-    assert (destination / "pi-agent/prompts/helper.md").is_file()
-    puller.harness_pull("delivery", destination, release_id="v1")
-    on_disk = {
-        str(path.relative_to(destination))
-        for path in destination.rglob("*")
-        if path.is_file() and path.name != HARNESS_RELEASE_FILE
-    }
-    assert on_disk == {"pi-agent/AGENTS.md"}
-    assert (destination / "pi-agent/AGENTS.md").read_text(encoding="utf-8") == "old rules"
-
-
-# --- the one-command install script (GET /reef/harness/install) ---
-
-#: Hostile composition text for the install-script tests: expansion syntax,
-#: quotes, a line equal to a naive heredoc delimiter, no trailing newline.
-HOSTILE_FILES = {
-    "pi-agent/AGENTS.md": "backtick `whoami` and $HOME and $(pwd)\n'single quotes' \"doubles\"\n",
-    "pi-agent/prompts/hostile.md": "line one\nEOF\nREEF_EOF\ndollar $x backslash \\ tail",
-    "pi-agent/settings.json": "{}\n",
-}
-#: An npm shim that fails, for installs whose pinned binary is already in place.
-NPM_FAILS = "#!/bin/sh\nexit 1\n"
-
-
-def _write_executable(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text)
-    path.chmod(0o755)
-
-
-def _install_fixture(
-    tmp_path: Path,
-    *,
-    binary_version: str | None,
-    npm: str,
-    scenario: str = "",
-    binding_files: dict[str, str] | None = None,
-    is_token_expected: bool = False,
-) -> tuple[Path, Path, Path, dict]:
-    """A rendered script, a PATH shim dir, and an install prefix.
-
-    ``binary_version`` seeds a fake pi at the descriptor's binary_path that
-    answers ``--version`` with it (None leaves the binary absent); ``npm``
-    is the shim body dropped onto PATH.
-    """
-    script = tmp_path / "install.sh"
-    script.write_text(
-        render_install_script(
-            descriptor=get_adapter("pi"),
-            files=HOSTILE_FILES,
-            release_id="v-test",
-            content_id="content-test",
-            scenario=scenario,
-            binding_files=binding_files,
-            is_token_expected=is_token_expected,
-        )
-    )
-    prefix = tmp_path / "prefix"
-    if binary_version is not None:
-        _write_executable(prefix / "node_modules/.bin/pi", f"#!/bin/sh\necho {binary_version}\n")
-    shim = tmp_path / "shim"
-    _write_executable(shim / "npm", npm)
-    return script, tmp_path / "dest", prefix, _source_env(shim, tmp_path / "home")
-
-
-def _source_env(shim: Path, home: Path) -> dict:
-    """The test's environment with ``shim`` first on PATH, the checkout on PYTHONPATH and ``home`` as HOME.
-
-    CI runs the suite against the source tree rather than an installed
-    reef-infra, and the install's import check runs under ``-P``, so the
-    checkout must reach the interpreter through PYTHONPATH: without it the
-    check fails and the script's pip branch installs reef-infra from GitHub
-    into the user site, which every later test then sees. The script links
-    the wrapper into ``$HOME/.local/bin``, so a home of the test's own keeps
-    the suite out of the developer's, where a test's link would replace the
-    reef-pi they use; the wrapper's temp copies go in that home's cache."""
-    repo_root = str(Path(__file__).resolve().parents[2])
-    # The script's python3 is the interpreter running the tests, never the machine's, so its reef bootstrap
-    # never shells out to `pip install --user` from GitHub. A fixture that writes its own shim keeps it.
-    if not (shim / "python3").exists():
-        _write_executable(shim / "python3", f'#!/bin/sh\nexec "{sys.executable}" "$@"\n')
-    return {
-        **os.environ,
-        "HOME": str(home),
-        "XDG_CACHE_HOME": str(home / ".cache"),
-        "PATH": f"{shim}:{os.environ['PATH']}",
-        "PYTHONPATH": os.pathsep.join(filter(None, (repo_root, os.environ.get("PYTHONPATH", "")))),
-    }
-
-
-def _run_install(
-    script: Path, dest: Path, prefix: Path, env: dict, cwd: Path | None = None
-) -> subprocess.CompletedProcess:
-    # A hung install (a read of a FIFO, say) is killed with its whole process group, so no child outlives the test.
-    process = subprocess.Popen(
-        ["sh", str(script), str(dest), str(prefix)],
-        env=env,
-        cwd=cwd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        start_new_session=True,
-    )
-    try:
-        stdout, stderr = process.communicate(timeout=60)
-    except subprocess.TimeoutExpired:
-        os.killpg(process.pid, signal.SIGKILL)
-        process.communicate()
-        raise
-    return subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
-
-
-@pytest.mark.unit
-def test_install_script_writes_the_model_binding_with_the_clients_token_readable_by_its_owner_alone(tmp_path) -> None:
-    """The served composition carries no endpoint; the script writes the adapter's binding at the Reef it came from,
-    fills the token from REEF_TOKEN at install time, and the wrapper reads the URL back. The token is a credential:
-    the binding file that holds it is mode 600 on a first install and on a rerun over a file an earlier install left
-    readable, while a composition file keeps the ordinary mode."""
-    from reef.harness.client.wrapper import _extract_reef_token, _extract_reef_url
-
-    binding = ModelBinding(base_url="http://reef.test:8901", model="qwen3-8b", api_key=TOKEN_PLACEHOLDER)
-    bound = render_composition(
-        [("rules", {"text": "old rules"}), *binding.compose_nodes(get_adapter("pi"))], get_adapter("pi")
-    )
-    binding_files = {"pi-agent/models.json": bound["pi-agent/models.json"]}
-    assert TOKEN_PLACEHOLDER in binding_files["pi-agent/models.json"]
-    script, dest, prefix, env = _install_fixture(
-        tmp_path, binary_version="0.84.2", npm=NPM_FAILS, binding_files=binding_files, is_token_expected=True
-    )
-    models_path = dest / "pi-agent/models.json"
-    result = _run_install(script, dest, prefix, {**env, "REEF_TOKEN": "tok-123"})
-    assert result.returncode == 0, result.stderr
-    models = json.loads(models_path.read_text(encoding="utf-8"))
-    assert models["providers"]["reef"] == {
-        "api": "openai-completions",
-        "apiKey": "tok-123",
-        "baseUrl": "http://reef.test:8901/v1",
-        # The binding's reply budget rides along, so the installed tree does not fall back to pi's 16384.
-        "models": [{"id": "qwen3-8b", "maxTokens": 32000}],
-    }
-    assert TOKEN_PLACEHOLDER not in models_path.read_text(encoding="utf-8")
-    assert _extract_reef_url("pi", dest / "pi-agent") == "http://reef.test:8901"
-    assert models_path.stat().st_mode & 0o777 == 0o600
-    # The composition files are what the manifest served; the binding rides beside them.
-    assert (dest / "pi-agent/AGENTS.md").read_text(encoding="utf-8") == HOSTILE_FILES["pi-agent/AGENTS.md"]
-    assert (dest / "pi-agent/AGENTS.md").stat().st_mode & 0o077 != 0
-    models_path.chmod(0o644)  # as an install from before the mode change left it
-    # A rerun re-points the tree and exits clean; without a token the script says so, since the request for it
-    # carried one, and still installs.
-    again = _run_install(script, dest, prefix, {k: v for k, v in env.items() if k != "REEF_TOKEN"})
-    assert again.returncode == 0, again.stderr
-    assert "REEF_TOKEN is not set" in again.stderr and "export REEF_TOKEN=<token>" in again.stderr
-    # pi refuses an empty key, so the binding carries a stand-in the wrapper reads back as no token.
-    models = json.loads(models_path.read_text(encoding="utf-8"))
-    assert models["providers"]["reef"]["apiKey"] == NO_TOKEN_API_KEY
-    assert _extract_reef_token("pi", dest / "pi-agent") is None
-    assert models_path.stat().st_mode & 0o777 == 0o600
-
-
-#: The bundled adapters whose descriptor declares an install section: the ones GET /reef/harness/install serves.
-INSTALLABLE_ADAPTERS = tuple(
-    name for name in reef.harness.adapters.BUILTIN_ADAPTERS if get_adapter(name).install is not None
-)
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize("adapter", INSTALLABLE_ADAPTERS)
-def test_a_rerun_of_the_same_release_is_current_when_the_binding_rewrites_a_served_file(
-    tmp_path, adapter: str
-) -> None:
-    """Every installable adapter's binding rewrites served config files on every run (claude settings.json, codex
-    config.toml, dsh .env and cordis.patch.yml, hermes config.yaml, opencode opencode.json, pi settings.json and
-    models.json), so those files never hold the served bytes again: a rerun of the same release still writes no
-    composition file and no release file, and writes the binding again with this run's token; another release is
-    still written."""
-    descriptor = get_adapter(adapter)
-    install = descriptor.install
-    assert install is not None
-    nodes = [("rules", {"text": "rules\n"})]
-    binding = ModelBinding(
-        base_url="http://reef.test:8901",
-        model="m1",
-        api_key=TOKEN_PLACEHOLDER,
-        api=next(iter(descriptor.model_binding)),
-    )
-    bound_nodes = binding.compose_nodes(descriptor)
-    files = render_composition(nodes, descriptor)
-    bound_files = render_composition([*nodes, *bound_nodes], descriptor)
-    # The binding files as the install route picks them: every config target a binding node writes that renders.
-    targets = sorted(
-        {descriptor.config_targets[str(config.get("target", "primary"))].path for _, config in bound_nodes}
-    )
-    binding_files = {path: bound_files[path] for path in targets if path in bound_files}
-    assert all(path in files and files[path] != binding_files[path] for path in binding_files)
-
-    def render(release_id: str) -> Path:
-        script = tmp_path / f"install-{release_id}.sh"
-        script.write_text(
-            render_install_script(
-                descriptor=descriptor,
-                files=files,
-                release_id=release_id,
-                content_id=f"content-{release_id}",
-                binding_files=binding_files,
+    async def run() -> None:
+        async with served(dispatcher) as client:
+            response = await client.get("/reef/harness", headers=HEADERS)
+            assert response.status == 200
+            files = (await response.json())["files"]
+            # The seed skill's text plus the frontmatter pi requires, made from its first line.
+            assert files["plugin/skills/answer-style/SKILL.md"] == (
+                "---\nname: answer-style\ndescription: seed skill\n---\n# seed skill\n"
             )
-        )
-        return script
+            assert "pi-agent/models.json" in files and "reef" not in files["pi-agent/models.json"]
+            source = await (await client.get("/reef/harness", params={"form": "source"}, headers=HEADERS)).json()
+            assert source["files"] == dict(seed.files)
 
-    # The pinned binary is in place, so the vendor install never runs; a git install also records its pin.
-    prefix = tmp_path / "prefix"
-    _write_executable(prefix / install.binary_path, f"#!/bin/sh\necho {install.version}\n")
-    if install.kind == "git":
-        (prefix / ".reef-install-pin").write_text(f"{install.repository}@{install.ref}\n")
-    env = _source_env(tmp_path / "shim", tmp_path / "home")
-    dest = tmp_path / "dest"
-    script = render("v1")
-    first = _run_install(script, dest, prefix, {**env, "REEF_TOKEN": "tok-1"})
-    assert first.returncode == 0, first.stderr
-    assert "already installed" in first.stdout
-    assert "writing the harness tree" in first.stdout
-    # Read-only bits make any write of a composition file or the release file a hard fail.
-    unbound = [dest / relative for relative in sorted(files) if relative not in binding_files]
-    assert unbound
-    for path in (*unbound, dest / HARNESS_RELEASE_FILE):
-        path.chmod(0o444)
-    before = {path: path.stat().st_mtime_ns for path in (*unbound, dest / HARNESS_RELEASE_FILE)}
-    second = _run_install(script, dest, prefix, {**env, "REEF_TOKEN": "tok-2"})
-    assert second.returncode == 0, second.stderr
-    assert "composition already current" in second.stdout
-    assert {path: path.stat().st_mtime_ns for path in before} == before
-    for path in binding_files:
-        assert (dest / path).read_text(encoding="utf-8") == binding_files[path].replace(TOKEN_PLACEHOLDER, "tok-2")
-    for path in before:
-        path.chmod(0o644)
-    # A changed file the binding leaves alone is still caught, and so is another release of the same files.
-    changed = unbound[-1]
-    changed.write_text("changed\n", encoding="utf-8")
-    third = _run_install(script, dest, prefix, {**env, "REEF_TOKEN": "tok-2"})
-    assert third.returncode == 0, third.stderr
-    assert "writing the harness tree" in third.stdout
-    assert changed.read_text(encoding="utf-8") == files[changed.relative_to(dest).as_posix()]
-    fourth = _run_install(render("v2"), dest, prefix, {**env, "REEF_TOKEN": "tok-2"})
-    assert fourth.returncode == 0, fourth.stderr
-    assert "writing the harness tree" in fourth.stdout
-    assert json.loads((dest / HARNESS_RELEASE_FILE).read_text(encoding="utf-8"))["release_id"] == "v2"
+    asyncio.run(run())
 
 
 @pytest.mark.unit
-def test_install_script_golden_structure() -> None:
-    """The full script for a one-file composition, byte for byte.
-
-    The heredoc delimiters derive from each file's content hash, so hostile
-    content can never terminate its own heredoc early; the checksum is the
-    sha256 of the sorted relative paths, byte lengths, and file bytes the
-    script re-checks after writing.
-    """
-    files = {"pi-agent/AGENTS.md": "hello\n"}
-    # The static record the script writes and hashes; ``setup`` is merged in at install time, outside the hash.
-    release_info_text = (
-        json.dumps(
-            {"release_id": "v1", "content_id": "content-v1", "files": ["pi-agent/AGENTS.md"], "requires": []},
-            indent=2,
-        )
-        + "\n"
-    )
-    golden = (
-        r"""#!/bin/sh
-# Reef harness install: adapter pi, release v1.
-# Self contained: the composition files ride inline below and the harness
-# binary comes from the vendor's own channel; running this script calls no
-# reef route and carries no token. Inspect freely, then run:
-#     sh install.sh [DEST] [PREFIX]
-set -eu
-
-DEST="${1:-$HOME/reef-harness/code-repair}"
-PREFIX="${2:-${REEF_HARNESS_PREFIX:-$HOME/.local/share/reef-harness}/pi}"
-BINARY="$PREFIX/node_modules/.bin/pi"
-CHECKSUM="@CHECKSUM@"
-RELEASE_FILE_CHECKSUM="@RELEASE_FILE_CHECKSUM@"
-REQUIRES='[]'
-FALLBACK=''
-SERVICE_URL=''
-
-if command -v sha256sum >/dev/null 2>&1; then
-    sha256() { sha256sum | cut -d' ' -f1; }
-elif command -v shasum >/dev/null 2>&1; then
-    sha256() { shasum -a 256 | cut -d' ' -f1; }
-else
-    echo 'reef: neither sha256sum nor shasum found' >&2
-    exit 1
-fi
-
-# One interpreter for the install and the wrapper it writes: REEF_PYTHON when the caller names one (the
-# wrapper's update names its own), else the python3 this shell resolves, followed through to the
-# interpreter behind it (a version manager's shim would re-decide it at every run), by absolute path.
-# -P (Python 3.11 and newer) keeps the working directory off sys.path.
-PYTHON="${REEF_PYTHON:-$(command -v python3 || true)}"
-if [ -z "$PYTHON" ]; then
-    echo 'reef: python3 not found on PATH' >&2
-    exit 1
-fi
-PYTHON="$("$PYTHON" -c 'import sys; print(sys.executable)')"
-# A python3 that prints at startup (a sitecustomize, a banner) would name nothing runnable.
-if [ ! -x "$PYTHON" ]; then
-    echo "reef: python3 did not name its interpreter (sys.executable read '$PYTHON'); rerun from a shell whose python3 prints nothing at startup" >&2
-    exit 1
-fi
-SAFE_PATH=""
-if "$PYTHON" -P -c '' 2>/dev/null; then
-    SAFE_PATH="-P"
-fi
-
-# reef-client (the capture proxy) and reef (the wrapper) must import in $PYTHON, which reef-pi runs.
-if ! "$PYTHON" $SAFE_PATH -c 'import reef_client.serve, reef.harness.client.wrapper' 2>/dev/null; then
-    echo "reef: reef-client and reef-infra are not importable by $PYTHON, which reef-pi runs; install them there:" >&2
-    echo "    \"$PYTHON\" -m pip install reef-client \"reef-infra @ git+https://github.com/Human-Agent-Society/reef.git\"" >&2
-    echo "or rerun this script from a shell whose python3 has them" >&2
-    exit 1
-fi
-
-# The release file's requires bookkeeping (reef-pi setup's check offs): JSON is no job for sed.
-release_info_tool() {
-    "$PYTHON" - "$@" <<'REEF_RELEASE_INFO_TOOL_EOF'
-import hashlib, json, os, sys
-mode, path = sys.argv[1], sys.argv[2]
-# The setup check reads it first of all, and a FIFO there would block the read.
-if os.path.lexists(path) and not os.path.isfile(path):
-    sys.exit("reef: " + path + " is not a regular file; remove it, then install again")
-try:
-    with open(path, encoding="utf-8") as handle:
-        record = json.load(handle)
-except (OSError, ValueError):
-    record = {}
-if not isinstance(record, dict):
-    record = {}
-setup = [item for item in record.get("setup") or [] if isinstance(item, dict) and item.get("name")]
-if mode == "static":
-    # The record without the check offs is what RELEASE_FILE_CHECKSUM was baked from.
-    record.pop("setup", None)
-    print(hashlib.sha256((json.dumps(record, indent=2) + "\n").encode("utf-8")).hexdigest())
-elif mode == "check":
-    checked = {item["name"]: item for item in setup}
-    def met(item):
-        # A check off records the check it stood for; one without it (an older release file) counts by name.
-        record = checked.get(item["name"])
-        return record is not None and ("check" not in record or record.get("check") == item.get("check"))
-    unmet = [item for item in json.loads(sys.argv[3]) if not met(item)]
-    if unmet:
-        print("reef: this release requires:", file=sys.stderr)
-        for item in unmet:
-            check = item.get("check")
-            print("    " + item["name"] + " (" + item["kind"] + ")" + (": " + check if check else ""), file=sys.stderr)
-        fallback = "; with nothing set up yet, install ?release_id=" + sys.argv[4] + " first: it requires nothing" if sys.argv[4] else ""
-        print("reef: run reef-pi setup, then install again" + fallback, file=sys.stderr)
-        sys.exit(1)
-elif mode == "carry":
-    print(json.dumps(setup))
-elif mode == "merge":
-    record["setup"] = json.loads(sys.argv[3])
-    with open(path, "w", encoding="utf-8") as handle:
-        handle.write(json.dumps(record, indent=2) + "\n")
-REEF_RELEASE_INFO_TOOL_EOF
-}
-
-# Run a slow step behind a spinner on a terminal (a static line elsewhere); its output shows only on failure.
-spin() {
-    label="$1"; shift
-    log="$(mktemp)"
-    if [ -t 1 ]; then
-        "$@" >"$log" 2>&1 &
-        pid=$!
-        i=0
-        while kill -0 "$pid" 2>/dev/null; do
-            case $i in 0) c='|' ;; 1) c='/' ;; 2) c='-' ;; *) c='\' ;; esac
-            i=$(( (i + 1) % 4 ))
-            printf '\r%s reef: %s' "$c" "$label"
-            sleep 0.2
-        done
-        wait "$pid" && status=0 || status=$?
-        printf '\r\033[K'
-    else
-        echo "reef: $label"
-        "$@" >"$log" 2>&1 && status=0 || status=$?
-    fi
-    if [ "$status" -ne 0 ]; then
-        cat "$log" >&2
-        rm -f "$log"
-        return "$status"
-    fi
-    rm -f "$log"
-}
-
-echo "reef: harness release v1 for pi"
-# Setup is checked first: nothing is installed or written while an item is not checked off (reef-pi setup).
-[ "$REQUIRES" = "[]" ] || release_info_tool check "$DEST/.reef-harness-release" "$REQUIRES" "$FALLBACK" || exit 1
-
-# Ensure the pinned binary (@earendil-works/pi-coding-agent@0.84.2) via the vendor's channel.
-vendor_install() {
-    npm install --prefix "$PREFIX" '@earendil-works/pi-coding-agent@0.84.2'
-}
-installed=""
-if [ -x "$BINARY" ]; then
-    PROBE_ROOT="$(mktemp -d)"
-    mkdir -p "$PROBE_ROOT"'/pi-agent' "$PROBE_ROOT"'/sessions'
-    installed="$(PI_CODING_AGENT_DIR="$PROBE_ROOT"'/pi-agent' PI_CODING_AGENT_SESSION_DIR="$PROBE_ROOT"'/sessions' PI_OFFLINE='1' PI_SKIP_VERSION_CHECK='1' "$BINARY" --version 2>/dev/null || true)"
-    rm -rf "$PROBE_ROOT"
-fi
-case " $installed " in
-    *" 0.84.2 "*)
-        echo "reef: pi 0.84.2 already installed"
-        ;;
-    *)
-        mkdir -p "$PREFIX"
-        spin "installing pi 0.84.2 (@earendil-works/pi-coding-agent@0.84.2) into $PREFIX, about a minute" vendor_install
-        echo "reef: pi 0.84.2 installed"
-        ;;
-esac
-
-command -v rg >/dev/null 2>&1 || echo "reef: warning: pi wants ripgrep (rg) on PATH and otherwise downloads it from GitHub at first start, which GitHub rate-limits; install ripgrep with your package manager" >&2
-command -v fd >/dev/null 2>&1 || echo "reef: warning: pi wants fd (fd) on PATH and otherwise downloads it from GitHub at first start, which GitHub rate-limits; install fd with your package manager" >&2
-
-# A link at a path this install writes would take the write elsewhere and pass as current: one inside the
-# install root is replaced with a regular file (or removed, for a directory); one leading outside is refused,
-# and so is anything else there that is not a regular file (a FIFO would block the write).
-"$PYTHON" - "$DEST" '.reef-harness-release' 'pi-agent/AGENTS.md' <<'REEF_LINKS_EOF'
-import os, shutil, sys, tempfile
-dest = sys.argv[1]
-root = os.path.realpath(dest)
-links, outside, special = {}, [], []
-for relative in sys.argv[2:]:
-    parts = relative.split("/")
-    for depth in range(1, len(parts) + 1):
-        shown = "/".join(parts[:depth])
-        path = os.path.join(dest, shown)
-        if os.path.islink(path):
-            target = os.path.realpath(path)
-            if os.path.commonpath([root, target]) == root:
-                links[shown] = path
-            else:
-                outside.append("reef: " + shown + " in " + root + " is a link to " + target)
-            break
-        if depth == len(parts) and os.path.lexists(path) and not os.path.isfile(path):
-            special.append("reef: " + shown + " in " + root + " is not a regular file")
-        elif depth == len(parts) and os.path.isfile(path) and os.stat(path).st_nlink > 1:
-            links[shown] = path
-if outside:
-    print("\n".join(sorted(set(outside))), file=sys.stderr)
-    sys.exit("reef: the install writes only inside the install root; remove the links named above, then install again")
-if special:
-    print("\n".join(sorted(set(special))), file=sys.stderr)
-    sys.exit("reef: the install writes only regular files; remove the paths named above, then install again")
-for shown, path in sorted(links.items()):
-    if os.path.isfile(path):
-        # A copy renamed over the link: the file it pointed at, or shared with, stays as it is.
-        handle, staging = tempfile.mkstemp(dir=os.path.dirname(path))
-        os.close(handle)
-        shutil.copy2(path, staging)
-        os.replace(staging, path)
-        print("reef: " + shown + " was a link; it is a regular file now")
-    else:
-        os.unlink(path)
-        print("reef: " + shown + " was a link; removed it, and the install writes it again")
-REEF_LINKS_EOF
-
-# The checksum stream, as baked into CHECKSUM: each sorted relative path,
-# its byte length, then its bytes, newline separated. The unquoted wc
-# substitution word-splits away the padding BSD wc prints.
-compose_stream() {
-    :
-    printf '%s\n' 'pi-agent/AGENTS.md'
-    printf '%s\n' $(wc -c < "$DEST/pi-agent/AGENTS.md")
-    cat "$DEST/pi-agent/AGENTS.md"
-}
-
-mkdir -p "$DEST"
-mkdir -p "$DEST/pi-agent"
-# The resolved install root, byte for byte as pwd -P prints it, and the wrapper's directory outside it, named
-# by the root's sha256; the record sits beside it as WRAPPER_DIR.json, where a session that can write only its
-# project cannot change either.
-ROOT_ABS="$(CDPATH= cd -P -- "$DEST" && pwd -P)"
-WRAPPER_DIR="$HOME/.reef/installs/$(printf '%s' "$ROOT_ABS" | sha256)"
-
-# A rerun of the same release on a current tree writes nothing here, not even the release file.
-current=""
-current_release_checksum=""
-if [ -f "$DEST/.reef-harness-release" ] && [ -f "$DEST/pi-agent/AGENTS.md" ]; then
-    current="$(compose_stream | sha256)"
-    current_release_checksum="$(release_info_tool static "$DEST/.reef-harness-release")"
-fi
-if [ "$current" = "$CHECKSUM" ] && [ "$current_release_checksum" = "$RELEASE_FILE_CHECKSUM" ]; then
-    echo "reef: composition already current"
-else
-    echo "reef: writing the harness tree (1 file) to $DEST"
-    # The check offs the release file on disk holds, carried into the new release file below.
-    SETUP="$(release_info_tool carry "$DEST/.reef-harness-release")"
-    # Prune the files a previous install's release file listed that this composition lacks, exactly like
-    # the stdlib client pull. A session can write that file and the tree, so nothing is removed outside the
-    # destination or through a link.
-    "$PYTHON" - "$DEST" 'pi-agent/AGENTS.md' <<'REEF_PRUNE_EOF'
-import json, os, stat, sys
-dest, kept = sys.argv[1], set(sys.argv[2:])
-try:
-    with open(os.path.join(dest, ".reef-harness-release"), encoding="utf-8") as handle:
-        listed = json.load(handle).get("files")
-except (OSError, ValueError, AttributeError):
-    listed = None
-for relative in listed if isinstance(listed, list) else []:
-    if not isinstance(relative, str) or relative in kept or relative.startswith("/"):
-        continue
-    parts = relative.split("/")
-    if ".." in parts:
-        continue
-    directory = os.open(dest, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        for depth, part in enumerate(parts[:-1], 1):
-            if stat.S_ISLNK(os.stat(part, dir_fd=directory, follow_symlinks=False).st_mode):
-                shown = "/".join(parts[:depth])
-                print("reef: did not remove " + relative + ": " + shown + " is a link", file=sys.stderr)
-                break
-            # O_NOFOLLOW: a link made since the check above stops the walk as well.
-            inner = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
-            os.close(directory)
-            directory = inner
-        else:
-            os.unlink(parts[-1], dir_fd=directory)
-    except OSError:
-        pass  # gone already, or no directory of this tree on the way: nothing of the install's to remove
-    finally:
-        os.close(directory)
-REEF_PRUNE_EOF
-cat > "$DEST/pi-agent/AGENTS.md" <<'@RULES_EOF@'
-hello
-@RULES_EOF@
-    written="$(compose_stream | sha256)"
-    if [ "$written" != "$CHECKSUM" ]; then
-        echo "reef: composition checksum mismatch: $written != $CHECKSUM" >&2
-        exit 1
-    fi
-    # The same release file the stdlib client pull writes, plus requires and the check offs carried over.
-cat > "$DEST/.reef-harness-release" <<'@RELEASE_FILE_EOF@'
-@RELEASE_FILE_JSON@@RELEASE_FILE_EOF@
-    release_info_tool merge "$DEST/.reef-harness-release" "$SETUP"
-fi
-
-# The reef-pi wrapper: capture proxy + report command. Rewritten whenever its text
-# differs: it depends on this machine (binary, interpreter), not on the composition. It runs the
-# check on the tree, so it lives outside the tree, beside the record.
-BINARY_ABS="$(cd "$(dirname "$BINARY")" && pwd)/$(basename "$BINARY")"
-mkdir -p "$DEST/pi-agent" "$WRAPPER_DIR"
-COMPOSE_ABS="$ROOT_ABS/pi-agent"
-wrapper_text() {
-    cat <<REEF_WRAPPER_EOF
-#!/bin/sh
-# reef-pi: run pi with the reef-evolved composition.
-# Generated by reef harness install (adapter pi, release v1).
-# Usage: reef-pi -p "fix the bug"     # run the agent (receipts captured)
-#        reef-pi report --score 0 --feedback "..."  # report last run's receipts
-#        reef-pi evolve "what the harness should do"  # ask reef for a change
-#        reef-pi doctor  # check the install: interpreter, service, binary, tools, release
-# Runs the python3 the install resolved; rerun the install from another shell to change it.
-export REEF_HARNESS_BINARY="$BINARY_ABS"
-export REEF_HARNESS_COMPOSE="$COMPOSE_ABS"
-export REEF_HARNESS_SCENARIO="code-repair"
-export REEF_HARNESS_ADAPTER="pi"
-export REEF_HARNESS_ENV_VAR="PI_CODING_AGENT_DIR"
-exec "$PYTHON"${SAFE_PATH:+ $SAFE_PATH} -m reef.harness.client.wrapper "\$@"
-REEF_WRAPPER_EOF
-}
-if [ ! -x "$WRAPPER_DIR/reef-pi" ] || [ "$(wrapper_text)" != "$(cat "$WRAPPER_DIR/reef-pi")" ]; then
-    wrapper_text > "$WRAPPER_DIR/reef-pi"
-    chmod +x "$WRAPPER_DIR/reef-pi"
-fi
-# An earlier install wrote the wrapper into the tree, where a session could rewrite it; removing a link
-# there leaves what it points at as it was.
-if [ -f "$DEST/reef-pi" ] || [ -L "$DEST/reef-pi" ]; then
-    rm -f "$DEST/reef-pi"
-fi
-# Symlink into ~/.local/bin so reef-pi is on PATH, on every run: the link may have been
-# pointed elsewhere since the wrapper was written (an install into another directory), and
-# ln -sf costs nothing.
-mkdir -p "$HOME/.local/bin"
-ln -sf "$WRAPPER_DIR/reef-pi" "$HOME/.local/bin/reef-pi"
-case ":$PATH:" in
-    *":$HOME/.local/bin:"*) ;;
-    *) echo "reef: add '$HOME/.local/bin' to your PATH to run reef-pi from anywhere" >&2 ;;
-esac
-
-# What this install wrote, recorded outside the install root: reef-pi refuses to start a session once
-# one of these files changed, and a session that can write only its project cannot change the record.
-"$PYTHON" - "$ROOT_ABS" "$WRAPPER_DIR.json" "$SERVICE_URL" "$RELEASE_FILE_CHECKSUM" '{}' 'pi-agent/AGENTS.md' <<'REEF_INSTALL_RECORD_EOF'
-import hashlib, json, os, sys
-root, record_path, service_url, release_file = sys.argv[1:5]
-files = {}
-for relative in sys.argv[6:]:
-    with open(os.path.join(root, relative), "rb") as handle:
-        files[relative] = hashlib.sha256(handle.read()).hexdigest()
-# A file the binary writes too: the keys it may change, and the value of every other key as the install wrote it.
-settings = {}
-for relative, preference_keys in json.loads(sys.argv[5]).items():
-    with open(os.path.join(root, relative), encoding="utf-8") as handle:
-        installed_settings = json.load(handle)
-    checked_values = {key: value for key, value in installed_settings.items() if key not in preference_keys}
-    settings[relative] = {"preference_keys": preference_keys, "checked_values": checked_values}
-record = {"install_root": root, "service_url": service_url or None, "release_file": release_file, "files": files, "settings": settings}
-text = json.dumps(record, indent=2) + "\n"
-try:
-    with open(record_path, encoding="utf-8") as handle:
-        current = handle.read()
-except OSError:
-    current = None
-if current != text:
-    try:
-        os.makedirs(os.path.dirname(record_path), exist_ok=True)
-        with open(record_path + ".part", "w", encoding="utf-8") as handle:
-            handle.write(text)
-        os.replace(record_path + ".part", record_path)
-    except OSError as exc:
-        sys.exit("reef: cannot record what the install wrote in " + record_path + ": " + str(exc))
-REEF_INSTALL_RECORD_EOF
-
-echo "reef: done"
-echo "run:     $HOME/.local/bin/reef-pi"
-echo "wrapper: $WRAPPER_DIR/reef-pi"
-echo "binary:  $BINARY"
-echo "harness: $DEST"
-"""
-    ).replace("@CHECKSUM@", hashlib.sha256(b"pi-agent/AGENTS.md\n6\nhello\n").hexdigest())
-    golden = golden.replace("@RELEASE_FILE_CHECKSUM@", hashlib.sha256(release_info_text.encode()).hexdigest())
-    golden = golden.replace("@RULES_EOF@", "REEF_EOF_" + hashlib.sha256(b"hello\n").hexdigest()[:12])
-    golden = golden.replace(
-        "@RELEASE_FILE_EOF@", "REEF_EOF_" + hashlib.sha256(release_info_text.encode()).hexdigest()[:12]
-    )
-    golden = golden.replace("@RELEASE_FILE_JSON@", release_info_text)
-    script = render_install_script(
-        descriptor=get_adapter("pi"),
-        files=files,
-        release_id="v1",
-        content_id="content-v1",
-        scenario="code-repair",
-    )
-    assert script == golden
-    assert composition_checksum(files) in script
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    ("adapter", "usage"),
-    [
-        ("pi", 'reef-pi -p "fix the bug"'),
-        ("claude", 'reef-claude -p "fix the bug"'),
-        ("codex", 'reef-codex exec "fix the bug"'),
-        ("opencode", 'reef-opencode run "fix the bug"'),
-        ("hermes", 'reef-hermes chat --oneshot -q "fix the bug"'),
-        ("dsh", 'reef-dsh --profile headless -- -- "fix the bug"'),
-    ],
-)
-def test_the_wrapper_header_shows_the_one_shot_run_each_binary_takes(adapter: str, usage: str) -> None:
-    """Codex refuses pi's -p (its profile flag): each wrapper's usage line names the binary's own one task form."""
-    script = render_install_script(
-        descriptor=get_adapter(adapter),
-        files={"AGENTS.md": "hello\n"},
-        release_id="v1",
-        content_id="content-v1",
-        scenario="code-repair",
-    )
-    assert f"# Usage: {usage}     # run the agent (receipts captured)" in script
-
-
-@pytest.mark.unit
-def test_install_script_lands_hostile_content_and_a_wrapper_and_a_rerun_rewrites_only_what_changed(tmp_path) -> None:
-    """Pinned binary present: npm never runs, every file lands byte exact, and the release file matches the client
-    pull's shape. The reef-<adapter> wrapper is executable, bakes binary/compose/scenario as absolute paths, calls
-    the client wrapper module, and is symlinked onto PATH. The wrapper depends on the machine, not the composition:
-    a rerun on a current tree writes no file of the tree and leaves the wrapper's bytes and mtime alone, yet remakes
-    the PATH link every time and rewrites a wrapper whose text is stale or that lost its exec bit."""
-    npm_log = tmp_path / "npm.log"
-    script, dest, prefix, env = _install_fixture(
-        tmp_path,
-        binary_version="0.84.2",
-        npm=f'#!/bin/sh\nprintf \'%s\\n\' "$@" >> "{npm_log}"\nexit 1\n',
-        scenario="code-repair",
-    )
-    first = _run_install(script, dest, prefix, env)
-    assert first.returncode == 0, first.stderr
-    assert not npm_log.exists()  # the version answered, so the install step never ran
-    assert "0.84.2 already installed" in first.stdout
-    assert "already current" not in first.stdout
-    for relative, text in HOSTILE_FILES.items():
-        assert (dest / relative).read_bytes() == text.encode("utf-8")
-    release_file = dest / HARNESS_RELEASE_FILE
-    # The client pull's record plus what the release requires (nothing here) and the check offs carried over (none).
-    record = {
-        "release_id": "v-test",
-        "content_id": "content-test",
-        "files": sorted(HOSTILE_FILES),
-        "requires": [],
-        "setup": [],
-    }
-    assert release_file.read_bytes() == (json.dumps(record, indent=2) + "\n").encode("utf-8")
-
-    wrapper = installed_wrapper(env, dest)
-    assert wrapper.is_file()
-    assert wrapper.stat().st_mode & 0o111  # executable
-    text = wrapper.read_text(encoding="utf-8")
-    assert text.startswith("#!/bin/sh\n")
-    lines = text.splitlines()
-    assert 'export REEF_HARNESS_SCENARIO="code-repair"' in lines
-    assert 'export REEF_HARNESS_ADAPTER="pi"' in lines
-    assert 'export REEF_HARNESS_ENV_VAR="PI_CODING_AGENT_DIR"' in lines
-    # compose dir and binary are baked as absolute paths, resolved at install time
-    assert "$COMPOSE_ABS" not in text
-    assert f'export REEF_HARNESS_COMPOSE="{os.path.realpath(dest)}/pi-agent"' in lines
-    assert f'export REEF_HARNESS_BINARY="{prefix / "node_modules" / ".bin" / "pi"}"' in lines
-    # the interpreter behind the python3 the install resolved (the shim execs sys.executable), by absolute
-    # path, with -P; never python3 from a later PATH
-    assert f'exec "{sys.executable}" -P -m reef.harness.client.wrapper "$@"' in text
-    # symlinked onto PATH, in the fixture's home
-    link = Path(env["HOME"]) / ".local" / "bin" / "reef-pi"
-    assert link.is_symlink()
-    assert link.resolve() == wrapper.resolve()
-    assert "run:" in first.stdout
-    assert "reef-pi" in first.stdout
-
-    # Rerun on a current machine: still exit 0, writes nothing at all (the read-only bits make any write attempt,
-    # release file included, a hard fail). A link pointed elsewhere since (another install, a target since
-    # removed) comes back: the link is made on every run, not only when the wrapper text changes.
-    for relative in HOSTILE_FILES:
-        (dest / relative).chmod(0o444)
-    release_file.chmod(0o444)
-    release_before, wrapper_before = release_file.stat().st_mtime_ns, wrapper.stat().st_mtime_ns
-    link.unlink()
-    link.symlink_to(tmp_path / "elsewhere" / "reef-pi")
-    second = _run_install(script, dest, prefix, env)
-    assert second.returncode == 0, second.stderr
-    assert "composition already current" in second.stdout
-    assert release_file.stat().st_mtime_ns == release_before
-    assert wrapper.stat().st_mtime_ns == wrapper_before
-    for relative, hostile in HOSTILE_FILES.items():
-        assert (dest / relative).read_bytes() == hostile.encode("utf-8")
-    assert link.resolve() == wrapper.resolve()
-    # An older install's wrapper ran python3 from PATH; the rerun replaces it on the unchanged tree.
-    stale = text.replace(f'exec "{sys.executable}"', "exec python3")
-    assert stale != text
-    wrapper.write_text(stale, encoding="utf-8")
-    third = _run_install(script, dest, prefix, env)
-    assert third.returncode == 0, third.stderr
-    assert "composition already current" in third.stdout
-    assert wrapper.read_text(encoding="utf-8") == text
-    assert wrapper.stat().st_mode & 0o111
-    # A wrapper that lost its exec bit is written again on the unchanged tree.
-    wrapper.chmod(0o644)
-    fourth = _run_install(script, dest, prefix, env)
-    assert fourth.returncode == 0, fourth.stderr
-    assert wrapper.stat().st_mode & 0o111
-
-
-@pytest.mark.unit
-def test_install_script_version_probe_runs_offline_without_updates_and_writes_nothing_in_the_home(tmp_path) -> None:
-    """The probe disables the binary's network and update check. hermes writes a home skeleton on --version: the
-    probe runs with the descriptor's directories on a scratch root, which the script removes, so the person's home
-    stays as it was."""
-    npm_log = tmp_path / "npm.log"
-    script, dest, prefix, env = _install_fixture(
-        tmp_path, binary_version="0.84.2", npm=f'#!/bin/sh\nprintf called > "{npm_log}"\nexit 1\n'
-    )
-    _write_executable(
-        prefix / "node_modules/.bin/pi",
-        '#!/bin/sh\n[ "$PI_SKIP_VERSION_CHECK" = 1 ] && [ "$PI_OFFLINE" = 1 ] || exit 0\n'
-        'state="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"\nmkdir -p "$state" && touch "$state/probed" && echo 0.84.2\n',
-    )
-    scratch = tmp_path / "tmp"
-    scratch.mkdir()
-    env.update(PI_SKIP_VERSION_CHECK="0", PI_OFFLINE="0", TMPDIR=str(scratch))
-    result = _run_install(script, dest, prefix, env)
-    assert result.returncode == 0, result.stderr
-    assert "0.84.2 already installed" in result.stdout and not npm_log.exists()
-    assert not (tmp_path / "home" / ".pi").exists()
-    assert list(scratch.iterdir()) == []
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize("scenario", ["sc$dollar", "sc`id`tick"])
-def test_the_wrapper_carries_a_scenario_name_with_shell_metacharacters_verbatim(tmp_path, scenario: str) -> None:
-    """A scenario name with shell metacharacters reaches the wrapper byte exact, never expanded."""
-    script, dest, prefix, env = _install_fixture(tmp_path, binary_version="0.84.2", npm=NPM_FAILS, scenario=scenario)
-    result = _run_install(script, dest, prefix, env)
-    assert result.returncode == 0, result.stderr
-    line = next(
-        candidate
-        for candidate in installed_wrapper(env, dest).read_text(encoding="utf-8").splitlines()
-        if candidate.startswith("export REEF_HARNESS_SCENARIO=")
-    )
-    evaluated = subprocess.run(
-        ["sh", "-c", f"{line}; printf '%s' \"$REEF_HARNESS_SCENARIO\""], capture_output=True, text=True, timeout=60
-    )
-    assert evaluated.returncode == 0, evaluated.stderr
-    assert evaluated.stdout == scenario
-
-
-@pytest.mark.unit
-def test_install_uses_the_explicit_interpreter_when_path_has_a_broken_python(tmp_path) -> None:
-    script, dest, prefix, env = _install_fixture(tmp_path, binary_version="0.84.2", npm=NPM_FAILS)
-    _write_executable(tmp_path / "shim" / "python3", "#!/bin/sh\nexit 91\n")
-    result = _run_install(script, dest, prefix, {**env, "REEF_PYTHON": sys.executable})
-    assert result.returncode == 0, result.stderr
-    assert f'exec "{sys.executable}"' in installed_wrapper(env, dest).read_text()
-
-
-@pytest.mark.unit
-def test_install_refuses_a_python3_that_prints_at_startup_instead_of_baking_garbage(tmp_path) -> None:
-    """A python3 that writes to stdout before running -c (a sitecustomize, a version manager banner) would leave
-    the resolved path unrunnable; the install says so and writes nothing rather than dying later in a python step."""
-    script, dest, prefix, env = _install_fixture(
-        tmp_path, binary_version="0.84.2", npm=NPM_FAILS, scenario="code-repair"
-    )
-    _write_executable(
-        tmp_path / "shim" / "python3", f'#!/bin/sh\necho "python shim v1"\nexec "{sys.executable}" "$@"\n'
-    )
-    result = _run_install(script, dest, prefix, env)
-    assert result.returncode == 1
-    assert "reef: python3 did not name its interpreter" in result.stderr
-    assert not (dest / "reef-pi").exists()
-
-
-@pytest.mark.unit
-def test_install_refuses_an_interpreter_without_reef_and_installs_nothing_on_its_own(tmp_path) -> None:
-    """The import check runs before the gate and the vendor install: an interpreter that cannot import reef and
-    reef-client stops the script with the line that installs them there, and nothing is written or run."""
-    script, dest, prefix, env = _install_fixture(
-        tmp_path, binary_version=None, npm='#!/bin/sh\necho npm >> "$0.log"\nexit 0\n', scenario="code-repair"
-    )
-    _write_executable(
-        tmp_path / "shim" / "python3",
-        '#!/bin/sh\nif [ "$1" = -m ] && [ "$2" = pip ]; then echo "pip called" >&2; exit 1; fi\n'
-        # It names itself as the interpreter, so every later call still goes through it.
-        'if [ "$1" = "-c" ] && [ "$2" = "import sys; print(sys.executable)" ]; then printf \'%s\\n\' "$0"; exit 0; fi\n'
-        'case "$*" in *reef_client.serve*) exit 1;; esac\n'
-        f'exec "{sys.executable}" "$@"\n',
-    )
-    result = _run_install(script, dest, prefix, env)
-    assert result.returncode == 1
-    assert "reef: reef-client and reef-infra are not importable by" in result.stderr
-    assert (
-        '-m pip install reef-client "reef-infra @ git+https://github.com/Human-Agent-Society/reef.git"'
-        in result.stderr
-    )
-    assert "pip called" not in result.stderr
-    assert not dest.exists() and not (tmp_path / "shim" / "npm.log").exists()
-
-
-@pytest.mark.unit
-def test_install_and_wrapper_ignore_a_reef_directory_in_the_working_directory(tmp_path) -> None:
-    """A directory named ``reef`` in the working directory (a checkout's parent, for one) shadows
-    the package for a bare ``python3 -c`` or ``-m``. The import check runs with ``-P`` and sees
-    the interpreter's real state, so it neither installs from GitHub nor warns; the wrapper
-    takes the same flag and runs from that directory."""
-    script, dest, prefix, env = _install_fixture(
-        tmp_path, binary_version="0.84.2", npm=NPM_FAILS, scenario="code-repair"
-    )
-    # The pip branch would install reef-infra from GitHub into user site-packages: refuse it, loudly.
-    _write_executable(
-        tmp_path / "shim" / "python3",
-        '#!/bin/sh\nif [ "$1" = -m ] && [ "$2" = pip ]; then echo "pip called" >&2; exit 1; fi\n'
-        f'exec "{sys.executable}" "$@"\n',
-    )
-    cwd = tmp_path / "cwd"
-    (cwd / "reef").mkdir(parents=True)
-    (cwd / "reef" / "__init__.py").write_text("")
-    result = _run_install(script, dest, prefix, env, cwd=cwd)
-    assert result.returncode == 0, result.stderr
-    assert "pip called" not in result.stderr
-    assert "not importable" not in result.stderr
-    # The wrapper reaches its own code from the shadowing directory: the tree has no binding file, and
-    # that is the wrapper module's complaint, not the launcher's ModuleNotFoundError.
-    run = subprocess.run(
-        [str(installed_wrapper(env, dest))], cwd=cwd, env=env, capture_output=True, text=True, timeout=60
-    )
-    assert run.returncode == 1
-    assert "reef-pi: no Reef URL in the tree's model binding files" in run.stderr
-
-
-@pytest.mark.unit
-def test_an_install_with_no_root_named_goes_under_the_home_directory(tmp_path) -> None:
-    """With no install root named, the script installs into ~/reef-harness/<scenario>, outside the project the agent
-    works in, and writes nothing into the directory it runs from."""
-    script, _, prefix, env = _install_fixture(tmp_path, binary_version="0.84.2", npm=NPM_FAILS, scenario="demo")
-    project = tmp_path / "project"
-    project.mkdir()
-    # An empty first argument is no argument to "${1:-...}", so the second can still name the prefix.
-    result = subprocess.run(
-        ["sh", str(script), "", str(prefix)], cwd=project, env=env, capture_output=True, text=True, timeout=60
-    )
-    assert result.returncode == 0, result.stderr
-    assert installed_wrapper(env, Path(env["HOME"]) / "reef-harness" / "demo").is_file()
-    assert list(project.iterdir()) == []
-
-
-@pytest.mark.unit
-def test_the_path_symlink_resolves_when_dest_is_the_relative_default(tmp_path) -> None:
-    """A person may name a relative install root such as ./reef-harness: the ~/.local/bin link is still absolute
-    and leads to the wrapper in the directory named by the resolved root's sha256, so it never dangles. Every other
-    install test passes an absolute DEST and cannot see it."""
-    script, _, prefix, env = _install_fixture(tmp_path, binary_version="0.84.2", npm=NPM_FAILS)
-    workdir = tmp_path / "workdir"
-    workdir.mkdir()
-    result = subprocess.run(
-        ["sh", str(script), "./reef-harness", str(prefix)],
-        cwd=workdir,
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=60,
-    )
-    assert result.returncode == 0, result.stderr
-    assert "not importable by python3" not in result.stderr  # the bootstrap short-circuited
-    link = Path(env["HOME"]) / ".local" / "bin" / "reef-pi"
-    assert link.is_symlink()
-    assert Path(os.readlink(link)).is_absolute()
-    assert link.resolve() == installed_wrapper(env, workdir / "reef-harness").resolve()
-    assert link.exists()  # not dangling
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize("binary_version", [None, "0.1.0"], ids=["absent", "mismatched"])
-def test_install_script_runs_exactly_the_descriptors_vendor_install_without_the_pinned_binary(
-    tmp_path, binary_version: str | None
-) -> None:
-    npm_log = tmp_path / "npm.log"
-    script, dest, prefix, env = _install_fixture(
-        tmp_path,
-        binary_version=binary_version,
-        npm=f'#!/bin/sh\nprintf \'%s\\n\' "$@" >> "{npm_log}"\n',
-    )
-    result = _run_install(script, dest, prefix, env)
-    assert result.returncode == 0, result.stderr
-    assert npm_log.read_text().splitlines() == [
-        "install",
-        "--prefix",
-        str(prefix),
-        "@earendil-works/pi-coding-agent@0.84.2",
-    ]
-    assert (dest / "pi-agent/AGENTS.md").read_bytes() == HOSTILE_FILES["pi-agent/AGENTS.md"].encode("utf-8")
-
-
-def _pinned_env(tmp_path: Path) -> tuple[Path, dict]:
-    """A PATH shim and install prefix whose fake pi answers the pinned version."""
-    prefix = tmp_path / "prefix"
-    _write_executable(prefix / "node_modules/.bin/pi", "#!/bin/sh\necho 0.84.2\n")
-    shim = tmp_path / "shim"
-    _write_executable(shim / "npm", "#!/bin/sh\nexit 0\n")
-    return prefix, _source_env(shim, tmp_path / "home")
-
-
-def _render_to(path: Path, files: dict[str, str], release_id: str) -> Path:
-    path.write_text(
-        render_install_script(
-            descriptor=get_adapter("pi"), files=files, release_id=release_id, content_id=f"content-{release_id}"
-        )
-    )
-    return path
-
-
-@pytest.mark.unit
-def test_install_of_an_older_version_prunes_the_newer_versions_files(tmp_path) -> None:
-    """Running an older version's script into a DEST holding a newer install
-    removes the files only the newer release file recorded, exactly like a repeat
-    client pull, and leaves the older tree with the older release file."""
-    prefix, env = _pinned_env(tmp_path)
-    dest = tmp_path / "dest"
-    v2 = _render_to(
-        tmp_path / "install-v2.sh",
-        {"pi-agent/AGENTS.md": "new rules\n", "pi-agent/prompts/helper.md": "added in v2\n"},
-        "v2",
-    )
-    v1 = _render_to(tmp_path / "install-v1.sh", {"pi-agent/AGENTS.md": "old rules\n"}, "v1")
-    assert _run_install(v2, dest, prefix, env).returncode == 0
-    assert (dest / "pi-agent/prompts/helper.md").is_file()
-    result = _run_install(v1, dest, prefix, env)
-    assert result.returncode == 0, result.stderr
-    on_disk = {
-        str(path.relative_to(dest)) for path in dest.rglob("*") if path.is_file() and path.name != HARNESS_RELEASE_FILE
-    }
-    assert on_disk == {"pi-agent/AGENTS.md"}
-    assert (dest / "pi-agent/AGENTS.md").read_bytes() == b"old rules\n"
-    # Neither release requires anything, so the record carries the two empty lists beside the client pull's fields.
-    record = {
-        "release_id": "v1",
-        "content_id": "content-v1",
-        "files": ["pi-agent/AGENTS.md"],
-        "requires": [],
-        "setup": [],
-    }
-    assert (dest / HARNESS_RELEASE_FILE).read_bytes() == (json.dumps(record, indent=2) + "\n").encode("utf-8")
-
-
-@pytest.mark.unit
-def test_a_reinstall_prunes_only_listed_files_inside_the_destination_and_nothing_through_a_link(tmp_path) -> None:
-    """The prune removes what a previous release file recorded and this composition lacks, and nothing else: the
-    env file ``reef-<adapter> setup`` keeps beside the release file, and any other file of the person's at the
-    install root, survive a reinstall and an already current rerun with their bytes and mode. A session can write
-    the release file, so the prune skips a listed path that is absolute or has a ``..`` part. ``rm`` follows a link
-    at a directory of the path it removes, and a session can make such a link, to a place outside the install root
-    or to one inside it, and list a path under it, or the next release can drop a file under a directory the
-    session linked: the prune removes nothing through the link and names it, and still removes the other files
-    the old release file lists."""
-    from reef.harness.client.wrapper import HARNESS_ENV_FILE
-
-    prefix, env = _pinned_env(tmp_path)
-    dest = tmp_path / "dest"
-    v1 = _render_to(
-        tmp_path / "install-v1.sh",
-        {"pi-agent/AGENTS.md": "one\n", "pi-agent/old.md": "old\n", "pi-agent/skills/old/SKILL.md": "old skill\n"},
-        "v1",
-    )
-    v2 = _render_to(tmp_path / "install-v2.sh", {"pi-agent/AGENTS.md": "two\n", "pi-agent/new.md": "new\n"}, "v2")
-    assert _run_install(v1, dest, prefix, env).returncode == 0
-    env_file = dest / HARNESS_ENV_FILE
-    descriptor = os.open(env_file, os.O_WRONLY | os.O_CREAT, 0o600)
-    os.write(descriptor, b"REEF_AWAY_PHONE=+15550100\n")
-    os.close(descriptor)
-    (dest / "notes.txt").write_text("mine\n", encoding="utf-8")
-    outside_file = tmp_path / "outside.txt"
-    outside_file.write_text("keep\n", encoding="utf-8")
-    outside = tmp_path / "persons-documents"
-    outside.mkdir()
-    (outside / "thesis.tex").write_text("years of work\n", encoding="utf-8")
-    (outside / "SKILL.md").write_text("the person's own skill\n", encoding="utf-8")
-    inside = dest / "kept"
-    inside.mkdir()
-    (inside / "notes.md").write_text("inside the root\n", encoding="utf-8")
-    # v2 drops pi-agent/skills/old/SKILL.md, and the session made its directory a link to a place outside.
-    shutil.rmtree(dest / "pi-agent/skills/old")
-    (dest / "pi-agent/skills/old").symlink_to(outside)
-    # The session also lists paths outside the destination and two paths through links it made, one leading
-    # outside and one inside the root.
-    (dest / "evil").symlink_to(outside)
-    (dest / "pi-agent/near").symlink_to(inside)
-    release_file = dest / HARNESS_RELEASE_FILE
-    record = json.loads(release_file.read_text(encoding="utf-8"))
-    record["files"] += [
-        "../outside.txt",
-        "pi-agent/../../outside.txt",
-        str(outside_file),
-        "evil/thesis.tex",
-        "pi-agent/near/notes.md",
-    ]
-    release_file.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
-    result = _run_install(v2, dest, prefix, env)
-    assert result.returncode == 0, result.stderr
-    assert "already current" not in result.stdout
-    assert sorted(line for line in result.stderr.splitlines() if "did not remove" in line) == [
-        "reef: did not remove evil/thesis.tex: evil is a link",
-        "reef: did not remove pi-agent/near/notes.md: pi-agent/near is a link",
-        "reef: did not remove pi-agent/skills/old/SKILL.md: pi-agent/skills/old is a link",
-    ]
-    rerun = _run_install(v2, dest, prefix, env)
-    assert rerun.returncode == 0, rerun.stderr
-    assert "already current" in rerun.stdout
-    assert env_file.read_bytes() == b"REEF_AWAY_PHONE=+15550100\n"
-    assert env_file.stat().st_mode & 0o777 == 0o600
-    assert (dest / "notes.txt").read_text(encoding="utf-8") == "mine\n"
-    assert outside_file.read_text(encoding="utf-8") == "keep\n"
-    assert (outside / "thesis.tex").read_text(encoding="utf-8") == "years of work\n"
-    assert (outside / "SKILL.md").read_text(encoding="utf-8") == "the person's own skill\n"
-    assert (inside / "notes.md").read_text(encoding="utf-8") == "inside the root\n"
-    assert not (dest / "pi-agent/old.md").exists() and (dest / "pi-agent/new.md").read_bytes() == b"new\n"
-    assert (dest / "pi-agent/AGENTS.md").read_bytes() == b"two\n"
-
-
-def installed_wrapper(env: dict, dest: Path) -> Path:
-    """The reef-pi wrapper an install into ``dest`` wrote, outside the tree: in ``~/.reef/installs``, in the directory
-    named by the resolved root's sha256, beside the record."""
-    root_digest = hashlib.sha256(os.fsencode(os.path.realpath(dest))).hexdigest()
-    return Path(env["HOME"]) / ".reef" / "installs" / root_digest / "reef-pi"
-
-
-def session_install(
-    tmp_path: Path, requires: list[dict] | None = None, settings: dict | None = None
-) -> tuple[Path, Path, Path, dict]:
-    """A pi install as the route serves it, with the model binding and the service address, whose fake pi lists
-    the files its agent directory holds, writes its environment beside them, and records which ``added`` and
-    ``reef-pi`` programs its PATH finds. ``settings`` is a config node the release puts in pi's settings.json."""
-    descriptor = get_adapter("pi")
-    binding = ModelBinding(base_url="http://reef.test:8901", model="qwen3-8b", api_key=TOKEN_PLACEHOLDER)
-    nodes = [("rules", {"text": "rules"}), *([("config", {"data": settings})] if settings else [])]
-    bound = render_composition([*nodes, *binding.compose_nodes(descriptor)], descriptor)
-    script = tmp_path / "install.sh"
-    script.write_text(
-        render_install_script(
-            descriptor=descriptor,
-            files={"pi-agent/AGENTS.md": "rules\n", "pi-agent/skills/notes/SKILL.md": "notes\n"},
-            release_id="v1",
-            content_id="content-v1",
-            scenario="sessions",
-            binding_files={path: bound[path] for path in ("pi-agent/models.json", "pi-agent/settings.json")},
-            requires=requires or [],
-            service_url="http://reef.test:8901",
-        )
-    )
-    prefix, env = _pinned_env(tmp_path)
-    _write_executable(
-        prefix / "node_modules/.bin/pi",
-        '#!/bin/sh\n[ "$1" = --version ] && { echo 0.84.2; exit 0; }\n'
-        f'(cd "$PI_CODING_AGENT_DIR" && find -L . -type f | sort) > "{tmp_path / "listing.txt"}"\n'
-        f'env > "{tmp_path / "env.txt"}"\n'
-        f'{{ command -v added || echo none; command -v reef-pi; }} > "{tmp_path / "found.txt"}"\n',
-    )
-    return script, tmp_path / "dest", prefix, {**env, "REEF_HARNESS_CAPTURES_DIR": str(tmp_path / "captures")}
-
-
-def start_session(dest: Path, env: dict) -> subprocess.CompletedProcess:
-    listing = dest.parent / "listing.txt"
-    listing.unlink(missing_ok=True)
-    return subprocess.run(
-        [str(installed_wrapper(env, dest)), "-p", "hi"],
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=60,
-        check=False,
-    )
-
-
-def refusal_lines(root: str, *entries: str) -> list[str]:
-    """The lines ``reef-pi`` prints when it refuses to start on a tree whose recorded files changed."""
-    return [
-        f"reef-pi: cannot start agent; these files in {root} changed since the install wrote them:",
-        *(f"  {entry}" for entry in entries),
-        "reef-pi: run reef-pi update to restore them, then start the agent again",
-    ]
-
-
-def session_env(tmp_path: Path) -> dict[str, str]:
-    """The environment the last fake pi session ran with."""
-    return dict(line.split("=", 1) for line in (tmp_path / "env.txt").read_text().splitlines() if "=" in line)
-
-
-@pytest.mark.unit
-def test_the_install_records_what_it_wrote_outside_the_tree_and_a_session_starts_only_on_those_files(
-    tmp_path,
-) -> None:
-    """The install records the sha256 of every file it wrote in ``~/.reef/installs``, outside the install root.
-    ``reef-pi`` refuses to start while one of them changed, naming each, and a rerun of the install (what ``update``
-    runs) restores them. The session gets those files and the client state; a file added to the tree never
-    reaches it, and a change to pi's own settings or to the check offs is no reason to refuse."""
-    script, dest, prefix, env = session_install(tmp_path)
-    assert _run_install(script, dest, prefix, env).returncode == 0
-    root = str(dest.resolve())
-    record_path = tmp_path / "home/.reef/installs" / f"{hashlib.sha256(root.encode()).hexdigest()}.json"
-    record = json.loads(record_path.read_text(encoding="utf-8"))
-    written = [
-        "pi-agent/AGENTS.md",
-        "pi-agent/models.json",
-        "pi-agent/settings.json",
-        "pi-agent/skills/notes/SKILL.md",
-    ]
-    assert record["install_root"] == root and record["service_url"] == "http://reef.test:8901"
-    assert record["files"] == {
-        relative: hashlib.sha256((dest / relative).read_bytes()).hexdigest() for relative in written
-    }
-    static = json.loads((dest / HARNESS_RELEASE_FILE).read_text(encoding="utf-8"))
-    static.pop("setup")
-    assert record["release_file"] == hashlib.sha256((json.dumps(static, indent=2) + "\n").encode()).hexdigest()
-    # A rerun on a current tree leaves the record as it is.
-    before = record_path.stat().st_mtime_ns
-    assert _run_install(script, dest, prefix, env).returncode == 0
-    assert record_path.stat().st_mtime_ns == before
-
-    listed = ["./AGENTS.md", "./models.json", "./settings.json", "./skills/notes/SKILL.md"]
-    assert start_session(dest, env).returncode == 0
-    assert (tmp_path / "listing.txt").read_text().split() == listed
-    # Files a session adds to the tree are not linked into the next one; pi's preference keys are its own to write.
-    (dest / "pi-agent/skills/added").mkdir()
-    (dest / "pi-agent/skills/added/SKILL.md").write_text("added later\n", encoding="utf-8")
-    (dest / "pi-agent/extra").mkdir()
-    (dest / "pi-agent/extra/notes.md").write_text("added later\n", encoding="utf-8")
-    (dest / "pi-agent/settings.json").write_text('{"lastChangelogVersion": "0.84.2"}\n', encoding="utf-8")
-    release = json.loads((dest / HARNESS_RELEASE_FILE).read_text(encoding="utf-8"))
-    release["setup"] = [{"name": "notify", "checked_at": 1.0, "check": None}]
-    (dest / HARNESS_RELEASE_FILE).write_text(json.dumps(release, indent=2) + "\n", encoding="utf-8")
-    assert start_session(dest, env).returncode == 0
-    assert (tmp_path / "listing.txt").read_text().split() == listed
-
-    # A rewritten, an edited and a removed composition file and an edited release file are each named.
-    (dest / "pi-agent/AGENTS.md").write_text("changed rules\n", encoding="utf-8")
-    models = dest / "pi-agent/models.json"
-    models.write_text(models.read_text().replace("reef.test", "other.test"))
-    (dest / "pi-agent/skills/notes/SKILL.md").unlink()
-    release_file = dest / HARNESS_RELEASE_FILE
-    release_file.write_text(release_file.read_text().replace('"requires": []', '"requires": [{}]'))
-    refused = start_session(dest, env)
-    assert refused.returncode == 3, refused.stderr
-    assert refused.stderr.splitlines() == refusal_lines(
-        root, "pi-agent/AGENTS.md", "pi-agent/models.json", "pi-agent/skills/notes/SKILL.md", HARNESS_RELEASE_FILE
-    )
-    assert not (tmp_path / "listing.txt").exists()
-    assert _run_install(script, dest, prefix, env).returncode == 0
-    assert start_session(dest, env).returncode == 0
-    # A file replaced by a link counts as changed even when the link reads the same bytes.
-    (tmp_path / "copy.md").write_bytes((dest / "pi-agent/AGENTS.md").read_bytes())
-    (dest / "pi-agent/AGENTS.md").unlink()
-    (dest / "pi-agent/AGENTS.md").symlink_to(tmp_path / "copy.md")
-    assert start_session(dest, env).returncode == 3
-
-
-@pytest.mark.unit
-def test_pi_writes_its_preferences_to_settings_json_and_a_session_that_changes_another_key_is_refused(
-    tmp_path,
-) -> None:
-    """pi writes settings.json in place, so the next session starts while only the keys pi saves itself differ from
-    the install (the model, the theme, the changelog version), in another key order and layout. A change to any other
-    key would load or run code in the next session (extensions, packages, a shell prefix), or undo what the release
-    set, so the start is refused, naming the keys, until ``update`` writes the install's settings again."""
-    script, dest, prefix, env = session_install(tmp_path, settings={"defaultProjectTrust": "never"})
-    assert _run_install(script, dest, prefix, env).returncode == 0
-    root = str(dest.resolve())
-    record_path = installed_wrapper(env, dest).parent.with_suffix(".json")
-    (state,) = [state for state in get_adapter("pi").client_state if state.path == "pi-agent/settings.json"]
-    assert json.loads(record_path.read_text(encoding="utf-8"))["settings"] == {
-        "pi-agent/settings.json": {
-            "preference_keys": sorted(state.preference_keys),
-            "checked_values": {"defaultProjectTrust": "never"},
-        }
-    }
-    settings = dest / "pi-agent/settings.json"
-    installed = json.loads(settings.read_text(encoding="utf-8"))
-    preferences = {"theme": "light", "lastChangelogVersion": "0.84.2", "retry": {}}
-    settings.write_text(json.dumps({**preferences, **installed, "defaultModel": "other"}, indent=2), encoding="utf-8")
-    assert start_session(dest, env).returncode == 0
-    changes = {
-        "extensions": ["/elsewhere/tool.ts"],
-        "packages": ["npm:some-package"],
-        "shellCommandPrefix": "sh /elsewhere/start.sh;",
-        "defaultProjectTrust": "always",
-        "hooks": ["a key pi 0.84.2 does not read"],
-    }
-    settings.write_text(json.dumps({**installed, **changes}), encoding="utf-8")
-    refused = start_session(dest, env)
-    assert refused.returncode == 3
-    assert refused.stderr.splitlines() == refusal_lines(
-        root, f"pi-agent/settings.json (keys: {', '.join(sorted(changes))})"
-    )
-    assert not (tmp_path / "listing.txt").exists()
-    assert _run_install(script, dest, prefix, env).returncode == 0
-    assert json.loads(settings.read_text(encoding="utf-8")) == installed
-    settings.write_text("[]", encoding="utf-8")
-    refused = start_session(dest, env)
-    assert refused.stderr.splitlines() == refusal_lines(root, "pi-agent/settings.json (not a JSON object)")
-
-
-@pytest.mark.unit
-def test_a_record_without_a_settings_entry_checks_every_key_of_pi_settings(tmp_path) -> None:
-    """A record written before Reef checked pi's settings, or a damaged one, keeps no preference keys for
-    settings.json, so every key counts as changed and the start is refused until ``update`` records them."""
-    script, dest, prefix, env = session_install(tmp_path)
-    assert _run_install(script, dest, prefix, env).returncode == 0
-    record_path = installed_wrapper(env, dest).parent.with_suffix(".json")
-    record = json.loads(record_path.read_text(encoding="utf-8"))
-    for settings_entry in (None, [], {"pi-agent/settings.json": {"preference_keys": "theme"}}):
-        record_path.write_text(json.dumps({**record, "settings": settings_entry}), encoding="utf-8")
-        refused = start_session(dest, env)
-        assert refused.returncode == 3, settings_entry
-        assert refused.stderr.splitlines() == refusal_lines(
-            str(dest.resolve()), "pi-agent/settings.json (keys: defaultModel, defaultProvider)"
-        )
-    assert _run_install(script, dest, prefix, env).returncode == 0
-    assert start_session(dest, env).returncode == 0
-
-
-@pytest.mark.unit
-def test_the_wrapper_lives_beside_the_record_and_a_session_finds_it_but_nothing_at_the_install_root(
-    tmp_path,
-) -> None:
-    """The wrapper runs the check, so the install writes it outside the tree, beside the record, links
-    ~/.local/bin/reef-pi to it and removes the wrapper an earlier install wrote into the tree. A session gets that
-    wrapper as REEF_HARNESS_WRAPPER, also after its record was removed, and ``reef-pi`` by name reaches it. The
-    install root is not on the session's PATH: a program a session adds there (a node that pi's
-    ``#!/usr/bin/env node`` would run, a git) is not checked, so the next session must not find it."""
-    script, dest, prefix, env = session_install(tmp_path)
-    dest.mkdir()
-    _write_executable(dest / "reef-pi", "#!/bin/sh\necho an earlier install wrote this\n")
-    assert _run_install(script, dest, prefix, env).returncode == 0
-    wrapper = installed_wrapper(env, dest)
-    root = os.path.realpath(dest)
-    assert not (dest / "reef-pi").exists()
-    assert (Path(env["HOME"]) / ".local/bin/reef-pi").resolve() == wrapper
-    assert f'export REEF_HARNESS_COMPOSE="{root}/pi-agent"' in wrapper.read_text(encoding="utf-8")
-    assert "reef-pi" not in json.loads(wrapper.parent.with_suffix(".json").read_text())["files"]
-    _write_executable(dest / "added", "#!/bin/sh\n")
-    for label in ("recorded", "record removed"):
-        started = start_session(dest, env)
-        assert started.returncode == 0, (label, started.stderr)
-        seen = session_env(tmp_path)
-        assert seen["REEF_HARNESS_WRAPPER"] == str(wrapper), label
-        assert seen["PATH"].split(os.pathsep)[1] == str(wrapper.parent), label
-        assert (tmp_path / "found.txt").read_text().splitlines() == ["none", str(wrapper)], label
-        wrapper.parent.with_suffix(".json").unlink(missing_ok=True)
-
-
-@pytest.mark.unit
-def test_a_start_and_an_update_refuse_an_install_root_a_session_replaced_with_a_link(tmp_path) -> None:
-    """A session that can write the directory above the install root can move the tree aside and put a link to a
-    tree it wrote in its place. That tree has no record, so the check would find nothing to compare, and an update
-    would write and prune the tree wherever the link points; the wrapper names the resolved root, so a start and an
-    update refuse the link instead, and neither the agent nor the install runs."""
-    script, dest, prefix, env = session_install(tmp_path)
-    assert _run_install(script, dest, prefix, env).returncode == 0
-    root, wrapper = os.path.realpath(dest), installed_wrapper(env, dest)
-    rogue = tmp_path / "rogue"
-    shutil.copytree(dest, rogue, symlinks=True)
-    (rogue / "pi-agent/AGENTS.md").write_text("rules a session wrote\n", encoding="utf-8")
-    shutil.rmtree(dest)
-    dest.symlink_to(rogue)
-    moved = f"{root} now leads through a link to {os.path.realpath(rogue)}, which the install did not make: remove the link"
-    refused = subprocess.run([str(wrapper), "-p", "hi"], env=env, capture_output=True, text=True, timeout=60)
-    assert refused.returncode == 3
-    assert refused.stderr.splitlines() == [f"reef-pi: cannot start agent; {moved} and run the install command again"]
-    assert not (tmp_path / "listing.txt").exists()
-    # The service address is unreachable, so an update that got past the refusal would say so instead.
-    update = subprocess.run([str(wrapper), "update"], env=env, capture_output=True, text=True, timeout=60)
-    assert update.returncode == 3
-    assert update.stderr.splitlines() == [f"reef-pi update: {moved} and run the install command again"]
-
-
-@pytest.mark.unit
-def test_a_session_reads_copies_of_the_files_the_install_wrote_and_links_only_the_client_state(tmp_path) -> None:
-    """Codex skips a linked ``SKILL.md`` and hermes warns on every linked skill, so the temp copy holds each file the
-    install wrote as a regular file with its mode, and links only the client state. What the session writes over a
-    copied file stays in the temp copy: the installed file keeps its bytes and the next session starts."""
-    script, dest, prefix, env = session_install(tmp_path)
-    assert _run_install(script, dest, prefix, env).returncode == 0
-    (dest / "pi-agent/skills/notes/SKILL.md").chmod(0o600)
-    record = tmp_path / "types.txt"
-    _write_executable(
-        prefix / "node_modules/.bin/pi",
-        '#!/bin/sh\n[ "$1" = --version ] && { echo 0.84.2; exit 0; }\n'
-        f'cd "$PI_CODING_AGENT_DIR" && {{ find . -type l | sort | sed "s/^/link /"; '
-        f'find . -type f | sort | sed "s/^/file /"; stat -f "%Lp" skills/notes/SKILL.md 2>/dev/null '
-        f'|| stat -c "%a" skills/notes/SKILL.md; }} > "{record}"\n'
-        'echo "session rules" > AGENTS.md\n',
-    )
-    rules = (dest / "pi-agent/AGENTS.md").read_bytes()
-    assert start_session(dest, env).returncode == 0
-    lines = record.read_text().split("\n")
-    assert "file ./AGENTS.md" in lines and "file ./skills/notes/SKILL.md" in lines and "file ./models.json" in lines
-    # pi's sessions and settings are client state, what the session writes into the tree.
-    assert [line for line in lines if line.startswith("link ")] == ["link ./sessions", "link ./settings.json"]
-    assert lines[-2] == "600"
-    assert (dest / "pi-agent/AGENTS.md").read_bytes() == rules
-    assert start_session(dest, env).returncode == 0
-
-
-def checked_install(tmp_path: Path) -> tuple[Path, Path, Path, dict, list[dict]]:
-    """``session_install`` for a release that requires ``REEF_AWAY_PHONE``, installed over a release file that
-    already checks it off, so a session starts on the check off alone."""
-    script, dest, prefix, env = session_install(tmp_path, requires=[{"name": "REEF_AWAY_PHONE", "kind": "env"}])
-    env.pop("REEF_AWAY_PHONE", None)
-    dest.mkdir()
-    checked = [{"name": "REEF_AWAY_PHONE", "checked_at": 1.0, "check": None}]
-    (dest / HARNESS_RELEASE_FILE).write_text(json.dumps({"setup": checked}), encoding="utf-8")
-    installed = _run_install(script, dest, prefix, env)
-    assert installed.returncode == 0, installed.stderr
-    return script, dest, prefix, env, checked
-
-
-@pytest.mark.unit
-def test_a_link_inside_the_install_root_counts_as_changed_and_the_install_puts_a_regular_file_there(
-    tmp_path,
-) -> None:
-    """``cat >`` writes through a link, and a link that reads the same bytes passes as current. So a start names a
-    file reached through a link (at the file, at a directory above it, or a second hard link) as changed, and a
-    rerun of the install (what ``update`` runs) puts a regular file there without writing through the link: what
-    the link reached keeps its bytes, and the next start runs. A link is replaced with a copy of what it reads, not
-    with nothing: for the release file that copy holds the check offs ``setup`` recorded, which the install carries
-    into the release file it keeps, so the next start still finds the release's items met."""
-    script, dest, prefix, env, checked = checked_install(tmp_path)
-    root = str(dest.resolve())
-    moved = dest / "moved"
-
-    def link_file(relative: str, text: str | None) -> Path:
-        # The recorded file moves inside the root, optionally rewritten, and a link to it takes its place.
-        target = moved / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        (dest / relative).rename(target)
-        if text is not None:
-            target.write_text(text, encoding="utf-8")
-        (dest / relative).symlink_to(target)
-        return target
-
-    skills = moved / "skills"
-    skills.parent.mkdir(parents=True, exist_ok=True)
-    (dest / "pi-agent/skills").rename(skills)
-    (dest / "pi-agent/skills").symlink_to(skills)
-    reached = {
-        "pi-agent/AGENTS.md": link_file("pi-agent/AGENTS.md", None),
-        "pi-agent/models.json": link_file("pi-agent/models.json", "{}\n"),
-        "pi-agent/skills/notes/SKILL.md": skills / "notes/SKILL.md",
-        HARNESS_RELEASE_FILE: link_file(HARNESS_RELEASE_FILE, None),
-    }
-    kept = {relative: path.read_bytes() for relative, path in reached.items()}
-    refused = start_session(dest, env)
-    assert refused.returncode == 3
-    assert refused.stderr.splitlines() == refusal_lines(
-        root,
-        "pi-agent/AGENTS.md (a link)",
-        "pi-agent/models.json (a link)",
-        "pi-agent/skills/notes/SKILL.md (pi-agent/skills is a link)",
-        f"{HARNESS_RELEASE_FILE} (a link)",
-    )
-    rerun = _run_install(script, dest, prefix, env)
-    assert rerun.returncode == 0, rerun.stderr
-    assert sorted(line for line in rerun.stdout.splitlines() if "was a link" in line) == [
-        f"reef: {HARNESS_RELEASE_FILE} was a link; it is a regular file now",
-        "reef: pi-agent/AGENTS.md was a link; it is a regular file now",
-        "reef: pi-agent/models.json was a link; it is a regular file now",
-        "reef: pi-agent/skills was a link; removed it, and the install writes it again",
-    ]
-    for relative, target in reached.items():
-        path = dest / relative
-        assert not any((dest / part).is_symlink() for part in [*PurePosixPath(relative).parents, relative])
-        assert path.is_file() and path.stat().st_nlink == 1, relative
-        assert target.read_bytes() == kept[relative], relative
-    assert json.loads((dest / HARNESS_RELEASE_FILE).read_text(encoding="utf-8"))["setup"] == checked
-    started = start_session(dest, env)
-    assert started.returncode == 0, started.stderr
-
-    other = tmp_path / "hard.md"
-    os.link(dest / "pi-agent/AGENTS.md", other)
-    other.write_text("session rules\n", encoding="utf-8")
-    refused = start_session(dest, env)
-    assert refused.returncode == 3
-    assert refused.stderr.splitlines() == refusal_lines(root, "pi-agent/AGENTS.md (a hard link)")
-    rerun = _run_install(script, dest, prefix, env)
-    assert rerun.returncode == 0, rerun.stderr
-    assert "reef: pi-agent/AGENTS.md was a link; it is a regular file now" in rerun.stdout.splitlines()
-    assert (dest / "pi-agent/AGENTS.md").stat().st_nlink == 1
-    assert other.read_bytes() == b"session rules\n"
-    started = start_session(dest, env)
-    assert started.returncode == 0, started.stderr
-
-
-@pytest.mark.unit
-def test_the_install_refuses_a_link_that_leads_outside_the_install_root_and_writes_nothing_through_it(
-    tmp_path,
-) -> None:
-    """A link to a place outside the install root, at a file the install writes or at the composition directory,
-    would take the install's write there. The start names what it reaches as changed (the record names the root,
-    so a linked composition directory does not move it), the install refuses, naming the link and its target, and
-    writes nothing; once the link is gone the install restores the tree."""
-    script, dest, prefix, env = session_install(tmp_path)
-    assert _run_install(script, dest, prefix, env).returncode == 0
-    root = str(dest.resolve())
-    outside = tmp_path / "outside.json"
-    outside.write_text("the person's own file\n", encoding="utf-8")
-    (dest / "pi-agent/models.json").unlink()
-    (dest / "pi-agent/models.json").symlink_to(outside)
-    refused = start_session(dest, env)
-    assert refused.returncode == 3 and refused.stderr.splitlines() == refusal_lines(
-        root, "pi-agent/models.json (a link)"
-    )
-    rerun = _run_install(script, dest, prefix, env)
-    assert rerun.returncode == 1
-    assert rerun.stderr.splitlines()[-2:] == [
-        f"reef: pi-agent/models.json in {root} is a link to {outside.resolve()}",
-        "reef: the install writes only inside the install root; remove the links named above, then install again",
-    ]
-    assert outside.read_text(encoding="utf-8") == "the person's own file\n"
-    (dest / "pi-agent/models.json").unlink()
-    assert _run_install(script, dest, prefix, env).returncode == 0
-
-    elsewhere = tmp_path / "elsewhere/pi-agent"
-    elsewhere.parent.mkdir()
-    (dest / "pi-agent").rename(elsewhere)
-    (dest / "pi-agent").symlink_to(elsewhere)
-    (elsewhere / "AGENTS.md").write_text("session rules\n", encoding="utf-8")
-    refused = start_session(dest, env)
-    assert refused.returncode == 3
-    assert refused.stderr.splitlines() == refusal_lines(
-        root,
-        "pi-agent/AGENTS.md (pi-agent is a link)",
-        "pi-agent/models.json (pi-agent is a link)",
-        "pi-agent/settings.json (pi-agent is a link)",
-        "pi-agent/skills/notes/SKILL.md (pi-agent is a link)",
-    )
-    rerun = _run_install(script, dest, prefix, env)
-    assert rerun.returncode == 1
-    assert f"reef: pi-agent in {root} is a link to {elsewhere.resolve()}" in rerun.stderr.splitlines()
-    assert (elsewhere / "AGENTS.md").read_text(encoding="utf-8") == "session rules\n"
-    (dest / "pi-agent").unlink()
-    assert _run_install(script, dest, prefix, env).returncode == 0
-    assert start_session(dest, env).returncode == 0
-
-
-@pytest.mark.unit
-def test_a_path_the_install_writes_that_is_not_a_regular_file_is_named_and_refused_and_blocks_nothing(
-    tmp_path,
-) -> None:
-    """``cat >`` into a FIFO, and a read of one, wait for a peer that never comes. A start names a recorded path
-    that is not a regular file; the install refuses it, naming it, instead of writing into it, and once it is
-    removed the install restores the tree. A FIFO at the release file stops neither the start nor the install's
-    setup check, and one at the env file does not stop the start. The env file sits in the tree a session can
-    write, so with an install record the session gets only the variables the release's ``env`` items name, never
-    another line of the file."""
-    script, dest, prefix, env, _ = checked_install(tmp_path)
-    root = str(dest.resolve())
-    models = dest / "pi-agent/models.json"
-    models.unlink()
-    os.mkfifo(models)
-    release_file = dest / HARNESS_RELEASE_FILE
-    kept = release_file.read_bytes()
-    release_file.unlink()
-    os.mkfifo(release_file)
-    refused = start_session(dest, env)
-    assert refused.returncode == 3
-    assert refused.stderr.splitlines() == refusal_lines(
-        root, "pi-agent/models.json (not a regular file)", f"{HARNESS_RELEASE_FILE} (not a regular file)"
-    )
-    # The setup check reads the release file first of all, so it is the first refusal.
-    rerun = _run_install(script, dest, prefix, env)
-    assert rerun.returncode == 1
-    assert rerun.stderr.splitlines()[-1] == (
-        f"reef: {dest}/{HARNESS_RELEASE_FILE} is not a regular file; remove it, then install again"
-    )
-    release_file.unlink()
-    release_file.write_bytes(kept)
-    rerun = _run_install(script, dest, prefix, env)
-    assert rerun.returncode == 1
-    assert rerun.stderr.splitlines()[-2:] == [
-        f"reef: pi-agent/models.json in {root} is not a regular file",
-        "reef: the install writes only regular files; remove the paths named above, then install again",
-    ]
-    models.unlink()
-    assert _run_install(script, dest, prefix, env).returncode == 0
-
-    env_file = dest / ".reef-harness-env"
-    os.mkfifo(env_file)
-    started = start_session(dest, env)
-    assert started.returncode == 0, started.stderr
-    env_file.unlink()
-    env_file.write_text("REEF_AWAY_PHONE=+15550100\nREEF_EXTRA_LINE=1\n", encoding="utf-8")
-    shell = {key: value for key, value in env.items() if key not in ("REEF_AWAY_PHONE", "REEF_EXTRA_LINE")}
-    started = start_session(dest, shell)
-    assert started.returncode == 0, started.stderr
-    seen = session_env(tmp_path)
-    assert seen["REEF_AWAY_PHONE"] == "+15550100"
-    assert "REEF_EXTRA_LINE" not in seen
-
-
-@pytest.mark.unit
-def test_render_refuses_a_composition_path_that_escapes_the_destination(tmp_path) -> None:
-    """The generator applies the same escape rule as the client pull: an
-    absolute path or any ``..`` part refuses the render, nothing is written."""
-    for hostile in ("../outside-marker.txt", "/outside-marker.txt", "inner/../../outside-marker.txt"):
-        with pytest.raises(ValueError, match="escapes the destination"):
-            render_install_script(
-                descriptor=get_adapter("pi"), files={hostile: "marker"}, release_id="v-esc", content_id="content-esc"
-            )
-    assert list(tmp_path.iterdir()) == []
-
-
-@pytest.mark.unit
-def test_composition_checksum_length_framing_rejects_the_aliasing_pair(tmp_path) -> None:
-    r"""{a: "1", b: "2b\n3"} and {a: "1b\n2", b: "3"} concatenate to the same
-    unframed stream; the byte-length frame must keep their checksums, and the
-    executed script's already-current verdict, apart."""
-    aliased = {"a": "1", "b": "2b\n3"}
-    files = {"a": "1b\n2", "b": "3"}
-    assert composition_checksum(aliased) != composition_checksum(files)
-    # Same release on purpose: the two release files are then identical,
-    # so only the composition checksum can tell the trees apart under sh.
-    prefix, env = _pinned_env(tmp_path)
-    dest = tmp_path / "dest"
-    first = _render_to(tmp_path / "install-aliased.sh", aliased, "v-alias")
-    second = _render_to(tmp_path / "install-files.sh", files, "v-alias")
-    assert _run_install(first, dest, prefix, env).returncode == 0
-    result = _run_install(second, dest, prefix, env)
-    assert result.returncode == 0, result.stderr
-    assert "already current" not in result.stdout
-    assert (dest / "a").read_bytes() == b"1b\n2"
-    assert (dest / "b").read_bytes() == b"3"
+def test_record_only_traffic_fires_a_step_and_publishes(tmp_path) -> None:
+    """The report-free policy end to end through the real service: recorded inference traffic alone fills the
+    batch, one step runs on the unscored samples, and the read channel serves the winner."""
+
+    async def run() -> None:
+        async with served(channel_dispatcher(tmp_path, PATCHES[:1], inference_stages=True, batch_size=2)) as client:
+            for prompt in ("first", "second"):
+                response = await client.post(
+                    "/v1/chat/completions", headers=HEADERS, json={"messages": [{"role": "user", "content": prompt}]}
+                )
+                assert response.status == 200
+                await response.read()
+            deadline = asyncio.get_running_loop().time() + UPDATE_TIMEOUT_S
+            while True:
+                response = await client.get("/reef/harness", headers=HEADERS)
+                if response.status == 200:
+                    manifest = await response.json()
+                    assert manifest["evaluation"]["selected"] is True
+                    assert "marker rules" in manifest["files"]["plugin/rules.md"]
+                    break
+                assert response.status == 404
+                await response.read()
+                if asyncio.get_running_loop().time() >= deadline:
+                    pytest.fail("record-driven step did not publish")
+                await asyncio.sleep(UPDATE_POLL_S)
+
+    asyncio.run(run())
+
+
+def descriptor_with(tmp_path: Path, adapter: str, change) -> Path:
+    """A copy of a bundled adapter's ``adapter.yaml``, changed by ``change``."""
+    data = descriptor_data(adapter)
+    change(data)
+    return write_descriptor(tmp_path, data)
 
 
 @pytest.mark.unit
@@ -2167,700 +406,32 @@ def test_composition_checksum_length_framing_rejects_the_aliasing_pair(tmp_path)
     ],
 )
 def test_descriptor_install_fields_constrain_their_charset(tmp_path, adapter: str, field: str, value: str) -> None:
-    """Install fields land inside generated shell text, so the descriptor
-    parse pins their charsets and a violation names the offending field."""
-    source = Path(reef.harness.adapters.__file__).parent / adapter / "descriptor.yaml"
-    data = yaml.safe_load(source.read_text(encoding="utf-8"))
-    data["install"][field] = value
-    target = tmp_path / "descriptor.yaml"
-    target.write_text(yaml.safe_dump(data), encoding="utf-8")
+    """Install fields reach a vendor command line, so the descriptor parse pins their charsets and a violation
+    names the offending field."""
+    target = descriptor_with(tmp_path, adapter, lambda data: data["install"].__setitem__(field, value))
     with pytest.raises(DescriptorError, match=f"install '{field}'"):
         load_descriptor(target)
 
 
 @pytest.mark.unit
 @pytest.mark.parametrize("path", ["/tmp/state", "../state", "workspace", "workspace/state", "."])
-def test_descriptor_writable_paths_stay_in_managed_state(tmp_path, path: str) -> None:
-    source = Path(reef.harness.adapters.__file__).parent / "pi" / "descriptor.yaml"
-    data = yaml.safe_load(source.read_text(encoding="utf-8"))
-    data["writable_paths"] = [path]
-    target = tmp_path / "descriptor.yaml"
-    target.write_text(yaml.safe_dump(data), encoding="utf-8")
-    with pytest.raises(DescriptorError, match=r"writable_paths.*rollout root"):
+def test_descriptor_dirs_stay_in_managed_state(tmp_path, path: str) -> None:
+    target = descriptor_with(tmp_path, "pi", lambda data: data.__setitem__("dirs", {path: None}))
+    with pytest.raises(DescriptorError, match=r"'dirs'.*run root"):
         load_descriptor(target)
 
 
 @pytest.mark.unit
-def test_a_seeded_recipe_serves_and_installs_a_fresh_scenario_before_any_step(tmp_path) -> None:
-    """The README flow: a fresh scenario against a recipe with a seed answers the manifest and the
-    install script at once, with the seed's files and a binding at the served model, no step needed.
-    Behind a gateway the client reached ``https://api.example.test``, not this process: the binding
-    takes the forwarded host and scheme, so reef-pi calls back through the gateway."""
-
-    async def run() -> None:
-        async with served(_dispatcher(tmp_path, (), seed=SKILL_SEED)) as client:
-            manifest = await client.get("/reef/harness", headers=DELIVERY)
-            assert manifest.status == 200
-            files = (await manifest.json())["files"]
-            # The seed skill's text plus the frontmatter pi requires, synthesized from its first line.
-            assert files["pi-agent/skills/answer-style/SKILL.md"] == (
-                "---\nname: answer-style\ndescription: seed skill\n---\n# seed skill\n"
-            )
-            assert "pi-agent/models.json" in files and "reef" not in files["pi-agent/models.json"]
-            response = await client.get("/reef/harness/install", params={"adapter": "pi"}, headers=DELIVERY)
-            assert response.status == 200
-            script = await response.text()
-            assert "# seed skill" in script
-            host = f"{client.host}:{client.port}"
-            assert f'"baseUrl": "http://{host}/v1"' in script
-            assert '"id": "demo-model"' in script  # the recipe's runtime model, since no gate ran yet
-            assert f'"apiKey": "{TOKEN_PLACEHOLDER}"' in script
-
-            response = await client.get(
-                "/reef/harness/install",
-                params={"adapter": "pi"},
-                headers={**DELIVERY, "x-forwarded-host": "api.example.test", "x-forwarded-proto": "https"},
-            )
-            assert response.status == 200
-            script = await response.text()
-            assert '"baseUrl": "https://api.example.test/v1"' in script
-            # The install record keeps the same address, for a wrapper whose binding a session changed.
-            assert "SERVICE_URL='https://api.example.test'" in script
-            assert host not in script
-
-    asyncio.run(run())
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize(("api", "pi_api"), [("responses", "openai-responses"), ("anthropic", "anthropic-messages")])
-def test_install_script_binds_the_client_in_the_served_models_dialect(tmp_path, api: str, pi_api: str) -> None:
-    """Reef forwards a call to the upstream unchanged, so an installed reef-pi must speak the upstream's API."""
-
-    async def run() -> None:
-        async with served(_dispatcher(tmp_path, (), seed=SKILL_SEED, api=api)) as client:
-            response = await client.get("/reef/harness/install", params={"adapter": "pi"}, headers=DELIVERY)
-            assert response.status == 200
-            assert f'"api": "{pi_api}"' in await response.text()
-
-    asyncio.run(run())
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize("headers", ({}, {"x-reef-scenario": "   "}))
-def test_install_route_creates_a_randomly_named_harness_scenario_when_header_is_missing_or_empty(
-    tmp_path, monkeypatch, headers
-) -> None:
-    dispatcher = _dispatcher(tmp_path, (), bootstrap_files={"pi-agent/AGENTS.md": "starter rules\n"})
-    monkeypatch.setattr("reef.service.request_service._random_harness_scenario_name", lambda: "harness-0123456789ab")
-
-    async def run() -> None:
-        async with served(dispatcher) as client:
-            response = await client.get("/reef/harness/install", params={"adapter": "pi"}, headers=headers)
-            assert response.status == 200
-            assert 'export REEF_HARNESS_SCENARIO="harness-0123456789ab"' in await response.text()
-            assert dispatcher.get_or_create_scenario("harness-0123456789ab") is not None
-
-    asyncio.run(run())
-
-
-@pytest.mark.unit
-def test_install_route_creates_no_scenario_when_implicit_creation_is_off(tmp_path) -> None:
-    dispatcher = _dispatcher(tmp_path, (), allow_implicit_creation=False)
-
-    async def run() -> None:
-        async with served(dispatcher) as client:
-            response = await client.get("/reef/harness/install", params={"adapter": "pi"})
-            assert response.status == 404
-            assert "POST /reef/scenarios" in await response.text()
-            assert dispatcher.list_scenarios() == ()
-
-    asyncio.run(run())
-
-
-@pytest.mark.unit
-def test_install_route_without_scenario_returns_404_when_no_harness_recipe_exists(tmp_path) -> None:
-    bootstrap = tmp_path / "bootstrap"
-    bootstrap.mkdir()
-    dispatcher = Dispatcher(
-        Recipe(),
-        InMemoryRepositoryBackend.factory(bootstrap, root=tmp_path / "repository"),
-        local_artifact_dir=tmp_path / "local",
-        scenario_storage=SQLiteScenarioStorage(None),
-        coordination=memory_coordination(),
-    )
-    dispatcher.get_or_create_scenario("weights-only")
-
-    async def run() -> None:
-        async with served(dispatcher) as client:
-            response = await client.get("/reef/harness/install", params={"adapter": "pi"})
-            assert response.status == 404
-            assert "no harness recipes are available" in await response.text()
-
-    asyncio.run(run())
-
-
-@pytest.mark.unit
-def test_install_route_answers_400_when_the_adapter_declares_no_install_section(tmp_path, monkeypatch) -> None:
-    """A known adapter whose descriptor has no install section is a caller
-    error, not a lookup miss: HTTP 400 naming the adapter and the routes that
-    still serve it."""
-    monkeypatch.setattr(
-        "reef.service.request_service.get_adapter", lambda name: dataclasses.replace(get_adapter(name), install=None)
-    )
-
-    async def run() -> None:
-        async with served(_dispatcher(tmp_path, (), seed=SKILL_SEED)) as client:
-            response = await client.get("/reef/harness/install", params={"adapter": "pi"}, headers=DELIVERY)
-            assert response.status == 400
-            text = await response.text()
-            assert "'pi'" in text
-            assert "no install section" in text
-            assert "GET /reef/harness serves its tree" in text and "POST /reef/train" in text
-
-    asyncio.run(run())
-
-
-@pytest.mark.unit
-def test_record_only_traffic_fires_a_step_and_publishes(tmp_path) -> None:
-    """The report-free policy end to end through the real service: recorded
-    inference traffic alone fills the batch, one evolve step runs on the
-    unscored samples, and the harness read channel serves the winner. No
-    report is ever posted."""
-
-    async def run() -> None:
-        async with served(_dispatcher(tmp_path, MUTATIONS[:1], inference_stages=True, batch_size=2)) as client:
-            for prompt in ("first", "second"):
-                response = await client.post(
-                    "/v1/chat/completions", headers=DELIVERY, json={"messages": [{"role": "user", "content": prompt}]}
-                )
-                assert response.status == 200
-                await response.read()
-
-            deadline = asyncio.get_running_loop().time() + _ASYNC_UPDATE_TIMEOUT_S
-            while True:
-                response = await client.get("/reef/harness", headers=DELIVERY)
-                if response.status == 200:
-                    manifest = await response.json()
-                    assert manifest["evaluation"]["published"] is True
-                    assert "marker rules" in manifest["files"]["pi-agent/AGENTS.md"]
-                    break
-                assert response.status == 404
-                await response.read()
-                if asyncio.get_running_loop().time() >= deadline:
-                    pytest.fail("record-driven step did not publish")
-                await asyncio.sleep(_ASYNC_UPDATE_POLL_S)
-
-    asyncio.run(run())
-
-
-@pytest.mark.unit
 @pytest.mark.parametrize(
-    ("adapter", "env_var", "compose_dir"),
+    ("layer", "message"),
     [
-        ("pi", "PI_CODING_AGENT_DIR", "pi-agent"),
-        ("opencode", "OPENCODE_CONFIG_DIR", "opencode"),
-        ("claude", "CLAUDE_CONFIG_DIR", "claude"),
-        # dsh's config file sits inside a profile; the relocated directory is the home two levels up.
-        ("dsh", "DSH_HOME", "dsh"),
-        ("hermes", "HERMES_HOME", "hermes"),
+        ({"args": [["--key", "{token}"]]}, "must not hold {token}"),
+        ({"register": [["login", "{token}"]]}, "must not hold {token}"),
+        ({"args": ["-e"]}, "a list of argument groups"),
+        ({"files": {}}, "an object of args, env, register and unregister"),
     ],
 )
-def test_install_script_relocates_every_bundled_adapters_compose_directory(
-    adapter: str, env_var: str, compose_dir: str
-) -> None:
-    descriptor = get_adapter(adapter)
-    files = render_composition([("rules", {"text": "hello"})], descriptor)
-    script = render_install_script(
-        descriptor=descriptor, files=files, release_id="v1", content_id="content-v1", scenario="s"
-    )
-    assert f'export REEF_HARNESS_ENV_VAR="{env_var}"' in script
-    assert f'COMPOSE_ABS="$ROOT_ABS/{compose_dir}"' in script
-
-
-#: The ref the bundled hermes descriptor pins, as the install script records it.
-HERMES_PIN = "https://github.com/NousResearch/hermes-agent@v2026.8.31"
-
-
-def _git_install_fixture(
-    tmp_path: Path, *, binary_version: str | None, pin: str | None = HERMES_PIN, ref: str | None = None
-) -> tuple[Path, Path, Path, dict, Path]:
-    """A rendered hermes script with git and python3 shims that log their calls and fake the venv.
-
-    ``pin`` is the ref recorded beside an already-installed binary (``None``
-    plants none); ``ref`` re-pins the descriptor, standing in for a pin bump.
-    """
-    descriptor = get_adapter("hermes")
-    if ref is not None:
-        descriptor = dataclasses.replace(descriptor, install=dataclasses.replace(descriptor.install, ref=ref))
-    script = tmp_path / "install.sh"
-    script.write_text(
-        render_install_script(
-            descriptor=descriptor,
-            files={"hermes/SOUL.md": "hello\n"},
-            release_id="v-test",
-            content_id="content-test",
-        )
-    )
-    prefix = tmp_path / "prefix"
-    if binary_version is not None:
-        _write_executable(
-            prefix / "venv/bin/hermes", f"#!/bin/sh\necho 'Hermes Agent v{binary_version} (2026.8.31)'\n"
-        )
-        if pin is not None:
-            (prefix / ".reef-install-pin").write_text(f"{pin}\n")
-    shim = tmp_path / "shim"
-    log = tmp_path / "vendor.log"
-    # POSIX sh (dash on CI): the clone target is the last argument, found by iterating.
-    _write_executable(
-        shim / "git",
-        f'#!/bin/sh\nprintf \'git %s\\n\' "$*" >> "{log}"\n'
-        'prev=""\nfor arg in "$@"; do\n'
-        '    [ "$prev" = "--branch" ] && ref="$arg"\n'
-        '    prev="$arg"\n    last="$arg"\ndone\n'
-        'if [ -d "$last" ] && [ -n "$(ls -A "$last")" ]; then\n'
-        "    echo \"fatal: destination path '$last' already exists and is not an empty directory.\" >&2\n"
-        "    exit 128\n"
-        "fi\n"
-        'mkdir -p "$last/.git"\nprintf \'%s\\n\' "$ref" > "$last/REF"\n',
-    )
-    # python3 -m venv DIR makes DIR/bin/python, whose -m pip install then drops the binary the pin expects.
-    # The install resolves python3 through sys.executable first: the shim names itself, so every later call
-    # still goes through it and lands in the log.
-    _write_executable(
-        shim / "python3",
-        "#!/bin/sh\n"
-        f'printf \'python3 %s\\n\' "$*" >> "{log}"\n'
-        'if [ "$1" = "-c" ] && [ "$2" = "import sys; print(sys.executable)" ]; then\n'
-        "    printf '%s\\n' \"$0\"\n"
-        "    exit 0\n"
-        "fi\n"
-        'if [ "$1" = "-m" ] && [ "$2" = "venv" ]; then\n'
-        '    mkdir -p "$3/bin"\n'
-        f'    printf \'#!/bin/sh\\nprintf "python %%s\\\\n" "$*" >> "{log}"\\nmkdir -p "$(dirname "$0")"\\n'
-        'printf "#!/bin/sh\\\\necho Hermes Agent v0.21.0\\\\n" > "$(dirname "$0")/hermes"\\nchmod +x "$(dirname "$0")/hermes"\\n\' > "$3/bin/python"\n'
-        '    chmod +x "$3/bin/python"\n'
-        "fi\n",
-    )
-    env = {**os.environ, "HOME": str(tmp_path / "home"), "PATH": f"{shim}:{os.environ['PATH']}"}
-    return script, tmp_path / "dest", prefix, env, log
-
-
-@pytest.mark.unit
-def test_git_install_kind_clones_the_pinned_ref_into_a_venv_over_a_failed_checkout(tmp_path) -> None:
-    """With the binary absent the install clones the pinned ref into a venv. git clone refuses a non-empty target,
-    so the run clears what a failed install left behind first: without that the first failure (or any pin bump)
-    wedges every later run on "destination path already exists" before a single file is written."""
-    script, dest, prefix, env, log = _git_install_fixture(tmp_path, binary_version=None)
-    (prefix / "src").mkdir(parents=True)
-    (prefix / "src/leftover").write_text("half a clone\n")
-    result = _run_install(script, dest, prefix, env)
-    assert result.returncode == 0, result.stderr
-    assert "already exists" not in result.stderr
-    assert not (prefix / "src/leftover").exists()
-    # The first three python3 calls are the install's: the sys.executable resolution of the interpreter it
-    # pins, the -P probe of it, then the import check; the vendor steps follow.
-    resolve, probe, check, *calls = log.read_text().splitlines()
-    assert resolve == "python3 -c import sys; print(sys.executable)"
-    assert probe == "python3 -P -c "
-    assert check == "python3 -P -c import reef_client.serve, reef.harness.client.wrapper"
-    assert calls[0] == (
-        f"git clone --quiet --depth 1 --branch v2026.8.31 https://github.com/NousResearch/hermes-agent {prefix}/src"
-    )
-    assert calls[1] == f"python3 -m venv {prefix}/venv"
-    assert calls[2] == f"python -m pip install --quiet -e {prefix}/src"
-    assert not (prefix / "src" / ".git").exists()  # the checkout's .git goes: nothing for a startup update check
-    assert (dest / "hermes/SOUL.md").read_text() == "hello\n"
-
-
-@pytest.mark.unit
-def test_git_install_kind_skips_the_clone_when_the_version_label_matches(tmp_path) -> None:
-    script, dest, prefix, env, log = _git_install_fixture(tmp_path, binary_version="0.21.0")
-    result = _run_install(script, dest, prefix, env)
-    assert result.returncode == 0, result.stderr
-    # The version answered, so the vendor step never ran (the reef-client step still calls python3).
-    assert "git clone" not in (log.read_text() if log.exists() else "")
-    assert "hermes 0.21.0 already installed" in result.stdout
-
-
-@pytest.mark.unit
-def test_git_install_kind_reinstalls_when_only_the_ref_moved(tmp_path) -> None:
-    """A date-tagged ref bump the package version does not follow still reinstalls.
-
-    hermes pins ``v2026.8.31`` but reports 0.21.0, so evaluating on the version
-    label alone would leave every existing install on the old checkout.
-    """
-    script, dest, prefix, env, _ = _git_install_fixture(tmp_path, binary_version="0.21.0", ref="v2026.9.2")
-    result = _run_install(script, dest, prefix, env)
-    assert result.returncode == 0, result.stderr
-    assert "already installed" not in result.stdout
-    assert (prefix / "src/REF").read_text() == "v2026.9.2\n"
-    assert (prefix / ".reef-install-pin").read_text() == "https://github.com/NousResearch/hermes-agent@v2026.9.2\n"
-
-
-@pytest.mark.unit
-def test_git_install_kind_reinstalls_when_the_binary_carries_no_recorded_pin(tmp_path) -> None:
-    """An existing binary does not establish that the pinned ref is checked out."""
-    script, dest, prefix, env, log = _git_install_fixture(tmp_path, binary_version="0.21.0", pin=None)
-    result = _run_install(script, dest, prefix, env)
-    assert result.returncode == 0, result.stderr
-    assert "already installed" not in result.stdout
-    assert "git clone" in log.read_text()
-
-
-@pytest.mark.unit
-def test_the_served_tree_carries_the_entries_list_where_the_adapter_declares_one(tmp_path, monkeypatch) -> None:
-    """``files.tree``: the base release carries the seed's list, a published release the commit's, byte for byte."""
-    carrying = dataclasses.replace(get_adapter("pi"), tree_path="pi-agent/tree.json")
-    monkeypatch.setitem(reef.harness.adapters._cache, "pi", carrying)
-    dispatcher = _dispatcher(tmp_path, MUTATIONS[:1], seed=SKILL_SEED)
-
-    async def run() -> None:
-        async with served(dispatcher) as client:
-            base = await client.get("/reef/harness", headers=DELIVERY)
-            assert base.status == 200
-            files = (await base.json())["files"]
-            assert json.loads(files["pi-agent/tree.json"]) == [dict(entry) for entry in SKILL_SEED]
-            manifest = await _gate_step(client)
-            text = manifest["files"]["pi-agent/tree.json"]
-            entries = json.loads(text)
-            assert [entry["id"] for entry in entries] == ["answer-style", "r1"]
-            assert entries[1] == {"id": "r1", "name": "rules", "config": {"text": "marker rules"}}
-            scenario = dispatcher.get_or_create_scenario("delivery")
-            assert scenario is not None
-            committed = scenario.release_queries.entries_for_version(
-                manifest["release_id"], scenario.surface.files_component
-            )
-            assert committed is not None and text == json.dumps(list(committed), indent=2, sort_keys=True) + "\n"
-            assert "pi-agent/tree.json" not in render_composition(NODES_V1, get_adapter("pi"))
-
-    asyncio.run(run())
-
-
-@pytest.mark.unit
-def test_a_pi_release_carries_no_entries_list_and_a_seed_with_reefs_own_entries_serves(tmp_path) -> None:
-    """The shipped pi descriptor declares no ``files.tree``: the base release, a published release and the
-    install script carry the rendered files alone, and a seed with reef's own entries boots and serves."""
-    notice = version_check_entry("pi")
-    dispatcher = _dispatcher(tmp_path, MUTATIONS[:1], seed=(notice,))
-
-    async def run() -> None:
-        async with served(dispatcher) as client:
-            base = await client.get("/reef/harness", headers=DELIVERY)
-            assert base.status == 200
-            files = (await base.json())["files"]
-            assert "pi-agent/tree.json" not in files
-            assert files["pi-agent/extensions/reef-version-check.ts"] == notice["config"]["code"]
-            response = await client.get("/reef/harness/install", params={"adapter": "pi"}, headers=DELIVERY)
-            assert response.status == 200
-            script = await response.text()
-            assert '"pi-agent/extensions/reef-version-check.ts"' in script and '"pi-agent/tree.json"' not in script
-            manifest = await _gate_step(client)
-            assert sorted(manifest["files"]) == [
-                "pi-agent/AGENTS.md",
-                "pi-agent/extensions/reef-version-check.ts",
-                "pi-agent/models.json",
-                "pi-agent/settings.json",
-            ]
-            # The entries live in the commit history, where the proposals route and the step's proposer read them.
-            scenario = dispatcher.get_or_create_scenario("delivery")
-            assert scenario is not None
-            entries = scenario.release_queries.entries_for_version(
-                manifest["release_id"], scenario.surface.files_component
-            )
-            assert entries is not None and list(entries) == [notice, *ENTRIES_V1]
-            assert tree_files(get_adapter("pi"), entries) == {}
-
-    asyncio.run(run())
-
-
-def _checked(*names: str) -> list[dict]:
-    """Check offs as reef-pi setup records them, one per name."""
-    return [{"name": name, "checked_at": float(index)} for index, name in enumerate(names, start=1)]
-
-
-def _files_under(dest: Path) -> set[str]:
-    return {str(path.relative_to(dest)) for path in dest.rglob("*") if path.is_file()}
-
-
-@pytest.mark.unit
-def test_install_script_refuses_a_release_whose_requires_are_not_checked_off_and_writes_nothing(tmp_path) -> None:
-    """The setup list is the message and no check runs (with no fallback release given the message ends there);
-    the release that requires nothing installs; once the release file checks every item off the release installs with
-    ``requires`` and the check offs carried over, and a rerun is current."""
-    prefix, env = _pinned_env(tmp_path)
-    dest = tmp_path / "dest"
-    ran = tmp_path / "ran"
-    requires = [
-        {"name": "TWILIO_SID", "kind": "env", "check": "TWILIO_SID"},
-        {"name": "notify", "kind": "permission", "check": f"touch {ran}"},
-    ]
-    v2 = tmp_path / "install-v2.sh"
-    v2.write_text(
-        render_install_script(
-            descriptor=get_adapter("pi"),
-            files={"pi-agent/AGENTS.md": "new rules\n"},
-            release_id="v2",
-            content_id="content-v2",
-            requires=requires,
-        )
-    )
-    result = _run_install(v2, dest, prefix, env)
-    assert result.returncode == 1
-    assert result.stderr.splitlines()[-4:] == [
-        "reef: this release requires:",
-        "    TWILIO_SID (env): TWILIO_SID",
-        f"    notify (permission): touch {ran}",
-        "reef: run reef-pi setup, then install again",
-    ]
-    assert _files_under(dest) == set() and not ran.exists()
-    # The refusal runs before the first mkdir: a refused run creates no directory at all.
-    assert not dest.exists()
-    # The parent requires nothing and installs; its release file carries the two empty lists.
-    v1 = _render_to(tmp_path / "install-v1.sh", {"pi-agent/AGENTS.md": "old rules\n"}, "v1")
-    assert _run_install(v1, dest, prefix, env).returncode == 0
-    release_file = dest / HARNESS_RELEASE_FILE
-    record = json.loads(release_file.read_text(encoding="utf-8"))
-    assert record["requires"] == [] and record["setup"] == []
-    # One item checked off: the refusal names only the other, and the parent's tree stays.
-    release_file.write_text(json.dumps({**record, "setup": _checked("TWILIO_SID")}, indent=2) + "\n", encoding="utf-8")
-    result = _run_install(v2, dest, prefix, env)
-    assert result.returncode == 1
-    assert "TWILIO_SID" not in result.stderr and f"    notify (permission): touch {ran}" in result.stderr
-    assert (dest / "pi-agent/AGENTS.md").read_bytes() == b"old rules\n" and not ran.exists()
-    # Every item checked off (plus one no release named): the install writes the tree and carries them all over.
-    release_file.write_text(
-        json.dumps({**record, "setup": _checked("TWILIO_SID", "notify", "old")}, indent=2) + "\n", encoding="utf-8"
-    )
-    result = _run_install(v2, dest, prefix, env)
-    assert result.returncode == 0, result.stderr
-    assert (dest / "pi-agent/AGENTS.md").read_bytes() == b"new rules\n" and not ran.exists()
-    written = {
-        "release_id": "v2",
-        "content_id": "content-v2",
-        "files": ["pi-agent/AGENTS.md"],
-        "requires": requires,
-        "setup": _checked("TWILIO_SID", "notify", "old"),
-    }
-    assert release_file.read_bytes() == (json.dumps(written, indent=2) + "\n").encode("utf-8")
-    # A rerun sees the check offs outside the hash and writes nothing.
-    release_file.chmod(0o444)
-    again = _run_install(v2, dest, prefix, env)
-    assert again.returncode == 0, again.stderr
-    assert "already current" in again.stdout
-    release_file.chmod(0o644)
-    # Back to the parent: the check offs survive a release that requires nothing.
-    assert _run_install(v1, dest, prefix, env).returncode == 0
-    record = json.loads(release_file.read_text(encoding="utf-8"))
-    assert record["release_id"] == "v1" and record["requires"] == []
-    assert record["setup"] == _checked("TWILIO_SID", "notify", "old")
-
-
-@pytest.mark.unit
-def test_install_script_embeds_requires_with_hostile_text_and_refuses_a_bad_list() -> None:
-    """The list rides single quoted, so a check with quotes and expansion syntax lands verbatim; the renderer
-    admits only the shape the training route admits."""
-    check = "osascript -e 'display notification \"$HOME\"' && echo `done`"
-    script = render_install_script(
-        descriptor=get_adapter("pi"),
-        files={"pi-agent/AGENTS.md": "hello\n"},
-        release_id="v1",
-        content_id="content-v1",
-        requires=[{"name": "notify", "kind": "permission", "check": check, "extra": "dropped"}],
-    )
-    expected = json.dumps([{"name": "notify", "kind": "permission", "check": check}])
-    assert f"REQUIRES='{expected.replace(chr(39), chr(39) + chr(92) + chr(39) * 2)}'" in script
-    assert '"requires": [' in script and '"extra"' not in script
-    assert "reef-pi doctor  # check the install: interpreter, service, binary, tools, release" in script
-    with pytest.raises(ValueError, match=r"requires\[0\]\.kind must be one of"):
-        render_install_script(
-            descriptor=get_adapter("pi"),
-            files={"pi-agent/AGENTS.md": "hello\n"},
-            release_id="v1",
-            content_id="content-v1",
-            requires=[{"name": "x", "kind": "secret"}],
-        )
-
-
-@pytest.mark.unit
-def test_install_script_refuses_before_the_vendor_install_naming_the_fallback_and_a_changed_check(tmp_path) -> None:
-    """Setup is checked first: with the binary absent a refused run calls no vendor install and makes no
-    directory, and the refusal's last line names the release that installs with nothing set up. A check off
-    whose recorded check is not the item's counts as unmet; the same check, or none recorded, counts by name."""
-    prefix = tmp_path / "prefix"
-    shim = tmp_path / "shim"
-    npm_log = tmp_path / "npm.log"
-    _write_executable(shim / "npm", f'#!/bin/sh\nprintf \'%s\\n\' "$@" >> "{npm_log}"\nexit 0\n')
-    env = _source_env(shim, tmp_path / "home")
-    dest = tmp_path / "dest"
-    v2 = tmp_path / "install-v2.sh"
-    v2.write_text(
-        render_install_script(
-            descriptor=get_adapter("pi"),
-            files={"pi-agent/AGENTS.md": "new rules\n"},
-            release_id="v2",
-            content_id="content-v2",
-            requires=[{"name": "notify", "kind": "permission", "check": "true"}],
-            fallback_release_id="v1",
-        )
-    )
-    assert "FALLBACK='v1'" in v2.read_text()
-    result = _run_install(v2, dest, prefix, env)
-    assert result.returncode == 1
-    assert result.stderr.splitlines()[-3:] == [
-        "reef: this release requires:",
-        "    notify (permission): true",
-        "reef: run reef-pi setup, then install again; with nothing set up yet, install ?release_id=v1 first: "
-        "it requires nothing",
-    ]
-    assert not dest.exists() and not prefix.exists() and not npm_log.exists()
-    # The binary in place, the check off decides: another recorded check is unmet, the same or none is met.
-    _write_executable(prefix / "node_modules/.bin/pi", "#!/bin/sh\necho 0.84.2\n")
-    dest.mkdir()
-    release_file = dest / HARNESS_RELEASE_FILE
-    for record, installs in (
-        ({"name": "notify", "checked_at": 1.0, "check": "false"}, False),
-        ({"name": "notify", "checked_at": 1.0, "check": "true"}, True),
-        ({"name": "notify", "checked_at": 1.0}, True),
-    ):
-        release_file.write_text(json.dumps({"release_id": "v1", "setup": [record]}, indent=2) + "\n", encoding="utf-8")
-        result = _run_install(v2, dest, prefix, env)
-        assert (result.returncode == 0) is installs, result.stderr
-        if installs:
-            assert (dest / "pi-agent/AGENTS.md").read_bytes() == b"new rules\n"
-            assert json.loads(release_file.read_text(encoding="utf-8"))["setup"] == [record]
-        else:
-            assert "    notify (permission): true" in result.stderr and _files_under(dest) == {release_file.name}
-    assert not npm_log.exists()
-
-
-@pytest.mark.unit
-def test_a_slow_install_render_starts_the_script_with_a_spinner_and_keeps_a_failure_the_scripts_exit(
-    tmp_path, monkeypatch
-) -> None:
-    """A render past the delay (a new scenario is created first) sends a preamble at once, so ``curl | bash``
-    shows progress; the script follows in one brace group, a failure becomes its message and exit 1, and a
-    connection that drops mid-script runs none of it."""
-    monkeypatch.setattr(system_routes, "INSTALL_PREAMBLE_DELAY_SECONDS", 0.05)
-    answers = iter(["#!/bin/sh\nset -eu\necho 'reef: done'\n", ArtifactNotFound("no release 'r9'")])
-
-    def slow_render(self, headers, adapter, release_id=None):
-        answer = next(answers)
-        Event().wait(0.2)
-        if isinstance(answer, Exception):
-            raise answer
-        return answer
-
-    monkeypatch.setattr(RequestService, "harness_install_script", slow_render)
-
-    def run_shell(script: str) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(["sh"], input=script, capture_output=True, text=True, timeout=10)
-
-    async def run() -> list[tuple[int, str]]:
-        async with served(_dispatcher(tmp_path, ())) as client:
-            texts = []
-            for _ in range(2):
-                response = await client.get("/reef/harness/install", params={"adapter": "pi"})
-                texts.append((response.status, await response.text()))
-            return texts
-
-    (status, script), (failed_status, failed) = asyncio.run(run())
-    assert status == 200 and script.startswith(render_install_preamble())
-    # curl passes a short first chunk into a pipe only with the next one and holds back its last partial block, so
-    # the preamble is padded past that buffer with comments that come after its commands.
-    preamble = render_install_preamble()
-    commands, _, padding = preamble.partition("\nfi\n")
-    assert len(preamble.encode()) >= PREAMBLE_MIN_BYTES and "if [ -t 1 ]" in commands
-    assert padding and all(line.startswith("#") for line in padding.splitlines())
-    assert script.endswith("echo 'reef: done'\n}\n")
-    ran = run_shell(script)
-    # Off a terminal the preamble says one static line instead of spinning.
-    assert ran.returncode == 0 and ran.stdout == "reef: preparing the harness install\nreef: done\n"
-
-    # The HTTP status went out with the preamble, so the failure is the script's message and exit status.
-    assert failed_status == 200
-    ran = run_shell(failed)
-    assert ran.returncode == 1
-    assert ran.stderr == "reef: the harness install failed (HTTP 404): no release 'r9'\n"
-
-    # A dropped connection leaves an unclosed group: the shell refuses it and runs nothing inside.
-    truncated = render_install_preamble() + render_streamed_install("echo 'reef: partial'\n").removesuffix("}\n")
-    ran = run_shell(truncated)
-    assert ran.returncode != 0 and "reef: partial" not in ran.stdout
-
-
-@pytest.mark.unit
-def test_the_install_script_warns_of_a_missing_token_only_when_the_service_wants_one(tmp_path: Path) -> None:
-    """A service with no token serves a script that installs without REEF_TOKEN and says nothing about it; a
-    request that carried a token reached a service that wants one, and its script warns when REEF_TOKEN is unset."""
-
-    async def script_for(tokens: tuple[str, ...], headers: dict[str, str]) -> str:
-        service_dir = tmp_path / f"service-{len(tokens)}"
-        service_dir.mkdir()
-        dispatcher = _dispatcher(service_dir, (), seed=RULES_SEED)
-        dispatcher.get_or_create_scenario("demo")
-        async with served(dispatcher, tokens=tokens) as client:
-            response = await client.get(
-                "/reef/harness/install?adapter=pi", headers={"x-reef-scenario": "demo", **headers}
-            )
-            assert response.status == 200
-            return await response.text()
-
-    open_script = asyncio.run(script_for((), {}))
-    assert "REEF_TOKEN is not set" not in open_script
-    guarded_script = asyncio.run(script_for(("tok",), {"Authorization": "Bearer tok"}))
-    assert "REEF_TOKEN is not set" in guarded_script
-    # The token itself stays out of the served script either way.
-    assert 'tok"' not in guarded_script and "Bearer tok" not in guarded_script
-
-
-@pytest.mark.unit
-def test_codex_install_route_includes_model_catalog(tmp_path: Path) -> None:
-    dispatcher = _dispatcher(
-        tmp_path,
-        (),
-        seed=RULES_SEED,
-        api="responses",
-        adapter="codex",
-        model_metadata={"demo-model": ModelMetadata(640_000, True)},
-    )
-
-    async def run() -> None:
-        async with served(dispatcher) as client:
-            response = await client.get("/reef/harness/install?adapter=codex", headers=DELIVERY)
-            assert response.status == 200
-            script = await response.text()
-            assert 'model_catalog_json = "models.json"' in script
-            assert '"slug": "demo-model"' in script
-            assert '"context_window": 640000' in script
-            assert '"max_context_window": 640000' in script
-
-    asyncio.run(run())
-
-
-@pytest.mark.unit
-def test_codex_install_resolves_same_model_on_changed_endpoint(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    def metadata(base_url: str, model: str, api_key: str | None) -> ModelMetadata:
-        if base_url == "http://localhost:8000":
-            return ModelMetadata(640_000, True)
-        return ModelMetadata(32_000, False)
-
-    monkeypatch.setattr("reef.harness.rollouts.model_binding.provider_model_metadata", metadata)
-    dispatcher = _dispatcher(tmp_path, (), seed=RULES_SEED, api="responses", adapter="codex")
-    scenario = dispatcher.get_or_create_scenario("delivery")
-    assert scenario.surface.harness.served_metadata == ModelMetadata(640_000, True)
-    scenario.model_config.runtime = InferenceProxyRuntime(
-        model_path="demo-model", base_url="http://alternate", api="responses"
-    )
-
-    async def run() -> None:
-        async with served(dispatcher) as client:
-            response = await client.get("/reef/harness/install?adapter=codex", headers=DELIVERY)
-            assert response.status == 200
-            script = await response.text()
-            assert '"context_window": 32000' in script
-            assert '"context_window": 640000' not in script
-            assert '"supports_reasoning_summary_parameter": false' in script
-
-    asyncio.run(run())
+def test_a_descriptor_layer_keeps_the_token_off_the_command_line(tmp_path, layer, message: str) -> None:
+    target = descriptor_with(tmp_path, "pi", lambda data: data["run"].__setitem__("layer", layer))
+    with pytest.raises(DescriptorError, match=re.escape(message)):
+        load_descriptor(target)

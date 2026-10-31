@@ -8,7 +8,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from reef.core.tasks import HarborTask, HarborTaskConflict, HarborTaskError, read_harbor_task, write_harbor_task
-from reef.harness.client.tasks import RolloutTurn, TaskRollout
+from reef.harness.tasks.rollouts import RolloutTurn, TaskRollout
 from reef.record2sample.generator import (
     DesignerRequest,
     DuplicateTask,

@@ -54,7 +54,7 @@ start.mkdir(parents=True)
 (start / "start.json").write_text(json.dumps(
     {"rollout_id": 0, "objective": None, "algorithm_state": {}, "schedule_state": None}))
 (directory / "checkpoints.json").write_text(json.dumps({"checkpoints": [
-    {"step": 2, "path": str(start), "release_path": str(start), "metrics": {"train/loss": 0.5}}]}))
+    {"step": 2, "path": str(start), "release_path": str(start), "metrics": {"train/loss": 0.5}, "changed_kinds": []}]}))
 (directory / "driver-result.json").write_text(json.dumps({"metrics": {"arguments": settings["arguments"]}}))
 """
 

@@ -93,7 +93,7 @@ from reef.train.slime_backend.rollout_group import (
     serving_session,
 )
 from reef.train.slime_backend.score_centering import ScoreCenteringSettings, settings_from_args
-from reef.train.task_rollouts import RolloutSettings, TaskJobRollouts, roll_out, task_name
+from reef.train.task_rollouts import RolloutSettings, TaskJobRollouts, run_train_tasks, task_name
 
 #: A start directory's description of the weights a later job continues from.
 START_STATE = "start.json"
@@ -512,7 +512,7 @@ class SlimeJobRunner(SlimeJobs):
         tasks = tuple(item for item in job.data.samples if isinstance(item, TaskSample))
         self.rollout_group.sync(self.group)
         try:
-            rollouts = roll_out(
+            rollouts = run_train_tasks(
                 tasks, settings, chat, model=self.args.hf_checkpoint, work_dir=directory / "rollouts", start=job.start
             )
         finally:

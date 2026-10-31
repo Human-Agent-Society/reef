@@ -3,7 +3,7 @@
 Each check names a ``key`` of the checked value and a ``match`` expression that
 every value at that key must match, such as
 ``Not(Lowercase(IsIn(["0", "false"])))``. The key syntax and what each matcher
-matches are the descriptor contract described in "Node checks" in
+matches are the descriptor contract described in "Config checks" in
 ``docs/developer-guide/harness-adapters.rst``.
 
 A match expression is parsed with Python's expression grammar, restricted to

@@ -29,7 +29,8 @@ def test_the_built_in_rules_activate_always_never_or_after_an_evaluation_that_pa
     reviewed = AlwaysActivate(frozenset({"skill"}))
     assert not reviewed.activates(MadeArtifact("harness", frozenset({"skill", "prompt"})))
     assert reviewed.activates(MadeArtifact("harness", frozenset({"prompt"})))
-    assert not AlwaysActivate().activates(MadeArtifact("harness", frozenset({"native_loop"}))), "always reviewed"
+    # The core rule names no part; a harness recipe adds the parts its adapter always reviews (test_native_loop).
+    assert AlwaysActivate().activates(MadeArtifact("harness", frozenset({"native_loop"})))
     gated = EvaluatedActivation(0.5)
     assert not gated.activates(weights)
     assert gated.activates_evaluated("a1", evaluation(1.0, 0.0)) and not gated.activates_evaluated(

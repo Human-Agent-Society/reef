@@ -7,6 +7,7 @@ import threading
 from pathlib import Path
 
 import pytest
+from tests.support.runtime_stubs import RunningEngines
 
 from reef.artifact import REFERENCE_FILE, DownloadedSnapshot, HuggingFaceRevision, HuggingFaceSource
 from reef.artifact.artifact import Artifact, ArtifactRef
@@ -15,7 +16,7 @@ from reef.core.weight_layout import ADAPTER_DIR
 from reef.runtime.deployment import InferenceService
 from reef.runtime.interfaces import InferenceBackend, InferenceHandler, RuntimeContractError
 from reef.runtime.residency import AdapterCapacityExhausted, AdapterResidencyError
-from reef.runtime.serving import AdapterServingRuntime, FullWeightServingRuntime, RunningEngines
+from reef.runtime.serving import AdapterServingRuntime, FullWeightServingRuntime
 from reef.surface.adapter import adapter_name, parse_adapter_name
 
 

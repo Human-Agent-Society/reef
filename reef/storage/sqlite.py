@@ -482,12 +482,21 @@ class SQLiteScenarioStorage(ScenarioStorage):
             stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
             destination = self._directory / "archived" / f"{self._scenario_key(scenario)}-{stamp}-{uuid.uuid4().hex}"
             moved: list[str] = []
+            database = paths[0]
             for path in paths:
-                if path.exists():
-                    destination.mkdir(parents=True, exist_ok=True)
-                    target = destination / path.name
+                if not path.exists():
+                    continue
+                destination.mkdir(parents=True, exist_ok=True)
+                target = destination / path.name
+                try:
                     shutil.move(str(path), str(target))
-                    moved.append(str(target))
+                except FileNotFoundError:
+                    # SQLite removes a WAL file only after it folded its frames into the database, which moved
+                    # first; a reader of another service that closes meanwhile makes it do so. Nothing is lost.
+                    if path == database:
+                        raise
+                    continue
+                moved.append(str(target))
             return (*moved, *archived_files)
 
     def prune(self, *, max_bytes: int) -> int:

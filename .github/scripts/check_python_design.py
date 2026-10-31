@@ -43,12 +43,8 @@ PROTOCOL_IGNORED_DIRECTORIES = {
 }
 # These are imported benchmark inputs, published output, or byte-exact fixtures,
 # rather than first-party Python source. Keep their ownership boundaries intact.
-PROTOCOL_EXCLUDED_TREES = (
-    "recipes/skillclaw/harbor/environment/workspace",
-    "tests/harness/data/harness_goldens",
-)
+PROTOCOL_EXCLUDED_TREES = ("tests/harness/data/harness_goldens",)
 PROTOCOL_EXCLUDED_FILES = (
-    "recipes/skillclaw/harbor/tests/grade.py",
     "recipes/tttd/examples/tttd/harbor/circle_packing_*/environment/score.py",
     "recipes/tttd/examples/tttd/results/*/best_solution.py",
     "recipes/meta_harness/results/reef_harness.py",

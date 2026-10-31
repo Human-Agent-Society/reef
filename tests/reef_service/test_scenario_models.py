@@ -1,4 +1,4 @@
-"""A real HTTP provider, proposer, judge and subprocess rollout share a scenario model setting.
+"""A real HTTP provider, method, judge and subprocess rollout share a scenario model setting.
 
 A scenario's model names the engine only (``url``, ``model``, ``api``); every call to it carries the deployment's
 provider key, which never reaches stored state or an API view.
@@ -15,21 +15,25 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
 
 import pytest
-from tests.support._strategies import resolve_proposer, resolve_rollout_scorer
+from tests.support._strategies import resolve_method, resolve_task_scorer
 from tests.support._trajectories import recorded_trajectory
+from tests.support.harness_service import harness_repository, job_backend
 
 from reef.artifact import Artifact, InMemoryRepositoryBackend
 from reef.dispatcher import Dispatcher
-from reef.evaluation.harness import ScoreComparisonPlugin
-from reef.harness.rollouts.model_binding import ModelBinding
+from reef.evaluation.harness import ComparePolicy, EvaluationSettings
+from reef.harness.tasks.model_binding import ModelBinding
+from reef.harness.tree import HarnessTree, TreePatch
 from reef.inference.http import InferenceProxyRuntime
 from reef.inference.model_config import ModelConfig
-from reef.recipe.cordis import CordisRecipe
+from reef.recipe.harness import EvolutionSettings, HarnessEvolutionRecipe
 from reef.runtime.executor.config import ExecutorSettings
 from reef.storage.scenario import ScenarioSettings
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
-from reef.train.cordis_backend import Mutation
+from reef.train.backend import ReleaseFiles
+from reef.train.harness_backend.state import HarnessState
+from reef.train.jobs import JobLoopState
 from reef.train.types import JobData
 
 
@@ -92,7 +96,7 @@ def engine_url(platform, name, version="1"):
 
 
 FAKE_AGENT = """#!/usr/bin/env python3
-import json, os, urllib.request
+import json, os, sys, urllib.request
 from pathlib import Path
 assert not os.environ.get("OPENAI_API_KEY")
 assert not os.environ.get("ANTHROPIC_API_KEY")
@@ -108,7 +112,7 @@ with urllib.request.urlopen(urllib.request.Request(url, data=json.dumps(body).en
     json.load(response)
 sessions = Path(os.environ["PI_CODING_AGENT_SESSION_DIR"])
 sessions.mkdir(parents=True, exist_ok=True)
-rules = root / "AGENTS.md"
+rules = Path(sys.argv[sys.argv.index("-e") + 1]) / "rules.md"
 (sessions / "session.jsonl").write_text(json.dumps({"type": "agent_end", "rules": rules.read_text() if rules.exists() else ""}) + "\\n")
 """
 
@@ -123,21 +127,19 @@ def make_recipe(platform, tmp_path):
     binary.write_text(FAKE_AGENT)
     binary.chmod(0o755)
 
-    def propose(nodes, samples, models):
-        assert models["teacher"].chat([{"role": "user", "content": "proposer"}]) == "OK"
-        return Mutation("create", "improvement", {"name": "rules", "config": {"text": "marker"}})
+    def method(workspace, services):
+        assert services.models["teacher"].chat([{"role": "user", "content": "method"}]) == "OK"
+        return TreePatch({"rules.md": "marker\n"})
 
     managed = ModelBinding(base_url=f"{platform['url']}/managed", api_key=PLATFORM_KEY, model="platform-model")
-    return CordisRecipe(
-        resolve_proposer(propose),
-        resolve_rollout_scorer(judge),
-        ("test task",),
+    return HarnessEvolutionRecipe(
+        method=resolve_method(method),
+        evolution=EvolutionSettings(binary=str(binary), state_dir=str(tmp_path / "harness")),
+        evaluation=EvaluationSettings(tasks=("test task",)),
+        scorer=resolve_task_scorer(judge),
         runtime=InferenceProxyRuntime(base_url=managed.base_url, api_key=managed.api_key, model_path=managed.model),
         models={"teacher": managed, "judge": managed},
-        binary=str(binary),
-        client_models=("managed-alternative",),
-        seed=({"id": "initial", "name": "skill", "config": {"name": "notes", "text": "notes"}},),
-        proposals_dir=str(tmp_path / "proposals"),
+        seed=HarnessTree({"skills/notes/SKILL.md": "notes\n"}),
     )
 
 
@@ -147,11 +149,9 @@ def test_full_evolution_uses_only_custom_binding(platform, tmp_path, monkeypatch
     monkeypatch.setenv("OPENAI_API_KEY", "must-not-reach-rollouts")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "must-not-reach-rollouts")
     recipe = replace(make_recipe(platform, tmp_path), worker_executor=ExecutorSettings(backend=executor))
-    initial = tmp_path / "initial"
-    initial.mkdir()
     dispatcher = Dispatcher(
         recipe,
-        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repo"),
+        harness_repository(tmp_path, recipe.base_artifact_source().files),
         scenario_storage=SQLiteScenarioStorage(),
         coordination=memory_coordination(),
     )
@@ -168,23 +168,27 @@ def test_full_evolution_uses_only_custom_binding(platform, tmp_path, monkeypatch
                     artifact, "/v1/messages/count_tokens", {"model": "custom-alpha", "messages": []}
                 )
             )
-        backend = scenario.trainer.candidate_backend
+        # A job carries the scenario's model without its key; the training component binds the deployment's key.
+        selected = scenario.trainer.job_loop_required().harness_parameters(
+            JobData("batch"), JobLoopState.from_dict(scenario.trainer.state)
+        )["scenario_model"]
+        assert selected == configure(platform, "alpha", api)
+        backend = job_backend(scenario.trainer, "harness", selected)
         prepared = backend.prepare_step(
             JobData("batch", (recorded_trajectory("record", {"messages": []}, 0.0),)),
-            backend.initial_state(),
+            HarnessState().to_json(),
             0,
+            head=ReleaseFiles("base", dict(recipe.seed.files)),
         )
         assert prepared.candidate is not None
-        # Updates between proposal and evaluation must not mix providers within the step.
+        # Updates between the method and the evaluation must not mix providers within the step.
         dispatcher.configure_scenario_model("alpha", configure(platform, "alpha", api, "2"))
-        plugin = ScoreComparisonPlugin(backend)
-        evaluation = plugin.evaluate(prepared.candidate)
-        result = backend.settle_step(prepared, plugin.decide(prepared.candidate, evaluation))
+        policy = ComparePolicy(backend)
+        evaluation = policy.evaluate(prepared.candidate)
+        result = backend.settle_step(prepared, policy.decide(prepared.candidate, evaluation))
         assert result.metrics["selected"] is True
         calls = platform["calls"]
-        assert len(calls) == (
-            7 if api == "anthropic" else 6
-        )  # inference, proposer, two rollouts, two judges (+ count)
+        assert len(calls) == (7 if api == "anthropic" else 6)  # inference, method, two rollouts, two judges (+ count)
         for path, raw_headers, body in calls:
             headers = {k.lower(): v for k, v in raw_headers.items()}
             assert path.startswith("/alpha/1/")
@@ -194,7 +198,7 @@ def test_full_evolution_uses_only_custom_binding(platform, tmp_path, monkeypatch
                 assert "authorization" not in headers
             else:
                 assert headers["authorization"] == f"Bearer {PLATFORM_KEY}"
-        assert PLATFORM_KEY not in json.dumps(prepared.candidate.candidate_files)
+        assert PLATFORM_KEY not in json.dumps(dict(prepared.candidate.candidate_tree.files))
         assert PLATFORM_KEY not in json.dumps(result.state)
         result.publication.artifact.discard()
         asyncio.run(
@@ -282,28 +286,20 @@ def test_model_auth_failure_never_falls_back(platform, tmp_path):
     bindings = recipe.model_bindings()
     platform["fail_models"] = True
     with pytest.raises(Exception, match="401"):
-        bindings["teacher"].chat([{"role": "user", "content": "proposer"}])
+        bindings["teacher"].chat([{"role": "user", "content": "method"}])
     assert len(platform["calls"]) == 1
     assert platform["calls"][0][0].startswith("/alpha/")
 
 
-def test_http_contract_updates_model_and_installs_selected_protocol(platform, tmp_path):
+def test_http_contract_updates_the_model_and_serves_no_provider(platform, tmp_path):
     from aiohttp.test_utils import TestClient, TestServer
 
-    from reef.harness.adapters import get_adapter
     from reef.service.app import create_app
-    from reef.service.request_service import RequestService
 
     recipe = make_recipe(platform, tmp_path)
-    initial = tmp_path / "initial"
-    initial.mkdir()
-    for path, content in recipe.base_artifact_source().files.items():
-        output = initial / path
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text(content)
     dispatcher = Dispatcher(
         recipe,
-        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repo"),
+        harness_repository(tmp_path, recipe.base_artifact_source().files),
         scenario_storage=SQLiteScenarioStorage(),
         coordination=memory_coordination(),
     )
@@ -354,20 +350,13 @@ def test_http_contract_updates_model_and_installs_selected_protocol(platform, tm
             assert (await updated.json())["model"]["api"] == "anthropic"
             fresh = await client.post("/v1/messages", headers=headers, json={"model": "custom-alpha", "messages": []})
             assert fresh.status == 200, await fresh.text()
-            service = RequestService(dispatcher)
             scenario = dispatcher.get_or_create_scenario("alpha")
-            # The live config takes precedence over the old release's model dialect.
-            binding = service._install_binding(
-                scenario,
-                {"release_id": scenario.repository.require_current_artifact().release_id},
-                get_adapter("pi"),
-                {"host": "platform.example", "x-forwarded-proto": "https"},
-            )
-            rendered = json.dumps(binding)
-            assert "anthropic-messages" in rendered
-            assert "https://platform.example" in rendered
-            assert PLATFORM_KEY not in rendered
-            assert "managed-alternative" not in rendered
+            # The served tree carries no provider: the deployment's key never reaches a client.
+            for form in ("rendered", "source"):
+                served = await client.get("/reef/harness", headers=headers, params={"form": form})
+                assert served.status == 200, await served.text()
+                files = json.dumps((await served.json())["files"])
+                assert PLATFORM_KEY not in files
             reset = await client.post("/reef/scenarios/alpha/update", headers=headers, json={"model": None})
             assert reset.status == 200
             assert (await reset.json())["model"] is None
@@ -401,7 +390,12 @@ def test_scenario_recovery_and_deletion_keep_model_lifecycle(platform, tmp_path)
             engine_url(platform, "alpha", "1"),
             PLATFORM_KEY,
         )
-        assert scenario.trainer.candidate_backend._models["judge"].base_url == engine_url(platform, "alpha", "1")
+        selected = scenario.trainer.job_loop_required().harness_parameters(
+            JobData("batch"), JobLoopState.from_dict(scenario.trainer.state)
+        )["scenario_model"]
+        assert job_backend(scenario.trainer, "harness", selected).models["judge"].base_url == engine_url(
+            platform, "alpha", "1"
+        )
         config = scenario.model_config
         previous_runtime = config.runtime
         reloaded = recovered.registry.reload("alpha")

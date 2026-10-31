@@ -146,10 +146,6 @@ class ProposalRecord:
     split: Literal["train", "eval"] = "train"
     infrastructure_failure: bool = False
 
-    @property
-    def is_written(self) -> bool:
-        return self.task_name is not None and not self.refusal
-
 
 @dataclass(frozen=True)
 class TaskMeasure:

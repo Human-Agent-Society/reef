@@ -328,7 +328,7 @@
    "request": null
   }
  ],
- "cordis_manual_cap": [
+ "trace_manual_cap": [
   {
    "consumed": [
     "i-c-0",

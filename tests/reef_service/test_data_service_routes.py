@@ -265,7 +265,7 @@ def test_the_contract_reports_what_the_scenario_can_run(tmp_path: Path) -> None:
     async def check(client: TestClient) -> None:
         assert (await client.post("/reef/scenarios", headers=AUTH, json={"name": "s"})).status == 201
         contract = await (await client.get("/reef/scenarios/s/contract", headers=AUTH)).json()
-        # The trainer steps on a candidate backend, so it can start from an artifact; the scenario has no runtime to
+        # The trainer's component starts jobs from releases, so it can start from an artifact; the scenario has no runtime to
         # evaluate on and none that loads its artifacts, so a served artifact needs only the durable history.
         assert contract["capabilities"] == {"serve_beside": True, "evaluate": [], "train_from": ["records"]}
 

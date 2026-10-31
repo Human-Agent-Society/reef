@@ -7,15 +7,22 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-import yaml
+
+from tests.support.harness_render import descriptor_data, write_descriptor
 
 import reef.harness.adapters
 from reef.harness.adapters import BUILTIN_ADAPTERS, builtin_descriptor_path, get_adapter
-from reef.harness.adapters.descriptor import AdapterDescriptor, AdapterRenderer, DescriptorError, load_descriptor
+from reef.harness.adapters.descriptor import (
+    ADAPTER_FILE,
+    AdapterDescriptor,
+    AdapterRenderer,
+    DescriptorError,
+    load_descriptor,
+)
 from reef.harness.adapters.matchers import ABSENT, parse_matcher
-from reef.harness.tree.render import RenderError, render_composition
+from reef.harness.tree import HarnessTree, RenderError, render_tree
 
-OPENCODE = "opencode/opencode.json"
+OPENCODE = "plugin/config.json"
 
 
 @pytest.mark.parametrize("adapter", BUILTIN_ADAPTERS)
@@ -27,7 +34,7 @@ def test_every_bundled_descriptor_loads(adapter: str) -> None:
 
 def test_every_descriptor_file_is_a_bundled_adapter() -> None:
     adapters_dir = Path(reef.harness.adapters.__file__).parent
-    assert {path.parent.name for path in adapters_dir.glob("*/descriptor.yaml")} == set(BUILTIN_ADAPTERS)
+    assert {path.parent.name for path in adapters_dir.glob(f"*/{ADAPTER_FILE}")} == set(BUILTIN_ADAPTERS)
 
 
 @pytest.mark.parametrize(
@@ -123,19 +130,17 @@ def checked(
 ) -> AdapterDescriptor:
     """The opencode descriptor with these checks and defaults on its primary target, loaded from YAML; with the
     base renderer unless ``renderer``, so only the checks act."""
-    data = yaml.safe_load((Path(reef.harness.adapters.__file__).parent / "opencode" / "descriptor.yaml").read_text())
-    primary = data["files"]["config"]["primary"]
+    data = descriptor_data("opencode")
+    primary = data["config"]["primary"]
     primary["checks"] = checks
     if defaults is not None:
         primary["defaults"] = defaults
-    path = tmp_path / "descriptor.yaml"
-    path.write_text(yaml.safe_dump(data), encoding="utf-8")
-    descriptor = load_descriptor(path)
+    descriptor = load_descriptor(write_descriptor(tmp_path, data))
     return descriptor if renderer else replace(descriptor, renderer=AdapterRenderer)
 
 
 def render_config(descriptor: AdapterDescriptor, data: dict[str, object]) -> dict[str, object]:
-    return json.loads(render_composition([("config", {"data": data})], descriptor)[OPENCODE])
+    return json.loads(render_tree(HarnessTree({"config/primary.json": json.dumps(data)}), descriptor)[OPENCODE])
 
 
 def test_is_default_keeps_the_value_the_defaults_set(tmp_path: Path) -> None:
@@ -145,7 +150,7 @@ def test_is_default_keeps_the_value_the_defaults_set(tmp_path: Path) -> None:
         {"autoupdate": False, "nested": {"key": 1}},
     )
     assert render_config(descriptor, {"autoupdate": False, "nested": {"key": 1}})["nested"] == {"key": 1}
-    with pytest.raises(RenderError, match=r"on autoupdate in opencode/opencode\.json: it must match IsDefault\(\)"):
+    with pytest.raises(RenderError, match=r"on autoupdate in plugin/config\.json: it must match IsDefault\(\)"):
         render_config(descriptor, {"autoupdate": True})
     # Booleans only match booleans: false refuses 0, which == false.
     with pytest.raises(RenderError, match="on autoupdate in"):
@@ -188,12 +193,12 @@ def test_a_refusal_names_the_failing_key_and_the_reason_but_not_the_value(tmp_pa
     with pytest.raises(RenderError) as refusal:
         render_config(descriptor, {"env": {"A": "1", "MY_TOKEN": "secret-value"}})
     assert str(refusal.value) == (
-        "opencode composition fails the check on env key 'MY_TOKEN' in opencode/opencode.json: "
+        "opencode harness tree fails the check on env key 'MY_TOKEN' in plugin/config.json: "
         "the binding owns credentials"
     )
     # Without a reason, the refusal gives the match expression, on one line however the descriptor wraps it.
     descriptor = checked(tmp_path, [{"key": ".", "match": "Each(Key(\n  IsIn(['a'])\n))"}], {})
-    with pytest.raises(RenderError, match=r"on key 'b' in opencode/opencode\.json: it must match Each\(Key\( IsIn"):
+    with pytest.raises(RenderError, match=r"on key 'b' in plugin/config\.json: it must match Each\(Key\( IsIn"):
         render_config(descriptor, {"b": 1})
 
 
@@ -241,4 +246,4 @@ def test_checks_change_no_rendered_file() -> None:
         descriptor,
         config_targets={name: replace(target, checks=()) for name, target in descriptor.config_targets.items()},
     )
-    assert render_composition([], unchecked) == render_composition([], descriptor)
+    assert render_tree(HarnessTree({}), unchecked) == render_tree(HarnessTree({}), descriptor)

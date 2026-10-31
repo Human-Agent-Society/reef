@@ -14,7 +14,8 @@ from typing import Any
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
-from tests.support._threshold_processor import threshold_pipeline
+from tests.support._threshold_processor import ThresholdJobData, threshold_pipeline
+from tests.support.runtime_stubs import StubTrainingComponent
 from tests.support.samples_service import make_samples
 
 from reef.artifact import Artifact, BaseArtifactSource, GitLFSRepositoryBackendFactory, InMemoryRepositoryBackend
@@ -24,53 +25,42 @@ from reef.core import AgentRecord, RequestType
 from reef.core.plugins import PluginReference
 from reef.core.reports import ReportValidationError, ScoredRolloutReport
 from reef.dispatcher import Dispatcher
-from reef.evaluation import EvaluationResult, UpdateCandidate
 from reef.evaluation.activation import AlwaysActivate, NeverActivate
 from reef.execution.workers import ServiceSet
+from reef.harness.adapters import get_adapter
+from reef.harness.sync import create_harness_surface
 from reef.inference.http import InferenceProxyRuntime
 from reef.pipeline_context import PipelineContext
 from reef.recipe import CompositeRecipe, Recipe, RecipeConfigError, build_recipe
 from reef.recipe.base import ServedEndpoint
 from reef.recipe.config import recipe_config_from_file_layout
 from reef.runtime.interfaces import InferenceHandler
+from reef.runtime.jobs import SavedCheckpoint, TrainingJob
 from reef.service.app import create_app
 from reef.service.request_service import RequestService
 from reef.storage.samples import consumed_sample_id
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.surface import ComponentSurface, Surface, TextFileTree, create_harness_surface
-from reef.train import CandidateBackend, PreparedStep, Trainer, TrainStepResult
+from reef.surface import ComponentSurface, Surface, TextFileTree
+from reef.train import Trainer, TrainStepResult
+from reef.train.jobs import JobLoop
 from reef.train.pipeline import TrainingPipeline
 
 
-class _FileBackend(CandidateBackend):
-    """Publish one text file per step for whatever component this recipe evolves."""
+class _FileJobs(StubTrainingComponent):
+    """A training component whose ``n``-th job saves one text file, ``<label>.txt`` = ``<label> step <n>``, for
+    whatever component this recipe evolves."""
 
     def __init__(self, label: str, artifact_dir: Path) -> None:
+        super().__init__(artifact_dir, name=label, shares_scenarios=True, release_format=None)
         self.label = label
-        self.artifact_dir = artifact_dir
-        self.result: TrainStepResult | None = None
 
-    def initial_state(self) -> Mapping[str, Any]:
-        return {"steps": 0}
-
-    def prepare_step(self, batch, state, scenario_step):
-        step = int(state["steps"]) + 1
-        path = self.artifact_dir / self.label / str(step)
+    def train(self, job: TrainingJob) -> tuple[SavedCheckpoint, ...]:
+        step = len(self.submitted)
+        path = self.checkpoint_root / self.label / str(step)
         path.mkdir(parents=True)
         (path / f"{self.label}.txt").write_text(f"{self.label} step {step}", encoding="utf-8")
-        self.result = TrainStepResult({"steps": step}, artifact=Artifact.local(path))
-        return PreparedStep.with_candidate(UpdateCandidate(batch.data_id), state={"steps": step})
-
-    def evaluate(self, candidate):
-        return EvaluationResult("test", "1", {})
-
-    def settle_step(self, prepared, decision):
-        assert self.result is not None
-        return self.result
-
-    def abort_step(self, prepared):
-        pass
+        return (SavedCheckpoint(0, str(path), str(path)),)
 
 
 @dataclass(frozen=True)
@@ -82,7 +72,7 @@ class _TreeRecipe(Recipe):
     seed: Mapping[str, str] | None = None
 
     def build_surface(self, scenario: str) -> Surface:
-        return create_harness_surface(served_model="served-model")
+        return create_harness_surface(get_adapter("pi"))
 
     def base_artifact_source(self) -> BaseArtifactSource:
         return BaseArtifactSource(files=self.seed or {})
@@ -90,17 +80,25 @@ class _TreeRecipe(Recipe):
     def step_pipeline(self, context: PipelineContext) -> TrainingPipeline:
         return threshold_pipeline(context)
 
-    def step_backend(self) -> CandidateBackend:
-        return _FileBackend(self.label, self.artifact_dir)
+    def step_jobs(self) -> _FileJobs:
+        return _FileJobs(self.label, self.artifact_dir)
 
     def build(
-        self, scenario, records, *, algorithm_state=None, experiment_logger=None, task_storage=None, samples=None
+        self,
+        scenario,
+        records,
+        *,
+        algorithm_state=None,
+        experiment_logger=None,
+        task_storage=None,
+        releases=None,
+        samples=None,
     ):
         return Trainer.build(
             scenario,
             records,
             pipeline_factory=self.step_pipeline,
-            candidate_backend=self.step_backend(),
+            job_loop=JobLoop(self.step_jobs(), scenario=scenario),
             algorithm_state=algorithm_state,
             report_type=self.report_type,
             experiment_logger=experiment_logger,
@@ -182,7 +180,6 @@ def test_composite_recipe_merges_surfaces_seeds_and_trainers(tmp_path: Path) -> 
     surface = recipe.build_surface("agent")
     assert surface.names == ("harness", "config")
     assert surface.files_component == "harness"
-    assert surface.harness is not None and surface.harness.served_model == "served-model"
     base = recipe.base_artifact_source()
     assert base.files == {
         "harness/AGENTS.md": "seed",
@@ -195,8 +192,8 @@ def test_composite_recipe_merges_surfaces_seeds_and_trainers(tmp_path: Path) -> 
         "agent", SQLiteScenarioStorage().open("agent").records, surface=surface, algorithm_states={}
     )
     assert [component_trainer.component for component_trainer in trainers] == ["harness", "config"]
-    assert trainers[0].trainer.candidate_backend is not None
-    assert trainers[1].trainer.candidate_backend is None
+    assert trainers[0].trainer.trains
+    assert not trainers[1].trainer.trains
 
 
 @pytest.mark.unit
@@ -210,7 +207,7 @@ def test_composite_recipe_rejects_incoherent_components(tmp_path: Path) -> None:
     with pytest.raises(RecipeConfigError, match="reserves"):
         CompositeRecipe(components={"step": _TreeRecipe(), "config": _ConfigRecipe()})
     two_trees = CompositeRecipe(components={"a": _TreeRecipe(label="a"), "b": _TreeRecipe(label="b")})
-    with pytest.raises(RecipeConfigError, match="harness information"):
+    with pytest.raises(ValueError, match="at most one component exposes a client-pulled file tree"):
         two_trees.build_surface("agent")
 
 
@@ -286,6 +283,21 @@ def test_service_connects_the_training_component_of_a_composite_weight_component
     assert recipe.training_component.received_model_path == "demo-model"
     assert all(component.training_component is recipe.training_component for component in recipe.components.values())
     assert all(component.runtime is recipe.runtime for component in recipe.components.values())
+
+    # The components share one job component; a replacement reaches every component that submits its jobs.
+    from tests.support.runtime_stubs import StubTrainingComponent
+
+    shared = recipe.training_component
+    assert recipe.job_components() == (shared,)
+    queued = StubTrainingComponent(name=shared.name)
+    moved = recipe.with_job_components({shared.name: queued})
+    assert moved.job_components() == (queued,)
+    assert all(
+        component.training_component is (None if original.training_component is None else queued)
+        for component, original in zip(moved.components.values(), recipe.components.values(), strict=True)
+    )
+    with pytest.raises(ValueError, match=r"the job components of CompositeRecipe are \['stub'\], not \[\]"):
+        recipe.with_job_components({})
 
     # A flat weight recipe setting has no place at the top of a composite.
     with pytest.raises(ValueError, match=r"reef\.training_mode is not a setting of CompositeRecipe"):
@@ -421,16 +433,24 @@ def test_composite_scenario_serves_its_config_and_reports_components(tmp_path: P
         rows = scenario.releases()
         assert rows[0]["component"] == "harness"
         assert "component" not in rows[1]
-        # The config component runs no step: the one commit is the harness's, naming the rows it consumed and the
-        # harness's sample of them.
+        # The config component runs no step: the one commit is the harness's job submission, naming the rows it
+        # consumed and the harness's sample of them.
         assert scenario.store.history()[-1].consumed_ids == {"i1", "r1", consumed_sample_id("harness:r1:0")}
+        # The job ended in submit: its checkpoint and its end follow, and consume nothing.
+        checkpoint = None
+        while scenario.trainer_for("harness").job_running:
+            polled = scenario.prepare_training_step("harness")
+            checkpoint = polled if polled.artifact is not None else checkpoint
+            scenario.commit(polled, component="harness")
+        assert checkpoint is not None
+        assert all(record.consumed_ids == frozenset() for record in scenario.store.history()[1:])
         status = dispatcher.build_training_status()["scenarios"]["agent"]
-        assert status["components"]["harness"]["last_committed_step"]["step"] == 1
+        assert status["components"]["harness"]["last_committed_step"]["step"] == 3
         assert status["components"]["config"]["last_committed_step"] is None
-        manifest = RequestService(dispatcher).harness_manifest({"x-reef-scenario": "agent"})
+        manifest = RequestService(dispatcher).harness_manifest({"x-reef-scenario": "agent"}, form="source")
         assert manifest["files"] == {"harness.txt": "harness step 1"}
         assert set(manifest["components"]) == {"harness", "config"}
-        assert manifest["components"]["harness"] == result.artifact.ref.content_id
+        assert manifest["components"]["harness"] == checkpoint.artifact.ref.content_id
 
 
 @dataclass(frozen=True)
@@ -585,9 +605,9 @@ def test_a_flat_scenario_without_a_durable_log_still_serves_its_head(tmp_path: P
     """The harness head of a flat scenario is the served release, found on the chain when the log keeps no rows."""
     tree = tmp_path / "seed"
     tree.mkdir()
-    (tree / "AGENTS.md").write_text("seed")
+    (tree / "rules.md").write_text("seed")
     dispatcher = Dispatcher(
-        _TreeRecipe(label="harness", artifact_dir=tmp_path / "steps", seed={"AGENTS.md": "seed"}),
+        _TreeRecipe(label="harness", artifact_dir=tmp_path / "steps", seed={"rules.md": "seed"}),
         InMemoryRepositoryBackend.factory(tree, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(None),
@@ -600,13 +620,13 @@ def test_a_flat_scenario_without_a_durable_log_still_serves_its_head(tmp_path: P
         headers = {"x-reef-scenario": "agent"}
         evolved = tmp_path / "evolved"
         evolved.mkdir()
-        (evolved / "AGENTS.md").write_text("evolved")
+        (evolved / "rules.md").write_text("evolved")
         scenario.commit(TrainStepResult(state={}, artifact=Artifact.local(evolved)))
         head = scenario.current_artifact_ref().release_id
-        assert service.harness_release_id(scenario) == head
-        manifest = service.harness_manifest(headers)
-        assert manifest["release_id"] == head and manifest["files"] == {"AGENTS.md": "evolved"}
-        assert f'"release_id": "{head}"' in service.harness_install_script(headers, adapter="pi")
+        source = service.harness_manifest(headers, form="source")
+        assert source["release_id"] == head and source["files"] == {"rules.md": "evolved"}
+        # The default form renders the source tree for the adapter.
+        assert service.harness_manifest(headers)["files"]["plugin/rules.md"].startswith("evolved")
     finally:
         dispatcher.close()
 
@@ -638,35 +658,35 @@ def test_the_evaluation_route_names_the_scenario_in_its_path(tmp_path: Path) -> 
         assert dispatcher.get_or_create_scenario("other", allow_implicit_creation=False) is None
 
 
-class _ClosingBackend(_FileBackend):
-    """A backend whose close waits for the rollout call in flight, as a worker pool's close waits for its batch."""
+class _ClosingJobData(ThresholdJobData):
+    """A sample-to-job stage whose close waits for the rollout call in flight, as a worker pool's close waits for its
+    batch: the trainer closes its pipeline when the scenario is deleted."""
 
-    def __init__(
-        self, label: str, artifact_dir: Path, closing: threading.Event, rollout_done: threading.Event
-    ) -> None:
-        super().__init__(label, artifact_dir)
+    def __init__(self, context: PipelineContext, closing: threading.Event, rollout_done: threading.Event) -> None:
+        super().__init__(context, None, None)
         self.closing = closing
         self.rollout_done = rollout_done
 
     def close(self) -> None:
         self.closing.set()
         self.rollout_done.wait(10)
+        super().close()
 
 
 @dataclass(frozen=True)
 class _RolloutTreeRecipe(_TreeRecipe):
-    """The tree recipe whose backend closes only once its evaluation rollout has made its last call."""
+    """The tree recipe whose pipeline closes only once its evaluation rollout has made its last call."""
 
     closing: threading.Event = field(default_factory=threading.Event)
     rollout_done: threading.Event = field(default_factory=threading.Event)
 
-    def step_backend(self) -> CandidateBackend:
-        return _ClosingBackend(self.label, self.artifact_dir, self.closing, self.rollout_done)
+    def step_pipeline(self, context: PipelineContext) -> TrainingPipeline:
+        return threshold_pipeline(context, sample2job=_ClosingJobData(context, self.closing, self.rollout_done))
 
 
 @pytest.mark.unit
 def test_an_evaluation_call_during_a_delete_neither_holds_it_up_nor_brings_the_scenario_back(tmp_path: Path) -> None:
-    """A delete closes the scenario's backend, which waits for the evaluation rollout in flight; the rollout's call
+    """A delete closes the scenario's pipeline, which waits for the evaluation rollout in flight; the rollout's call
     must not wait for the scenario the delete holds, and must not create the scenario again once the delete ends."""
     harness = _RolloutTreeRecipe(label="harness", artifact_dir=tmp_path / "steps", seed={"AGENTS.md": "seed"})
     runtime = InferenceProxyRuntime(base_url="http://engine.test", model_path="m")

@@ -188,16 +188,8 @@ const preservedModelPrompts = new Map([
     /(^_JUDGE_SYSTEM_PROMPT = \(\n)((?:[ \t]+(?:"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*')[ \t]*\n)+)(\))/gm,
   ],
   [
-    "recipes/skillclaw/harness/prompts.py",
-    /(^(?:EVOLVE_SYSTEM|CREATE_SYSTEM|JUDGE_SYSTEM) = """)([\s\S]*?)(""")/gm,
-  ],
-  [
     "recipes/meta_harness/results/reef_harness.py",
     /(^[ \t]+_REVIEW_GATE = """)([\s\S]*?)(""")/gm,
-  ],
-  [
-    "recipes/skillclaw/harness/evolver.py",
-    /(^[ \t]*f")(## Session evidence \(\{len\(sessions\)\} sessions\)\\n\\n)(")/gm,
   ],
 ]);
 
