@@ -22,7 +22,7 @@ from reef.runtime.jobs import JobStatus, ReleaseFormat, SavedCheckpoint, Trainin
 from reef.sample2job import Sample2Job
 from reef.storage.samples import TrainerSamples
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
-from reef.train.jobs import JobLoop, JobLoopState, RunningJob
+from reef.train.jobs import JobLoop, JobLoopState, RunningJob, SubmitParameters
 from reef.train.pipeline import TrainingPipeline
 from reef.train.trainer import Trainer
 from reef.train.types import JobData
@@ -471,3 +471,28 @@ def test_an_sft_job_and_then_an_rl_job_each_take_the_parameters_of_their_instruc
         "TrajectorySample",
         "TaskSample",
     ]
+
+
+class ScenarioModel(SubmitParameters):
+    """The scenario's own model, read when each job is submitted."""
+
+    def __init__(self) -> None:
+        self.model = "first"
+
+    def parameters(self, data: JobData) -> dict[str, str]:
+        return {"model": self.model}
+
+
+@pytest.mark.unit
+def test_a_job_gets_the_parameters_that_its_scenario_knows_when_it_is_submitted(component) -> None:
+    model = ScenarioModel()
+    loop = JobLoop(component, scenario="math", submitted=model)
+    state = JobLoopState.from_dict(loop.submit(JobLoopState("fake:base"), batch(), PARAMETERS).result.state)
+    assert component.jobs[-1].parameters == {"method": "sft", "model": "first"}
+    # A later job reads the scenario again; the parameters name the job, so its ID differs.
+    model.model = "second"
+    ended = loop.end(state, JobStatus(state.job.job_id, "finished"))
+    loop.submit(JobLoopState.from_dict(ended.result.state), batch(), PARAMETERS)
+    assert component.jobs[-1].parameters["model"] == "second"
+    with pytest.raises(ValueError, match="already name"):
+        loop.submit(JobLoopState("fake:base"), batch(), {"model": "the stage's"})
