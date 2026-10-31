@@ -14,11 +14,12 @@ from pathlib import Path
 
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
-from sqlalchemy import Column, LargeBinary, MetaData, Table, cast, func, inspect, select
+from sqlalchemy import Column, LargeBinary, MetaData, Table, cast, func, inspect, select, update
 from sqlalchemy.engine import Connection
 
 from reef.core.errors import ReefError
 from reef.storage.commits import read_consumed_ids
+from reef.storage.work_queue import FINAL_STATES
 
 
 def migrate_record_storage(connection: Connection, records: Table, consumption: Table) -> None:
@@ -148,6 +149,32 @@ def migrate_sample_columns(connection: Connection, samples: Table) -> None:
                 Column(name, column.type, nullable=column.nullable, server_default=column.server_default),
                 schema=samples.schema,
             )
+
+
+def migrate_work_item_columns(connection: Connection, work_items: Table) -> None:
+    """Add to an existing ``work_item`` table the columns that it lacks: ``started_at``, ``ended_at`` and
+    ``metadata_json``. A final item that was stored before ended at its last change (``changed_at``), since a
+    final item did not change; the start of an earlier item is not known, so it stays NULL. Earlier items have no
+    metadata.
+
+    Run in the caller's schema transaction, after ``create_all``; a table that ``create_all`` made has them all.
+    """
+    columns = {column["name"] for column in inspect(connection).get_columns(work_items.name, schema=work_items.schema)}
+    operations = Operations(MigrationContext.configure(connection))
+    for name in ("started_at", "ended_at", "metadata_json"):
+        if name not in columns:
+            column = work_items.c[name]
+            operations.add_column(
+                work_items.name,
+                Column(name, column.type, nullable=column.nullable, server_default=column.server_default),
+                schema=work_items.schema,
+            )
+    if "ended_at" not in columns:
+        connection.execute(
+            update(work_items)
+            .where(work_items.c.state.in_(sorted(FINAL_STATES)))
+            .values(ended_at=work_items.c.changed_at)
+        )
 
 
 def migrate_uploaded_trajectories(connection: Connection, samples: Table, train_counts: Table, commits: Table) -> None:

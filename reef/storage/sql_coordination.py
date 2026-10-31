@@ -61,6 +61,7 @@ from reef.core.values import require_text
 from reef.storage.control_lease import ControlLease, ControlLeaseState
 from reef.storage.coordination import Coordination, CoordinationResource
 from reef.storage.marks import Marks, check_mark_name
+from reef.storage.migrations import migrate_work_item_columns
 from reef.storage.postgres import postgres_url, validate_postgres_schema
 from reef.storage.served_models import ControlLeaseConflict, ServedModelsWriter
 from reef.storage.sqlite import enable_wal
@@ -142,12 +143,15 @@ def coordination_tables(metadata: MetaData) -> CoordinationTables:
         Column("available_at", Float, nullable=False),
         Column("created_at", Float, nullable=False),
         Column("changed_at", Float, nullable=False),
+        Column("started_at", Float, nullable=True),
+        Column("ended_at", Float, nullable=True),
         Column("attempt_count", Integer, nullable=False),
         Column("worker_id", Text, nullable=True),
         Column("lease_expires_at", Float, nullable=True),
         Column("progress_json", Text, nullable=False),
         Column("result_json", Text, nullable=True),
         Column("error", Text, nullable=True),
+        Column("metadata_json", Text, nullable=False, server_default="{}"),
         Column("created_sequence", BigInteger, nullable=False, index=True),
         Column("changed_sequence", BigInteger, nullable=False, index=True),
         PrimaryKeyConstraint("queue", "item_id"),
@@ -221,6 +225,7 @@ class CoordinationDatabase(CoordinationResource):
 
     def create(self, connection: Connection, metadata: MetaData) -> None:
         metadata.create_all(connection)
+        migrate_work_item_columns(connection, self.tables.work_item)
         present = set(connection.execute(select(self.tables.sequence.c.id)).scalars())
         for sequence in (WORK_SEQUENCE, SERVED_SEQUENCE):
             if sequence not in present:
@@ -568,12 +573,15 @@ def item_from_row(row: RowMapping) -> WorkItem:
         serial_key=row["serial_key"],
         available_at=float(row["available_at"]),
         created_at=float(row["created_at"]),
+        started_at=None if row["started_at"] is None else float(row["started_at"]),
+        ended_at=None if row["ended_at"] is None else float(row["ended_at"]),
         attempt_count=int(row["attempt_count"]),
         worker_id=row["worker_id"],
         lease_expires_at=None if row["lease_expires_at"] is None else float(row["lease_expires_at"]),
         progress=tuple(json.loads(row["progress_json"])),
         result=None if row["result_json"] is None else json.loads(row["result_json"]),
         error=row["error"],
+        metadata=json.loads(row["metadata_json"]),
         created_sequence=int(row["created_sequence"]),
         changed_sequence=int(row["changed_sequence"]),
     )
@@ -698,6 +706,7 @@ class SQLWorkQueue(WorkQueue):
                 changed_at=moment,
                 attempt_count=0,
                 progress_json="[]",
+                metadata_json="{}",
                 created_sequence=sequence,
                 changed_sequence=sequence,
             )
@@ -709,7 +718,7 @@ class SQLWorkQueue(WorkQueue):
 
     def delete_final(self, *, finished_before: float) -> int:
         statement = delete(self.table).where(
-            self.table.c.state.in_(sorted(FINAL_STATES)), self.table.c.changed_at < finished_before
+            self.table.c.state.in_(sorted(FINAL_STATES)), self.table.c.ended_at < finished_before
         )
         with self.database.write(WORK_SEQUENCE) as (connection, _counter):
             return int(connection.execute(statement).rowcount or 0)
@@ -762,6 +771,7 @@ class SQLWorkQueue(WorkQueue):
                 worker_id=worker_id,
                 lease_expires_at=moment + self.lease_seconds,
                 attempt_count=chosen.attempt_count + 1,
+                started_at=moment if chosen.started_at is None else chosen.started_at,
                 error=None,
             )
 
@@ -811,6 +821,7 @@ class SQLWorkQueue(WorkQueue):
                 result=dict(result),
                 worker_id=None,
                 lease_expires_at=None,
+                ended_at=moment,
             )
 
     def fail(
@@ -837,10 +848,12 @@ class SQLWorkQueue(WorkQueue):
                 error=error,
                 worker_id=None,
                 lease_expires_at=None,
+                ended_at=None if again else moment,
             )
 
     def cancel(self, queue: str, item_id: str, error: str) -> WorkItem | None:
         require_text(error, "error")
+        moment = time.time()
         with self.database.write(WORK_SEQUENCE) as (connection, counter):
             item = self.row(connection, queue, item_id, lock=True)
             if item is None or item.final:
@@ -849,11 +862,24 @@ class SQLWorkQueue(WorkQueue):
                 connection,
                 counter,
                 item,
-                time.time(),
+                moment,
                 state="failed",
                 error=error,
                 worker_id=None,
                 lease_expires_at=None,
+                ended_at=moment,
+            )
+
+    def set_metadata(self, queue: str, item_id: str, name: str, value: JsonValue) -> WorkItem | None:
+        require_text(name, "name")
+        with self.database.write(WORK_SEQUENCE) as (connection, counter):
+            item = self.row(connection, queue, item_id, lock=True)
+            if item is None or (
+                name in item.metadata and canonical_json(item.metadata[name]) == canonical_json(value)
+            ):
+                return item
+            return self.save(
+                connection, counter, item, time.time(), metadata_json=canonical_json({**item.metadata, name: value})
             )
 
     def requeue_expired(self, *, now: float | None = None) -> tuple[WorkItem, ...]:
@@ -869,19 +895,23 @@ class SQLWorkQueue(WorkQueue):
             query = query.with_for_update(skip_locked=True)
         with self.database.write(WORK_SEQUENCE) as (connection, counter):
             expired = [item_from_row(row) for row in connection.execute(query).mappings().all()]
-            return tuple(
-                self.save(
-                    connection,
-                    counter,
-                    item,
-                    moment,
-                    state="queued" if item.attempt_count < self.attempts_allowed(item.queue) else "failed",
-                    error="the worker's lease expired",
-                    worker_id=None,
-                    lease_expires_at=None,
+            changed = []
+            for item in expired:
+                again = item.attempt_count < self.attempts_allowed(item.queue)
+                changed.append(
+                    self.save(
+                        connection,
+                        counter,
+                        item,
+                        moment,
+                        state="queued" if again else "failed",
+                        error="the worker's lease expired",
+                        worker_id=None,
+                        lease_expires_at=None,
+                        ended_at=None if again else moment,
+                    )
                 )
-                for item in expired
-            )
+            return tuple(changed)
 
     def get(self, queue: str, item_id: str) -> WorkItem | None:
         with self.database.read() as connection:

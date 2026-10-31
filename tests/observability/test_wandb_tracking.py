@@ -6,7 +6,12 @@ import time
 import pytest
 
 from reef.core.artifact_ref import ArtifactRef
-from reef.observability.base import TrainFromExperimentEvent, TrainingExperimentContext, TrainingExperimentEvent
+from reef.observability.base import (
+    ExperimentRun,
+    TrainFromExperimentEvent,
+    TrainingExperimentContext,
+    TrainingExperimentEvent,
+)
 from reef.observability.operations import OperationMetrics
 from reef.observability.wandb import WandbConfig, WandbExperimentTracker
 from reef.service.deploy.service_config import service_config_from_mapping
@@ -21,6 +26,8 @@ class _StubRun:
         self.summary: dict[str, object] = {}
         self.artifacts: list[object] = []
         self.finished = False
+        # An offline run has no page yet; an online run gives its page.
+        self.url: str | None = None
 
     def define_metric(self, *args, **kwargs) -> None:
         self.defined.append((args, kwargs))
@@ -516,3 +523,27 @@ def test_a_component_trainers_metrics_keep_their_own_names() -> None:
     assert [row["weights/step/step"] for row in reward_rows] == [2, 3]
     assert run.summary["reef/weights/optimizer_steps"] == 4
     tracker.close()
+
+
+def test_the_run_of_a_context_is_named_with_its_page_while_the_run_is_open() -> None:
+    client = _StubClient()
+    tracker = _tracker(client)
+    assert tracker.experiment_run(_context()) is None
+    tracker.record(_event())
+    run_id = client.init_calls[0]["id"]
+    # An offline run gives no URL: the page is where the run is once it is synced, under the configured entity.
+    assert tracker.experiment_run(_context()) == ExperimentRun(
+        "wandb", "reef-tests", run_id, "has", f"https://wandb.ai/has/reef-tests/runs/{run_id}"
+    )
+    client.runs[0].url = f"https://wandb.ai/has-team/reef-tests/runs/{run_id}"
+    assert tracker.experiment_run(_context()).url == client.runs[0].url
+
+    no_entity = _tracker(_StubClient(), entity=None)
+    no_entity.record(_event())
+    assert no_entity.experiment_run(_context()).url is None
+    disabled = _tracker(_StubClient(), enabled=False)
+    disabled.record(_event())
+    assert disabled.experiment_run(_context()) is None
+    failed = _tracker(_StubClient(fail_init=True))
+    failed.record(_event())
+    assert failed.experiment_run(_context()) is None
