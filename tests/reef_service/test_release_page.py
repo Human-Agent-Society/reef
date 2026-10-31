@@ -35,6 +35,7 @@ from reef.recipe.cordis import CordisRecipe
 from reef.service.app import create_app
 from reef.service.page_layout import status_label
 from reef.service.release_page import before_release_id, build_release_page, result_of, served_step
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.cordis_backend import Mutation
 
@@ -117,6 +118,7 @@ def _dispatcher(tmp_path: Path, *, keep_records: bool = False) -> Dispatcher:
         factory,
         local_artifact_dir=tmp_path / "local",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
+        coordination=memory_coordination(),
     )
 
 

@@ -24,6 +24,7 @@ from tests.reef_service.test_harness_recipe import (
 )
 from tests.reef_service.test_harness_wrapper import _ask_tree, _write_spool_entry
 from tests.support._strategies import resolve_proposer, resolve_rollout_scorer
+from tests.support.samples_service import make_samples
 from tests.train.test_harness_evolve_processor import harness_stages
 from tests.train.test_reef_trainer_contracts import ExampleBackend
 
@@ -542,6 +543,7 @@ def test_prepare_commit_keeps_the_backends_training_request_and_fills_a_step_tha
                     scenario="agents", request_type=RequestType.TRAIN, payload=payload, agent_record_id="ask-1"
                 )
             )
+            make_samples(trainer)
             result = trainer.run_once()
             assert result is not None
             prepared = trainer.prepare_commit(result)

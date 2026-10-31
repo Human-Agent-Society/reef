@@ -13,8 +13,6 @@ This module defines the item values, the metadata rules, the ``DataStore`` plugi
 from __future__ import annotations
 
 import copy
-import hashlib
-import json
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -23,17 +21,15 @@ from typing import Any, Literal, Self, get_args
 
 from reef.core.errors import ReefError
 from reef.core.plugins import Plugin, PluginConfigError
+from reef.storage.item_kinds import ITEM_KIND_RULES, task_partition
 from reef.storage.tasks import SPLIT_NAMES, TaskFileStore
 
-ItemKind = Literal["trajectory", "task", "record"]
+ItemKind = Literal["trajectory", "task", "record", "artifact"]
 ITEM_KINDS: tuple[ItemKind, ...] = get_args(ItemKind)
 #: The metadata keys that Reef reads. ``kind``, ``owner`` and ``origin`` are set at creation and never change.
 FIXED_KEYS = ("kind", "owner", "origin")
 #: The most items that one query returns.
 MAX_QUERY_LIMIT = 1000
-#: Prefixes the task file partition of an owner. A scenario name never contains ``/``, so no scenario's partition
-#: starts with it, and archiving a scenario never moves an owner's task files.
-TASK_PARTITION_PREFIX = "data/"
 
 
 class ItemConflict(ReefError):
@@ -61,20 +57,17 @@ def check_item_id(item_id: object) -> str:
     return item_id
 
 
-def json_digest(content: Mapping[str, Any]) -> str:
-    """The SHA-256 of the canonical JSON of ``content``: sorted keys, no spaces, UTF-8."""
-    encoded = json.dumps(content, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
-
-
 def check_scenarios(value: object, kind: ItemKind) -> dict[str, str]:
     """Return ``value`` as the ``scenarios`` metadata of an item of ``kind``, or raise ``ValueError``.
 
     ``scenarios`` maps each scenario name (the rules of ``check_owner``) to a split, ``train`` or ``eval``. A
-    trajectory and a record are always ``train``.
+    trajectory and a record are always ``train``. An artifact has no ``scenarios``: a scenario uses an artifact
+    item by importing it, so its ``scenarios`` is always empty.
     """
     if not isinstance(value, Mapping):
         raise ValueError("metadata.scenarios must be an object from scenario name to split")
+    if kind == "artifact" and value:
+        raise ValueError("a scenario uses an artifact item by importing it, so metadata.scenarios is empty")
     scenarios: dict[str, str] = {}
     for scenario, split in value.items():
         check_owner(scenario)
@@ -87,26 +80,27 @@ def check_scenarios(value: object, kind: ItemKind) -> dict[str, str]:
 
 
 def check_origin(value: object) -> dict[str, str | None]:
-    """Return ``value`` as a record's ``origin``: ``{scenario, release_id, load_id}``.
+    """Return ``value`` as a record's ``origin``: ``{scenario, release_id, artifact_id}``.
 
-    ``scenario`` is a valid scenario name. ``release_id`` and ``load_id`` are non-empty strings, or null for a
-    record that names no release or no runtime load, such as an imported record. Raise ``ValueError`` otherwise.
+    ``scenario`` is a valid scenario name. ``release_id`` and ``artifact_id`` are non-empty strings, or null for a
+    record that names no release or no artifact, such as an imported record. Raise ``ValueError`` otherwise.
     """
-    if not isinstance(value, Mapping) or set(value) != {"scenario", "release_id", "load_id"}:
-        raise ValueError("metadata.origin must be {scenario, release_id, load_id}")
+    if not isinstance(value, Mapping) or set(value) != {"scenario", "release_id", "artifact_id"}:
+        raise ValueError("metadata.origin must be {scenario, release_id, artifact_id}")
     check_owner(value["scenario"])
-    for key in ("release_id", "load_id"):
+    for key in ("release_id", "artifact_id"):
         if value[key] is not None and not (isinstance(value[key], str) and value[key]):
             raise ValueError(f"metadata.origin.{key} must be a non-empty string or null")
-    return {key: value[key] for key in ("scenario", "release_id", "load_id")}
+    return {key: value[key] for key in ("scenario", "release_id", "artifact_id")}
 
 
 def created_metadata(owner: str, metadata: Mapping[str, Any]) -> dict[str, Any]:
     """The metadata that an item of ``owner`` is created with, from the client's ``metadata``.
 
     ``kind`` is required. ``owner``, when given, must be ``owner``; it is set when it is missing. ``scenarios``
-    defaults to ``{}``. ``origin`` is required for a record and refused for any other kind. Other keys are kept
-    as they are. Raise ``ValueError`` for metadata that breaks these rules.
+    defaults to ``{}``. ``origin`` is required for a record; an artifact may have one, with a non-null
+    ``release_id`` and ``artifact_id``, when a scenario made it (``reef.storage.artifact_items``); any other kind
+    refuses it. Other keys are kept as they are. Raise ``ValueError`` for metadata that breaks these rules.
     """
     if not isinstance(metadata, Mapping):
         raise ValueError("metadata must be an object")
@@ -120,8 +114,13 @@ def created_metadata(owner: str, metadata: Mapping[str, Any]) -> dict[str, Any]:
     created["scenarios"] = check_scenarios(metadata.get("scenarios", {}), kind)
     if kind == "record":
         created["origin"] = check_origin(metadata.get("origin"))
+    elif kind == "artifact" and "origin" in metadata:
+        origin = check_origin(metadata["origin"])
+        if origin["release_id"] is None or origin["artifact_id"] is None:
+            raise ValueError("an artifact item's metadata.origin names its release_id and artifact_id")
+        created["origin"] = origin
     elif "origin" in metadata:
-        raise ValueError(f"only a record has metadata.origin, not a {kind}")
+        raise ValueError(f"only a record or an artifact has metadata.origin, not a {kind}")
     return created
 
 
@@ -163,7 +162,7 @@ def patched_metadata(metadata: Mapping[str, Any], patch: Mapping[str, Any]) -> d
 class NewItem:
     """An item that a client creates.
 
-    Values: ``item_id`` passes ``check_item_id``. ``content`` is a JSON object for a trajectory or a record, and
+    Values: ``item_id`` passes ``check_item_id``. ``content`` is a JSON object for a trajectory, a record or an artifact, and
     the path of a task directory for a task; a task's ``item_id`` is the name of that directory. ``metadata`` is the client's metadata, which ``created_metadata``
     checks against the owner.
 
@@ -183,7 +182,7 @@ class StoredItem:
     ``owner`` and ``item_id`` identify the item; no two items of one owner have the same ``item_id``.
     ``metadata`` passes ``created_metadata`` for ``owner``, and its ``kind`` is the item's kind. ``digest`` is the
     SHA-256 of the content: ``json_digest`` of the JSON content, or the task file store's digest of a task
-    directory. A trajectory or a record has its JSON ``content``. A task has no ``content``: the task file store
+    directory. A trajectory, a record or an artifact has its JSON ``content``. A task has no ``content``: the task file store
     keeps its directory under ``digest``, in the owner's partition (``task_partition``).
 
     Purpose: what ``DataStore`` returns. Training reads a scenario's items, and clients read and query them.
@@ -203,11 +202,6 @@ class StoredItem:
     @property
     def scenarios(self) -> Mapping[str, str]:
         return self.metadata["scenarios"]
-
-
-def task_partition(owner: str) -> str:
-    """The task file store partition that keeps the task directories of ``owner``."""
-    return TASK_PARTITION_PREFIX + owner
 
 
 class DataStore(Plugin, ABC):
@@ -297,9 +291,10 @@ def prepared_items(
 ) -> list[tuple[NewItem, dict[str, Any], str]]:
     """Check a ``create`` call and return each item with its created metadata and digest.
 
-    A task directory is copied into the owner's task file partition, so its digest names stored files. The copy
-    happens before the store checks for conflicts; files are kept by digest, so a refused call leaves at most an
-    unused copy. Raise ``ValueError`` for an invalid owner, ID, metadata or content, or for an ID given twice.
+    Each item's content follows the rules of its kind (``ITEM_KIND_RULES``). A task directory is copied into the
+    owner's task file partition, so its digest names stored files. The copy happens before the store checks for
+    conflicts; files are kept by digest, so a refused call leaves at most an unused copy. Raise ``ValueError`` for
+    an invalid owner, ID, metadata or content, or for an ID given twice.
     """
     check_owner(owner)
     prepared: list[tuple[NewItem, dict[str, Any], str]] = []
@@ -310,17 +305,8 @@ def prepared_items(
             raise ValueError(f"item {item.item_id!r} is given twice")
         seen.add(item.item_id)
         metadata = created_metadata(owner, item.metadata)
-        if metadata["kind"] == "task":
-            if not isinstance(item.content, Path) or not item.content.is_dir():
-                raise ValueError(f"task item {item.item_id!r} needs a task directory as its content")
-            if item.content.name != item.item_id:
-                raise ValueError(f"task item {item.item_id!r} needs a task directory of the same name")
-            digest = task_files.put(task_partition(owner), item.content)
-        elif isinstance(item.content, Mapping):
-            digest = json_digest(item.content)
-        else:
-            raise ValueError(f"{metadata['kind']} item {item.item_id!r} needs a JSON object as its content")
-        prepared.append((item, metadata, digest))
+        rules = ITEM_KIND_RULES[metadata["kind"]]
+        prepared.append((item, metadata, rules.stored_digest(owner, item.item_id, item.content, metadata, task_files)))
     return prepared
 
 

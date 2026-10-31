@@ -135,7 +135,7 @@ in ``pipeline``.
    pipeline.sample2job.config.remove_thinking_from_demonstration | true | strip ``<think>`` blocks from the demonstration.
    pipeline.sample2job.config.include_environment_feedback | false | add the report's ``teacher_context`` to the teacher's prompt.
    pipeline.sample2job.config.environment_feedback_only_without_solution | true | use the feedback only when no correct sibling exists.
-   pipeline.record2record.config.max_staleness | 0 | accepted lag, in versions, between the producing and serving version.
+   pipeline.record2record.config.max_staleness | 0 | accepted lag, in artifacts that the scenario served, between the producing and served artifact.
 
 ``SDPOSamples`` also takes the sample assembly's keys
 (``accept_multi_turn_policy_samples``, ``realign_threshold`` and

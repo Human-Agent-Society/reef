@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from tests.support._trajectories import policy_trajectory, recorded_trajectory
 
-from reef.core import AgentRecord, RequestType, RuntimeLoadSpan
+from reef.core import AgentRecord, RequestType
 from reef.core.training_request import TrainingRequest
 from reef.core.trajectories import (
     make_trajectory,
@@ -32,14 +32,13 @@ def captured_trajectory(record_id="inference-1", reward=1.0):
         (1, 0, 1),
         (-0.2, -0.3, -0.4),
         reward,
-        runtime_load_id="weights-1",
+        artifact_id="weights-1",
         action_mask=(1, 0, 1),
         rollout_created_at=123.0,
         turn_count=2,
         topk_indices=((11, 20), (12, 21), (13, 22)),
         topk_log_probs=((-0.2, -1.2), (-0.3, -1.3), (-0.4, -1.4)),
         extras={"teacher_cands": [{"hint": "", "teacher_tokens": [10, 11, 12, 13]}]},
-        runtime_load_spans=(RuntimeLoadSpan(0, 3, "weights-1"),),
     )
 
 
@@ -80,7 +79,7 @@ def test_algorithms_consume_json_roundtripped_atif_with_identical_payloads(algor
     assert prepare_slime_job(
         loaded, TrainingMethod(algorithm), {}, SCHEDULING, step_size=STEP_SIZE
     ) == prepare_slime_job(original, TrainingMethod(algorithm), {}, SCHEDULING, step_size=STEP_SIZE)
-    assert loaded.samples[0].training["runtime_load_spans"] == [{"start": 0, "end": 3, "runtime_load_id": "weights-1"}]
+    assert loaded.samples[0].training["artifact_id"] == "weights-1"
 
 
 def test_harness_projection_reads_external_atif_without_reef_records():
@@ -288,7 +287,7 @@ def test_independent_algorithms_ignore_group_metadata(algorithm):
     batch = JobData("grouped", tuple(replace(captured_trajectory(str(index)), group_id="a") for index in range(2)))
     result = prepare_slime_job(batch, TrainingMethod(algorithm), {}, SCHEDULING, step_size=STEP_SIZE)
     assert result.payload["rollout_ids"] == [0, 1]
-    assert result.payload["producing_runtime_load_ids"] == ["weights-1", "weights-1"]
+    assert result.payload["producing_artifact_ids"] == ["weights-1", "weights-1"]
 
 
 def test_extension_updates_preserve_unknown_metadata_and_leave_input_unchanged():

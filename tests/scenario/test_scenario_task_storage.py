@@ -12,6 +12,7 @@ from reef.artifact import InMemoryRepositoryBackend
 from reef.dispatcher import Dispatcher
 from reef.pipeline_context import PipelineContext
 from reef.recipe import CompositeRecipe, Recipe
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.surface import Surface
 from reef.train.pipeline import TrainingPipeline
@@ -38,6 +39,7 @@ def test_a_scenario_pipeline_opens_the_task_stores_of_its_session(tmp_path: Path
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
+        coordination=memory_coordination(),
     )
     try:
         scenario = dispatcher.get_or_create_scenario("math")

@@ -243,6 +243,8 @@ def main() -> None:
     problems = load_problems()
     order = problem_order(problems, BUDGET)
     client = ReefClient(SERVICE_URL, token=TOKEN, timeout_s=7200)
+    # The inference routes serve only a scenario that exists: create it before the first rollout.
+    client.post("/reef/scenarios", SCENARIO, {"name": SCENARIO})
     model = os.environ.get("SAO_MODEL_NAME", "reef")  # the name run.py sends; Reef's SGLang serves it
     pacer = TrainerPacer(PROGRESS_FILE)
     print(

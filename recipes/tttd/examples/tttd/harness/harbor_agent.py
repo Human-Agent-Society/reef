@@ -64,7 +64,8 @@ class HarborAgent(BaseAgent):
         return None
 
     async def setup(self, environment: BaseEnvironment) -> None:
-        """Nothing to install: the search runs on the host."""
+        """Create the scenario if it does not exist yet: the inference routes serve only a scenario that exists."""
+        await asyncio.to_thread(self._client.post, "/reef/scenarios", SCENARIO, {"name": SCENARIO})
 
     async def run(
         self,
@@ -139,6 +140,6 @@ class HarborAgent(BaseAgent):
             "agent_record_ids": valid_receipts,
             "start_step": outcome.start_step,
             "next_step": outcome.next_step,
-            "runtime_load_id": outcome.runtime_load_id,
+            "served_artifact_id": outcome.served_artifact_id,
         }
         context.metadata = metadata

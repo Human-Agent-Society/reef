@@ -6,12 +6,10 @@ This surface delivers the artifact; evolution runs in a method package, where
 a skill may be one node kind of its composition tree.
 """
 
-from reef.surface.skills.modules import RequestSkillLayer, SkillLayer
-from reef.surface.skills.surface import SkillInferenceHooks, SkillValidator, create_skill_surface, validate_tree
+from reef.surface.skills.modules import SkillLayer
+from reef.surface.skills.surface import SkillValidator, create_skill_surface, validate_tree
 
 __all__ = [
-    "RequestSkillLayer",
-    "SkillInferenceHooks",
     "SkillLayer",
     "SkillValidator",
     "create_skill_surface",

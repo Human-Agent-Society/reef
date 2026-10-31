@@ -31,8 +31,9 @@ from typing import Any, Literal
 from reef.artifact.artifact import Artifact
 from reef.core.errors import InferenceUnavailable, ReefError
 from reef.core.evaluation import ArtifactKind, PolicyModel
+from reef.core.served_models import ServedArtifact
 from reef.core.weight_layout import WEIGHT_LAYOUTS, WeightLayout
-from reef.surface.base import AdapterWeightRuntime, InferenceLease
+from reef.surface.base import AdapterWeightRuntime
 
 # -- Identities and errors ----------------------------------------------------
 
@@ -295,7 +296,7 @@ def learning_rate_metrics(
 # -- Request admission --------------------------------------------------------
 
 
-class InferenceAdmissionHandle(InferenceLease):
+class InferenceAdmissionHandle:
     """A handle for one admitted inference, released after model execution."""
 
     def __init__(self, controller: InferenceAdmissionController) -> None:
@@ -439,6 +440,11 @@ class InferenceHandler(ABC):
     async def inference(self, artifact: Artifact, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         """Return the provider response for one native request payload."""
 
+    def address_model(self, payload: Mapping[str, Any], model_name: str) -> dict[str, Any]:
+        """``payload`` addressed to ``model_name``, the name under which the engine serves an artifact
+        (``ServedArtifact.model_name``). The default names it as the request's ``model``."""
+        return {**payload, "model": model_name}
+
     async def inference_stream(self, artifact: Artifact, path: str, payload: dict[str, Any]) -> InferenceStream:
         """Return a stream for one native request payload.
 
@@ -454,22 +460,30 @@ class InferenceHandler(ABC):
         return InferenceStream(status=200, headers={"Content-Type": "application/json"}, chunks=chunks())
 
 
-#: The routes a client calls on Reef for a multimodal call; a recipe's relay decides which its provider serves.
-MULTIMODAL_ROUTES: tuple[str, ...] = ("/v1/images", "/v1/embeddings", "/v1/audio/speech", "/v1/decisions")
+class EngineClients(ABC):
+    """The handlers that reach the engines that ``served_models`` names.
 
-
-class MultimodalRelay(ABC):
-    """Relay a recipe's multimodal calls (images, embeddings, speech, decisions) to the provider it configured.
-
-    A recipe that offers one keeps the provider's address and key; Reef only
-    forwards the client's request body and streams the answer back unchanged,
-    and records nothing.
+    Purpose: an inference replica asks for the handler of each ``ServedArtifact`` it serves; the deployment's
+    engine configuration, or the engines that a control process runs, decide which one it is.
     """
 
     @abstractmethod
-    async def relay(self, path: str, payload: dict[str, Any]) -> InferenceStream:
-        """Forward one request body to the provider and return its answer as a stream; raise
-        :class:`NotImplementedError` for a route the provider does not serve."""
+    def handler(self, served: ServedArtifact) -> InferenceHandler:
+        """The handler that calls the engine at ``served.url``; ``LookupError`` when no engine answers there."""
+
+
+class FixedEngineClients(EngineClients):
+    """One handler for every ``ServedArtifact``: an embedding application's own handler.
+
+    Values: ``fixed`` is that handler. Purpose: ``build_app`` gives it to the inference routes when the caller
+    passes an ``inference_handler``.
+    """
+
+    def __init__(self, fixed: InferenceHandler) -> None:
+        self.fixed = fixed
+
+    def handler(self, served: ServedArtifact) -> InferenceHandler:
+        return self.fixed
 
 
 # -- Runtime contracts --------------------------------------------------------
@@ -512,6 +526,58 @@ class InferenceRuntime(AdapterWeightRuntime):
     def inference_handler(self) -> InferenceHandler:
         """The inference request handler owned by this runtime."""
 
+    def handler_for(self, url: str) -> InferenceHandler | None:
+        """The handler of the engine at ``url`` that this runtime serves, for a process that did not open the
+        runtime, or None when the runtime serves nothing at ``url``.
+
+        A separate inference service calls it for the URL of each ``served_models`` row, and reaches a URL with no
+        handler as a plain proxy. The default gives ``inference_handler`` for ``base_url`` and None for any other
+        URL. A runtime that serves artifacts at several URLs, or whose engines need credentials or retries that a
+        plain proxy does not send, gives a handler for each of them.
+        """
+        return self.inference_handler if url == self.base_url else None
+
+    def served_model_name(self, scenario: str) -> str:
+        """The name under which the engine serves ``scenario``'s weights now; ``model_path`` unless a runtime serves
+        each scenario under its own name."""
+        return self.model_path
+
+    def served_artifact(self, artifact_id: str, scenario: str) -> ServedArtifact | None:
+        """The ``ServedArtifact`` that reaches ``artifact_id``, the artifact that serves ``scenario`` now, from
+        outside this process: the engine's HTTP(S) ``base_url`` and ``served_model_name``.
+
+        None when the engine has no such address or name, so an inference service cannot reach it without this
+        runtime; control then writes no ``served_models`` row for it.
+        """
+        name = self.served_model_name(scenario)
+        if not name:
+            return None
+        try:
+            return ServedArtifact(artifact_id, self.base_url, name)
+        except ValueError:
+            # The base URL is no HTTP(S) URL that another process can call.
+            return None
+
+    def open(self) -> None:
+        """Take control of the engines, before control adopts or activates anything; a second call does nothing.
+
+        Only the process that runs control calls it. Every other process builds the same runtime and never opens
+        it, so it changes no engine and only sends requests through ``inference_handler``. The default does
+        nothing: a runtime that controls no engine has nothing to open.
+        """
+
+    def adopt(self, served: ServedArtifact) -> None:
+        """Take over ``served``, which a ``served_models`` row names for this runtime's engine, from before this
+        runtime existed (a control restart): when the engine still serves it, the next activation of the same
+        artifact loads nothing. The default can tell nothing about the engine, so the next activation loads."""
+        return
+
+    def stop_serving(self, served: ServedArtifact) -> None:
+        """Stop serving ``served``, which no ``served_models`` row names any more: the engine frees what it holds
+        for it. A value the runtime does not know is no error. The default holds nothing per value: a runtime that
+        loads full weights in place replaced them at the next activation."""
+        return
+
     def shutdown(self) -> None:
         """Release owned resources after all users of this runtime have stopped.
 
@@ -545,15 +611,43 @@ class InferenceRuntime(AdapterWeightRuntime):
         """
         return "model"
 
-    def artifact_model(self, artifact: Artifact) -> PolicyModel | None:
-        """The model that this runtime serves for ``artifact`` on request, without loading it.
+    @property
+    def api(self) -> str:
+        """The API dialect in which Reef's training side calls the model itself: ``openai`` (Chat Completions),
+        ``responses`` or ``anthropic``. The default is ``openai``: an engine serves Chat Completions."""
+        return "openai"
 
-        ``None``, the default, means the runtime serves only the artifact it has loaded, so it cannot answer a call
-        for another artifact. A runtime whose handler answers each call from the artifact that the call names, such
-        as a sampler for each checkpoint, returns that artifact's model. Raise ``ValueError`` when ``artifact`` is
+    @property
+    def provider_key(self) -> str | None:
+        """The key with which the runtime calls a provider, which a scenario's own model is called with too; the
+        default is None, for a runtime that calls no provider."""
+        return None
+
+    @property
+    def serves_artifacts_on_request(self) -> bool:
+        """Whether this runtime answers each call from the artifact that the call names, without loading it.
+
+        It is the one statement of that capability. False, the default, for a runtime that serves only the artifact
+        it has loaded. A runtime that returns True overrides ``artifact_model`` and ``served_artifact_on_request``;
+        the defaults of both refuse.
+        """
+        return False
+
+    def artifact_model(self, artifact: Artifact) -> PolicyModel:
+        """The model that an evaluation rollout names to sample ``artifact`` on request, without a load.
+
+        Raise ``ReefError`` when ``serves_artifacts_on_request`` is False, and ``ValueError`` when ``artifact`` is
         not one that this runtime can serve.
         """
-        return None
+        raise ReefError("this runtime serves only the artifact it has loaded, so it serves no artifact on request")
+
+    def served_artifact_on_request(self, artifact: Artifact) -> ServedArtifact | None:
+        """The ``served_models`` value that reaches ``artifact`` on request: the engine's ``base_url`` and the model
+        name that samples that artifact. None when the engine has no address that another process can call.
+
+        Raise as ``artifact_model`` does.
+        """
+        raise ReefError("this runtime serves only the artifact it has loaded, so it serves no artifact on request")
 
     @property
     def per_scenario_adapters(self) -> bool:

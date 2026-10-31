@@ -28,8 +28,9 @@ from reef.runtime.jobs import ReleaseFormat
 from reef.runtime.serving import (
     AdapterServingRuntime,
     FullWeightServingRuntime,
+    OpenedEngines,
     ReleaseWeights,
-    SavedWeightServingRuntime,
+    ServingEngines,
 )
 
 #: The request dialect of each built-in engine the component can run.
@@ -181,13 +182,42 @@ class RemoteServingRuntimeConfig:
             raise ValueError("runtime.inference_timeout_s must be positive")
 
 
+class ComponentEngines(ServingEngines):
+    """The engines of a remote inference component, which outlive control.
+
+    ``open`` attaches to the engines that the component runs, or starts them when it runs none, so a control
+    restart or a standby that takes over leaves the engines and the requests in flight alone. ``close`` stops no
+    engine: the component's engines are the inference service's, and stop with the component.
+    """
+
+    def __init__(self, service: RemoteInferenceService) -> None:
+        self.service = service
+
+    @property
+    def base_url(self) -> str:
+        return self.service.settings.url
+
+    @property
+    def watched(self) -> bool:
+        return True
+
+    def open(self) -> OpenedEngines:
+        attached = self.service.attach()
+        if attached is not None:
+            return OpenedEngines(self.service.backend(attached), attached=True)
+        return OpenedEngines(self.service.backend(self.service.start()), attached=False)
+
+    def check_health(self) -> None:
+        self.service.check_health()
+
+
 class RemoteServingRuntimeFactory(RuntimeFactory):
     """Start the component's engines and serve published releases on them, in the layout of their release format.
 
     The engine's own request handler speaks to the component, with the
     inference token as a bearer header; a ``module:factory`` engine needs an
-    explicit ``inference_handler_factory``. The runtime stops the engines when
-    it shuts down.
+    explicit ``inference_handler_factory``. The engines outlive the runtime
+    (``ComponentEngines``).
     """
 
     kind = "remote_serving"
@@ -246,36 +276,28 @@ class RemoteServingRuntimeFactory(RuntimeFactory):
             num_gpus=config["num_gpus"],
             control_token=control_token,
         )
-        try:
-            backend = service.backend(service.start())
-            handler = handler_factory.from_config(
-                remote.url,
+        handler = handler_factory.from_config(
+            remote.url,
+            model_path=model_path,
+            timeout_s=config["inference_timeout_s"],
+            **dict(config["inference_handler_config"]),
+            request_headers=ProviderRequestHeaders(inference_token),
+        )
+        # Building the runtime touches no engine: only control opens it, in every layout.
+        engines = ComponentEngines(service)
+        if release_format.layout == "adapter":
+            return AdapterServingRuntime(
+                engines,
+                handler,
+                adapter_capacity=config["adapter_capacity"],
                 model_path=model_path,
-                timeout_s=config["inference_timeout_s"],
-                **dict(config["inference_handler_config"]),
-                request_headers=ProviderRequestHeaders(inference_token),
+                inference_timeout_s=config["inference_timeout_s"],
+                weights=weights,
             )
-            serving: SavedWeightServingRuntime
-            if release_format.layout == "adapter":
-                serving = AdapterServingRuntime(
-                    backend,
-                    handler,
-                    adapter_capacity=config["adapter_capacity"],
-                    service=service,
-                    model_path=model_path,
-                    inference_timeout_s=config["inference_timeout_s"],
-                    weights=weights,
-                )
-            else:
-                serving = FullWeightServingRuntime(
-                    backend,
-                    handler,
-                    service=service,
-                    model_path=model_path,
-                    inference_timeout_s=config["inference_timeout_s"],
-                    weights=weights,
-                )
-            return serving
-        except BaseException:
-            service.close()
-            raise
+        return FullWeightServingRuntime(
+            engines,
+            handler,
+            model_path=model_path,
+            inference_timeout_s=config["inference_timeout_s"],
+            weights=weights,
+        )

@@ -146,6 +146,10 @@ class RecordStore(ABC):
         """Count training-visible records by optional type and append sequence."""
 
     @abstractmethod
+    def last_sequence(self, scenario: str) -> int:
+        """The append sequence of the newest training-visible record of ``scenario``; 0 when it has none."""
+
+    @abstractmethod
     def get_for_audit(self, scenario: str, agent_record_id: str) -> StoredRecord | None:
         """Read a retained record with its append sequence."""
 

@@ -275,6 +275,7 @@ def test_deployment_file_names_a_storage_plugin_with_its_config(tmp_path):
         "recipe:\n  implementation: recipe\n"
         "storage:\n  record_backend:\n    module: reef.storage.postgres:PostgresScenarioStorage\n"
         "    config:\n      database_url: postgresql://user:secret@example.invalid/db\n"
+        "  coordination_backend: postgres\n  record_database_url: postgresql://user:secret@example.invalid/db\n"
     )
     settings = service_config_from_mapping(translate_layout(load_config(path)))
     assert settings.record_backend == {
@@ -311,14 +312,19 @@ def test_deployment_selects_record_backend(backend, request, tmp_path):
         url, schema = request.getfixturevalue("postgres_config")
         values = {"record_backend": backend, "record_database_url": url, "record_database_schema": schema}
     elif backend == "sqlite-plugin":
-        values = {"record_backend": "reef.storage.sqlite:SQLiteScenarioStorage"}
+        values = {"record_backend": "reef.storage.sqlite:SQLiteScenarioStorage", "coordination_backend": "sqlite"}
     elif backend == "postgres-plugin":
         url, schema = request.getfixturevalue("postgres_config")
         plugin = {
             "module": "reef.storage.postgres:PostgresScenarioStorage",
             "config": {"database_url": url, "schema": schema},
         }
-        values = {"record_backend": plugin}
+        values = {
+            "record_backend": plugin,
+            "coordination_backend": "postgres",
+            "record_database_url": url,
+            "record_database_schema": schema,
+        }
     settings = ServiceConfig(
         recipe="recipe",
         agent_record_dir=str(tmp_path / "records"),

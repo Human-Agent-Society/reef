@@ -86,6 +86,7 @@ def test_a_task_job_rolls_out_on_the_synced_engines_releases_them_and_trains_the
         stack.component.base_start,
         JobData("tasks", (task(tmp_path / "tasks", "add"),)),
         {**parameters(TrainingMethod("sft")), "rollout": ROLLOUT},
+        scenario="s",
     )
 
     stack.component.submit(job)
@@ -116,6 +117,7 @@ def test_failed_rollouts_still_release_the_engines(tmp_path, task_stack):
         stack.component.base_start,
         JobData("tasks", (task(tmp_path / "tasks", "add"),)),
         {**parameters(TrainingMethod("sft")), "rollout": ROLLOUT},
+        scenario="s",
     )
     (tmp_path / "failing").mkdir()
     with pytest.raises(RuntimeError, match="sandbox did not start"):
@@ -138,7 +140,9 @@ def test_a_task_job_is_checked_at_submit(tmp_path, task_stack):
     ):
         with pytest.raises(ValueError, match=message):
             stack.component.submit(
-                TrainingJob("j", "slime", stack.component.base_start, JobData("d", items), job_parameters)
+                TrainingJob(
+                    "j", "slime", stack.component.base_start, JobData("d", items), job_parameters, scenario="s"
+                )
             )
     assert events == []
 
