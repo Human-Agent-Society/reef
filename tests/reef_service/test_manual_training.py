@@ -1042,6 +1042,49 @@ def test_a_job_trainer_runs_each_instruction_as_a_job_and_a_failed_job_does_not_
     assert scenario.trainer.pending_instructions() == 0
 
 
+def test_the_job_of_an_instruction_lists_the_instructions_parameters_and_its_times(tmp_path, open_dispatcher):
+    component = StubTrainingComponent(tmp_path / "checkpoints")
+    dispatcher = open_dispatcher(
+        _InstructionJobRecipe(component, runtime=StubInferenceRuntime(), training_mode="manual")
+    )
+    dispatcher.accept_record(
+        AgentRecord.create(
+            scenario="s",
+            request_type=RequestType.INFERENCE,
+            payload={"response": {"training": {}}},
+            agent_record_id="a",
+        )
+    )
+    dispatcher.accept_record(report("a"))
+    insert_samples_of(dispatcher, "a")
+    body = {
+        "agent_record_id": "train-1",
+        "text": "Prefer tests first",
+        "session": "session-1",
+        "release_id": "release-1",
+        "parameters": {"learning_rate": 0.5},
+    }
+
+    async def run():
+        async with TestClient(TestServer(create_app(dispatcher))) as client:
+            response = await client.post("/reef/train", headers={"x-reef-scenario": "s"}, json=body)
+            assert response.status == 200, await response.text()
+            async with asyncio.timeout(10):
+                while True:
+                    listing = await (await client.get("/reef/scenarios/s/jobs")).json()
+                    if listing["jobs"] and listing["jobs"][0]["state"] == "finished":
+                        return listing["jobs"][0]
+                    await asyncio.sleep(0.05)
+
+    job = asyncio.run(run())
+    # The recipe gives no job parameters, so the job's are the instruction's.
+    assert job["parameters"] == {"learning_rate": 0.5}
+    assert job["instruction"] == {"id": "train-1", "text": "Prefer tests first", "parameters": {"learning_rate": 0.5}}
+    assert (job["sample_count"], job["sample_kind"]) == (1, "trajectory")
+    assert job["created_at"] <= job["started_at"] <= job["ended_at"]
+    assert job["experiment"] is None
+
+
 def test_a_job_trainer_skips_a_failed_instruction_instead_of_submitting_it_again(tmp_path, records):
     component = SubmitRaisesForInstructionOne(tmp_path / "checkpoints")
     trainer = Trainer.build(

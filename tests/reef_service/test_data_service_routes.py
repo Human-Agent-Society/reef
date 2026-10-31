@@ -27,15 +27,23 @@ from reef.artifact.artifact import ArtifactRef
 from reef.artifact.files import DirectoryFiles
 from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.artifact.repository import FileDownload
+from reef.core.job_data import JobData
 from reef.core.tasks import write_harbor_task
 from reef.dispatcher import Dispatcher
+from reef.runtime.jobs import TrainingJob
 from reef.service.app import create_app
 from reef.storage.data_queue import DATA_QUEUE
 from reef.storage.work_queue import NewWork
-from reef.train.job_queue import JOB_CANCELLED_ERROR, JOBS_QUEUE
+from reef.train.job_queue import JOB_CANCELLED_ERROR, JOBS_QUEUE, job_kind, job_payload
 
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
 DATA = "/reef/namespaces/acme/data"
+
+
+def queued_job(job_id: str, scenario: str) -> NewWork:
+    """A Tinker training job of ``scenario`` with no samples, as control adds it to the jobs queue."""
+    job = TrainingJob(job_id, "tinker", "tinker:base", JobData(f"{scenario}:data:1"), {"lr": 1e-5}, scenario=scenario)
+    return NewWork(JOBS_QUEUE, job_id, scenario, job_kind("tinker"), job_payload(job), serial_key=scenario)
 
 
 def served(dispatcher: Dispatcher, check) -> None:
@@ -144,7 +152,7 @@ def test_an_artifacts_files_list_and_download_and_the_jobs_of_a_scenario_read_fr
     (tmp_path / "initial").mkdir()
     (tmp_path / "initial" / "model.txt").write_text("w0")
     dispatcher = dispatcher_for(tmp_path, UploadRecipe())
-    dispatcher.queue.add(NewWork(JOBS_QUEUE, "job-1", "s", "training_job:tinker", {"job": "1"}, serial_key="s"))
+    dispatcher.queue.add(queued_job("job-1", "s"))
 
     async def check(client: TestClient) -> None:
         assert (await client.post("/reef/scenarios", headers=AUTH, json={"name": "s"})).status == 201
@@ -169,6 +177,16 @@ def test_an_artifacts_files_list_and_download_and_the_jobs_of_a_scenario_read_fr
 
         jobs = await (await client.get("/reef/scenarios/s/jobs", headers=AUTH)).json()
         assert [(job["id"], job["state"]) for job in jobs["jobs"]] == [("job-1", "queued")]
+        (job,) = jobs["jobs"]
+        assert (job["parameters"], job["sample_count"], job["sample_kind"], job["instruction"]) == (
+            {"lr": 1e-5},
+            0,
+            None,
+            None,
+        )
+        assert job["created_at"].endswith("+00:00") and (job["started_at"], job["ended_at"]) == (None, None)
+        # The deployment has no experiment tracker, so no run records the job.
+        assert job["experiment"] is None
         assert (await client.get("/reef/scenarios/nothing/jobs", headers=AUTH)).status == 404
 
     served(dispatcher, check)
@@ -215,8 +233,8 @@ def test_an_artifacts_file_list_gives_the_repositorys_urls_without_materializing
 
 def test_a_client_cancels_a_training_job_of_its_scenario_and_an_ended_job_stays_as_it_is(tmp_path: Path) -> None:
     dispatcher = dispatcher_for(tmp_path, UploadRecipe())
-    dispatcher.queue.add(NewWork(JOBS_QUEUE, "job-1", "s", "training_job:tinker", {"job": "1"}, serial_key="s"))
-    dispatcher.queue.add(NewWork(JOBS_QUEUE, "job-t", "t", "training_job:tinker", {"job": "t"}, serial_key="t"))
+    dispatcher.queue.add(queued_job("job-1", "s"))
+    dispatcher.queue.add(queued_job("job-t", "t"))
 
     async def check(client: TestClient) -> None:
         for name in ("s", "t"):
@@ -225,6 +243,8 @@ def test_a_client_cancels_a_training_job_of_its_scenario_and_an_ended_job_stays_
         answer = await (await client.post(cancel, headers=AUTH)).json()
         assert answer["scenario"] == "s"
         assert (answer["job"]["state"], answer["job"]["error"]) == ("failed", JOB_CANCELLED_ERROR)
+        # A job that never ran has no start; the cancel ended it.
+        assert answer["job"]["started_at"] is None and answer["job"]["ended_at"] is not None
         # The cancel is idempotent: the job ended, so a second cancel changes nothing.
         again = await (await client.post(cancel, headers=AUTH)).json()
         assert again["job"] == answer["job"]
