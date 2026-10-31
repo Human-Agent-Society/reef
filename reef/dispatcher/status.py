@@ -9,6 +9,7 @@ from typing import Any
 from reef.dispatcher.errors import TrainingErrors, error_text
 from reef.recipe.base import Recipe
 from reef.scenario.registry import ScenarioRegistry
+from reef.scenario.scenario import Scenario
 from reef.train.jobs import JobLoopState
 
 logger = logging.getLogger(__name__)
@@ -58,6 +59,17 @@ class TrainingStatus:
         current = self.registry.get_optional(scenario_name)
         if current is None:
             return None
+        try:
+            return self.instance_status(current)
+        except RuntimeError:
+            # A reload can replace the instance and close it while this read runs: read the new instance then.
+            replacement = self.registry.get_optional(scenario_name)
+            if replacement is None or replacement is current:
+                raise
+            return self.instance_status(replacement)
+
+    def instance_status(self, current: Scenario) -> dict[str, Any]:
+        """The status block of the loaded instance ``current``."""
         runtime = current.runtime
         stepping_trainer = current.trainer
         job_data_ready = stepping_trainer.job_data_ready()
@@ -87,7 +99,7 @@ class TrainingStatus:
             )
             block["finished_jobs"] = state.finished_jobs
         if runtime is not None and runtime.per_scenario_adapters:
-            block["adapter_runtime_load_id"] = runtime.serving_adapter_runtime_load_id(scenario_name)
+            block["adapter_runtime_load_id"] = runtime.serving_adapter_runtime_load_id(current.name)
         if len(current.trainers) > 1:
             # Each component's trainer commits on its own; report each one beside the scenario-wide step.
             components: dict[str, Any] = {}

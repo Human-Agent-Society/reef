@@ -34,6 +34,7 @@ from reef.train.pipeline import TrainingPipeline
 
 WEIGHTS = "weights"
 HARNESS = "harness"
+from reef.execution.workers import SERVICE_COMPONENTS
 
 
 class _ComponentBackend(CandidateBackend):
@@ -328,8 +329,10 @@ def _dispatcher(
     backend_factory: Any = None,
     experiment_tracker: ExperimentTracker | None = None,
     hold_local_cycles: bool = False,
+    components: frozenset[str] = frozenset(SERVICE_COMPONENTS),
 ) -> tuple[Dispatcher, dict[str, _ComponentBackend]]:
-    """A dispatcher over the two trainer recipe of ``backends``, or over ``recipe`` when one is given."""
+    """A dispatcher over the two trainer recipe of ``backends``, or over ``recipe`` when one is given. ``components``
+    are the services that it runs; without ``samples``, only the test makes samples (``make_samples``)."""
     repository = _seeded_repository(tmp_path) if backend_factory is None else backend_factory
     if recipe is not None:
         backends = {} if backends is None else backends
@@ -356,5 +359,6 @@ def _dispatcher(
         hold_local_cycles=hold_local_cycles,
         # The work queues live beside the records, so a restarted dispatcher finds the running job, as in a deployment.
         coordination=open_coordination("sqlite", agent_record_dir=str(records), record_database_url=None),
+        components=components,
     )
     return dispatcher, backends

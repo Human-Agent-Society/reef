@@ -45,6 +45,7 @@ from reef.core.errors import ReefError
 from reef.core.requirements import required_by
 from reef.dispatcher import Dispatcher
 from reef.execution.jobs import SupportsReceipt
+from reef.execution.workers import SERVICE_COMPONENTS
 from reef.pipeline_context import PipelineContext
 from reef.recipe import Recipe
 from reef.record2record import (
@@ -1573,7 +1574,11 @@ def test_experiment_events_remain_ordered_across_reload(tmp_path, monkeypatch, n
     from threading import Event
 
     tracker = _RecordingTracker()
-    value, backends = _dispatcher(tmp_path, experiment_tracker=tracker)
+    # No samples worker: the samples that the store watcher would ask for would wake the weights trainer, whose own
+    # step would land between the steps that this test counts.
+    value, backends = _dispatcher(
+        tmp_path, experiment_tracker=tracker, components=frozenset(SERVICE_COMPONENTS) - {"samples"}
+    )
     update = tmp_path / "updated-harness"
     update.mkdir()
     (update / "harness.txt").write_text("updated shipped content")
