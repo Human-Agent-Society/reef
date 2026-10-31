@@ -108,21 +108,18 @@ class AdapterProgram(SandboxProgram):
 
 
 def version_probe_env(descriptor: AdapterDescriptor, root: Path) -> dict[str, str]:
-    """The descriptor's env for a ``--version`` probe, each directory it relocates made under ``root``.
+    """The descriptor's env for a ``--version`` probe, with ``{root}`` as ``root``, and each directory of the
+    adapter's ``dirs`` (``writable_paths``) made under ``root``.
 
     ``root`` is a scratch directory the caller removes. The probe keeps the
     adapter's offline and update guards, and a binary that writes its state
     on ``--version`` (hermes, opencode) writes it there, not in the home
-    directory of whoever runs the install, the doctor or the service."""
-    env: dict[str, str] = {}
-    for key, value in descriptor.env.items():
-        if "{root}" in value:
-            relocated_dir = value.replace("{root}", str(root))
-            Path(relocated_dir).mkdir(parents=True, exist_ok=True)
-            env[key] = relocated_dir
-        else:
-            env[key] = value
-    return env
+    directory of whoever runs the install, the doctor or the service. A
+    value that names the root but is no directory, such as opencode's config
+    text, only has the root filled in."""
+    for directory in descriptor.writable_paths:
+        (root / directory).mkdir(parents=True, exist_ok=True)
+    return {key: value.replace("{root}", str(root)) for key, value in descriptor.env.items()}
 
 
 def _pin(install: InstallSpec) -> str:

@@ -29,6 +29,7 @@ from reef.harness.tasks.vendor_install import (
     VendorInstallError,
     install_prefix,
     resolve_binary,
+    version_probe_env,
 )
 from reef.harness.tree import TreePatch
 from reef.runtime.executor.config import ExecutorSettings
@@ -65,6 +66,25 @@ def on_path(monkeypatch):
         monkeypatch.setenv("PATH", f"{shim}{os.pathsep}{os.environ['PATH']}")
 
     return apply
+
+
+@pytest.mark.unit
+def test_a_version_probe_makes_only_the_adapters_directories(tmp_path: Path, monkeypatch) -> None:
+    """opencode's config text names the root too; the probe fills it in and makes no directory of it."""
+    monkeypatch.chdir(tmp_path)
+    root = tmp_path / "probe"
+    root.mkdir()
+    env = version_probe_env(get_adapter("opencode"), root)
+    assert env["XDG_DATA_HOME"] == str(root / "xdg-data") and (root / "xdg-cache" / "npm").is_dir()
+    assert env["OPENCODE_CONFIG_CONTENT"] == f'{{"plugin": ["{root}/plugin"]}}'
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["probe"]
+    assert sorted(path.name for path in root.iterdir()) == [
+        "opencode",
+        "xdg-cache",
+        "xdg-config",
+        "xdg-data",
+        "xdg-state",
+    ]
 
 
 @pytest.mark.unit
