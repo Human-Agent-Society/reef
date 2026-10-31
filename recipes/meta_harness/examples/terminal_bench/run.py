@@ -14,70 +14,78 @@ from pathlib import Path
 from typing import Any
 
 from harness import benchmark
-from recipes.meta_harness.backend import POPULATION_STATE_KEY
-from recipes.meta_harness.population import Population
-from recipes.meta_harness.recipe import MetaHarnessRecipe
+from recipes.meta_harness import MetaHarness
+from recipes.meta_harness.method import search_population
 from reef.artifact import GitLFSRepositoryBackend
 from reef.core import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher
-from reef.harness import render_composition, run_rollout
+from reef.harness import run_task
 from reef.harness.adapters import get_adapter
+from reef.harness.tree import HarnessTree, render_tree
 from reef.inference.http import InferenceProxyRuntime
 from reef.recipe.config import recipe_config_from_file_layout
+from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.recipe.registry import build_recipe
+from reef.scenario.release_files import component_files
 from reef.scenario.scenario import Scenario
 from reef.service.deploy.config_utils import load_config
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.train.harness_backend.backend import HarnessBackend
 
 HERE = Path(__file__).resolve().parent
 SCENARIO = "terminal-bench"
+SEED = HERE / "seed"
 
 
 def configuration(tasks: tuple[str, ...], iterations: int | None, repeats: int | None) -> dict[str, Any]:
-    """Fill the stack's dataset and keep the gate budget consistent with it."""
+    """Fill the stack's dataset and keep the evaluation run budget consistent with it."""
     sections = recipe_config_from_file_layout(load_config(HERE / "terminal_bench.yaml"))
     evolution = sections["evolution"]
-    evolution["tasks"] = list(tasks)
+    evaluation = evolution["evaluation"]
+    evolution["seed"] = str(SEED)
+    evaluation["tasks"] = list(tasks)
     if repeats is not None:
-        evolution["rollout_repeats"] = repeats
-    method = evolution["meta_harness"]
+        evaluation["repeats"] = repeats
+    method = evolution["method"]["config"]
     if iterations is not None:
         method["max_candidates"] = iterations
         evolution["max_steps"] = 2 * iterations
-    method["max_target_rollouts"] = 2 * len(tasks) * evolution["rollout_repeats"] * method["max_candidates"]
+    # The cache keeps the incumbent's scores: the seed runs once, then each candidate once.
+    method["max_target_runs"] = len(tasks) * evaluation["repeats"] * (method["max_candidates"] + 1)
     return sections
 
 
 def campaign_id(sections: Mapping[str, Any]) -> str:
     """Different tasks, models, seeds, or budgets must never share search state."""
     identity = json.loads(json.dumps(sections))
-    identity["evolution"]["seed"] = benchmark.SEED
-    identity["evolution"]["meta_harness"].pop("archive")
+    identity["evolution"]["seed"] = HarnessTree.read(SEED).checksum()
     identity["target_url"] = os.environ["REEF_UPSTREAM_URL"]
     identity["target_model"] = os.environ["REEF_MODEL"]
     identity["dataset_revision"] = benchmark.MANIFEST["revision"]
     return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
 
 
-def load_recipe(sections: Mapping[str, Any], directory: Path) -> MetaHarnessRecipe:
-    """Build the shared recipe with deployment credentials, never candidate credentials."""
+def load_recipe(sections: Mapping[str, Any], directory: Path) -> HarnessEvolutionRecipe:
+    """Build the recipe with deployment credentials, never candidate credentials; its history lives in ``directory``."""
     config = json.loads(json.dumps(sections))
-    config["evolution"]["meta_harness"]["archive"] = str(directory / "population")
+    config["evolution"]["state_dir"] = str(directory / "harness")
     runtime = InferenceProxyRuntime(
         model_path=os.environ["REEF_MODEL"],
         base_url=os.environ["REEF_UPSTREAM_URL"],
         api_key=os.environ.get("REEF_UPSTREAM_API_KEY") or None,
-        inference_timeout_s=config["evolution"]["rollout_timeout_s"],
+        inference_timeout_s=config["evolution"]["evaluation"]["task_timeout_s"],
     )
     recipe = build_recipe(config["implementation"], config=config, runtime=runtime)
-    if not isinstance(recipe, MetaHarnessRecipe):
-        raise TypeError("the example requires MetaHarnessRecipe")
+    if not isinstance(recipe, HarnessEvolutionRecipe) or not isinstance(recipe.method, MetaHarness):
+        raise TypeError("the example runs the Meta-Harness method")
     return recipe
 
 
-def open_campaign(recipe: MetaHarnessRecipe, directory: Path) -> Dispatcher:
+def open_campaign(recipe: HarnessEvolutionRecipe, directory: Path) -> Dispatcher:
     """Use persistent artifacts and SQLite records so a new process can resume.
+
+    The recipe's seed is the base release of a new scenario, as the service makes it, so the search starts there.
 
     ``search`` prepares and commits every step itself, so the dispatcher runs no training cycle of its own: a
     cycle that its preload starts would commit the same replayed step a second time.
@@ -88,6 +96,7 @@ def open_campaign(recipe: MetaHarnessRecipe, directory: Path) -> Dispatcher:
             directory / "artifacts.git",
             work_dir=directory / "artifact-work",
             cache_dir=directory / "artifact-cache",
+            base=recipe.base_artifact_source(),
         ),
         scenario_storage=SQLiteScenarioStorage(directory / "reef-data"),
         hold_local_cycles=True,
@@ -95,47 +104,59 @@ def open_campaign(recipe: MetaHarnessRecipe, directory: Path) -> Dispatcher:
     )
 
 
-def population(scenario: Scenario) -> Population:
-    """Read committed search state; never use the population JSON mirror as input."""
-    return Population.from_dict(scenario.trainer.state[POPULATION_STATE_KEY])
+def harness_backend(scenario: Scenario) -> HarnessBackend:
+    """The scenario's harness backend, which holds the search history."""
+    backend = scenario.trainer.candidate_backend
+    if not isinstance(backend, HarnessBackend):
+        raise TypeError("the example's scenario evolves a harness")
+    return backend
 
 
-def record_rollout(scenario: Scenario, recipe: MetaHarnessRecipe) -> None:
-    """Record one real served-harness rollout and its verifier feedback.
+def served_tree(scenario: Scenario) -> HarnessTree:
+    """The head release's source tree: the tree the next step builds on."""
+    artifact = scenario.repository.resolve(scenario.repository.require_current_artifact())
+    return HarnessTree(component_files(scenario.surface, artifact, scenario.surface.files_component or "harness"))
+
+
+def record_run(scenario: Scenario, recipe: HarnessEvolutionRecipe) -> None:
+    """Record one real served-harness run and its verifier feedback.
 
     Stable ids let a restart finish an interrupted report without rerunning an
-    already recorded rollout. The next task is a function of the committed step.
+    already recorded run. The next task is a function of the committed step.
     """
+    if recipe.scorer is None:
+        raise ValueError("the example scores its runs with evolution.evaluation.scorer, which is not set")
     step = scenario.scenario_step
-    task = recipe.tasks[step % len(recipe.tasks)]
-    inference_id = f"terminal-bench-rollout-{step}"
+    tasks = recipe.configured_tasks()
+    task = tasks[step % len(tasks)]
+    inference_id = f"terminal-bench-run-{step}"
     inference = scenario.records.get(scenario.name, inference_id)
     if inference is None:
-        descriptor = get_adapter(recipe.adapter)
-        entries = scenario.trainer.state["entries"]
-        nodes = [(entry["name"], entry.get("config")) for entry in entries if not entry.get("disabled")]
-        files = render_composition((*nodes, *recipe.model_binding().compose_nodes(descriptor)), descriptor)
-        result = run_rollout(
+        descriptor = get_adapter(recipe.evolution.adapter)
+        tree = served_tree(scenario)
+        files = render_tree(tree, descriptor, recipe.model_binding().config_overlays(descriptor))
+        result = run_task(
             descriptor,
             files,
             task,
-            binary=recipe.binary,
-            timeout=recipe.rollout_timeout_s,
+            binary=recipe.evolution.binary,
+            timeout=recipe.evaluation.task_timeout_s,
             executor=recipe.executor,
         )
-        score = 0.0 if recipe.forbid_residue and result.residue else float(recipe.score_rollout.score(task, result))
+        littered = recipe.evaluation.forbid_residue and bool(result.residue)
+        score = 0.0 if littered else float(recipe.scorer.score(task, result))
         if not math.isfinite(score):
-            raise ValueError("rollout scorer returned a non-finite score")
+            raise ValueError("run scorer returned a non-finite score")
         inference = scenario.records.append(
             AgentRecord.create(
                 scenario=scenario.name,
                 agent_record_id=inference_id,
                 request_type=RequestType.INFERENCE,
                 payload={
-                    "source": "terminus_rollout",
+                    "source": "terminus_run",
                     "task": task,
-                    "composition": entries,
-                    "rollout": dataclasses.asdict(result),
+                    "tree": dict(tree.files),
+                    "run": dataclasses.asdict(result),
                     "score": score,
                 },
             )
@@ -154,28 +175,31 @@ def record_rollout(scenario: Scenario, recipe: MetaHarnessRecipe) -> None:
     )
 
 
-def write_summary(scenario: Scenario, directory: Path) -> dict[str, Any]:
-    """Rebuild a disposable summary solely from the latest durable commit."""
-    history = scenario.store.history()
-    if not history:
+def write_summary(scenario: Scenario, recipe: HarnessEvolutionRecipe, directory: Path) -> dict[str, Any]:
+    """Rebuild a disposable summary from the latest durable commit and the history of the steps it covers."""
+    commits = scenario.store.history()
+    if not commits:
         return {}
-    committed = history[-1]
-    search = Population.from_dict(committed.algorithm_state[POPULATION_STATE_KEY])
+    committed = commits[-1]
+    step = committed.step + 1
+    history = harness_backend(scenario).history
+    head = served_tree(scenario).checksum()
+    members = search_population(history, head, step, recipe.configured_tasks())
     summary = {
         "scenario": scenario.name,
         "step": committed.step,
-        "served_id": search.served_id,
-        "generated_candidates": search.generated_candidates,
-        "proposer_calls": search.proposer_calls,
-        "gate_rollouts": search.rollout_calls,
+        "served_id": head,
+        "generated_candidates": sum(member.record.origin == "method" for member in members),
+        "evaluation_runs": sum(task_run.step < step for task_run in history.runs),
         "candidates": [
             {
-                "id": candidate.candidate_id,
-                "parent_id": candidate.parent_id,
-                "scores": candidate.scores,
-                "mean": None if candidate.scores is None else sum(candidate.scores) / len(candidate.scores),
+                "id": member.record.tree,
+                "parent_id": member.parent,
+                "outcome": member.outcome,
+                "scores": [task_run.score.to_json() for task_run in member.runs],
+                "mean": member.mean_score,
             }
-            for candidate in search.candidates
+            for member in members
         ],
     }
     directory.mkdir(parents=True, exist_ok=True)
@@ -185,30 +209,31 @@ def write_summary(scenario: Scenario, directory: Path) -> dict[str, Any]:
     return summary
 
 
-def search(scenario: Scenario, recipe: MetaHarnessRecipe, directory: Path) -> dict[str, Any]:
-    """Resume pending feedback, then request bounded proposal/evaluation steps."""
-    summary = write_summary(scenario, directory)
-    while scenario.scenario_step < recipe.max_steps:
-        committed = population(scenario)
-        gate_cost = 2 * len(recipe.tasks) * recipe.rollout_repeats
-        if committed.generated_candidates >= recipe.max_candidates:
-            break
-        if committed.rollout_calls + gate_cost > recipe.max_target_rollouts:
+def search(scenario: Scenario, recipe: HarnessEvolutionRecipe, directory: Path) -> dict[str, Any]:
+    """Resume pending feedback, then request bounded proposal and evaluation steps."""
+    method = recipe.method
+    if not isinstance(method, MetaHarness):
+        raise TypeError("the example drives the Meta-Harness method")
+    history = harness_backend(scenario).history
+    summary = write_summary(scenario, recipe, directory)
+    while scenario.scenario_step < recipe.evolution.max_steps:
+        # The method's own budget check, before a run is spent on a step that would propose nothing.
+        if method.spent_budget(history, scenario.scenario_step + 1) is not None:
             break
         # A previous process may have recorded the report but not committed its
-        # step. Let Reef replay it before spending on another rollout.
+        # step. Let Reef replay it before spending on another run.
         scenario.produce_samples()
         result = scenario.prepare_training_step()
         if result is None:
-            record_rollout(scenario, recipe)
+            record_run(scenario, recipe)
             scenario.produce_samples()
             result = scenario.prepare_training_step()
         if result is None:
-            raise RuntimeError("the recorded rollout did not produce a training step")
+            raise RuntimeError("the recorded run did not produce a training step")
         scenario.commit(result)
-        summary = write_summary(scenario, directory)
+        summary = write_summary(scenario, recipe, directory)
         print(
-            json.dumps({key: summary[key] for key in ("step", "generated_candidates", "gate_rollouts", "served_id")})
+            json.dumps({key: summary[key] for key in ("step", "generated_candidates", "evaluation_runs", "served_id")})
         )
     return summary
 
@@ -236,17 +261,18 @@ def main() -> None:
     sections = configuration(tasks, args.iterations, args.repeats)
     directory = Path(os.environ["REEF_WORK"]).resolve() / campaign_id(sections)
     descriptor = get_adapter("terminus")
-    files = render_composition([(entry["name"], entry["config"]) for entry in benchmark.SEED], descriptor)
+    files = render_tree(HarnessTree.read(SEED), descriptor)
     evolution = sections["evolution"]
+    method = evolution["method"]["config"]
     print(
         json.dumps(
             {
                 "directory": str(directory),
                 "tasks": len(tasks),
-                "repeats": evolution["rollout_repeats"],
-                "candidate_limit": evolution["meta_harness"]["max_candidates"],
-                "gate_rollout_limit": evolution["meta_harness"]["max_target_rollouts"],
-                "rollout_limit": evolution["max_steps"],
+                "repeats": evolution["evaluation"]["repeats"],
+                "candidate_limit": method["max_candidates"],
+                "evaluation_run_limit": method["max_target_runs"],
+                "run_limit": evolution["max_steps"],
                 "seed_files": sorted(files),
             },
             indent=2,

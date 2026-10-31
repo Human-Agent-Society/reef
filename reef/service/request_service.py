@@ -10,35 +10,27 @@ scenario surface's request/response checks. No aiohttp types appear here;
 from __future__ import annotations
 
 import logging
-import uuid
-from collections.abc import Mapping, Sequence
+import tempfile
+from collections.abc import Mapping
+from dataclasses import asdict
+from pathlib import Path
 from typing import Any
 
-from reef.artifact.artifact import ArtifactError, ArtifactNotFound, ArtifactRef
-from reef.core.errors import ReefError, UnknownScenario
+from reef.artifact.artifact import Artifact, ArtifactConflict, ArtifactError, ArtifactNotFound, ArtifactRef
+from reef.core.errors import ReefError
 from reef.core.records_types import AgentRecord, RequestType
-from reef.core.requirements import ancestor_requiring_nothing, required_by
+from reef.core.requirements import required_by
 from reef.core.training_request import normalize_training_request_payload
 from reef.dispatcher import Dispatcher
-from reef.harness.adapters import available_adapters, get_adapter
-from reef.harness.rollouts.model_binding import ModelBinding, ModelBindingError
-from reef.harness.tree.mutations import Mutation, MutationError
-from reef.harness.tree.render import RenderError, render_composition
+from reef.harness.sync import import_files, layer_install, merge_trees
+from reef.harness.tree import HarnessTree, validate_tree
+from reef.harness.tree.checks import clip_record_value
+from reef.scenario.release_files import component_files
 from reef.scenario.scenario import Scenario
-from reef.service.install_script import TOKEN_PLACEHOLDER, render_install_script
 from reef.service.release_page import before_release_id, build_release_page, build_running_step_page, result_of
 from reef.service.request_page import STATE_WORDS, build_request_page, request_state, settled_step
-from reef.service.wire import (
-    SCENARIO_HEADER,
-    ProposalPayload,
-    ReportPayload,
-    RequestHeaders,
-    parse_request_headers,
-    with_request_tags,
-)
-from reef.train.backend import CandidateBackend
-from reef.train.cordis_backend.contracts import ProposalValidator, StepProgressReader, StepRecords
-from reef.train.cordis_backend.proposals import ProposalInbox
+from reef.service.wire import SCENARIO_HEADER, ReportPayload, RequestHeaders, parse_request_headers, with_request_tags
+from reef.train.harness_backend.backend import HarnessBackend
 from reef.train.trainer import Trainer
 
 logger = logging.getLogger(__name__)
@@ -56,23 +48,6 @@ def page_headers(headers: Mapping[str, str], query: Mapping[str, str]) -> dict[s
     if scenario and not any(key.lower() == SCENARIO_HEADER for key in merged):
         merged[SCENARIO_HEADER] = scenario
     return merged
-
-
-def _random_harness_scenario_name() -> str:
-    return f"harness-{uuid.uuid4().hex[:12]}"
-
-
-def install_service_url(headers: Mapping[str, str]) -> str | None:
-    """The address an install request reached Reef at, from its Host; None without one.
-
-    A gateway in front of Reef names the address the client reached in the
-    forwarded headers; the binding goes there, so the installed harness
-    calls back through it."""
-    normalized = {key.lower(): value.strip() for key, value in headers.items()}
-    host = normalized.get("x-forwarded-host") or normalized.get("host")
-    if not host:
-        return None
-    return f"{normalized.get('x-forwarded-proto') or 'http'}://{host}"
 
 
 def normalize_request_payload(
@@ -159,19 +134,163 @@ class RequestService:
         )
         return parsed, item
 
-    def harness_manifest(self, headers: Mapping[str, str], release_id: str | None = None) -> dict[str, Any]:
+    def harness_manifest(
+        self,
+        headers: Mapping[str, str],
+        release_id: str | None = None,
+        form: str = "rendered",
+        service_url: str | None = None,
+        root: str | None = None,
+    ) -> dict[str, Any]:
         """The served tree plus its parent release and evaluation metrics.
 
         ``release_id`` addresses one catalog release instead of the
-        serving head, so a consumer can pin or go back by pulling an older
+        active release, so a consumer can pin or go back by pulling an older
         tree; an unknown or unrestorable release raises ArtifactNotFound
-        naming it. The ``evaluation`` field carries the metrics of the training step
-        that published the active release, so a consumer can audit what a
-        pulled tree changed and why it was admitted before running it.
-        Read-only: never creates a scenario.
+        naming it. ``form`` chooses the ``files``: ``rendered`` (the default)
+        is the release rendered for the scenario's adapter, ``source`` is
+        its source tree, the paths a patch names, and ``client`` is the
+        release as a layer for a client that installs it at ``root``, bound
+        to ``service_url``'s route of the scenario
+        (``reef.harness.sync.layer_install``). The client form adds ``run``,
+        the command that runs the agent on the files (``binary``, ``args``,
+        ``env``), the agent's commands that record and remove the install
+        (``register``, ``unregister``) and the agent's pinned ``install``, and ``synced``, the render templates of the files a client
+        sends back. The ``evaluation`` field carries the metrics of the
+        training step that published the release, so a consumer can audit
+        what a pulled tree changed and why it was admitted before running
+        it. Read-only: never creates a scenario.
         """
+        if form not in ("rendered", "source", "client"):
+            raise ValueError(f"form must be 'rendered', 'source' or 'client', got {form!r}")
+        if form == "client" and not (service_url and root):
+            raise ValueError(
+                "form=client needs service_url, the address the client reaches Reef at, and root, the directory "
+                "the client installs the files in"
+            )
         scenario = self._file_scenario(headers)
-        return self._harness_manifest_for_scenario(scenario, release_id or self.harness_release_id(scenario))
+        manifest = self._harness_manifest_for_scenario(
+            scenario, release_id or self.harness_release_id(scenario), source=form != "rendered"
+        )
+        if form == "client" and service_url is not None and root is not None:
+            backend = self.harness_backend(scenario)
+            scenario_url = f"{service_url.rstrip('/')}/reef/scenarios/{scenario.name}"
+            layer = layer_install(
+                HarnessTree(manifest["files"]), backend.descriptor, backend.models.served, scenario_url, root
+            )
+            manifest["files"] = dict(layer.files)
+            install = backend.descriptor.install
+            manifest["run"] = {
+                "binary": backend.descriptor.binary,
+                "args": list(layer.args),
+                "env": dict(layer.env),
+                "register": [list(command) for command in layer.register],
+                "unregister": [list(command) for command in layer.unregister],
+                # The pinned vendor install, so a client can install the agent the rollouts run when it has none.
+                "install": None if install is None else asdict(install),
+            }
+            manifest["synced"] = list(layer.synced)
+        return manifest
+
+    def harness_import(self, headers: Mapping[str, str], payload: Mapping[str, Any]) -> dict[str, Any]:
+        """Commit a sync of a person's harness files: ``POST /reef/harness/import``.
+
+        ``payload["files"]`` maps each file's path under the adapter's render
+        roots to its text. ``payload["base_release_id"]`` is the release the
+        client installed. The files become the tree that
+        ``reef.harness.sync.import_files`` reads against the base, and
+        ``merge_trees`` puts the client's changes on the tree of the active
+        release (``harness_release_id``), not on the training start: a kept
+        tree that the activation rule held stays inactive, so a sync never
+        serves a change that waits for review. A file that the active tree
+        and the client both changed in a way its part's ``merge`` refuses
+        raises ``ArtifactConflict`` naming it. A merged tree that fails
+        validation raises ``ValueError`` naming every problem. A sync that
+        changes nothing publishes nothing. Otherwise the merged tree becomes
+        the active release and the harness trainer's training start in one
+        ``"sync"`` commit (``ScenarioCommitter.sync_release``). The answer
+        names the active release after the sync, the release it was merged
+        onto, whether it changed, whether it merged onto a newer release than
+        the base, the tree's paths, and the client's paths no part takes.
+        """
+        files = payload.get("files")
+        if not isinstance(files, Mapping) or not all(
+            isinstance(path, str) and isinstance(text, str) for path, text in files.items()
+        ):
+            raise ValueError("files must map each path under the adapter's roots to the file's text")
+        base = payload.get("base_release_id")
+        if not isinstance(base, str) or not base:
+            raise ValueError("base_release_id must be the release the client installed")
+        scenario = self._file_scenario(headers)
+        backend = self.harness_backend(scenario)
+        component = scenario.surface.files_component
+        if component is None:
+            raise ArtifactNotFound(f"scenario {scenario.name!r} serves no harness component")
+        current_id = scenario.repository.require_current_artifact().release_id
+        active_id = self.harness_release_id(scenario)
+        active = HarnessTree(self._harness_manifest_for_scenario(scenario, active_id, source=True)["files"])
+        if base == active_id:
+            base_tree = active
+        else:
+            base_tree = HarnessTree(self._harness_manifest_for_scenario(scenario, base, source=True)["files"])
+        imported = import_files(files, base_tree, backend.descriptor)
+        merge = merge_trees(base_tree, active, imported.tree, backend.descriptor.layout)
+        if merge.tree is None:
+            located = [(path, backend.descriptor.layout.locate(path)) for path in merge.conflicts]
+            # The person knows each file at its render path, such as plugin/rules.md for rules.md.
+            named = [
+                path if location is None or location.part.renders is None else location.part.render_path(location.name)
+                for path, location in located
+            ]
+            raise ArtifactConflict(
+                f"release {active_id} and your files both changed {', '.join(named)} since release {base}: "
+                "make each one match one side, or drop yours with sync --discard, then sync again"
+            )
+        tree = merge.tree
+        answer = {
+            "parent_release_id": active_id,
+            "merged": base_tree != active,
+            "files": sorted(tree.files),
+            "ignored": list(imported.ignored),
+        }
+        if tree == active:
+            return {**answer, "release_id": active_id, "changed": False}
+        validation = validate_tree(tree, backend.descriptor)
+        if not validation.passed:
+            raise ValueError(f"the synced harness fails validation: {validation.message()}")
+        patch = active.diff(tree)
+        directory = Path(tempfile.mkdtemp(prefix="reef-harness-sync-"))
+        tree.write(directory)
+        artifact = Artifact.local(directory)
+        try:
+            published = self._dispatcher.sync_release(
+                scenario.name,
+                artifact,
+                component=component,
+                expected_release_id=current_id,
+                metrics={
+                    "sync": {
+                        "files": len(tree.files),
+                        "ignored": list(imported.ignored),
+                        "base_release_id": base,
+                    },
+                    "patch": clip_record_value(patch.to_json()),
+                    "patch_parts": backend.descriptor.layout.part_names(patch.changes),
+                },
+            )
+        finally:
+            artifact.discard()
+        return {**answer, "release_id": published.release_id, "changed": True}
+
+    def harness_backend(self, scenario: Scenario) -> HarnessBackend:
+        """The backend evolving the harness a client pulls; ArtifactNotFound when the recipe evolves no harness."""
+        backend = self.files_trainer(scenario).candidate_backend
+        if not isinstance(backend, HarnessBackend):
+            raise ArtifactNotFound(
+                f"scenario {scenario.name!r} evolves no harness: the deployment's recipe is not a harness "
+                "evolution recipe"
+            )
+        return backend
 
     @staticmethod
     def files_trainer(scenario: Scenario) -> Trainer:
@@ -180,23 +299,23 @@ class RequestService:
 
     @staticmethod
     def _harness_manifest_for_scenario(
-        scenario: Scenario,
-        release_id: str | None = None,
+        scenario: Scenario, release_id: str | None = None, *, source: bool = False
     ) -> dict[str, Any]:
         artifact, evaluation_metrics = scenario.release_queries.artifact_with_metrics(release_id)
         tree = scenario.surface.files
-        if tree is None:
+        component = scenario.surface.files_component
+        if tree is None or component is None:
             raise ArtifactNotFound(
                 f"scenario {scenario.name!r} serves no files: the deployment's recipe "
                 "carries no harness surface (record-only or weight-training recipes have "
-                "no file tree). Point 'reef.recipe' at a harness_evolve recipe."
+                "no file tree). Point 'recipe.implementation' at a harness evolution recipe."
             )
-        files = tree.read_files(artifact)
+        files = component_files(scenario.surface, artifact, component) if source else tree.read_files(artifact)
         if files is None:
             raise ArtifactNotFound(
-                f"scenario {scenario.name!r} serves no files: no harness composition has "
-                "been published yet. The scenario's initial artifact carries no files "
-                "until the trainer publishes its first step (see docs/user-guide/evolve-your-harness)."
+                f"scenario {scenario.name!r} serves no files: release {artifact.ref.release_id!r} holds no "
+                "harness tree. The base release holds the recipe's evolution.seed, so an empty seed serves "
+                "nothing until a step publishes a tree."
             )
         manifest = {
             "release_id": artifact.ref.release_id,
@@ -289,45 +408,13 @@ class RequestService:
         self.harness_heads[scenario.name] = (step, current, head)
         return head
 
-    def harness_propose(self, headers: Mapping[str, str], payload: Mapping[str, Any]) -> dict[str, Any]:
-        """Admit one agent proposal against the head release's entries and hold it for the next evolve step.
-
-        The admission is the backend's own (``admit_mutations`` over a fresh
-        loader), never a touch of its live tree, and it runs again on the
-        training thread when the step takes the proposal, since the head may
-        have moved. The answer names the proposal, whether it was admitted,
-        the refusal when not, and the head it was admitted against.
-        """
-        proposal = ProposalPayload.from_dict(payload)
-        scenario = self._file_scenario(headers)
-        backend = self.files_trainer(scenario).candidate_backend
-        if not isinstance(backend, ProposalValidator) or backend.proposals is None:
-            raise ArtifactNotFound(
-                f"scenario {scenario.name!r} takes no proposals: the deployment's recipe is not a harness "
-                "evolution recipe with a proposal inbox"
-            )
-        head = self.harness_release_id(scenario)
-        proposal_id = ProposalInbox.new_id()
-        # Only an automatic step claims the inbox, and a manual scenario runs instruction steps only.
-        if self.files_trainer(scenario).pipeline.training_mode == "manual":
-            return {
-                "proposal_id": proposal_id,
-                "admitted": False,
-                "reason": "manual mode takes instructions only",
-                "release_id": head,
-            }
-        # The entries of the head, which the served tree.json carries too, not the trainer's live state, which a
-        # step in flight has already moved; the base artifact's before the first commit.
-        logged = scenario.release_queries.entries_for_version(head, scenario.surface.files_component)
-        entries = [dict(entry) for entry in logged or ()]
+    def harness_head(self, headers: Mapping[str, str]) -> str | None:
+        """The release ``GET /reef/harness`` serves the request's scenario, or None when it serves no files."""
         try:
-            mutations = [Mutation(str(m["op"]), str(m["id"]), m.get("options")) for m in proposal.mutations]
-            _, refusal = backend.admit(entries, mutations)
-        except MutationError as error:
-            refusal = str(error)
-        if refusal is None:
-            refusal = backend.proposals.submit(proposal_id, {**proposal.to_dict(), "head_release_id": head})
-        return {"proposal_id": proposal_id, "admitted": refusal is None, "reason": refusal, "release_id": head}
+            scenario = self._file_scenario(headers)
+        except ArtifactNotFound:
+            return None
+        return self.harness_release_id(scenario)
 
     def harness_releases(self, headers: Mapping[str, str]) -> dict[str, Any]:
         """The scenario's release catalog with per-release evaluation metrics, newest last.
@@ -354,12 +441,12 @@ class RequestService:
             raise ArtifactNotFound(f"scenario {scenario.name!r} has no step {step}")
         directory = (rows[step].get("metrics") or {}).get("step_record")
         backend = self.files_trainer(scenario).candidate_backend
-        if not directory or not isinstance(backend, StepRecords):
+        if not directory or not isinstance(backend, HarnessBackend):
             return {"status": "not_recorded", "files": []}
         if not isinstance(directory, str):
             raise ValueError("invalid step record directory")
         try:
-            return backend.read_step_records(directory, relative)
+            return backend.records.read(directory, relative)
         except FileNotFoundError as error:
             raise ArtifactNotFound("record file is not retained") from error
 
@@ -372,8 +459,8 @@ class RequestService:
         client counts there is the step this page names. The release the
         step ran on (the parent of a win, the head a rejected or skipped
         step ran on) comes through the artifact snapshot when it is
-        restorable, so an extension update shows as a diff, else as its new
-        text. ``link_query`` is carried to the Chain's links, so a page
+        restorable, so an updated file shows as a diff, else as its new text.
+        ``link_query`` is carried to the Chain's links, so a page
         opened through query parameters links pages that open the same way.
         An unknown step raises ArtifactNotFound naming the range.
         """
@@ -390,34 +477,15 @@ class RequestService:
                 f"scenario {scenario.name!r} has no step {step}: the catalog holds steps 0 to {len(rows) - 1}"
             )
         before = before_release_id(rows[step])
-        before_entries: Sequence[Mapping[str, Any]] = ()
+        component = scenario.surface.files_component
         before_files: Mapping[str, str] | None = None
-        if before is not None:
-            before_entries = (
-                scenario.release_queries.entries_for_version(before, scenario.surface.files_component) or ()
-            )
-            tree = scenario.surface.files
+        if before is not None and component is not None:
             try:
                 artifact, _ = scenario.release_queries.artifact_with_metrics(before)
-                before_files = None if tree is None else tree.read_files(artifact)
+                before_files = component_files(scenario.surface, artifact, component)
             except ArtifactError:
                 before_files = None
-        backend = self.files_trainer(scenario).candidate_backend
-        return build_release_page(
-            step,
-            rows,
-            before_entries=before_entries,
-            before_files=before_files,
-            node_paths=None if backend is None else backend.harness_node_paths,
-            link_query=link_query,
-            adapter=self.harness_adapter(backend),
-        )
-
-    @staticmethod
-    def harness_adapter(backend: CandidateBackend | None) -> str:
-        """The adapter a harness page names in its commands: the backend's, pi for a backend that names none."""
-        adapter = None if backend is None else backend.harness_adapter
-        return "pi" if adapter is None else adapter
+        return build_release_page(step, rows, before_files=before_files, link_query=link_query)
 
     @classmethod
     def running_request_id(cls, scenario: Scenario) -> str | None:
@@ -427,7 +495,7 @@ class RequestService:
         if reserved is not None and reserved.request is not None:
             return str(reserved.request.id)
         backend = trainer.candidate_backend
-        progress = backend.step_progress if isinstance(backend, StepProgressReader) else None
+        progress = backend.step_progress if isinstance(backend, HarnessBackend) else None
         return None if progress is None or progress.request_id is None else str(progress.request_id)
 
     def harness_request_page(
@@ -452,24 +520,19 @@ class RequestService:
         # The step a request settled as counts the catalog rows, the ones the release page opens.
         rows = list(reversed(self.harness_rows(scenario)))
         backend = self.files_trainer(scenario).candidate_backend
-        progress = backend.step_progress if isinstance(backend, StepProgressReader) else None
+        progress = backend.step_progress if isinstance(backend, HarnessBackend) else None
         reserved = self.files_trainer(scenario).pending_job_data
         consumed = reserved is not None and reserved.request is not None and reserved.request.id == record_id
         return build_request_page(
-            record,
-            rows,
-            progress=progress,
-            consumed=consumed,
-            link_query=link_query,
-            adapter=self.harness_adapter(backend),
+            record, rows, scenario=scenario.name, progress=progress, consumed=consumed, link_query=link_query
         )
 
     def harness_request_progress(self, headers: Mapping[str, str], record_id: str) -> dict[str, Any]:
         """Where a filed request stands, as JSON, for a client with no browser to open its page.
 
         The same reading the page renders: the state
-        (``queued``, ``proposing``, ``evaluating``, ``running``, ``settling``,
-        else the settled row's result), what it means in the page's words,
+        (``queued``, ``proposing``, ``evaluating``, ``running``, else the
+        settled row's result), what it means in the page's words,
         and, once a row answers the request, the step it landed as. A client
         polls this to show a phase; the page itself stays the readable view.
         An unknown id, or one that is not a training instruction, raises
@@ -489,12 +552,12 @@ class RequestService:
                 "state": result_of(rows[step]),
                 "meaning": None,
                 "started_at": None,
-                "rollouts_total": None,
+                "runs_total": None,
                 "step_record": None,
                 "activity": [],
             }
         backend = self.files_trainer(scenario).candidate_backend
-        progress = backend.step_progress if isinstance(backend, StepProgressReader) else None
+        progress = backend.step_progress if isinstance(backend, HarnessBackend) else None
         reserved = self.files_trainer(scenario).pending_job_data
         consumed = reserved is not None and reserved.request is not None and reserved.request.id == record_id
         state = request_state(record, progress, consumed)
@@ -507,139 +570,14 @@ class RequestService:
             "meaning": STATE_WORDS.get(state),
             # The step's own clock, so a client shows the time in the step and not the time since it asked.
             "started_at": None if mine is None else mine.started_at,
-            "rollouts_total": None if mine is None else mine.rollouts_total,
+            "runs_total": None if mine is None else mine.runs_total,
             "step_record": None if mine is None else mine.step_record,
-            # What the proposer has done so far, oldest first: {at, kind, text, failed?}.
+            # What the method has done so far, oldest first: {at, kind, text, failed?}.
             "activity": [] if mine is None else [dict(line) for line in mine.activity],
         }
 
-    def harness_install_script(
-        self,
-        headers: Mapping[str, str],
-        adapter: str | None,
-        release_id: str | None = None,
-    ) -> str:
-        """A self-contained install script over one served manifest.
-
-        The manifest side is adapter-agnostic files, addressed exactly like
-        ``harness_manifest`` (the harness head by default, any release through
-        ``release_id``); the named ``adapter`` contributes only its
-        descriptor's install section, which the script uses to ensure the
-        pinned binary through the vendor's own channel. An unknown adapter
-        raises ArtifactNotFound naming it, mirroring the unknown-release
-        behavior; a known adapter whose descriptor declares no install
-        section raises DescriptorError (HTTP 400) naming it. Unlike the other
-        harness reads, a missing or empty scenario header creates a new,
-        randomly named file-serving scenario, unless the deployment turned
-        implicit scenario creation off.
-        """
-        if not adapter:
-            raise ReefError("the harness install route requires an 'adapter' query parameter naming an adapter")
-        known = available_adapters()
-        if adapter not in known:
-            raise ArtifactNotFound(f"unknown harness adapter {adapter!r}; known adapters: {', '.join(known)}")
-        scenario = self._file_scenario(
-            headers,
-            create_if_missing=True,
-            release_id=release_id,
-        )
-        manifest = self._harness_manifest_for_scenario(scenario, release_id or self.harness_release_id(scenario))
-        descriptor = get_adapter(adapter)
-        binding_files = self._install_binding(scenario, manifest, descriptor, headers)
-        return render_install_script(
-            descriptor=descriptor,
-            files=manifest["files"],
-            release_id=manifest["release_id"],
-            content_id=manifest["content_id"],
-            scenario=scenario.name,
-            binding_files=binding_files,
-            # The install record keeps the address the binding names, for a wrapper whose binding a session changed.
-            service_url=install_service_url(headers) if binding_files else None,
-            requires=manifest["requires"],
-            # The release the script names for a first install must be one the catalog lists.
-            fallback_release_id=ancestor_requiring_nothing(
-                list(reversed(self.harness_rows(scenario))), manifest["release_id"]
-            ),
-            # A request that carried a token reached a service that wants one, so the harness needs it too.
-            is_token_expected=any(name.lower() in ("authorization", "x-api-key") for name in headers),
-        )
-
-    def _install_binding(
-        self, scenario: Scenario, manifest: Mapping[str, Any], descriptor: Any, headers: Mapping[str, str]
-    ) -> dict[str, str]:
-        """The adapter's config targets re-rendered with a binding at the Reef this request reached.
-
-        The served composition never carries an endpoint or a credential, so
-        an installed tree needs one written beside it: the release's own
-        entries (the base artifact's for the creation) plus the descriptor's
-        binding template, the base URL taken from the request's Host, the model from the evaluation the release ran against (the
-        recipe's served model for the base release), and the token left as a
-        placeholder the script fills from the client's environment. Empty
-        when any of those is unknown, and the script then installs the
-        composition as before.
-        """
-        service_url = install_service_url(headers)
-        evaluation_metrics = manifest.get("evaluation") or {}
-        model = (
-            (evaluation_metrics.get("evaluation_context") or {}).get("model")
-            if isinstance(evaluation_metrics, Mapping)
-            else None
-        )
-        info = scenario.surface.harness
-        if not isinstance(model, str) or not model:
-            model = None if info is None else info.served_model
-        entries = scenario.release_queries.entries_for_version(
-            manifest["release_id"], scenario.surface.files_component
-        )
-        if not service_url or not model or not entries:
-            return {}
-        api = "openai" if info is None else info.served_api
-        client_models = () if info is None else info.client_models
-        metadata = None if info is None else info.model_metadata.get(model)
-        if metadata is None and info is not None and model == info.served_model:
-            metadata = info.served_metadata
-        override = scenario.model_config.runtime
-        if override is not None:
-            selected = ModelBinding.from_runtime(override)
-            model, api = selected.model, selected.api
-            if descriptor.name == "codex":
-                selected = selected.with_metadata(None if info is None else info.model_metadata.get(model))
-            metadata = selected.metadata
-            client_models = ()
-        binding = ModelBinding(
-            base_url=service_url, model=model, api_key=TOKEN_PLACEHOLDER, api=api, metadata=metadata
-        )
-        nodes = [(str(entry["name"]), entry.get("config")) for entry in entries if not entry.get("disabled")]
-        try:
-            bound = binding.compose_nodes(descriptor, models=client_models)
-            files = render_composition((*nodes, *bound), descriptor)
-        except (ModelBindingError, RenderError, KeyError, TypeError):
-            return {}
-        targets = {descriptor.config_targets[str(config.get("target", "primary"))].path for _, config in bound}
-        return {path: files[path] for path in sorted(targets) if path in files}
-
-    def _file_scenario(
-        self,
-        headers: Mapping[str, str],
-        *,
-        create_if_missing: bool = False,
-        release_id: str | None = None,
-    ) -> Scenario:
-        """Resolve a file-serving scenario, optionally creating a randomly named one."""
-        normalized = {key.lower(): value.strip() for key, value in headers.items()}
-        if create_if_missing and not normalized.get(SCENARIO_HEADER):
-            if not self._dispatcher.recipe_has_files():
-                raise ArtifactNotFound("no harness recipes are available")
-
-            scenario_name = _random_harness_scenario_name()
-            scenario = self._dispatcher.get_or_create_scenario(scenario_name, release_id=release_id)
-            if scenario is None:
-                raise UnknownScenario(
-                    "this deployment creates no scenario implicitly: create one with POST /reef/scenarios "
-                    f"and name it in the {SCENARIO_HEADER} header"
-                )
-            return scenario
-
+    def _file_scenario(self, headers: Mapping[str, str]) -> Scenario:
+        """The existing file-serving scenario the headers name; ArtifactNotFound for an unknown one or one without files."""
         parsed = parse_request_headers(headers, RequestType.INFERENCE)
         if not self._dispatcher.has_scenario(parsed.scenario):
             raise ArtifactNotFound(f"unknown scenario {parsed.scenario!r}")
@@ -650,7 +588,7 @@ class RequestService:
             raise ArtifactNotFound(
                 f"scenario {parsed.scenario!r} serves no files: the deployment's recipe "
                 "carries no harness surface (record-only or weight-training recipes have "
-                "no file tree). Point 'reef.recipe' at a harness_evolve recipe."
+                "no file tree). Point 'recipe.implementation' at a harness evolution recipe."
             )
         return scenario
 

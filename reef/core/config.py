@@ -94,7 +94,7 @@ class ConfigArgument:
     def flags(self) -> tuple[str, ...]:
         dotted = ".".join(self.path)
         names = [dotted.replace("_", "-"), dotted]
-        # The launcher owns --recipe; the setting remains --reef.recipe.
+        # The launcher reserves --recipe; the setting remains --reef.recipe.
         if len(self.path) == 2 and self.path[0] == "reef" and self.name != "recipe":
             names = [self.name.replace("_", "-"), self.name, *names]
         if self.public_path:

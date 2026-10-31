@@ -1,0 +1,149 @@
+# The pi coding agent, driven headless per run.
+#
+# A release is a pi package in plugin/: its skills, prompts and extensions, and
+# the rules and settings that Reef's own extension (plugin/extensions/reef/)
+# applies. A run loads the package with -e; a person's machine installs it
+# with pi install, so every pi session there loads it, in place.
+# PI_CODING_AGENT_DIR relocates pi's own directory, which holds the model
+# binding, so nothing is rendered into a project-local .pi/ and the trust gate
+# never fires. PI_OFFLINE kills all startup network work and
+# PI_SKIP_VERSION_CHECK pins the self-updater; both keep runs hermetic.
+name: pi
+binary: pi
+# The vendor's install channel at the pinned version. Harness evolution startup
+# installs it for the runs unless evolution.binary names a binary.
+install:
+  kind: npm
+  package: "@earendil-works/pi-coding-agent"
+  version: "0.84.2"
+  binary_path: "node_modules/.bin/pi"
+renderer: reef.harness.adapters.pi.render:PiAdapterRenderer
+# What Reef may evolve: each kind of file, at its path in the package. A config/<target>.json of
+# the tree merges into that config file (config, below).
+evolve:
+  rules:
+    renders: plugin/rules.md
+    holds: the instructions that Reef's extension adds to pi's system prompt in every session
+  skill: plugin/skills/{name}/SKILL.md
+  command: plugin/prompts/{name}.md
+  extension: plugin/extensions/{name}.ts
+# The agent's directories under the root, each with the variable that moves it there. What the agent writes
+# in them is its state, never residue, and a sandbox keeps them writable.
+dirs:
+  pi-agent: PI_CODING_AGENT_DIR
+  sessions: PI_CODING_AGENT_SESSION_DIR
+sessions: {format: pi-session-jsonl, path: sessions}
+# How to point pi at a model endpoint, per API dialect. Reef renders the set
+# matching its model binding's api into evaluation runs; the served tree
+# never carries a provider. maxTokens is Reef's reply budget rather than pi's
+# own default of 16384: a reasoning model spends that on its reasoning and
+# answers with no text, which ends the turn with nothing written.
+model:
+  openai:
+    - target: models
+      data:
+        providers:
+          reef:
+            api: openai-completions
+            apiKey: "{api_key}"
+            baseUrl: "{base_url}/v1"
+            models:
+              - id: "{model}"
+                maxTokens: "{max_output_tokens}"
+    - target: agent
+      data:
+        defaultModel: "reef/{model}"
+        defaultProvider: reef
+  responses:
+    - target: models
+      data:
+        providers:
+          reef:
+            api: openai-responses
+            apiKey: "{api_key}"
+            baseUrl: "{base_url}/v1"
+            models:
+              - id: "{model}"
+                maxTokens: "{max_output_tokens}"
+    - target: agent
+      data:
+        defaultModel: "reef/{model}"
+        defaultProvider: reef
+  anthropic:
+    - target: models
+      data:
+        providers:
+          reef:
+            api: anthropic-messages
+            apiKey: "{api_key}"
+            baseUrl: "{base_url}"
+            models:
+              - id: "{model}"
+                maxTokens: "{max_output_tokens}"
+    - target: agent
+      data:
+        defaultModel: "reef/{model}"
+        defaultProvider: reef
+# How the agent runs: one evaluation run in a root of its own (the command, and variables
+# beside the dirs), and on a person's machine a layer over the person's own configuration.
+run:
+  task:
+    argv: ["--mode", "json", "-p", "{task}", "-e", "{root}/plugin"]
+    env:
+      PI_OFFLINE: "1"
+      PI_SKIP_VERSION_CHECK: "1"
+  # How a person's machine runs pi on a release: the person's own ~/.pi/agent stays. pi install
+  # adds the package to it, and pi loads the package in place in every session; on a name both
+  # define, the release's wins. pi reads models.json only from its own directory, so an extension
+  # the layer adds registers the release's provider, and a session that Reef starts selects it.
+  layer:
+    args:
+      - ["--model", "reef/{model}"]
+    register:
+      - ["install", "{root}/plugin"]
+    unregister:
+      - ["remove", "{root}/plugin"]
+# The config files the agent reads, with the defaults Reef merges first and the checks the merged
+# file must pass. A tree's config/<target>.json merges into one of them. The defaults and checks
+# are optional: a new adapter can start with the paths alone.
+config:
+  # The release's settings. pi reads no settings.json from a package, so Reef's extension
+  # applies them at session start: only an empty defaultTools, which keeps the extensions'
+  # tools and turns the built-in ones off. Another setting has no extension API that leaves
+  # the person's own settings.json as it is.
+  primary:
+    path: "plugin/settings.json"
+    defaults: {}
+    checks:
+      - key: "."
+        match: Each(Key(Eq("defaultTools")))
+        reason: a pi package carries no other setting
+      - key: defaultTools
+        match: AnyOf(IsAbsent(), Eq([]))
+        reason: Reef's extension turns off only all of the built-in tools
+  # pi's own settings.json, which the binding writes in a run.
+  agent:
+    path: "pi-agent/settings.json"
+    defaults: {}
+    checks:
+      - key: "."
+        match: Each(Key(IsIn(["defaultModel", "defaultProvider"])))
+        reason: Reef's model binding chooses the endpoint and the model
+  models:
+    path: "pi-agent/models.json"
+    defaults: {}
+    # The binding writes the provider reef and selects it with
+    # defaultProvider and defaultModel in settings.json. Another provider,
+    # with its own baseUrl or pi's built in one with a new endpoint, is the
+    # tree choosing where calls go.
+    checks:
+      # The entire file is treated as a dict: the binding's providers are all a tree may name.
+      - key: "."
+        match: Each(Key(Eq("providers")))
+        reason: Reef's model binding writes models.json
+      - key: providers
+        match: Each(Key(Eq("reef")))
+        reason: Reef's model binding chooses the provider, the endpoint, the credential and the model
+      - key: providers.reef
+        match: Each(Key(IsIn(["api", "apiKey", "baseUrl", "models"])))
+        reason: Reef's model binding chooses the provider, the endpoint, the credential and the model

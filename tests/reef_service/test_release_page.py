@@ -6,7 +6,7 @@ chain driven here runs in ``training_mode: manual``: one published win and one
 rejected candidate answering requests posted to ``POST /reef/train``, one
 rejected automatic step from a scored report with no request, run after a switch
 to ``auto``, and one inactive extension update, again from a request in
-``manual``, whose page diffs the file against the head.
+``manual``, whose page diffs the source file against the head's.
 """
 
 from __future__ import annotations
@@ -15,50 +15,42 @@ import asyncio
 import html
 import json
 import re
+from dataclasses import replace
 from pathlib import Path
 from urllib.parse import urlencode
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
-from tests.reef_service.test_harness_recipe import SEED_MODELS, SEED_SETTINGS, make_binary, runtime
-from tests.reef_service.test_harness_requests import _post, _request
-from tests.support._strategies import resolve_proposer, resolve_rollout_scorer
+from tests.support.harness_service import harness_dispatcher, report_records, wait_for_rows
+from tests.support.harness_steps import UNCHANGED, harness_recipe
 
-from reef.artifact import InMemoryRepositoryBackend
-from reef.core import AgentRecord, RequestType
 from reef.core.plugins import PluginReference
 from reef.dispatcher import Dispatcher
 from reef.evaluation.activation import AlwaysActivate
-from reef.harness.rollouts.run import RolloutResult
-from reef.harness.step_result import design_sections
-from reef.recipe.cordis import CordisRecipe
+from reef.harness.tasks.run import TaskResult
+from reef.harness.tree import HarnessTree, TreePatch
 from reef.service.app import create_app
 from reef.service.page_layout import status_label
 from reef.service.release_page import before_release_id, build_release_page, result_of, served_step
-from reef.storage.sql_coordination import memory_coordination
-from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.train.cordis_backend import Mutation
 
 MODULE = Path(__file__).parents[2] / "reef" / "service" / "release_page.py"
 LAYOUT = Path(__file__).parents[2] / "reef" / "service" / "page_layout.py"
 
 OLD_CODE = "export default function hello(pi) {\n  if (1 < 2) return;\n}\n"
 NEW_CODE = 'export default function hello(pi) {\n  if (1 < 2) return;\n  pi.on("session_start", () => {});\n}\n'
-SEED_RULES = {"id": "r1", "name": "rules", "config": {"text": "Answer briefly."}}
-SEED_EXTENSION = {"id": "ext", "name": "code_extension", "config": {"name": "hello", "code": OLD_CODE}}
-SEED = (SEED_MODELS, SEED_SETTINGS, SEED_RULES, SEED_EXTENSION)
+EXTENSION_PATH = "extensions/hello.ts"
+SEED = HarnessTree({"rules.md": "Answer briefly.\n", EXTENSION_PATH: OLD_CODE})
 
-MARKER = Mutation("update", "r1", {"config": {"text": "marker rules"}})
-PLAIN = Mutation("update", "r1", {"config": {"text": "Answer briefly, with care."}})
-TWO_MARKERS = Mutation("update", "r1", {"config": {"text": "marker marker rules"}})
-EXTENSION = Mutation("update", "ext", {"config": {"name": "hello", "code": NEW_CODE}})
-NOTES = Mutation("create", "s1", {"name": "skill", "config": {"name": "notes", "text": "# notes"}})
+MARKER = {"rules.md": "marker rules\n"}
+PLAIN = {"rules.md": "Answer briefly, with care.\n"}
+TWO_MARKERS_AND_EXTENSION = {"rules.md": "marker marker rules\n", EXTENSION_PATH: NEW_CODE}
+NOTES = {"skills/notes/SKILL.md": "# notes\n"}
 
 FIRST = "run the tests before you answer"
 SECOND = "answer with more care"
 FOURTH = "log a note when a < b, before the turn ends"
-# What the proposer answers each request with; an automatic step, with no request, proposes NOTES from the failure.
-ANSWERS = {FIRST: MARKER, SECOND: PLAIN, FOURTH: (TWO_MARKERS, EXTENSION)}
+# What the method answers each request with; an automatic step, with no request, writes NOTES from the failure.
+ANSWERS = {FIRST: MARKER, SECOND: PLAIN, FOURTH: TWO_MARKERS_AND_EXTENSION}
 SCENARIO = "agents"
 # Hand-made catalog rows of a one-component scenario, where a row's artifact id is its release id: the creation,
 # active until a step replaces it, and a step that made release rel-1 on it; a test sets ``active`` and the metrics.
@@ -83,70 +75,24 @@ PUBLISHED = {
 }
 
 
-def evaluate(task: str, result: RolloutResult) -> float:
+def evaluate(task: str, result: TaskResult) -> float:
     # Marker count, so a second marker still beats a head that carries one.
     return float(result.trajectory[-1]["rules"].count("marker"))
 
 
-def _propose(nodes, samples, models, *, requests=()):
-    return ANSWERS[requests[0]["text"]] if requests else NOTES
+def answer(workspace, services) -> TreePatch:
+    request = workspace.request()
+    return TreePatch(ANSWERS[request.text] if request is not None else NOTES)
 
 
-def _dispatcher(tmp_path: Path, *, keep_records: bool = False) -> Dispatcher:
-    recipe = CordisRecipe(
-        resolve_proposer(_propose),
-        resolve_rollout_scorer(evaluate),
-        ("task one",),
-        binary=str(make_binary(tmp_path)),
-        seed=SEED,
-        runtime=runtime(),
-        proposals_dir=str(tmp_path / "inbox"),
-        step_record_dir=str(tmp_path / "steps") if keep_records else None,
-        activation=PluginReference(AlwaysActivate, {"review_kinds": ["code_extension"]}),
-        training_mode="manual",
-    )
-    bootstrap = tmp_path / "bootstrap"
-    bootstrap.mkdir()
-    # What the service assembly does: the recipe's seed is the base artifact every scenario forks from.
-    for relative, text in recipe.base_artifact_source().files.items():
-        target = bootstrap / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(text, encoding="utf-8")
-    factory = InMemoryRepositoryBackend.factory(bootstrap, root=tmp_path / "repository")
-    return Dispatcher(
-        recipe,
-        factory,
-        local_artifact_dir=tmp_path / "local",
-        scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
-        coordination=memory_coordination(),
-    )
+def train_request(text: str, *, session: str = "3f1c2a9d0b7e", release_id: str = "rel-0") -> dict:
+    return {"text": text, "session": session, "release_id": release_id}
 
 
-def _report(dispatcher: Dispatcher, suffix: str) -> None:
-    """One scored exchange through the dispatcher: what wakes an automatic step in ``auto`` mode."""
-    inference = AgentRecord.create(
-        scenario=SCENARIO,
-        request_type=RequestType.INFERENCE,
-        payload={"messages": [{"role": "user", "content": "q"}]},
-        agent_record_id=f"i{suffix}",
-    )
-    report = AgentRecord.create(
-        scenario=SCENARIO,
-        request_type=RequestType.REPORT,
-        payload={"score": 0.0, "references": [f"i{suffix}"]},
-        agent_record_id=f"r{suffix}",
-    )
-    dispatcher.accept_record(inference)
-    dispatcher.accept_record(report)
-
-
-async def _committed(scenario, count: int, seconds: float = 30.0) -> None:
-    """Returns once the catalog holds ``count`` rows; the dispatcher's worker runs the steps on its own thread."""
-    for _ in range(int(seconds / 0.05)):
-        if len(scenario.releases()) >= count:
-            return
-        await asyncio.sleep(0.05)
-    raise AssertionError(f"the catalog did not reach {count} rows in {seconds}s: {scenario.releases()}")
+def _dispatcher(tmp_path: Path) -> Dispatcher:
+    activation = PluginReference(AlwaysActivate, {"review_kinds": ["extension"]})
+    recipe = harness_recipe(tmp_path, answer, seed=SEED, score=evaluate, activation=activation)
+    return harness_dispatcher(tmp_path, replace(recipe, training_mode="manual"))
 
 
 def _chain(tmp_path: Path) -> Dispatcher:
@@ -158,19 +104,22 @@ def _chain(tmp_path: Path) -> Dispatcher:
     async def run() -> None:
         client = TestClient(TestServer(create_app(dispatcher)))
         await client.start_server()
+        headers = {"x-reef-scenario": SCENARIO}
         try:
             # One step at a time, so the rows land in the order the pages are counted by.
-            for count, body in ((2, _request(FIRST)), (3, _request(SECOND, session="s2"))):
-                response = await _post(client, body, SCENARIO)
+            for count, body in ((2, train_request(FIRST)), (3, train_request(SECOND, session="s2"))):
+                response = await client.post("/reef/train", headers=headers, json=body)
                 assert response.status == 200, await response.text()
-                await _committed(scenario, count)
+                await wait_for_rows(scenario, count)
             dispatcher.set_training_mode(SCENARIO, "auto")
-            _report(dispatcher, "3")
-            await _committed(scenario, 4)
+            for record in report_records(SCENARIO, "3"):
+                dispatcher.accept_record(record)
+            await wait_for_rows(scenario, 4)
             dispatcher.set_training_mode(SCENARIO, "manual")
-            response = await _post(client, _request(FOURTH, session="s4", release_id="rel-1"), SCENARIO)
+            body = train_request(FOURTH, session="s4", release_id="rel-1")
+            response = await client.post("/reef/train", headers=headers, json=body)
             assert response.status == 200, await response.text()
-            await _committed(scenario, 5)
+            await wait_for_rows(scenario, 5)
         finally:
             await client.close()
 
@@ -248,8 +197,12 @@ def test_the_page_for_a_published_step_carries_the_request_the_result_and_the_ch
         assert _sections(page) == ["Why", "What changed", "Result", "Setup", "Chain"]
         assert FIRST in _section(page, "Why") and "3f1c2a9d0b7e" in _section(page, "Why")
         changed = _section(page, "What changed")
-        assert '<span class="tag operation-update">update</span><span class="node-id">r1</span>' in changed
-        assert '<span class="tag">rules</span>' in changed and "<pre>marker rules</pre>" in changed
+        # The patch file by file, each updated file diffed against the release the step ran on.
+        assert '<span class="tag operation-update">update</span><span class="node-id">rules.md</span>' in changed
+        assert (
+            '<span class="del">-Answer briefly.</span>' in changed
+            and '<span class="add">+marker rules</span>' in changed
+        )
         selection_result = _section(page, "Result")
         assert '<span class="selected">Published</span>' in selection_result
         assert "<dt>Wins</dt><dd>1</dd>" in selection_result and "<dt>Losses</dt><dd>0</dd>" in selection_result
@@ -257,7 +210,7 @@ def test_the_page_for_a_published_step_carries_the_request_the_result_and_the_ch
             "<dt>Candidate score</dt><dd>1.0</dd>" in selection_result
             and "<dt>Current score</dt><dd>0.0</dd>" in selection_result
         )
-        assert "<dt>Rollout failures</dt><dd>0</dd>" in selection_result
+        assert "<dt>Run failures</dt><dd>0</dd>" in selection_result
         assert "nothing to set up" in _section(page, "Setup")
         chain = _section(page, "Chain")
         assert rows[0]["release_id"] in chain and rows[1]["release_id"] in chain
@@ -278,15 +231,16 @@ def test_the_page_for_an_inactive_extension_step_diffs_the_file_against_the_head
         assert "<title>Harness v4</title>" in page
         assert FOURTH.replace("<", "&lt;") in _section(page, "Why")
         changed = _section(page, "What changed")
-        assert '<span class="tag operation-update">update</span><span class="node-id">ext</span>' in changed
-        assert '<span class="tag">code_extension</span>' in changed
-        # A unified diff of the rendered file against the copy in the release it ran on, the added line marked.
-        assert f"--- pi-agent/extensions/hello.ts ({rows[1]['release_id'][:8]})" in changed
-        assert f"+++ pi-agent/extensions/hello.ts ({rows[4]['release_id'][:8]})" in changed
+        assert (
+            f'<span class="tag operation-update">update</span><span class="node-id">{EXTENSION_PATH}</span>' in changed
+        )
+        # A unified diff of the source file against the copy in the release it ran on, the added line marked.
+        assert f"--- {EXTENSION_PATH} ({rows[1]['release_id'][:8]})" in changed
+        assert f"+++ {EXTENSION_PATH} ({rows[4]['release_id'][:8]})" in changed
         assert '<span class="add">+  pi.on(&quot;session_start&quot;, () =&gt; {});</span>' in changed
         assert "if (1 &lt; 2) return;" in changed
-        # The rules bump that made the composite win rides beside it.
-        assert "<pre>marker marker rules</pre>" in changed
+        # The rules bump that made the patch win rides beside it.
+        assert '<span class="add">+marker marker rules</span>' in changed
         selection_result = _section(page, "Result")
         assert '<span class="inactive">Waiting for activation</span>' in selection_result
         assert "a person activates it first" in selection_result
@@ -294,7 +248,7 @@ def test_the_page_for_an_inactive_extension_step_diffs_the_file_against_the_head
         assert f'<dt>Parent</dt><dd class="id">{rows[1]["release_id"]}</dd>' in chain
         assert rows[4]["release_id"] in chain and "<li>" not in chain
         data = _data(page)
-        assert data["active"] is False and data["metrics"]["mutations"][1]["options"]["config"]["code"] == NEW_CODE
+        assert data["active"] is False and data["metrics"]["patch"][EXTENSION_PATH] == NEW_CODE
     finally:
         dispatcher.close()
 
@@ -305,7 +259,10 @@ def test_the_page_for_a_rejected_step_names_the_head_it_ran_on_and_the_candidate
         rows = list(reversed(dispatcher.get_or_create_scenario(SCENARIO).releases()))
         page = _page(dispatcher, 2)
         assert SECOND in _section(page, "Why") and "s2" in _section(page, "Why")
-        assert "<pre>Answer briefly, with care.</pre>" in _section(page, "What changed")
+        # A rejected step ran on the head, so its patch reads against the head's files.
+        changed = _section(page, "What changed")
+        assert '<span class="del">-marker rules</span>' in changed
+        assert '<span class="add">+Answer briefly, with care.</span>' in changed
         selection_result = _section(page, "Result")
         assert '<span class="rejected">Not selected</span>' in selection_result
         assert (
@@ -326,9 +283,11 @@ def test_the_page_for_an_automatic_step_without_a_request_says_a_failure_in_the_
         page = _page(dispatcher, 3)
         assert "A failure in the job data" in _section(page, "Why")
         changed = _section(page, "What changed")
-        assert '<span class="tag operation-create">create</span><span class="node-id">s1</span>' in changed
-        assert '<span class="tag">skill</span>' in changed
-        assert "<pre># notes</pre>" in changed and "notes" in changed
+        assert (
+            '<span class="tag operation-create">create</span><span class="node-id">skills/notes/SKILL.md</span>'
+            in changed
+        )
+        assert "<pre># notes\n</pre>" in changed
         assert '<span class="rejected">Not selected</span>' in _section(page, "Result")
         # The trainer writes training_request on every request step's row; an automatic step has none.
         assert "training_request" not in _data(page)["metrics"]
@@ -343,7 +302,7 @@ def test_the_chain_lists_the_steps_evaluated_against_a_release_as_its_children(t
         page = _page(dispatcher, 0)
         assert "<title>Harness v0</title>" in page
         assert "no step made it" in _section(page, "Why")
-        assert "the seed as the recipe rendered it" in _section(page, "What changed")
+        assert "this release is the seed tree" in _section(page, "What changed")
         assert '<span class="creation">Starting point</span>' in _section(page, "Result")
         chain = _section(page, "Chain")
         # Only the win ran on the seed; the two rejected candidates ran on the win, whose id their rows carry.
@@ -445,7 +404,7 @@ def test_the_page_names_each_state_and_metric_in_the_words_the_request_page_uses
     metrics = {
         "selected": {"selected": True},
         "rejected": {"selected": False},
-        "skipped": {"skipped": "no proposal"},
+        "skipped": {"skipped": UNCHANGED},
         "inactive": {"selected": True},
     }
     for state, (css_class, label) in states.items():
@@ -499,9 +458,14 @@ def test_the_page_module_is_ascii_and_the_builder_escapes_every_angle_bracket() 
             "ties": 1,
             "current_score": 1.0,
             "candidate_score": 3.0,
-            "rollout_failures": 1,
-            "proposer_input_tokens": 1200,
-            "proposer_output_tokens": 80,
+            "run_failures": 1,
+            "runs_run": 3,
+            "runs_cached": 3,
+            "method_runs": 2,
+            "model_calls": 4,
+            "model_seconds": 12.5,
+            "model_input_tokens": 1200,
+            "model_output_tokens": 80,
             "candidate_agents": {
                 "root": {
                     "turns": 3,
@@ -524,7 +488,7 @@ def test_the_page_module_is_ascii_and_the_builder_escapes_every_angle_bracket() 
             },
             "step_record": "/srv/reef/steps/agents/1",
             "selection": {"reason": "candidate won 2 of 3"},
-            "mutation": {"op": "create", "id": "n1", "options": {"name": "rules", "config": {"text": "<b>bold</b>"}}},
+            "patch": {"rules.md": "<b>bold</b>"},
             "training_request": {
                 "id": "q-1",
                 "session": "s1",
@@ -549,11 +513,18 @@ def test_the_page_module_is_ascii_and_the_builder_escapes_every_angle_bracket() 
     assert "caf&#233;" in page
     assert "<pre>&lt;b&gt;bold&lt;/b&gt;</pre>" in page
     selection_result = _section(page, "Result")
-    assert "<dt>Ties</dt><dd>1</dd>" in selection_result and "<dt>Rollout failures</dt><dd>1</dd>" in selection_result
-    assert (
-        "<dt>Proposer input tokens</dt><dd>1200</dd>" in selection_result
-        and "<dt>Proposer output tokens</dt><dd>80</dd>" in selection_result
-    )
+    assert "<dt>Ties</dt><dd>1</dd>" in selection_result and "<dt>Run failures</dt><dd>1</dd>" in selection_result
+    # What the step cost: the runs the evaluation ran and reused, the method's own, and its model use.
+    for label, value in (
+        ("Tasks run", "3"),
+        ("Runs cached", "3"),
+        ("Method runs", "2"),
+        ("Model calls", "4"),
+        ("Model seconds", "12.5"),
+        ("Model input tokens", "1200"),
+        ("Model output tokens", "80"),
+    ):
+        assert f"<dt>{label}</dt><dd>{value}</dd>" in selection_result
     assert "<dt>Evaluation tokens</dt><dd>950 in, 75 out</dd>" in selection_result
     assert (
         '<dd class="id">/srv/reef/steps/agents/1</dd>' in selection_result
@@ -567,9 +538,9 @@ def test_the_page_module_is_ascii_and_the_builder_escapes_every_angle_bracket() 
         "<td>Allow &lt;notifications&gt; &amp; &quot;more&quot;</td></tr>" in setup
     )
     assert '<tr><td>calendar</td><td>service</td><td class="id"></td><td></td></tr>' in setup
-    assert "reef-pi setup" in setup and "Carried from earlier steps" not in setup
+    assert "Reef does not check them" in setup and "Carried from earlier steps" not in setup
     assert "Refused by the step" not in setup
-    # No proposal notes on the row: no Design and no Review section.
+    # No method summary or notes on the row: no section for them.
     assert _sections(page) == ["Why", "What changed", "Result", "Setup", "Chain"]
     data = _data(page)
     assert data["metrics"]["training_request"]["text"] == "caf\u00e9 <script>alert(1)</script>"
@@ -579,7 +550,7 @@ def test_the_page_module_is_ascii_and_the_builder_escapes_every_angle_bracket() 
 
 
 def test_the_setup_section_splits_the_steps_own_items_from_what_the_chain_carries() -> None:
-    """The same union the install script reads (required_by), shown by the step that named each item."""
+    """The same union ``GET /reef/harness`` answers (required_by), shown by the step that named each item."""
     twilio = {"name": "TWILIO_SID", "kind": "env", "check": "TWILIO_SID"}
     notify = {"name": "notify", "kind": "permission", "check": "test -d /", "prompt": "Allow notifications"}
     never = {"name": "never", "kind": "service"}
@@ -623,38 +594,40 @@ def test_the_setup_section_splits_the_steps_own_items_from_what_the_chain_carrie
     own, _, carried = _section(build_release_page(3, rows), "Setup").partition("<h3>Carried from earlier steps</h3>")
     assert notify_row in own and twilio_row not in own
     assert twilio_row in carried and notify_row not in carried
-    assert "reef-pi setup" in carried
+    assert "Reef does not check them" in carried
     own, _, carried = _section(build_release_page(4, rows), "Setup").partition("<h3>Carried from earlier steps</h3>")
     assert "nothing of its own" in own and twilio_row in carried and notify_row in carried
     assert carried.index(twilio_row) < carried.index(notify_row)
 
 
-def test_an_extension_update_without_the_parents_file_shows_its_new_text() -> None:
+def test_each_file_of_the_patch_reads_against_the_release_the_step_ran_on() -> None:
     creation = {"release_id": "rel-0", "parent_release_id": None, "operation": "creation"}
+    patch = {EXTENSION_PATH: NEW_CODE, "skills/notes/SKILL.md": "# notes\n", "rules.md": None}
     row = {
         "release_id": "rel-1",
         "parent_release_id": "rel-0",
         "operation": "training",
-        "metrics": {
-            "selected": True,
-            "mutation": {"op": "update", "id": "ext", "options": {"config": {"code": NEW_CODE}}},
-        },
+        "metrics": {"selected": True, "patch": patch},
     }
-    without = build_release_page(1, [creation, row], before_entries=[SEED_EXTENSION])
-    assert "<pre>export default function hello(pi) {" in without and "+++ " not in without
-    assert '<span class="tag operation-update">update</span><span class="node-id">ext</span>' in without
-    assert '<span class="tag">code_extension</span>' in without
-    files = {"pi-agent/extensions/hello.ts": OLD_CODE}
-    paths = {"code_extension": "pi-agent/extensions/{name}.ts"}
-    with_diff = build_release_page(
-        1, [creation, row], before_entries=[SEED_EXTENSION], before_files=files, node_paths=paths
-    )
-    assert "+++ pi-agent/extensions/hello.ts (rel-1)" in with_diff and '<span class="add">+  pi.on(' in with_diff
-    unchanged = {"pi-agent/extensions/hello.ts": NEW_CODE}
-    same = build_release_page(
-        1, [creation, row], before_entries=[SEED_EXTENSION], before_files=unchanged, node_paths=paths
-    )
-    assert "pi-agent/extensions/hello.ts is unchanged" in same
+
+    def change(page: str, operation: str, path: str) -> str:
+        head = f'<span class="tag operation-{operation}">{operation}</span><span class="node-id">{path}</span>'
+        assert head in page, (operation, path)
+        return page.partition(f"{head}</div>")[2].partition('<div class="change">')[0]
+
+    # The release the step ran on is not restorable: a written file shows its new text, an update or a creation.
+    without = _section(build_release_page(1, [creation, row]), "What changed")
+    assert change(without, "write", EXTENSION_PATH).startswith("<pre>export default function hello(pi) {")
+    assert "+++ " not in without
+    change(without, "remove", "rules.md")
+    before = {EXTENSION_PATH: OLD_CODE, "rules.md": "Answer briefly.\n"}
+    with_files = _section(build_release_page(1, [creation, row], before_files=before), "What changed")
+    update = change(with_files, "update", EXTENSION_PATH)
+    assert f"+++ {EXTENSION_PATH} (rel-1)" in update and '<span class="add">+  pi.on(' in update
+    assert change(with_files, "create", "skills/notes/SKILL.md").startswith("<pre># notes")
+    assert change(with_files, "remove", "rules.md") == "</div>"
+    unchanged = build_release_page(1, [creation, row], before_files={EXTENSION_PATH: NEW_CODE})
+    assert f"{EXTENSION_PATH} is unchanged" in _section(unchanged, "What changed")
 
 
 def test_active_marks_the_active_release_and_not_the_newest_row(tmp_path: Path) -> None:
@@ -686,7 +659,7 @@ def test_an_activated_step_reads_selected_and_adds_no_row(tmp_path: Path) -> Non
         assert '<span class="chip">Active release</span>' in _sub(page)
         assert "a person activates it first" not in _section(page, "Result")
         # The step still diffs against the release it was evaluated on.
-        assert f"+++ pi-agent/extensions/hello.ts ({inactive_id[:8]})" in _section(page, "What changed")
+        assert f"+++ {EXTENSION_PATH} ({inactive_id[:8]})" in _section(page, "What changed")
         assert "Active release" not in _sub(_page(dispatcher, 1))
         head = _section(_page(dispatcher, 1), "Chain")
         assert f'>v4</a><span class="id">{inactive_id}</span><span class="selected">Published</span>' in head
@@ -696,7 +669,7 @@ def test_an_activated_step_reads_selected_and_adds_no_row(tmp_path: Path) -> Non
 
 def test_a_step_that_published_nothing_chains_to_the_release_it_ran_on() -> None:
     head = {**PUBLISHED, "active": True}
-    skipped = {**PUBLISHED, "checkpoint": False, "active": False, "metrics": {"skipped": "no proposal"}}
+    skipped = {**PUBLISHED, "checkpoint": False, "active": False, "metrics": {"skipped": UNCHANGED}}
     rows = [{**CREATION, "active": False}, head, skipped]
     assert before_release_id(skipped) == "rel-1" and served_step(rows) == 1
     chain = _section(build_release_page(2, rows), "Chain")
@@ -718,172 +691,90 @@ def test_the_diff_colours_lines_by_position_so_a_plus_plus_line_is_an_addition()
         "release_id": "rel-1",
         "parent_release_id": "rel-0",
         "operation": "training",
-        "metrics": {
-            "selected": True,
-            "mutation": {"op": "update", "id": "ext", "options": {"config": {"code": "let n = 0;\n++n;\n"}}},
-        },
+        "metrics": {"selected": True, "patch": {EXTENSION_PATH: "let n = 0;\n++n;\n"}},
     }
-    files = {"pi-agent/extensions/hello.ts": "let n = 0;\n--n;\n"}
-    paths = {"code_extension": "pi-agent/extensions/{name}.ts"}
-    page = build_release_page(
-        1, [creation, row], before_entries=[SEED_EXTENSION], before_files=files, node_paths=paths
-    )
+    page = build_release_page(1, [creation, row], before_files={EXTENSION_PATH: "let n = 0;\n--n;\n"})
     changed = _section(page, "What changed")
-    assert '<span class="hunk">--- pi-agent/extensions/hello.ts (rel-0)</span>' in changed
-    assert '<span class="hunk">+++ pi-agent/extensions/hello.ts (rel-1)</span>' in changed
+    assert f'<span class="hunk">--- {EXTENSION_PATH} (rel-0)</span>' in changed
+    assert f'<span class="hunk">+++ {EXTENSION_PATH} (rel-1)</span>' in changed
     assert '<span class="del">---n;</span>' in changed and '<span class="add">+++n;</span>' in changed
 
 
-def test_a_review_that_did_not_run_is_named_on_the_version_page() -> None:
-    """A published step with no review is a step nothing checked; the page says why instead of omitting it."""
+def test_the_page_shows_the_method_summary_and_notes_and_escapes_them() -> None:
+    """What the method returned shows as written: the summary as plain text with its line breaks after Why, and the
+    notes as JSON after the Result; neither is read as HTML."""
     creation = {"release_id": "rel-0", "parent_release_id": None, "operation": "creation"}
-    notes = {"design": "Add /away.", "review_failure": "the review reply carried no result object"}
+    summary = "Add an <away> command.\n\nHow to use: type /away on."
+    notes = {"review": {"result": "partial", "uncovered": ["no <b>notice</b>"]}, "attempts": 2}
     row = {
         "release_id": "rel-1",
         "parent_release_id": "rel-0",
         "operation": "training",
-        "metrics": {"selected": True, "training_request": {"id": "q-1", "text": "away"}, "proposal_notes": notes},
-    }
-    page = build_release_page(1, [creation, row])
-    review = _section(page, "Review")
-    assert "did not run, so nothing checked whether they deliver it" in review
-    assert "carried no result object" in review
-
-
-def test_the_page_shows_the_proposers_design_and_review_and_escapes_them() -> None:
-    creation = {"release_id": "rel-0", "parent_release_id": None, "operation": "creation"}
-    notes = {
-        "design": "Add an <away> command.\n\nA rule alone would assume the state holds.",
-        "review": {
-            "result": "partial",
-            "covered": ["the /away command toggles the state", "the rule reads a < b"],
-            "uncovered": ["no <b>notice</b> when the state clears"],
+        "metrics": {
+            "selected": True,
+            "training_request": {"id": "q-1", "text": "away mode"},
+            "method_summary": summary,
+            "method_notes": notes,
         },
-        "undeclared_env": ["SLACK_WEBHOOK", "X<Y"],
-    }
-    row = {
-        "release_id": "rel-1",
-        "parent_release_id": "rel-0",
-        "operation": "training",
-        "metrics": {"selected": True, "training_request": {"id": "q-1", "text": "away mode"}, "proposal_notes": notes},
     }
     page = build_release_page(1, [creation, row])
     page.encode("ascii")
-    assert _sections(page) == ["Why", "Design", "What changed", "Review", "Result", "Setup", "Chain"]
-    design = _section(page, "Design")
-    assert '<p class="text">Add an &lt;away&gt; command.\n\nA rule alone would assume the state holds.</p>' in design
-    # A design that ends with a How to use section shows it as the card after the design.
-    with_usage = dict(
-        row, metrics={**row["metrics"], "proposal_notes": {"design": "Add /away.\n\n## How to use\n/away on"}}
+    assert _sections(page) == ["Why", "Method summary", "What changed", "Result", "Method notes", "Setup", "Chain"]
+    assert '<p class="text">Add an &lt;away&gt; command.\n\nHow to use: type /away on.</p>' in _section(
+        page, "Method summary"
     )
-    usage_page = build_release_page(1, [creation, with_usage])
-    assert _sections(usage_page)[:3] == ["Why", "Design", "How to use"]
-    assert '<p class="text">Add /away.</p>' in _section(usage_page, "Design")
-    assert '<p class="text">/away on</p>' in _section(usage_page, "How to use")
-    # The heading may also lead its own line's text, as a model often writes it.
-    inline = dict(row, metrics={**row["metrics"], "proposal_notes": {"design": "Add /away.\n\nHow to use: /away on"}})
-    inline_page = build_release_page(1, [creation, inline])
-    assert '<p class="text">/away on</p>' in _section(inline_page, "How to use")
-    assert '<p class="text">Add /away.</p>' in _section(inline_page, "Design")
-    # A design in Chinese writes a full width colon, a one line design puts the heading after its last sentence, and
-    # a bold heading is common; each is found, while a sentence that says how to use something is no heading.
-    for text, expected in (
-        ("\u8bbe\u8ba1\u3002\n\nHow to use\uff1a\u8f93\u5165 /chat", ("\u8bbe\u8ba1\u3002", "\u8f93\u5165 /chat")),
-        ("A chat mode. How to use: type /chat, then /chat off.", ("A chat mode.", "Type /chat, then /chat off.")),
-        ("Add /away.\n\n**How to use:** /away on", ("Add /away.", "/away on")),
-        (
-            "It says how to use the tool. How to use the mode is simple.",
-            ("It says how to use the tool. How to use the mode is simple.", ""),
-        ),
+    shown = _section(page, "Method notes")
+    assert shown.startswith("\n<pre>{\n") and "&quot;attempts&quot;: 2" in shown
+    assert "no &lt;b&gt;notice&lt;/b&gt;" in shown
+    assert "<away>" not in page and "<b>notice" not in page
+    assert _data(page)["metrics"]["method_notes"] == notes
+
+
+def test_a_row_without_a_method_summary_or_notes_has_no_such_section() -> None:
+    creation = {"release_id": "rel-0", "parent_release_id": None, "operation": "creation"}
+    plain = ["Why", "What changed", "Result", "Setup", "Chain"]
+    for metrics in (
+        {"selected": True},
+        # An empty summary and empty notes count as absent.
+        {"selected": True, "method_summary": "  ", "method_notes": {}},
+        {"skipped": UNCHANGED},
     ):
-        assert design_sections({"design": text}) == expected, text
-    review = _section(page, "Review")
-    assert 'The proposer\'s review of its entries against the request: <span class="partial">Partial</span>' in review
-    assert (
-        '<h3>Covered</h3><ul class="review-list"><li>the /away command toggles the state</li>'
-        "<li>the rule reads a &lt; b</li></ul>" in review
-    )
-    assert (
-        '<h3>Uncovered</h3><ul class="review-list"><li>no &lt;b&gt;notice&lt;/b&gt; when the state clears</li></ul>'
-        in review
-    )
-    assert (
-        "The extension reads these and no requires item names them: "
-        '<span class="id">SLACK_WEBHOOK, X&lt;Y</span>' in review
-    )
-    assert "<away>" not in page and "<b>notice" not in page and "X<Y" not in page
-    assert _data(page)["metrics"]["proposal_notes"] == notes
-    # A complete review with nothing left uncovered says so.
-    complete = {"review": {"result": "complete", "covered": ["the command"], "uncovered": []}}
-    review = _section(
-        build_release_page(1, [creation, {**row, "metrics": {**row["metrics"], "proposal_notes": complete}}]), "Review"
-    )
-    assert '<span class="complete">Complete</span>' in review
-    assert '<h3>Uncovered</h3><p class="empty">nothing left uncovered</p>' in review
-    assert "no requires item names them" not in review
-    # The review call failed: no result on record, but the undeclared variables still show.
-    failed = {"design": "One command.", "undeclared_env": ["TWILIO_SID"]}
-    page = build_release_page(1, [creation, {**row, "metrics": {**row["metrics"], "proposal_notes": failed}}])
-    assert _sections(page) == ["Why", "Design", "What changed", "Review", "Result", "Setup", "Chain"]
-    review = _section(page, "Review")
-    assert '<p class="empty">no review on record</p>' in review and "<h3>Covered</h3>" not in review
-    assert '<span class="id">TWILIO_SID</span>' in review
+        row = {"release_id": "rel-1", "parent_release_id": "rel-0", "operation": "training", "metrics": metrics}
+        assert _sections(build_release_page(1, [creation, row])) == plain
 
 
-def test_the_result_names_why_the_proposer_produced_nothing_when_the_step_recorded_it() -> None:
+def test_a_step_that_failed_reads_as_failed_names_its_error_and_published_nothing() -> None:
     creation = CREATION
-    failure = "model call failed after 58.2 s (max_tokens=16384): model endpoint returned <non-text> content"
+    error = "RuntimeError: model call failed after 58.2 s: model endpoint returned <non-text> content"
     row = {
         **CREATION,
         "operation": "training",
         "checkpoint": False,
         "active": False,
         "metrics": {
-            "skipped": "no proposal",
+            "skipped": "instruction failed",
+            "error": error,
             "training_request": {"id": "q-1", "text": "text me"},
-            "proposal_notes": {"failure": failure},
         },
     }
     page = build_release_page(1, [creation, row])
     page.encode("ascii")
-    # A failure alone adds no Design or Review section; the Result section names it after the skip, escaped.
-    assert result_of(row) == "failed"
-    assert served_step([creation, row]) == 0
-    assert before_release_id(row) == "rel-0"
+    assert result_of(row) == "failed" and served_step([creation, row]) == 0 and before_release_id(row) == "rel-0"
     assert '<span class="failed">Failed</span>' in page
     assert _sections(page) == ["Why", "What changed", "Result", "Setup", "Chain"]
     selection_result = _section(page, "Result")
-    assert "<dt>Skipped</dt><dd>no proposal</dd>" in selection_result
+    assert "see the error below before retrying" in selection_result
+    assert "<dt>Skipped</dt><dd>instruction failed</dd>" in selection_result
     assert (
-        "<h3>Proposer failure</h3><p>model call failed after "
-        "58.2 s (max_tokens=16384): model endpoint returned &lt;non-text&gt; content</p>"
+        "<h3>Error</h3><p>RuntimeError: model call failed after 58.2 s: model endpoint returned "
+        "&lt;non-text&gt; content</p>"
     ) in selection_result
     assert "<non-text>" not in page.partition("<script")[0]
-    # Without the note, or with one that is not text, there is no such row.
-    for notes in ({}, {"failure": "  "}, {"failure": 3}):
-        without = {**row, "metrics": {**row["metrics"], "proposal_notes": notes}}
+    # Without an error, or with one that is not text, the step skipped: nothing failed.
+    for metrics in ({"skipped": "instruction failed"}, {"skipped": "instruction failed", "error": "  "}):
+        without = {**row, "metrics": metrics}
         assert result_of(without) == "skipped"
-        assert "Proposer failure" not in build_release_page(1, [creation, without])
-    # A design written before the reply came to nothing keeps its section beside the row.
-    designed = {**row, "metrics": {**row["metrics"], "proposal_notes": {"design": "A tool.", "failure": failure}}}
-    page = build_release_page(1, [creation, designed])
-    assert _sections(page) == ["Why", "Design", "What changed", "Result", "Setup", "Chain"]
-    assert "<h3>Proposer failure</h3>" in _section(page, "Result")
-
-
-def test_a_row_without_a_design_or_a_review_has_no_such_section() -> None:
-    creation = {"release_id": "rel-0", "parent_release_id": None, "operation": "creation"}
-    plain = ["Why", "What changed", "Result", "Setup", "Chain"]
-    for metrics in (
-        {"selected": True},
-        {"selected": True, "proposal_notes": {}},
-        # Other methods write other keys; an empty design and a review that is not a mapping count as absent.
-        {"selected": True, "proposal_notes": {"design": "  ", "review": "complete", "plan": "other keys"}},
-        {"skipped": "no proposal"},
-    ):
-        row = {"release_id": "rel-1", "parent_release_id": "rel-0", "operation": "training", "metrics": metrics}
-        page = build_release_page(1, [creation, row])
-        assert _sections(page) == plain and "Design" not in page.partition("<script")[0]
+        assert "<h3>Error</h3>" not in build_release_page(1, [creation, without])
 
 
 @pytest.mark.parametrize("legacy_policy_version", [False, True])
@@ -902,7 +793,7 @@ def test_the_result_lists_the_floor_metrics_and_omits_the_current_score_when_no_
             "floor_score": 1.0,
             "evaluation_sides": ["candidate"],
             "candidate_score": 1.0,
-            "rollout_failures": 0,
+            "run_failures": 0,
             "candidate_agents": {"root": {"turns": 1, "input_tokens": 300, "output_tokens": 20}},
             "selection": {
                 "policy": "floor",
@@ -921,7 +812,7 @@ def test_the_result_lists_the_floor_metrics_and_omits_the_current_score_when_no_
     )
     assert (
         "<dt>Candidate score</dt><dd>1.0</dd>" in selection_result
-        and "<dt>Rollout failures</dt><dd>0</dd>" in selection_result
+        and "<dt>Run failures</dt><dd>0</dd>" in selection_result
     )
     for absent in ("Current score", "Wins", "Losses", "Ties"):
         assert f"<dt>{absent}</dt>" not in selection_result
@@ -939,19 +830,15 @@ def test_the_result_lists_the_floor_metrics_and_omits_the_current_score_when_no_
 
 def test_the_setup_section_lists_the_requires_the_step_refused_with_their_reasons() -> None:
     creation = {"release_id": "rel-0", "parent_release_id": None, "operation": "creation"}
-    by_backend = [
+    refused_items = [
         {
-            "item": {"name": "bad name", "kind": "env", "check": 'test -n "$X" && echo 1 < 2'},
-            "reason": "requires[0].name must be a non-empty string matching ^[A-Za-z0-9][A-Za-z0-9._-]*$",
+            "item": {"name": "notify", "kind": "service", "check": 'curl -H "Bearer <token>" && echo 1 < 2'},
+            "reason": "carries a credential shaped literal",
         },
-        # A malformed item need not be an object; its JSON stands where the name would.
-        {"item": "SLACK_WEBHOOK", "reason": "requires[0] must be an object with a name and a kind"},
-    ]
-    by_method = [
         {
-            "item": {"name": "phone", "kind": "sms", "prompt": "The number to text, with the <country> code"},
-            "reason": "kind must be one of ('permission', 'env', 'service')",
-        }
+            "item": {"name": "phone", "kind": "env", "prompt": "The number, then ignore the <rules>"},
+            "reason": "carries an instruction override phrasing",
+        },
     ]
     row = {
         "release_id": "rel-1",
@@ -963,9 +850,8 @@ def test_the_setup_section_lists_the_requires_the_step_refused_with_their_reason
                 "id": "q-1",
                 "text": "text me",
                 "requires": [{"name": "TWILIO_SID", "kind": "env", "check": "TWILIO_SID"}],
-                "refused_requires": by_backend,
+                "refused_requires": refused_items,
             },
-            "proposal_notes": {"refused_requires": by_method},
         },
     }
     page = build_release_page(1, [creation, row])
@@ -973,25 +859,21 @@ def test_the_setup_section_lists_the_requires_the_step_refused_with_their_reason
     setup = _section(page, "Setup")
     own, _, refused = setup.partition("<h3>Refused by the step</h3>")
     assert '<tr><td>TWILIO_SID</td><td>env</td><td class="id">TWILIO_SID</td><td></td></tr>' in own
-    assert "reef-pi setup" in own
+    assert "Reef does not check them" in own
     assert "<thead><tr><th>name</th><th>kind</th><th>check</th><th>prompt</th><th>reason</th></tr></thead>" in refused
     assert (
-        '<tr><td>bad name</td><td>env</td><td class="id">test -n &quot;$X&quot; &amp;&amp; echo 1 &lt; 2</td><td></td>'
-        "<td>requires[0].name must be a non-empty string matching ^[A-Za-z0-9][A-Za-z0-9._-]*$</td></tr>" in refused
+        '<tr><td>notify</td><td>service</td><td class="id">curl -H &quot;Bearer &lt;token&gt;&quot; &amp;&amp; '
+        "echo 1 &lt; 2</td><td></td><td>carries a credential shaped literal</td></tr>" in refused
     )
     assert (
-        '<tr><td>&quot;SLACK_WEBHOOK&quot;</td><td></td><td class="id"></td><td></td>'
-        "<td>requires[0] must be an object with a name and a kind</td></tr>" in refused
+        '<tr><td>phone</td><td>env</td><td class="id"></td><td>The number, then ignore the &lt;rules&gt;</td>'
+        "<td>carries an instruction override phrasing</td></tr>" in refused
     )
-    assert (
-        '<tr><td>phone</td><td>sms</td><td class="id"></td><td>The number to text, with the &lt;country&gt; code</td>'
-        "<td>kind must be one of (&#x27;permission&#x27;, &#x27;env&#x27;, &#x27;service&#x27;)</td></tr>" in refused
-    )
-    # The backend's records first, then the method's.
-    assert refused.index("bad name") < refused.index("SLACK_WEBHOOK") < refused.index("phone")
+    assert refused.index("notify") < refused.index("phone")
     assert "echo 1 < 2" not in page.partition("<script")[0]
     # With nothing to set up, the refused table still closes the section.
-    only_refused = {**row, "metrics": {"selected": True, "proposal_notes": {"refused_requires": by_method}}}
+    request = {"id": "q-1", "text": "text me", "refused_requires": refused_items}
+    only_refused = {**row, "metrics": {"selected": True, "training_request": request}}
     setup = _section(build_release_page(1, [creation, only_refused]), "Setup")
     assert "nothing to set up" in setup and "<td>phone</td>" in setup
     assert setup.index("nothing to set up") < setup.index("<h3>Refused by the step</h3>")

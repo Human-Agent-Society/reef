@@ -155,8 +155,8 @@ def test_required_environment_values_resolve_and_optional_values_can_be_empty(tm
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("tutorial", ["evolve-your-harness", "reefine"])
-def test_tutorial_missing_environment_fails_before_launch_without_traceback(tutorial, monkeypatch, capsys) -> None:
+@pytest.mark.parametrize("example", ["tutorials/evolve-your-harness", "recipes/beta/reefine/examples"])
+def test_example_missing_environment_fails_before_launch_without_traceback(example, monkeypatch, capsys) -> None:
     for name in ("REEF_UPSTREAM_URL", "REEF_UPSTREAM_MODEL", "REEF_UPSTREAM_API_KEY"):
         monkeypatch.delenv(name, raising=False)
 
@@ -165,8 +165,8 @@ def test_tutorial_missing_environment_fails_before_launch_without_traceback(tuto
 
     monkeypatch.setattr(orchestrator, "resolve_model_paths", must_not_run)
     monkeypatch.setattr(orchestrator, "_Stack", must_not_run)
-    # The tutorial belongs to the checkout even when Reef is imported from an installed wheel.
-    path = Path(__file__).resolve().parents[2] / "tutorials" / tutorial / "configs" / "deployment.yaml"
+    # The example belongs to the checkout even when Reef is imported from an installed wheel.
+    path = Path(__file__).resolve().parents[2] / example / "configs" / "deployment.yaml"
     with pytest.raises(SystemExit) as caught:
         cli_main(["serve", "-c", str(path)])
     assert caught.value.code == 2

@@ -1,22 +1,34 @@
-"""The trace pipeline: the trace batching half of harness evolution.
+"""Harness evolution's job data: trace batching, and offline runs of the imported train tasks.
 
-The pipeline pairs reports with their inference records and batches every
-valid scored trace; the evolution backend (``CordisBackend``) consumes the
-batch. The stages are built from a ``pipeline`` section, as a deployment
-configures them, rather than through any Recipe wrapper.
+The trace pipeline pairs reports with their inference records and batches
+every valid scored trace; the evolution backend (``HarnessBackend``)
+consumes the batch. The stages are built from a ``pipeline`` section, as a
+deployment configures them, rather than through any Recipe wrapper.
+``TrainTaskJobData`` also takes the scenario's imported train tasks from the
+sample store into the buffer, for offline steps.
 """
 
 from __future__ import annotations
 
-import pytest
+from pathlib import Path
 
+import pytest
+from tests.support.task_service_stubs import task_for
+
+from reef.artifact import ArtifactRef
 from reef.core import AgentRecord, RequestType
+from reef.core.job_data import TaskSample
 from reef.core.reports import ReportValidationError
+from reef.core.tasks import write_harbor_task
 from reef.core.trajectories import recorded_payload, recorded_payloads, source_record_id
 from reef.pipeline_context import PipelineContext
-from reef.recipe.cordis import CordisRecipe
+from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.record2record import InferenceRecord2Record, ReportGrouping, ReportRecord2Record
-from reef.train.cordis_backend.processor import InferenceSamples, TraceJobData, TraceSamples
+from reef.record2sample.traces import InferenceSamples, TraceSamples
+from reef.sample2job.traces import TraceJobData, TrainTaskJobData
+from reef.storage.commits import CommitRecord
+from reef.storage.samples import SampleStore, TrainerSamples, consumed_sample_id
+from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.pipeline import PipelineConfig, TrainingPipeline
 from reef.train.types import JobData
 
@@ -45,7 +57,7 @@ def _report(agent_record_id: str, score: object, references: list[str], feedback
 #: The ``pipeline`` section that evolves on recorded inference traffic alone, without reports.
 INFERENCE_STAGES = {
     "record2record": {"module": "reef.record2record:InferenceRecord2Record"},
-    "record2sample": {"module": "reef.train.cordis_backend.processor:InferenceSamples"},
+    "record2sample": {"module": "reef.record2sample.traces:InferenceSamples"},
 }
 
 
@@ -54,7 +66,7 @@ def harness_stages(*, inference: bool = False, buffer_size: int | None = None) -
     section: dict = dict(INFERENCE_STAGES) if inference else {}
     if buffer_size is not None:
         section["sample2job"] = {"config": {"buffer_size": buffer_size}}
-    return PipelineConfig.from_setting(section, spec=CordisRecipe.pipeline_spec(), environ={})
+    return PipelineConfig.from_setting(section, spec=HarnessEvolutionRecipe.pipeline_spec(), environ={})
 
 
 def reports_pipeline(context: PipelineContext, buffer_size: int | None = None) -> TrainingPipeline:
@@ -256,3 +268,106 @@ def test_record_driven_processor_overflow_stays_pending_for_the_next_batch() -> 
     assert not processor.ready(2)
     processor.push(_inference("inf-3", {"messages": []}))
     assert [source_record_id(s) for s in processor.build_job_data(2).samples] == ["inf-2", "inf-3"]
+
+
+def add_tasks(samples: SampleStore, root: Path, split: str, *names: str) -> None:
+    """Add one Harbor task per name to ``split`` of the scenario's imported tasks, each with its own files."""
+    directories = tuple(
+        write_harbor_task(task_for(name, "record-1", 9000 + sum(name.encode())), root / split) for name in names
+    )
+    samples.add_tasks(directories, split)
+
+
+def offline_pipeline(samples: SampleStore, *, job_samples: int, buffer_size: int | None = None) -> TrainingPipeline:
+    """An offline pipeline of the scenario whose sample store is ``samples``, in ``auto``."""
+    context = PipelineContext("offline", samples=TrainerSamples(samples), default_job_samples=1)
+    return TrainingPipeline(context, sample2job=TrainTaskJobData(context, buffer_size, job_samples))
+
+
+def task_names(data: JobData) -> list[str]:
+    """The names of the imported tasks in ``data``, in job order."""
+    return [sample.metadata["task"]["name"] for sample in data.samples if isinstance(sample, TaskSample)]
+
+
+def test_imported_train_tasks_reach_the_job_data_through_the_buffer_and_each_trains_once(tmp_path: Path) -> None:
+    session = SQLiteScenarioStorage(tmp_path / "records").open("offline")
+    add_tasks(session.samples, tmp_path / "tasks", "train", "task-a", "task-b", "task-c")
+    add_tasks(session.samples, tmp_path / "tasks", "eval", "held-out")
+    pipeline = offline_pipeline(session.samples, job_samples=2)
+    assert pipeline.accepts_imported_tasks and not TraceJobData.accepts_imported_tasks
+
+    data = pipeline.build_job_data(2)
+    assert task_names(data) == ["task-a", "task-b"]
+    assert all(sample.task_path.is_dir() for sample in data.samples if isinstance(sample, TaskSample))
+    assert pipeline.acknowledge(data.data_id) == {consumed_sample_id("task-a"), consumed_sample_id("task-b")}
+    # One train task is left; an eval task never trains, since an evaluation runs it.
+    assert not pipeline.ready(2)
+
+    # A later upload joins the buffer; a task uploaded again with the same files does not train again.
+    add_tasks(session.samples, tmp_path / "tasks", "train", "task-a", "task-d")
+    data = pipeline.build_job_data(2)
+    assert task_names(data) == ["task-c", "task-d"]
+    pipeline.acknowledge(data.data_id)
+    assert not pipeline.ready(1)
+    pipeline.close()
+    session.close()
+
+
+def test_one_job_holds_traces_or_train_tasks_never_both(tmp_path: Path) -> None:
+    session = SQLiteScenarioStorage(tmp_path / "records").open("s")
+    context = PipelineContext("s", samples=TrainerSamples(session.samples), default_job_samples=1)
+    pipeline = TrainingPipeline(
+        context,
+        record2record=ReportRecord2Record(context, ReportGrouping()),
+        record2sample=TraceSamples(),
+        sample2job=TrainTaskJobData(context, 4, 1),
+    )
+    pipeline.push(_inference("inf-1", {"messages": []}))
+    pipeline.push(_report("rep-1", 0.0, ["inf-1"]))
+    add_tasks(session.samples, tmp_path / "tasks", "train", "task-a", "task-b")
+
+    # The buffer takes up to four samples, but the trace came first, so its job holds the trace alone.
+    traces = pipeline.build_job_data(1)
+    assert [source_record_id(sample) for sample in traces.samples] == ["inf-1"]
+    pipeline.acknowledge(traces.data_id)
+    tasks = pipeline.build_job_data(1)
+    assert task_names(tasks) == ["task-a", "task-b"]
+    pipeline.close()
+    session.close()
+
+
+def test_a_restart_reads_the_store_back_and_trains_the_tasks_that_no_durable_commit_trained(tmp_path: Path) -> None:
+    session = SQLiteScenarioStorage(tmp_path / "records").open("offline")
+    add_tasks(session.samples, tmp_path / "tasks", "train", "task-a", "task-b", "task-c")
+    first = offline_pipeline(session.samples, job_samples=1)
+    durable = first.build_job_data(1)
+    session.commit_step(
+        expected_step=0,
+        commit=CommitRecord(
+            scenario="offline",
+            step=1,
+            artifact_ref=ArtifactRef("content:1", "release:1", "base"),
+            checkpoint=True,
+            algorithm_state={},
+            high_water_sequence=0,
+            high_water_offset=0,
+            consumed_ids=first.acknowledge(durable.data_id),
+        ),
+    )
+    # The second step's commit never becomes durable.
+    lost = first.build_job_data(1)
+    first.acknowledge(lost.data_id)
+    first.close()
+
+    (trained,) = session.samples.get(("task-a",))
+    assert task_names(durable) == ["task-a"] and trained.train_count("") == 1
+    restarted = offline_pipeline(session.samples, job_samples=1)
+    rest = []
+    while restarted.ready(1):
+        data = restarted.build_job_data(1)
+        rest.append(task_names(data))
+        restarted.acknowledge(data.data_id)
+    # The step whose commit never became durable trains its task again.
+    assert rest == [task_names(lost), ["task-c"]] == [["task-b"], ["task-c"]]
+    restarted.close()
+    session.close()

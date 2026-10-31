@@ -17,7 +17,6 @@ import math
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
-from pathlib import Path
 from threading import Lock
 from typing import Any
 
@@ -311,6 +310,14 @@ class Trainer:
     @property
     def pipeline(self) -> TrainingPipeline:
         return self._pipeline
+
+    @property
+    def accepts_imported_tasks(self) -> bool:
+        """Whether the trainer's pipeline trains the scenario's imported train tasks
+        (``TrainingPipeline.accepts_imported_tasks``). Admission refuses a train-split task upload when no trainer
+        of the scenario accepts them.
+        """
+        return self._pipeline.accepts_imported_tasks
 
     def admit_reports_of(self, report_type: type[ReportBase] | None) -> None:
         """Name the contract the scenario's ingress admits, when several trainers share one scenario."""
@@ -718,21 +725,6 @@ class Trainer:
             )
             self._pending.prepared_commit = prepared
             return prepared
-
-    def shipped_content_update(self, published_tree: Path) -> TrainStepResult | None:
-        """The backend's update of its shipped content; ``None`` while a step is pending or nothing is stale."""
-        with self._lock:
-            if self._candidate_backend is None or self._pending is not None:
-                return None
-            state = dict(self._state)
-        return self._candidate_backend.shipped_content_update(state, published_tree)
-
-    def apply_committed_state(self, state: Mapping[str, Any]) -> None:
-        """Expose state a commit outside a training step recorded, such as a shipped content update."""
-        with self._lock:
-            if self._pending is not None:
-                raise RuntimeError("cannot apply committed state while a training step is pending")
-            self._state = dict(state)
 
     def commit(self, prepared: PreparedCommit) -> None:
         """Expose one prepared state after its scenario commit has settled."""

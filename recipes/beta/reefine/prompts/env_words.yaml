@@ -1,0 +1,24 @@
+# The words the request and review prompts take for an env item, by whether the harness takes an extension: pi's
+# extensions read process.env (extension), another harness's files find the value in its environment (files). Each
+# set fills the request prompt's env_value, env_reader, means and asker, and the review prompt's env_check.
+extension:
+  env_value: >-
+    The value of an env item is read at run time from process.env.NAME; an extension never asks the user for it,
+    never stores it in a file of its own and never hardcodes it.
+  env_reader: which the extension reads at run time from process.env.NAME
+  means: these files and the extension API
+  asker: the extension itself never asks
+  env_check: >-
+    a variable an extension reads that no requires item names (PI_OFFLINE, PI_CODING_AGENT_DIR and the REEF_
+    variables are reef's own and need none), a value the user must provide that the extension asks for or stores
+    itself instead of declaring it as a requires item.
+files:
+  env_value: >-
+    The value of an env item reaches the harness's environment at run time; no file asks the user for it, stores it
+    in a file of its own or hardcodes it.
+  env_reader: which the harness finds in its environment at run time
+  means: these files
+  asker: no file of the change asks for it itself
+  env_check: >-
+    a variable a file relies on that no requires item names (the REEF_ variables are reef's own and need none), a
+    value the user must provide that a file asks for or stores itself instead of declaring it as a requires item.

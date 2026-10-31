@@ -49,6 +49,7 @@ const navigationSources: ReadonlyArray<{ title: string; files: ReadonlyArray<str
       "getting-started/intro.rst",
       "getting-started/installation.rst",
       "getting-started/quickstart.rst",
+      "getting-started/harness-tutorial.rst",
       "getting-started/core-loop.rst",
     ],
   },
@@ -62,7 +63,6 @@ const navigationSources: ReadonlyArray<{ title: string; files: ReadonlyArray<str
       "user-guide/scenario-models.rst",
       "user-guide/evolve-your-model.rst",
       "user-guide/tinker.rst",
-      "user-guide/recipes/reefine.rst",
       "user-guide/recipes/sft.rst",
       "user-guide/recipes/sao.rst",
       "user-guide/recipes/sdft.rst",
@@ -71,7 +71,6 @@ const navigationSources: ReadonlyArray<{ title: string; files: ReadonlyArray<str
       "user-guide/recipes/tttd.rst",
       "user-guide/recipes/guidance-ttt.rst",
       "user-guide/recipes/openclawrl.rst",
-      "user-guide/recipes/skillclaw.rst",
       "user-guide/recipes/gepa.rst",
       "user-guide/operate.rst",
       "user-guide/troubleshooting.rst",
@@ -125,8 +124,7 @@ const navigationSources: ReadonlyArray<{ title: string; files: ReadonlyArray<str
 
 // The site loads only the files listed above, so a page missing from the list
 // does not merely go unlinked — it 404s. Adding a page under a section
-// directory now fails the build until it is placed in the reading order. Not
-// scanned: rfcs/ (design records, read in the repo).
+// directory now fails the build until it is placed in the reading order.
 const navigated = new Set<string>(navigationSources.flatMap((group) => group.files));
 // Pages live in one directory per navigation section, so a page's path names
 // its section and the URL follows the path.
@@ -450,6 +448,8 @@ const docDescriptions: Partial<Record<string, string>> = {
     "Install Reef for harness evolution on a laptop, GPU-based model training, or client-only access to an existing deployment.",
   "getting-started/quickstart":
     "Start Reef locally without a GPU, send an inference request, report feedback, and inspect the release history.",
+  "getting-started/harness-tutorial":
+    "Start Reef, connect your coding agent, give feedback on a session, and see Reef evolve the agent's harness from it.",
   "user-guide/recipes":
     "Compare Reef recipes for model training and harness evolution. Choose a method based on your workload, feedback, and compute requirements.",
   "user-guide/evolve-your-harness":

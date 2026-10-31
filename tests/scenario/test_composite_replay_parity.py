@@ -153,7 +153,16 @@ class _Recipe(_TwoTrainerRecipe):
     pipelines: tuple[tuple[str, Any], ...] = ()
 
     def build_trainers(
-        self, scenario, records, *, surface, algorithm_states, experiment_logger=None, task_storage=None, samples=None
+        self,
+        scenario,
+        records,
+        *,
+        surface,
+        algorithm_states,
+        experiment_logger=None,
+        task_storage=None,
+        releases=None,
+        samples=None,
     ):
         pipelines = dict(self.pipelines)
         # Each trainer reads the stored samples of its component, so a rebuilt trainer finds the samples made live.

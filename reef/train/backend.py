@@ -5,7 +5,6 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any, Literal
 
 from reef.artifact.artifact import Artifact
@@ -53,6 +52,70 @@ class PreparedStep:
         return cls("skip", state, metrics or {})
 
 
+@dataclass(frozen=True)
+class ReleaseFiles:
+    """One component's files in one committed release.
+
+    Values: ``release_id`` is the non-empty id of the release; ``files`` maps
+    each relative path of the component's view of that release to its UTF-8
+    text, without the repository's own files.
+    Purpose: ``CommittedReleases`` makes it; a candidate backend builds its
+    head, or a recheck target, from ``files``.
+    """
+
+    release_id: str
+    files: Mapping[str, str]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.release_id, str) or not self.release_id:
+            raise ValueError("ReleaseFiles.release_id must be a non-empty string")
+
+
+class CommittedReleases(ABC):
+    """The releases a scenario's commits recorded, read for one component at a time.
+
+    Purpose: a candidate backend that builds each candidate from the committed
+    head reads it here, and the scenario layer implements it over its commit
+    history and artifact repository. A component's head is its training
+    start: the release of the later of its newest ``train_from`` record and
+    its newest training commit that made an artifact, active or not. An
+    ``activate`` record moves what serves, not the head. Before any such
+    record, the head is the base release.
+    """
+
+    @abstractmethod
+    def head(self, component: str) -> ReleaseFiles:
+        """``component``'s files in its head release."""
+
+    @abstractmethod
+    def release(self, release_id: str, component: str) -> ReleaseFiles:
+        """``component``'s files in release ``release_id``; ``ArtifactNotFound`` for an unknown release."""
+
+
+@dataclass(frozen=True)
+class ComponentReleases:
+    """One component's view of a scenario's ``CommittedReleases``.
+
+    Values: ``releases`` is the scenario's reader, and ``component`` names a
+    component of the scenario's release, non-empty.
+    Purpose: ``Recipe.build_trainers`` makes one per component and hands it
+    to ``Recipe.build``; a candidate backend reads its head through it.
+    """
+
+    releases: CommittedReleases
+    component: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.component, str) or not self.component:
+            raise ValueError("ComponentReleases.component must be a non-empty string")
+
+    def head(self) -> ReleaseFiles:
+        return self.releases.head(self.component)
+
+    def release(self, release_id: str) -> ReleaseFiles:
+        return self.releases.release(release_id, self.component)
+
+
 class CandidateBackend(CandidateEvaluator, ABC):
     """Prepare and evaluate updates while Reef owns candidate selection.
 
@@ -71,16 +134,6 @@ class CandidateBackend(CandidateEvaluator, ABC):
         """Release resources owned by this backend; safe to call repeatedly."""
         return
 
-    @property
-    def harness_node_paths(self) -> Mapping[str, str] | None:
-        """Root-relative render paths of the harness node kinds; ``None`` for a backend that evolves no harness."""
-        return None
-
-    @property
-    def harness_adapter(self) -> str | None:
-        """The name of the harness adapter the backend evolves; ``None`` for a backend that evolves no harness."""
-        return None
-
     def commit_applied(self, state: Mapping[str, Any]) -> None:
         """Observe algorithm state only after its scenario commit is durable.
 
@@ -89,18 +142,6 @@ class CandidateBackend(CandidateEvaluator, ABC):
         speculative prepare/evaluate work escape Reef's commit boundary.
         """
         return
-
-    def shipped_content_update(self, state: Mapping[str, Any], published_tree: Path) -> TrainStepResult | None:
-        """A result that republishes the content this Reef ships, when the served tree no longer carries it.
-
-        Content a backend ships with Reef itself (the harness backend's reef-owned
-        entries) is fixed when a scenario is created and carried unchanged by every
-        later step, so a scenario opened by an upgraded Reef compares it against
-        ``published_tree``, the active release's files. The result carries the
-        refreshed ``state`` and a durable ``artifact``; it is committed without an
-        evaluation. The default ships nothing.
-        """
-        return None
 
     def started_from(self, state: Mapping[str, Any], artifact: Artifact) -> Mapping[str, Any]:
         """The state whose next step starts from ``artifact``, given the current ``state``.
@@ -153,4 +194,10 @@ class CandidateBackend(CandidateEvaluator, ABC):
         """Restore backend-local state after evaluation or settlement fails."""
 
 
-__all__ = ["CandidateBackend", "PreparedStep"]
+__all__ = [
+    "CandidateBackend",
+    "CommittedReleases",
+    "ComponentReleases",
+    "PreparedStep",
+    "ReleaseFiles",
+]

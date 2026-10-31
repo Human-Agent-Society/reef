@@ -13,7 +13,7 @@ from pathlib import Path
 from threading import Event, Lock, Thread
 from typing import Any
 
-from reef.artifact.artifact import Artifact
+from reef.artifact.artifact import Artifact, ArtifactRef
 from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.artifact.repository import EnumerableRepositoryBackendFactory, RepositoryBackendFactory
 from reef.artifact.sources import SourceFiles
@@ -450,11 +450,6 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
                 moved.append(str(destination))
         return moved
 
-    def recipe_has_files(self) -> bool:
-        """Whether the served recipe creates a file-serving surface."""
-        # Capability probe only: file serving does not depend on the scenario.
-        return self.recipe.build_surface("").files is not None
-
     def list_artifacts(self, scenario: str) -> tuple[dict[str, Any], ...]:
         """Each component's artifacts of ``scenario``, newest first, with each component's active one marked."""
         with self.registry.lock_for(scenario):
@@ -564,6 +559,22 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
             )
         self.request_artifact_copy(scenario)
         return imported
+
+    def sync_release(
+        self,
+        scenario: str,
+        artifact: Artifact,
+        *,
+        component: str,
+        expected_release_id: str,
+        metrics: Mapping[str, Any],
+    ) -> ArtifactRef:
+        """Make a person's merged ``component`` tree ``scenario``'s active release and training start, under the
+        scenario's lock; see :meth:`ScenarioCommitter.sync_release`."""
+        with self.registry.lock_for(scenario):
+            return self.registry.require(scenario).sync_release(
+                artifact, component=component, expected_release_id=expected_release_id, metrics=metrics
+            )
 
     def current_artifact(
         self,

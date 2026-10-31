@@ -26,7 +26,7 @@ from typing import Any
 from reef.core import AgentRecord, RequestType
 from reef.core.evaluation import RolloutRequest, RolloutScores
 from reef.core.job_data import TaskSample, TrajectorySample
-from reef.harness.client.tasks import TaskLab, TaskRollout, TaskRolloutRunner
+from reef.harness.tasks.rollouts import TaskLab, TaskRollout, TaskRolloutRunner
 from reef.record2sample.assembly import SampleAssembly, SampleAssemblySettings
 from reef.runtime.interfaces import inference_aborted
 
@@ -52,7 +52,7 @@ class RolloutSettings:
     ``verifier_timeout_reward`` is the reward of a rollout whose verifier timed out, or None to leave it
     unscored. ``scaffold_tolerance`` is a non-negative int, the masked tokens that the assembly may realign
     before a response (for a thinking template's scaffold). Purpose: ``from_parameters`` reads it from a
-    job's parameters; ``roll_out`` runs it.
+    job's parameters; ``run_train_tasks`` runs it.
     """
 
     rollouts_per_task: int
@@ -103,7 +103,7 @@ class TaskJobRollouts:
 
     Values: ``samples`` holds the samples of the groups that train, each group contiguous, every sample with
     the ``group_id`` of its task. ``scores`` holds the score of each rollout, by task name, in run order; each
-    group names a task of ``scores``. Purpose: ``roll_out`` makes it; the component trains ``samples`` and
+    group names a task of ``scores``. Purpose: ``run_train_tasks`` makes it; the component trains ``samples`` and
     reports the scores in the job's metrics.
     """
 
@@ -227,7 +227,7 @@ def rollout_sample(rollout: TaskRollout, group: str, assembly: SampleAssembly, s
     return replace(sample, group_id=group, source_agent_record_ids=())
 
 
-def roll_out(
+def run_train_tasks(
     tasks: Sequence[TaskSample],
     settings: RolloutSettings,
     chat: RolloutChat,

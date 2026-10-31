@@ -26,7 +26,7 @@ from reef.core.evaluation import PolicyHarness, PolicyModel, RolloutRequest, Rol
 from reef.core.values import require_text
 from reef.evaluation.artifact_endpoint import ArtifactEndpoint, CandidateArtifacts
 from reef.execution.workers import QueueWorker
-from reef.harness.client.tasks import DEFAULT_AGENT, TaskLab, TaskRolloutRunner
+from reef.harness.tasks.rollouts import DEFAULT_AGENT, TaskLab, TaskRolloutRunner
 from reef.storage.work_queue import JsonValue, WorkItem, WorkQueue
 
 #: The queue of evaluations and their rollouts.

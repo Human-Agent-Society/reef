@@ -12,12 +12,10 @@ from threading import RLock
 from typing import Any
 
 from reef.artifact.artifact import Artifact, ArtifactError, ArtifactNotFound, ArtifactRef, is_local_release
-from reef.artifact.files import DirectoryFiles
 from reef.artifact.release_chain import ArtifactReleaseChain
 from reef.core.components import made_artifact_id
 from reef.storage.commits import CommitRecord, active_record
 from reef.storage.scenario import ScenarioStore
-from reef.surface.files import ENTRIES_FILE, read_entries
 
 
 @dataclass(frozen=True)
@@ -96,8 +94,8 @@ class ScenarioReleases:
         return self._store.history() if self._store.durable else ()
 
     def releases(self, scenario_step: int) -> tuple[dict[str, Any], ...]:
-        """List the creation, every training step and every import, newest first; activations and new training starts
-        are not listed.
+        """List the creation, every training step, every import and every sync, newest first; activations and new
+        training starts are not listed.
 
         ``active`` is true on the row that made the active release (see
         :func:`active_record`), and ``activated`` on each row whose release
@@ -117,6 +115,7 @@ class ScenarioReleases:
             }
             rows = [
                 self._release_row(
+                    step=0,
                     artifact_ref=self._creation_artifact,
                     checkpoint=True,
                     recorded_at=None,
@@ -127,6 +126,7 @@ class ScenarioReleases:
             ]
             rows.extend(
                 self._release_row(
+                    step=record.step,
                     artifact_ref=record.artifact_ref,
                     checkpoint=record.checkpoint,
                     recorded_at=record.recorded_at,
@@ -140,11 +140,12 @@ class ScenarioReleases:
                     components=record.components,
                 )
                 for record in records
-                if record.operation in ("training", "import")
+                if record.operation in ("training", "import", "sync")
             )
             if recovered:
                 rows.append(
                     self._release_row(
+                        step=scenario_step,
                         artifact_ref=self._artifacts.current,
                         checkpoint=True,
                         recorded_at=None,
@@ -184,7 +185,7 @@ class ScenarioReleases:
         An artifact is the content of one component. Each row lists an
         artifact under the release that made it.
 
-        - With one component, each release that a training step or an import
+        - With one component, each release that a training step, an import or a sync
           made is one artifact. Its ``artifact_id`` is its ``release_id``.
         - With several components, a release made the artifact of a component
           when its manifest gives the component the ``artifact_id`` that the
@@ -403,20 +404,6 @@ class ScenarioReleases:
                 return record.metrics
         return None
 
-    def entries_for_version(self, release_id: str, component: str | None) -> tuple[dict[str, Any], ...] | None:
-        """The composition entries that ``component``'s harness artifact in ``release_id`` holds (``read_entries``).
-
-        ``component`` is ``None`` for the release root. Every harness artifact
-        holds its entries in its tree, the base artifact included; a release
-        whose tree holds none gives ``None``. Raise ``ArtifactNotFound`` as
-        ``artifact_for_version`` does.
-        """
-        release = self.artifact_for_version(release_id)
-        tree = (release if component is None else release.component(component)).local_path
-        if tree is None or not (tree / ENTRIES_FILE).is_file():
-            return None
-        return read_entries(DirectoryFiles(tree))
-
     def artifact_for_version(self, release_id: str) -> Artifact:
         """Materialize a scenario release for a read-only content serve.
 
@@ -457,6 +444,7 @@ class ScenarioReleases:
     @staticmethod
     def _release_row(
         *,
+        step: int,
         artifact_ref: ArtifactRef,
         checkpoint: bool,
         recorded_at: float | None,
@@ -470,6 +458,7 @@ class ScenarioReleases:
         components: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
         row: dict[str, Any] = {
+            "step": step,
             "release_id": artifact_ref.release_id,
             "parent_release_id": artifact_ref.parent_release_id,
             "content_id": artifact_ref.content_id,

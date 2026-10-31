@@ -23,7 +23,7 @@ uses the deployment's model:
            config:
              pipeline: {sample2job: {config: {job_samples: 8, buffer_size: 32}}}
          harness:
-           implementation: reef.recipe.cordis:CordisRecipe
+           implementation: reef.recipe.harness:HarnessEvolutionRecipe
            config:
              evolution: {adapter: pi, ...}
 """
@@ -52,7 +52,8 @@ from reef.runtime.jobs import TrainingComponent
 from reef.storage.records import RecordStore
 from reef.storage.samples import SampleStore, TrainerSamples
 from reef.storage.tasks import TaskStorage, TaskStore
-from reef.surface.base import ComponentSurface, HarnessInfo, Surface
+from reef.surface.base import ComponentSurface, Surface
+from reef.train.backend import CommittedReleases, ComponentReleases
 from reef.train.trainer import ComponentTrainer
 
 #: Metric prefixes experiment tracking keeps for itself; a component's metrics are prefixed with its name.
@@ -292,9 +293,8 @@ class CompositeRecipe(Recipe):
         return any_component_report(tuple(declared))
 
     def build_surface(self, scenario: str) -> Surface:
-        """Every component's serving capabilities under its own name; one component may carry harness info."""
+        """Every component's serving capabilities under its own name."""
         components: dict[str, ComponentSurface] = {}
-        harness: HarnessInfo | None = None
         for component, recipe in self.components.items():
             surface = recipe.serving_surface(scenario)
             if len(surface.components) > 1:
@@ -304,11 +304,7 @@ class CompositeRecipe(Recipe):
             # this component here: inside the composite, the component is that recipe's release.
             checks = every_check(surface.validator, served.validator)
             components[component] = served if checks is served.validator else replace(served, validator=checks)
-            if surface.harness is not None:
-                if harness is not None:
-                    raise RecipeConfigError("only one component may serve harness information")
-                harness = surface.harness
-        return Surface(components=components, harness=harness)
+        return Surface(components=components)
 
     def build_trainers(
         self,
@@ -319,6 +315,7 @@ class CompositeRecipe(Recipe):
         algorithm_states: Mapping[str, Mapping[str, Any] | None],
         experiment_logger: ExperimentLogger | None = None,
         task_storage: TaskStorage | None = None,
+        releases: CommittedReleases | None = None,
         samples: SampleStore | None = None,
     ) -> tuple[ComponentTrainer, ...]:
         trainers = []
@@ -332,6 +329,7 @@ class CompositeRecipe(Recipe):
                 algorithm_state=algorithm_states.get(component),
                 experiment_logger=experiment_logger,
                 task_storage=None if task_storage is None else ComponentTaskStorage(task_storage, component),
+                releases=None if releases is None else ComponentReleases(releases, component),
                 samples=None if samples is None else TrainerSamples(samples, component),
             )
             # Ingress admits what any component accepts; each trainer then releases the reports shaped for another.

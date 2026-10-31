@@ -1,7 +1,7 @@
 """Deterministic coverage for the GEPA AIME example.
 
 Nothing here calls a model or launches Pi: the scorer and the feedback hook run
-on synthetic rollout results, and the driver's record lookup and
+on synthetic run results, and the driver's record lookup and
 report run against a real embedded Reef service with a stubbed inference
 backend, exactly as the campaign driver's suite does.
 """
@@ -18,18 +18,20 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from tests.support.harness_steps import TreeReleases
 
 from reef.core.evaluation import PolicyHarness, RolloutRequest
-
-from reef.harness import RolloutResult
+from reef.harness import TaskResult
 from reef.harness.adapters import get_adapter
-from reef.harness.rollouts.model_binding import ModelBinding
+from reef.harness.tasks.model_binding import ModelBinding
+from reef.harness.tree import HarnessTree
+from reef.train.backend import ComponentReleases
 
 
-def rollout_requests(evaluator, *pairings):
-    """One rollout request for each ``(files, task)``, on the evaluator's adapter and served model."""
+def run_requests(evaluator, *pairings):
+    """One run request for each ``(files, task)``, on the evaluator's adapter and served model."""
     return [
-        RolloutRequest(PolicyHarness(evaluator._descriptor.name, files), evaluator.served_model, task)
+        RolloutRequest(PolicyHarness(evaluator.descriptor.name, files), evaluator.served_model, task)
         for files, task in pairings
     ]
 
@@ -38,7 +40,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 EXAMPLE_DIR = REPO_ROOT / "recipes" / "gepa" / "examples" / "aime"
 
 
-def _purge_example_modules() -> None:
+def purge_example_modules() -> None:
     # Every example names its package ``harness`` and its driver ``run``:
     # drop any cached import so this file's syspath entry wins, and drop
     # ours again afterwards so a sibling suite never inherits it.
@@ -47,12 +49,21 @@ def _purge_example_modules() -> None:
 
 
 @pytest.fixture
-def load(monkeypatch):
-    """Import an example module fresh, and leave no trace for the next suite."""
+def load(monkeypatch, tmp_path):
+    """Import an example module fresh, and leave no trace for the next suite.
+
+    The driver writes the seed it builds under ``REEF_WORK``, so the work directory is the test's own.
+    """
+    monkeypatch.setenv("REEF_WORK", str(tmp_path / "work"))
     monkeypatch.syspath_prepend(str(EXAMPLE_DIR))
-    _purge_example_modules()
+    purge_example_modules()
     yield importlib.import_module
-    _purge_example_modules()
+    purge_example_modules()
+
+
+def releases_of(recipe) -> ComponentReleases:
+    """A commit history whose head is the recipe's seed, as a new scenario's base release is."""
+    return ComponentReleases(TreeReleases(recipe.seed), "harness")
 
 
 @pytest.fixture
@@ -63,9 +74,9 @@ def aime(load):
     return module
 
 
-def pi_rollout(answer: str, *, exit_code: int = 0, residue: tuple[str, ...] = ()) -> RolloutResult:
+def pi_run(answer: str, *, exit_code: int = 0, residue: tuple[str, ...] = ()) -> TaskResult:
     trajectory = ({"message": {"role": "assistant", "content": [{"type": "text", "text": answer}]}},)
-    return RolloutResult(exit_code, "", "", trajectory, residue)
+    return TaskResult(exit_code, "", "", trajectory, residue)
 
 
 # The scorer and the feedback hook ----------------------------------------
@@ -78,19 +89,19 @@ def pi_rollout(answer: str, *, exit_code: int = 0, residue: tuple[str, ...] = ()
 def test_scorer_matches_the_upstream_expected_string(aime, response, score):
     aime.register([{"input": "problem", "answer": "### 17"}])
 
-    assert aime.evaluate("problem", pi_rollout(response)) == score
+    assert aime.evaluate("problem", pi_run(response)) == score
 
 
 @pytest.mark.parametrize(("exit_code", "residue"), [(1, ()), (0, ("pi-agent/stray.json",))])
-def test_a_dirty_rollout_scores_zero_however_it_answered(aime, exit_code, residue):
+def test_a_dirty_run_scores_zero_however_it_answered(aime, exit_code, residue):
     aime.register([{"input": "problem", "answer": "### 17"}])
 
-    assert aime.evaluate("problem", pi_rollout("### 17", exit_code=exit_code, residue=residue)) == 0.0
+    assert aime.evaluate("problem", pi_run("### 17", exit_code=exit_code, residue=residue)) == 0.0
 
 
 def test_an_unregistered_task_refuses_rather_than_scoring_zero(aime):
     with pytest.raises(RuntimeError, match="no AIME answer is registered"):
-        aime.evaluate("never seen", pi_rollout("### 17"))
+        aime.evaluate("never seen", pi_run("### 17"))
 
 
 def test_scorer_snapshot_and_feedback_survive_serialization_without_registry(aime):
@@ -100,23 +111,24 @@ def test_scorer_snapshot_and_feedback_survive_serialization_without_registry(aim
     evaluate, feedback = pickle.loads(pickle.dumps((scorer.score, scorer.feedback)))
     aime.ANSWERS.clear()
     aime.CONTEXTS.clear()
-    assert evaluate("problem", pi_rollout("### 17")) == 1.0
+    assert evaluate("problem", pi_run("### 17")) == 1.0
     assert "solution: explanation" in feedback("problem", "wrong", 0.0)
-    assert evaluate("problem", pi_rollout("### 17", exit_code=1)) == 0.0
-    assert evaluate("problem", pi_rollout("### 17", residue=("stray",))) == 0.0
+    assert evaluate("problem", pi_run("### 17", exit_code=1)) == 0.0
+    assert evaluate("problem", pi_run("### 17", residue=("stray",))) == 0.0
     with pytest.raises(RuntimeError, match="no AIME answer is registered"):
-        evaluate("unknown", pi_rollout("### 17"))
+        evaluate("unknown", pi_run("### 17"))
 
 
 def test_driver_preserves_executor_profiles(load, monkeypatch, tmp_path):
     driver = load("run")
     config = driver.load_config(EXAMPLE_DIR / "gepa.yaml")
-    config["recipe"]["config"]["evolution"]["gepa"]["archive"] = str(tmp_path / "archive")
     config["executors"] = {"cpu-pool": {"backend": "mp", "workers": 2}}
     config["execution"] = {"evolution": "cpu-pool"}
     monkeypatch.setattr(driver, "load_config", lambda path: config)
-    _, recipe = driver.load_recipe(["problem"], api_key="dummy")
+    _, recipe = driver.load_recipe(["problem"], api_key="dummy", trainset_size=45)
     assert recipe.worker_executor.backend == "mp"
+    # One --seed drives both draws, and the method plans over the training split.
+    assert (recipe.method.settings.seed, recipe.method.settings.trainset_size) == (0, 45)
 
 
 def test_default_driver_pool_uses_a_stable_answer_snapshot(load, monkeypatch, tmp_path):
@@ -127,28 +139,19 @@ def test_default_driver_pool_uses_a_stable_answer_snapshot(load, monkeypatch, tm
     config = driver.load_config(EXAMPLE_DIR / "gepa.yaml")
     assert config["execution"]["evolution"]["backend"] == "auto"
     config["execution"]["evolution"]["workers"] = 1
-    config["recipe"]["config"]["evolution"]["gepa"]["archive"] = str(tmp_path / "archive")
     monkeypatch.setattr(driver, "load_config", lambda path: config)
-    monkeypatch.setattr("reef.evaluation.harness.run_rollout", lambda *args, **kwargs: pi_rollout("### 17"))
-    _, recipe = driver.load_recipe(["problem"], api_key="dummy")
+    monkeypatch.setattr("reef.evaluation.harness.runner.run_task", lambda *args, **kwargs: pi_run("### 17"))
+    _, recipe = driver.load_recipe(["problem"], api_key="dummy", trainset_size=45)
     with SQLiteRecordStore() as records:
-        trainer = recipe.build("test", records)
+        trainer = recipe.build("test", records, releases=releases_of(recipe))
         try:
-            backend = trainer.candidate_backend
-            assert backend._rollout_evaluator.worker_selection.settings.backend == "uni"
-            assert [
-                row.score.value
-                for row in backend._rollout_evaluator.run_rollouts(
-                    rollout_requests(backend._rollout_evaluator, ({}, "problem"), ({}, "problem"))
-                )
-            ] == [1.0, 1.0]
+            evaluator = trainer.candidate_backend.evaluator
+            assert evaluator.worker_pool.selection.settings.backend == "uni"
+            rows = evaluator.run_rollouts(run_requests(evaluator, ({}, "problem"), ({}, "problem")))
+            assert [row.score.value for row in rows] == [1.0, 1.0]
+            # A later registration does not reach the snapshot the recipe scores with.
             driver.aime.register([{"input": "problem", "answer": "### 18"}])
-            assert (
-                backend._rollout_evaluator.run_rollouts(rollout_requests(backend._rollout_evaluator, ({}, "problem")))[
-                    0
-                ].score.value
-                == 1.0
-            )
+            assert evaluator.run_rollouts(run_requests(evaluator, ({}, "problem")))[0].score.value == 1.0
         finally:
             trainer.close()
 
@@ -187,55 +190,45 @@ def test_driver_evaluates_with_isolated_workers(load, monkeypatch, tmp_path, exe
     )
     binary.chmod(0o755)
     monkeypatch.setenv("REEF_PI_BINARY", str(binary))
-    _, recipe = driver.load_recipe(["problem"], api_key="dummy")
+    _, recipe = driver.load_recipe(["problem"], api_key="dummy", trainset_size=45)
     # Validation workers use the runtime's upstream, not the loopback service
     # used by the driver's minibatch and held-out passes.
     assert recipe.model_binding().base_url == driver.aime.OPENAI_BASE_URL
     driver.aime.ANSWERS.clear()
     with driver.worker_runtime(recipe), SQLiteRecordStore() as records:
-        trainer = recipe.build("isolated", records)
+        trainer = recipe.build("isolated", records, releases=releases_of(recipe))
         try:
-            backend = trainer.candidate_backend
-            assert backend._rollout_evaluator.worker_selection.settings.backend == (
-                "mp" if executor == "auto" else executor
-            )
-            rows = backend._rollout_evaluator.run_rollouts(
-                rollout_requests(backend._rollout_evaluator, ({}, "problem"), ({}, "problem"))
-            )
+            evaluator = trainer.candidate_backend.evaluator
+            assert evaluator.worker_pool.selection.settings.backend == ("mp" if executor == "auto" else executor)
+            rows = evaluator.run_rollouts(run_requests(evaluator, ({}, "problem"), ({}, "problem")))
             assert [row.score.value for row in rows] == [1.0, 1.0]
             with pytest.raises(Exception, match="no AIME answer is registered"):
-                backend._rollout_evaluator.run_rollouts(rollout_requests(backend._rollout_evaluator, ({}, "unknown")))
+                evaluator.run_rollouts(run_requests(evaluator, ({}, "unknown")))
         finally:
             trainer.close()
 
 
-def test_driver_keeps_custom_task_hooks(load, monkeypatch):
+def test_driver_binds_the_example_hooks_to_one_snapshot_and_keeps_other_hooks(load, monkeypatch):
+    from recipes.gepa import ScoreFeedback
+    from reef.evaluation.harness import VerifierRewardScorer
+
     driver = load("run")
+    _, recipe = driver.load_recipe(["problem"], api_key="dummy", trainset_size=45)
+    assert isinstance(recipe.scorer, driver.aime.AIMEScorer) and recipe.method.feedback is recipe.scorer
     config = driver.load_config(EXAMPLE_DIR / "gepa.yaml")
-
-    from recipes.gepa.method import Feedback
-    from reef.evaluation.harness import RolloutScorer
-
-    class HalfScorer(RolloutScorer):
-        def score(self, task, result):
-            return 0.5
-
-    class CustomFeedback(Feedback):
-        def feedback(self, task, output, score):
-            return "custom"
-
-    config["recipe"]["config"]["evolution"].update(evaluate=HalfScorer(), feedback=CustomFeedback())
+    evolution = config["recipe"]["config"]["evolution"]
+    evolution["evaluation"]["scorer"] = "reef.evaluation.harness:VerifierRewardScorer"
+    evolution["method"]["config"]["feedback"] = "recipes.gepa:ScoreFeedback"
     monkeypatch.setattr(driver, "load_config", lambda path: config)
-    _, recipe = driver.load_recipe(["problem"], api_key="dummy")
-    assert recipe.score_rollout.score("problem", pi_rollout("anything")) == 0.5
-    assert recipe.feedback.feedback("problem", "anything", 0.5) == "custom"
+    _, recipe = driver.load_recipe(["problem"], api_key="dummy", trainset_size=45)
+    assert isinstance(recipe.scorer, VerifierRewardScorer) and isinstance(recipe.method.feedback, ScoreFeedback)
 
 
 @pytest.mark.parametrize("already_initialized", [False, True])
 def test_worker_runtime_owns_only_its_own_ray_session(load, monkeypatch, already_initialized):
     monkeypatch.setenv("REEF_GEPA_EXECUTOR", "ray")
     driver = load("run")
-    _, recipe = driver.load_recipe(["problem"], api_key="dummy")
+    _, recipe = driver.load_recipe(["problem"], api_key="dummy", trainset_size=45)
     calls = []
     fake_ray = SimpleNamespace(
         is_initialized=lambda: already_initialized,
@@ -255,7 +248,7 @@ def test_worker_runtime_owns_only_its_own_ray_session(load, monkeypatch, already
 def test_local_worker_runtime_does_not_require_ray(load, monkeypatch):
     monkeypatch.setenv("REEF_GEPA_EXECUTOR", "auto")
     driver = load("run")
-    _, recipe = driver.load_recipe(["problem"], api_key="dummy")
+    _, recipe = driver.load_recipe(["problem"], api_key="dummy", trainset_size=45)
     monkeypatch.setitem(sys.modules, "ray", None)
     with driver.worker_runtime(recipe):
         pass
@@ -313,43 +306,42 @@ def test_the_pins_a_report_names_stay_exact(aime):
 # The example's own wiring -------------------------------------------------
 
 
-def test_the_seed_composition_carries_the_quickstart_envelope():
+def test_the_seed_tree_carries_the_quickstart_envelope():
     import yaml
 
-    seed = yaml.safe_load((EXAMPLE_DIR / "gepa.yaml").read_text(encoding="utf-8"))["recipe"]["config"]["evolution"][
-        "seed"
+    evolution = yaml.safe_load((EXAMPLE_DIR / "gepa.yaml").read_text(encoding="utf-8"))["recipe"]["config"][
+        "evolution"
     ]
-    entries = {str(entry["id"]): entry for entry in seed}
+    seed = HarnessTree.read(EXAMPLE_DIR / evolution["seed"])
 
-    assert entries["rules"]["config"]["text"].startswith("You are a helpful assistant.")
-    assert entries["quickstart-settings"]["config"] == {"target": "primary", "data": {"defaultTools": []}}
-    extension = entries["reef-quickstart-system"]["config"]["code"]
+    assert sorted(seed.files) == ["config/primary.json", "extensions/reef-quickstart-system.ts", "rules.md"]
+    assert seed.files["rules.md"].startswith("You are a helpful assistant.")
+    assert json.loads(seed.files["config/primary.json"]) == {"defaultTools": []}
+    extension = seed.files["extensions/reef-quickstart-system.ts"]
     assert 'pi.on("before_agent_start"' in extension
     assert 'pi.on("before_provider_request"' in extension
-    # The extension reads the rules node instead of embedding its text, so the
-    # envelope stays fixed while the evolving node underneath it changes.
-    assert "AGENTS.md" in extension and "You are a helpful assistant" not in extension
+    # The extension reads the rules file instead of embedding its text, so the
+    # envelope stays fixed while the evolving rules underneath it change.
+    assert "rules.md" in extension and "You are a helpful assistant" not in extension
 
 
-def test_rollout_files_merge_the_transient_binding_into_the_served_tree(load, monkeypatch, tmp_path):
-    monkeypatch.setenv("REEF_WORK", str(tmp_path))
+def test_run_files_render_the_served_tree_with_the_transient_binding(load):
     driver = load("run")
-    served = {"pi-agent/AGENTS.md": "rules\n", "pi-agent/settings.json": json.dumps({"defaultTools": []})}
+    served = HarnessTree({"rules.md": "rules\n", "config/primary.json": json.dumps({"defaultTools": []})})
 
-    merged = driver.rollout_files(served, ModelBinding("http://service.test", "task-model", "k"), get_adapter("pi"))
+    merged = driver.run_files(served, ModelBinding("http://service.test", "task-model", "k"), get_adapter("pi"))
 
-    assert merged["pi-agent/AGENTS.md"] == "rules\n"
-    settings = json.loads(merged["pi-agent/settings.json"])
-    # The served tree's own config survives the merge; the endpoint is added.
-    assert settings["defaultTools"] == []
-    assert settings["defaultModel"] == "reef/task-model"
+    assert merged["plugin/rules.md"] == "rules\n"
+    # The served tree's own settings stay in the package; the endpoint goes to pi's own directory.
+    assert json.loads(merged["plugin/settings.json"])["defaultTools"] == []
+    assert json.loads(merged["pi-agent/settings.json"])["defaultModel"] == "reef/task-model"
     assert json.loads(merged["pi-agent/models.json"])["providers"]["reef"]["baseUrl"] == "http://service.test/v1"
 
 
 # The driver against the embedded service ----------------------------------
 
 
-def _stub_backend():
+def stub_backend():
     from reef.runtime.interfaces import InferenceHandler
 
     class StubModel(InferenceHandler):
@@ -361,21 +353,19 @@ def _stub_backend():
 
 
 def test_driver_reports_each_problem_against_its_recorded_request(load, monkeypatch, tmp_path):
-    """The record path end to end on the real service: a rollout's model call
+    """The record path end to end on the real service: a run's model call
     is recorded against the served composition, the driver finds it by problem
     text, and the report references it. Two of the three reports leave the
     batch open, so no training step runs and no Pi binary is needed."""
     from reef_client import ReefClient
 
-    monkeypatch.setenv("REEF_WORK", str(tmp_path))
     monkeypatch.setenv("REEF_MODEL", "task-model")
     driver = load("run")
     problems = ["Find n such that ...", "Let ABC be a triangle ..."]
-    recipe_name, recipe = driver.load_recipe(problems, api_key="dummy")
+    recipe_name, recipe = driver.load_recipe(problems, api_key="dummy", trainset_size=45)
+    # The base release holds the source tree, as every harness release does.
     bootstrap = tmp_path / "bootstrap"
-    for relative, text in driver.seed_tree(recipe).items():
-        (bootstrap / relative).parent.mkdir(parents=True, exist_ok=True)
-        (bootstrap / relative).write_text(text, encoding="utf-8")
+    recipe.seed.write(bootstrap)
     service = driver.RunService(
         scenario="gepa-test",
         recipe_name=recipe_name,
@@ -385,19 +375,26 @@ def test_driver_reports_each_problem_against_its_recorded_request(load, monkeypa
         upstream_url="http://127.0.0.1:9",
         upstream_key="dummy",
         port=0,
-        inference_handler=_stub_backend(),
+        inference_handler=stub_backend(),
     )
     service.start()
     try:
         client = ReefClient(service.base_url, timeout_s=60.0)
         manifest = driver.pull_tree(client, service, tmp_path / "served")
-        assert manifest["files"]["pi-agent/AGENTS.md"].startswith("You are a helpful assistant.")
-        assert "providers" not in json.loads(manifest["files"]["pi-agent/models.json"])
+        # The served source tree is the seed: no rendered file, and so no provider endpoint.
+        assert manifest["files"] == dict(recipe.seed.files)
+        assert HarnessTree.read(tmp_path / "served") == recipe.seed
+        # The driver plans from the history where the scenario's backend writes it; before any step the archive
+        # holds the seed alone, charged GEPA's seed validation.
+        backend = service.dispatcher.get_or_create_scenario(service.scenario).trainer.candidate_backend
+        assert service.history().root == backend.history.root
+        archive = driver.committed_archive(service, problems, recipe.seed, 0)
+        assert (len(archive.candidates), archive.served, archive.metric_calls) == (1, 0, len(problems))
 
         floor = driver.max_sequence(service.records(), service.scenario)
         references = []
         for problem in problems:
-            # What a Pi rollout does: an OpenAI-compatible call with no reef
+            # What a Pi run does: an OpenAI-compatible call with no reef
             # headers, which the service stamps with this run's scenario.
             request = urllib.request.Request(
                 f"{service.base_url}/v1/chat/completions",

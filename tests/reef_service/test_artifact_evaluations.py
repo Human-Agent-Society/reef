@@ -26,7 +26,9 @@ from reef.core.tasks import write_harbor_task
 from reef.dispatcher import Dispatcher
 from reef.evaluation.activation import AlwaysActivate, EvaluatedActivation, NeverActivate, activation_reference
 from reef.evaluation.rollout_worker import EvaluationRollout, EvaluationRolloutWorker, LocalCandidateEndpoints
-from reef.harness.client.tasks import RolloutRow, TaskLab
+from reef.harness.adapters import get_adapter
+from reef.harness.sync import create_harness_surface
+from reef.harness.tasks.rollouts import RolloutRow, TaskLab
 from reef.recipe import Recipe
 from reef.runtime.interfaces import InferenceHandler, InferenceRuntime
 from reef.service.app import create_app
@@ -34,7 +36,7 @@ from reef.service.artifact_evaluations import STOPPED_ERROR, ArtifactEvaluations
 from reef.storage.commits import CommitRecord
 from reef.storage.observer import ObservedScenarioStorage
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.surface import Surface, create_harness_surface, create_weight_surface
+from reef.surface import Surface, create_weight_surface
 from reef.train.trainer import ComponentTrainer
 
 TOKEN = "artifact-evaluation-test-token"
@@ -95,10 +97,19 @@ class WeightRecipe(Recipe):
         weights = create_weight_surface(kind=self.runtime.served_weight_kind)
         if not self.harness:
             return weights
-        return Surface({**weights.components, **create_harness_surface().components})
+        return Surface({**weights.components, **create_harness_surface(get_adapter("pi")).components})
 
     def build_trainers(
-        self, scenario, records, *, surface, algorithm_states, experiment_logger=None, task_storage=None, samples=None
+        self,
+        scenario,
+        records,
+        *,
+        surface,
+        algorithm_states,
+        experiment_logger=None,
+        task_storage=None,
+        releases=None,
+        samples=None,
     ):
         return tuple(
             ComponentTrainer(

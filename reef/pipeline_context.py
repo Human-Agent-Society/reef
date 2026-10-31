@@ -48,8 +48,6 @@ class PipelineContext:
     #: ``evolution.batch_size`` for harness evolution. None otherwise: a weight trainer's stage sets its own
     #: ``job_samples``, and a trainer that trains nothing keeps every sample.
     default_job_samples: int | None = None
-    #: Whether the pipeline takes training instructions; a recipe whose proposer reads none turns it off.
-    manual_enabled: bool = True
     #: The parameters of each training job, by the kind of the job's samples (``trajectory`` or ``task``), each a
     #: mapping that encodes as JSON; the recipe gives them, with its ``method``. Empty for a trainer without a job
     #: loop. ``Sample2Job.job_parameters`` reads them.

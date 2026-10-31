@@ -104,11 +104,14 @@ class ConfiguredPlugin(Plugin):
         return cls()
 
     @classmethod
-    def from_setting(cls, value: object, *, setting: str) -> Self:
-        """Build the plugin a setting names; Python callers may pass a built instance instead."""
+    def from_setting(cls, value: object, *, setting: str, default: PluginReference | None = None) -> Self:
+        """Build the plugin a setting names, or ``default`` when the setting is absent.
+
+        Python callers may pass a built instance instead.
+        """
         if isinstance(value, cls):
             return value
-        reference = cls.reference(value, setting=setting)
+        reference = default if value is None and default is not None else cls.reference(value, setting=setting)
         return cls.referenced_class(reference).from_config(reference.config)
 
 

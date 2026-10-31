@@ -45,7 +45,6 @@ from reef.core.errors import ReefError
 from reef.core.requirements import required_by
 from reef.dispatcher import Dispatcher
 from reef.execution.jobs import SupportsReceipt
-from reef.execution.workers import SERVICE_COMPONENTS
 from reef.pipeline_context import PipelineContext
 from reef.recipe import Recipe
 from reef.record2record import (
@@ -74,7 +73,7 @@ from reef.storage.commits import (
 from reef.storage.samples import consumed_sample_id
 from reef.storage.sqlite import SQLiteRecordStore
 from reef.surface import ComponentSurface, Surface, TextFileTree
-from reef.train import ComponentTrainer, Trainer, TrainStepResult
+from reef.train import ComponentTrainer, Trainer
 from reef.train.job_queue import JOBS_QUEUE
 from reef.train.jobs import JobLoopState
 from reef.train.pipeline import TrainingPipeline
@@ -625,7 +624,16 @@ class _NamedComponentsRecipe(Recipe):
         )
 
     def build_trainers(
-        self, scenario, records, *, surface, algorithm_states, experiment_logger=None, task_storage=None, samples=None
+        self,
+        scenario,
+        records,
+        *,
+        surface,
+        algorithm_states,
+        experiment_logger=None,
+        task_storage=None,
+        releases=None,
+        samples=None,
     ):
         return tuple(
             ComponentTrainer(
@@ -1180,7 +1188,7 @@ def test_the_harness_catalog_is_one_lineage_of_trees(dispatchers: _Dispatchers) 
     assert catalog[-1]["composed_release_id"] == w1
     assert catalog[-1]["parent_release_id"] == catalog[1]["parent_release_id"] == creation
     assert "ran on" in service.harness_release_page(headers, 2).lower()
-    assert f'"release_id": "{h1}"' in service.harness_install_script(headers, adapter="pi")
+    assert service.harness_manifest(headers, form="source")["release_id"] == h1
 
     # The next harness release descends from h1 in the listed chain; the weights release it was published
     # on stays under another name, and the requires chain walks the listed rows.
@@ -1209,7 +1217,7 @@ def test_the_harness_catalog_is_one_lineage_of_trees(dispatchers: _Dispatchers) 
     assert required_by(catalog, h1) == [{"name": "TOKEN", "kind": "env"}]
 
     # Weights held for review are activated as weights: the served tree stays, so the head stays a listed
-    # release, and the install script names no weights release or combination.
+    # release and names no weights release or combination.
     _append_records(scenario, 4)
     make_samples(scenario)
     backends[WEIGHTS].hold_next = True
@@ -1224,10 +1232,8 @@ def test_the_harness_catalog_is_one_lineage_of_trees(dispatchers: _Dispatchers) 
     assert component_files(scenario, scenario.current_artifact_ref())[WEIGHTS] == "weights step 3"
     catalog = service.harness_releases(headers)["releases"]
     assert [row["release_id"] for row in catalog] == [creation, h1, h1, h2, h3]
-    assert service.harness_release_id(scenario) == h3
+    assert service.harness_head(headers) == h3 not in (w1, w2, held, combined, activated.release_id)
     assert required_by(catalog, h3) == [{"name": "TOKEN", "kind": "env"}]
-    script = service.harness_install_script(headers, adapter="pi")
-    assert all(release not in script for release in (w1, w2, held, combined, activated.release_id))
 
 
 @pytest.mark.unit
@@ -1566,75 +1572,6 @@ def test_service_start_notification_cannot_reopen_stopping_workers(dispatchers: 
     dispatcher.close()
     dispatcher.local_workers.start("late", HARNESS)
     assert ("late", HARNESS) not in dispatcher.local_workers.workers
-
-
-@pytest.mark.parametrize("next_operation", ["training", "reload", "train_from"])
-@pytest.mark.parametrize("tracker_fails", [False, True])
-def test_experiment_events_remain_ordered_across_reload(tmp_path, monkeypatch, next_operation, tracker_fails):
-    from threading import Event
-
-    tracker = _RecordingTracker()
-    # No samples worker: the samples that the store watcher would ask for would wake the weights trainer, whose own
-    # step would land between the steps that this test counts.
-    value, backends = _dispatcher(
-        tmp_path, experiment_tracker=tracker, components=frozenset(SERVICE_COMPONENTS) - {"samples"}
-    )
-    update = tmp_path / "updated-harness"
-    update.mkdir()
-    (update / "harness.txt").write_text("updated shipped content")
-    entered, release = Event(), Event()
-    attempted = []
-
-    def shipped(state, tree):
-        updates = state.get("updates", 0)
-        if updates and next_operation != "reload":
-            return None
-        return TrainStepResult({**state, "updates": updates + 1}, artifact=Artifact.local(update))
-
-    def record(event):
-        if event.context.step == 1:
-            entered.set()
-            release.wait(10)
-        attempted.append(event.context.step)
-        if tracker_fails and event.context.step == 1:
-            raise ConnectionError("tracker unavailable")
-        tracker.events.append(event)
-
-    def record_train_from(event):
-        attempted.append(event.step)
-
-    monkeypatch.setattr(tracker, "record_train_from", record_train_from)
-    monkeypatch.setattr(backends[HARNESS], "shipped_content_update", shipped)
-    monkeypatch.setattr(tracker, "record", record)
-    try:
-        # The reload publishes shipped content at step 1; the tracker blocks on its event.
-        value.registry.reload("agent")
-        assert entered.wait(5)
-        # The next operation lands step 2 while the tracker still blocks: nothing waits for it.
-        if next_operation == "reload":
-            value.registry.reload("agent")
-        elif next_operation == "train_from":
-            value.train_from(
-                "agent", f"{_scenario(value).repository.backend.resolve_release('base').release_id}:{HARNESS}", HARNESS
-            )
-        else:
-            current = value.registry.reload("agent")
-            _append_records(current, 1)
-            make_samples(current)
-            assert value.local_workers.process_step("agent", HARNESS)
-        assert attempted == []
-        release.set()
-        value.registry.experiment_reports.flush()
-        current = value.get_or_create_scenario("agent")
-        assert [record.step for record in current.store.history()] == [1, 2]
-        assert attempted == [1, 2]
-        expected = [1] if next_operation == "train_from" else [1, 2]
-        if tracker_fails:
-            expected.remove(1)
-        assert [event.context.step for event in tracker.events] == expected
-    finally:
-        release.set()
-        value.close()
 
 
 class HeldJobs(WeightsJobComponent):

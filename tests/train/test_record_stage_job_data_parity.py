@@ -52,11 +52,12 @@ from reef.record2record import (
 from reef.record2sample import JudgedSamples, Record2Sample, ReportSamples
 from reef.record2sample.assembly import SampleAssembly, SampleAssemblySettings
 from reef.record2sample.distill import DistillSamples
+from reef.record2sample.traces import TraceSamples
 from reef.sample2job import DistillJobData, Sample2Job, Sample2JobSettings
+from reef.sample2job.traces import TraceJobData
 from reef.storage.sqlite import SQLiteRecordStore
 from reef.train import PipelineContext, Trainer
 from reef.train.backend import CandidateBackend, PreparedStep
-from reef.train.cordis_backend.processor import TraceJobData, TraceSamples
 from reef.train.pipeline import PipelineConfig, PipelineSpec
 from reef.train.types import JobData, Sample, TaskSample, TrajectorySample
 
@@ -707,7 +708,7 @@ def computed_steps() -> list[Step]:
     ]
 
 
-def cordis_steps(mode_requests: bool) -> list[Step]:
+def trace_steps(mode_requests: bool) -> list[Step]:
     steps: list[Step] = []
     for index in range(6):
         steps += scored("c", index, float(index))
@@ -760,9 +761,9 @@ def streams() -> dict[str, tuple[StreamRun, list[Step]]]:
             StreamRun(TOY_COMPUTED_STAGES, stage_configs(record2record={"max_staleness": 1}), batch_size=2),
             computed_steps(),
         ),
-        "cordis_manual_cap": (
+        "trace_manual_cap": (
             StreamRun(TRACE_STAGES, training_mode="manual"),
-            cordis_steps(True),
+            trace_steps(True),
         ),
     }
 

@@ -37,6 +37,7 @@ from reef.storage.tasks import TaskStorage
 from reef.surface.base import AcceptAnyArtifact, Surface
 from reef.surface.weights import create_weight_surface
 from reef.train.algos.registry import resolve_objective
+from reef.train.backend import CommittedReleases, ComponentReleases
 from reef.train.jobs import JobLoop
 from reef.train.pipeline import PipelineConfig, PipelineSpec, TrainingPipeline
 from reef.train.trainer import ComponentTrainer, Trainer
@@ -115,10 +116,11 @@ class Recipe:
         """The recipe's default stage classes. The default passes records through and makes no job data."""
         return PipelineSpec()
 
-    def activation_rule(self) -> ActivationRule:
-        """The rule that decides whether an artifact that the recipe's trainers make serves (``activation``)."""
+    def activation_rule(self, reference: PluginReference | None = None) -> ActivationRule:
+        """The rule that decides whether an artifact that the recipe's trainers make serves: the one ``reference``
+        names, such as a scenario's own rule, else the ``activation`` section's."""
         try:
-            return build_activation_rule(self.activation)
+            return build_activation_rule(self.activation if reference is None else reference)
         except PluginConfigError as exc:
             raise RecipeConfigError(str(exc)) from exc
 
@@ -258,6 +260,7 @@ class Recipe:
         algorithm_state: Mapping[str, Any] | None = None,
         experiment_logger: ExperimentLogger | None = None,
         task_storage: TaskStorage | None = None,
+        releases: ComponentReleases | None = None,
         samples: TrainerSamples | None = None,
     ) -> Trainer:
         return Trainer.build(
@@ -281,6 +284,7 @@ class Recipe:
         algorithm_states: Mapping[str, Mapping[str, Any] | None],
         experiment_logger: ExperimentLogger | None = None,
         task_storage: TaskStorage | None = None,
+        releases: CommittedReleases | None = None,
         samples: SampleStore | None = None,
     ) -> tuple[ComponentTrainer, ...]:
         """Build every trainer of the named scenario, each bound to the component it evolves.
@@ -295,6 +299,8 @@ class Recipe:
         the scenario session, and ``samples`` is its sample store. Each trainer
         gives them to its pipeline; a trainer reads the samples as
         ``TrainerSamples`` of its key (``""`` for the only trainer).
+        ``releases`` reads the scenario's committed releases; each trainer
+        reads those of its own component.
         """
         if len(surface.names) > 1:
             raise RecipeConfigError(
@@ -311,6 +317,7 @@ class Recipe:
                     algorithm_state=algorithm_states.get(component),
                     experiment_logger=experiment_logger,
                     task_storage=task_storage,
+                    releases=None if releases is None else ComponentReleases(releases, component),
                     samples=None if samples is None else TrainerSamples(samples),
                 ),
             ),
@@ -364,7 +371,7 @@ class Recipe:
 
     @property
     def harness_adapter(self) -> str | None:
-        """The adapter a client installs this recipe's harness tree with (``reef-<adapter>``).
+        """The adapter this recipe's harness releases render for, as ``GET /reef/harness`` serves them.
 
         ``None`` for a recipe that serves no harness tree. Every scenario of
         the process shares it, so the scenario list names it before a
@@ -561,6 +568,7 @@ class WeightTrainingRecipe(Recipe):
         algorithm_state: Mapping[str, Any] | None = None,
         experiment_logger: ExperimentLogger | None = None,
         task_storage: TaskStorage | None = None,
+        releases: ComponentReleases | None = None,
         samples: TrainerSamples | None = None,
     ) -> Trainer:
         """Build a trainer from this recipe's pipeline, objective, and report contract.

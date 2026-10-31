@@ -15,8 +15,8 @@ A harness trainer runs the recipe's candidate evaluation
 (``reef.evaluation``) between prepare and settle; a weight trainer's job loop
 runs it on each checkpoint that a job saves.
 
-The package does not import recipes or service assembly. ``CordisRecipe``
-lives in ``reef.recipe.cordis``. ``slime_backend.component`` and
+The package does not import recipes or service assembly. The harness
+evolution recipe lives in ``reef.recipe.harness``. ``slime_backend.component`` and
 ``tinker_backend.component`` are training components over
 ``reef.train.local_jobs.LocalJobComponent``; Reef's service layer assembles
 them and ``reef.runtime.deployment`` owns their lifecycle. Each component

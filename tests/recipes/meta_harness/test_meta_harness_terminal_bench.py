@@ -1,4 +1,4 @@
-"""The Terminal-Bench campaign uses real Reef commits, without paid rollouts."""
+"""The Terminal-Bench campaign uses real Reef commits, without paid runs."""
 
 from __future__ import annotations
 
@@ -13,11 +13,10 @@ from pathlib import Path
 import pytest
 from tests.support.git_lfs import fake_git_lfs
 
-from recipes.meta_harness.population import content_id
-from recipes.meta_harness.recipe import scenario_population_path
 from reef.execution.sandbox.process import SandboxExecutor
-from reef.harness import RolloutResult
-from reef.harness.rollouts.model_binding import ModelBinding
+from reef.harness import TaskResult
+from reef.harness.tasks.model_binding import ModelBinding
+from reef.harness.tree import HarnessTree
 
 __all__ = ["fake_git_lfs"]
 
@@ -51,8 +50,8 @@ def driver(monkeypatch, tmp_path):
     purge_modules()
 
 
-def rollout(task, score=1, **kwargs):
-    return RolloutResult(
+def task_run(task, score=1, **kwargs):
+    return TaskResult(
         exit_code=kwargs.get("exit_code", 0),
         stdout="",
         stderr="",
@@ -63,20 +62,20 @@ def rollout(task, score=1, **kwargs):
 
 @pytest.mark.parametrize("score", [0, 1])
 def test_binary_verifier_scores(driver, score):
-    assert driver.benchmark.evaluate("task", rollout("task", score)) == score
+    assert driver.benchmark.evaluate("task", task_run("task", score)) == score
 
 
 @pytest.mark.parametrize("score", [float("nan"), float("inf"), "1", True, 0.5])
 def test_invalid_verifier_rewards_refuse(driver, score):
     with pytest.raises(ValueError, match="reward"):
-        driver.benchmark.evaluate("task", rollout("task", score))
+        driver.benchmark.evaluate("task", task_run("task", score))
 
 
 def test_missing_failed_and_mismatched_verifier(driver):
-    assert driver.benchmark.evaluate("task", rollout("task", None)) == 0
-    assert driver.benchmark.evaluate("task", rollout("task", 1, exit_code=1)) == 0
+    assert driver.benchmark.evaluate("task", task_run("task", None)) == 0
+    assert driver.benchmark.evaluate("task", task_run("task", 1, exit_code=1)) == 0
     with pytest.raises(ValueError, match="verifier"):
-        driver.benchmark.evaluate("another", rollout("task"))
+        driver.benchmark.evaluate("another", task_run("task"))
 
 
 def test_task_pin_and_drift_checks(driver, tmp_path, monkeypatch):
@@ -110,11 +109,13 @@ def test_task_pin_and_drift_checks(driver, tmp_path, monkeypatch):
 
 def test_configuration_scales_budgets_and_isolates_campaigns(driver, monkeypatch):
     full = driver.configuration(tuple(driver.benchmark.MANIFEST["tasks"]), None, None)
-    assert len(full["evolution"]["tasks"]) == len(set(full["evolution"]["tasks"])) == 89
-    assert full["evolution"]["meta_harness"]["max_target_rollouts"] == 1424
+    tasks = full["evolution"]["evaluation"]["tasks"]
+    assert len(tasks) == len(set(tasks)) == 89
+    # The seed and four candidates, each evaluated once on 89 tasks with two repeats.
+    assert full["evolution"]["method"]["config"]["max_target_runs"] == 890
     short = driver.configuration(("task",), 1, 1)
     assert short["evolution"]["max_steps"] == 2
-    assert short["evolution"]["meta_harness"]["max_target_rollouts"] == 2
+    assert short["evolution"]["method"]["config"]["max_target_runs"] == 2
     original = driver.campaign_id(short)
     assert original != driver.campaign_id(full)
     monkeypatch.setenv("REEF_MODEL", "another-model")
@@ -122,11 +123,12 @@ def test_configuration_scales_budgets_and_isolates_campaigns(driver, monkeypatch
 
 
 class Proposals(ModelBinding):
-    def __init__(self, seed):
+    """The proposer model: it answers every prompt with the seed's agent improved, the seed as the parent."""
+
+    def __init__(self, seed: HarnessTree):
         super().__init__(base_url="http://127.0.0.1:9", model="proposer")
-        improved = copy.deepcopy(seed)
-        improved[0]["config"]["code"] += "\n# improved\n"
-        object.__setattr__(self, "reply", json.dumps({"parent_id": content_id(seed), "entries": improved}))
+        improved = {**seed.files, "extensions/agent.py": seed.files["extensions/agent.py"] + "\n# improved\n"}
+        object.__setattr__(self, "reply", json.dumps({"parent_id": seed.checksum(), "files": improved}))
         object.__setattr__(self, "prompts", [])
 
     def chat(self, messages, **params):
@@ -144,39 +146,51 @@ def campaign(driver, monkeypatch, tmp_path, fake_git_lfs):
         launches.append(kwargs)
         assert isinstance(kwargs["executor"], SandboxExecutor)
         assert kwargs["timeout"] == 9000
-        return rollout(task, int("# improved" in files["terminus/context/agent.py"]))
+        return task_run(task, int("# improved" in files.get("terminus/context/agent.py", "")))
 
-    monkeypatch.setattr(driver, "run_rollout", launch)
-    monkeypatch.setattr("reef.evaluation.harness.run_rollout", launch)
+    monkeypatch.setattr(driver, "run_task", launch)
+    monkeypatch.setattr("reef.evaluation.harness.runner.run_task", launch)
     config = driver.configuration(("task",), 1, 1)
     recipe = driver.load_recipe(config, tmp_path)
-    chat = Proposals(driver.benchmark.SEED)
+    chat = Proposals(HarnessTree.read(driver.SEED))
     recipe = dataclasses.replace(recipe, models={"proposer": chat})
     return recipe, chat, launches, tmp_path
 
 
-def test_search_commits_and_restart_repairs_mirrors_without_more_rollouts(driver, campaign):
+def test_the_campaign_starts_from_the_seed_tree(driver, campaign):
+    recipe, _, _, directory = campaign
+    dispatcher = driver.open_campaign(recipe, directory)
+    try:
+        assert driver.served_tree(dispatcher.get_or_create_scenario(driver.SCENARIO)) == recipe.seed
+    finally:
+        dispatcher.close()
+
+
+def test_search_commits_and_restart_resumes_from_the_commit_without_more_runs(driver, campaign):
     recipe, chat, launches, directory = campaign
     dispatcher = driver.open_campaign(recipe, directory)
     try:
         scenario = dispatcher.get_or_create_scenario(driver.SCENARIO)
         summary = driver.search(scenario, recipe, directory)
         assert summary["generated_candidates"] == 1
-        assert summary["gate_rollouts"] == 2
-        assert len(launches) == 3  # One recorded rollout and one paired gate.
-        assert len(chat.prompts) == 1 and "terminus_rollout" in chat.prompts[0]
+        assert summary["evaluation_runs"] == 2
+        assert len(launches) == 3  # One recorded run and one paired evaluation.
+        assert len(chat.prompts) == 1 and "terminus_run" in chat.prompts[0]
         assert "target-test-key" not in chat.prompts[0]
-        assert scenario.trainer.state[driver.POPULATION_STATE_KEY]["served_id"] == summary["served_id"]
+        served = driver.served_tree(scenario).checksum()
+        assert summary["served_id"] == served != recipe.seed.checksum()
+        assert [(candidate["outcome"], candidate["scores"]) for candidate in summary["candidates"]] == [
+            ("undecided", [0.0]),
+            ("served", [1.0]),
+        ]
     finally:
         dispatcher.close()
-    mirror = scenario_population_path(directory / "population", driver.SCENARIO)
-    mirror.write_text("stale")
+    # The summary is disposable: a restart rebuilds it from the latest durable commit.
     (directory / "summary.json").write_text("stale")
     restarted = driver.open_campaign(recipe, directory)
     try:
         scenario = restarted.get_or_create_scenario(driver.SCENARIO)
         assert driver.search(scenario, recipe, directory) == summary
-        assert json.loads(mirror.read_text()) == scenario.trainer.state[driver.POPULATION_STATE_KEY]
         assert json.loads((directory / "summary.json").read_text())["served_id"] == summary["served_id"]
         assert len(launches) == 3 and len(chat.prompts) == 1
     finally:
@@ -199,20 +213,22 @@ def test_commit_failure_writes_no_summary_and_restart_replays_pending_report(dri
                 driver.search(scenario, recipe, directory)
         assert scenario.trainer.state == before
         assert not (directory / "summary.json").exists()
-        assert not scenario_population_path(directory / "population", driver.SCENARIO).exists()
     finally:
         dispatcher.close()
     restarted = driver.open_campaign(recipe, directory)
     try:
         scenario = restarted.get_or_create_scenario(driver.SCENARIO)
-        assert driver.search(scenario, recipe, directory)["generated_candidates"] == 1
-        assert len(launches) == 5  # The recorded rollout survives; only the gate is retried.
-        assert len(chat.prompts) == 2
+        summary = driver.search(scenario, recipe, directory)
+        # The replayed step proposes the same tree again: the failed attempt neither spent its budget nor made
+        # it a known tree, and the history's runs score it without another launch.
+        assert (summary["generated_candidates"], summary["evaluation_runs"]) == (1, 2)
+        assert summary["served_id"] != recipe.seed.checksum()
+        assert len(launches) == 3 and len(chat.prompts) == 2
     finally:
         restarted.close()
 
 
-def test_rollout_record_survives_interrupted_report(driver, campaign, monkeypatch):
+def test_run_record_survives_interrupted_report(driver, campaign, monkeypatch):
     recipe, _, launches, directory = campaign
     dispatcher = driver.open_campaign(recipe, directory)
     try:
@@ -227,8 +243,8 @@ def test_rollout_record_survives_interrupted_report(driver, campaign, monkeypatc
         with monkeypatch.context() as patch:
             patch.setattr(scenario.records, "append", fail_report)
             with pytest.raises(OSError, match="report interrupted"):
-                driver.record_rollout(scenario, recipe)
-        driver.record_rollout(scenario, recipe)
+                driver.record_run(scenario, recipe)
+        driver.record_run(scenario, recipe)
         assert len(launches) == 1
         assert scenario.records.count(scenario.name) == 2
     finally:

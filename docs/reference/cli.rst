@@ -3,8 +3,8 @@ Reef CLI: serve
 
 ``reef serve`` reads a deployment config and starts every
 process the config declares, in dependency order. (The wheel also installs
-``reef-native`` and ``reef-terminus``, the loop runners those two harness
-adapters launch per rollout; nothing calls them by hand.)
+``reef-native``, the loop runner that the ``native`` adapter launches per
+rollout; nothing calls it by hand.)
 
 .. code:: bash
 
@@ -25,41 +25,33 @@ to forced cleanup of the managed service processes.
 .. config::
 
    -c, --config | optional config file. No file is loaded unless explicitly selected.
-   --recipe NAME | start a built in recipe's profile instead of a config file. Today: ``reefine``.
    --model [PROVIDER/]MODEL | the upstream model. An ``ollama/`` or ``openai/`` prefix fills the endpoint and the key; any other spelling is the model ID as is.
    --component NAME | run one service of the deployment in this process: ``control``, ``inference``, ``samples``, ``training``, ``evaluation`` or ``data``. The process starts no other child. Without it, one process runs all services. See `Run the services in separate processes <../user-guide/operate.rst#run-the-services-in-separate-processes>`__.
    --print-config | print every resolved setting with its source (file, command line, environment, automatic, default) and exit without downloading models or starting services. Credentials are masked.
    --help | the command list
    -V, --version | the installed reef version. Takes no command: ``reef --version``.
 
-Starting a recipe's profile
----------------------------
+Selecting the model
+-------------------
 
-A built in recipe can carry a profile: one deployment config that is the same
-for every deployment of that recipe except the model. ``--recipe`` starts it
-without a file of your own:
-
-.. code:: bash
-
-   reef serve --recipe reefine \
-     --inference.upstream-url http://127.0.0.1:11434 \
-     --inference.upstream-model gemma4:26b
-
-Select a file with ``-c`` or a built-in profile with ``--recipe``. With neither,
-Reef uses CLI inference settings and does not discover ``$REEF_CONFIG`` or
-``reef.yaml``. The profile selector is a launcher option; configuration values
-use their full public namespaces as shown above.
+Select a file with ``-c``. Without it, Reef uses CLI inference settings and
+does not discover ``$REEF_CONFIG`` or ``reef.yaml``. Configuration values use
+their full public namespaces as shown above.
 
 The optional ``--model`` shorthand remains supported: ``ollama/`` fills
 ``http://127.0.0.1:11434`` and a placeholder key; ``openai/`` fills
 ``https://api.openai.com`` and reads ``REEF_UPSTREAM_API_KEY``. Other prefixes
 and bare values are model IDs and need an upstream URL.
 An explicit ``--inference.upstream-url`` or ``--inference.upstream-api-key`` override wins over
-the prefix. The ``reefine`` profile ships its proposer and evaluator in the
-wheel, so it runs from an installed package; it listens on
-``127.0.0.1:8901`` without authentication unless ``REEF_TOKEN`` is set, and keeps its state under
-``.reef/reefine/``. To change anything else, copy
-``reef/service/profiles/reefine.yaml`` and pass the copy with ``-c``.
+the prefix.
+
+.. code:: bash
+
+   reef serve --model ollama/gemma4:26b
+
+Reef bundles no deployment profiles. ``reef serve --recipe <name>`` exits
+with ``--recipe <name>: built in profiles were removed; pass -c <config file>``.
+Pass a recipe's deployment config with ``-c`` instead.
 
 Overriding config values
 ------------------------

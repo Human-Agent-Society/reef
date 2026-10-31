@@ -1,7 +1,7 @@
 """The serve process's view of Reef's release channel: the poll, the manifest read, and the head watch.
 
-``ReleaseClient`` is the Python form of ``version_check.ts``: it reads the
-release catalog and one manifest by id. ``HeadWatch`` learns the head from
+``ReleaseClient`` reads the release catalog and one release's source tree.
+``HeadWatch`` learns the head from
 the periodic poll and from the ``x-reef-release-id`` header the capture proxy
 reads on every inference answer, and notifies its listener once per new head; a
 failure is logged and retried with backoff, and the process keeps serving.
@@ -18,7 +18,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from typing import Any
 
-from reef.harness.client.wrapper import ReleaseObserver
+from reef.harness.capture import ReleaseObserver
 
 #: The poll backoff never waits longer than this between attempts.
 MAX_BACKOFF_S = 600.0
@@ -56,7 +56,7 @@ class EventWriter(ABC):
 
 
 class ReleaseClient:
-    """The release routes of one scenario: the catalog, one manifest, and the proposals route."""
+    """The release routes of one scenario: the catalog and one manifest."""
 
     def __init__(self, reef_url: str, token: str | None, scenario: str, *, timeout_s: float = 30.0) -> None:
         self.reef_url = reef_url.rstrip("/")
@@ -98,21 +98,13 @@ class ReleaseClient:
         release = next((row.get("release_id") for row in self.releases() if row.get("active")), None)
         return str(release) if release else None
 
-    def fetch(self, release_id: str) -> dict[str, Any]:
-        """One release's manifest; its ``files`` carry ``native/tree.json`` and ``gate`` the verdict."""
-        _, manifest = self._request("GET", f"/reef/harness?release_id={urllib.parse.quote(release_id, safe='')}")
-        if not isinstance(manifest, Mapping) or "files" not in manifest:
-            raise ReleaseClientError(f"release {release_id!r} answered no manifest")
+    def fetch(self, release_id: str | None = None) -> dict[str, Any]:
+        """One release's manifest with its source tree as ``files``; the served head without ``release_id``."""
+        query = {"form": "source"} if release_id is None else {"form": "source", "release_id": release_id}
+        _, manifest = self._request("GET", f"/reef/harness?{urllib.parse.urlencode(query)}")
+        if not isinstance(manifest, Mapping) or "files" not in manifest or "release_id" not in manifest:
+            raise ReleaseClientError(f"release {release_id or 'head'!r} answered no manifest")
         return dict(manifest)
-
-    def propose(self, body: Mapping[str, Any]) -> tuple[int, Any]:
-        """``POST /reef/harness/proposals``; the status and the JSON answer, a 404 included."""
-        try:
-            return self._request("POST", "/reef/harness/proposals", body)
-        except ReleaseClientError as exc:
-            if exc.status == 404:
-                return 404, None
-            raise
 
 
 class HeadWatch(ReleaseObserver):

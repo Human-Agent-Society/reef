@@ -27,6 +27,8 @@ from reef.dispatcher import Dispatcher
 from reef.evaluation import EvaluationResult, UpdateCandidate
 from reef.evaluation.activation import AlwaysActivate, NeverActivate
 from reef.execution.workers import ServiceSet
+from reef.harness.adapters import get_adapter
+from reef.harness.sync import create_harness_surface
 from reef.inference.http import InferenceProxyRuntime
 from reef.pipeline_context import PipelineContext
 from reef.recipe import CompositeRecipe, Recipe, RecipeConfigError, build_recipe
@@ -38,7 +40,7 @@ from reef.service.request_service import RequestService
 from reef.storage.samples import consumed_sample_id
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.surface import ComponentSurface, Surface, TextFileTree, create_harness_surface
+from reef.surface import ComponentSurface, Surface, TextFileTree
 from reef.train import CandidateBackend, PreparedStep, Trainer, TrainStepResult
 from reef.train.pipeline import TrainingPipeline
 
@@ -82,7 +84,7 @@ class _TreeRecipe(Recipe):
     seed: Mapping[str, str] | None = None
 
     def build_surface(self, scenario: str) -> Surface:
-        return create_harness_surface(served_model="served-model")
+        return create_harness_surface(get_adapter("pi"))
 
     def base_artifact_source(self) -> BaseArtifactSource:
         return BaseArtifactSource(files=self.seed or {})
@@ -94,7 +96,15 @@ class _TreeRecipe(Recipe):
         return _FileBackend(self.label, self.artifact_dir)
 
     def build(
-        self, scenario, records, *, algorithm_state=None, experiment_logger=None, task_storage=None, samples=None
+        self,
+        scenario,
+        records,
+        *,
+        algorithm_state=None,
+        experiment_logger=None,
+        task_storage=None,
+        releases=None,
+        samples=None,
     ):
         return Trainer.build(
             scenario,
@@ -182,7 +192,6 @@ def test_composite_recipe_merges_surfaces_seeds_and_trainers(tmp_path: Path) -> 
     surface = recipe.build_surface("agent")
     assert surface.names == ("harness", "config")
     assert surface.files_component == "harness"
-    assert surface.harness is not None and surface.harness.served_model == "served-model"
     base = recipe.base_artifact_source()
     assert base.files == {
         "harness/AGENTS.md": "seed",
@@ -210,7 +219,7 @@ def test_composite_recipe_rejects_incoherent_components(tmp_path: Path) -> None:
     with pytest.raises(RecipeConfigError, match="reserves"):
         CompositeRecipe(components={"step": _TreeRecipe(), "config": _ConfigRecipe()})
     two_trees = CompositeRecipe(components={"a": _TreeRecipe(label="a"), "b": _TreeRecipe(label="b")})
-    with pytest.raises(RecipeConfigError, match="harness information"):
+    with pytest.raises(ValueError, match="at most one component exposes a client-pulled file tree"):
         two_trees.build_surface("agent")
 
 
@@ -427,7 +436,7 @@ def test_composite_scenario_serves_its_config_and_reports_components(tmp_path: P
         status = dispatcher.build_training_status()["scenarios"]["agent"]
         assert status["components"]["harness"]["last_committed_step"]["step"] == 1
         assert status["components"]["config"]["last_committed_step"] is None
-        manifest = RequestService(dispatcher).harness_manifest({"x-reef-scenario": "agent"})
+        manifest = RequestService(dispatcher).harness_manifest({"x-reef-scenario": "agent"}, form="source")
         assert manifest["files"] == {"harness.txt": "harness step 1"}
         assert set(manifest["components"]) == {"harness", "config"}
         assert manifest["components"]["harness"] == result.artifact.ref.content_id
@@ -585,9 +594,9 @@ def test_a_flat_scenario_without_a_durable_log_still_serves_its_head(tmp_path: P
     """The harness head of a flat scenario is the served release, found on the chain when the log keeps no rows."""
     tree = tmp_path / "seed"
     tree.mkdir()
-    (tree / "AGENTS.md").write_text("seed")
+    (tree / "rules.md").write_text("seed")
     dispatcher = Dispatcher(
-        _TreeRecipe(label="harness", artifact_dir=tmp_path / "steps", seed={"AGENTS.md": "seed"}),
+        _TreeRecipe(label="harness", artifact_dir=tmp_path / "steps", seed={"rules.md": "seed"}),
         InMemoryRepositoryBackend.factory(tree, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(None),
@@ -600,13 +609,14 @@ def test_a_flat_scenario_without_a_durable_log_still_serves_its_head(tmp_path: P
         headers = {"x-reef-scenario": "agent"}
         evolved = tmp_path / "evolved"
         evolved.mkdir()
-        (evolved / "AGENTS.md").write_text("evolved")
+        (evolved / "rules.md").write_text("evolved")
         scenario.commit(TrainStepResult(state={}, artifact=Artifact.local(evolved)))
         head = scenario.current_artifact_ref().release_id
-        assert service.harness_release_id(scenario) == head
-        manifest = service.harness_manifest(headers)
-        assert manifest["release_id"] == head and manifest["files"] == {"AGENTS.md": "evolved"}
-        assert f'"release_id": "{head}"' in service.harness_install_script(headers, adapter="pi")
+        assert service.harness_head(headers) == head
+        source = service.harness_manifest(headers, form="source")
+        assert source["release_id"] == head and source["files"] == {"rules.md": "evolved"}
+        # The default form renders the source tree for the adapter.
+        assert service.harness_manifest(headers)["files"]["plugin/rules.md"].startswith("evolved")
     finally:
         dispatcher.close()
 

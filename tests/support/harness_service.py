@@ -1,0 +1,157 @@
+"""Shared pieces of the harness service and backend tests: a seeded dispatcher, one step, a stub model.
+
+``harness_dispatcher`` writes the recipe's seed into the repository's
+bootstrap directory, as the service's assembly does through
+``base_artifact_source``, so a new scenario's base release is the seed tree.
+``run_step`` drives one step of a scenario; ``backend_step`` drives one step
+of a backend alone, through the phases the trainer runs.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from collections.abc import Mapping
+from pathlib import Path
+from typing import Any
+from weakref import WeakKeyDictionary
+
+from tests.support.samples_service import make_samples
+
+from reef.artifact import CachedRepositoryBackendFactory, InMemoryRepositoryBackend
+from reef.core import AgentRecord, RequestType
+from reef.core.evaluation import CandidateEvaluationPlugin
+from reef.dispatcher import Dispatcher
+from reef.evaluation.harness import ComparePolicy
+from reef.recipe import Recipe
+from reef.runtime.interfaces import InferenceHandler
+from reef.scenario.scenario import Scenario
+from reef.storage.sql_coordination import memory_coordination
+from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.train.harness_backend.backend import HarnessBackend
+from reef.train.types import JobData, TrainStepResult
+
+
+def harness_repository(tmp_path: Path, base_files: Mapping[str, str]) -> CachedRepositoryBackendFactory:
+    """An in-memory repository whose base release holds ``base_files``."""
+    initial = tmp_path / "initial"
+    initial.mkdir(parents=True, exist_ok=True)
+    for relative, text in base_files.items():
+        path = initial / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    return InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
+
+
+def harness_dispatcher(tmp_path: Path, recipe: Recipe, *, hold_local_cycles: bool = False) -> Dispatcher:
+    """A dispatcher over ``recipe`` with a seeded repository and a durable commit history.
+
+    A test that prepares and commits each step itself sets ``hold_local_cycles``, so no local cycle commits the
+    same step a second time.
+    """
+    return Dispatcher(
+        recipe,
+        harness_repository(tmp_path, recipe.base_artifact_source().files),
+        local_artifact_dir=tmp_path / "staged",
+        scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
+        hold_local_cycles=hold_local_cycles,
+        coordination=memory_coordination(),
+    )
+
+
+def report_records(scenario: str, suffix: str, *, prompt: str = "q", score: float = 0.0) -> tuple[AgentRecord, ...]:
+    """One inference record ``i<suffix>`` and the scored report ``r<suffix>`` on it: one trace sample."""
+    return (
+        AgentRecord.create(
+            scenario=scenario,
+            request_type=RequestType.INFERENCE,
+            payload={"messages": [{"role": "user", "content": prompt}]},
+            agent_record_id=f"i{suffix}",
+        ),
+        AgentRecord.create(
+            scenario=scenario,
+            request_type=RequestType.REPORT,
+            payload={"score": score, "references": [f"i{suffix}"]},
+            agent_record_id=f"r{suffix}",
+        ),
+    )
+
+
+def report_once(scenario: Scenario, suffix: str, *, prompt: str = "q", score: float = 0.0) -> None:
+    """One trace sample through the record store and the samples service, without waking the trainer: enough for
+    one step."""
+    for record in report_records(scenario.name, suffix, prompt=prompt, score=score):
+        scenario.records.append_result(record)
+    make_samples(scenario)
+
+
+def run_step(scenario: Scenario, suffix: str) -> TrainStepResult:
+    """One report, then the step it wakes, committed; the step's result."""
+    report_once(scenario, suffix)
+    result = scenario.prepare_training_step()
+    if result is None:
+        raise AssertionError("the report woke no step")
+    scenario.commit(result)
+    return result
+
+
+#: Each backend's scenario step: the steps ``backend_step`` ran on it.
+SCENARIO_STEPS: WeakKeyDictionary[HarnessBackend, int] = WeakKeyDictionary()
+
+
+def backend_step(
+    backend: HarnessBackend,
+    data: JobData,
+    state: Mapping[str, Any],
+    policy: CandidateEvaluationPlugin | None = None,
+    *,
+    scenario_step: int | None = None,
+) -> TrainStepResult:
+    """One step of ``backend`` as the trainer runs it, decided by ``policy`` (a win-count comparison by default).
+
+    The steps of one backend number 1, 2, ... as a scenario numbers its commits: a step that raised keeps its
+    number for its retry. ``scenario_step`` sets the scenario step the step follows instead, as a retry after a
+    lost commit or a resumed scenario sees it. A failure aborts the step.
+    """
+    scenario_step = SCENARIO_STEPS.get(backend, 0) if scenario_step is None else scenario_step
+    prepared = backend.prepare_step(data, state, scenario_step)
+    if prepared.candidate is None:
+        result = TrainStepResult(prepared.state, prepared.metrics)
+    else:
+        selection = ComparePolicy(backend) if policy is None else policy
+        try:
+            decision = selection.decide(prepared.candidate, selection.evaluate(prepared.candidate))
+            result = backend.settle_step(prepared, decision)
+        except BaseException:
+            backend.abort_step(prepared)
+            raise
+    SCENARIO_STEPS[backend] = scenario_step + 1
+    return result
+
+
+async def wait_for_rows(scenario: Scenario, count: int, seconds: float = 30.0) -> tuple[dict[str, Any], ...]:
+    """The scenario's catalog, newest first, once it holds ``count`` rows; the trainer commits on its own thread."""
+    for _ in range(int(seconds / 0.05)):
+        rows = scenario.releases()
+        if len(rows) >= count:
+            return rows
+        await asyncio.sleep(0.05)
+    raise AssertionError(f"the catalog did not reach {count} rows in {seconds}s: {scenario.releases()}")
+
+
+class EchoInference(InferenceHandler):
+    """An upstream that answers every call with one assistant message."""
+
+    async def inference(self, artifact: Any, path: str, payload: Any) -> dict[str, Any]:
+        return {"choices": [{"message": {"role": "assistant", "content": "ok"}}]}
+
+
+__all__ = [
+    "EchoInference",
+    "backend_step",
+    "harness_dispatcher",
+    "harness_repository",
+    "report_once",
+    "report_records",
+    "run_step",
+    "wait_for_rows",
+]

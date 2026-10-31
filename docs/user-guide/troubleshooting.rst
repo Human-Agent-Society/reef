@@ -17,9 +17,9 @@ Starting Reef
 
 **A service never reports ready.** Its ``ready`` probe keeps failing; the stack waits that service's ``ready_timeout`` before giving up. The default is 30 seconds for the Reef HTTP service and 3600 seconds for a managed engine or a training stack, which download weights. Read that service's log under ``reef.run-dir``. For a training stack, the usual causes are a model that is still downloading, serving engines that fail to start on the inference component (read ``inference.log``), or GPUs already in use.
 
-**Boot fails naming a config key.** A ``reef.*`` key that the selected recipe has no field for stops the start rather than being ignored. Recipe fields are listed in `Bundled recipes <recipes.rst>`__; ``harness_evolve`` takes none in the flat section and is configured through a preset.
+**Boot fails naming a config key.** A ``reef.*`` key that the selected recipe has no field for stops the start rather than being ignored. Recipe fields are listed in `Bundled recipes <recipes.rst>`__; a harness evolution recipe reads its settings from ``recipe.config.evolution`` (`Harness evolution keys <../reference/configuration.rst#harness-evolution-keys>`__).
 
-**Boot fails naming a credential in the tree.** A harness-evolution seed, proposal, or recovered state holding a literal key (``apiKey``, ``token``, and their plural and list forms) is refused, because tree state is persisted and published. Rotate the key, remove it from the entry, and keep credentials in ``inference.upstream-api-key`` or an ``api_key_env``.
+**Boot fails naming a credential in the tree.** A harness evolution seed whose config holds a literal key (``apiKey``, ``token``, and their plural and list forms), or whose other files hold a credential-shaped string, refuses startup: the seed becomes the scenario's first release, and every release stores its tree in git. A proposed patch that holds one is refused the same way. Rotate the key, remove it from the file, and keep credentials in ``inference.upstream-api-key`` or an ``api_key_env``.
 
 Requests
 --------
@@ -86,13 +86,19 @@ Harness evolution
 
 **startup fails installing the harness binary.** With ``evolution.binary`` unset, startup installs the descriptor's pinned binary. Install the vendor tool named in the error (``npm`` for pi), fix the reported vendor failure, or set ``evolution.binary`` to an existing executable.
 
-**no skill mutation passed the selection.** A step ran and the candidate did not win. Read the step's rollouts in the service log. Both sides scoring nothing means the rollouts could not run: the adapter binary could not be launched (``evolution.binary``, when set, must point at a real binary), the endpoint rejected ``tool_choice: "auto"`` (vLLM needs ``--enable-auto-tool-choice --tool-call-parser hermes``), or a rollout exceeded the 600 second timeout. Both sides scoring the same means the proposal did not change the outcome; ``selection: always`` publishes every applied mutation if that is what you want.
+**No step publishes a change.** A step ran and its candidate was not selected. Read the step's ``candidate_rollouts`` in its releases row, and each rollout's record under the scenario's history (``<evolution.state_dir>/<scenario>/<component>/history/rollouts/``, where ``<component>`` is ``harness`` for ``HarnessEvolutionRecipe``; see `History <evolve-your-harness.rst#history>`__). Both sides scoring nothing means the rollouts could not run: the adapter binary could not be launched (``evolution.binary``, when set, must point at a real binary), the endpoint rejected ``tool_choice: "auto"`` (vLLM needs ``--enable-auto-tool-choice --tool-call-parser hermes``), or a rollout exceeded ``evolution.evaluation.task_timeout_s`` (600 seconds by default). Both sides scoring the same means the patch did not change the outcome; ``evolution.evaluation.policy: none`` publishes every valid candidate if that is what you want.
 
-**GET /reef/harness returns 404.** Nothing has been published yet, or the scenario's recipe serves no files. The catalog at ``GET /reef/harness/releases`` lists what exists.
+**GET /reef/harness returns 404.** No request has named the scenario yet, the recipe's seed is empty and no step has published a tree, or the scenario's recipe serves no files; the answer's message says which. An inference call that names the scenario creates it, with the seed as its first release, unless ``reef.allow_implicit_scenario_creation`` is false; then create it with ``POST /reef/scenarios``. The catalog at ``GET /reef/harness/releases`` lists what exists.
 
-**reef-pi captures no receipts, so report has nothing to send.** The installed ``reef-client`` is older than 0.2.0 and reads a header the service no longer sends. ``pip install -U "reef-client>=0.2.0"``.
+**A client captures no receipts, so a report has nothing to send.** The installed ``reef-client`` is older than 0.2.0 and reads a header the service no longer sends. ``pip install -U "reef-client>=0.2.0"``.
 
-**reef-<adapter> exits with no Reef URL in the tree's model binding files.** The wrapper finds Reef through the file the adapter's model binding renders its endpoint into: ``pi-agent/models.json``, ``opencode/opencode.json``, ``claude/settings.json``, ``dsh/profiles/headless/cordis.patch.yml`` (and ``dsh/profiles/web/cordis.patch.yml`` for ``reef-dsh web``), ``hermes/config.yaml``, ``native/models.json``. The published tree carries no endpoint on purpose; write the binding with your Reef URL there before running the wrapper. A codex tree (``codex/config.toml``) is rewritten the same way; codex calls Reef's ``/v1/responses`` route.
+**An agent on a pulled tree gets HTTP 400 ``missing or empty x-reef-scenario``.** The default ``GET /reef/harness`` files carry no endpoint and no credential, so the client binds the agent's model itself. Install with ``reef-client harness connect``, or pull ``?form=client&service_url=<reef>&root=<directory>``: those files send each call to ``<reef>/reef/scenarios/<scenario>/v1``, which names the scenario in the path. A binding of your own must send the ``x-reef-scenario`` header and the token (`Use a published tree <evolve-your-harness.rst#use-a-published-tree>`__).
+
+**``reef-client harness sync`` says that a release and your files both changed a file.** A step changed the same lines of a file of the install that you changed. Your files stay as they are. Make those lines match one side, then sync again; ``sync --discard`` drops all your changes instead.
+
+**``reef-client harness run`` says to name the scenario.** More than one scenario is installed. Name one, such as ``reef-client harness run code-repair``.
+
+**``run`` or ``sync`` says ``kept your files`` because the scenario is running a step.** Reef takes no import while a step runs. Your changes stay in the install, and the next ``run`` or ``sync`` sends them. When the send after a session met a running step, the next ``run`` prints the refusal after ``after the last session:``.
 
 Docs and links
 --------------

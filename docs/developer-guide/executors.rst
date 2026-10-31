@@ -450,7 +450,7 @@ Harness evolution: worker executor selection
 --------------------------------------------
 
 Harness evolution evaluates external model endpoints, so it does not require
-a local GPU. ``RolloutScorer.execution_requirements()`` declares local worker
+a local GPU. ``TaskScorer.execution_requirements()`` declares local worker
 needs using ``ExecutionRequirements``. Its default is CPU-only. The recipe
 supplies the worker count and resources from ``execution.evolution``. The
 selector chooses ``uni`` for one local worker and ``mp`` for multiple local
@@ -466,7 +466,7 @@ explicitly for a cluster.
      evolution:
        workers: 8
    evolution:
-     # Existing adapter/propose/evaluate/tasks/models/seed remain unchanged.
+     # The other evolution keys (adapter, method, evaluation, models, seed) stay as they are.
      executor: sandbox      # independent isolation policy; requires bubblewrap
 
 ``execution.evolution`` accepts a backend, named profile, or inline object.
@@ -491,7 +491,7 @@ directories.
 To retain an in-process callback, choose ``uni`` with exactly one worker.
 With ``mp`` each rank gets its own copy of the scorer. Mutable scorer state is
 not shared or merged back into the recipe. The parent keeps ownership of
-proposal, composition, selection and publication. Only rollout execution and
+the method's step, composition, selection and publication. Only rollout execution and
 scoring cross the worker boundary. Candidate and current results keep their
 pairing order.
 

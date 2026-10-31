@@ -429,13 +429,18 @@ class Scenario:
         with self.release_queries.publication_lock:
             return self._committer.resolve_artifact(artifact_id, component)
 
+    def sync_release(
+        self, artifact: Artifact, *, component: str, expected_release_id: str, metrics: Mapping[str, Any]
+    ) -> ArtifactRef:
+        """Make a person's merged ``component`` tree active and the training start; see
+        :meth:`ScenarioCommitter.sync_release`."""
+        return self._committer.sync_release(
+            artifact, component=component, expected_release_id=expected_release_id, metrics=metrics
+        )
+
     def commit(self, result: TrainStepResult, *, component: str | None = None) -> Any:
         """Commit ``component``'s pending result as one atomic version record."""
         return self._committer.commit(result, component=component)
-
-    def publish_shipped_content(self) -> ArtifactRef | None:
-        """Republish the head with the content this Reef ships when it is stale; the new head, or ``None``."""
-        return self._committer.publish_shipped_content()
 
     def close(self) -> None:
         """Tear down what this scenario instance owns: trainers, then its storage session.

@@ -1,10 +1,10 @@
 """The replay page: what one run of harness evolution did, from the files it left under work/.
 
 ``python3 harness/replay.py [work] [out.html]`` reads the commit history in
-each scenario database (every step's verdict, its mutations and the entries
-each release holds), the resident process's log (mounts, polls) and every
-session log (turns, stages, tool calls), and writes one self contained HTML
-page: the release chain with each step's verdict and the tree diff it made,
+each scenario database (every step's result and the patch it recorded), the
+resident process's log (mounts, polls) and every session log (turns, stages,
+tool calls), and writes one self contained HTML page: the release chain with
+each step's result and the files its patch changed,
 the loop graph of each release with a scrubber that replays a session's stage
 path over it, the event log of each session, and the process timeline. No
 server, no network: the page carries its data inline.
@@ -16,64 +16,68 @@ import sys
 from contextlib import closing
 from pathlib import Path
 
-WORK = Path(__file__).resolve().parent.parent / "work"
+TUTORIAL = Path(__file__).resolve().parent.parent
+WORK = TUTORIAL / "work"
 RELEASE_FILE = ".reef-harness-release"
+MAIN_GRAPH = "native/graphs/main.json"
 
 
 def _lines(path):
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
-def _diff(before, after, mutations=()):
-    """Entry ids added, updated and removed by a step: from its mutations when it recorded them, else by comparing
-    the two entry lists (an update's previous options are not on the record, so only the mutation names it)."""
-    old = {e["id"]: e for e in before}
-    new = {e["id"]: e for e in after}
-    if mutations:
-        kinds = {**{i: e.get("name") for i, e in old.items()}, **{i: e.get("name") for i, e in new.items()}}
-        rows = {"create": [], "update": [], "remove": []}
-        for m in mutations:
-            op = m.get("op")
-            if op in rows:
-                kind = ((m.get("options") or {}).get("name")) or kinds.get(m.get("id")) or "?"
-                rows[op].append({"id": m.get("id"), "kind": kind})
-        return {"added": rows["create"], "updated": rows["update"], "removed": rows["remove"]}
-    added = [e for i, e in new.items() if i not in old]
-    removed = [e for i, e in old.items() if i not in new]
-    updated = [e for i, e in new.items() if i in old and old[i] != e]
+def read_tree(directory: Path) -> dict:
+    """Every file under ``directory`` by its path relative to it; empty when there is none."""
+    if not directory.is_dir():
+        return {}
     return {
-        "added": [{"id": e["id"], "kind": e["name"]} for e in added],
-        "updated": [{"id": e["id"], "kind": e["name"]} for e in updated],
-        "removed": [{"id": e["id"], "kind": e["name"]} for e in removed],
+        path.relative_to(directory).as_posix(): path.read_text(encoding="utf-8")
+        for path in sorted(directory.rglob("*"))
+        if path.is_file()
+    }
+
+
+def applied(files: dict, patch: dict) -> dict:
+    """``files`` with a recorded patch applied: a path to text writes it, a path to null removes it."""
+    result = {path: text for path, text in files.items() if path not in patch}
+    result.update({path: text for path, text in patch.items() if text is not None})
+    return result
+
+
+def changed(files: dict, patch: dict) -> dict:
+    """The paths a patch adds, updates and removes, against the files it applies to."""
+    return {
+        "added": sorted(path for path, text in patch.items() if text is not None and path not in files),
+        "updated": sorted(path for path, text in patch.items() if text is not None and path in files),
+        "removed": sorted(path for path, text in patch.items() if text is None),
     }
 
 
 def collect(work: Path) -> dict:
-    """Everything the page shows, as one JSON value."""
-    releases = []
-    seed_entries = []
+    """Everything the page shows, as one JSON value.
+
+    Each release's files are the variant's seed tree with every published step's recorded patch applied in
+    order; the native variant's run leaves work/tree/native behind, the pi variant's does not.
+    """
     tree_dir = work / "tree" / "native"
-    if (tree_dir / "tree.json").is_file():
-        seed_entries = json.loads((tree_dir / "tree.json").read_text(encoding="utf-8"))
+    seed_files = read_tree(TUTORIAL / "seeds" / ("native" if tree_dir.is_dir() else "pi"))
     commits = []
     for path in sorted((work / "agent-record").glob("*.sqlite3")) if (work / "agent-record").is_dir() else []:
         with closing(sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)) as connection:
             rows = connection.execute("SELECT commit_json FROM scenario_commit ORDER BY step").fetchall()
         commits.extend(json.loads(text) for (text,) in rows)
     commits.sort(key=lambda row: row.get("recorded_at") or 0)
-    previous = None
-    first_entries = None
+    releases = [{"release_id": "seed", "step": 0, "kind": "seed", "files": seed_files, "diff": None, "result": None}]
+    previous = seed_files
     # The tree of each release by id, so an activation or a new training start shows the tree it names.
-    entries_by_release: dict[str, list] = {}
+    files_by_release: dict[str, dict] = {"seed": seed_files}
     for row in commits:
         metrics = row.get("metrics") or {}
-        state = row.get("algorithm_state") or {}
-        entries = state.get("entries") or []
         operation = row.get("operation")
+        ref = row.get("artifact_ref") or {}
         if operation in ("activate", "train_from"):
             # Not a step: a person activated a release or set the training start. The row carries no state.
-            ref = row.get("artifact_ref") or {}
-            named = entries_by_release.get(ref.get("release_id"), previous or [])
+            named = files_by_release.get(ref.get("release_id"), previous)
             releases.append(
                 {
                     "release_id": ref.get("release_id"),
@@ -81,9 +85,9 @@ def collect(work: Path) -> dict:
                     "step": row.get("step"),
                     "kind": operation,
                     "recorded_at": row.get("recorded_at"),
-                    "mutations": [],
+                    "patch": [],
                     "result": None,
-                    "entries": named,
+                    "files": named,
                     "diff": None,
                 }
             )
@@ -91,35 +95,24 @@ def collect(work: Path) -> dict:
                 # The next step evolves the tree the new training start names.
                 previous = named
             continue
-        if first_entries is None:
-            # The seed the first step started from: the served tree before any commit.
-            first_entries = _seed_before(entries, metrics)
-            previous = first_entries
-            entries_by_release[row.get("artifact_ref", {}).get("parent_release_id") or "seed"] = first_entries
-            releases.append(
-                {
-                    "release_id": row.get("artifact_ref", {}).get("parent_release_id") or "seed",
-                    "step": 0,
-                    "kind": "seed",
-                    "entries": first_entries,
-                    "diff": None,
-                    "result": None,
-                    "recorded_at": None,
-                }
-            )
-        ref = row.get("artifact_ref") or {}
-        published = bool(metrics.get("published"))
+        if operation != "training":
+            continue
+        # A step builds on its parent release, so the first step names the seed's release id.
+        files_by_release.setdefault(ref.get("parent_release_id"), previous)
+        published = bool(metrics.get("selected"))
         selection = metrics.get("selection") or {}
+        patch = metrics.get("patch") or {}
+        files = applied(previous, patch) if published else previous
         releases.append(
             {
                 "release_id": ref.get("release_id") if published else None,
                 "parent_release_id": ref.get("parent_release_id"),
-                "step": metrics.get("steps"),
+                "step": row.get("step"),
                 "kind": "published" if published else ("skipped" if metrics.get("skipped") else "rejected"),
                 "skipped": metrics.get("skipped"),
                 "recorded_at": row.get("recorded_at"),
-                "proposal": metrics.get("proposal"),
-                "mutations": metrics.get("mutations") or ([metrics["mutation"]] if metrics.get("mutation") else []),
+                "summary": metrics.get("method_summary"),
+                "patch": sorted(patch),
                 "result": {
                     "wins": metrics.get("wins"),
                     "losses": metrics.get("losses"),
@@ -129,19 +122,15 @@ def collect(work: Path) -> dict:
                     "reason": (selection.get("reason") if isinstance(selection, dict) else None),
                     "candidate_paths": metrics.get("candidate_paths"),
                     "current_paths": metrics.get("current_paths"),
-                    "proposer_seconds": metrics.get("proposer_seconds"),
+                    "model_seconds": metrics.get("model_seconds"),
                 },
-                "entries": entries if published else previous,
-                "diff": _diff(previous, entries, metrics.get("mutations") or ()) if published else None,
+                "files": files,
+                "diff": changed(previous, patch) if published else None,
             }
         )
         if published:
-            previous = entries
-            entries_by_release[ref.get("release_id")] = entries
-    if not releases and seed_entries:
-        releases.append(
-            {"release_id": "seed", "step": 0, "kind": "seed", "entries": seed_entries, "diff": None, "result": None}
-        )
+            files_by_release[ref.get("release_id")] = files
+        previous = files
 
     sessions = []
     sessions_dir = tree_dir / "sessions"
@@ -169,24 +158,7 @@ def collect(work: Path) -> dict:
             )
     process = _lines(sessions_dir / "serve.jsonl") if (sessions_dir / "serve.jsonl").is_file() else []
     sessions.sort(key=lambda s: s["start"] or 0)
-    return {"releases": releases, "sessions": sessions, "process": process, "seed_entries": seed_entries}
-
-
-def _seed_before(entries, metrics):
-    """The entries before the first step: undo its mutations when it published, else the state itself."""
-    if not metrics.get("published"):
-        return entries
-    mutations = metrics.get("mutations") or ([metrics["mutation"]] if metrics.get("mutation") else [])
-    before = [dict(e) for e in entries]
-    for mutation in reversed(mutations):
-        op, entry_id = mutation.get("op"), mutation.get("id")
-        if op == "create":
-            before = [e for e in before if e.get("id") != entry_id]
-        elif op == "remove":
-            before.append({"id": entry_id, "name": "?", "config": {}})
-        # An update's previous options are not on the record: the seed keeps the updated entry as published,
-        # and the step's diff names it from the mutation, not from a comparison.
-    return before
+    return {"releases": releases, "sessions": sessions, "process": process, "seed_files": seed_files}
 
 
 PAGE = """<title>Harness Evolution Replay</title>
@@ -258,24 +230,25 @@ document.getElementById('sub').textContent =
   `${D.releases.length} release(s), ${D.sessions.length} session(s), ${D.process.length} process event(s)` +
   (D.sessions[0] && D.sessions[0].model ? ` on ${D.sessions[0].model}` : '');
 
-function graphOf(entries) {
-  const g = (entries || []).find(e => e.name === 'native_graph' && e.config && e.config.name === 'main');
-  return g ? g.config : null;
+function graphOf(files) {
+  const text = (files || {})['native/graphs/main.json'];
+  if (!text) return null;
+  try { return JSON.parse(text); } catch (error) { return null; }
 }
 function renderChain() {
   const el = document.getElementById('chain'); el.innerHTML = '';
   D.releases.forEach((r, i) => {
     const d = document.createElement('div'); d.className = 'rel' + (i === state.release ? ' sel' : ''); d.tabIndex = 0;
-    const v = r.result || r.verdict || {};
-    const source = r.proposal ? `agent proposal, session ${short(r.proposal.session)}` : (r.step ? 'method proposal' : 'the served tree before any step');
-    const muts = (r.mutations || []).map(m => `<li><span class="tag">${esc(m.op)}</span>${esc(m.id)} <span class="tag">${esc((m.options||{}).name||'')}</span></li>`).join('');
-    const diff = r.diff ? ['added','updated','removed'].filter(k => r.diff[k].length).map(k => `<li>${k}: ${r.diff[k].map(e => esc(e.id)).join(', ')}</li>`).join('') : '';
+    const v = r.result || {};
+    const source = r.step ? 'method proposal' : 'the served tree before any step';
+    const muts = r.diff ? '' : (r.patch || []).map(path => `<li>${esc(path)}</li>`).join('');
+    const diff = r.diff ? ['added','updated','removed'].filter(k => r.diff[k].length).map(k => `<li>${k}: ${r.diff[k].map(esc).join(', ')}</li>`).join('') : '';
     d.innerHTML = `<div class="id">${r.step ? 'step ' + r.step + ' · ' : ''}${esc(short(r.release_id) || '-')}</div>` +
       `<div class="k ${r.kind}">${esc(r.kind)}${r.skipped ? ': ' + esc(r.skipped) : ''}</div>` +
-      `<div>${esc(source)}</div>` +
+      `<div>${esc(source)}</div>` + (r.summary ? `<div>${esc(r.summary)}</div>` : '') +
       (v.wins != null ? `<div>W / L / T ${v.wins} / ${v.losses} / ${v.ties} · candidate ${v.candidate_score} vs current ${v.current_score}</div>` : '') +
       (muts ? `<ul>${muts}</ul>` : '') + (diff ? `<ul>${diff}</ul>` : '') +
-      `<div class="id">${(r.entries||[]).length} entries</div>`;
+      `<div class="id">${Object.keys(r.files||{}).length} files</div>`;
     d.onclick = () => { state.release = i; renderChain(); renderGraph(); };
     d.onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); d.onclick(); } };
     el.appendChild(d);
@@ -298,7 +271,7 @@ function renderGraph() {
   const r = D.releases[state.release];
   const box = document.getElementById('graph');
   if (!r) { box.innerHTML = '<div class="panel"><span class="empty">No release on record: nothing was pulled or committed under work/ yet.</span></div>'; return; }
-  const g = graphOf(r.entries);
+  const g = graphOf(r.files);
   if (!g) { box.innerHTML = '<div class="panel"><span class="empty">This release carries no main graph (the seed graph runs).</span></div>'; return; }
   const L = layout(g); const s = D.sessions[state.session];
   const seen = new Set(), seenEdges = new Set(); let now = null;
@@ -340,7 +313,7 @@ function describe(e) {
     case 'tool/call': return `${d.name}(${typeof d.arguments === 'string' ? d.arguments : JSON.stringify(d.arguments)})`;
     case 'tool/result': return `${d.name} -> ${d.is_error ? 'error: ' : ''}${d.content}`;
     case 'user/message': return `user message from ${d.source ? d.source.kind : '?'}: ${d.content}`;
-    case 'harness/mount': return `mount ${short(d.release_id)} (${d.source}, ${d.entries} entries)`;
+    case 'harness/mount': return `mount ${short(d.release_id)} (${d.source}, ${d.files} files)`;
     case 'harness/mount-failed': return `mount failed ${short(d.release_id)}: ${d.error}`;
     case 'release/poll-failed': return `poll failed, retry in ${d.retry_in_s}s: ${d.error}`;
     case 'turn/end': return `turn ${d.turn} ended: ${JSON.stringify(d.reason)}`;
@@ -381,7 +354,7 @@ function renderProcess() {
     const what = e.type === 'turn' ? `turn in session ${short(d.session)} on release ${short(d.release_id)}` : describe(e);
     tr.innerHTML = `<td class="t">${sec(t)}</td><td>${esc(e.type)}</td><td>${esc(what)}</td>`; tb.appendChild(tr);
   });
-  if (!rows.length) tb.innerHTML = '<tr><td colspan="3" class="empty">No process log: the rollout form writes none.</td></tr>';
+  if (!rows.length) tb.innerHTML = '<tr><td colspan="3" class="empty">No process log: the run form writes none.</td></tr>';
 }
 function sync() { document.getElementById('scrub').value = state.pos; renderGraph(); renderDetail(); }
 document.getElementById('relsel').onchange = e => { state.release = +e.target.value; renderChain(); renderGraph(); };

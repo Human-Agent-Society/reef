@@ -1,407 +1,468 @@
-"""The history-aware proposer and selection policy of Meta-Harness.
+"""Meta-Harness: full-history search over complete harness trees.
 
-The proposer implements Reef's normal ``Proposer`` signature.  It gives one
-configured model the complete committed population, the current trace batch,
-and the adapter's available node vocabulary.  The response chooses any known
-parent and returns one complete composition.  That composition is translated
-back into Reef mutations against the composition currently being served.
+Each step gives one proposer model the search so far, read from the
+scenario's history: the seed and every tree the method proposed, each with its
+files, its parent, what the proposer said about it, its outcome and its scores
+on the evaluation tasks; excerpts of the run records and of the step's
+traces; and the files the adapter takes. The reply names any candidate as its
+parent and returns one complete tree. The step checks that tree and leaves it
+in ``workspace.harness`` as the candidate. A reply that is invalid, or that
+repeats a tree the history holds, leaves the head unchanged, so the step skips.
 
-The selector retains every unique, valid candidate and moves serving only on
-a strict mean-score improvement.  Scores and parents are staged in the same
-population transaction as the composition update; the backend makes them
-durable together.
+A deployment selects with the ``compare`` policy and ``statistic: mean``. The
+incumbent's scores come from the score cache, not from new runs, so a
+candidate must beat the mean the incumbent was measured at, as upstream's
+frontier does.
+
+The history holds the search. ``state/attempts.jsonl`` holds what the history
+cannot: the replies that proposed no candidate.
 """
 
 from __future__ import annotations
 
-import hashlib
+import itertools
 import json
 from collections.abc import Mapping, Sequence
-from statistics import fmean
-from typing import Any
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Self
 
-from reef.core.evaluation import (
-    CandidateEvaluationPlugin,
-    EvaluationResult,
-    RolloutScores,
-    SelectionDecision,
-    UpdateCandidate,
-)
-from reef.core.trajectories import recorded_payload, recorded_payloads, source_record_id
-from reef.evaluation.evaluators import BackendEvaluateMixin
-from reef.harness.adapters.descriptor import AdapterDescriptor
-from reef.harness.rollouts.model_binding import ModelBinding, ModelBindings
-from reef.harness.tree.mutations import Mutation
-from reef.harness.tree.nodes import NODE_KINDS
-from reef.harness.tree.render import RenderError, render_composition
-from reef.train.cordis_backend.manifest import FailureManifest
-from reef.train.cordis_backend.strategies import AgentHost, Proposer
-from reef.train.types import TrajectorySample
+from reef.core.config import config_option
+from reef.core.evaluation import mean_score
+from reef.core.plugins import PluginSettings
+from reef.core.prompts import untrusted_text
+from reef.evaluation.harness import CandidateRecord, History, RunRecord
+from reef.harness.adapters import get_adapter
+from reef.harness.adapters.parts import TreeLayout
+from reef.harness.tree import HarnessTree
+from reef.harness.tree.checks import redact_secret_shaped
+from reef.train.harness_backend import Method, Services, StepContext, Workspace
 
-from .population import Population, PopulationStore, normalize_entries
-
-SEARCH_MODES = ("full_history", "incumbent_only")
-
-#: What each node kind's ``config`` must contain. The proposer is told this
-#: because the vocabulary alone does not describe the shape, and on the first
-#: step the population carries no example to copy: an empty seed renders as the
-#: stock agent, so there is nothing to infer the schema from.
-_NODE_CONFIG_SCHEMA = {
-    "config": {"data": "object merged into the adapter's config target", "target": "optional target name"},
-    "rules": {"text": "non-empty string, context appended to the agent's rules file"},
-    "agent_command": {"name": "non-empty identifier", "text": "non-empty string, the prompt template"},
-    "skill": {"name": "non-empty identifier", "text": "non-empty string, the SKILL.md body"},
-    "code_extension": {"name": "non-empty identifier", "code": "non-empty string that must compile"},
-    "native_tool": {"name": "non-empty identifier", "code": "non-empty string", "description": "string"},
-}
-
-_SYSTEM_PROMPT = """You are the proposal policy in a Meta-Harness search.
-Improve the fixed model's harness composition using the retained candidates,
-their evaluation scores, and the latest recorded traces. Choose a parent,
-change the harness rather than the underlying task or model, and return JSON
-only. Do not copy task answers, credentials, or task-specific facts into the
-composition. Prefer one falsifiable, reusable mechanism per proposal."""
+#: ``full_history`` branches from any candidate; ``incumbent_only``, the greedy control, from the served one.
+MODES = ("full_history", "incumbent_only")
+#: What happened to a candidate: the step builds on it, a decision selected it, decisions only rejected it, or none
+#: decided it.
+OUTCOMES = ("served", "selected", "rejected", "undecided")
+#: The fields of a proposer reply.
+REPLY_FIELDS = ("parent_id", "hypothesis", "changes", "files")
+#: The method's file in ``state/``: one JSON line per reply that proposed no candidate.
+ATTEMPTS_FILE = "attempts.jsonl"
+#: How many of the latest such replies a prompt shows.
+RECENT_ATTEMPTS = 5
+SYSTEM_PROMPT = Path(__file__).with_name("system_prompt.md").read_text(encoding="utf-8").strip()
+PROPOSAL_PROMPT = Path(__file__).with_name("proposal_prompt.md").read_text(encoding="utf-8").strip()
 
 
-def _entry_nodes(entries: Sequence[Mapping[str, Any]]) -> tuple[tuple[str, Any], ...]:
-    return tuple((str(entry["name"]), entry.get("config")) for entry in entries if not entry.get("disabled"))
+@dataclass(frozen=True)
+class MetaHarnessSettings(PluginSettings):
+    """The config of ``MetaHarness``, from ``evolution.method.config``.
 
-
-def mutations_between(
-    current: Sequence[Mapping[str, Any]],
-    target: Sequence[Mapping[str, Any]],
-) -> tuple[Mutation, ...]:
-    """Translate a complete target composition into Reef's mutation protocol.
-
-    Updates are minimal while the target order is expressible by removals,
-    in-place updates, and appended creates.  A real reorder is represented by
-    an atomic remove-and-recreate sequence so the target tree remains exact.
+    Values: ``mode`` is one of ``MODES``. ``model`` names an
+    ``evolution.models`` binding and is never ``served``. ``components`` are
+    distinct parts of the adapter's tree, empty for every part.
+    ``max_candidates`` and ``max_target_runs`` are budgets ≥ 0, where 0
+    sets no limit. ``max_files`` ≥ 1, ``max_traces`` ≥ 0 and
+    ``trace_chars`` ≥ 1 bound one proposal and one prompt.
+    Purpose: ``MetaHarness.from_config`` parses it, and the method reads it
+    in each step.
     """
-    before = normalize_entries(current)
-    after = normalize_entries(target)
-    if before == after:
-        return ()
-    before_by_id = {str(entry["id"]): entry for entry in before}
-    after_by_id = {str(entry["id"]): entry for entry in after}
-    retained = [str(entry["id"]) for entry in before if str(entry["id"]) in after_by_id]
-    created = [str(entry["id"]) for entry in after if str(entry["id"]) not in before_by_id]
-    target_ids = [str(entry["id"]) for entry in after]
 
-    if target_ids != retained + created or any(
-        before_by_id[entry_id]["name"] != after_by_id[entry_id]["name"] for entry_id in retained
-    ):
-        return (
-            *(Mutation("remove", str(entry["id"])) for entry in before),
-            *(
-                Mutation("create", str(entry["id"]), {key: value for key, value in entry.items() if key != "id"})
-                for entry in after
-            ),
-        )
-
-    mutations: list[Mutation] = [
-        Mutation("remove", str(entry["id"])) for entry in before if str(entry["id"]) not in after_by_id
-    ]
-    for entry in after:
-        entry_id = str(entry["id"])
-        previous = before_by_id.get(entry_id)
-        if previous is None:
-            continue
-        patch = {
-            key: entry.get(key)
-            for key in set(previous) | set(entry)
-            if key != "id" and previous.get(key) != entry.get(key)
-        }
-        if patch:
-            mutations.append(Mutation("update", entry_id, patch))
-    mutations.extend(
-        Mutation("create", entry_id, {key: value for key, value in after_by_id[entry_id].items() if key != "id"})
-        for entry_id in created
+    mode: str = config_option(
+        "full_history", help="full_history branches from any candidate; incumbent_only from the served one."
     )
-    return tuple(mutations)
+    model: str = config_option("proposer", help="The evolution.models binding that proposes; never the served model.")
+    components: tuple[str, ...] = config_option(
+        (), help="The parts of the tree a proposal may change; none means every part."
+    )
+    max_candidates: int = config_option(0, help="The most candidates the method proposes. 0 sets no limit.")
+    max_target_runs: int = config_option(
+        0, help="Propose no candidate once the evaluations ran this many runs. 0 sets no limit."
+    )
+    max_files: int = config_option(32, help="The most files of one proposed tree.")
+    max_traces: int = config_option(16, help="The most traces whose record files one prompt shows.")
+    trace_chars: int = config_option(4000, help="The most characters one prompt shows of one trace's record files.")
 
-
-class MetaHarnessProposer(Proposer):
-    """One model-authored, full-composition proposal from retained history."""
-
-    def __init__(
-        self,
-        *,
-        store: PopulationStore,
-        descriptor: AdapterDescriptor,
-        tasks: Sequence[str],
-        rollout_repeats: int,
-        mode: str = "full_history",
-        model: str = "proposer",
-        kinds: Sequence[str] = (),
-        max_candidates: int = 0,
-        max_target_rollouts: int = 0,
-        max_nodes: int = 32,
-    ) -> None:
-        if mode not in SEARCH_MODES:
-            raise ValueError(f"Meta-Harness mode must be one of {SEARCH_MODES}")
-        if not model:
-            raise ValueError("Meta-Harness proposer model name must not be empty")
-        for label, value in (("max_candidates", max_candidates), ("max_target_rollouts", max_target_rollouts)):
-            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-                raise ValueError(f"Meta-Harness {label} must be a non-negative integer")
-        if isinstance(max_nodes, bool) or not isinstance(max_nodes, int) or max_nodes < 1:
-            raise ValueError("Meta-Harness max_nodes must be a positive integer")
-        available = _adapter_kinds(descriptor)
-        selected = tuple(kinds) if kinds else available
-        unknown = [kind for kind in selected if kind not in NODE_KINDS]
-        unsupported = [kind for kind in selected if kind not in available]
-        if unknown:
-            raise ValueError(f"Meta-Harness node kinds are unknown: {unknown}")
-        if unsupported:
-            raise ValueError(f"adapter {descriptor.name!r} does not render Meta-Harness node kinds: {unsupported}")
-        if not selected:
-            raise ValueError(f"adapter {descriptor.name!r} exposes no evolvable Reef node kinds")
-        self._store = store
-        self._descriptor = descriptor
-        self._tasks = tuple(str(task) for task in tasks)
-        self._rollout_repeats = rollout_repeats
-        self._mode = mode
-        self._model = model
-        self._available_kinds = available
-        self._kinds = selected
-        self._max_candidates = max_candidates
-        self._max_target_rollouts = max_target_rollouts
-        self._max_nodes = max_nodes
-        self._evaluation_cost = 2 * len(self._tasks) * rollout_repeats
-
-    def propose(
-        self,
-        nodes: tuple[tuple[str, object], ...],
-        samples: tuple[TrajectorySample, ...],
-        models: ModelBindings,
-        *,
-        manifest: FailureManifest | None = None,
-        rejected: Sequence[Mapping[str, Any]] = (),
-        sources: Sequence[Mapping[str, Any]] = (),
-        requests: Sequence[Mapping[str, Any]] = (),
-        entries: Sequence[Mapping[str, Any]] = (),
-        agent_host: AgentHost | None = None,
-    ) -> tuple[Mutation, ...] | None:
-        del nodes, manifest, rejected  # The committed population is the richer history surface.
-        population = self._store.active
-        step = population.proposer_calls + 1
-        if self._max_candidates and population.generated_candidates >= self._max_candidates:
-            population.record_attempt(step=step, status="budget_exhausted", budget="max_candidates")
-            return None
-        if self._max_target_rollouts and population.rollout_calls + self._evaluation_cost > self._max_target_rollouts:
-            population.record_attempt(step=step, status="budget_exhausted", budget="max_target_rollouts")
-            return None
-
-        prompt = self._prompt(population, samples)
-        population.proposer_calls += 1
-        reply = self._binding(models).chat(
-            [
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user", "content": prompt},
-            ]
-        )
-        audit = {
-            "step": step,
-            "input_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
-            "reply_sha256": hashlib.sha256(reply.encode("utf-8")).hexdigest(),
-        }
-        try:
-            proposal = _parse_proposal(reply)
-            parent_id = proposal["parent_id"]
-            parent = population.by_id(parent_id)
-            if self._mode == "incumbent_only" and parent_id != population.served_id:
-                raise ValueError("incumbent-only proposals must choose the served candidate")
-            entries = self._validate_entries(proposal["entries"], parent.entries)
-            candidate, is_new = population.stage_candidate(
-                entries,
-                parent_id=parent.candidate_id,
-                step=step,
-                hypothesis=proposal["hypothesis"],
-                changes=proposal["changes"],
+    def __post_init__(self) -> None:
+        if self.mode not in MODES:
+            raise ValueError(f"mode must be one of {', '.join(MODES)}")
+        if not self.model.strip() or self.model == "served":
+            raise ValueError(
+                "model must name an evolution.models binding: the served model never proposes its harness"
             )
-            if not is_new:
-                population.record_attempt(
-                    **audit,
-                    status="duplicate",
-                    parent_id=parent_id,
-                    candidate_id=candidate.candidate_id,
-                )
-                return None
-            mutations = mutations_between(population.served.entries, candidate.entries)
-            if not mutations:
-                raise ValueError("proposal does not change the served composition")
-        except (KeyError, TypeError, ValueError, RenderError) as exc:
-            population.discard_pending()
-            population.record_attempt(**audit, status="invalid", error=str(exc))
-            return None
+        if len(set(self.components)) != len(self.components):
+            raise ValueError("components must not repeat a part")
+        for label, value, least in (
+            ("max_candidates", self.max_candidates, 0),
+            ("max_target_runs", self.max_target_runs, 0),
+            ("max_files", self.max_files, 1),
+            ("max_traces", self.max_traces, 0),
+            ("trace_chars", self.trace_chars, 1),
+        ):
+            if value < least:
+                raise ValueError(f"{label} must be at least {least}")
 
-        population.record_attempt(
-            **audit,
-            status="proposed",
-            parent_id=parent_id,
-            candidate_id=candidate.candidate_id,
-            hypothesis=candidate.hypothesis,
-            changes=candidate.changes,
-        )
-        return mutations
 
-    def _binding(self, models: ModelBindings) -> ModelBinding:
+@dataclass(frozen=True)
+class Member:
+    """One candidate a proposal may branch from.
+
+    Values: ``record`` is the candidate's history record and ``tree`` its
+    files, with ``tree.checksum() == record.tree``. ``outcome`` is one of
+    ``OUTCOMES``: ``served`` when the tree is the head of the step; otherwise
+    ``selected`` when a step's decision selected it, ``rejected`` when the
+    decisions on it only rejected it, and ``undecided`` when no decision is on
+    it. ``runs`` are runs of ``tree``: its latest one for each (task,
+    repeat) of the evaluation tasks, in task order and then repeat order.
+    Purpose: ``search_population`` makes them; the method shows them to the
+    proposer model and checks the reply's parent against them, and the
+    Terminal-Bench example lists them in its summary.
+    """
+
+    record: CandidateRecord
+    tree: HarnessTree
+    outcome: str
+    runs: tuple[RunRecord, ...]
+
+    def __post_init__(self) -> None:
+        if self.tree.checksum() != self.record.tree:
+            raise ValueError("Member.tree must be the tree its record names")
+        if self.outcome not in OUTCOMES:
+            raise ValueError(f"Member.outcome must be one of {', '.join(OUTCOMES)}")
+        if any(task_run.tree != self.record.tree for task_run in self.runs):
+            raise ValueError("Member.runs must be runs of the member's tree")
+
+    @property
+    def parent(self) -> str | None:
+        """The tree this method's proposer branched from; for another tree, its record's parent: the head it was
+        proposed against, ``None`` for the seed."""
+        parent = self.record.notes.get("parent_id")
+        return parent if isinstance(parent, str) else self.record.parent
+
+    @property
+    def mean_score(self) -> float | None:
+        """The mean score of the ``runs`` that did not fail, as ``compare`` counts it (``mean_score``); ``None``
+        before the first run, or when every run failed."""
+        return mean_score(task_run.score for task_run in self.runs)
+
+
+class MetaHarness(Method):
+    """Propose one complete tree per step from the whole search history.
+
+    Values: ``settings`` is the method's config.
+    Purpose: a deployment names it in ``evolution.method``; the backend calls
+    ``step`` once per step.
+    """
+
+    def __init__(self, settings: MetaHarnessSettings | None = None) -> None:
+        self.settings = MetaHarnessSettings() if settings is None else settings
+
+    @classmethod
+    def from_config(cls, config: Mapping[str, Any]) -> Self:
+        return cls(MetaHarnessSettings.parse(config, plugin_class=cls))
+
+    def step(self, context: StepContext) -> None:
+        workspace, services = context.workspace, context.services
+        settings = self.settings
+        host = workspace.host()
+        layout = get_adapter(str(host["adapter"])).layout
+        parts = settings.components or tuple(layout.parts)
+        unsupported = [part for part in parts if part not in layout.parts]
+        if unsupported:
+            raise ValueError(f"the {host['adapter']} harness tree has no parts {unsupported}")
         try:
-            return models[self._model]
+            proposer = services.models[settings.model]
         except KeyError as exc:
             raise ValueError(
-                f"Meta-Harness proposer model {self._model!r} is not declared under evolution.models; "
+                f"the Meta-Harness proposer model {settings.model!r} is not declared under evolution.models; "
                 "the harness under test must not propose its own improvements"
             ) from exc
-
-    def _validate_entries(
-        self,
-        value: Any,
-        parent_entries: Sequence[Mapping[str, Any]],
-    ) -> tuple[dict[str, Any], ...]:
-        if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
-            raise ValueError("proposal entries must be a JSON list")
-        entries = normalize_entries(value)
-        if len(entries) > self._max_nodes:
-            raise ValueError(f"proposal contains {len(entries)} nodes; max_nodes is {self._max_nodes}")
-        for entry in entries:
-            kind = str(entry["name"])
-            if kind not in self._available_kinds:
-                raise ValueError(
-                    f"proposal uses node kind {kind!r}; adapter {self._descriptor.name!r} supports "
-                    f"{self._available_kinds}"
-                )
-            NODE_KINDS[kind](None, entry.get("config"))
-        fixed_before = [entry for entry in normalize_entries(parent_entries) if entry["name"] not in self._kinds]
-        fixed_after = [entry for entry in entries if entry["name"] not in self._kinds]
-        if fixed_after != fixed_before:
-            raise ValueError(f"proposal may change only configured components {self._kinds}")
-        # Adapter quirks and path collisions are part of the same admission
-        # gate the backend applies.  Running the pure render here turns an
-        # invalid proposal into committed attempt history instead of a crash.
-        render_composition(_entry_nodes(entries), self._descriptor)
-        return entries
-
-    def _prompt(self, population: Population, samples: Sequence[TrajectorySample]) -> str:
-        records = population.candidates if self._mode == "full_history" else [population.served]
-        history = [
-            {
-                "candidate_id": candidate.candidate_id,
-                "parent_id": candidate.parent_id,
-                "outcome": candidate.outcome,
-                "scores": None if candidate.scores is None else list(candidate.scores),
-                "hypothesis": candidate.hypothesis,
-                "changes": candidate.changes,
-                "entries": [dict(entry) for entry in candidate.entries],
-            }
-            for candidate in records
-        ]
-        traffic = [
-            {
-                "source_agent_record_id": source_record_id(sample),
-                "score": sample.metadata.get("reward"),
-                "feedback": sample.metadata.get("feedback"),
-                "payload": dict(recorded_payload(sample)),
-                "trajectory": [dict(event) for event in recorded_payloads(sample)],
-            }
-            for sample in samples
-        ]
-        surface = {
-            "adapter": self._descriptor.name,
-            "mode": self._mode,
-            "node_config_schema": {
-                kind: schema for kind, schema in _NODE_CONFIG_SCHEMA.items() if kind in self._kinds
-            },
-            "served_candidate_id": population.served_id,
-            "evaluation_tasks": list(self._tasks),
-            "rollout_repeats": self._rollout_repeats,
-            "adapter_node_kinds": list(self._available_kinds),
-            "evolvable_node_kinds": list(self._kinds),
-            "max_nodes": self._max_nodes,
-            "population": history,
-            "recent_traces": traffic,
+        history = workspace.history()
+        budget = self.spent_budget(history, workspace.step)
+        if budget is not None:
+            workspace.write_output(f"The {budget} budget is spent.", {"status": "budget_exhausted", "budget": budget})
+            return
+        head = workspace.tree().checksum()
+        tasks = workspace.tasks()
+        members = search_population(
+            history, head, workspace.step, tasks, incumbent_only=settings.mode == "incumbent_only"
+        )
+        task_ids = {task: f"t{number}" for number, task in enumerate(tasks, start=1)}
+        search_state: dict[str, Any] = {
+            "mode": settings.mode,
+            "adapter": host["adapter"],
+            "config_targets": host["config_targets"],
+            "parts": host["parts"],
+            "evolvable_parts": list(parts),
+            "max_files": settings.max_files,
+            "served_candidate_id": head,
+            "evaluation_tasks": {task_id: task for task, task_id in task_ids.items()},
+            "population": [member_json(member, task_ids) for member in members],
+            "traces": self.traces(workspace, history, members, task_ids),
+            "attempts": read_attempts(workspace)[-RECENT_ATTEMPTS:],
         }
-        return (
-            "Propose exactly one complete Reef composition. Use node_config_schema as field guidance "
-            "where provided; every entry must pass the adapter's validation. "
-            "In full_history mode you may branch from any "
-            "candidate_id in population; in incumbent_only mode use served_candidate_id. Each entry must have "
-            "a unique root-level id, a name from adapter_node_kinds, and that node kind's config. Entries whose "
-            "name is not in evolvable_node_kinds must be copied unchanged from the selected parent. Return exactly "
-            'this object: {"parent_id": "<full candidate id>", "hypothesis": "<falsifiable claim>", '
-            '"changes": "<concise mechanism>", "entries": [<complete entry mappings>]}.\n\n'
-            + json.dumps(surface, indent=2, sort_keys=True, ensure_ascii=False)
+        request = workspace.request()
+        if request is not None:
+            search_state["instruction"] = request.text
+        prompt = "\n\n".join(
+            (
+                PROPOSAL_PROMPT,
+                untrusted_text(json.dumps(search_state, indent=2, sort_keys=True, ensure_ascii=False), "search state"),
+            )
         )
+        reply = proposer.chat([{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": prompt}])
+        try:
+            proposal = parse_proposal(reply)
+            parent = next((member for member in members if member.record.tree == proposal["parent_id"]), None)
+            if parent is None:
+                raise ValueError(f"parent_id must name a candidate of the population ({settings.mode} mode)")
+            tree = self.checked_tree(proposal["files"], parent.tree, layout, parts, services)
+        except ValueError as exc:
+            append_attempt(workspace, {"step": workspace.step, "status": "invalid", "error": str(exc)})
+            workspace.write_output(
+                f"The proposer's reply was invalid: {exc}", {"status": "invalid", "error": str(exc)}
+            )
+            return
+        candidate = tree.checksum()
+        # The head is a committed tree of the history, so it is known too.
+        known = {record.tree for record in history.candidates.values() if not uncommitted(record, workspace.step)}
+        if candidate in known:
+            append_attempt(
+                workspace,
+                {
+                    "step": workspace.step,
+                    "status": "duplicate",
+                    "candidate_id": candidate,
+                    "parent_id": parent.record.tree,
+                },
+            )
+            workspace.write_output(
+                f"The reply repeats candidate {candidate}.", {"status": "duplicate", "candidate_id": candidate}
+            )
+            return
+        workspace.write_tree(tree)
+        notes = {
+            "status": "proposed",
+            "parent_id": parent.record.tree,
+            "hypothesis": proposal["hypothesis"],
+            "changes": proposal["changes"],
+        }
+        summary = f"Hypothesis: {proposal['hypothesis']}\nChanges: {proposal['changes']}\nParent: {parent.record.tree}"
+        workspace.write_output(summary, notes)
 
+    def spent_budget(self, history: History, step: int) -> str | None:
+        """The budget the search spent before ``step``: ``max_candidates`` or ``max_target_runs``, ``None``
+        while both last.
 
-class MetaHarnessSelectorMixin(CandidateEvaluationPlugin):
-    """Give a plugin a ``decide()`` that serves strict mean-score improvements."""
-
-    def __init__(self, store: PopulationStore) -> None:
-        super().__init__()
-        self._store = store
-
-    def decide(self, candidate: UpdateCandidate, evaluation: EvaluationResult) -> SelectionDecision:
-        del candidate
-        population = self._store.active
-        proposed = population.pending
-        candidate_scores = _evaluation_scores(evaluation.metrics.get("candidate_scores", ()))
-        current_scores = _evaluation_scores(evaluation.metrics.get("current_scores", ()))
-        if len(candidate_scores) != len(current_scores):
-            raise ValueError("Meta-Harness evaluation score vectors must have equal lengths")
-        # Upstream Meta-Harness keeps a frontier: each candidate's average is
-        # compared against the best average recorded so far, and the incumbent
-        # is never re-run. Reproducing that means judging against the
-        # incumbent's committed score rather than this batch's paired one, even
-        # though Cordis measures both. The bar is therefore a high-water mark,
-        # which is upstream's behaviour and not an accident of this port.
-        incumbent = population.served
-        incumbent_scores = incumbent.scores or current_scores
-        candidate_mean = fmean(candidate_scores)
-        incumbent_mean = fmean(incumbent_scores)
-        selected = candidate_mean > incumbent_mean
-        population.record_decision(
-            candidate_scores=candidate_scores,
-            current_scores=current_scores,
-            selected=selected,
+        The counts read the history's records of the steps before ``step``. An
+        earlier attempt of ``step`` itself never committed, so a retry of the
+        step does not count it.
+        """
+        settings = self.settings
+        proposed = sum(
+            1 for record in history.candidates.values() if record.origin == "method" and not uncommitted(record, step)
         )
-        return SelectionDecision(
-            selected=selected,
-            policy="meta_harness",
-            reason=(
-                f"candidate scored {candidate_mean:.4f} against committed incumbent {incumbent_mean:.4f} "
-                f"over {len(candidate_scores)} rollout results"
-            ),
-            evaluation=evaluation,
-            metrics={
-                "candidate_mean": candidate_mean,
-                "incumbent_mean": incumbent_mean,
-                "population_candidate_id": proposed.candidate_id,
-                "population_parent_id": proposed.parent_id,
-                "population_size": len(population.candidates),
-                "proposer_calls": population.proposer_calls,
-                "target_rollout_calls": population.rollout_calls,
-            },
+        if settings.max_candidates and proposed >= settings.max_candidates:
+            return "max_candidates"
+        task_runs = sum(1 for task_run in history.runs if task_run.step < step)
+        if settings.max_target_runs and task_runs >= settings.max_target_runs:
+            return "max_target_runs"
+        return None
+
+    def checked_tree(
+        self,
+        files: Mapping[str, Any],
+        parent: HarnessTree,
+        layout: TreeLayout,
+        parts: Sequence[str],
+        services: Services,
+    ) -> HarnessTree:
+        """The proposed tree when it passes the adapter's validation and changes only files of ``parts`` of
+        ``parent``; ``ValueError`` otherwise."""
+        tree = HarnessTree(dict(files))
+        if len(tree.files) > self.settings.max_files:
+            raise ValueError(f"the tree holds {len(tree.files)} files; max_files is {self.settings.max_files}")
+        if fixed_files(tree, layout, parts) != fixed_files(parent, layout, parts):
+            raise ValueError(f"a proposal may change only the files of the parts {list(parts)}")
+        validation = services.check(tree)
+        if not validation.passed:
+            raise ValueError(f"the tree fails validation: {validation.message()}")
+        return tree
+
+    def traces(
+        self, workspace: Workspace, history: History, members: Sequence[Member], task_ids: Mapping[str, str]
+    ) -> list[dict[str, Any]]:
+        """The traces a prompt shows, each with an excerpt of its record files: at most ``max_traces``.
+
+        The step's own traces come first. Then the members' runs take
+        turns: the served member first and the others newest first, and each
+        member gives its lowest scores first, a failed run before any
+        score.
+        """
+        max_traces = self.settings.max_traces
+        shown: list[dict[str, Any]] = [
+            {
+                "source": trace.source,
+                "score": trace.score,
+                # A run keeps its trajectory files and its run.json in the history, not in the trace.
+                "record": excerpt(
+                    history.run_dir(trace.record) if trace.source == "run" else trace.directory,
+                    self.settings.trace_chars,
+                ),
+            }
+            for trace in workspace.traces()[:max_traces]
+        ]
+        served = [member for member in members if member.outcome == "served"]
+        others = [member for member in reversed(members) if member.outcome != "served"]
+        turns = itertools.zip_longest(
+            *(
+                sorted(
+                    member.runs,
+                    key=lambda task_run: (not task_run.score.is_failed, task_run.score.value or 0.0),
+                )
+                for member in (*served, *others)
+            )
         )
+        for task_run in itertools.chain.from_iterable(turns):
+            if len(shown) >= max_traces:
+                break
+            if task_run is None:
+                continue
+            failure = None if task_run.failure is None else f"{task_run.failure.stage}: {task_run.failure.cause}"
+            shown.append(
+                {
+                    "source": "evaluation",
+                    "candidate_id": task_run.tree,
+                    "task": task_ids[task_run.task],
+                    "repeat": task_run.repeat,
+                    "score": task_run.score.to_json(),
+                    "failure": None if failure is None else clipped(failure, self.settings.trace_chars),
+                    "record": excerpt(history.run_dir(task_run.run_id), self.settings.trace_chars),
+                }
+            )
+        return shown
 
 
-class MetaHarnessPlugin(MetaHarnessSelectorMixin, BackendEvaluateMixin):
-    """Meta-Harness's candidate evaluation: measure through the backend, decide on the population frontier."""
+def search_population(
+    history: History, head: str, step: int, tasks: Sequence[str], *, incumbent_only: bool = False
+) -> tuple[Member, ...]:
+    """The candidates a proposal at ``step`` may branch from, in the order the history first saw them.
 
-    def __init__(self, candidate_backend: Any, store: PopulationStore) -> None:
-        super().__init__(store)
-        self._candidate_backend = candidate_backend
+    ``head`` is the checksum of the tree the step builds on, which the history
+    holds; it is always a member. In full history the seed and every tree the
+    method proposed before
+    ``step`` are members too. A tree that an earlier attempt of ``step``
+    proposed is not: that attempt never committed. Outcomes read the final
+    decision of each step before ``step``, the latest one the history holds
+    for it. The runs are those on ``tasks``.
+    """
+    decisions = {decision.step: decision for decision in history.decisions if decision.step < step}
+    order = {task: index for index, task in enumerate(tasks)}
+    members = []
+    for record in history.candidates.values():
+        searched = record.origin == "seed" or (record.origin == "method" and not uncommitted(record, step))
+        if record.tree != head and (incumbent_only or not searched):
+            continue
+        selections = [decision.selected for decision in decisions.values() if decision.tree == record.tree]
+        if record.tree == head:
+            outcome = "served"
+        elif any(selections):
+            outcome = "selected"
+        elif selections:
+            outcome = "rejected"
+        else:
+            outcome = "undecided"
+        latest = {(task_run.task, task_run.repeat): task_run for task_run in history.runs_of(record.tree)}
+        task_runs = sorted(
+            (task_run for (task, _), task_run in latest.items() if task in order),
+            key=lambda task_run: (order[task_run.task], task_run.repeat),
+        )
+        members.append(Member(record, history.tree(record.tree), outcome, tuple(task_runs)))
+    return tuple(members)
 
 
-def _adapter_kinds(descriptor: AdapterDescriptor) -> tuple[str, ...]:
-    kinds = []
-    if descriptor.config_targets:
-        kinds.append("config")
-    kinds.extend(kind for kind in NODE_KINDS if kind != "config" and kind in descriptor.node_paths)
-    return tuple(kinds)
+def uncommitted(record: CandidateRecord, step: int) -> bool:
+    """Whether ``record`` is a tree that an earlier attempt of ``step`` proposed.
+
+    The history keeps every attempt, and that attempt never committed: a retry
+    of ``step`` neither counts the tree, nor shows it, nor refuses it as known.
+    """
+    return record.origin == "method" and record.step >= step
 
 
-def _parse_proposal(reply: str) -> dict[str, Any]:
+def member_json(member: Member, task_ids: Mapping[str, str]) -> dict[str, Any]:
+    """What a prompt shows of one member; ``task_ids`` names each evaluation task."""
+    scores: dict[str, list[float | str]] = {}
+    for task_run in member.runs:
+        scores.setdefault(task_ids[task_run.task], []).append(task_run.score.to_json())
+    return {
+        "candidate_id": member.record.tree,
+        "parent_id": member.parent,
+        "origin": member.record.origin,
+        "outcome": member.outcome,
+        "hypothesis": str(member.record.notes.get("hypothesis", "")),
+        "changes": str(member.record.notes.get("changes", "")),
+        "mean_score": member.mean_score,
+        "scores": scores,
+        "files": dict(member.tree.files),
+    }
+
+
+def fixed_files(tree: HarnessTree, layout: TreeLayout, parts: Sequence[str]) -> dict[str, str]:
+    """The files of ``tree`` that a proposal must keep: every file whose part is not in ``parts``."""
+    return {
+        path: text
+        for path, text in tree.files.items()
+        if (location := layout.locate(path)) is None or location.part.name not in parts
+    }
+
+
+def excerpt(directory: Path, limit: int) -> str:
+    """The text files under ``directory``, each after a line that names it, cut to ``limit`` characters.
+
+    Links and files that are not UTF-8 text are left out, and
+    credential-shaped literals are redacted. A missing directory has no files.
+    """
+    parts = []
+    for path in sorted(directory.rglob("*")):
+        if path.is_symlink() or not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            continue
+        parts.append(f"--- {path.relative_to(directory).as_posix()} ---\n{text}")
+    return clipped(redact_secret_shaped("\n".join(parts)), limit)
+
+
+def clipped(text: str, limit: int) -> str:
+    """``text`` when it has at most ``limit`` characters; otherwise its first and last characters, ``limit`` in
+    all, around a line that says how many were left out."""
+    if len(text) <= limit:
+        return text
+    head = limit // 2
+    return f"{text[:head]}\n[... {len(text) - limit} characters left out ...]\n{text[len(text) - (limit - head) :]}"
+
+
+def read_attempts(workspace: Workspace) -> list[dict[str, Any]]:
+    """Every reply that proposed no candidate, oldest first, from ``state/``."""
+    path = workspace.state / ATTEMPTS_FILE
+    if not path.is_file():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def append_attempt(workspace: Workspace, attempt: Mapping[str, Any]) -> None:
+    """Add one reply that proposed no candidate to ``state/``."""
+    with (workspace.state / ATTEMPTS_FILE).open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(dict(attempt), sort_keys=True) + "\n")
+
+
+def parse_proposal(reply: str) -> dict[str, Any]:
+    """The proposal object in the reply: ``parent_id``, ``hypothesis``, ``changes`` and ``files``.
+
+    A Markdown code fence around the object is removed. ``ValueError`` when
+    the reply holds no such object.
+    """
     text = reply.strip()
     if text.startswith("```"):
         first_line, separator, remainder = text.partition("\n")
@@ -421,29 +482,21 @@ def _parse_proposal(reply: str) -> dict[str, Any]:
             raise ValueError(f"proposer response is not valid JSON: {exc.msg}") from exc
     if not isinstance(value, Mapping):
         raise ValueError("proposer response must be a JSON object")
-    unknown = set(value) - {"parent_id", "hypothesis", "changes", "entries"}
+    unknown = set(value) - set(REPLY_FIELDS)
     if unknown:
         raise ValueError(f"proposer response contains unknown fields: {sorted(unknown)}")
     parent = value.get("parent_id")
-    entries = value.get("entries")
+    files = value.get("files")
     if not isinstance(parent, str) or not parent:
         raise ValueError("proposer response requires a non-empty parent_id")
-    if not isinstance(entries, list):
-        raise ValueError("proposer response requires an entries list")
+    if not isinstance(files, Mapping):
+        raise ValueError("proposer response requires a files object")
     return {
         "parent_id": parent,
         "hypothesis": str(value.get("hypothesis", "")),
         "changes": str(value.get("changes", "")),
-        "entries": entries,
+        "files": files,
     }
 
 
-def _evaluation_scores(values: Any) -> tuple[float, ...]:
-    """Per-rollout scores, task by task, with every rollout that has no value read as zero, as upstream
-    Meta-Harness counts a failed run."""
-    if not values:
-        raise ValueError("Meta-Harness evaluation requires non-empty score vectors")
-    return tuple(0.0 if score.value is None else score.value for score in RolloutScores.from_json(values).rollouts())
-
-
-__all__ = ["SEARCH_MODES", "MetaHarnessPlugin", "MetaHarnessProposer", "MetaHarnessSelectorMixin", "mutations_between"]
+__all__ = ["MODES", "Member", "MetaHarness", "MetaHarnessSettings", "parse_proposal", "search_population"]
