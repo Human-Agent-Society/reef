@@ -260,22 +260,17 @@ class ArtifactEvaluations:
             artifact_id = current.surface.component_artifact(active, component).artifact_id
         request = settings.request(artifact_id, component)
         kind = kinds[component]
-        if kind == "harness_plugin":
-            raise ReefError("Reef does not evaluate a harness artifact yet (RFC #959, step 2)")
         if kind is None:
             raise ValueError(f"component {component!r} is no side of a policy, so Reef cannot evaluate it")
+        runtime = current.runtime
+        refusal = current.evaluation_refusal(component)
+        if refusal is not None or runtime is None:
+            # A scenario without a runtime always has a refusal, which names the reason.
+            raise ReefError(refusal or f"scenario {current.name!r} has no runtime")
         if request.harness is None:
             raise ValueError(f"component {component!r} is a {kind}: configure the harness that runs it")
-        if any(other == "harness_plugin" for other in kinds.values()):
-            raise ReefError("Reef evaluates a model artifact only in a scenario whose artifacts hold no harness")
         _, release = current.resolve_artifact(artifact_id, component)
         artifact = release.materialize()
-        runtime = current.runtime
-        if runtime is None or not runtime.serves_artifacts_on_request:
-            raise ReefError(
-                f"scenario {current.name!r}'s runtime serves only its current artifact, so it cannot evaluate an "
-                "artifact on request"
-            )
         return request, artifact, runtime.artifact_model(artifact)
 
     def accept(

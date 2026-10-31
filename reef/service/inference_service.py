@@ -46,8 +46,7 @@ from reef.artifact.artifact import Artifact
 from reef.core.artifact_ref import ArtifactRef
 from reef.core.errors import ReefError
 from reef.core.records_types import ROLLOUT_HEADER, AgentRecord, RequestType
-from reef.core.served_models import ACTIVE, ServedArtifact
-from reef.dispatcher.served import CACHE_SECONDS
+from reef.core.served_models import ACTIVE, CACHE_SECONDS, ServedArtifact
 from reef.runtime.interfaces import (
     INFERENCE_ABORT_ERROR,
     EngineClients,
@@ -55,7 +54,6 @@ from reef.runtime.interfaces import (
     UpstreamStatusError,
     inference_aborted,
 )
-from reef.service.request_service import with_request_tags
 from reef.service.streaming import (
     SSEFrameDecoder,
     chat_completion_chunk_identity,
@@ -65,7 +63,7 @@ from reef.service.streaming import (
     stream_record,
 )
 from reef.service.web import service_application
-from reef.service.wire import HeaderError, RequestHeaders, parse_request_headers
+from reef.service.wire import HeaderError, RequestHeaders, parse_request_headers, with_request_tags
 from reef.storage.scenario import ScenarioStorage
 from reef.storage.served_models import ServedModels
 

@@ -20,6 +20,9 @@ from reef.core.values import require_text
 
 #: The name of a scenario's active artifact in ``ScenarioModel``.
 ACTIVE = "active"
+#: The seconds an inference replica caches ``served_models`` at most. Control keeps a replaced value serving at
+#: least this long, so that a replica that read it before the change still reaches it.
+CACHE_SECONDS = 5.0
 
 
 @dataclass(frozen=True)
@@ -102,4 +105,4 @@ class ScheduledStop:
             raise ValueError("stop_after is a finite time")
 
 
-__all__ = ["ACTIVE", "ScenarioModel", "ScheduledStop", "ServedArtifact"]
+__all__ = ["ACTIVE", "CACHE_SECONDS", "ScenarioModel", "ScheduledStop", "ServedArtifact"]

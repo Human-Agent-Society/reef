@@ -37,7 +37,6 @@ from reef.evaluation.activation import (
     build_activation_rule,
     scenario_activation_reference,
 )
-from reef.inference.http import InferenceProxyRuntime
 from reef.inference.model_config import ModelConfig
 from reef.observability import ExperimentTracker, NullExperimentTracker
 from reef.observability.commits import ExperimentReportQueue
@@ -487,9 +486,9 @@ class ScenarioRegistry:
 
     def provider_key(self) -> str | None:
         """The deployment's provider key, which a scenario's own model is called with: the key of the recipe's
-        provider runtime, or None."""
+        runtime (``InferenceRuntime.provider_key``), or None without a runtime."""
         runtime = self._recipe.runtime
-        return runtime.api_key if isinstance(runtime, InferenceProxyRuntime) else None
+        return None if runtime is None else runtime.provider_key
 
     def apply_stored_settings(self, instance: Scenario) -> None:
         """Select the training mode and the activation rule a person stored for the scenario on a newly built

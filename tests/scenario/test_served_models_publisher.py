@@ -6,8 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from reef.core.served_models import ACTIVE, ScenarioModel, ScheduledStop, ServedArtifact
-from reef.dispatcher.served import CACHE_SECONDS, ControlInstance, ServedModelsPublisher, wait_for_control_lease
+from reef.core.served_models import ACTIVE, CACHE_SECONDS, ScenarioModel, ScheduledStop, ServedArtifact
+from reef.dispatcher.served import ControlInstance, ServedModelsPublisher, wait_for_control_lease
 from reef.storage.coordination import Coordination
 from reef.storage.sql_coordination import (
     SQLControlLease,

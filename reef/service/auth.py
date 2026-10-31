@@ -9,6 +9,7 @@ from collections.abc import Iterable, Mapping
 from urllib.parse import urlencode
 
 from aiohttp import web
+from aiohttp.typedefs import Handler
 
 
 def normalize_tokens(tokens: str | Iterable[str] | None) -> frozenset[str]:
@@ -70,8 +71,23 @@ DOWNLOAD_SIGNATURE_CONTEXT = b"reef-download\n"
 #: The most seconds that a signed download URL stays valid.
 MAX_DOWNLOAD_URL_SECONDS = 24 * 3600
 
-#: The downloads that a signed URL opens, matched on the raw path: a data item's archive and an artifact's files.
-DOWNLOAD_ROUTES = re.compile(r"^/reef/(namespaces/[^/]+/data/.+/archive|scenarios/[^/]+/artifacts/[^/]+/files)$")
+#: The canonical paths of the routes of an app that a signed URL opens (``add_signed_download``).
+SIGNED_DOWNLOADS = web.AppKey("signed_downloads", set[str])
+
+
+def add_signed_download(app: web.Application, path: str, handler: Handler) -> None:
+    """Add the GET route ``path`` to ``app`` as a download that a signed URL opens (``signed_download_url``), as
+    well as a request with a token."""
+    route = app.router.add_get(path, handler)
+    if SIGNED_DOWNLOADS not in app:
+        app[SIGNED_DOWNLOADS] = set()
+    app[SIGNED_DOWNLOADS].add(route.resource.canonical if route.resource is not None else path)
+
+
+def is_signed_download(request: web.Request) -> bool:
+    """Whether ``request`` matched a route that ``add_signed_download`` added."""
+    resource = request.match_info.route.resource
+    return resource is not None and resource.canonical in request.app.get(SIGNED_DOWNLOADS, set())
 
 
 #: The query parameters of a download that its signature covers: what the download reads.
@@ -155,7 +171,7 @@ def create_authentication_middleware(
     request with no Authorization header may present the token in
     ``x-api-key`` instead, the header the Anthropic dialect's clients send.
 
-    A download (``DOWNLOAD_ROUTES``) also opens on a GET with no Authorization
+    A download (``add_signed_download``) also opens on a GET with no Authorization
     header that carries ``expires`` in the future and the ``signature`` of
     its raw path, its ``DOWNLOAD_PARAMETERS`` and ``expires`` for an accepted token
     (``download_signature``): a signed URL that a browser or another service
@@ -211,7 +227,7 @@ def create_authentication_middleware(
     def _signature_opens(request: web.Request) -> bool:
         """Whether a download GET with no Authorization header carries a valid, unexpired signature."""
         raw_path = request.rel_url.raw_path
-        if "Authorization" in request.headers or request.method != "GET" or not DOWNLOAD_ROUTES.match(raw_path):
+        if "Authorization" in request.headers or request.method != "GET" or not is_signed_download(request):
             return False
         signature = request.query.get("signature") or ""
         try:
@@ -257,14 +273,16 @@ def create_authentication_middleware(
 
 
 __all__ = [
-    "DOWNLOAD_ROUTES",
     "EVALUATION_ROUTES",
     "MAX_DOWNLOAD_URL_SECONDS",
     "PAGE_KEY_CONTEXT",
     "PAGE_ROUTES",
+    "SIGNED_DOWNLOADS",
+    "add_signed_download",
     "create_authentication_middleware",
     "download_signature",
     "evaluation_token_for",
+    "is_signed_download",
     "normalize_tokens",
     "page_key_for_digest",
     "page_query",

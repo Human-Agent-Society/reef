@@ -28,7 +28,14 @@ from reef.scenario.scenario import Scenario
 from reef.service.install_script import TOKEN_PLACEHOLDER, render_install_script
 from reef.service.release_page import before_release_id, build_release_page, build_running_step_page, result_of
 from reef.service.request_page import STATE_WORDS, build_request_page, request_state, settled_step
-from reef.service.wire import SCENARIO_HEADER, ProposalPayload, ReportPayload, RequestHeaders, parse_request_headers
+from reef.service.wire import (
+    SCENARIO_HEADER,
+    ProposalPayload,
+    ReportPayload,
+    RequestHeaders,
+    parse_request_headers,
+    with_request_tags,
+)
 from reef.train.backend import CandidateBackend
 from reef.train.cordis_backend.contracts import ProposalValidator, StepProgressReader, StepRecords
 from reef.train.cordis_backend.proposals import ProposalInbox
@@ -682,24 +689,8 @@ class RequestService:
             raise
 
 
-def with_request_tags(payload: Mapping[str, Any], parsed: RequestHeaders) -> Mapping[str, Any]:
-    """Carry ``x-reef-tag-*`` through to the INFERENCE record's metadata.
-
-    Only inference: a tag is context about a served exchange, and the
-    processors that read one correlate on the inference side. This stores
-    every pair as sent (method-integration RFC §3.2); only
-    :func:`recorded_ref` reads a value.
-    """
-    if parsed.request_type is not RequestType.INFERENCE or not parsed.tags:
-        return payload
-    metadata = dict(payload.get("metadata") or {})
-    metadata["tags"] = {**(metadata.get("tags") or {}), **parsed.tags}
-    return {**payload, "metadata": metadata}
-
-
 __all__ = [
     "RequestService",
     "normalize_request_payload",
     "page_headers",
-    "with_request_tags",
 ]

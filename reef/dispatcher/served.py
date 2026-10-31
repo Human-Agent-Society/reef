@@ -20,7 +20,7 @@ import time
 from abc import ABC, abstractmethod
 
 from reef.artifact.artifact import Artifact
-from reef.core.served_models import ACTIVE, ScenarioModel, ScheduledStop, ServedArtifact
+from reef.core.served_models import ACTIVE, CACHE_SECONDS, ScenarioModel, ScheduledStop, ServedArtifact
 from reef.execution.workers import ServiceWorker
 from reef.runtime.interfaces import EngineClients, InferenceHandler, InferenceRuntime
 from reef.scenario.registry import ScenarioRegistry
@@ -29,9 +29,6 @@ from reef.storage.control_lease import ControlLease, ControlLeaseState
 from reef.storage.coordination import Coordination
 
 logger = logging.getLogger(__name__)
-
-#: The seconds an inference replica caches ``served_models`` at most.
-CACHE_SECONDS = 5.0
 
 
 def wait_for_control_lease(
@@ -265,4 +262,4 @@ class PublishedEngines(EngineClients):
         return found
 
 
-__all__ = ["CACHE_SECONDS", "ControlInstance", "PublishedEngines", "ServedModelsPublisher", "wait_for_control_lease"]
+__all__ = ["ControlInstance", "PublishedEngines", "ServedModelsPublisher", "wait_for_control_lease"]

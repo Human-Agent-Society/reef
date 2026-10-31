@@ -421,7 +421,7 @@ def test_named_recipe_configs_resolve_by_name(monkeypatch, tmp_path) -> None:
     assert isinstance(runtime, InferenceProxyRuntime)
     assert runtime.model_path == "MiniMax-M3"
     assert runtime.base_url == "https://api.minimax.io/anthropic"
-    assert runtime.api_key == "test-minimax-key"
+    assert runtime.provider_key == "test-minimax-key"
 
 
 def test_cookbook_objectives_signal_their_recipes_loss_family() -> None:

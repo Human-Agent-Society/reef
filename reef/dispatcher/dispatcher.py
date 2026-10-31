@@ -21,12 +21,13 @@ from reef.artifact.sources import SourceFiles
 from reef.core.errors import ReefError, ScenarioCapacityFull, UnknownScenario
 from reef.core.job_data import TrajectorySample
 from reef.core.records_types import AgentRecord, RequestType
+from reef.core.served_models import CACHE_SECONDS
 from reef.dispatcher import ingest
 from reef.dispatcher.data_sync_worker import DataSyncWorker, ItemSync
 from reef.dispatcher.errors import TrainingErrors
 from reef.dispatcher.local_workers import LocalTrainingWorkers
 from reef.dispatcher.samples import LocalSampleProducers
-from reef.dispatcher.served import CACHE_SECONDS, ControlInstance, ServedModelsPublisher, wait_for_control_lease
+from reef.dispatcher.served import ControlInstance, ServedModelsPublisher, wait_for_control_lease
 from reef.dispatcher.status import TrainingStatus
 from reef.dispatcher.store_changes import StoreChanges, StoreChangesWatcher
 from reef.dispatcher.work_retention import EndedWorkSweeper

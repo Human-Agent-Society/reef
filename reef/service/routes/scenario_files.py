@@ -10,7 +10,7 @@ import asyncio
 from aiohttp import web
 
 from reef.core.errors import UnknownScenario
-from reef.service.auth import signed_download_url
+from reef.service.auth import add_signed_download, signed_download_url
 from reef.service.request_service import RequestService
 from reef.service.routes.data import download_seconds
 from reef.service.scenario_files import artifact_file, artifact_files
@@ -44,7 +44,7 @@ def register_scenario_file_routes(app: web.Application, *, request_service: Requ
         listing = await asyncio.to_thread(scenario_jobs, dispatcher.queue, scenario)
         return web.json_response({"scenario": scenario, "jobs": listing}, headers={"Cache-Control": "no-store"})
 
-    app.router.add_get("/reef/scenarios/{scenario}/artifacts/{artifact_id}/files", files)
+    add_signed_download(app, "/reef/scenarios/{scenario}/artifacts/{artifact_id}/files", files)
     app.router.add_get("/reef/scenarios/{scenario}/jobs", jobs)
 
 

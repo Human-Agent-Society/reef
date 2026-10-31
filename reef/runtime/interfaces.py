@@ -601,6 +601,18 @@ class InferenceRuntime(AdapterWeightRuntime):
         return "model"
 
     @property
+    def api(self) -> str:
+        """The API dialect in which Reef's training side calls the model itself: ``openai`` (Chat Completions),
+        ``responses`` or ``anthropic``. The default is ``openai``: an engine serves Chat Completions."""
+        return "openai"
+
+    @property
+    def provider_key(self) -> str | None:
+        """The key with which the runtime calls a provider, which a scenario's own model is called with too; the
+        default is None, for a runtime that calls no provider."""
+        return None
+
+    @property
     def serves_artifacts_on_request(self) -> bool:
         """Whether this runtime answers each call from the artifact that the call names, without loading it.
 

@@ -1048,8 +1048,7 @@ def test_tag_headers_ride_the_inference_record_and_nothing_else() -> None:
     The streaming path builds its own record and carries the tags as well: a streaming agent-loop call is exactly
     the one a correlating processor needs.
     """
-    from reef.service.request_service import with_request_tags
-    from reef.service.wire import parse_request_headers
+    from reef.service.wire import parse_request_headers, with_request_tags
 
     headers = {
         "x-reef-scenario": "math",

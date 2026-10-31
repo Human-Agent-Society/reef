@@ -12,7 +12,7 @@ from typing import Any
 
 from aiohttp import web
 
-from reef.service.auth import signed_download_url
+from reef.service.auth import add_signed_download, signed_download_url
 from reef.service.data import (
     create_items,
     create_task_items,
@@ -177,7 +177,7 @@ def register_data_routes(app: web.Application, *, request_service: RequestServic
     # These come before the item routes, whose ID takes the rest of the path.
     app.router.add_post(f"{base}/{transfers}", start)
     app.router.add_get(f"{base}/{transfers}/{{transfer_id}}", transfer)
-    app.router.add_get(base + "/{item_id:.+}/archive", archive)
+    add_signed_download(app, base + "/{item_id:.+}/archive", archive)
     # An item ID can hold '/', so the route takes the rest of the path.
     app.router.add_get(base + "/{item_id:.+}", read)
     app.router.add_delete(base + "/{item_id:.+}", delete)

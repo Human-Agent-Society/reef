@@ -263,7 +263,7 @@ def test_model_settings_persist_privately_and_invalid_values_fail_recovery(platf
     assert SQLiteScenarioStorage(tmp_path).read_settings("alpha").model_config == value
     recovered = ModelConfig.from_value(storage.read_settings("alpha").model_config, api_key=PLATFORM_KEY)
     assert recovered.runtime.base_url == engine_url(platform, "alpha", "1")
-    assert recovered.runtime.api_key == PLATFORM_KEY
+    assert recovered.runtime.provider_key == PLATFORM_KEY
     assert recovered.view() == {"url": engine_url(platform, "alpha", "1"), "model": "custom-alpha", "api": "openai"}
     assert PLATFORM_KEY not in repr(recovered)
     # A scenario names its engine only: a key of its own is refused.
@@ -371,7 +371,7 @@ def test_http_contract_updates_model_and_installs_selected_protocol(platform, tm
             reset = await client.post("/reef/scenarios/alpha/update", headers=headers, json={"model": None})
             assert reset.status == 200
             assert (await reset.json())["model"] is None
-            assert scenario.runtime.api_key == PLATFORM_KEY
+            assert scenario.runtime.provider_key == PLATFORM_KEY
         finally:
             await client.close()
 
@@ -397,7 +397,7 @@ def test_scenario_recovery_and_deletion_keep_model_lifecycle(platform, tmp_path)
     )
     try:
         scenario = recovered.get_or_create_scenario("alpha")
-        assert (scenario.runtime.base_url, scenario.runtime.api_key) == (
+        assert (scenario.runtime.base_url, scenario.runtime.provider_key) == (
             engine_url(platform, "alpha", "1"),
             PLATFORM_KEY,
         )
@@ -417,7 +417,10 @@ def test_scenario_recovery_and_deletion_keep_model_lifecycle(platform, tmp_path)
             assert archived.read_settings().model_config == configure(platform, "alpha", "openai", "2")
         recreated = recovered.get_or_create_scenario("alpha")
         assert recreated.model_config is not config
-        assert (recreated.runtime.base_url, recreated.runtime.api_key) == (f"{platform['url']}/managed", PLATFORM_KEY)
+        assert (recreated.runtime.base_url, recreated.runtime.provider_key) == (
+            f"{platform['url']}/managed",
+            PLATFORM_KEY,
+        )
     finally:
         recovered.close()
 

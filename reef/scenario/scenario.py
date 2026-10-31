@@ -210,18 +210,37 @@ class Scenario:
         """The mode the scenario's stepping trainers run in; a trainer that runs no step keeps none."""
         return self.stepping_trainers()[0].trainer.pipeline.training_mode
 
+    def evaluation_refusal(self, component: str) -> str | None:
+        """Why this scenario cannot evaluate an artifact of ``component``, a component that its surface declares
+        with a kind; None when it can.
+
+        Reef evaluates a model artifact (``RFC #959``): the artifacts hold no harness, and the runtime answers each
+        call from the artifact that the call names (``InferenceRuntime.serves_artifacts_on_request``).
+        """
+        kinds = {name: declared.kind for name, declared in self._surface.components.items()}
+        if kinds[component] == "harness_plugin":
+            return "Reef does not evaluate a harness artifact yet (RFC #959, step 2)"
+        if "harness_plugin" in kinds.values():
+            return "Reef evaluates a model artifact only in a scenario whose artifacts hold no harness"
+        runtime = self.runtime
+        if runtime is None or not runtime.serves_artifacts_on_request:
+            return (
+                f"scenario {self.name!r}'s runtime serves only its current artifact, so it cannot evaluate an "
+                "artifact on request"
+            )
+        return None
+
     def capabilities(self) -> ScenarioCapabilities:
         """The artifact operations that this scenario can run (``ScenarioCapabilities``)."""
         surface, runtime = self._surface, self.runtime
         on_request = runtime is not None and runtime.serves_artifacts_on_request
-        kinds = {name: component.kind for name, component in surface.components.items()}
-        if on_request and "harness_plugin" not in kinds.values():
-            evaluate = tuple(name for name, kind in kinds.items() if kind is not None)
-        else:
-            evaluate = ()
         return ScenarioCapabilities(
             serve_beside=self._store.durable and (surface.loader_component is None or runtime is None or on_request),
-            evaluate=evaluate,
+            evaluate=tuple(
+                name
+                for name, component in surface.components.items()
+                if component.kind is not None and self.evaluation_refusal(name) is None
+            ),
             train_from=tuple(
                 component_trainer.component
                 for component_trainer in self.trainers

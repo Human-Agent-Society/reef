@@ -247,7 +247,7 @@ class InferenceProxyRuntime(InferenceRuntime):
         return self._model_path
 
     @property
-    def api_key(self) -> str | None:
+    def provider_key(self) -> str | None:
         return self._api_key
 
     @property
