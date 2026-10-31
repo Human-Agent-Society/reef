@@ -340,8 +340,9 @@ def background_step_dispatcher(tmp_path: Path) -> tuple[Dispatcher, BackgroundSt
 
 
 def assert_trains_the_generated_task(component: StubTrainingComponent) -> None:
-    """Wait up to two seconds for the one job, which trains the step's task."""
-    deadline = time.monotonic() + 2
+    """Wait up to ten seconds for the one job, which trains the step's task: it passes the jobs queue, whose
+    workers poll, so a loaded host takes longer than an idle one."""
+    deadline = time.monotonic() + 10
     while not component.submitted and time.monotonic() < deadline:
         time.sleep(0.01)
     [job] = component.submitted

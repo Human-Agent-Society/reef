@@ -741,6 +741,11 @@ class SQLWorkQueue(WorkQueue):
             .order_by(item.c.created_sequence)
             .limit(1)
         )
+        # Most looks find nothing: read first, so that an idle worker takes no write lock. The write runs the query
+        # again, so an item that another worker took meanwhile is not taken twice.
+        with self.database.read() as connection:
+            if connection.execute(query).first() is None:
+                return None
         if self.database.locks_rows:
             query = query.with_for_update(skip_locked=True, of=item)
         with self.database.write(WORK_SEQUENCE) as (connection, counter):
@@ -856,6 +861,10 @@ class SQLWorkQueue(WorkQueue):
         query = select(self.table).where(
             self.table.c.state.in_(sorted(HELD_STATES)), self.table.c.lease_expires_at < moment
         )
+        # As in ``take``: no write lock when no lease expired.
+        with self.database.read() as connection:
+            if connection.execute(query.limit(1)).first() is None:
+                return ()
         if self.database.locks_rows:
             query = query.with_for_update(skip_locked=True)
         with self.database.write(WORK_SEQUENCE) as (connection, counter):
