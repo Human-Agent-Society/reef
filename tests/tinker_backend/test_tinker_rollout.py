@@ -54,6 +54,7 @@ class AgentLab(TaskLab):
     def __init__(self, rewards: dict[str, float], failing: frozenset[str] = frozenset()) -> None:
         self.rewards = rewards
         self.failing = failing
+        self.builds: list[str] = []
 
     async def run(self, task_path, agent, *, key, tags, overrides) -> RolloutRow:
         if task_path.name in self.failing:
@@ -70,6 +71,10 @@ class AgentLab(TaskLab):
             response.read()
         return RolloutRow(rewards={"reward": self.rewards[task_path.name]})
 
+    async def build_environment(self, task_path, *, overrides) -> str:
+        self.builds.append(task_path.name)
+        return ""
+
 
 def harbor_task(root: Path, name: str) -> TaskSample:
     path = root / name
@@ -82,6 +87,7 @@ def harbor_task(root: Path, name: str) -> TaskSample:
 def test_a_rollout_samples_each_task_on_the_start_sampler_and_groups_its_samples(tmp_path):
     tasks = (harbor_task(tmp_path, "add"), harbor_task(tmp_path, "sort"), harbor_task(tmp_path, "broken"))
     sampler = Sampler()
+    lab = AgentLab({"add": 1.0, "sort": 0.0}, failing=frozenset({"broken"}))
 
     rollouts = roll_out(
         tasks,
@@ -91,9 +97,11 @@ def test_a_rollout_samples_each_task_on_the_start_sampler_and_groups_its_samples
         work_dir=tmp_path / "work",
         start="tinker://start",
         model_adapter="tinker://start/sampler",
-        lab=AgentLab({"add": 1.0, "sort": 0.0}, failing=frozenset({"broken"})),
+        lab=lab,
     )
 
+    # This runner runs on Docker, which builds one image at a time, so no build comes before the rollouts.
+    assert lab.builds == []
     assert sampler.paths == ["tinker://start/sampler"] * 4
     # Each task's two rollouts form its group; the task whose sandbox failed has none.
     assert [sample.group_id for sample in rollouts.samples] == ["add", "add", "sort", "sort"]
