@@ -39,7 +39,6 @@ from reef.storage.samples import SAMPLE_KINDS, consumed_sample_id
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train import CandidateBackend, PreparedStep, Trainer, TrainStepResult
-from reef.train.harness_backend.state import HarnessState
 from reef.train.jobs import JobLoop, JobLoopState
 from reef.train.pipeline import TrainingPipeline
 
@@ -934,8 +933,9 @@ def test_harness_growth_does_not_block_acceptance_or_other_scenarios(tmp_path) -
         assert returned.wait(5), "report acceptance waited for harness growth"
         assert status_returned.wait(5), "status waited for harness growth"
         status = status_values[0]["scenarios"]["skills-a"]
-        assert status["scenario_step"] == 0
-        assert status["last_committed_step"] is None
+        # The step's job is submitted, and runs while the scenario takes reports.
+        assert status["scenario_step"] == 1
+        assert status["last_committed_step"]["metrics"]["training_job"]["event"] == "submitted"
         dispatcher.accept_record(trace_inference("b-i1", scenario="skills-b"))
         dispatcher.accept_record(
             trace_report("b-r1", "b-i1", scenario="skills-b"),
@@ -948,13 +948,13 @@ def test_harness_growth_does_not_block_acceptance_or_other_scenarios(tmp_path) -
 
     assert errors == []
     scenario = dispatcher.get_or_create_scenario("skills-a")
-    wait_for_step(dispatcher, 1, scenario="skills-a")
-    assert scenario.scenario_step == 1
+    wait_for_step(dispatcher, 2, scenario="skills-a")
+    assert scenario.scenario_step == 2
     dispatcher.close()
 
 
 @pytest.mark.unit
-def test_local_backend_failure_reaches_status_and_retries_pending_job_data(tmp_path) -> None:
+def test_a_failed_harness_job_ends_with_its_error_and_the_next_batch_trains(tmp_path) -> None:
     calls = 0
     should_fail = True
 
@@ -968,17 +968,21 @@ def test_local_backend_failure_reaches_status_and_retries_pending_job_data(tmp_p
     dispatcher.accept_record(trace_inference("i1"))
     dispatcher.accept_record(trace_report("r1", "i1"))
 
-    # A retry clears the error until it fails again, so wait for a status read that shows it.
-    wait_until(
-        lambda: dispatcher.build_training_status()["error"] == "skills: RuntimeError: the method failed",
-        "the failure did not reach the status",
-    )
+    # The step's job fails, and its end names the error: the job consumed the batch, and no step runs it again.
+    wait_for_step(dispatcher, 2, scenario="skills")
+    committed = dispatcher.build_training_status()["scenarios"]["skills"]["last_committed_step"]
+    assert committed["metrics"]["skipped"] == "step failed"
+    assert committed["metrics"]["error"] == "RuntimeError: the method failed"
+    assert committed["metrics"]["training_job"]["event"] == "failed"
+    assert calls == 1
 
-    failed_attempts = calls
     should_fail = False
     dispatcher.accept_record(trace_inference("i2"))
-    wait_for_step(dispatcher, 1, scenario="skills")
-    assert calls == failed_attempts + 1
+    dispatcher.accept_record(trace_report("r2", "i2"))
+    wait_for_step(dispatcher, 4, scenario="skills")
+    assert calls == 2
+    committed = dispatcher.build_training_status()["scenarios"]["skills"]["last_committed_step"]
+    assert committed["metrics"]["skipped"] == "the method left the head tree unchanged"
     assert dispatcher.build_training_status()["error"] is None
     dispatcher.close()
 
@@ -1218,28 +1222,29 @@ def test_durable_local_backend_recovers_after_post_commit_notification_failure(t
     assert not activation_thread.is_alive()
     assert activation_errors == []
 
-    wait_for_step(dispatcher, 1, scenario="skills")
+    # The step's job committed its submission (step 1) and, after the recovery, its end (step 2).
+    wait_for_step(dispatcher, 2, scenario="skills")
     recovered = dispatcher.get_or_create_scenario("skills")
     assert recovered is not original
     assert recovered.records.get("skills", "i1") is not None
     assert recovered.records.get("skills", "r1") is not None
     status = dispatcher.build_training_status()["scenarios"]["skills"]
-    assert status["scenario_step"] == 1
-    assert status["last_committed_step"]["step"] == 1
+    assert status["scenario_step"] == 2
+    assert status["last_committed_step"]["step"] == 2
     assert status["last_committed_step"]["metrics"]["skipped"] == "the method left the head tree unchanged"
     records = committed_records(agent_record_dir, scenario="skills")
-    assert [record.step for record in records] == [1]
-    assert records[0].metrics is not None
-    assert records[0].metrics["skipped"] == "the method left the head tree unchanged"
+    assert [record.step for record in records] == [1, 2]
+    assert records[1].metrics is not None
+    assert records[1].metrics["skipped"] == "the method left the head tree unchanged"
 
     dispatcher.accept_record(trace_inference("i2"))
     dispatcher.accept_record(trace_report("r2", "i2"))
-    wait_for_step(dispatcher, 2, scenario="skills")
+    wait_for_step(dispatcher, 4, scenario="skills")
 
-    assert [record.step for record in committed_records(agent_record_dir, scenario="skills")] == [1, 2]
+    assert [record.step for record in committed_records(agent_record_dir, scenario="skills")] == [1, 2, 3, 4]
     status = dispatcher.build_training_status()["scenarios"]["skills"]
-    assert status["scenario_step"] == 2
-    assert status["last_committed_step"]["step"] == 2
+    assert status["scenario_step"] == 4
+    assert status["last_committed_step"]["step"] == 4
     dispatcher.close()
 
 
@@ -1258,24 +1263,27 @@ def test_no_artifact_commit_appends_a_record_and_survives_a_restart(tmp_path) ->
     first = build_harness_evolve_dispatcher(tmp_path, backend_factory, agent_record_dir=agent_record_dir)
     first.accept_record(trace_inference("i1"))
     first.accept_record(trace_report("r1", "i1"))
-    wait_for_step(first, 1, scenario="skills")
+    # The step's job commits its submission, which consumes the batch, and its end.
+    wait_for_step(first, 2, scenario="skills")
     scenario = first.get_or_create_scenario("skills")
-    assert scenario.scenario_step == 1
+    assert scenario.scenario_step == 2
     committed = first.build_training_status()["scenarios"]["skills"]["last_committed_step"]
-    assert committed["step"] == 1
+    assert committed["step"] == 2
     assert committed["metrics"]["skipped"] == "the method left the head tree unchanged"
-    [record] = committed_records(agent_record_dir, scenario="skills")
-    assert record.step == 1
-    assert record.checkpoint is False
-    assert record.artifact_ref == scenario.repository.require_current_artifact()  # no new artifact published
-    assert record.algorithm_state == HarnessState().to_json()
-    assert record.high_water_sequence == 2
-    assert record.consumed_ids == frozenset({"i1", "r1", consumed_sample_id("r1:0")})
+    submitted, ended = committed_records(agent_record_dir, scenario="skills")
+    assert (submitted.step, ended.step) == (1, 2)
+    assert submitted.checkpoint is False and ended.checkpoint is False
+    current = scenario.repository.require_current_artifact()
+    assert submitted.artifact_ref == ended.artifact_ref == current  # no new artifact published
+    state = JobLoopState.from_dict(ended.algorithm_state)
+    assert state.job is None and state.finished_jobs == 1 and state.last_job.event == "finished"
+    assert submitted.high_water_sequence == ended.high_water_sequence == 2
+    assert submitted.consumed_ids == frozenset({"i1", "r1", consumed_sample_id("r1:0")})
 
     second = build_harness_evolve_dispatcher(tmp_path, backend_factory, agent_record_dir=agent_record_dir)
     recovered = second.get_or_create_scenario("skills")
-    assert recovered.scenario_step == 1
-    assert recovered.trainer.state == HarnessState().to_json()
+    assert recovered.scenario_step == 2
+    assert recovered.trainer.state == ended.algorithm_state
     assert second.build_training_status()["scenarios"]["skills"]["last_committed_step"] == committed
     # Record progress resumes at the committed watermark, not sequence 0.
     assert recovered.trainer.data_offset == 2

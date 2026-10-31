@@ -190,6 +190,8 @@ def result_of(row: Mapping[str, Any]) -> str:
     - ``failed``: ``metrics.selected`` is absent, ``metrics.skipped`` is set and
       ``metrics.error`` is non-blank text: the step raised and published nothing.
     - ``skipped``: ``metrics.selected`` is absent and ``metrics.skipped`` is set otherwise.
+    - ``failed`` also for the end of a training job whose ``metrics.training_job.event`` is ``failed``: the step's
+      job raised and published nothing.
     - the row's ``operation`` (``creation``, ``training`` or ``recovery``) for
       any other row, ``unknown`` when the row names none.
 
@@ -204,6 +206,9 @@ def result_of(row: Mapping[str, Any]) -> str:
     if metrics.get("skipped"):
         error = metrics.get("error")
         return "failed" if isinstance(error, str) and error.strip() else "skipped"
+    job = metrics.get("training_job")
+    if isinstance(job, Mapping) and job.get("event") == "failed":
+        return "failed"
     return str(row.get("operation") or "unknown")
 
 

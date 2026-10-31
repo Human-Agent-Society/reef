@@ -63,7 +63,7 @@ from reef.harness.tasks.model_binding import ModelBinding
 from reef.harness.tree import HarnessTree, TreePatch, render_tree
 from reef.inference.http import HttpInferenceHandler, InferenceProxyRuntime, provider_request_headers
 from reef.recipe.config import recipe_config_from_file_layout
-from reef.recipe.harness import HISTORY_DIR, HarnessEvolutionRecipe
+from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.recipe.registry import build_recipe
 from reef.service.app import create_app
 from reef.service.deploy.config_utils import load_config
@@ -71,7 +71,9 @@ from reef.service.wire import SCENARIO_HEADER
 from reef.storage.records import RecordStore
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.train.harness_backend.component import HISTORY_DIR, HarnessTrainingComponent
 from reef.train.harness_backend.state import HarnessState
+from reef.train.jobs import JobLoopState
 
 HERE = Path(__file__).resolve().parent
 # run.sh exports these; the defaults repeat here so the module imports (and
@@ -265,12 +267,15 @@ class RunService:
         return ModelBinding(self.base_url, os.environ["REEF_MODEL"], api_key=EMBEDDED_KEY, timeout_s=RUN_TIMEOUT_S)
 
     def committed_state(self) -> HarnessState:
-        """The harness backend's state as the latest commit recorded it; the initial state before any."""
+        """The harness state after the latest step that ended, which the harness training component keeps; the
+        initial state before any."""
         scenario = self.dispatcher.get_or_create_scenario(self.scenario)
         assert scenario is not None
-        history = scenario.store.history()
-        state = history[-1].algorithm_state if history else None
-        return HarnessState() if state is None else HarnessState.from_json(state)
+        component = self.recipe.harness_component
+        if not isinstance(component, HarnessTrainingComponent):
+            raise TypeError("the example's recipe runs its steps on its own harness training component")
+        last = JobLoopState.from_dict(scenario.trainer.state).last_job
+        return component.state_after(None if last is None else last.job_id)[1]
 
     def history(self) -> History:
         """The scenario's harness history (every candidate, run and decision) as the latest step left it."""
@@ -282,9 +287,10 @@ class RunService:
         return scenario.records
 
     def training_step(self) -> int:
+        """The steps that ended: each step is one training job of the scenario's trainer."""
         current = self.dispatcher.get_or_create_scenario(self.scenario)
         assert current is not None
-        return current.scenario_step
+        return JobLoopState.from_dict(current.trainer.state).finished_jobs
 
     def wait_for_training_step(self, after: int) -> None:
         deadline = time.monotonic() + STEP_TIMEOUT_S

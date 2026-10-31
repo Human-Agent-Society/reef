@@ -41,6 +41,7 @@ from reef.core.components import validate_component_name
 from reef.core.plugins import PluginConfigError
 from reef.core.reports import ReportBase, ReportValidationError
 from reef.evaluation.activation import activation_reference
+from reef.harness.tasks.model_binding import ModelBinding
 from reef.inference.model_config import ModelConfig
 from reef.observability import ExperimentLogger
 from reef.recipe.base import Recipe, ServedEndpoint, WeightTrainingRecipe, check_job_components, every_check
@@ -247,6 +248,14 @@ class CompositeRecipe(Recipe):
                 for name, recipe in self.components.items()
             },
         )
+
+    def harness_served_model(self, scenario: str, component: str, model: ModelConfig) -> ModelBinding | None:
+        recipe = self.components.get(component)
+        return None if recipe is None else recipe.harness_served_model(scenario, component, model)
+
+    def harness_state_dir(self, scenario: str, component: str) -> Path | None:
+        recipe = self.components.get(component)
+        return None if recipe is None else recipe.harness_state_dir(scenario, component)
 
     def job_components(self) -> tuple[TrainingComponent, ...]:
         """The job components of every component recipe, each once: the components share the composite's

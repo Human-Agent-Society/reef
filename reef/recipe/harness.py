@@ -1,8 +1,10 @@
 """The harness evolution recipe: one recipe for every harness evolution method.
 
-``HarnessEvolutionRecipe`` reads the ``evolution`` config section and builds
-one ``HarnessBackend`` per scenario, with the evaluator, the selection
-policy and the surface around it. A method is a
+``HarnessEvolutionRecipe`` reads the ``evolution`` config section. Its
+trainer submits each step as a job of its ``HarnessTrainingComponent``
+(``reef.train.harness_backend.component``), which runs the step in the
+training service on one ``HarnessBackend`` per scenario component, with
+the evaluator and the selection policy around it. A method is a
 ``reef.train.harness_backend.Method`` that the deployment names in
 ``evolution.method``; a method needs no recipe of its own. A recipe subclass
 is for a method that changes more than the method, such as the delivery
@@ -34,6 +36,7 @@ from reef.core.activation import ActivationRule
 from reef.core.config import Settings, config_option
 from reef.core.errors import ReefError
 from reef.core.evaluation import CandidateEvaluationPlugin
+from reef.core.job_data import JobData, TaskSample
 from reef.core.model_metadata import ModelMetadata
 from reef.core.plugins import PluginReference
 from reef.core.reports import ScoredRolloutReport
@@ -62,11 +65,12 @@ from reef.harness.tasks.vendor_install import AdapterProgram
 from reef.harness.tree import HarnessTree, validate_tree
 from reef.inference.model_config import ModelConfig
 from reef.observability import ExperimentLogger
-from reef.recipe.base import Recipe, ServedEndpoint
+from reef.recipe.base import Recipe, ServedEndpoint, check_job_components
 from reef.recipe.errors import RecipeConfigError
 from reef.record2record import ReportRecord2Record
 from reef.record2sample.traces import TraceSamples
 from reef.runtime.executor.config import ExecutorSettings, role_executor_settings
+from reef.runtime.jobs import TrainingComponent
 from reef.sample2job.traces import TraceJobData, TrainTaskJobData
 from reef.storage.records import RecordStore
 from reef.storage.samples import TrainerSamples
@@ -75,14 +79,15 @@ from reef.surface.base import ArtifactLayout, Surface
 from reef.train.backend import ComponentReleases
 from reef.train.harness_backend.agent.settings import AgentSettings, agent_settings
 from reef.train.harness_backend.backend import HarnessBackend, StepLimits
+from reef.train.harness_backend.component import HISTORY_DIR, STEPS_DIR, HarnessSteps, HarnessTrainingComponent
 from reef.train.harness_backend.contract import Method
 from reef.train.harness_backend.records import StepRecord
+from reef.train.jobs import JobLoop, JobLoopState, SubmitParameters
 from reef.train.pipeline import PipelineSpec
 from reef.train.trainer import Trainer
 
-#: The directories of one component's state under ``<evolution.state_dir>/<scenario>/<component>``.
-HISTORY_DIR = "history"
-STEPS_DIR = "steps"
+#: The directory of the harness training component's jobs and starts under ``evolution.state_dir``.
+TRAINING_DIR = ".training"
 
 
 @dataclass(frozen=True)
@@ -200,6 +205,83 @@ class ScenarioModels(ModelBindingsResolver):
 
 
 @dataclass(frozen=True)
+class HarnessJobParameters(SubmitParameters):
+    """The parameters of a scenario component's harness job that only the scenario knows when the job is submitted.
+
+    Values: ``releases`` reads the component's head, whose release is the job's start. ``model`` is the scenario's
+    model selection, read at each submit, so a model change reaches the next job. ``eval_samples`` is the sample
+    store whose imported eval split the job evaluates on, or ``None`` for the configured tasks.
+    ``parameters(data, state)`` is ``{component, head_release_id, evaluation_tasks, scenario_model,
+    previous_job}``: the component's name, its head release, the eval split's task paths in arrival order or
+    ``None``, the scenario's model override without its key (``InferenceProxyRuntime.model_config``) or ``None``,
+    and the ID of the last job that the trainer committed the end of (``state.last_job``), whose harness state
+    the job continues, or ``None`` before the first.
+
+    Purpose: ``HarnessEvolutionRecipe.build`` gives one to its trainer's ``JobLoop``;
+    ``HarnessTrainingComponent`` reads the parameters.
+    """
+
+    releases: ComponentReleases
+    model: ModelConfig | None
+    eval_samples: TrainerSamples | None
+
+    def parameters(self, data: JobData, state: JobLoopState) -> Mapping[str, Any]:
+        tasks = (
+            None
+            if self.eval_samples is None
+            else [
+                str(stored.sample.task_path)
+                for stored in self.eval_samples.imported_tasks(split="eval")
+                if isinstance(stored.sample, TaskSample)
+            ]
+        )
+        runtime = None if self.model is None else self.model.runtime
+        return {
+            "component": self.releases.component,
+            "head_release_id": self.releases.head().release_id,
+            "evaluation_tasks": tasks,
+            "scenario_model": None if runtime is None else runtime.model_config(),
+            "previous_job": None if state.last_job is None else state.last_job.job_id,
+        }
+
+
+@dataclass(frozen=True)
+class RecipeSteps(HarnessSteps):
+    """The ``HarnessSteps`` of ``recipe``: its seed, its state directories, its backend and its selection policy.
+
+    Values: ``recipe`` is the recipe whose component reads it. ``backend`` binds a scenario's model override to the
+    deployment's provider key, the key of ``recipe.runtime``.
+    Purpose: ``HarnessEvolutionRecipe`` gives one to its ``HarnessTrainingComponent``.
+    """
+
+    recipe: HarnessEvolutionRecipe
+
+    @property
+    def seed(self) -> HarnessTree:
+        return self.recipe.seed
+
+    def state_root(self, scenario: str, component: str) -> Path:
+        return self.recipe.state_root(scenario) / component
+
+    def backend(self, scenario: str, component: str, scenario_model: Mapping[str, Any] | None) -> HarnessBackend:
+        runtime = self.recipe.runtime
+        model = (
+            None
+            if scenario_model is None
+            else ModelConfig.from_value(scenario_model, api_key=None if runtime is None else runtime.provider_key)
+        )
+        return self.recipe.build_backend(scenario, None, None, component=component, scenario_model=model)
+
+    def policy(self, backend: HarnessBackend) -> CandidateEvaluationPlugin:
+        return self.recipe.build_policy(backend)
+
+    def check_tree(self, tree: HarnessTree) -> None:
+        validation = validate_tree(tree, get_adapter(self.recipe.evolution.adapter))
+        if not validation.passed:
+            raise ValueError(f"the harness tree fails validation: {validation.message()}")
+
+
+@dataclass(frozen=True)
 class HarnessEvolutionRecipe(Recipe):
     """Harness evolution of one adapter's harness tree by one method.
 
@@ -217,9 +299,12 @@ class HarnessEvolutionRecipe(Recipe):
     method as ``services.models.served``, and the adapter's ``model_binding``
     templates write it into each evaluation run, so neither the seed nor
     a kept tree ever carries a provider.
+    ``harness_component`` is the training component that runs the steps: the recipe's own
+    ``HarnessTrainingComponent`` over ``RecipeSteps`` of this recipe, under ``<evolution.state_dir>/.training``,
+    which each copy of the recipe makes again, or the jobs queue's view of one (``with_job_components``).
     Purpose: a deployment names it as its recipe; the service builds it once
-    from the deployment config, and ``build`` makes each scenario's trainer
-    over a ``HarnessBackend``.
+    from the deployment config, and ``build`` makes each scenario's trainer,
+    which submits each step as a job of ``harness_component``.
     """
 
     method: Method
@@ -240,6 +325,7 @@ class HarnessEvolutionRecipe(Recipe):
 
     name: str = field(default="harness_evolution", kw_only=True)
     scenario_model: ModelConfig | None = field(default=None, repr=False, kw_only=True)
+    harness_component: TrainingComponent | None = field(default=None, repr=False, kw_only=True)
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -289,6 +375,19 @@ class HarnessEvolutionRecipe(Recipe):
             evaluation_selection(self.scorer, self.worker_executor)
         # A task manifest is read now, so a deployment with an unreadable one refuses to start.
         self.configured_tasks()
+        # The recipe's own component reads this recipe, so each copy of the recipe makes its own; a component that
+        # the recipe was given, the jobs queue's view of one, stays.
+        if self.harness_component is None or isinstance(self.harness_component, HarnessTrainingComponent):
+            root = Path(self.evolution.state_dir).expanduser().resolve() / TRAINING_DIR
+            object.__setattr__(self, "harness_component", HarnessTrainingComponent(RecipeSteps(self), root))
+
+    def job_components(self) -> tuple[TrainingComponent, ...]:
+        """The harness component, whose jobs are this recipe's steps."""
+        return () if self.harness_component is None else (self.harness_component,)
+
+    def with_job_components(self, components: Mapping[str, TrainingComponent]) -> HarnessEvolutionRecipe:
+        check_job_components(self, components)
+        return replace(self, harness_component=next(iter(components.values())))
 
     def runs_offline(self) -> bool:
         """Whether the steps roll out the imported train tasks (``TrainTaskJobData``)."""
@@ -499,6 +598,14 @@ class HarnessEvolutionRecipe(Recipe):
         """The scenario's history and step records: what a delete archives beside the record store."""
         return (self.state_root(scenario),)
 
+    def harness_served_model(self, scenario: str, component: str, model: ModelConfig) -> ModelBinding | None:
+        if model.runtime is None:
+            return self.default_model_bindings(scenario).served
+        return ScenarioModels(model, self).resolve(scenario).served
+
+    def harness_state_dir(self, scenario: str, component: str) -> Path | None:
+        return self.state_root(scenario) / component
+
     def state_root(self, scenario: str) -> Path:
         """The scenario's directory under ``evolution.state_dir``, made absolute."""
         return Path(self.evolution.state_dir).expanduser().resolve() / scenario
@@ -514,15 +621,22 @@ class HarnessEvolutionRecipe(Recipe):
         releases: ComponentReleases | None = None,
         samples: TrainerSamples | None = None,
     ) -> Trainer:
+        """The scenario's trainer: it submits each step as a job of ``harness_component``, whose start is the
+        component's head release in ``releases``."""
         if releases is None:
             raise RecipeConfigError("harness evolution reads its head tree from the scenario's committed releases")
-        backend = self.build_backend(scenario, releases, samples)
+        if self.evaluation.imported_tasks and samples is None:
+            raise RecipeConfigError("evolution.evaluation.imported_tasks needs the sample store of a scenario session")
+        if self.harness_component is None:
+            raise RecipeConfigError("harness evolution has no training component to run its steps")
+        submitted = HarnessJobParameters(
+            releases, self.scenario_model, samples if self.evaluation.imported_tasks else None
+        )
         return Trainer.build(
             scenario,
             records,
             pipeline_factory=self.build_pipeline,
-            candidate_backend=backend,
-            candidate_evaluator=self.build_policy(backend),
+            job_loop=JobLoop(self.harness_component, scenario=scenario, submitted=submitted),
             algorithm_state=algorithm_state,
             report_type=self.report_type,
             experiment_logger=experiment_logger,
@@ -542,21 +656,37 @@ class HarnessEvolutionRecipe(Recipe):
         return NoEvaluationPolicy()
 
     def build_backend(
-        self, scenario: str, releases: ComponentReleases, samples: TrainerSamples | None
+        self,
+        scenario: str,
+        releases: ComponentReleases | None,
+        samples: TrainerSamples | None,
+        *,
+        component: str | None = None,
+        scenario_model: ModelConfig | None = None,
     ) -> HarnessBackend:
-        """The scenario's backend: the binary installed, the history, the evaluator, the tasks, the records and the
-        coding agent bound."""
+        """The backend of a scenario component: the binary installed, the history, the evaluator, the tasks, the
+        records and the coding agent bound.
+
+        The component is ``component``, else the one that ``releases`` reads. ``scenario_model`` is the
+        scenario's model selection, else the recipe's own (``scenario_model``) applies. ``ValueError`` when
+        neither ``component`` nor ``releases`` names the component.
+        """
         descriptor = get_adapter(self.evolution.adapter)
+        if component is None:
+            if releases is None:
+                raise ValueError("a harness backend names its component, or reads it from releases")
+            component = releases.component
+        model = self.scenario_model if scenario_model is None else scenario_model
         # Each component of a composed scenario keeps its own history and records.
-        root = self.state_root(scenario) / releases.component
+        root = self.state_root(scenario) / component
         try:
             history = History.open(root / HISTORY_DIR)
         except OSError as exc:
             raise RecipeConfigError(f"evolution.state_dir cannot hold {root}: {exc}") from exc
-        models = self.model_bindings(scenario)
+        models = (
+            self.default_model_bindings(scenario) if model is None else ScenarioModels(model, self).resolve(scenario)
+        )
         evaluator = None if self.scorer is None else self.build_evaluator(descriptor, models, history, self.scorer)
-        if self.evaluation.imported_tasks and samples is None:
-            raise RecipeConfigError("evolution.evaluation.imported_tasks needs the sample store of a scenario session")
         records = StepRecord(root / STEPS_DIR)
         return HarnessBackend(
             descriptor=descriptor,
@@ -575,9 +705,7 @@ class HarnessEvolutionRecipe(Recipe):
             ),
             history=history,
             models=models,
-            model_resolver=(
-                None if self.scenario_model is None else ScenarioModels(self.scenario_model, self, scenario)
-            ),
+            model_resolver=None if model is None else ScenarioModels(model, self, scenario),
             limits=StepLimits(
                 max_steps=self.evolution.max_steps,
                 max_failure_streak=self.evolution.max_failure_streak,

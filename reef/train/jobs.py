@@ -134,14 +134,15 @@ class JobCommit:
 class SubmitParameters(ABC):
     """The parameters of a scenario's job that only the scenario knows when the job is submitted.
 
-    Values: ``parameters(data)`` returns the parameters of the job that trains ``data``, a mapping that encodes as
-    JSON, read from the scenario's state at that moment, such as the scenario's own model or the tasks of its
-    eval split. Purpose: a recipe whose jobs depend on such state gives one to its ``JobLoop``; ``JobLoop.submit``
-    adds the parameters to the ones that the pipeline's sample-to-job stage gives.
+    Values: ``parameters(data, state)`` returns the parameters of the job that trains ``data`` from the trainer's
+    committed ``state``, a mapping that encodes as JSON, read from the scenario's state at that moment, such as the
+    scenario's own model, the tasks of its eval split, or the last job that ended (``state.last_job``). Purpose: a
+    recipe whose jobs depend on such state gives one to its ``JobLoop``; ``JobLoop.submit`` adds the parameters to
+    the ones that the pipeline's sample-to-job stage gives.
     """
 
     @abstractmethod
-    def parameters(self, data: JobData) -> Mapping[str, Any]: ...
+    def parameters(self, data: JobData, state: JobLoopState) -> Mapping[str, Any]: ...
 
 
 class JobLoop:
@@ -197,7 +198,7 @@ class JobLoop:
         if state.job is not None:
             raise ValueError("a weight trainer runs one job at a time")
         if self.submitted is not None:
-            added = dict(self.submitted.parameters(data))
+            added = dict(self.submitted.parameters(data, state))
             shared = sorted(set(added) & set(parameters))
             if shared:
                 raise ValueError(f"the stage's job parameters already name {shared}")

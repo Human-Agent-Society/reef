@@ -61,7 +61,7 @@ from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.tasks.model_binding import ModelBindings, ModelBindingsResolver
 from reef.harness.tree import HarnessTree, validate_tree
 from reef.harness.tree.checks import clip_record_text, clip_record_value, directive_shaped, secret_shaped
-from reef.train.backend import CandidateBackend, ComponentReleases, PreparedStep
+from reef.train.backend import CandidateBackend, ComponentReleases, PreparedStep, ReleaseFiles
 from reef.train.harness_backend.agent.run import AgentExecution
 from reef.train.harness_backend.calls import StepCalls, call_tokens
 from reef.train.harness_backend.contract import Method, StepContext
@@ -92,8 +92,8 @@ class StepProgress:
     evaluation once its runs are laid out, else ``None``. ``activity``
     is what the method did so far, oldest first, each ``{at, kind, text}``
     with ``failed`` on a line that went wrong.
-    Purpose: the backend replaces it at each phase change; the request page
-    reads it from another thread through ``HarnessBackend.step_progress``.
+    Purpose: the backend replaces it at each phase change; the harness training component writes it to the step's
+    progress file (``to_json``), and the request page reads it back (``from_json``).
     """
 
     request_id: str | None
@@ -111,6 +111,30 @@ class StepProgress:
         total = self.runs_total
         if total is not None and (isinstance(total, bool) or not isinstance(total, int) or total < 0):
             raise ValueError("StepProgress.runs_total must be an integer of at least 0 or None")
+
+    def to_json(self) -> dict[str, Any]:
+        """The progress file's form of this value; ``from_json`` reads it back as an equal value."""
+        return {
+            "request_id": self.request_id,
+            "phase": self.phase,
+            "started_at": self.started_at,
+            "step_record": self.step_record,
+            "runs_total": self.runs_total,
+            "activity": [dict(line) for line in self.activity],
+        }
+
+    @classmethod
+    def from_json(cls, value: Mapping[str, Any]) -> StepProgress:
+        """The value that ``to_json`` wrote; ``ValueError`` or ``KeyError`` for another mapping."""
+        request_id = value["request_id"]
+        return cls(
+            request_id=None if request_id is None else str(request_id),
+            phase=str(value["phase"]),
+            started_at=float(value["started_at"]),
+            step_record=str(value["step_record"]),
+            runs_total=value["runs_total"],
+            activity=tuple(dict(line) for line in value["activity"]),
+        )
 
 
 @dataclass(frozen=True)
@@ -146,22 +170,22 @@ class StepLimits:
 class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator):
     """Evolve one harness component: one candidate per step, evaluated against the head tree.
 
-    Values: ``method`` is the deployment's ``Method``, the one part of a step
-    that is not Reef's; methods never subclass the backend. ``agent`` is the
+    Values: ``releases`` reads the head tree of each step from the scenario's commits, or is ``None`` when each
+    step names its head (``prepare_step``'s ``head``). ``method`` is the deployment's ``Method``, the one part of a
+    step that is not Reef's; methods never subclass the backend. ``agent`` is the
     deployment's coding agent, ``None`` when it configured none or the method
     does not run it. ``evaluator`` is ``None`` when the deployment configured
     no scorer; then no task runs. ``task_directories`` says
     that the tasks are Harbor task directories.
     Purpose: ``HarnessEvolutionRecipe.build_backend`` makes one per scenario
-    component; the trainer runs its steps, and the service reads its step
-    records and its ``step_progress``.
+    component; the harness training component (``reef.train.harness_backend.component``) runs one step per job.
     """
 
     def __init__(
         self,
         *,
         descriptor: AdapterDescriptor,
-        releases: ComponentReleases,
+        releases: ComponentReleases | None,
         method: Method,
         agent: AgentExecution | None,
         evaluator: HarnessTaskEvaluator | None,
@@ -217,11 +241,26 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator):
         if self.evaluator is not None:
             self.evaluator.close()
 
-    def prepare_step(self, data: JobData, state: Mapping[str, Any], scenario_step: int) -> PreparedStep:
+    def prepare_step(
+        self,
+        data: JobData,
+        state: Mapping[str, Any],
+        scenario_step: int,
+        *,
+        head: ReleaseFiles | None = None,
+        seed_tasks: tuple[str, ...] | None = None,
+    ) -> PreparedStep:
+        """Step ``scenario_step + 1``'s candidate, or its skip, on ``head``: the head that ``releases`` reads when
+        ``head`` is ``None``. ``seed_tasks`` replaces the evaluation's seed tasks for this step when it is set.
+        ``ValueError`` without ``head`` on a backend that has no ``releases``."""
+        if head is None:
+            if self.releases is None:
+                raise ValueError("this harness backend reads no releases: each step names its head")
+            head = self.releases.head()
         self.progress = None
         self.failed_step = {}
         try:
-            prepared = self.prepare(data, HarnessState.from_json(state), scenario_step + 1)
+            prepared = self.prepare(data, HarnessState.from_json(state), scenario_step + 1, head, seed_tasks)
         except BaseException:
             if self.progress is not None:
                 # The failed row keeps the phase it reached and the record directory the attempt wrote.
@@ -235,8 +274,10 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator):
             self.progress = replace(self.progress, phase="evaluating")
         return prepared
 
-    def prepare(self, data: JobData, state: HarnessState, step: int) -> PreparedStep:
-        """Step ``step``'s candidate, or the skip and its reason; ``step`` is the scenario step it will commit as."""
+    def prepare(
+        self, data: JobData, state: HarnessState, step: int, head: ReleaseFiles, seed_tasks: tuple[str, ...] | None
+    ) -> PreparedStep:
+        """Step ``step``'s candidate on ``head``, or the skip and its reason; ``seed_tasks`` as ``prepare_step``."""
         # The step's material: the traces of traffic, and on an offline step the train tasks it rolls out.
         samples = tuple(sample for sample in data.samples if isinstance(sample, TrajectorySample))
         train_tasks = tuple(str(sample.task_path) for sample in data.samples if isinstance(sample, TaskSample))
@@ -252,11 +293,10 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator):
             return skipped(state, metrics, f"step budget of {self.limits.max_steps} exhausted")
         if automatic and self.limits.max_failure_streak and state.failure_streak >= self.limits.max_failure_streak:
             return skipped(state, metrics, f"failure streak of {state.failure_streak} rejections")
-        head = self.releases.head()
         head_tree = HarnessTree(head.files)
         metrics["head_release_id"] = head.release_id
         self.history.add_candidate(head_tree, step=step, origin="release" if self.history.candidates else "seed")
-        step_tasks = self.tasks.for_step(samples, state.collected_tasks, state.collected_clients)
+        step_tasks = self.tasks.for_step(samples, state.collected_tasks, state.collected_clients, seed=seed_tasks)
         state = replace(
             state, collected_tasks=step_tasks.collected_tasks, collected_clients=step_tasks.collected_clients
         )

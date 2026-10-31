@@ -397,6 +397,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         - Its storage is durable.
         - No request runs on it.
         - No trainer has records that it would still train on.
+        - No trainer has a training job that runs.
         - No reload or close of an instance waits.
 
         A weight-training scenario is never idle, because only a delete
@@ -409,7 +410,10 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
             return False
         if self.local_workers.instance_change_pending(current.name):
             return False
-        return not any(component_trainer.trainer.holds_untrained_records() for component_trainer in current.trainers)
+        return not any(
+            component_trainer.trainer.job_running or component_trainer.trainer.holds_untrained_records()
+            for component_trainer in current.trainers
+        )
 
     def unload_if_idle(self, scenario: str) -> bool:
         """Unload ``scenario`` if it is idle, and return whether it was unloaded.
@@ -578,11 +582,14 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         metrics: Mapping[str, Any],
     ) -> ArtifactRef:
         """Make a person's merged ``component`` tree ``scenario``'s active release and training start, under the
-        scenario's lock; see :meth:`ScenarioCommitter.sync_release`."""
+        scenario's lock, and write what the scenario serves now; see :meth:`ScenarioCommitter.sync_release`."""
         with self.registry.lock_for(scenario):
-            return self.registry.require(scenario).sync_release(
+            current = self.registry.require(scenario)
+            published = current.sync_release(
                 artifact, component=component, expected_release_id=expected_release_id, metrics=metrics
             )
+            self.scenario_committed(current)
+            return published
 
     def current_artifact(
         self,
@@ -820,6 +827,12 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
 
     def samples_added(self, scenario: str) -> None:
         """The samples service stored samples of ``scenario``: its local workers build the next job from them."""
+        current = self.registry.get_loaded(scenario)
+        if current is not None:
+            self.local_workers.wake(current)
+
+    def job_changed(self, scenario: str) -> None:
+        """A training job of ``scenario`` saved a checkpoint or ended: its local workers commit it now."""
         current = self.registry.get_loaded(scenario)
         if current is not None:
             self.local_workers.wake(current)

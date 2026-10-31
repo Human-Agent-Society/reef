@@ -187,7 +187,8 @@ def test_search_commits_and_restart_resumes_from_the_commit_without_more_runs(dr
         dispatcher.close()
     # The summary is disposable: a restart rebuilds it from the latest durable commit.
     (directory / "summary.json").write_text("stale")
-    restarted = driver.open_campaign(recipe, directory)
+    # A restarted process builds its recipe again, and with it its own harness component.
+    restarted = driver.open_campaign(dataclasses.replace(recipe), directory)
     try:
         scenario = restarted.get_or_create_scenario(driver.SCENARIO)
         assert driver.search(scenario, recipe, directory) == summary
@@ -197,7 +198,7 @@ def test_search_commits_and_restart_resumes_from_the_commit_without_more_runs(dr
         restarted.close()
 
 
-def test_commit_failure_writes_no_summary_and_restart_replays_pending_report(driver, campaign, monkeypatch):
+def test_commit_failure_writes_no_summary_and_restart_commits_the_queued_job(driver, campaign, monkeypatch):
     recipe, chat, launches, directory = campaign
     dispatcher = driver.open_campaign(recipe, directory)
     try:
@@ -215,15 +216,16 @@ def test_commit_failure_writes_no_summary_and_restart_replays_pending_report(dri
         assert not (directory / "summary.json").exists()
     finally:
         dispatcher.close()
-    restarted = driver.open_campaign(recipe, directory)
+    # A restarted process builds its recipe again, and with it its own harness component.
+    restarted = driver.open_campaign(dataclasses.replace(recipe), directory)
     try:
         scenario = restarted.get_or_create_scenario(driver.SCENARIO)
         summary = driver.search(scenario, recipe, directory)
-        # The replayed step proposes the same tree again: the failed attempt neither spent its budget nor made
-        # it a known tree, and the history's runs score it without another launch.
+        # The commit of the job's submission failed, but the jobs queue on disk kept the job: the restart submits
+        # the same job again, and commits the step that it ran once, without another proposal or launch.
         assert (summary["generated_candidates"], summary["evaluation_runs"]) == (1, 2)
         assert summary["served_id"] != recipe.seed.checksum()
-        assert len(launches) == 3 and len(chat.prompts) == 2
+        assert len(launches) == 3 and len(chat.prompts) == 1
     finally:
         restarted.close()
 

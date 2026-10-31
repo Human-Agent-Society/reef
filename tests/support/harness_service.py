@@ -3,13 +3,16 @@
 ``harness_dispatcher`` writes the recipe's seed into the repository's
 bootstrap directory, as the service's assembly does through
 ``base_artifact_source``, so a new scenario's base release is the seed tree.
-``run_step`` drives one step of a scenario; ``backend_step`` drives one step
-of a backend alone, through the phases the trainer runs.
+``run_step`` drives one step of a scenario, which is one job of its harness
+training component (``drive_job``); ``backend_step`` drives one step of a
+backend alone, through the phases the job runs. ``catalog`` is the
+scenario's catalog rows, without the commits that only follow a job.
 """
 
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -25,9 +28,13 @@ from reef.evaluation.harness import ComparePolicy
 from reef.recipe import Recipe
 from reef.runtime.interfaces import InferenceHandler
 from reef.scenario.scenario import Scenario
+from reef.service.request_service import RequestService
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.harness_backend.backend import HarnessBackend
+from reef.train.harness_backend.component import HarnessTrainingComponent
+from reef.train.job_queue import JobQueueComponent
+from reef.train.trainer import Trainer
 from reef.train.types import JobData, TrainStepResult
 
 
@@ -84,14 +91,100 @@ def report_once(scenario: Scenario, suffix: str, *, prompt: str = "q", score: fl
     make_samples(scenario)
 
 
+def drive_job(scenario: Scenario, *, seconds: float = 30.0) -> TrainStepResult:
+    """Commit one training job of ``scenario``'s trainer, from its submission to its end; the step's result.
+
+    The step's result is the commit of the job's checkpoint when the step kept a tree, else the commit of the job's
+    end. The training service of the dispatcher runs the job meanwhile. ``AssertionError`` when no job starts or
+    the job does not end within ``seconds``.
+    """
+    deadline = time.monotonic() + seconds
+    step: TrainStepResult | None = None
+    while time.monotonic() < deadline:
+        result = scenario.prepare_training_step()
+        if result is None:
+            time.sleep(0.02)
+            continue
+        scenario.commit(result)
+        event = result.metrics["training_job"]["event"]
+        if event == "checkpoint":
+            step = result
+        elif event != "submitted":
+            return result if step is None else step
+    raise AssertionError(f"scenario {scenario.name!r} ran no whole training job in {seconds}s")
+
+
+def checkpoint_result(scenario: Scenario, *, seconds: float = 30.0) -> TrainStepResult:
+    """Commit the submission of ``scenario``'s next job, then wait for the job's checkpoint; the result that publishes
+    it, not committed yet.
+
+    ``AssertionError`` when the job submits nothing, ends without a checkpoint, or saves none within ``seconds``.
+    """
+    submitted = scenario.prepare_training_step()
+    if submitted is None or submitted.metrics["training_job"]["event"] != "submitted":
+        raise AssertionError(f"scenario {scenario.name!r} submitted no job")
+    scenario.commit(submitted)
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        result = scenario.prepare_training_step()
+        if result is None:
+            time.sleep(0.02)
+            continue
+        if result.metrics["training_job"]["event"] != "checkpoint":
+            raise AssertionError(f"the job of scenario {scenario.name!r} ended without a checkpoint")
+        return result
+    raise AssertionError(f"the job of scenario {scenario.name!r} saved no checkpoint in {seconds}s")
+
+
+def drive_trainer_job(trainer: Trainer, *, seconds: float = 30.0) -> TrainStepResult | None:
+    """Commit one job of ``trainer``, built alone from a harness recipe, from its submission to its end; the step's
+    result as ``drive_job`` gives it, or None when the trainer has no job to submit.
+
+    The trainer's harness component runs its jobs in this process. ``AssertionError`` when the job does not end
+    within ``seconds``.
+    """
+    trainer.job_loop_required().component.start_jobs()
+    deadline = time.monotonic() + seconds
+    step: TrainStepResult | None = None
+    submitted = False
+    while time.monotonic() < deadline:
+        result = trainer.run_once(0)
+        if result is None:
+            if not submitted:
+                return None
+            time.sleep(0.02)
+            continue
+        trainer.commit(trainer.prepare_commit(result))
+        event = result.metrics["training_job"]["event"]
+        if event == "submitted":
+            submitted = True
+        elif event == "checkpoint":
+            step = result
+        else:
+            return result if step is None else step
+    raise AssertionError(f"the job of trainer {trainer.scenario!r} did not end in {seconds}s")
+
+
+def job_backend(trainer: Trainer, component: str = "harness", scenario_model: Any = None) -> HarnessBackend:
+    """The backend that ``trainer``'s harness component runs the steps of ``component`` on."""
+    harness = trainer.job_loop_required().component
+    if isinstance(harness, JobQueueComponent):
+        # The dispatcher's trainer submits through the jobs queue; its training worker runs the component itself.
+        harness = harness.component
+    if not isinstance(harness, HarnessTrainingComponent):
+        raise TypeError(f"trainer {trainer.scenario!r} submits no harness jobs")
+    return harness.backend_for(trainer.scenario, component, scenario_model)
+
+
 def run_step(scenario: Scenario, suffix: str) -> TrainStepResult:
-    """One report, then the step it wakes, committed; the step's result."""
+    """One report, then the job of the step it wakes, committed; the step's result (``drive_job``)."""
     report_once(scenario, suffix)
-    result = scenario.prepare_training_step()
-    if result is None:
-        raise AssertionError("the report woke no step")
-    scenario.commit(result)
-    return result
+    return drive_job(scenario)
+
+
+def catalog(scenario: Scenario) -> list[dict[str, Any]]:
+    """The catalog rows of ``scenario``, newest first, as ``GET /reef/harness/releases`` lists them."""
+    return RequestService.harness_rows(scenario)
 
 
 #: Each backend's scenario step: the steps ``backend_step`` ran on it.
@@ -128,14 +221,14 @@ def backend_step(
     return result
 
 
-async def wait_for_rows(scenario: Scenario, count: int, seconds: float = 30.0) -> tuple[dict[str, Any], ...]:
+async def wait_for_rows(scenario: Scenario, count: int, seconds: float = 30.0) -> list[dict[str, Any]]:
     """The scenario's catalog, newest first, once it holds ``count`` rows; the trainer commits on its own thread."""
     for _ in range(int(seconds / 0.05)):
-        rows = scenario.releases()
+        rows = catalog(scenario)
         if len(rows) >= count:
             return rows
         await asyncio.sleep(0.05)
-    raise AssertionError(f"the catalog did not reach {count} rows in {seconds}s: {scenario.releases()}")
+    raise AssertionError(f"the catalog did not reach {count} rows in {seconds}s: {catalog(scenario)}")
 
 
 class EchoInference(InferenceHandler):
@@ -148,8 +241,13 @@ class EchoInference(InferenceHandler):
 __all__ = [
     "EchoInference",
     "backend_step",
+    "catalog",
+    "checkpoint_result",
+    "drive_job",
+    "drive_trainer_job",
     "harness_dispatcher",
     "harness_repository",
+    "job_backend",
     "report_once",
     "report_records",
     "run_step",

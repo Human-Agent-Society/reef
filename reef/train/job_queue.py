@@ -133,6 +133,10 @@ def checkpoint_from_json(entry: Mapping[str, JsonValue]) -> SavedCheckpoint:
     )
 
 
+#: The metadata entry of a failed job's item that holds the metrics the component reported for it.
+FAILED_METRICS_KEY = "failed_metrics"
+
+
 def status_from_item(item: WorkItem) -> JobStatus:
     """The ``JobStatus`` of the job in ``item``: running until the item is final, then finished or failed."""
     checkpoints = tuple(checkpoint_from_json(entry) for entry in item.progress)
@@ -141,8 +145,10 @@ def status_from_item(item: WorkItem) -> JobStatus:
             item.id, "finished", checkpoints, metrics=json_object(item.result.get("metrics", {}), "metrics")
         )
     if item.state == "failed":
-        # A failed item always carries its error (``WorkItem``).
-        return JobStatus(item.id, "failed", checkpoints, error=item.error)
+        # A failed item always carries its error (``WorkItem``); a job that failed with metrics keeps them in the
+        # item's metadata, since a failed item has no result.
+        metrics = json_object(item.metadata.get(FAILED_METRICS_KEY, {}), "a failed job's metrics")
+        return JobStatus(item.id, "failed", checkpoints, metrics=metrics, error=item.error)
     return JobStatus(item.id, "running", checkpoints)
 
 
@@ -445,6 +451,10 @@ class TrainingJobWorker(QueueWorker):
                 if status.state == "finished":
                     return {"state": "finished", "metrics": cast(JsonValue, dict(status.metrics))}
                 if status.state == "failed":
+                    if status.metrics:
+                        self.queue.set_metadata(
+                            JOBS_QUEUE, item.id, FAILED_METRICS_KEY, cast(JsonValue, dict(status.metrics))
+                        )
                     raise ItemFailed(status.error or "the job failed")
                 if self.stopped.wait(self.poll_seconds):
                     raise WorkerStopped

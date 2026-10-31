@@ -9,6 +9,7 @@ import json
 import math
 import os
 import shutil
+import time
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,7 @@ from recipes.meta_harness.method import search_population
 from reef.artifact import GitLFSRepositoryBackend
 from reef.core import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher
+from reef.evaluation.harness import History
 from reef.harness import run_task
 from reef.harness.adapters import get_adapter
 from reef.harness.tree import HarnessTree, render_tree
@@ -29,9 +31,10 @@ from reef.recipe.registry import build_recipe
 from reef.scenario.release_files import component_files
 from reef.scenario.scenario import Scenario
 from reef.service.deploy.config_utils import load_config
-from reef.storage.sql_coordination import memory_coordination
+from reef.storage.sql_coordination import open_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.train.harness_backend.backend import HarnessBackend
+from reef.train.harness_backend.component import HISTORY_DIR
+from reef.train.jobs import JobLoopState
 
 HERE = Path(__file__).resolve().parent
 SCENARIO = "terminal-bench"
@@ -100,16 +103,42 @@ def open_campaign(recipe: HarnessEvolutionRecipe, directory: Path) -> Dispatcher
         ),
         scenario_storage=SQLiteScenarioStorage(directory / "reef-data"),
         hold_local_cycles=True,
-        coordination=memory_coordination(),
+        # The jobs queue is on disk, so a restarted campaign finds the job of its step.
+        coordination=open_coordination(
+            "sqlite", agent_record_dir=str(directory / "reef-data"), record_database_url=None
+        ),
     )
 
 
-def harness_backend(scenario: Scenario) -> HarnessBackend:
-    """The scenario's harness backend, which holds the search history."""
-    backend = scenario.trainer.candidate_backend
-    if not isinstance(backend, HarnessBackend):
+def steps_done(scenario: Scenario) -> int:
+    """The harness steps that ended: each step is one training job of the scenario's trainer."""
+    return JobLoopState.from_dict(scenario.trainer.state).finished_jobs
+
+
+def search_history(scenario: Scenario, recipe: HarnessEvolutionRecipe) -> History:
+    """The search history that the harness training component keeps for the scenario, as its last step left it."""
+    root = recipe.harness_state_dir(scenario.name, scenario.surface.files_component or "harness")
+    if root is None:
         raise TypeError("the example's scenario evolves a harness")
-    return backend
+    return History.open(root / HISTORY_DIR)
+
+
+def commit_job(scenario: Scenario) -> bool:
+    """Commit the scenario's next training job, or the one a previous process started, from its submission to its
+    end; False when no job starts. The dispatcher's training service runs the job meanwhile."""
+    trainer = scenario.trainer
+    if not trainer.job_running:
+        submitted = scenario.prepare_training_step()
+        if submitted is None:
+            return False
+        scenario.commit(submitted)
+    while trainer.job_running:
+        result = scenario.prepare_training_step()
+        if result is None:
+            time.sleep(1.0)
+            continue
+        scenario.commit(result)
+    return True
 
 
 def served_tree(scenario: Scenario) -> HarnessTree:
@@ -126,7 +155,7 @@ def record_run(scenario: Scenario, recipe: HarnessEvolutionRecipe) -> None:
     """
     if recipe.scorer is None:
         raise ValueError("the example scores its runs with evolution.evaluation.scorer, which is not set")
-    step = scenario.scenario_step
+    step = steps_done(scenario)
     tasks = recipe.configured_tasks()
     task = tasks[step % len(tasks)]
     inference_id = f"terminal-bench-run-{step}"
@@ -177,17 +206,16 @@ def record_run(scenario: Scenario, recipe: HarnessEvolutionRecipe) -> None:
 
 def write_summary(scenario: Scenario, recipe: HarnessEvolutionRecipe, directory: Path) -> dict[str, Any]:
     """Rebuild a disposable summary from the latest durable commit and the history of the steps it covers."""
-    commits = scenario.store.history()
-    if not commits:
+    done = steps_done(scenario)
+    if not done:
         return {}
-    committed = commits[-1]
-    step = committed.step + 1
-    history = harness_backend(scenario).history
+    step = done + 1
+    history = search_history(scenario, recipe)
     head = served_tree(scenario).checksum()
     members = search_population(history, head, step, recipe.configured_tasks())
     summary = {
         "scenario": scenario.name,
-        "step": committed.step,
+        "step": done,
         "served_id": head,
         "generated_candidates": sum(member.record.origin == "method" for member in members),
         "evaluation_runs": sum(task_run.step < step for task_run in history.runs),
@@ -214,23 +242,19 @@ def search(scenario: Scenario, recipe: HarnessEvolutionRecipe, directory: Path) 
     method = recipe.method
     if not isinstance(method, MetaHarness):
         raise TypeError("the example drives the Meta-Harness method")
-    history = harness_backend(scenario).history
     summary = write_summary(scenario, recipe, directory)
-    while scenario.scenario_step < recipe.evolution.max_steps:
+    while steps_done(scenario) < recipe.evolution.max_steps:
         # The method's own budget check, before a run is spent on a step that would propose nothing.
-        if method.spent_budget(history, scenario.scenario_step + 1) is not None:
+        if method.spent_budget(search_history(scenario, recipe), steps_done(scenario) + 1) is not None:
             break
         # A previous process may have recorded the report but not committed its
-        # step. Let Reef replay it before spending on another run.
+        # step, or started its job. Let Reef replay it before spending on another run.
         scenario.produce_samples()
-        result = scenario.prepare_training_step()
-        if result is None:
+        if not commit_job(scenario):
             record_run(scenario, recipe)
             scenario.produce_samples()
-            result = scenario.prepare_training_step()
-        if result is None:
-            raise RuntimeError("the recorded run did not produce a training step")
-        scenario.commit(result)
+            if not commit_job(scenario):
+                raise RuntimeError("the recorded run did not produce a training step")
         summary = write_summary(scenario, recipe, directory)
         print(
             json.dumps({key: summary[key] for key in ("step", "generated_candidates", "evaluation_runs", "served_id")})

@@ -236,6 +236,10 @@ class InferenceProxyRuntime(InferenceRuntime):
             raise ValueError("model.api must be openai, responses or anthropic")
         return cls(base_url=url, model_path=value["model"].strip(), api=api, api_key=api_key)
 
+    def model_config(self) -> dict[str, str]:
+        """The per-scenario model override that ``from_model_config`` builds this runtime from, without its key."""
+        return {"url": self.base_url, "model": self._model_path, "api": self._api}
+
     @property
     def model_path(self) -> str:
         return self._model_path

@@ -32,6 +32,7 @@ from recipes.beta.reefine.multimodal import MultimodalProvider, MultimodalSettin
 from recipes.beta.reefine.scorer import HEALTH_TASK_DIRECTORY, AnswerScorer
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import DescriptorError
+from reef.inference.model_config import ModelConfig
 from reef.recipe.config_fields import config_field
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.harness import HarnessEvolutionRecipe
@@ -150,15 +151,30 @@ class ReefineRecipe(HarnessEvolutionRecipe):
         return kwargs
 
     def build_backend(
-        self, scenario: str, releases: ComponentReleases, samples: TrainerSamples | None
+        self,
+        scenario: str,
+        releases: ComponentReleases | None,
+        samples: TrainerSamples | None,
+        *,
+        component: str | None = None,
+        scenario_model: ModelConfig | None = None,
     ) -> HarnessBackend:
         """The scenario's backend. With an agent configured, its Reefine method runs the agent, bound here to pi
         once per scenario as the evaluator is: the binary is resolved, and installed when missing, on the Reef
         host, or named in a cloud sandbox's image."""
         if self.agent is None or not isinstance(self.method, ReefineMethod):
-            return super().build_backend(scenario, releases, samples)
+            return super().build_backend(
+                scenario, releases, samples, component=component, scenario_model=scenario_model
+            )
         method = ReefineMethod(ReefineAgent(self.agent.bind(), self.trial_timeout_s, self.multimodal_provider))
-        return HarnessEvolutionRecipe.build_backend(replace(self, method=method), scenario, releases, samples)
+        return HarnessEvolutionRecipe.build_backend(
+            replace(self, method=method),
+            scenario,
+            releases,
+            samples,
+            component=component,
+            scenario_model=scenario_model,
+        )
 
 
 __all__ = ["DEFAULT_TRIAL_TIMEOUT_S", "SEED_DIRECTORY", "ReefineRecipe"]

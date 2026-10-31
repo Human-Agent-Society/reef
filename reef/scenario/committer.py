@@ -623,15 +623,18 @@ class ScenarioCommitter:
 
         ``expected_release_id`` is the active release that ``artifact`` was
         merged against. Raise ``ArtifactConflict``, and change nothing, while
-        a step holds job data (the step was prepared against the training
-        start that the sync replaces) or when the active release is no
-        longer ``expected_release_id``. Raise ``ReefError`` when no trainer
+        a step holds job data or a training job runs (the step was prepared
+        against the training start that the sync replaces) or when the active
+        release is no longer ``expected_release_id``. Raise ``ReefError`` when no trainer
         trains ``component``, the admission check's error when it refuses the
         tree, and ``TrainingStartRefused`` when the trainer cannot start from
         it.
         """
         with self._lock, self._publication_lock:
-            if any(component_trainer.trainer.has_pending_commit for component_trainer in self.trainers):
+            if any(
+                component_trainer.trainer.has_pending_commit or component_trainer.trainer.job_running
+                for component_trainer in self.trainers
+            ):
                 raise ArtifactConflict(f"scenario {self._name!r} is running a step; sync again when it ends")
             current_ref, checkpoint = self._artifacts.current, self._artifacts.checkpoint
             if current_ref.release_id != expected_release_id:

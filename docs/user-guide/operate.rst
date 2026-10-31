@@ -254,12 +254,11 @@ What survives a restart, provided the storage paths are persistent:
    * - checkpoint decisions of a running job
      - each decision is committed; a restart evaluates only the
        checkpoints that have no committed decision
-   * - a local cycle's job data (a harness step) when the service stops
-     - kept: once shutdown begins, a local cycle commits nothing and no
-       new one starts, since its model calls go through the stopping
-       service; after the next start the local cycles of a composite
-       recipe open once the service answers on its own address, and the
-       rows train then, with no new record needed
+   * - a harness step in flight
+     - resumed, as any training job: a step's outcome is durable before its
+       checkpoint, so a step that settled commits after the restart without
+       running again, and a step that did not settle runs again from the
+       same start and harness state
 
 A process that stops normally releases the control lease. After a crash, the
 next process waits until the old lease expires (at most 30 seconds) before it
@@ -306,8 +305,9 @@ goes from evaluation to control, for the candidate that a rollout evaluates.
      - Makes training samples from new records
      - samples
    * - ``training``
-     - Runs training jobs on the training component
-     - job progress, trained artifacts
+     - Runs training jobs on the training component, and harness evolution
+       steps on the ``harness`` training component
+     - job progress, trained artifacts, harness step records
    * - ``evaluation``
      - Runs the rollouts of artifact evaluations. It serves each candidate
        artifact itself, from the artifact repository
@@ -341,6 +341,14 @@ must reach the same store:
   their shared tables in the schema ``<record schema>_coordination``
   (``reef_records_coordination`` by default), so deployments with their own
   record schemas share no tables.
+
+**Harness steps.** A harness evolution step is a training job of the
+``harness`` training component, so the training service runs the method, the
+coding agent and the evaluation runs. Install the adapter's binary and the
+sandbox where the training service runs. The training service writes the step
+records and the running step's progress under ``evolution.state_dir``. Control
+reads them for the release and request pages, so both must reach that
+directory, as they reach the artifact backend.
 
 Every service except inference must also reach the same data store
 (``storage.data-store``, which follows the record backend by default; see

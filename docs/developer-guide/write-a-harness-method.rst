@@ -297,8 +297,9 @@ Read the history
    if decision is not None:
        scores = history.scores(decision.tree, workspace.tasks())
 
-A failed attempt reuses its step number, so skip records whose ``step`` is
-``workspace.step`` or more.
+``workspace.step`` is one more than the steps that ended, failed steps
+included. A step that runs again, after a restart before it settled, reuses its
+number, so skip records whose ``step`` is ``workspace.step`` or more.
 
 Evaluation
 ----------

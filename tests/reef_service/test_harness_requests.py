@@ -11,7 +11,7 @@ from threading import Event
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
-from tests.support.harness_service import backend_step, harness_dispatcher
+from tests.support.harness_service import backend_step, catalog, drive_trainer_job, harness_dispatcher
 from tests.support.harness_steps import COMPONENT, TreeReleases, changed_rules, harness_backend, harness_recipe
 from tests.support.samples_service import make_samples
 
@@ -75,7 +75,7 @@ def answered(workspace: Workspace, patch: TreePatch, **output) -> None:
 
 def request_rows(scenario) -> list[dict]:
     """The committed rows that answered a request, oldest first."""
-    rows = [row for row in scenario.releases() if row.get("metrics", {}).get("training_request")]
+    rows = [row for row in catalog(scenario) if row.get("metrics", {}).get("training_request")]
     return sorted(rows, key=lambda row: row["step"])
 
 
@@ -439,7 +439,7 @@ def test_requires_overflow_reason_reaches_request_page(tmp_path: Path) -> None:
         dispatcher.close()
 
 
-def test_prepare_commit_keeps_the_backends_training_request_and_fills_a_step_that_never_reached_it(
+def test_the_step_row_keeps_the_backends_training_request_and_fills_a_step_that_never_reached_it(
     tmp_path: Path,
 ) -> None:
     """The backend's dict wins, since it carries what the method added; a step the backend skipped before it
@@ -465,10 +465,9 @@ def test_prepare_commit_keeps_the_backends_training_request_and_fills_a_step_tha
                 )
             )
             make_samples(trainer)
-            result = trainer.run_once()
+            result = drive_trainer_job(trainer)
             assert result is not None
-            prepared = trainer.prepare_commit(result)
-            request = prepared.metrics["training_request"]
+            request = result.metrics["training_request"]
             assert {key: request[key] for key in ("id", *payload)} == {"id": "ask-1", **payload, "requires": expected}
         finally:
             trainer.close()

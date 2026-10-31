@@ -240,8 +240,9 @@ In ``train/``, ``trainer.py`` holds the ``Trainer``; ``jobs.py`` holds the
 ``JobLoop`` and the committed ``JobLoopState``;
 ``local_jobs.py`` holds ``LocalJobComponent``, the base of the built-in
 training components; ``deployment.py`` holds the ``TrainingDeployment``
-definitions; and ``backend.py`` holds ``CandidateBackend``, the candidate
-lifecycle of harness evolution. ``train/slime_backend/component.py`` and
+definitions; and ``backend.py`` holds ``CandidateBackend``, the prepare,
+evaluate and settle lifecycle of one candidate step, which ``HarnessBackend``
+implements. ``train/slime_backend/component.py`` and
 ``train/tinker_backend/component.py`` supply the Slime and Tinker training
 components, and each ``launch.py`` supplies its deployment definition and
 runtime factory. No training backend builds serving:
@@ -351,7 +352,10 @@ The extension points those packages expose are in `Python API
   evaluation and release are Reef's, shared with weight training; evolve and
   sync are the harness's own. ``reef/harness/tree/`` holds the tree that
   every part reads, and ``reef/train/harness_backend/backend.py`` runs one
-  step through evolve, evaluation and release.
+  step through evolve, evaluation and release. ``component.py`` is the
+  ``harness`` training component: it runs each step as one training job, in
+  the training service, and keeps the harness state after each job in the
+  job's outcome.
 
   - Data: the training pipeline below turns the agent's recorded calls,
     their reports and the uploaded tasks into a step's job data. The harness

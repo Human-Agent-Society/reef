@@ -17,7 +17,7 @@ from threading import Thread
 import pytest
 from tests.support._strategies import resolve_method, resolve_task_scorer
 from tests.support._trajectories import recorded_trajectory
-from tests.support.harness_service import harness_repository
+from tests.support.harness_service import harness_repository, job_backend
 
 from reef.artifact import Artifact, InMemoryRepositoryBackend
 from reef.dispatcher import Dispatcher
@@ -31,6 +31,8 @@ from reef.runtime.executor.config import ExecutorSettings
 from reef.storage.scenario import ScenarioSettings
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
+from reef.train.backend import ReleaseFiles
+from reef.train.jobs import JobLoopState
 from reef.train.types import JobData
 
 
@@ -165,11 +167,17 @@ def test_full_evolution_uses_only_custom_binding(platform, tmp_path, monkeypatch
                     artifact, "/v1/messages/count_tokens", {"model": "custom-alpha", "messages": []}
                 )
             )
-        backend = scenario.trainer.candidate_backend
+        # A job carries the scenario's model without its key; the training component binds the deployment's key.
+        selected = scenario.trainer.job_loop_required().submitted.parameters(
+            JobData("batch"), JobLoopState.from_dict(scenario.trainer.state)
+        )["scenario_model"]
+        assert selected == configure(platform, "alpha", api)
+        backend = job_backend(scenario.trainer, "harness", selected)
         prepared = backend.prepare_step(
             JobData("batch", (recorded_trajectory("record", {"messages": []}, 0.0),)),
             backend.initial_state(),
             0,
+            head=ReleaseFiles("base", dict(recipe.seed.files)),
         )
         assert prepared.candidate is not None
         # Updates between the method and the evaluation must not mix providers within the step.
@@ -381,7 +389,12 @@ def test_scenario_recovery_and_deletion_keep_model_lifecycle(platform, tmp_path)
             engine_url(platform, "alpha", "1"),
             PLATFORM_KEY,
         )
-        assert scenario.trainer.candidate_backend.models["judge"].base_url == engine_url(platform, "alpha", "1")
+        selected = scenario.trainer.job_loop_required().submitted.parameters(
+            JobData("batch"), JobLoopState.from_dict(scenario.trainer.state)
+        )["scenario_model"]
+        assert job_backend(scenario.trainer, "harness", selected).models["judge"].base_url == engine_url(
+            platform, "alpha", "1"
+        )
         config = scenario.model_config
         previous_runtime = config.runtime
         reloaded = recovered.registry.reload("alpha")

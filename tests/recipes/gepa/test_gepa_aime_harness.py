@@ -18,6 +18,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from tests.support.harness_service import job_backend
 from tests.support.harness_steps import TreeReleases
 
 from reef.core.evaluation import PolicyHarness, RolloutRequest
@@ -145,7 +146,7 @@ def test_default_driver_pool_uses_a_stable_answer_snapshot(load, monkeypatch, tm
     with SQLiteRecordStore() as records:
         trainer = recipe.build("test", records, releases=releases_of(recipe))
         try:
-            evaluator = trainer.candidate_backend.evaluator
+            evaluator = job_backend(trainer).evaluator
             assert evaluator.worker_pool.selection.settings.backend == "uni"
             rows = evaluator.run_rollouts(run_requests(evaluator, ({}, "problem"), ({}, "problem")))
             assert [row.score.value for row in rows] == [1.0, 1.0]
@@ -198,7 +199,7 @@ def test_driver_evaluates_with_isolated_workers(load, monkeypatch, tmp_path, exe
     with driver.worker_runtime(recipe), SQLiteRecordStore() as records:
         trainer = recipe.build("isolated", records, releases=releases_of(recipe))
         try:
-            evaluator = trainer.candidate_backend.evaluator
+            evaluator = job_backend(trainer).evaluator
             assert evaluator.worker_pool.selection.settings.backend == ("mp" if executor == "auto" else executor)
             rows = evaluator.run_rollouts(run_requests(evaluator, ({}, "problem"), ({}, "problem")))
             assert [row.score.value for row in rows] == [1.0, 1.0]
@@ -386,7 +387,7 @@ def test_driver_reports_each_problem_against_its_recorded_request(load, monkeypa
         assert HarnessTree.read(tmp_path / "served") == recipe.seed
         # The driver plans from the history where the scenario's backend writes it; before any step the archive
         # holds the seed alone, charged GEPA's seed validation.
-        backend = service.dispatcher.get_or_create_scenario(service.scenario).trainer.candidate_backend
+        backend = job_backend(service.dispatcher.get_or_create_scenario(service.scenario).trainer)
         assert service.history().root == backend.history.root
         archive = driver.committed_archive(service, problems, recipe.seed, 0)
         assert (len(archive.candidates), archive.served, archive.metric_calls) == (1, 0, len(problems))

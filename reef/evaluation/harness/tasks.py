@@ -131,12 +131,15 @@ class EvaluationTasks:
         samples: tuple[TrajectorySample, ...],
         collected_tasks: Sequence[str],
         collected_clients: Mapping[str, int],
+        *,
+        seed: tuple[str, ...] | None = None,
     ) -> StepTasks:
         """The tasks this step evaluates, after collecting this step's prompts when collection is on.
 
         ``collected_tasks`` and ``collected_clients`` are the collection state the previous step committed.
+        ``seed`` is the step's seed tasks, such as the eval split that its job names; ``None`` reads ``seed()``.
         """
-        seed = self.seed()
+        seed = self.seed() if seed is None else seed
         collected = list(collected_tasks)
         counts = dict(collected_clients)
         screened = 0

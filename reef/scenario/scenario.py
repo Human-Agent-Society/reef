@@ -306,11 +306,11 @@ class Scenario:
             return trainer.run_once(self.scenario_step, serving_artifact_id=serving)
 
     def served_component(self) -> str | None:
-        """The component whose artifact the runtime serves: the weight trainer's component, or the only component;
-        None when the scenario has several components and no weight trainer."""
-        weights = [item.component for item in self.trainers if item.trainer.job_loop is not None]
-        if weights:
-            return weights[0]
+        """The component whose artifact the runtime serves: the component that the runtime loads, or the only
+        component; None when the scenario has several components and the runtime loads none of them."""
+        loader = self._binding.surface.loader_component
+        if loader is not None:
+            return loader
         names = self._committer.component_names()
         return names[0] if len(names) == 1 else None
 

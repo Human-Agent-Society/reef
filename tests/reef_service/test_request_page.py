@@ -458,9 +458,15 @@ def test_the_page_follows_a_filed_request_from_proposing_to_its_result_by_a_brow
             ]
             assert await asyncio.to_thread(entered.wait, 10)
 
-            # The link a browser opens: no header, the scenario and the page key in the query.
-            response = await client.get(link, params=QUERY)
-            page = await response.text()
+            # The link a browser opens: no header, the scenario and the page key in the query. The training
+            # component writes the step's progress a moment after the method starts, so the page polls as a
+            # browser's refresh does.
+            for _ in range(100):
+                response = await client.get(link, params=QUERY)
+                page = await response.text()
+                if '<span class="proposing">' in page:
+                    break
+                await asyncio.sleep(0.05)
             assert response.status == 200 and response.headers["content-type"].startswith("text/html"), page
             assert response.headers["Cache-Control"] == "no-store"
             page.encode("ascii")

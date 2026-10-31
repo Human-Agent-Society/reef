@@ -21,6 +21,7 @@ from reef.core.config import config_arguments
 from reef.core.plugins import PluginConfigError, PluginReference
 from reef.core.reports import ReportBase
 from reef.evaluation.activation import activation_reference, build_activation_rule
+from reef.harness.tasks.model_binding import ModelBinding
 from reef.inference.http import resolve_proxy_runtime
 from reef.inference.model_config import ModelConfig
 from reef.observability import ExperimentLogger
@@ -381,6 +382,18 @@ class Recipe:
     def base_artifact_source(self) -> BaseArtifactSource:
         """The content of the deployment's base artifact, which every new scenario starts from; empty by default."""
         return BaseArtifactSource()
+
+    def harness_state_dir(self, scenario: str, component: str) -> Path | None:
+        """The directory of ``component``'s harness evolution state in ``scenario``: its history, its step records
+        and the running step's progress (``reef.train.harness_backend.component``); ``None`` for a recipe that
+        evolves no harness."""
+        return None
+
+    def harness_served_model(self, scenario: str, component: str, model: ModelConfig) -> ModelBinding | None:
+        """The model that ``component``'s harness in ``scenario`` calls, on the scenario's model selection
+        ``model``: a client's layer asks Reef for this model by name and dialect. ``None`` for a recipe that evolves
+        no harness."""
+        return None
 
     @property
     def harness_adapter(self) -> str | None:

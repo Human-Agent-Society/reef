@@ -21,7 +21,7 @@ from urllib.parse import urlencode
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
-from tests.support.harness_service import harness_dispatcher, report_records, wait_for_rows
+from tests.support.harness_service import catalog, harness_dispatcher, report_records, wait_for_rows
 from tests.support.harness_steps import UNCHANGED, harness_recipe
 
 from reef.core.plugins import PluginReference
@@ -124,7 +124,7 @@ def _chain(tmp_path: Path) -> Dispatcher:
             await client.close()
 
     asyncio.run(run())
-    rows = list(reversed(scenario.releases()))
+    rows = list(reversed(catalog(scenario)))
     assert [result_of(row) for row in rows] == ["creation", "selected", "rejected", "rejected", "inactive"]
     assert [row["active"] for row in rows] == [False, True, False, False, False]
     assert ["training_request" in (row.get("metrics") or {}) for row in rows] == [False, True, True, False, True]
@@ -189,7 +189,7 @@ def _hero(page: str) -> str:
 def test_the_page_for_a_published_step_carries_the_request_the_result_and_the_chain(tmp_path: Path) -> None:
     dispatcher = _chain(tmp_path)
     try:
-        rows = list(reversed(dispatcher.get_or_create_scenario(SCENARIO).releases()))
+        rows = list(reversed(catalog(dispatcher.get_or_create_scenario(SCENARIO))))
         page = _page(dispatcher, 1)
         assert page.startswith("<!doctype html>") and "<title>Harness v1</title>" in page
         assert '<meta name="viewport" content="width=device-width, initial-scale=1">' in page
@@ -226,7 +226,7 @@ def test_the_page_for_a_published_step_carries_the_request_the_result_and_the_ch
 def test_the_page_for_an_inactive_extension_step_diffs_the_file_against_the_head(tmp_path: Path) -> None:
     dispatcher = _chain(tmp_path)
     try:
-        rows = list(reversed(dispatcher.get_or_create_scenario(SCENARIO).releases()))
+        rows = list(reversed(catalog(dispatcher.get_or_create_scenario(SCENARIO))))
         page = _page(dispatcher, 4)
         assert "<title>Harness v4</title>" in page
         assert FOURTH.replace("<", "&lt;") in _section(page, "Why")
@@ -256,7 +256,7 @@ def test_the_page_for_an_inactive_extension_step_diffs_the_file_against_the_head
 def test_the_page_for_a_rejected_step_names_the_head_it_ran_on_and_the_candidate(tmp_path: Path) -> None:
     dispatcher = _chain(tmp_path)
     try:
-        rows = list(reversed(dispatcher.get_or_create_scenario(SCENARIO).releases()))
+        rows = list(reversed(catalog(dispatcher.get_or_create_scenario(SCENARIO))))
         page = _page(dispatcher, 2)
         assert SECOND in _section(page, "Why") and "s2" in _section(page, "Why")
         # A rejected step ran on the head, so its patch reads against the head's files.
@@ -298,7 +298,7 @@ def test_the_page_for_an_automatic_step_without_a_request_says_a_failure_in_the_
 def test_the_chain_lists_the_steps_evaluated_against_a_release_as_its_children(tmp_path: Path) -> None:
     dispatcher = _chain(tmp_path)
     try:
-        rows = list(reversed(dispatcher.get_or_create_scenario(SCENARIO).releases()))
+        rows = list(reversed(catalog(dispatcher.get_or_create_scenario(SCENARIO))))
         page = _page(dispatcher, 0)
         assert "<title>Harness v0</title>" in page
         assert "no step made it" in _section(page, "Why")
@@ -633,7 +633,7 @@ def test_each_file_of_the_patch_reads_against_the_release_the_step_ran_on() -> N
 def test_active_marks_the_active_release_and_not_the_newest_row(tmp_path: Path) -> None:
     dispatcher = _chain(tmp_path)
     try:
-        rows = list(reversed(dispatcher.get_or_create_scenario(SCENARIO).releases()))
+        rows = list(reversed(catalog(dispatcher.get_or_create_scenario(SCENARIO))))
         # The newest row made an inactive release, so it is not active.
         assert rows[4]["active"] is False and rows[1]["active"] is True
         assert served_step(rows) == 1
@@ -648,9 +648,9 @@ def test_an_activated_step_reads_selected_and_adds_no_row(tmp_path: Path) -> Non
     dispatcher = _chain(tmp_path)
     try:
         scenario = dispatcher.get_or_create_scenario(SCENARIO)
-        inactive_id = list(reversed(scenario.releases()))[4]["release_id"]
+        inactive_id = list(reversed(catalog(scenario)))[4]["release_id"]
         assert dispatcher.activate(SCENARIO, inactive_id).release_id == inactive_id
-        rows = list(reversed(scenario.releases()))
+        rows = list(reversed(catalog(scenario)))
         assert len(rows) == 5 and rows[4]["active"] is True and rows[1]["active"] is False
         assert result_of(rows[4]) == "selected"
         assert served_step(rows) == 4

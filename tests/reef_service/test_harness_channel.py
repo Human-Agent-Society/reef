@@ -16,7 +16,7 @@ from threading import Event
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from tests.support.harness_render import descriptor_data, write_descriptor
-from tests.support.harness_service import EchoInference, harness_dispatcher
+from tests.support.harness_service import EchoInference, harness_dispatcher, job_backend
 from tests.support.harness_steps import changed_rules, harness_recipe
 
 from reef.core.evaluation import EvaluationResult, UpdateCandidate
@@ -101,11 +101,12 @@ async def scored_exchange(client: TestClient) -> None:
 
 
 async def committed_step(client: TestClient) -> dict:
-    """The scenario's latest committed step, once one is committed."""
+    """The scenario's latest committed step, once one is committed: a commit of the step's job after its submission."""
     deadline = asyncio.get_running_loop().time() + UPDATE_TIMEOUT_S
     while True:
         scenario = (await (await client.get("/reef/status")).json())["scenarios"]["delivery"]
-        if scenario["last_committed_step"] is not None:
+        committed = scenario["last_committed_step"]
+        if committed is not None and committed["metrics"]["training_job"]["event"] != "submitted":
             return scenario
         if asyncio.get_running_loop().time() >= deadline:
             pytest.fail("the step did not commit")
@@ -142,7 +143,8 @@ def test_status_reports_a_committed_step_that_published_no_harness(tmp_path) -> 
             await scored_exchange(client)
             scenario = await committed_step(client)
             committed = scenario["last_committed_step"]
-            assert scenario["scenario_step"] == committed["step"] == 1
+            # The step's job committed its submission, then its end.
+            assert scenario["scenario_step"] == committed["step"] == 2
             assert isinstance(committed["recorded_at"], float)
             assert committed["metrics"]["skipped"] == "the method left the head tree unchanged"
             # The empty seed serves nothing until a step publishes a tree.
@@ -159,7 +161,7 @@ def test_status_reports_a_committed_rejection(tmp_path) -> None:
             await scored_exchange(client)
             scenario = await committed_step(client)
             committed = scenario["last_committed_step"]
-            assert scenario["scenario_step"] == committed["step"] == 1
+            assert scenario["scenario_step"] == committed["step"] == 2
             assert committed["metrics"]["selected"] is False
             assert committed["metrics"]["selection"]["selected"] is False
             assert (await client.get("/reef/harness", headers=HEADERS)).status == 404
@@ -263,7 +265,7 @@ def test_release_reads_stay_responsive_during_evaluation(tmp_path, monkeypatch) 
 
     async def run() -> None:
         dispatcher = channel_dispatcher(tmp_path, PATCHES)
-        backend = dispatcher.get_or_create_scenario("delivery").trainer.candidate_backend
+        backend = job_backend(dispatcher.get_or_create_scenario("delivery").trainer)
         evaluate_candidate = backend.evaluate
 
         def blocked_evaluate(candidate: UpdateCandidate, **options) -> EvaluationResult:

@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
-from tests.support.harness_service import harness_dispatcher, wait_for_rows
+from tests.support.harness_service import catalog, harness_dispatcher, wait_for_rows
 from tests.support.harness_steps import changed_rules, harness_recipe
 
 from reef.harness.tree import TreePatch
@@ -133,12 +133,12 @@ def test_failed_method_records_remain_linked_after_reload_and_retry(tmp_path: Pa
                 assert response.status == 200
                 for _ in range(200):
                     scenario = dispatcher.get_or_create_scenario(SCENARIO)
-                    if len(scenario.releases()) > step:
+                    if len(catalog(scenario)) > step:
                         break
                     await asyncio.sleep(0.05)
                 else:
                     raise AssertionError("instruction did not commit")
-                row = scenario.releases()[0]
+                row = catalog(scenario)[0]
                 metrics = row["metrics"]
                 assert metrics["training_request"]["text"] == instruction
                 if step == 1:

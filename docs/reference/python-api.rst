@@ -88,10 +88,14 @@ happen to expose similarly named methods.
 
 Two other extension points have separate names and purposes:
 
-- ``reef.train.CandidateBackend`` prepares, evaluates and settles harness
-  updates; ``Trainer`` accepts it as ``candidate_backend``. A weight trainer
-  takes a ``JobLoop`` as ``job_loop`` instead (see `Training jobs and
-  components`_); a trainer takes one or the other, not both.
+- ``reef.train.CandidateBackend`` prepares, evaluates and settles one
+  candidate step in the trainer's process; ``Trainer`` accepts it as
+  ``candidate_backend``. A trainer that submits jobs takes a ``JobLoop`` as
+  ``job_loop`` instead (see `Training jobs and components`_); a trainer takes
+  one or the other, not both. The built-in harness recipe takes a
+  ``JobLoop``: its ``HarnessTrainingComponent``
+  (``reef.train.harness_backend.component``) runs each step's
+  ``HarnessBackend`` as one training job, in the training service.
   ``Trainer.build(..., default_job_samples=...)`` takes the default
   ``job_samples`` of the sample-to-job stage: a harness recipe passes
   ``evolution.batch_size``, and a weight recipe passes none, so its
@@ -2047,9 +2051,12 @@ loop:
      - Release the component's resources; safe to call repeatedly.
 
 A ``SavedCheckpoint`` has a ``step`` within its job, a ``path`` that a later
-job starts from, a ``release_path`` that Reef publishes and serving loads, and
-the backend's ``metrics``. A finished job without checkpoints trained nothing,
-for example because its objective skipped the job's data.
+job starts from, a ``release_path`` that Reef publishes and serving loads, the
+backend's ``metrics``, and ``changed_kinds``: the names of the parts that the
+checkpoint changed from the job's start, which the scenario's activation rule
+reads. A weight checkpoint names none; a harness checkpoint names the parts of
+the tree that its step changed. A finished job without checkpoints trained
+nothing, for example because its objective skipped the job's data.
 
 ``reef.train.local_jobs.LocalJobComponent`` is the base of the built-in
 components. It keeps one directory per job (``job.json``,
@@ -2059,13 +2066,17 @@ A subclass implements ``check_job(job)`` and ``run(job, directory)``. It must
 call ``start_jobs()`` once it can train. Until then no job runs, including
 the jobs that a restart left.
 
-``reef.train.jobs.JobLoop`` is the control plane's side. It holds the weight
-trainer's one training component. It returns the result that the trainer
-commits:
+``reef.train.jobs.JobLoop`` is the control plane's side. It holds the
+trainer's one training component, and optionally a ``SubmitParameters``: the
+parameters of a job that only the scenario knows when the job is submitted,
+such as its own model or its eval split, read from the trainer's committed
+``JobLoopState``. It returns the result that the trainer commits:
 
 1. When no job runs, the trainer reserves ready job data. The pipeline's
-   sample-to-job stage gives the job's parameters, the loop submits it, and the trainer commits the submission, which
-   consumes the records of the job's data.
+   sample-to-job stage gives the job's parameters, ``SubmitParameters`` adds
+   its own (a name that both give is refused), the loop submits the job, and the
+   trainer commits the submission, which consumes the records of the job's
+   data.
 2. While the job runs, the trainer commits each new saved checkpoint: its
    ``release_path`` becomes a new artifact, with the checkpoint's training
    metrics. The scenario's activation rule decides whether it serves.

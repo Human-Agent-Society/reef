@@ -27,7 +27,7 @@ from tests.support.harness_methods import (
     proposal_reply,
     served_runtime,
 )
-from tests.support.harness_service import backend_step, harness_dispatcher, report_once
+from tests.support.harness_service import backend_step, drive_job, harness_dispatcher, report_once
 from tests.support.harness_steps import COMPONENT, TreeReleases, harness_recipe
 
 import recipes.meta_harness
@@ -367,9 +367,7 @@ def test_terminus_extension_uses_shared_recipe_run_runner_and_publication(tmp_pa
     try:
         scenario = dispatcher.get_or_create_scenario("terminus-meta")
         report_once(scenario, "1")
-        result = scenario.prepare_training_step()
-        assert result.metrics["selected"] is True
-        scenario.commit(result)
+        assert drive_job(scenario).metrics["selected"] is True
         assert next((tmp_path / "repository").rglob("extensions/agent.py")).read_text() == code
     finally:
         dispatcher.close()

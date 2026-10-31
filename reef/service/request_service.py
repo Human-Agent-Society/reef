@@ -22,7 +22,8 @@ from reef.core.records_types import AgentRecord, RequestType
 from reef.core.requirements import required_by
 from reef.core.training_request import normalize_training_request_payload
 from reef.dispatcher import Dispatcher
-from reef.harness.sync import import_files, layer_install, merge_trees
+from reef.harness.adapters.descriptor import AdapterDescriptor
+from reef.harness.sync import HarnessFiles, import_files, layer_install, merge_trees
 from reef.harness.tree import HarnessTree, validate_tree
 from reef.harness.tree.checks import clip_record_value
 from reef.scenario.release_files import component_files
@@ -30,7 +31,9 @@ from reef.scenario.scenario import Scenario
 from reef.service.release_page import before_release_id, build_release_page, build_running_step_page, result_of
 from reef.service.request_page import STATE_WORDS, build_request_page, request_state, settled_step
 from reef.service.wire import SCENARIO_HEADER, ReportPayload, RequestHeaders, parse_request_headers, with_request_tags
-from reef.train.harness_backend.backend import HarnessBackend
+from reef.train.harness_backend.backend import StepProgress
+from reef.train.harness_backend.component import PROGRESS_FILE, STEPS_DIR, read_step_progress
+from reef.train.harness_backend.records import read_step_records
 from reef.train.trainer import Trainer
 
 logger = logging.getLogger(__name__)
@@ -173,15 +176,18 @@ class RequestService:
             scenario, release_id or self.harness_release_id(scenario), source=form != "rendered"
         )
         if form == "client" and service_url is not None and root is not None:
-            backend = self.harness_backend(scenario)
-            scenario_url = f"{service_url.rstrip('/')}/reef/scenarios/{scenario.name}"
-            layer = layer_install(
-                HarnessTree(manifest["files"]), backend.descriptor, backend.models.served, scenario_url, root
+            descriptor = self.harness_descriptor(scenario)
+            served = self._dispatcher.recipe.harness_served_model(
+                scenario.name, str(scenario.surface.files_component), scenario.model_config
             )
+            if served is None:
+                raise ArtifactNotFound(f"scenario {scenario.name!r} evolves no harness that calls a model")
+            scenario_url = f"{service_url.rstrip('/')}/reef/scenarios/{scenario.name}"
+            layer = layer_install(HarnessTree(manifest["files"]), descriptor, served, scenario_url, root)
             manifest["files"] = dict(layer.files)
-            install = backend.descriptor.install
+            install = descriptor.install
             manifest["run"] = {
-                "binary": backend.descriptor.binary,
+                "binary": descriptor.binary,
                 "args": list(layer.args),
                 "env": dict(layer.env),
                 "register": [list(command) for command in layer.register],
@@ -222,7 +228,7 @@ class RequestService:
         if not isinstance(base, str) or not base:
             raise ValueError("base_release_id must be the release the client installed")
         scenario = self._file_scenario(headers)
-        backend = self.harness_backend(scenario)
+        descriptor = self.harness_descriptor(scenario)
         component = scenario.surface.files_component
         if component is None:
             raise ArtifactNotFound(f"scenario {scenario.name!r} serves no harness component")
@@ -233,10 +239,10 @@ class RequestService:
             base_tree = active
         else:
             base_tree = HarnessTree(self._harness_manifest_for_scenario(scenario, base, source=True)["files"])
-        imported = import_files(files, base_tree, backend.descriptor)
-        merge = merge_trees(base_tree, active, imported.tree, backend.descriptor.layout)
+        imported = import_files(files, base_tree, descriptor)
+        merge = merge_trees(base_tree, active, imported.tree, descriptor.layout)
         if merge.tree is None:
-            located = [(path, backend.descriptor.layout.locate(path)) for path in merge.conflicts]
+            located = [(path, descriptor.layout.locate(path)) for path in merge.conflicts]
             # The person knows each file at its render path, such as plugin/rules.md for rules.md.
             named = [
                 path if location is None or location.part.renders is None else location.part.render_path(location.name)
@@ -255,7 +261,7 @@ class RequestService:
         }
         if tree == active:
             return {**answer, "release_id": active_id, "changed": False}
-        validation = validate_tree(tree, backend.descriptor)
+        validation = validate_tree(tree, descriptor)
         if not validation.passed:
             raise ValueError(f"the synced harness fails validation: {validation.message()}")
         patch = active.diff(tree)
@@ -275,22 +281,34 @@ class RequestService:
                         "base_release_id": base,
                     },
                     "patch": clip_record_value(patch.to_json()),
-                    "patch_parts": backend.descriptor.layout.part_names(patch.changes),
+                    "patch_parts": descriptor.layout.part_names(patch.changes),
                 },
             )
         finally:
             artifact.discard()
         return {**answer, "release_id": published.release_id, "changed": True}
 
-    def harness_backend(self, scenario: Scenario) -> HarnessBackend:
-        """The backend evolving the harness a client pulls; ArtifactNotFound when the recipe evolves no harness."""
-        backend = self.files_trainer(scenario).candidate_backend
-        if not isinstance(backend, HarnessBackend):
+    @staticmethod
+    def harness_descriptor(scenario: Scenario) -> AdapterDescriptor:
+        """The adapter of the harness a client pulls; ArtifactNotFound when the scenario serves no harness tree."""
+        component = scenario.surface.files_component
+        files = None if component is None else scenario.surface.components[component].files
+        if not isinstance(files, HarnessFiles):
             raise ArtifactNotFound(
                 f"scenario {scenario.name!r} evolves no harness: the deployment's recipe is not a harness "
                 "evolution recipe"
             )
-        return backend
+        return files.descriptor
+
+    def harness_state_dir(self, scenario: Scenario) -> Path | None:
+        """The state directory of the harness a client pulls (``Recipe.harness_state_dir``), or None."""
+        component = scenario.surface.files_component
+        return None if component is None else self._dispatcher.recipe.harness_state_dir(scenario.name, component)
+
+    def step_progress(self, scenario: Scenario) -> StepProgress | None:
+        """The progress of the harness step that runs now, which the training component writes; None for none."""
+        root = self.harness_state_dir(scenario)
+        return None if root is None else read_step_progress(root / PROGRESS_FILE)
 
     @staticmethod
     def files_trainer(scenario: Scenario) -> Trainer:
@@ -346,7 +364,10 @@ class RequestService:
         release that minted its parent's harness artifact as
         ``parent_release_id``; the ids it had are kept beside them as
         ``composed_release_id`` and ``composed_parent_release_id``. A step
-        that made no artifact is listed when the harness trainer made it.
+        that made no artifact is listed when the harness trainer made it. The
+        commits that only follow a training job, its submission and the end of
+        a job whose checkpoint row holds the step, carry no step metrics and are
+        not listed.
         """
         files_component = scenario.surface.files_component
         single = scenario.surface.single
@@ -363,6 +384,12 @@ class RequestService:
 
         kept: list[dict[str, Any]] = []
         for row in scenario.releases():
+            metrics = row.get("metrics") or {}
+            job = metrics.get("training_job")
+            if isinstance(job, Mapping) and (
+                job.get("event") == "submitted" or not set(metrics) - {"training_job", "training_request"}
+            ):
+                continue
             if row["checkpoint"] and row["release_id"] not in by_release:
                 continue
             if not row["checkpoint"] and row.get("component") not in (None, files_component):
@@ -440,13 +467,13 @@ class RequestService:
         if not 0 <= step < len(rows):
             raise ArtifactNotFound(f"scenario {scenario.name!r} has no step {step}")
         directory = (rows[step].get("metrics") or {}).get("step_record")
-        backend = self.files_trainer(scenario).candidate_backend
-        if not directory or not isinstance(backend, HarnessBackend):
+        root = self.harness_state_dir(scenario)
+        if not directory or root is None:
             return {"status": "not_recorded", "files": []}
         if not isinstance(directory, str):
             raise ValueError("invalid step record directory")
         try:
-            return backend.records.read(directory, relative)
+            return read_step_records(root / STEPS_DIR, directory, relative)
         except FileNotFoundError as error:
             raise ArtifactNotFound("record file is not retained") from error
 
@@ -487,15 +514,12 @@ class RequestService:
                 before_files = None
         return build_release_page(step, rows, before_files=before_files, link_query=link_query)
 
-    @classmethod
-    def running_request_id(cls, scenario: Scenario) -> str | None:
-        """The id of the request the scenario's step is running: the reserved job data's, else the backend's progress."""
-        trainer = cls.files_trainer(scenario)
-        reserved = trainer.pending_job_data
+    def running_request_id(self, scenario: Scenario) -> str | None:
+        """The id of the request the scenario's step is running: the reserved job data's, else the step's progress."""
+        reserved = self.files_trainer(scenario).pending_job_data
         if reserved is not None and reserved.request is not None:
             return str(reserved.request.id)
-        backend = trainer.candidate_backend
-        progress = backend.step_progress if isinstance(backend, HarnessBackend) else None
+        progress = self.step_progress(scenario)
         return None if progress is None or progress.request_id is None else str(progress.request_id)
 
     def harness_request_page(
@@ -506,7 +530,7 @@ class RequestService:
         The record is the ``POST /reef/train`` instruction as stored; the
         catalog row whose ``training_request.id`` names it settles the page.
         Until then the page reads the running step's progress from the
-        scenario's candidate backend, when the backend reports one, and
+        progress file of the harness training component, when a step runs, and
         whether the trainer holds the request in its reserved job data.
         ``link_query`` is carried to the version page link, so a page opened
         through query parameters links one that opens the same way. An
@@ -519,8 +543,7 @@ class RequestService:
             raise ArtifactNotFound(f"scenario {scenario.name!r} has no harness request {record_id!r}")
         # The step a request settled as counts the catalog rows, the ones the release page opens.
         rows = list(reversed(self.harness_rows(scenario)))
-        backend = self.files_trainer(scenario).candidate_backend
-        progress = backend.step_progress if isinstance(backend, HarnessBackend) else None
+        progress = self.step_progress(scenario)
         reserved = self.files_trainer(scenario).pending_job_data
         consumed = reserved is not None and reserved.request is not None and reserved.request.id == record_id
         return build_request_page(
@@ -556,8 +579,7 @@ class RequestService:
                 "step_record": None,
                 "activity": [],
             }
-        backend = self.files_trainer(scenario).candidate_backend
-        progress = backend.step_progress if isinstance(backend, HarnessBackend) else None
+        progress = self.step_progress(scenario)
         reserved = self.files_trainer(scenario).pending_job_data
         consumed = reserved is not None and reserved.request is not None and reserved.request.id == record_id
         state = request_state(record, progress, consumed)

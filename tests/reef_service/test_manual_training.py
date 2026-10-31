@@ -13,7 +13,7 @@ from threading import Event
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from tests.support._threshold_processor import threshold_pipeline
-from tests.support.harness_service import harness_dispatcher
+from tests.support.harness_service import catalog, drive_trainer_job, harness_dispatcher, job_backend
 from tests.support.harness_steps import COMPONENT, UNCHANGED, TreeReleases, changed_rules, harness_recipe
 from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent
 from tests.support.samples_service import make_samples
@@ -38,7 +38,7 @@ from reef.storage.samples import CONSUMED_SAMPLE_PREFIX
 from reef.storage.scenario import ScenarioSettings
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
-from reef.train.backend import ComponentReleases, PreparedStep
+from reef.train.backend import ComponentReleases, PreparedStep, ReleaseFiles
 from reef.train.harness_backend.state import HarnessState
 from reef.train.jobs import JobLoop
 from reef.train.pipeline import TrainingPipeline
@@ -160,7 +160,7 @@ def _wait(predicate, seconds=10.0):
 
 
 def _release_texts(dispatcher, scenario="s"):
-    rows = dispatcher.get_or_create_scenario(scenario).releases()
+    rows = catalog(dispatcher.get_or_create_scenario(scenario))
     return [row.get("metrics", {}).get("training_request", {}).get("text") for row in rows]
 
 
@@ -633,7 +633,8 @@ def test_http_mode_change_does_not_wait_for_running_method(tmp_path, open_dispat
                 assert not release.is_set()
                 scenario = dispatcher.get_or_create_scenario("s")
                 assert scenario.trainer.pipeline.training_mode == "auto"
-                assert scenario.trainer.pending_job_data.request.text == "one"
+                # The instruction's job still runs: the mode change neither waits for it nor stops it.
+                assert scenario.trainer.job_running
             finally:
                 release.set()
 
@@ -655,12 +656,13 @@ def test_mode_selection_survives_a_reload_and_a_restart(tmp_path, open_dispatche
     dispatcher.set_training_mode("s", "manual")
     dispatcher.accept_record(instruction("one"))
     assert _wait(lambda: _committed_skip(dispatcher, "one") == UNCHANGED)
-    assert dispatcher.get_or_create_scenario("s").scenario_step == 1
+    # The step's job committed twice: its submission and its end.
+    assert _wait(lambda: dispatcher.get_or_create_scenario("s").scenario_step == 2)
     dispatcher.close()
     # A new process loads the committed state and the stored mode.
     restarted = open_dispatcher(harness_recipe(tmp_path, method))
     loaded = restarted.get_or_create_scenario("s")
-    assert loaded.scenario_step == 1 and loaded.trainer.pipeline.training_mode == "manual"
+    assert loaded.scenario_step == 2 and loaded.trainer.pipeline.training_mode == "manual"
     restarted.close()
     # A recipe that takes no instructions keeps its default, so a person can still select a mode.
     without_requests = open_dispatcher(Recipe())
@@ -686,8 +688,12 @@ def test_a_stored_hybrid_mode_loads_the_scenario_with_the_recipe_default(tmp_pat
 
 
 def _committed_row(dispatcher, text):
+    """The metrics of the step that answered the instruction ``text``, newest first; a job's submission names the
+    instruction too, and is passed over."""
     for row in dispatcher.get_or_create_scenario("s").releases():
         metrics = row.get("metrics") or {}
+        if metrics.get("training_job", {}).get("event") == "submitted":
+            continue
         if metrics.get("training_request", {}).get("text") == text:
             return metrics
     return None
@@ -702,7 +708,7 @@ def _automatic_traces(dispatcher):
     """The trace count of every committed step that ran without an instruction."""
     return [
         metrics["traces"]
-        for row in dispatcher.get_or_create_scenario("s").releases()
+        for row in catalog(dispatcher.get_or_create_scenario("s"))
         if (metrics := row.get("metrics")) and "training_request" not in metrics
     ]
 
@@ -755,8 +761,8 @@ def test_a_step_whose_evaluation_raised_keeps_its_candidate_and_says_where_it_fa
 
 
 def test_a_queue_of_failing_instructions_drains_and_keeps_the_selected_mode(tmp_path, open_dispatcher):
-    """No further record arrives after the two instructions, so the failures wake the worker until both are consumed.
-    A failed instruction is not run again, and the reload after each failure keeps the selected mode."""
+    """No further record arrives after the two instructions, so the failed jobs wake the worker until both are
+    consumed. A failed instruction is not run again, and the scenario keeps the selected mode."""
     calls = []
     method, entered, release = raising_method(calls, poison=None, error="method outage")
     dispatcher = open_dispatcher(harness_recipe(tmp_path, method))
@@ -773,7 +779,7 @@ def test_a_queue_of_failing_instructions_drains_and_keeps_the_selected_mode(tmp_
         assert calls == ["p1", "p2"]
         assert _committed_row(dispatcher, "p2")["error"] == "RuntimeError: method outage"
         current = dispatcher.get_or_create_scenario("s")
-        assert current is not scenario and current.trainer.pipeline.training_mode == "manual"
+        assert current.trainer.pipeline.training_mode == "manual"
         assert current.trainer.pending_instructions() == 0
         assert dispatcher.accept_record(instruction("p3")).agent_record_id == "p3"
         assert _wait(lambda: _committed_skip(dispatcher, "p3") == "instruction failed")
@@ -850,18 +856,19 @@ def test_a_failed_instruction_is_skipped_alone_and_its_units_wait_for_the_next_i
         seen.append(asked(workspace))
 
     restarted = open_dispatcher(recipe_in("manual", tmp_path, method_again))
-    assert restarted.get_or_create_scenario("s").scenario_step == 1
+    # The failed instruction's job committed twice: its submission and its end.
+    assert restarted.get_or_create_scenario("s").scenario_step == 2
     # Recovery keeps the manual buffer and never replays the instruction that the skip row named.
     restarted.accept_record(instruction("after"))
     assert _wait(lambda: _committed_skip(restarted, "after") == UNCHANGED)
     assert seen == [("after", ("a",))]
     loaded = restarted.get_or_create_scenario("s")
-    assert loaded.scenario_step == 2
+    assert loaded.scenario_step == 4
     assert loaded.records.get("s", "poison") is not None
     assert loaded.trainer.pending_instructions() == 0
 
 
-def test_a_logless_scenario_keeps_the_failed_batch_and_skips_it_on_its_next_wake(tmp_path):
+def test_a_logless_scenario_ends_a_failed_instructions_job_and_runs_the_next_instruction(tmp_path):
     calls = []
     entered, release = Event(), Event()
 
@@ -870,7 +877,6 @@ def test_a_logless_scenario_keeps_the_failed_batch_and_skips_it_on_its_next_wake
         calls.append(text)
         if text == "poison":
             raise RuntimeError("poison method")
-        # The step after the skip row holds, so the skip row is observable as the last commit.
         entered.set()
         release.wait(10)
 
@@ -887,17 +893,18 @@ def test_a_logless_scenario_keeps_the_failed_batch_and_skips_it_on_its_next_wake
         scenario = dispatcher.get_or_create_scenario("s")
         assert not scenario.store.durable
         dispatcher.accept_record(instruction("poison"))
-        dispatcher.accept_record(instruction("fine"))
-        assert entered.wait(5)
-        # No reload without a log: the same scenario kept the batch and committed its skip row on the next wake.
+        # The failed job's end is the last commit: its submission was the first.
+        assert _wait(lambda: scenario.scenario_step == 2)
         assert dispatcher.get_or_create_scenario("s") is scenario
         skipped = _last_committed(scenario)
         assert skipped["skipped"] == "instruction failed"
         assert skipped["training_request"]["id"] == "poison"
         assert skipped["error"] == "RuntimeError: poison method"
+        dispatcher.accept_record(instruction("fine"))
+        assert entered.wait(5)
         assert calls == ["poison", "fine"]
         release.set()
-        assert _wait(lambda: scenario.scenario_step == 2)
+        assert _wait(lambda: scenario.scenario_step == 4)
         assert _last_committed(scenario).get("skipped") == UNCHANGED
         assert scenario.trainer.pending_instructions() == 0
         assert scenario.trainer.pipeline_status()["buffered_requests"] == 0
@@ -1109,17 +1116,17 @@ def test_an_instruction_runs_past_the_step_budget_and_the_failure_streak(tmp_pat
     def method(workspace, services):
         seen.append(asked(workspace)[0])
 
-    trainer = _trainer(recipe_in("manual", tmp_path, method, max_steps=1), records)
+    recipe = recipe_in("manual", tmp_path, method, max_steps=1)
+    head = ReleaseFiles("base", dict(recipe.seed.files))
+    trainer = _trainer(recipe, records)
     records.append(instruction("one"))
     records.append(instruction("two"))
     rows = []
-    for step in range(2):
+    for _ in range(2):
         make_samples(trainer)
-        result = trainer.run_once(step)
+        result = drive_trainer_job(trainer)
         assert result is not None
-        prepared = trainer.prepare_commit(result)
-        trainer.commit(prepared)
-        rows.append(prepared.metrics)
+        rows.append(result.metrics)
     assert seen == ["one", "two"]
     assert [row["training_request"]["text"] for row in rows] == ["one", "two"]
     assert [row["skipped"] for row in rows] == [UNCHANGED, UNCHANGED]
@@ -1127,20 +1134,20 @@ def test_an_instruction_runs_past_the_step_budget_and_the_failure_streak(tmp_pat
     assert trainer.run_once(2) is None
 
     # An automatic step past the budget skips; the two instructions above ran past it.
-    backend = trainer.candidate_backend
-    automatic = backend.prepare_step(JobData("auto", ()), HarnessState().to_json(), 5)
+    backend = job_backend(trainer)
+    automatic = backend.prepare_step(JobData("auto", ()), HarnessState().to_json(), 5, head=head)
     assert automatic.metrics["skipped"] == "step budget of 1 exhausted"
     assert seen == ["one", "two"]
     trainer.close()
 
     (tmp_path / "streak").mkdir()
     trainer = _trainer(recipe_in("manual", tmp_path / "streak", method, max_failure_streak=1), records)
-    backend = trainer.candidate_backend
+    backend = job_backend(trainer)
     state = HarnessState(failure_streak=1).to_json()
-    automatic = backend.prepare_step(JobData("auto", ()), state, 0)
+    automatic = backend.prepare_step(JobData("auto", ()), state, 0, head=head)
     assert automatic.metrics["skipped"] == "failure streak of 1 rejections"
     request = TrainingRequest("Follow the request", "session", "r", "request-id")
-    answered = backend.prepare_step(JobData("request-id", (), request=request), state, 0)
+    answered = backend.prepare_step(JobData("request-id", (), request=request), state, 0, head=head)
     assert answered.metrics["skipped"] == UNCHANGED and seen[-1] == "Follow the request"
     trainer.close()
 
@@ -1315,7 +1322,7 @@ def test_manual_collects_the_failures_each_instruction_step_carries(tmp_path, op
     def evaluation_rows():
         """Each step's traces, its evaluation's task count (the seed task and the collected ones) and whether it
         answered an instruction, newest first."""
-        rows = dispatcher.get_or_create_scenario("s").releases()
+        rows = catalog(dispatcher.get_or_create_scenario("s"))
         return [
             (metrics["traces"], metrics["evaluation_task_count"], "training_request" in metrics)
             for row in rows
