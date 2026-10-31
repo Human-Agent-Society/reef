@@ -5,9 +5,9 @@ of its policy configured (RFC #959). A scenario can also hold settings that Reef
 when a commit publishes a checkpoint as a new artifact, Reef queues its evaluation. ``ArtifactEvaluations``
 checks each request against the scenario and stores it in the scenario's evaluation store. It adds one
 ``evaluation_rollout`` item for each rollout to the ``evaluations`` work queue, where the evaluation service's
-workers run them (``reef.evaluation.rollout_worker``). When every rollout of an evaluation is final, it reads the
-scores, stores their ``PolicyEvaluation``, and gives it to the scenario's activation rule. No aiohttp types appear
-here.
+workers run them (``reef.evaluation.rollout_worker``). When every rollout of an evaluation is final,
+``EvaluationResults`` reads the scores, stores their ``PolicyEvaluation``, and gives it to the scenario's activation
+rule (``Scenario.evaluation_refusal`` says which components Reef evaluates). No aiohttp types appear here.
 ``reef.service.routes.evaluations`` adapts it to HTTP.
 
 This version evaluates a model artifact (a ``model`` or ``model_adapter`` component) on a runtime that serves an
