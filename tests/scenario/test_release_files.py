@@ -34,6 +34,8 @@ def harness_scenario(tmp_path: Path, method, *, durable: bool = True, **fields) 
         harness_repository(tmp_path, PI_SEED.files),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record" if durable else None),
+        # The tests commit each step themselves (``run_step``), so no local cycle commits the same job.
+        hold_local_cycles=True,
         coordination=memory_coordination(),
     )
     scenario = dispatcher.get_or_create_scenario("demo")
