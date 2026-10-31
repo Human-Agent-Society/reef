@@ -53,7 +53,12 @@ class LocalJobComponent(TrainingComponent):
         self.job_thread: threading.Thread | None = None
 
     def start_jobs(self) -> None:
-        """Run the jobs that have not ended, in submission order: those a previous process left and those submitted."""
+        """Run the jobs that have not ended, in submission order: those a previous process left and those submitted.
+
+        A second call changes nothing.
+        """
+        if self.job_thread is not None:
+            return
         with self.jobs_lock:
             unfinished = [
                 path

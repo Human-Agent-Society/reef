@@ -210,6 +210,7 @@ def test_a_task_job_of_two_tasks_with_one_name_is_refused(tmp_path):
     component = TinkerTrainingComponent(
         MODEL, TinkerConfig(state_dir=str(tmp_path / "state")), Client(), sampler=Sampler()
     )
+    component.start_jobs()
     try:
         tasks = (harbor_task(tmp_path / "a", "add"), harbor_task(tmp_path / "b", "add"))
         parameters = {"method": TrainingMethod("task_group").to_dict(), "rollout": ROLLOUT, "batch_size": 2}
@@ -234,6 +235,7 @@ def test_a_task_job_trains_its_rollouts_and_a_resumed_job_trains_the_same_ones(t
     component = TinkerTrainingComponent(
         MODEL, TinkerConfig(state_dir=str(tmp_path / "state")), client, sampler=Sampler()
     )
+    component.start_jobs()
     try:
         parameters = {"method": TrainingMethod("task_group").to_dict(), "rollout": ROLLOUT, "batch_size": 2}
         job = TrainingJob(
@@ -264,6 +266,7 @@ def test_a_task_job_is_checked_at_submit(tmp_path):
     method = {"method": TrainingMethod("task_group").to_dict()}
     trajectory = grouped(tmp_path).samples[0]
     without_sampler = TinkerTrainingComponent(MODEL, TinkerConfig(state_dir=str(tmp_path / "a")), Client())
+    without_sampler.start_jobs()
     try:
         with pytest.raises(ValueError, match="no sampler"):
             without_sampler.submit(
@@ -276,6 +279,7 @@ def test_a_task_job_is_checked_at_submit(tmp_path):
     component = TinkerTrainingComponent(
         MODEL, TinkerConfig(state_dir=str(tmp_path / "b")), Client(), sampler=Sampler()
     )
+    component.start_jobs()
     try:
         for items, parameters, message in (
             ((task,), method, "needs the rollout parameter"),

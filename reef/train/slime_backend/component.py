@@ -934,7 +934,6 @@ class SlimeTrainingComponent(SlimeJobs):
         from reef.train.slime_backend.reef_adapters.megatron.lora import megatron_lora_enabled
 
         super().__init__(args, lora=megatron_lora_enabled(args))
-        self.start_jobs()
 
     @property
     def held_rollout_id(self) -> int | None:

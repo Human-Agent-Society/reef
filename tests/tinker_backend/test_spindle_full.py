@@ -127,6 +127,8 @@ def exporter():
 @pytest.fixture
 def component(tmp_path, client, exporter):
     value = SpindleFullTrainingComponent(MODEL, settings(tmp_path), client, exporter)
+    value.start_jobs()
+    value.start_jobs()
     yield value
     value.close()
 
@@ -198,6 +200,7 @@ def test_a_new_base_commit_replaces_the_base_reference_in_the_state_dir(tmp_path
     SpindleFullTrainingComponent(MODEL, settings(tmp_path), client, exporter).close_resources()
     later = "f" * 40
     component = SpindleFullTrainingComponent(MODEL, settings(tmp_path, base=f"hf://{MODEL}@{later}"), client, exporter)
+    component.start_jobs()
     assert read_reference(component.base_artifact_source().model_directory) == HuggingFaceRevision(MODEL, later)
     assert component.start_at(Path(component.base_start)) == FreshStart(MODEL)
 

@@ -158,6 +158,8 @@ def config(tmp_path):
 @pytest.fixture
 def component(config, client):
     value = TinkerTrainingComponent(MODEL, config, client)
+    value.start_jobs()
+    value.start_jobs()
     yield value
     value.close()
 
@@ -348,6 +350,7 @@ def test_a_job_with_parameters_tinker_does_not_take_is_refused_and_records_nothi
 
 def test_a_restarted_component_resumes_a_job_after_its_last_checkpoint(config, client, objective):
     component = TinkerTrainingComponent(MODEL, config, client)
+    component.start_jobs()
     job_id = submit(component, batch(3), objective.name, save_interval=1)
     first = wait(component, job_id).checkpoints[0]
     component.close()
@@ -359,6 +362,7 @@ def test_a_restarted_component_resumes_a_job_after_its_last_checkpoint(config, c
     trained = len(client.calls)
 
     restarted = TinkerTrainingComponent(MODEL, config, client)
+    restarted.start_jobs()
     try:
         status = wait(restarted, job_id)
         assert status.state == "finished"
@@ -420,8 +424,11 @@ def test_an_imported_release_is_a_manifest_whose_paths_resolve_on_the_service(co
 
 def test_exclusive_state_dir_and_model_validation(component, config, inference, tmp_path):
     assert inference.served_weight_kind == "model_adapter", "a Tinker sampler serves a LoRA adapter"
+    # Another process may use the state directory, as control does, but only one runs its jobs.
+    other_process = TinkerTrainingComponent(MODEL, config, RemoteClient())
     with pytest.raises(ValueError, match="already owned"):
-        TinkerTrainingComponent(MODEL, config, RemoteClient())
+        other_process.start_jobs()
+    other_process.close()
     other = TinkerCheckpoint("other/model", 32, "tinker://other/state", "tinker://other/sampler")
     other.write(tmp_path / "other")
     with pytest.raises(ValueError, match="base model"):
@@ -467,6 +474,7 @@ def test_a_method_whose_loss_has_no_kl_penalty_is_refused_before_training(
 
 def test_a_schedule_counts_optimizer_steps_across_jobs_and_restarts(config, client, objective):
     component = TinkerTrainingComponent(MODEL, config, client)
+    component.start_jobs()
     first = train(component, batch(3), objective.name, schedule=WARMUP).checkpoints[-1]
     assert client.learning_rates[-1] == pytest.approx((0.0, 2.5e-5, 5e-5))
     assert first.metrics["learning_rate"] == pytest.approx(5e-5)
@@ -476,6 +484,7 @@ def test_a_schedule_counts_optimizer_steps_across_jobs_and_restarts(config, clie
 
     # A restart continues from the last checkpoint: the warmup continues instead of starting over.
     restarted = TinkerTrainingComponent(MODEL, config, client)
+    restarted.start_jobs()
     try:
         continued = train(restarted, batch(3, "b1"), objective.name, start=first.path, schedule=WARMUP)
         assert client.learning_rates[-1] == pytest.approx((7.5e-5, 1e-4, 1e-4))
@@ -808,6 +817,7 @@ def test_scenario_commits_recovers_activates_and_trains_from_remote_checkpoint(t
 
     def build(client):
         component = TinkerTrainingComponent(MODEL, settings, client)
+        component.start_jobs()
         inference = TinkerInferenceRuntime(client, base_model=MODEL)
         dispatcher = Dispatcher(
             PolicyRecipe(component, runtime=inference, pipeline_stages=job_sized_stages(PolicyRecipe.pipeline_spec())),
@@ -911,6 +921,7 @@ def test_documented_smoke_runs_through_http_and_ttdd_recipe(tmp_path, monkeypatc
     remote = RemoteClient()
     # A job and a batch size of the whole grid train it as one optimizer step.
     component = TinkerTrainingComponent(MODEL, TinkerConfig(state_dir=str(tmp_path / "runtime"), batch_size=4), remote)
+    component.start_jobs()
     inference = TinkerInferenceRuntime(remote, base_model=MODEL)
     step_grid = PipelineConfig.from_setting(
         {

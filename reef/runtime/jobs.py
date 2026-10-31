@@ -364,6 +364,15 @@ class TrainingComponent(ABC):
     def cancel(self, job_id: str) -> None:
         """Stop the job, which then reports ``failed``; nothing for an unknown or ended job."""
 
+    def start_jobs(self) -> None:
+        """Start running jobs in this process: take the component's job state and resume the jobs that have not ended.
+
+        Only the process that runs the jobs calls it: the training service's ``TrainingJobWorker``, which a
+        one-process deployment runs too. Another process, such as control, uses the component to describe jobs and
+        to import starts, and never runs a job. A component whose jobs run elsewhere does nothing, the default.
+        """
+        return
+
     def close(self) -> None:
         """Release the component's resources; safe to call repeatedly."""
         return

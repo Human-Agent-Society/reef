@@ -53,6 +53,13 @@ model. Reef reads none of the parameters. The component contract is:
    Copy a published release into the component's own storage and return it
    as a start. Reef calls this for a ``train-from``. Raise ``ValueError``
    when the component cannot start from those weights.
+``start_jobs()``
+   Start running jobs in this process and resume the jobs that have not
+   ended. Only the training service's job worker calls it, also in a
+   one-process deployment. Control and the other services use the component
+   to describe jobs and import starts, and never run a job. A component that
+   keeps its job state on disk, such as Tinker's ``state_dir``, locks it
+   here, so one process at a time runs its jobs.
 ``starts_from_releases``
    False when ``import_start`` refuses every release; the default is true.
    A client reads it in the scenario contract before it offers a

@@ -241,9 +241,11 @@ class TrainingJobWorker(ServiceWorker):
         self.thread: threading.Thread | None = None
 
     def start(self) -> None:
-        """Run the worker on a daemon thread."""
+        """Start the component's jobs in this process (``TrainingComponent.start_jobs``), and run the worker on a
+        daemon thread."""
         if self.thread is not None:
             return
+        self.component.start_jobs()
         self.thread = threading.Thread(target=self.run, name=f"reef-training-{self.component.name}", daemon=True)
         self.thread.start()
 

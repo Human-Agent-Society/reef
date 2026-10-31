@@ -220,6 +220,8 @@ def build(config, monkeypatch, engines):
     component, inference = connect_training_component(
         service_config_from_mapping(config), model_path="Qwen/Qwen3-8B", loss_family="tttd"
     )
+    # The test runs the jobs in this process, as the training service does.
+    component.start_jobs()
     return component, inference, seen
 
 

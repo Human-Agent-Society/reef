@@ -1930,6 +1930,10 @@ loop:
        it as a start. Reef calls it
        for a ``train-from``. Raise ``ValueError`` when no job can start from
        those weights.
+   * - ``start_jobs()``
+     - Start running jobs in this process: the training service's job worker
+       calls it once. Other processes use the component without running jobs.
+       The default does nothing.
    * - ``starts_from_releases``
      - False when ``import_start`` refuses every release, as Slime's does;
        True, the default, otherwise. The scenario contract's

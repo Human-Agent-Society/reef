@@ -25,7 +25,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 from reef.artifact.files import ArtifactFiles
 from reef.artifact.repository import BaseArtifactSource
@@ -117,6 +117,8 @@ class TinkerJobComponent(LocalJobComponent, ABC):
     data; an intermediate checkpoint (``save_interval``) carries the state of
     the job's start, since the objective computes its state for the whole data.
 
+    Every process that uses the component reads and writes ``config.state_dir``; only the process that runs the
+    jobs holds its lock (``start_jobs``). A split deployment gives control and the training service one directory.
     ``config.state_dir`` holds ``base/`` (the base start, which
     ``prepare_base`` writes), ``imported/<digest>/`` (starts taken from
     releases) and ``jobs/`` (see ``LocalJobComponent``); a saved checkpoint is
@@ -144,21 +146,26 @@ class TinkerJobComponent(LocalJobComponent, ABC):
         self._sampler = sampler
         self._root = Path(config.state_dir).expanduser().resolve()
         self._root.mkdir(parents=True, exist_ok=True)
-        self._state_lock = (self._root / ".lock").open("a")
+        #: The lock of ``state_dir``, which the process that runs the jobs holds (``start_jobs``); None until then.
+        self._state_lock: TextIO | None = None
+        super().__init__(self._root / "jobs")
+        self._base = self._root / "base"
+        self.prepare_base()
+        self.start_at(self._base)
+
+    def start_jobs(self) -> None:
+        """Take ``state_dir`` for this process, then run the jobs: one process at a time runs a state directory's
+        jobs. Raise ``ValueError`` when another process holds it; a second call changes nothing."""
+        if self._state_lock is not None:
+            return
+        lock = (self._root / ".lock").open("a")
         try:
-            fcntl.flock(self._state_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
-            self._state_lock.close()
+            lock.close()
             raise ValueError("Tinker state_dir is already owned by another runtime") from None
-        try:
-            super().__init__(self._root / "jobs")
-            self._base = self._root / "base"
-            self.prepare_base()
-            self.start_at(self._base)
-        except BaseException:
-            self._state_lock.close()
-            raise
-        self.start_jobs()
+        self._state_lock = lock
+        super().start_jobs()
 
     @abstractmethod
     def prepare_base(self) -> None:
@@ -268,7 +275,8 @@ class TinkerJobComponent(LocalJobComponent, ABC):
             if self._sampler is not None:
                 self._sampler.close()
         finally:
-            self._state_lock.close()
+            if self._state_lock is not None:
+                self._state_lock.close()
 
     def task_rollouts(
         self, job: TrainingJob, directory: Path, start: TinkerCheckpoint | FreshStart, settings: RolloutSettings
