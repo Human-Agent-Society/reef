@@ -26,7 +26,7 @@ import uuid
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
 from reef.artifact.artifact import Artifact
 from reef.core.components import made_artifact_id
@@ -406,6 +406,32 @@ class ArtifactEvaluations:
                 key=lambda item: item.id,
             )
         )
+
+    def rollouts_json(self, scenario: str, evaluation_id: str) -> list[dict[str, Any]] | None:
+        """The rollouts of one evaluation, in task and repeat order, each as ``{task, task_index, repeat, state,
+        attempt_count, score, error}``; None when ``scenario`` has no evaluation ``evaluation_id``.
+
+        ``state`` is the rollout's queue state. ``score`` is the rollout's ``RolloutScore`` as JSON once it finished,
+        else null; ``error`` is the reason of a failed rollout, else null.
+        """
+        if self.get(scenario, evaluation_id) is None:
+            return None
+        views = []
+        for item in self.rollouts(evaluation_id, scenario):
+            rollout = EvaluationRollout.from_item(item)
+            finished = item.state == "finished" and item.result is not None
+            views.append(
+                {
+                    "task": rollout.task_name,
+                    "task_index": rollout.task_index,
+                    "repeat": rollout.repeat,
+                    "state": item.state,
+                    "attempt_count": item.attempt_count,
+                    "score": cast(Mapping[str, object], item.result)["score"] if finished else None,
+                    "error": item.error,
+                }
+            )
+        return views
 
     def read_results(self) -> None:
         """End each evaluation whose rollouts are all final, until ``close``."""

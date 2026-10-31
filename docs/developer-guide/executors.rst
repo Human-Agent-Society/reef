@@ -53,6 +53,10 @@ model. Reef reads none of the parameters. The component contract is:
    Copy a published release into the component's own storage and return it
    as a start. Reef calls this for a ``train-from``. Raise ``ValueError``
    when the component cannot start from those weights.
+``starts_from_releases``
+   False when ``import_start`` refuses every release; the default is true.
+   A client reads it in the scenario contract before it offers a
+   ``train-from``.
 ``name``
    The backend name that jobs carry.
 ``shares_scenarios``

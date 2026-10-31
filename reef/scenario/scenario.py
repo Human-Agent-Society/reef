@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from contextlib import nullcontext
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +30,50 @@ from reef.storage.scenario import ScenarioStore
 from reef.surface.base import Surface
 from reef.train.trainer import ComponentTrainer, Trainer
 from reef.train.types import TrainStepResult
+
+
+@dataclass(frozen=True)
+class ScenarioCapabilities:
+    """The artifact operations that one scenario can run, as its store, runtime and trainers allow them.
+
+    Values:
+
+    - ``serve_beside`` is True exactly when ``Scenario.serve`` can serve an artifact beside the active release: the
+      store keeps a durable commit history, and the scenario has no runtime-loaded component, no runtime, or a
+      runtime that serves artifacts on request (``InferenceRuntime.serves_artifacts_on_request``).
+    - ``evaluate`` holds the components whose artifacts an artifact evaluation can run, in surface order: each
+      component with a kind, when no component is a ``harness_plugin`` and the runtime serves artifacts on request;
+      else it is empty.
+    - ``train_from`` holds the components whose trainer can start from an artifact (``Trainer.can_train_from``), in
+      trainer order.
+
+    Each name occurs at most once in its tuple.
+
+    Purpose: ``Scenario.capabilities`` makes it, and the contract route reports it, so that a client offers only the
+    operations that the scenario can run. An operation that it allows can still refuse one artifact, for example a
+    release whose weights the training component cannot import.
+    """
+
+    serve_beside: bool
+    evaluate: tuple[str, ...]
+    train_from: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.serve_beside, bool):
+            raise TypeError("serve_beside must be a bool")
+        for field_name, names in (("evaluate", self.evaluate), ("train_from", self.train_from)):
+            if not isinstance(names, tuple) or not all(isinstance(name, str) and name for name in names):
+                raise TypeError(f"{field_name} must be a tuple of component names")
+            if len(set(names)) != len(names):
+                raise ValueError(f"{field_name} names a component twice")
+
+    def to_json(self) -> dict[str, object]:
+        """``{serve_beside, evaluate, train_from}``, with the tuples as lists."""
+        return {
+            "serve_beside": self.serve_beside,
+            "evaluate": list(self.evaluate),
+            "train_from": list(self.train_from),
+        }
 
 
 class Scenario:
@@ -164,6 +209,25 @@ class Scenario:
     def training_mode(self) -> str:
         """The mode the scenario's stepping trainers run in; a trainer that runs no step keeps none."""
         return self.stepping_trainers()[0].trainer.pipeline.training_mode
+
+    def capabilities(self) -> ScenarioCapabilities:
+        """The artifact operations that this scenario can run (``ScenarioCapabilities``)."""
+        surface, runtime = self._surface, self.runtime
+        on_request = runtime is not None and runtime.serves_artifacts_on_request
+        kinds = {name: component.kind for name, component in surface.components.items()}
+        if on_request and "harness_plugin" not in kinds.values():
+            evaluate = tuple(name for name, kind in kinds.items() if kind is not None)
+        else:
+            evaluate = ()
+        return ScenarioCapabilities(
+            serve_beside=self._store.durable and (surface.loader_component is None or runtime is None or on_request),
+            evaluate=evaluate,
+            train_from=tuple(
+                component_trainer.component
+                for component_trainer in self.trainers
+                if component_trainer.trainer.can_train_from
+            ),
+        )
 
     def stepping_trainers(self) -> tuple[ComponentTrainer, ...]:
         """The trainers that train; the first trainer when none does."""
@@ -335,6 +399,12 @@ class Scenario:
         with self.release_queries.publication_lock:
             return self._committer.artifact_status()
 
+    def artifact_release_ref(self, artifact_id: str, component: str | None = None) -> tuple[str, ArtifactRef]:
+        """The component that ``artifact_id`` names and the ref of the release that minted it, without materializing
+        the release; see :meth:`ScenarioCommitter.artifact_release_ref`."""
+        with self.release_queries.publication_lock:
+            return self._committer.artifact_release_ref(artifact_id, component)
+
     def resolve_artifact(self, artifact_id: str, component: str | None = None) -> tuple[ComponentArtifact, Artifact]:
         """The artifact ``artifact_id`` names and a release that binds it; see :meth:`ScenarioCommitter.resolve_artifact`."""
         with self.release_queries.publication_lock:
@@ -394,5 +464,6 @@ __all__ = [
     "SCENARIO_METADATA_KEY",
     "ReleaseNotRestorable",
     "Scenario",
+    "ScenarioCapabilities",
     "validate_component_trainers",
 ]

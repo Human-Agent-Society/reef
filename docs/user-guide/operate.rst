@@ -394,9 +394,10 @@ the same artifact backend.
 ``GET /reef/scenarios/{scenario}/jobs`` to the data service. In the split
 layout, control does not serve these routes. The data service also answers the
 reads of what each scenario stores: the scenario list, settings, contract,
-records, commits, artifacts, samples, tasks and evaluations. Control answers
-these reads too. Writes to a scenario, the buffer routes, ``/reef/status`` and
-the harness routes stay with control. The data service needs no control lease,
+records, commits, artifacts, samples, tasks, and evaluations with their
+rollouts. Control answers these reads too. Writes to a scenario, the buffer
+routes, the cancel of a training job, ``/reef/status`` and the harness routes
+stay with control. The data service needs no control lease,
 so you can run several replicas of it behind one address.
 
 After each data write, the data service asks control to sync the scenarios

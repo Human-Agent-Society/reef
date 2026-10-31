@@ -598,11 +598,20 @@ class InferenceRuntime(AdapterWeightRuntime):
         """
         return "model"
 
+    @property
+    def serves_artifacts_on_request(self) -> bool:
+        """Whether this runtime answers each call from the artifact that the call names, without loading it.
+
+        False, the default, for a runtime that serves only the artifact it has loaded; its ``artifact_model`` is
+        None for every artifact. A runtime that returns True overrides ``artifact_model`` to return a model.
+        """
+        return False
+
     def artifact_model(self, artifact: Artifact) -> PolicyModel | None:
         """The model that this runtime serves for ``artifact`` on request, without loading it.
 
         ``None``, the default, means the runtime serves only the artifact it has loaded, so it cannot answer a call
-        for another artifact. A runtime whose handler answers each call from the artifact that the call names, such
+        for another artifact (``serves_artifacts_on_request`` is False). A runtime whose handler answers each call from the artifact that the call names, such
         as a sampler for each checkpoint, returns that artifact's model. Raise ``ValueError`` when ``artifact`` is
         not one that this runtime can serve.
         """

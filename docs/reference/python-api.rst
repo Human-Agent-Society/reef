@@ -811,6 +811,15 @@ that the backend supports:
        without moving the head, and ``commit_release`` moves the head
        after the scenario commit. A durable scenario store requires it.
 
+A backend whose storage can give clients a URL for each file, such as an
+object store, overrides ``file_downloads(ref, expires_in_seconds)``. It
+returns every file of the release as a ``FileDownload``: ``path`` in the
+release, ``byte_count``, and a ``url`` that opens the file without a Reef
+credential until ``expires_at``. It must not materialize the release. The
+default returns None, and Reef then lists and serves the files of the
+materialized release itself. The artifact file list of the HTTP API gives
+these URLs to clients, so that a large artifact downloads from the storage.
+
 ``tests/artifact/test_reef_artifacts.py`` and
 ``tests/artifact/test_reef_git_lfs.py`` show the publication and recovery
 behavior that a backend must have. ``GitLFSRepositoryBackendFactory`` is the
@@ -1774,7 +1783,9 @@ Neither inherits from the other, and no trainer holds a serving engine.
   runtime that serves only its loaded artifact. A runtime whose handler answers
   each call from the artifact that the call names overrides it, as the Tinker
   runtime does; the `artifact evaluation <http-api.rst#evaluate-an-artifact>`__
-  of a model artifact needs it.
+  of a model artifact needs it. Such a runtime also returns True from
+  ``serves_artifacts_on_request``, which the scenario contract's
+  ``capabilities`` read.
   ``shared_by_training_scenarios`` is true for a runtime that serves each
   training scenario its own weights.
 * ``ScenarioCommitter`` orders both around each commit. It publishes a
@@ -1913,6 +1924,10 @@ loop:
        it as a start. Reef calls it
        for a ``train-from``. Raise ``ValueError`` when no job can start from
        those weights.
+   * - ``starts_from_releases``
+     - False when ``import_start`` refuses every release, as Slime's does;
+       True, the default, otherwise. The scenario contract's
+       ``capabilities`` read it.
    * - ``check_release(directory)``
      - Raise ``ValueError`` unless ``directory`` holds a release in the
        layout of this component's releases. An artifact import calls it.

@@ -467,6 +467,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync):
                 "training_mode": current.trainer.pipeline.training_mode,
                 "status": dict(current.trainer.pipeline_status()),
                 "required_request_types": sorted(rt.value for rt in pipeline.required_request_types),
+                "capabilities": current.capabilities().to_json(),
             }
 
     def activate(self, scenario: str, artifact_id: str, component: str | None = None) -> ComponentArtifact:

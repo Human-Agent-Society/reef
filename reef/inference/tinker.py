@@ -123,6 +123,10 @@ class TinkerInferenceRuntime(InferenceRuntime):
                 return self._active, self._version
             return self._remember(sampler_path)
 
+    @property
+    def serves_artifacts_on_request(self) -> bool:
+        return True
+
     def artifact_model(self, artifact: Artifact) -> PolicyModel:
         """The model that serves ``artifact``: each call samples its own artifact.
 

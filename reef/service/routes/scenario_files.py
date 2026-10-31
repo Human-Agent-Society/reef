@@ -19,7 +19,8 @@ def register_scenario_file_routes(app: web.Application, *, request_service: Requ
     dispatcher = request_service.dispatcher
 
     async def files(request: web.Request) -> web.Response | web.FileResponse:
-        """The artifact's file list; with ``path``, that file; with ``signed=1``, a signed URL of either."""
+        """The artifact's file list, with the backend's URL of each file when it signs them; with ``path``, that file;
+        with ``signed=1``, a signed URL of either. ``expires_in`` sets the life of the URLs."""
         scenario, artifact_id = request.match_info["scenario"], request.match_info["artifact_id"]
         component = request.query.get("component") or None
         path = request.query.get("path", "")
@@ -27,7 +28,9 @@ def register_scenario_file_routes(app: web.Application, *, request_service: Requ
             url, expires_at = signed_download_url(request, download_seconds(request))
             return web.json_response({"url": url, "expires_at": expires_at})
         if not path:
-            listing = await asyncio.to_thread(artifact_files, dispatcher, scenario, artifact_id, component)
+            listing = await asyncio.to_thread(
+                artifact_files, dispatcher, scenario, artifact_id, component, download_seconds(request)
+            )
             return web.json_response(listing)
         file = await asyncio.to_thread(artifact_file, dispatcher, scenario, artifact_id, component, path)
         return web.FileResponse(file, headers={"Content-Disposition": f'attachment; filename="{file.name}"'})

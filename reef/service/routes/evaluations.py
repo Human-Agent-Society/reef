@@ -23,6 +23,16 @@ def register_evaluation_routes(app: web.Application, *, evaluations: ArtifactEva
             raise web.HTTPNotFound(text=f"no evaluation {evaluation_id!r}")
         return web.json_response(stored.to_json(), headers={"Cache-Control": "no-store"})
 
+    async def rollouts(request: web.Request) -> web.Response:
+        scenario, evaluation_id = request.match_info["scenario"], request.match_info["evaluation_id"]
+        views = await asyncio.to_thread(evaluations.rollouts_json, scenario, evaluation_id)
+        if views is None:
+            raise web.HTTPNotFound(text=f"no evaluation {evaluation_id!r}")
+        return web.json_response(
+            {"scenario": scenario, "evaluation_id": evaluation_id, "rollouts": views},
+            headers={"Cache-Control": "no-store"},
+        )
+
     async def newest(request: web.Request) -> web.Response:
         scenario = request.match_info["scenario"]
         # A limit that is not a positive integer is a ValueError, which answers HTTP 400.
@@ -34,6 +44,7 @@ def register_evaluation_routes(app: web.Application, *, evaluations: ArtifactEva
 
     app.router.add_get("/reef/scenarios/{scenario}/evaluations", newest)
     app.router.add_get("/reef/scenarios/{scenario}/evaluations/{evaluation_id}", evaluation)
+    app.router.add_get("/reef/scenarios/{scenario}/evaluations/{evaluation_id}/rollouts", rollouts)
     if writes:
         app.router.add_post("/reef/scenarios/{scenario}/evaluations", start)
 

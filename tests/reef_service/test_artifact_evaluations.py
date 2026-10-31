@@ -80,6 +80,10 @@ class ReleaseRuntime(InferenceRuntime):
     def served_model_name(self, scenario: str) -> str:
         return "base"
 
+    @property
+    def serves_artifacts_on_request(self) -> bool:
+        return self.serves_any_release
+
     def artifact_model(self, artifact: Artifact) -> PolicyModel | None:
         return PolicyModel("base", f"sampler:{artifact.artifact_id}") if self.serves_any_release else None
 
@@ -209,6 +213,22 @@ def test_a_model_artifact_is_evaluated_with_the_configured_harness_on_the_releas
             }
             assert answer["mean_score"] == 0.5
             assert runtime.handler.releases == [artifact_id] * 4, "every call samples the evaluated release"
+            rollouts_route = f"/reef/scenarios/s/evaluations/{accepted['evaluation_id']}/rollouts"
+            rollouts = (await (await client.get(rollouts_route, headers=AUTH)).json())["rollouts"]
+            assert [(rollout["task"], rollout["repeat"], rollout["score"]) for rollout in rollouts] == [
+                ("add", 0, 1.0),
+                ("add", 1, 1.0),
+                ("broken", 0, "failed"),
+                ("broken", 1, "failed"),
+                ("sort", 0, 0.0),
+                ("sort", 1, 0.0),
+            ]
+            assert {rollout["state"] for rollout in rollouts} == {"finished"}
+            missing = await client.get("/reef/scenarios/s/evaluations/missing/rollouts", headers=AUTH)
+            assert missing.status == 404
+            contract = await (await client.get("/reef/scenarios/s/contract", headers=AUTH)).json()
+            assert contract["capabilities"]["evaluate"] == ["weights"]
+            assert contract["capabilities"]["serve_beside"] is True
             listing = await (await client.get("/reef/scenarios/s/evaluations", headers=AUTH)).json()
             assert [item["evaluation_id"] for item in listing["evaluations"]] == [accepted["evaluation_id"]]
             # The evaluation keeps no record and changes nothing the scenario serves.
@@ -253,6 +273,10 @@ def test_a_runtime_that_serves_only_its_current_release_or_a_scenario_with_a_har
         evaluations = ArtifactEvaluations(dispatcher)
         async with TestClient(TestServer(create_app(dispatcher, tokens=TOKEN, evaluations=evaluations))) as client:
             artifact_id = await created(client, root, "add")
+            # The contract tells a client so before it asks: no component can be evaluated.
+            contract = await (await client.get("/reef/scenarios/s/contract", headers=AUTH)).json()
+            assert contract["capabilities"]["evaluate"] == []
+            assert contract["capabilities"]["serve_beside"] is harness
             body = {"artifact_id": artifact_id, "harness": {"name": "terminus-2"}, "component": "weights"}
             response = await client.post("/reef/scenarios/s/evaluations", headers=AUTH, json=body)
             assert response.status == 400 and message in await response.text(), await response.text()

@@ -9,6 +9,7 @@ from reef.scenario.scenario import Scenario
 from reef.service.artifact_evaluations import ArtifactEvaluations
 from reef.service.request_service import RequestService
 from reef.service.routes.payload import read_object
+from reef.service.scenario_files import cancel_scenario_job
 from reef.storage.data import check_owner
 
 
@@ -202,6 +203,13 @@ def register_scenario_routes(
             }
         )
 
+    async def cancel_job(request: web.Request) -> web.Response:
+        scenario, job_id = request.match_info["scenario"], request.match_info["job_id"]
+        job = await asyncio.to_thread(cancel_scenario_job, request_service.dispatcher, scenario, job_id)
+        if job is None:
+            raise web.HTTPNotFound(text=f"scenario {scenario!r} has no training job {job_id!r}")
+        return web.json_response({"scenario": scenario, "job": job})
+
     async def train_from_artifact(request: web.Request) -> web.Response:
         scenario = request.match_info["scenario"]
         artifact_id, component = await read_artifact_selection(request)
@@ -226,6 +234,7 @@ def register_scenario_routes(
     app.router.add_post("/reef/scenarios/{scenario}/train-from", train_from_artifact)
     app.router.add_post("/reef/scenarios/{scenario}/serve", serve_artifact)
     app.router.add_post("/reef/scenarios/{scenario}/stop-serving", stop_serving_artifact)
+    app.router.add_post("/reef/scenarios/{scenario}/jobs/{job_id}/cancel", cancel_job)
 
 
 __all__ = ["register_scenario_routes"]

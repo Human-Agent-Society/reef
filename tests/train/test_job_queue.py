@@ -181,3 +181,23 @@ def test_a_worker_that_continues_a_job_reports_each_checkpoint_step_once(tmp_pat
     assert item.state == "finished"
     assert [entry["step"] for entry in item.progress] == [1, 2]
     worker.stop()
+
+
+class ReleaseRefusingComponent(StepComponent):
+    """A component that continues only from its own checkpoints, as Slime does."""
+
+    @property
+    def starts_from_releases(self) -> bool:
+        return False
+
+    def import_start(self, release: Path) -> str:
+        raise ValueError("this component starts only from its own checkpoints")
+
+
+@pytest.mark.unit
+def test_a_queue_component_reports_whether_its_component_starts_from_releases(tmp_path):
+    queue = memory_coordination().work_queue
+    assert JobQueueComponent(StepComponent(tmp_path / "a"), queue).starts_from_releases is True
+    refusing = JobQueueComponent(ReleaseRefusingComponent(tmp_path / "b"), queue)
+    assert refusing.starts_from_releases is False
+    assert refusing.for_scenario("s").starts_from_releases is False

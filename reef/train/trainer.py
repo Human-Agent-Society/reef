@@ -331,6 +331,15 @@ class Trainer:
         return self._job_loop is not None or self._candidate_backend is not None
 
     @property
+    def can_train_from(self) -> bool:
+        """Whether ``start_from`` can take an artifact: a harness trainer always can, a weight trainer when its
+        training component takes releases (``TrainingComponent.starts_from_releases``), and a trainer that trains
+        nothing never can."""
+        if self._candidate_backend is not None:
+            return True
+        return self._job_loop is not None and self._job_loop.component.starts_from_releases
+
+    @property
     def job_running(self) -> bool:
         """Whether this trainer's committed state names a running job, which its worker polls."""
         with self._lock:

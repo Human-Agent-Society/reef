@@ -28,8 +28,48 @@ from reef.core.components import validate_component_name
 from reef.core.plugins import Plugin
 
 
+@dataclass(frozen=True)
+class FileDownload:
+    """One file of a release that a client downloads straight from a repository backend's storage.
+
+    Values: ``path`` is the file's path in the release, as the materialized release names it: a relative POSIX
+    path, not empty, with no ``.`` or ``..`` part. ``byte_count`` is the file's size, at least 0. ``url`` is an
+    absolute ``https`` or ``http`` URL that opens the file with a GET and no Reef credential until ``expires_at``
+    (Unix seconds, positive).
+
+    Purpose: ``RepositoryBackend.file_downloads`` makes them, and the data service's artifact file list gives them
+    to clients, so that the bytes of a large artifact do not pass through a Reef process.
+    """
+
+    path: str
+    byte_count: int
+    url: str
+    expires_at: int
+
+    def __post_init__(self) -> None:
+        parts = PurePosixPath(self.path).parts if isinstance(self.path, str) else ()
+        if not parts or PurePosixPath(self.path).is_absolute() or any(part in (".", "..") for part in parts):
+            raise ValueError(f"a file download's path is a relative path in the release, got {self.path!r}")
+        if isinstance(self.byte_count, bool) or not isinstance(self.byte_count, int) or self.byte_count < 0:
+            raise ValueError("a file download's byte_count is an int of at least 0")
+        if not isinstance(self.url, str) or not self.url.startswith(("https://", "http://")):
+            raise ValueError("a file download's url is an absolute http or https URL")
+        if isinstance(self.expires_at, bool) or not isinstance(self.expires_at, int) or self.expires_at <= 0:
+            raise ValueError("a file download's expires_at is a positive int of Unix seconds")
+
+
 class RepositoryBackend(ArtifactRepository):
     """Durable storage bound to one scenario repository."""
+
+    def file_downloads(self, ref: ArtifactRef, expires_in_seconds: int) -> tuple[FileDownload, ...] | None:
+        """Every file of the release ``ref``, in path order, each with a URL that opens it for ``expires_in_seconds``
+        seconds; the backend lists and signs them without materializing the release.
+
+        None, the default, when this backend keeps no copy of its releases that a client can open; Reef then lists
+        the files of the materialized release, and serves them itself. Raise ``ArtifactNotFound`` when the backend
+        holds no release ``ref``.
+        """
+        return None
 
     @abstractmethod
     def resolve_release(self, release_id: str | None = None) -> ArtifactRef:
@@ -299,6 +339,13 @@ class Repository(ArtifactRepository):
     @property
     def backend(self) -> RepositoryBackend:
         return self._backend
+
+    def file_downloads(self, ref: ArtifactRef, expires_in_seconds: int) -> tuple[FileDownload, ...] | None:
+        """The backend's ``file_downloads`` of the durable release ``ref``; None for a release staged on this host,
+        which only the local copy holds."""
+        if ref.release_id in self._local_artifacts:
+            return None
+        return self.backend.file_downloads(ref, expires_in_seconds)
 
     @property
     def base_artifact(self) -> ArtifactRef:

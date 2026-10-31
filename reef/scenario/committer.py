@@ -320,18 +320,12 @@ class ScenarioCommitter:
         if any(component_trainer.trainer.has_pending_commit for component_trainer in self.trainers):
             raise CommitPending(f"cannot {action} while a training result waits for its commit")
 
-    def resolve_artifact(self, artifact_id: str, component: str | None) -> tuple[ComponentArtifact, Artifact]:
-        """The artifact ``artifact_id`` names as ``component``'s content, and the resolved release that minted it.
+    def artifact_release_ref(self, artifact_id: str, component: str | None) -> tuple[str, ArtifactRef]:
+        """The component that ``artifact_id`` names, and the ref of the durable release that minted it.
 
-        With one component, ``component`` may be ``None`` and
-        ``artifact_id`` is the ``release_id`` of the release that made the
-        artifact. With several, ``component`` is required and ``artifact_id``
-        is ``<release_id>:<component>`` for a release that minted that
-        component's content (``ScenarioReleases.artifacts``). Raise
-        ``ValueError`` for a missing or unknown component,
-        ``ArtifactNotFound`` for an ``artifact_id`` the scenario does not
-        list, and ``ReleaseNotRestorable`` for a release without durable
-        bytes or without every component the scenario serves.
+        It reads the commit history alone and does not materialize the release. ``component`` and ``artifact_id``
+        are as for :meth:`resolve_artifact`, which raises the same errors, except for the check of the release's
+        components.
         """
         names = self.component_names()
         if component is None:
@@ -349,7 +343,23 @@ class ScenarioCommitter:
         found = self.release_queries.find_release(row["release_id"])
         if found is None or not found[1]:
             raise ReleaseNotRestorable(f"scenario {self._name!r} artifact {artifact_id!r} has no durable bytes")
-        release = self._artifacts.resolve(found[0])
+        return component, found[0]
+
+    def resolve_artifact(self, artifact_id: str, component: str | None) -> tuple[ComponentArtifact, Artifact]:
+        """The artifact ``artifact_id`` names as ``component``'s content, and the resolved release that minted it.
+
+        With one component, ``component`` may be ``None`` and
+        ``artifact_id`` is the ``release_id`` of the release that made the
+        artifact. With several, ``component`` is required and ``artifact_id``
+        is ``<release_id>:<component>`` for a release that minted that
+        component's content (``ScenarioReleases.artifacts``). Raise
+        ``ValueError`` for a missing or unknown component,
+        ``ArtifactNotFound`` for an ``artifact_id`` the scenario does not
+        list, and ``ReleaseNotRestorable`` for a release without durable
+        bytes or without every component the scenario serves.
+        """
+        component, ref = self.artifact_release_ref(artifact_id, component)
+        release = self._artifacts.resolve(ref)
         try:
             self.require_components(release)
         except ReefError as exc:

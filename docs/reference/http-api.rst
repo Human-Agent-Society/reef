@@ -124,6 +124,8 @@ Routes
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/scenarios/{scenario}/jobs``                                          | the scenario's training jobs in the jobs queue    |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/scenarios/{scenario}/jobs/{job_id}/cancel``                         | cancel one training job of the scenario           |
++----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/scenarios/{scenario}/samples``                                       | the scenario's training samples, in store order   |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/scenarios/{scenario}/buffer``                                        | the samples that the next job trains              |
@@ -139,6 +141,8 @@ Routes
 | ``GET /reef/scenarios/{scenario}/evaluations``                                   | artifact evaluations, newest first                |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/scenarios/{scenario}/evaluations/{evaluation_id}``                   | one evaluation: its state and result              |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/scenarios/{scenario}/evaluations/{evaluation_id}/rollouts``          | the rollouts of one evaluation, as they run       |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``DELETE /reef/scenarios/{scenario}``                                            | remove a scenario; its state is archived          |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
@@ -791,14 +795,28 @@ that was queued or running when the service stopped reads as ``failed``; Reef
 does not resume it. ``GET /reef/scenarios/{scenario}/evaluations`` lists the
 evaluations, newest first, at most ``limit`` (50 by default).
 
+``GET /reef/scenarios/{scenario}/evaluations/{evaluation_id}/rollouts``
+shows the progress of an evaluation while it runs. It answers ``{scenario,
+evaluation_id, rollouts}``: each rollout in task and repeat order, as
+``{task, task_index, repeat, state, attempt_count, score, error}``.
+
+- ``state`` is the rollout's state in the evaluations queue: ``queued``,
+  ``assigned``, ``running``, ``finished`` or ``failed``.
+- ``score`` is the rollout's score once it finished, else null.
+- ``error`` is the reason that a failed rollout failed, else null.
+
+An unknown evaluation returns 404.
+
 Reef returns:
 
 - 400, and runs nothing, for a request that the scenario cannot run: an
   unknown field or task, the wrong side configured, a component that is no
   side of a policy, an artifact or a runtime that this version refuses, or no
   eval task;
-- 404 for an unknown scenario, artifact or evaluation;
-- 429 when the service runs two evaluations already.
+- 404 for an unknown scenario, artifact or evaluation.
+
+Reef sets no limit on the evaluations that run at once: the evaluations queue
+holds the rollouts that wait.
 
 Automatic evaluation
 ~~~~~~~~~~~~~~~~~~~~
@@ -1032,7 +1050,7 @@ returns HTTP 404, and you create the scenario first:
 +---------------------------------------------+---------------------------------------------+
 | ``GET /reef/scenarios/{scenario}/contract`` | ``{scenario, processor,                     |
 |                                             | required_request_types, training_mode,      |
-|                                             | status}``                                   |
+|                                             | status, capabilities}``                     |
 +---------------------------------------------+---------------------------------------------+
 | ``DELETE /reef/scenarios/{scenario}``       | → ``{scenario, archived}``; 404 unknown     |
 +---------------------------------------------+---------------------------------------------+
@@ -1044,6 +1062,37 @@ returns HTTP 404, and you create the scenario first:
 |                                             | that the job reported. Read only, from the  |
 |                                             | data service; 404 unknown                   |
 +---------------------------------------------+---------------------------------------------+
+
+``POST /reef/scenarios/{scenario}/jobs/{job_id}/cancel`` cancels one training
+job of the scenario. It answers ``{scenario, job}``, with the job as ``GET
+/reef/scenarios/{scenario}/jobs`` lists it after the cancel:
+
+- A queued job fails at once, with the error ``cancelled by request``.
+- A running job fails the same way, and its training worker cancels the run
+  at its next poll.
+- A job that ended stays as it is, so a second cancel changes nothing.
+
+The trainer reads the failed job and records its end. An unknown scenario, or
+a job that the scenario does not have, returns 404. Control answers this
+route.
+
+The contract's ``capabilities`` tell a client which artifact operations the
+scenario can run, so that it offers only those:
+
+- ``serve_beside``: whether ``POST /reef/scenarios/{scenario}/serve`` can
+  serve an artifact beside the active release. It is false when the runtime
+  answers only from the release that it has loaded, or when the store keeps
+  no durable commit history.
+- ``evaluate``: the components whose artifacts ``POST
+  /reef/scenarios/{scenario}/evaluations`` can evaluate. It is empty when the
+  runtime cannot serve an artifact on request, or when the artifacts hold a
+  harness.
+- ``train_from``: the components whose trainer ``POST
+  /reef/scenarios/{scenario}/train-from`` can start from an artifact. A Slime
+  component, which continues only from its own checkpoints, is not in it.
+
+An operation that the capabilities allow can still refuse one artifact, for
+example a release whose weights the training component cannot import.
 
 Deleting a scenario
 -------------------
@@ -1582,7 +1631,18 @@ either.
 
 ``GET /reef/scenarios/{scenario}/artifacts/{artifact_id}/files`` answers
 ``{scenario, artifact_id, files}``: each file of the artifact as ``{path,
-bytes}``, in path order. With ``?path=<path>``, it downloads that file. In a
+bytes, url, url_expires_at}``, in path order.
+
+- When the repository backend signs URLs of its files, ``url`` opens the file
+  in the backend's storage, without a Reef token, until ``url_expires_at``
+  (Unix seconds). Reef then lists the files without copying the artifact to
+  its own disk. ``?expires_in=`` sets the life of these URLs in seconds: 1 to
+  86400, 3600 by default. Download a large artifact through these URLs, so
+  that its bytes do not pass through Reef.
+- With a backend that signs no URLs, such as ``git_lfs``, both fields are
+  null, and the data service serves the files itself.
+
+With ``?path=<path>``, the route downloads that file. In a
 scenario of several components, name the component with ``?component=``. An
 artifact that the scenario does not list, or a path that is not one of its
 files, returns 404. ``?signed=1`` returns a `signed download URL

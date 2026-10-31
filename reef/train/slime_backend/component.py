@@ -335,6 +335,10 @@ class SlimeJobs(LocalJobComponent):
     def base_start(self) -> str:
         return str(self.base_start_dir)
 
+    @property
+    def starts_from_releases(self) -> bool:
+        return False
+
     def import_start(self, release: Path) -> str:
         raise ValueError(
             "Slime continues training from its own latest checkpoint; it cannot load a published release "

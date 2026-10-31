@@ -251,6 +251,16 @@ class TrainingComponent(ABC):
         """The start of a job from the untrained checkpoint; the first job of every trainer starts from it."""
 
     @property
+    def starts_from_releases(self) -> bool:
+        """Whether ``import_start`` can take a published release as the start of later jobs.
+
+        False exactly when the component refuses every release, so no trainer of it can train from an artifact.
+        True, the default, when it takes some releases; ``import_start`` still refuses one whose weights it cannot
+        start from.
+        """
+        return True
+
+    @property
     def shares_scenarios(self) -> bool:
         """Whether jobs of several scenarios can run on this component.
 
@@ -333,8 +343,8 @@ class TrainingComponent(ABC):
         (``train-from``). The component copies what it trains
         from into its own durable directory, since ``release`` can be
         discarded later. Raise ``ValueError``, and change nothing, when the
-        component cannot start from these weights; a component may refuse
-        every release.
+        component cannot start from these weights. A component whose
+        ``starts_from_releases`` is False refuses every release.
         """
 
     @abstractmethod

@@ -1,4 +1,5 @@
-"""The data service's routes: imports and exports at a URI, item archives, artifact files, jobs and signed URLs."""
+"""The data service's routes: imports and exports at a URI, item archives, artifact files, jobs and signed URLs;
+and control's cancel of a job and the contract's capabilities."""
 
 from __future__ import annotations
 
@@ -10,6 +11,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from tests.support.task_service_stubs import task_for
 from tests.support.trajectory_uploads import (
@@ -21,9 +23,14 @@ from tests.support.trajectory_uploads import (
     upload_trajectories,
 )
 
+from reef.artifact.artifact import ArtifactRef
+from reef.artifact.files import DirectoryFiles
+from reef.artifact.memory import InMemoryRepositoryBackend
+from reef.artifact.repository import FileDownload
 from reef.core.tasks import write_harbor_task
 from reef.dispatcher import Dispatcher
 from reef.service.app import create_app
+from reef.service.scenario_files import JOB_CANCELLED_ERROR
 from reef.storage.data import DATA_QUEUE
 from reef.storage.work_queue import NewWork
 from reef.train.job_queue import JOBS_QUEUE
@@ -148,6 +155,8 @@ def test_an_artifacts_files_list_and_download_and_the_jobs_of_a_scenario_read_fr
         listing = await (await client.get(files_route, headers=AUTH)).json()
         paths = [entry["path"] for entry in listing["files"]]
         assert paths and all(entry["bytes"] >= 0 for entry in listing["files"])
+        # The in-memory repository signs no URLs, so data serves the files itself.
+        assert all(entry["url"] is None and entry["url_expires_at"] is None for entry in listing["files"])
         signed = await (await client.get(f"{files_route}?path={paths[0]}&signed=1", headers=AUTH)).json()
         downloaded = await client.get(signed["url"])
         assert downloaded.status == 200
@@ -162,5 +171,83 @@ def test_an_artifacts_files_list_and_download_and_the_jobs_of_a_scenario_read_fr
         jobs = await (await client.get("/reef/scenarios/s/jobs", headers=AUTH)).json()
         assert [(job["id"], job["state"]) for job in jobs["jobs"]] == [("job-1", "queued")]
         assert (await client.get("/reef/scenarios/nothing/jobs", headers=AUTH)).status == 404
+
+    served(dispatcher, check)
+
+
+class SigningBackend(InMemoryRepositoryBackend):
+    """An in-memory repository that signs a URL for each file of a release, as an object store does."""
+
+    def file_downloads(self, ref: ArtifactRef, expires_in_seconds: int) -> tuple[FileDownload, ...]:
+        files = DirectoryFiles(self.materialize(ref).local_path)
+        expires_at = int(time.time()) + expires_in_seconds
+        return tuple(
+            FileDownload(path, files.file(path).stat().st_size, f"https://store.example/{path}", expires_at)
+            for path in files.paths()
+        )
+
+
+def test_an_artifacts_file_list_gives_the_repositorys_urls_without_materializing_the_artifact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "initial").mkdir()
+    (tmp_path / "initial" / "model.txt").write_text("w0")
+    factory = SigningBackend.factory(tmp_path / "initial", root=tmp_path / "repository")
+    dispatcher = dispatcher_for(tmp_path, UploadRecipe(), factory)
+
+    def materialized(*args: object) -> None:
+        raise AssertionError("the file list materialized the artifact")
+
+    async def check(client: TestClient) -> None:
+        assert (await client.post("/reef/scenarios", headers=AUTH, json={"name": "s"})).status == 201
+        artifacts = await (await client.get("/reef/scenarios/s/artifacts", headers=AUTH)).json()
+        files_route = f"/reef/scenarios/s/artifacts/{artifacts['artifacts'][0]['artifact_id']}/files"
+        monkeypatch.setattr("reef.service.scenario_files.artifact_directory", materialized)
+        before = int(time.time())
+        listing = await (await client.get(f"{files_route}?expires_in=600", headers=AUTH)).json()
+        assert [(entry["path"], entry["bytes"], entry["url"]) for entry in listing["files"]] == [
+            ("model.txt", 2, "https://store.example/model.txt")
+        ]
+        assert before + 600 <= listing["files"][0]["url_expires_at"] <= int(time.time()) + 600
+        assert (await client.get(f"{files_route}?expires_in=0", headers=AUTH)).status == 400
+
+    served(dispatcher, check)
+
+
+def test_a_client_cancels_a_training_job_of_its_scenario_and_an_ended_job_stays_as_it_is(tmp_path: Path) -> None:
+    dispatcher = dispatcher_for(tmp_path, UploadRecipe())
+    dispatcher.queue.add(NewWork(JOBS_QUEUE, "job-1", "s", "training_job:tinker", {"job": "1"}, serial_key="s"))
+    dispatcher.queue.add(NewWork(JOBS_QUEUE, "job-t", "t", "training_job:tinker", {"job": "t"}, serial_key="t"))
+
+    async def check(client: TestClient) -> None:
+        for name in ("s", "t"):
+            assert (await client.post("/reef/scenarios", headers=AUTH, json={"name": name})).status == 201
+        cancel = "/reef/scenarios/s/jobs/job-1/cancel"
+        answer = await (await client.post(cancel, headers=AUTH)).json()
+        assert answer["scenario"] == "s"
+        assert (answer["job"]["state"], answer["job"]["error"]) == ("failed", JOB_CANCELLED_ERROR)
+        # The cancel is idempotent: the job ended, so a second cancel changes nothing.
+        again = await (await client.post(cancel, headers=AUTH)).json()
+        assert again["job"] == answer["job"]
+        jobs = await (await client.get("/reef/scenarios/s/jobs", headers=AUTH)).json()
+        assert [job["state"] for job in jobs["jobs"]] == ["failed"]
+        # A job of another scenario, an unknown job and an unknown scenario are not found.
+        assert (await client.post("/reef/scenarios/s/jobs/job-t/cancel", headers=AUTH)).status == 404
+        assert (await client.post("/reef/scenarios/s/jobs/missing/cancel", headers=AUTH)).status == 404
+        assert (await client.post("/reef/scenarios/nothing/jobs/job-1/cancel", headers=AUTH)).status == 404
+        assert dispatcher.queue.get(JOBS_QUEUE, "job-t").state == "queued"
+
+    served(dispatcher, check)
+
+
+def test_the_contract_reports_what_the_scenario_can_run(tmp_path: Path) -> None:
+    dispatcher = dispatcher_for(tmp_path, UploadRecipe())
+
+    async def check(client: TestClient) -> None:
+        assert (await client.post("/reef/scenarios", headers=AUTH, json={"name": "s"})).status == 201
+        contract = await (await client.get("/reef/scenarios/s/contract", headers=AUTH)).json()
+        # The trainer steps on a candidate backend, so it can start from an artifact; the scenario has no runtime to
+        # evaluate on and none that loads its artifacts, so a served artifact needs only the durable history.
+        assert contract["capabilities"] == {"serve_beside": True, "evaluate": [], "train_from": ["records"]}
 
     served(dispatcher, check)
