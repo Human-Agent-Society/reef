@@ -1,109 +1,193 @@
 # Meta-Harness
 
 Meta-Harness is full-history search over a fixed model's harness. This method
-represents every candidate as a complete Reef composition, so the same search
-works with any Reef adapter and any rollout scorer. It has no Harbor,
-Terminal-Bench, Terminus, or coding-agent dependency.
+represents every candidate as a complete Reef harness tree, so the same search
+works with any Reef adapter and any run scorer. `MetaHarness` has no
+Harbor, Terminal-Bench, Terminus, or coding-agent dependency.
 
-The implementation is a specialization of Reef's existing harness-evolution
-recipe. Reef still owns node validation, adapter rendering, model binding,
-rollout execution, timeouts, residue policy, finite-score checks, selection
-settlement, artifact publication, and scenario commits. Meta-Harness adds only
-the population-aware proposal and selection policies.
+The method is a Reef harness evolution method (`Method`) in the standard
+layout:
+
+```text
+meta_harness/
+  method.py            MetaHarness: one complete tree per step from the whole search history
+  system_prompt.md     the proposer model's system prompt
+  proposal_prompt.md   the instructions in front of the search state
+  agent/               the same search with a coding agent as the proposer, as prompts (AgentMethod)
+  examples/terminal_bench/
+                       the runnable Terminal-Bench search
+  results/             the selected harness of the reported comparison
+```
+
+`MetaHarness` makes one model call per step. Upstream's proposer is a coding
+agent that reads the whole search as files; [`agent/`](agent/README.md) runs
+that proposer as a method made of prompts, on the deployment's coding agent.
+
+Reef owns tree validation, adapter rendering, model binding, run
+execution, timeouts, residue policy, finite-score checks, the score cache,
+selection, publication, and scenario commits. Meta-Harness adds the proposal:
+what the proposer model sees and how its reply becomes a candidate.
 
 ## Configuration
 
+A deployment names the method in `evolution.method` of Reef's harness
+evolution recipe, and selects with the `compare` policy on means:
+
 ```yaml
 recipe:
-  implementation: recipes.meta_harness.recipe:MetaHarnessRecipe
+  implementation: reef.recipe.harness:HarnessEvolutionRecipe
   config:
     evolution:
       adapter: pi
-      evaluate: my_harness.scoring:RolloutScore
-      tasks:
-        - First validation task
-        - Second validation task
-      seed:
-        - id: rules
-          name: rules
-          config:
-            text: Work carefully and verify the result.
+      seed: seed                 # the first tree, a directory
+      method:
+        module: recipes.meta_harness:MetaHarness
+        config:
+          mode: full_history
+          max_candidates: 20
+          max_target_runs: 42
       models:
         proposer:
           url: https://api.openai.com
           model: gpt-5
           api_key_env: OPENAI_API_KEY
-      meta_harness:
-        archive: ${REEF_WORK}/meta-harness
-        mode: full_history
-        max_candidates: 20
-        max_target_rollouts: 200
-        max_nodes: 32
+      evaluation:
+        tasks:
+          - First validation task
+          - Second validation task
+        scorer: my_harness.scoring:RolloutScore
+        policy: compare
+        statistic: mean
 
 inference:
   upstream-model: model-under-test
 ```
 
-`evaluate` names a standard Reef rollout scorer class:
+`seed` is a directory of tree files, such as `rules.md` with the starting
+rules. `evaluation.scorer` names a standard Reef run scorer class:
 
 ```python
-class RolloutScore(RolloutScorer):
-    def score(self, task: str, result: RolloutResult) -> float:
+class RolloutScore(TaskScorer):
+    def score(self, task: str, result: TaskResult) -> float:
         ...
 ```
 
-The built-in proposal policy is a standard Reef `Proposer`: its
-`propose(nodes, samples, models, *, manifest, rejected, ...)` receives every
-proposer keyword.
+`evolution.method.config` takes these keys:
 
-It calls `evolution.models.proposer`, and refuses to run when
-that name is not configured. The model sees all retained candidate
-compositions and scores, the parent each came from, the traces of the current step, the
-validation task names, and the adapter's Reef node vocabulary. It returns one
-parent id and one complete composition. In `full_history` mode the parent may
-be any retained candidate; `incumbent_only` is the greedy control.
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `mode` | `full_history` | `full_history` lets the proposer branch from any candidate; `incumbent_only`, the greedy control, from the served one only |
+| `model` | `proposer` | the `evolution.models` binding that proposes; `served` is refused |
+| `components` | every part of the adapter's tree | the parts of the adapter's tree (the `evolve` section of its `adapter.yaml`) whose files a proposal may change; the method refuses a name the tree does not have |
+| `max_candidates` | `0` (no limit) | the candidates the method proposes |
+| `max_target_runs` | `0` (no limit) | the evaluation runs after which the method proposes nothing |
+| `max_files` | `32` | the files of one proposed tree |
+| `max_traces` | `16` | the traces whose record files one prompt shows |
+| `trace_chars` | `4000` | the characters one prompt shows of one trace's record files |
 
-`components` can narrow what the proposer may change. Other nodes from the
-selected parent must remain byte-for-byte equivalent in the proposed
-composition:
+The method refuses to run when `evolution.models` does not declare `model`:
+the harness under test must not propose its own improvements.
 
-```yaml
-      meta_harness:
-        archive: ${REEF_WORK}/meta-harness
-        components: [rules, skill]
+## One step
+
+The population is the scenario's history. A step shows the proposer model
+these items, as data:
+
+- The candidates of the search: the served tree, the seed, and each tree the
+  method proposed; in `incumbent_only` mode, the served tree alone. Each has its
+  files, the parent it branched from, the proposer's hypothesis and changes,
+  its outcome (served, selected, rejected, or undecided), and its scores on
+  the evaluation tasks.
+- Excerpts of the run records that the history keeps, and of the step's
+  own traces. The step's traces come first. Then the candidates take turns,
+  the served one first and the others newest first, each with its lowest
+  scores first. A long record keeps its beginning and its end.
+- The latest replies that proposed no candidate, and why.
+- The person's instruction, on a step that answers a training request.
+- The parts of the adapter's tree: each part's path, format and render path,
+  and what its file holds, with the parts a proposal may change.
+
+The reply names one parent and returns one complete tree as `files`, path to
+text. The step refuses the reply when the parent is not a candidate it
+showed, when the tree changes a file of a part outside `components` (such
+files must stay byte for byte equal to the parent's), when the tree holds
+more than `max_files` files, or when the tree fails the adapter's
+validation. It also refuses a tree that the history already holds. A refused
+reply leaves the head unchanged, so the step skips and Reef evaluates
+nothing. The adapter's validation remains authoritative: an adapter may
+still refuse an otherwise valid file.
+
+A proposed tree becomes the step's candidate. The history keeps it with the
+proposer's hypothesis, changes, and parent, so the next step shows it.
+
+## Selection and budgets
+
+Select with `policy: compare` and `statistic: mean`. The candidate is
+published when its mean score is strictly higher than the head's; a run
+that could not run counts as zero. The score cache keeps the first scores of each tree,
+so the head's mean is the one it was admitted on, and the head does not run
+again. The exception is a run that could not run: it runs again in the
+next evaluation. This reproduces upstream's frontier: it keeps the highest recorded
+mean, and a tie keeps the current choice. The seed runs once with the first
+candidate, and then each candidate runs once.
+
+The budgets count the history: `max_candidates` counts the trees the method
+proposed, and `max_target_runs` counts the evaluation runs that completed.
+A spent budget ends the search before the model call; the last evaluation may
+pass `max_target_runs`. Zero turns a budget off. Reef's own `max_steps`,
+`max_model_calls_per_step`, executor, timeout, and residue options apply as
+usual.
+
+Keep the evaluation suite fixed, so that the scores of all candidates stay
+comparable: do not combine this method with task collection.
+
+## State and commits
+
+The history directory under `evolution.state_dir` holds every candidate, its
+runs and records, and each step's decision. The method's own state,
+committed with each step, is `state/attempts.jsonl`: one line per reply that
+proposed no candidate.
+
+The history keeps an attempt whose step never committed, such as an
+evaluation or a commit that failed. A retry of that step does not count the
+attempt's tree, does not show it, and does not refuse it as a known tree. If
+the proposer returns it again, the cache scores it; only the runs that
+could not run are run again.
+
+## Terminus 2 code evolution
+
+Use the Terminal-Bench campaign's `terminus` adapter and its `extension`
+part to evolve Python behavior. Reef does not bundle the adapter:
+`pip install -e examples/terminal_bench` registers it (see [the terminus
+adapter](examples/terminal_bench/README.md#the-terminus-adapter)). It accepts one self-contained module defining `Agent(Terminus2)`,
+at `extensions/<name>.py` in the tree. Start from a no-op subclass so the
+proposer sees the adapter contract: a seed directory holding
+`extensions/agent.py` with
+
+```python
+from harbor.agents.terminus_2 import Terminus2
+
+
+class Agent(Terminus2):
+    pass
 ```
 
-With no `components` setting, every node kind the selected adapter exposes is
-eligible. The adapter's own render/finalization checks remain authoritative;
-for example, an adapter may still reject an otherwise valid Reef node kind.
-
-### Terminus 2 code evolution
-
-Use Reef's `terminus` adapter and its `code_extension` node to evolve Python
-behavior. It accepts one self-contained module defining `Agent(Terminus2)`.
-Start from a no-op subclass so the proposer sees the adapter contract:
+and this configuration:
 
 ```yaml
 recipe:
   config:
     evolution:
       adapter: terminus
+      seed: seed
       executor: sandbox
       sandbox:
         egress_hosts: [api.e2b.dev, api.openai.com]
         env_from: [REEF_TERMINUS_ENVIRONMENT, E2B_API_KEY]
-      seed:
-        - id: agent
-          name: code_extension
-          config:
-            name: agent
-            code: |
-              from harbor.agents.terminus_2 import Terminus2
-              class Agent(Terminus2):
-                  pass
-      meta_harness:
-        archive: ./meta-harness
-        components: [code_extension]
+      method:
+        module: recipes.meta_harness:MetaHarness
+        config:
+          components: [extension]
 ```
 
 Combine this with the tasks, scorer, model, and proposer settings above. Export
@@ -120,40 +204,8 @@ network access; it does not enforce a hostname firewall. Only explicitly named
 deployment variables are forwarded. A tree without an extension can still run
 stock Terminus 2 locally with Docker.
 
-## Population and commits
+## Example and results
 
-Every unique valid candidate is retained, including non-winners, and can be a
-future parent. Selection is a strict improvement in mean validation score over
-the score the incumbent was admitted on, which reproduces upstream's frontier:
-it keeps the highest recorded score. Reef's paired gate
-still measures both sides, so this method spends two evaluations per iteration
-where upstream spends one; budgets expressed in rollouts are not directly
-comparable to upstream's iteration counts. Failed rollouts count as zero; a
-non-finite score is rejected by Reef before settlement.
-
-The [Terminal-Bench example](examples/terminal_bench/README.md) runs the shared
-recipe on the full pinned dataset. The [results](RESULTS.md) compare a matched
-search with upstream and include the selected harness. The experiment measured
-the baseline once and each new candidate once per measurement; its local
-campaign tooling is separate from this reusable recipe.
-
-The evaluation suite must stay fixed so historical scores remain comparable.
-Task promotion, periodic rechecks, and review-only publication are therefore
-rejected by this method. Selection and automatic publication commit together.
-
-The complete population, parents, scores, served id, proposal attempts, and
-budget counters live under `meta_harness_population` in Reef's algorithm
-state. Proposal and selection changes are staged until the scenario commit is
-durable. Evaluation, settlement, activation, publication, or commit failures
-cannot advance the committed population.
-
-The file under `archive` is only a human-readable post-commit mirror. Scenario
-names are SHA-256 encoded into filenames so they cannot escape the directory.
-On restart Reef ignores the file as input and rewrites a stale mirror from the
-committed algorithm state.
-
-`max_target_rollouts` counts both sides of Reef's paired gate: candidate and
-incumbent, multiplied by `rollout_repeats`. A proposal is not started unless
-the complete next gate fits. Zero disables a budget; Reef's shared
-`max_steps`, `max_model_calls_per_step`, executor, timeout, and residue options
-remain available as usual.
+The [Terminal-Bench example](examples/terminal_bench/README.md) runs the
+method on the full pinned dataset. The [results](RESULTS.md) compare a matched
+search with upstream and include the selected harness.

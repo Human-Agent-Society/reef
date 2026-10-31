@@ -22,8 +22,8 @@ from reef.execution.sandbox.process import (
     ProcessOutcome,
     ProcessOwner,
     ProgramExecutor,
-    RolloutLaunchError,
-    RolloutTimeout,
+    ProgramLaunchError,
+    ProgramTimeout,
 )
 
 ResultType = TypeVar("ResultType")
@@ -102,7 +102,7 @@ class ExecutorEnvironment(BaseEnvironment):
 
     async def start(self, force_build: bool) -> None:
         if self.closed:
-            raise RolloutLaunchError("the execution environment was stopped")
+            raise ProgramLaunchError("the execution environment was stopped")
         if self.started:
             return
         if force_build:
@@ -160,7 +160,7 @@ class ExecutorEnvironment(BaseEnvironment):
     ) -> ExecResult:
         """Preserve argv semantics for existing synchronous executor callers."""
         if not self.started or self.closed:
-            raise RolloutLaunchError("the execution environment is not running")
+            raise ProgramLaunchError("the execution environment is not running")
         if not argv:
             raise ValueError("the execution command must contain a binary")
         timeout = self.timeout_seconds if timeout_sec is None else float(timeout_sec)
@@ -189,7 +189,7 @@ class ExecutorEnvironment(BaseEnvironment):
                 try:
                     await asyncio.to_thread(self.executor.close)
                 finally:
-                    with contextlib.suppress(RolloutLaunchError, RolloutTimeout):
+                    with contextlib.suppress(ProgramLaunchError, ProgramTimeout):
                         await asyncio.shield(pending)
                 self.closed = True
                 raise
@@ -199,7 +199,7 @@ class ExecutorEnvironment(BaseEnvironment):
 
     def staged_path(self, path: str) -> Path:
         if self.closed:
-            raise RolloutLaunchError("the execution environment was stopped")
+            raise ProgramLaunchError("the execution environment was stopped")
         target = Path(path)
         if not target.is_absolute():
             target = self.workspace / target
@@ -295,7 +295,7 @@ class ProgramExecution(Execution):
         """Start this run on the current loop; callers on that loop must not block in wait_closed."""
         with self.gate:
             if self.started or self.stopped:
-                raise RolloutLaunchError("the program execution was already started or stopped")
+                raise ProgramLaunchError("the program execution was already started or stopped")
             self.started = True
             self.loop = asyncio.get_running_loop()
             self.task = asyncio.current_task()
@@ -333,7 +333,7 @@ def execute(
     writable_paths: Sequence[Path] = (),
     readonly_paths: Sequence[Path] = (),
 ) -> ProcessOutcome:
-    """Run an existing rollout caller through Harbor's environment interface."""
+    """Run an existing run caller through Harbor's environment interface."""
     environment = ExecutorEnvironment(
         executor,
         root=root,

@@ -1,66 +1,65 @@
-"""The harness layer: a coding agent's composition as a tree, rendered, run and served.
+"""The harness layer: a harness as a file tree, rendered for one agent, run, and read back.
 
 The map, one subpackage per job:
 
-``compose/``
-    the composition engine shared by resident serving and the evolution backend.
 ``tree/``
-    what a composition is: the node kinds and their admission (``nodes``), and
-    how a tree renders to one harness's files (``render``), and mutation admission
-    shared by serving and training (``mutations``).
+    what a harness is: ``HarnessTree`` and ``TreePatch``, the checks of its
+    files (``checks``, ``validate``), and how a tree renders for one adapter
+    (``render``).
 ``adapters/``
-    one directory per agent, the mapping only: a ``descriptor.yaml`` (schema in
-    ``descriptor``) plus quirks, and the ``harness_facts.yaml`` a text proposer
-    reads about the harness's own surface (``harness_facts``). pi, opencode, claude, codex, dsh, hermes, and
-    the two programs Reef ships, native and terminus.
-``rollouts/``
+    one directory per agent, the mapping only: an ``adapter.yaml`` (schema in
+    ``descriptor``) that says what Reef may evolve and where the agent reads
+    each file (kinds in ``parts``), where the agent keeps its directories,
+    how it binds a model, and how it runs; and a ``render.py`` with its own
+    render steps. pi, opencode, claude, codex, dsh, hermes, and native, the
+    program Reef ships. Another distribution adds an adapter through the
+    ``reef.harness_adapters`` entry point group.
+``runs/``
     one headless run and its reading: launch on a rendered root through any
     ``reef.execution.sandbox`` executor (``run``), the adapter as the program that
     executor runs and its install (``vendor_install``), the model binding,
-    the version pin and the trajectory readers.
+    the trajectory readers, Harbor task runs that report to Reef
+    (``tasks``), and one adapter's agent playing a Harbor task in the task's
+    container (``harbor_task``).
 ``runners/``
-    the programs an adapter's ``binary`` points at when Reef ships them:
-    ``native`` (the loop, its graph, its seed and the resident ``serve`` form)
-    and ``terminus`` (the Harbor runner).
-``client/``
-    what runs on a user's machine: the wrapper the install script bakes
-    around a pulled harness.
-``step_result``
-    what a settled step means for the person who asked, and the next action
-    it offers: the words the wrapper prints and the harness pages render.
+    the program an adapter's ``binary`` points at when Reef ships it:
+    ``native`` (the loop, its graph and the resident ``serve`` form).
+``capture``
+    the capture proxy between a harness and Reef: tags and receipts.
+``gateway``
+    the loopback gateway an agent process reaches its model and its tools
+    through, which meters each call.
+``delivery``
+    the surface that serves a release to a client: its source tree rendered
+    for the scenario's adapter.
 
-This package depends on core values, runtime contracts and sandbox execution, never on training,
-recipes, scenario coordination, or the HTTP service.
-
-The evolution loop itself, propose, gate and publish, is
-``reef.train.cordis_backend``; versioning (staging, publishing, the commit
-log, recovery and activation) is reef's artifact stack (``reef.artifact``,
-``reef.scenario.committer``), not here.
-
-Vocabulary note: ``reef.surface.harnesses`` delivers a *harness artifact* to
-a client program; this package evolves the *harness composition itself* by
-driving a real coding agent binary per rollout.
+This package depends on core values, runtime and surface contracts, and
+sandbox execution, never on training, recipes, scenario coordination, or the
+HTTP service. The evolution loop is ``reef.train.harness_backend``; versioning
+(staging, publishing, the commit history, recovery and activation) is Reef's
+artifact stack (``reef.artifact``, ``reef.scenario``).
 """
 
 from reef.harness.adapters.descriptor import AdapterDescriptor, ConfigTarget, DescriptorError, load_descriptor
-from reef.harness.rollouts.run import RolloutError, RolloutResult, TrajectoryKeepError, run_rollout
-from reef.harness.rollouts.trajectory import TrajectoryError, read_opencode_session, read_pi_session
-from reef.harness.tree.nodes import NODE_KINDS
-from reef.harness.tree.render import RenderError, render_composition
+from reef.harness.tasks.run import TaskResult, TaskRunError, TrajectoryKeepError, run_task
+from reef.harness.tasks.trajectory import TrajectoryError, read_opencode_session, read_pi_session
+from reef.harness.tree import HarnessTree, RenderError, TreePatch, render_tree, validate_tree
 
 __all__ = [
-    "NODE_KINDS",
     "AdapterDescriptor",
     "ConfigTarget",
     "DescriptorError",
+    "HarnessTree",
     "RenderError",
-    "RolloutError",
-    "RolloutResult",
+    "TaskResult",
+    "TaskRunError",
     "TrajectoryError",
     "TrajectoryKeepError",
+    "TreePatch",
     "load_descriptor",
     "read_opencode_session",
     "read_pi_session",
-    "render_composition",
-    "run_rollout",
+    "render_tree",
+    "run_task",
+    "validate_tree",
 ]

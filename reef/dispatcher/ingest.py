@@ -14,7 +14,7 @@ from reef.core.job_data import TrajectorySample
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.reports import ReportValidationError, validate_report_payload
 from reef.core.training_request import normalize_training_request_payload
-from reef.harness.tree.nodes import directive_shaped, secret_shaped
+from reef.harness.tree.checks import directive_shaped, secret_shaped
 from reef.scenario.scenario import Scenario
 from reef.storage.records import RecordConflict
 
@@ -23,7 +23,7 @@ def training_request_refusal(text: str, requires: Sequence[Mapping[str, Any]] = 
     """Why admission refuses an instruction, or ``None``. The reason names the rule, never the text or the item.
 
     The text becomes proposer input and a catalog row. Thus it must pass the
-    same screens as a promoted task prompt. A ``requires`` name, check or
+    same screens as a collected task prompt. A ``requires`` name, check or
     prompt is shown to the person and recorded in the commit. Thus it must
     pass the same screens too.
     """
@@ -135,7 +135,7 @@ def check_use(current: Scenario, trajectories: Sequence[tuple[str, TrajectorySam
     whether one or more task item is to be in the ``train`` split. A trajectory needs a trainer that accepts
     uploaded trajectories (``TrainingPipeline.accepts_trajectories``), and each such trainer must render it;
     otherwise every trainer would skip it. A train task needs a trainer that reads imported tasks
-    (``TrainingPipeline.accepts_imported_tasks``). The ``eval`` split is always open: an artifact evaluation
+    (``Trainer.accepts_imported_tasks``). The ``eval`` split is always open: an artifact evaluation
     runs its tasks.
     """
     if trajectories:
@@ -153,6 +153,6 @@ def check_use(current: Scenario, trajectories: Sequence[tuple[str, TrajectorySam
                 except ValueError as exc:
                     raise ValueError(f"trajectory {item_id!r} cannot train: {exc}") from exc
     if train_tasks and not any(
-        component_trainer.trainer.pipeline.accepts_imported_tasks for component_trainer in current.trainers
+        component_trainer.trainer.accepts_imported_tasks for component_trainer in current.trainers
     ):
         raise ValueError(f"the recipe of scenario {current.name!r} does not train on imported tasks")

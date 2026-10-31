@@ -164,9 +164,9 @@ def create_authentication_middleware(
     page key of the query's ``scenario`` (``page_key_for_digest``) for an
     accepted token: it opens those two pages of that scenario alone, a
     request whose ``x-reef-scenario`` header names another scenario is
-    refused, and the token cannot be read back from it, so the links the
-    harness wrapper and pi's extension print, which a session's model reads,
-    carry it. The token itself is never read from a query. Every other route,
+    refused, and the token cannot be read back from it, so a link a client
+    prints where a session's model reads it can carry the key. The token
+    itself is never read from a query. Every other route,
     and any request that carries the header, is judged by the header alone. A
     request with no Authorization header may present the token in
     ``x-api-key`` instead, the header the Anthropic dialect's clients send.
@@ -179,7 +179,7 @@ def create_authentication_middleware(
 
     ``evaluation_tokens`` open the evaluation routes (``EVALUATION_ROUTES``)
     only, on POST. The service hands one to the recipe for its evaluation
-    rollouts and proposer, which run candidate code: that code can sample the
+    rollouts and method, which run candidate code: that code can sample the
     served release, and nothing else of the service. With no ``tokens``,
     authentication is off and these tokens change nothing.
     """
@@ -202,7 +202,7 @@ def create_authentication_middleware(
         api_key = request.headers.get("x-api-key")
         if isinstance(api_key, str) and api_key:
             # A client speaking the Anthropic dialect (an evaluation rollout, a
-            # proposer bound to this service) presents its key in this header.
+            # method's model call bound to this service) presents its key in this header.
             return api_key
         return None
 

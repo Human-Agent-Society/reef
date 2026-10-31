@@ -17,7 +17,7 @@ from reef.core.records_types import RequestType, parse_references
 
 SCENARIO_HEADER = "x-reef-scenario"
 RELEASE_ID_HEADER = "x-reef-release-id"
-#: Harness-stamped side-channel context (method-integration RFC §3.2). The
+#: Harness-stamped side-channel context. The
 #: service carries each pair through to the INFERENCE record so a processor
 #: can correlate on it, and reads one value itself: ``release``, the release
 #: a client runs, which names the record's artifact where the client pulls
@@ -116,61 +116,12 @@ class ReportPayload:
         return result
 
 
-@dataclass(frozen=True)
-class ProposalPayload:
-    """``POST /reef/harness/proposals``: mutations in the shape the backend applies, and where they came from.
-
-    ``mutations`` is a non-empty list of ``{op, id, options?}``; ``reason``
-    is the proposer's own account; ``session`` and ``release_id`` name the
-    session that proposed and the release it was running, so a commit that
-    settles the proposal is attributable. The values stay opaque here: the
-    admission rules run at the service, never at the wire.
-    """
-
-    mutations: tuple[Mapping[str, Any], ...]
-    reason: str
-    session: str
-    release_id: str
-
-    @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> ProposalPayload:
-        mutations = payload.get("mutations")
-        if not isinstance(mutations, list) or not mutations:
-            raise ValueError("mutations must be a non-empty list of {op, id, options} objects")
-        parsed: list[dict[str, Any]] = []
-        for index, mutation in enumerate(mutations):
-            if not isinstance(mutation, Mapping):
-                raise ValueError(f"mutations[{index}] must be an object with a string op and id")
-            op, id_, options = mutation.get("op"), mutation.get("id"), mutation.get("options")
-            if not isinstance(op, str) or not isinstance(id_, str):
-                raise ValueError(f"mutations[{index}] must be an object with a string op and id")
-            if options is not None and not isinstance(options, Mapping):
-                raise ValueError(f"mutations[{index}].options must be an object")
-            parsed.append({"op": op, "id": id_, "options": None if options is None else dict(options)})
-        fields: dict[str, str] = {}
-        for key in ("reason", "session", "release_id"):
-            value = payload.get(key)
-            if not isinstance(value, str):
-                raise ValueError(f"{key} must be a string")
-            fields[key] = value
-        return cls(mutations=tuple(parsed), **fields)
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "mutations": [dict(mutation) for mutation in self.mutations],
-            "reason": self.reason,
-            "session": self.session,
-            "release_id": self.release_id,
-        }
-
-
 def with_request_tags(payload: Mapping[str, Any], parsed: RequestHeaders) -> Mapping[str, Any]:
     """Carry ``x-reef-tag-*`` through to the INFERENCE record's metadata.
 
     Only inference: a tag is context about a served exchange, and the
     processors that read one correlate on the inference side. This stores
-    every pair as sent (method-integration RFC §3.2); only
-    :func:`recorded_ref` reads a value.
+    every pair as sent; only :func:`recorded_ref` reads a value.
     """
     if parsed.request_type is not RequestType.INFERENCE or not parsed.tags:
         return payload

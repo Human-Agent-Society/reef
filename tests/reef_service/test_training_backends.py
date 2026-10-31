@@ -129,7 +129,6 @@ def test_recipe_build_submits_jobs_to_the_backend_component_and_preserves_cleanu
     records = SQLiteRecordStore()
     try:
         trainer = recipe.build("scenario", records)
-        assert trainer.candidate_backend is None
         assert trainer.job_loop.component is recipe.training_component
         assert type(recipe.training_component).__name__ == "LocalRuntime"
         # The deployment's pipeline section sets the job size.

@@ -40,7 +40,8 @@ WAIT_SECONDS = 10.0
 
 
 class StepComponent(LocalJobComponent):
-    """Saves two checkpoints per job; a job with ``{"fail": true}`` raises, ``{"invalid": true}`` is refused."""
+    """Saves two checkpoints per job; a job with ``{"fail": true}`` raises and reports what it reached, and
+    ``{"invalid": true}`` is refused."""
 
     def __init__(self, jobs_root: Path) -> None:
         super().__init__(jobs_root)
@@ -68,6 +69,12 @@ class StepComponent(LocalJobComponent):
     def check_job(self, job: TrainingJob) -> None:
         if job.parameters.get("invalid"):
             raise ValueError("this component cannot train the job")
+
+    def status(self, job_id: str) -> JobStatus:
+        status = super().status(job_id)
+        if status.state != "failed" or status.error == "cancelled":
+            return status
+        return JobStatus(job_id, "failed", status.checkpoints, metrics={"reached": "start"}, error=status.error)
 
     def run(self, job: TrainingJob, directory: Path) -> Mapping[str, Any]:
         if job.parameters.get("fail"):
@@ -125,7 +132,7 @@ def test_a_queued_job_runs_on_the_worker_and_reports_its_checkpoints_through_the
 
 
 @pytest.mark.unit
-def test_a_refused_job_never_enters_the_queue_and_a_failed_job_reports_its_error(worked):
+def test_a_refused_job_never_enters_the_queue_and_a_failed_job_reports_its_error_and_metrics(worked):
     queue, component, _worker = worked
     view = JobQueueComponent(component, queue)
     with pytest.raises(ValueError, match="cannot train"):
@@ -134,7 +141,8 @@ def test_a_refused_job_never_enters_the_queue_and_a_failed_job_reports_its_error
 
     view.submit(job("boom", fail=True))
     failed = wait_for(lambda: view.status("boom"), "failed")
-    assert "boom" in failed.error
+    # A failed item has no result, so the metrics that the component reported cross the queue in its metadata.
+    assert "boom" in failed.error and failed.metrics == {"reached": "start"}
 
 
 @pytest.mark.unit

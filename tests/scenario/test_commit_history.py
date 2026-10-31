@@ -12,26 +12,23 @@ import hashlib
 import sqlite3
 import time
 from contextlib import closing
-from dataclasses import KW_ONLY, dataclass, replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from threading import Event, Thread
 
 import pytest
 from tests.support._policy_recipe import TestPolicyRecipe
-from tests.support._strategies import resolve_proposer, resolve_rollout_scorer
 from tests.support._threshold_processor import ThresholdJobData, ThresholdSamples, threshold_pipeline
+from tests.support.harness_service import harness_repository
+from tests.support.harness_steps import PI_SEED, harness_recipe
 from tests.support.runtime_stubs import StubTrainingComponent, runtime_bindings
 from tests.support.samples_service import make_samples
 
-from reef.artifact import Artifact, ArtifactRef, InMemoryRepositoryBackend
+from reef.artifact import ArtifactRef, InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
 from reef.core.errors import ReefError
 from reef.core.trajectories import source_record_id
 from reef.dispatcher import Dispatcher, local_workers
-from reef.evaluation import EvaluationResult, SelectionDecision, UpdateCandidate
-from reef.evaluation.harness import ScoreComparisonPlugin
-from reef.harness.adapters import get_adapter
-from reef.harness.rollouts.model_binding import ModelBinding
 from reef.recipe.base import Recipe
 from reef.record2record import ReportGrouping, ReportRecord2Record
 from reef.runtime.jobs import SavedCheckpoint, TrainingJob
@@ -40,11 +37,7 @@ from reef.storage.commits import CommitRecord, active_artifact_ref
 from reef.storage.samples import SAMPLE_KINDS, consumed_sample_id
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
-from reef.surface import Surface
-from reef.surface.harnesses import create_harness_surface
-from reef.train import CandidateBackend, PreparedStep, Trainer, TrainStepResult
-from reef.train.cordis_backend import CordisBackend
-from reef.train.cordis_backend.processor import TraceJobData, TraceSamples
+from reef.train import Trainer
 from reef.train.jobs import JobLoop, JobLoopState
 from reef.train.pipeline import TrainingPipeline
 
@@ -406,13 +399,10 @@ def delete_commits(agent_record_dir, *steps: int) -> None:
         assert deleted.rowcount == len(steps)
 
 
-def repository_factory(tmp_path, *, skill: bool = False):
-    """The in-memory repository factory over the test's base: empty, or one ``skills/SKILL.md`` when ``skill``."""
+def repository_factory(tmp_path):
+    """The in-memory repository factory over an empty test base."""
     initial = tmp_path / "initial"
     initial.mkdir()
-    if skill:
-        (initial / "skills").mkdir()
-        (initial / "skills" / "SKILL.md").write_text("skill v0", encoding="utf-8")
     return InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
 
 
@@ -447,47 +437,41 @@ def train_pair(dispatcher: Dispatcher, index: int, artifact_id: str | None = Non
     wait_for_jobs(dispatcher, index)
 
 
-class _SavedArtifactBackend(CandidateBackend):
+class _SavedArtifactJobs(StubTrainingComponent):
+    """A training component whose every job saves the checkpoint ``artifact_path``; ``data_ids`` lists the data of
+    the jobs it ran."""
+
     def __init__(self, artifact_path: Path) -> None:
-        self._artifact_path = artifact_path
+        super().__init__(name="saved", shares_scenarios=True)
+        self.artifact_path = artifact_path
         self.data_ids: list[str] = []
 
-    def initial_state(self):
-        return {"steps": 0}
-
-    def prepare_step(self, batch, state, scenario_step):
-        del scenario_step
-        self.data_ids.append(batch.data_id)
-        return PreparedStep.with_candidate(
-            UpdateCandidate(batch.data_id),
-            state={"steps": int(state["steps"]) + 1},
-        )
-
-    def evaluate(self, candidate):
-        del candidate
-        return EvaluationResult("test", "1", {})
-
-    def settle_step(self, prepared, decision: SelectionDecision):
-        del decision
-        return TrainStepResult(prepared.state, artifact=Artifact.local(self._artifact_path))
-
-    def abort_step(self, prepared):
-        del prepared
+    def train(self, job: TrainingJob) -> tuple[SavedCheckpoint, ...]:
+        self.data_ids.append(job.data.data_id)
+        return (SavedCheckpoint(0, str(self.artifact_path), str(self.artifact_path)),)
 
 
 @dataclass(frozen=True)
 class _SavedArtifactRecipe(Recipe):
-    backend: CandidateBackend
+    backend: _SavedArtifactJobs
 
     def build(
-        self, scenario, records, *, algorithm_state=None, experiment_logger=None, task_storage=None, samples=None
+        self,
+        scenario,
+        records,
+        *,
+        algorithm_state=None,
+        experiment_logger=None,
+        task_storage=None,
+        releases=None,
+        samples=None,
     ):
         del experiment_logger
         return Trainer.build(
             scenario,
             records,
             pipeline_factory=threshold_pipeline,
-            candidate_backend=self.backend,
+            job_loop=JobLoop(self.backend, scenario=scenario),
             algorithm_state=algorithm_state,
             default_job_samples=1,
         )
@@ -497,7 +481,7 @@ def _build_saved_artifact_dispatcher(tmp_path, *, agent_record_dir=None):
     artifact_path = tmp_path / "candidate"
     artifact_path.mkdir()
     (artifact_path / "model.txt").write_text("trained")
-    backend = _SavedArtifactBackend(artifact_path)
+    backend = _SavedArtifactJobs(artifact_path)
     dispatcher = Dispatcher(
         _SavedArtifactRecipe(backend=backend),
         repository_factory(tmp_path),
@@ -584,7 +568,15 @@ class ProtectAllPipeline(TrainingPipeline):
 @dataclass(frozen=True)
 class ProtectAllPolicyRecipe(TestPolicyRecipe):
     def build(
-        self, scenario, records, *, algorithm_state=None, experiment_logger=None, task_storage=None, samples=None
+        self,
+        scenario,
+        records,
+        *,
+        algorithm_state=None,
+        experiment_logger=None,
+        task_storage=None,
+        releases=None,
+        samples=None,
     ):
         component = self.training_component
         return Trainer.build(
@@ -839,70 +831,12 @@ def test_checkpoint_status_metrics_survive_without_a_commit_log(tmp_path) -> Non
     second.close()
 
 
-@dataclass(frozen=True)
-class _HarnessEvolveTestRecipe(Recipe):
-    """Private harness-evolution stand-in for these mechanics tests.
-
-    These tests exercise commit-history/version-chain mechanics, not
-    harness-evolution semantics specifically; they just need a concrete,
-    artifact-producing Recipe. Constructs CordisBackend and
-    the reported trace pipeline directly, the same shape
-    CordisRecipe.build() has, minus the config-boot layer these
-    tests never touch (see tests/reef_service/test_harness_recipe.py for
-    the backend's own guarantees).
-    """
-
-    propose: object
-    evaluate: object
-    tasks: tuple[str, ...]
-    batch_size: int = 1
-    _: KW_ONLY
-    name: str = "harness_evolve"
-
-    def build_surface(self, scenario: str) -> Surface:
-        return create_harness_surface()
-
-    def build(
-        self, scenario, records, *, algorithm_state=None, experiment_logger=None, task_storage=None, samples=None
-    ) -> Trainer:
-        candidate_backend = CordisBackend(
-            descriptor=get_adapter("pi"),
-            propose=resolve_proposer(self.propose),
-            score_rollout=resolve_rollout_scorer(self.evaluate),
-            tasks=self.tasks,
-            binary="fake-pi",
-            models=ModelBinding(base_url="http://localhost:8000", model="qwen3-8b"),
-        )
-        return Trainer.build(
-            scenario,
-            records,
-            pipeline_factory=lambda context: TrainingPipeline(
-                context,
-                record2record=ReportRecord2Record(context, ReportGrouping()),
-                record2sample=TraceSamples(),
-                sample2job=TraceJobData(context, None, None),
-            ),
-            candidate_backend=candidate_backend,
-            candidate_evaluator=ScoreComparisonPlugin(candidate_backend),
-            algorithm_state=algorithm_state,
-            experiment_logger=experiment_logger,
-            default_job_samples=self.batch_size,
-        )
-
-
 def build_harness_evolve_dispatcher(
-    runtime,
-    tmp_path,
-    backend_factory,
-    *,
-    propose=lambda nodes, samples, model: None,
-    evaluate=lambda task, result: 0.0,
-    tasks=("task one",),
-    agent_record_dir=None,
+    tmp_path, backend_factory, *, method=lambda workspace, services: None, agent_record_dir=None
 ):
-    recipe = _HarnessEvolveTestRecipe(propose=propose, evaluate=evaluate, tasks=tasks, runtime=runtime)
+    """A dispatcher over a pi harness recipe; these tests need an artifact-producing recipe, not its semantics."""
     return Dispatcher(
-        recipe,
+        harness_recipe(tmp_path, method),
         backend_factory,
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(agent_record_dir),
@@ -939,18 +873,14 @@ def test_harness_growth_does_not_block_acceptance_or_other_scenarios(tmp_path) -
     started = Event()
     release = Event()
 
-    def blocking_proposer(nodes, samples, model):
-        del nodes
-        if source_record_id(samples[0]) != "a-i1":
+    def blocking_method(workspace, services):
+        if workspace.traces()[0].record != "a-i1":
             return
         started.set()
         assert release.wait(10)
 
     dispatcher = build_harness_evolve_dispatcher(
-        None,
-        tmp_path,
-        repository_factory(tmp_path, skill=True),
-        propose=blocking_proposer,
+        tmp_path, harness_repository(tmp_path, PI_SEED.files), method=blocking_method
     )
     dispatcher.accept_record(trace_inference("a-i1", scenario="skills-a"))
 
@@ -988,8 +918,9 @@ def test_harness_growth_does_not_block_acceptance_or_other_scenarios(tmp_path) -
         assert returned.wait(5), "report acceptance waited for harness growth"
         assert status_returned.wait(5), "status waited for harness growth"
         status = status_values[0]["scenarios"]["skills-a"]
-        assert status["scenario_step"] == 0
-        assert status["last_committed_step"] is None
+        # The step's job is submitted, and runs while the scenario takes reports.
+        assert status["scenario_step"] == 1
+        assert status["last_committed_step"]["metrics"]["training_job"]["event"] == "submitted"
         dispatcher.accept_record(trace_inference("b-i1", scenario="skills-b"))
         dispatcher.accept_record(
             trace_report("b-r1", "b-i1", scenario="skills-b"),
@@ -1002,40 +933,41 @@ def test_harness_growth_does_not_block_acceptance_or_other_scenarios(tmp_path) -
 
     assert errors == []
     scenario = dispatcher.get_or_create_scenario("skills-a")
-    wait_for_step(dispatcher, 1, scenario="skills-a")
-    assert scenario.scenario_step == 1
+    wait_for_step(dispatcher, 2, scenario="skills-a")
+    assert scenario.scenario_step == 2
     dispatcher.close()
 
 
 @pytest.mark.unit
-def test_local_backend_failure_reaches_status_and_retries_pending_job_data(tmp_path) -> None:
+def test_a_failed_harness_job_ends_with_its_error_and_the_next_batch_trains(tmp_path) -> None:
     calls = 0
     should_fail = True
 
-    def proposer(nodes, samples, model):
-        nonlocal calls, should_fail
-        del nodes, samples
+    def method(workspace, services):
+        nonlocal calls
         calls += 1
         if should_fail:
-            raise RuntimeError("proposal failed")
+            raise RuntimeError("the method failed")
 
-    dispatcher = build_harness_evolve_dispatcher(
-        None,
-        tmp_path,
-        repository_factory(tmp_path, skill=True),
-        propose=proposer,
-    )
+    dispatcher = build_harness_evolve_dispatcher(tmp_path, harness_repository(tmp_path, PI_SEED.files), method=method)
     dispatcher.accept_record(trace_inference("i1"))
     dispatcher.accept_record(trace_report("r1", "i1"))
 
-    wait_until(lambda: dispatcher.build_training_status()["error"] is not None, "the failure did not reach the status")
-    assert dispatcher.build_training_status()["error"] == "skills: RuntimeError: proposal failed"
+    # The step's job fails, and its end names the error: the job consumed the batch, and no step runs it again.
+    wait_for_step(dispatcher, 2, scenario="skills")
+    committed = dispatcher.build_training_status()["scenarios"]["skills"]["last_committed_step"]
+    assert committed["metrics"]["skipped"] == "step failed"
+    assert committed["metrics"]["error"] == "RuntimeError: the method failed"
+    assert committed["metrics"]["training_job"]["event"] == "failed"
+    assert calls == 1
 
-    failed_attempts = calls
     should_fail = False
     dispatcher.accept_record(trace_inference("i2"))
-    wait_for_step(dispatcher, 1, scenario="skills")
-    assert calls == failed_attempts + 1
+    dispatcher.accept_record(trace_report("r2", "i2"))
+    wait_for_step(dispatcher, 4, scenario="skills")
+    assert calls == 2
+    committed = dispatcher.build_training_status()["scenarios"]["skills"]["last_committed_step"]
+    assert committed["metrics"]["skipped"] == "the method left the head tree unchanged"
     assert dispatcher.build_training_status()["error"] is None
     dispatcher.close()
 
@@ -1052,10 +984,15 @@ def test_artifact_commit_failure_keeps_the_pending_job_data_retryable(tmp_path, 
     scenario.records.append(sft_inference("i1"))
     scenario.records.append(sft_report("r1", "i1"))
     make_samples(scenario)
-    result = scenario.prepare_training_step()
-    assert result is not None
+    # The job's submission consumes the batch; its checkpoint is the commit that publishes the artifact.
+    submitted = scenario.prepare_training_step()
+    assert submitted is not None
     pending = scenario.trainer.pending_job_data
     assert pending is not None
+    scenario.commit(submitted)
+    submitted_state = dict(scenario.trainer.state)
+    result = scenario.prepare_training_step()
+    assert result is not None and result.artifact is not None
     committer = scenario._committer
 
     if failure_point == "commit_history":
@@ -1087,29 +1024,23 @@ def test_artifact_commit_failure_keeps_the_pending_job_data_retryable(tmp_path, 
 
     # The active release moves only after the runtime serves the new one and its record lands.
     assert scenario.current_artifact_ref() == active
-    assert scenario.scenario_step == 0
-    assert scenario.trainer.state == {"steps": 0}
-    assert scenario.trainer.pending_job_data is pending
+    assert scenario.scenario_step == 1
+    assert scenario.trainer.state == submitted_state
     assert [record.agent_record_id for record in scenario.records.replay("math")] == ["i1", "r1"]
 
     scenario.records.append(sft_inference("i2"))
     scenario.commit(result)
 
     assert backend.data_ids == [pending.data_id]
-    assert scenario.trainer.state == {"steps": 1}
-    assert scenario.trainer.pending_job_data is None
+    assert scenario.trainer.state == result.state
+    assert scenario.current_artifact_ref() != active
     assert [record.agent_record_id for record in scenario.records.replay("math")] == ["i1", "r1", "i2"]
-    assert len(scenario.store.history()) == 1
+    assert len(scenario.store.history()) == 2
     dispatcher.close()
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("failure_point", ["commit_applied", "release_records"])
-def test_post_commit_failure_resumes_the_recorded_step_without_republication(
-    tmp_path,
-    monkeypatch,
-    failure_point,
-) -> None:
+def test_post_commit_failure_resumes_the_recorded_step_without_republication(tmp_path, monkeypatch) -> None:
     dispatcher, backend = _build_saved_artifact_dispatcher(
         tmp_path,
         agent_record_dir=tmp_path / "records",
@@ -1122,8 +1053,8 @@ def test_post_commit_failure_resumes_the_recorded_step_without_republication(
     assert result is not None
     pending = scenario.trainer.pending_job_data
     assert pending is not None
-    target = scenario.trainer.pipeline if failure_point == "release_records" else scenario.trainer
-    original = getattr(target, failure_point)
+    pipeline = scenario.trainer.pipeline
+    original = pipeline.release_records
     should_fail = True
 
     def fail_after_effect(*args, **kwargs):
@@ -1131,30 +1062,32 @@ def test_post_commit_failure_resumes_the_recorded_step_without_republication(
         outcome = original(*args, **kwargs)
         if should_fail:
             should_fail = False
-            raise RuntimeError(f"injected {failure_point} failure")
+            raise RuntimeError("injected release_records failure")
         return outcome
 
-    monkeypatch.setattr(target, failure_point, fail_after_effect)
+    monkeypatch.setattr(pipeline, "release_records", fail_after_effect)
+    initial_state = dict(scenario.trainer.state)
 
-    with pytest.raises(RuntimeError, match=f"injected {failure_point} failure"):
+    # The job's submission consumes the batch, so its commit releases the batch's records.
+    with pytest.raises(RuntimeError, match="injected release_records failure"):
         scenario.commit(result)
 
     assert scenario.scenario_step == 0
-    assert scenario.trainer.state == {"steps": 0}
+    assert scenario.trainer.state == initial_state
     assert scenario.trainer.pending_job_data is pending
     assert scenario.store.durable
     [record] = scenario.store.history()
-    published_release = record.artifact_ref.release_id
+    recorded_release = record.artifact_ref.release_id
     with pytest.raises(RuntimeError, match="does not match the pending step"):
         scenario.commit(replace(result, state={"steps": 999}))
 
     scenario.commit(result)
 
     assert scenario.scenario_step == 1
-    assert scenario.trainer.state == {"steps": 1}
+    assert scenario.trainer.state == result.state
     assert scenario.trainer.pending_job_data is None
     assert len(scenario.store.history()) == 1
-    assert scenario.repository.require_current_artifact().release_id == published_release
+    assert scenario.repository.require_current_artifact().release_id == recorded_release
     assert backend.data_ids == [pending.data_id]
     dispatcher.close()
 
@@ -1220,12 +1153,8 @@ def test_a_commit_failure_keeps_one_retryable_batch_and_one_record(tmp_path, mon
 @pytest.mark.unit
 def test_durable_local_backend_recovers_after_post_commit_notification_failure(tmp_path) -> None:
     agent_record_dir = tmp_path / "agent-record"
-    backend_factory = repository_factory(tmp_path, skill=True)
     dispatcher = build_harness_evolve_dispatcher(
-        None,
-        tmp_path,
-        backend_factory,
-        agent_record_dir=agent_record_dir,
+        tmp_path, harness_repository(tmp_path, PI_SEED.files), agent_record_dir=agent_record_dir
     )
     original = dispatcher.get_or_create_scenario("skills")
     assert original is not None
@@ -1279,28 +1208,29 @@ def test_durable_local_backend_recovers_after_post_commit_notification_failure(t
     assert not activation_thread.is_alive()
     assert activation_errors == []
 
-    wait_for_step(dispatcher, 1, scenario="skills")
+    # The step's job committed its submission (step 1) and, after the recovery, its end (step 2).
+    wait_for_step(dispatcher, 2, scenario="skills")
     recovered = dispatcher.get_or_create_scenario("skills")
     assert recovered is not original
     assert recovered.records.get("skills", "i1") is not None
     assert recovered.records.get("skills", "r1") is not None
     status = dispatcher.build_training_status()["scenarios"]["skills"]
-    assert status["scenario_step"] == 1
-    assert status["last_committed_step"]["step"] == 1
-    assert status["last_committed_step"]["metrics"]["skipped"] == "no proposal"
+    assert status["scenario_step"] == 2
+    assert status["last_committed_step"]["step"] == 2
+    assert status["last_committed_step"]["metrics"]["skipped"] == "the method left the head tree unchanged"
     records = committed_records(agent_record_dir, scenario="skills")
-    assert [record.step for record in records] == [1]
-    assert records[0].metrics is not None
-    assert records[0].metrics["skipped"] == "no proposal"
+    assert [record.step for record in records] == [1, 2]
+    assert records[1].metrics is not None
+    assert records[1].metrics["skipped"] == "the method left the head tree unchanged"
 
     dispatcher.accept_record(trace_inference("i2"))
     dispatcher.accept_record(trace_report("r2", "i2"))
-    wait_for_step(dispatcher, 2, scenario="skills")
+    wait_for_step(dispatcher, 4, scenario="skills")
 
-    assert [record.step for record in committed_records(agent_record_dir, scenario="skills")] == [1, 2]
+    assert [record.step for record in committed_records(agent_record_dir, scenario="skills")] == [1, 2, 3, 4]
     status = dispatcher.build_training_status()["scenarios"]["skills"]
-    assert status["scenario_step"] == 2
-    assert status["last_committed_step"]["step"] == 2
+    assert status["scenario_step"] == 4
+    assert status["last_committed_step"]["step"] == 4
     dispatcher.close()
 
 
@@ -1315,28 +1245,31 @@ def test_no_artifact_commit_appends_a_record_and_survives_a_restart(tmp_path) ->
     restores the step, the state, and the record progress without re-training compacted rows.
     """
     agent_record_dir = tmp_path / "agent-record"
-    backend_factory = repository_factory(tmp_path, skill=True)
-    first = build_harness_evolve_dispatcher(None, tmp_path, backend_factory, agent_record_dir=agent_record_dir)
+    backend_factory = harness_repository(tmp_path, PI_SEED.files)
+    first = build_harness_evolve_dispatcher(tmp_path, backend_factory, agent_record_dir=agent_record_dir)
     first.accept_record(trace_inference("i1"))
     first.accept_record(trace_report("r1", "i1"))
-    wait_for_step(first, 1, scenario="skills")
+    # The step's job commits its submission, which consumes the batch, and its end.
+    wait_for_step(first, 2, scenario="skills")
     scenario = first.get_or_create_scenario("skills")
-    assert scenario.scenario_step == 1
+    assert scenario.scenario_step == 2
     committed = first.build_training_status()["scenarios"]["skills"]["last_committed_step"]
-    assert committed["step"] == 1
-    assert committed["metrics"]["skipped"] == "no proposal"
-    [record] = committed_records(agent_record_dir, scenario="skills")
-    assert record.step == 1
-    assert record.checkpoint is False
-    assert record.artifact_ref == scenario.repository.require_current_artifact()  # no new artifact published
-    assert record.algorithm_state == {"steps": 1, "entries": []}
-    assert record.high_water_sequence == 2
-    assert record.consumed_ids == frozenset({"i1", "r1", consumed_sample_id("r1:0")})
+    assert committed["step"] == 2
+    assert committed["metrics"]["skipped"] == "the method left the head tree unchanged"
+    submitted, ended = committed_records(agent_record_dir, scenario="skills")
+    assert (submitted.step, ended.step) == (1, 2)
+    assert submitted.checkpoint is False and ended.checkpoint is False
+    current = scenario.repository.require_current_artifact()
+    assert submitted.artifact_ref == ended.artifact_ref == current  # no new artifact published
+    state = JobLoopState.from_dict(ended.algorithm_state)
+    assert state.job is None and state.finished_jobs == 1 and state.last_job.event == "finished"
+    assert submitted.high_water_sequence == ended.high_water_sequence == 2
+    assert submitted.consumed_ids == frozenset({"i1", "r1", consumed_sample_id("r1:0")})
 
-    second = build_harness_evolve_dispatcher(None, tmp_path, backend_factory, agent_record_dir=agent_record_dir)
+    second = build_harness_evolve_dispatcher(tmp_path, backend_factory, agent_record_dir=agent_record_dir)
     recovered = second.get_or_create_scenario("skills")
-    assert recovered.scenario_step == 1
-    assert recovered.trainer.state["steps"] == 1
+    assert recovered.scenario_step == 2
+    assert recovered.trainer.state == ended.algorithm_state
     assert second.build_training_status()["scenarios"]["skills"]["last_committed_step"] == committed
     # Record progress resumes at the committed watermark, not sequence 0.
     assert recovered.trainer.data_offset == 2

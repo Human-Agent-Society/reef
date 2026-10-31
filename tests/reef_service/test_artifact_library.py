@@ -176,6 +176,29 @@ def test_a_scenarios_artifacts_enter_the_library_and_a_scenario_in_another_cell_
 
 
 @pytest.mark.integration
+def test_a_new_owner_gets_the_artifact_items_that_a_copy_made_for_the_default_owner(tmp_path: Path) -> None:
+    """The creation commit's copy can run before the scenario takes its owner; the owner's store still gets them."""
+    dispatcher = dispatcher_for(tmp_path, UploadRecipe())
+    try:
+        scenario = dispatcher.get_or_create_scenario("s")
+        item_id = f"s/{scenario.artifacts()[0]['artifact_id']}"
+        store = dispatcher.data_store
+        assert store is not None
+        wait_until(lambda: store.read("s", item_id) is not None)
+        dispatcher.set_scenario_owner("s", "acme")
+        wait_until(lambda: store.read("acme", item_id) is not None)
+    finally:
+        dispatcher.close()
+
+
+def wait_until(condition, seconds: float = 10.0) -> None:
+    deadline = time.monotonic() + seconds
+    while not condition():
+        if time.monotonic() >= deadline:
+            raise AssertionError("the data service did not copy the item")
+        time.sleep(0.05)
+
+
 def test_an_artifact_item_without_a_source_uri_is_listed_but_not_imported(tmp_path: Path) -> None:
     # The in-memory repository names no URI, so its artifacts are in the library without a source_uri.
     dispatcher = dispatcher_for(tmp_path, UploadRecipe())

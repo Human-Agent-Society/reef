@@ -28,7 +28,6 @@ SERVICE_CONFIGS = (
     "tutorials/evolve-your-harness/configs/deployment.yaml",
 )
 EVOLUTION_CONFIGS = (
-    "recipes/skillclaw/skillclaw.yaml",
     "tutorials/evolve-your-harness/configs/serve.yaml",
     "tutorials/evolve-your-harness/configs/serve-native.yaml",
     "tutorials/evolve-your-harness/configs/deployment.yaml",

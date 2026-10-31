@@ -257,7 +257,7 @@ def test_shipped_reef_yamls_use_the_public_layout():
 
     root = Path(__file__).resolve().parents[2]
     configs = []
-    for directory in ("recipes", "tutorials", "reef/service/profiles", "tests/packaging"):
+    for directory in ("recipes", "tutorials", "tests/packaging"):
         for path in (root / directory).rglob("*.yaml"):
             if "work" in path.relative_to(root).parts:
                 continue
@@ -272,20 +272,20 @@ def test_shipped_reef_yamls_use_the_public_layout():
 def test_declared_recipe_sections_support_leaf_overrides():
     config = {
         "reef": {
-            "recipe": "reef.recipe.cordis:CordisRecipe",
+            "recipe": "reef.recipe.harness:HarnessEvolutionRecipe",
             "data": {"training_mode": "auto"},
-            "evolution": {"adapter": "pi", "tasks": ["one"], "rollout_repeats": 2},
+            "evolution": {"adapter": "pi", "evaluation": {"tasks": ["one"], "repeats": 2}},
         }
     }
     arguments = component_config_arguments(config)
     result = _apply_overrides(
         config,
-        {"recipe.config.evolution.rollout_repeats": "4", "recipe.config.training-mode": "manual"},
+        {"recipe.config.evolution.evaluation.repeats": "4", "recipe.config.training-mode": "manual"},
         arguments=arguments,
     )
-    assert result["reef"]["evolution"] == {"adapter": "pi", "tasks": ["one"], "rollout_repeats": 4}
+    assert result["reef"]["evolution"] == {"adapter": "pi", "evaluation": {"tasks": ["one"], "repeats": 4}}
     assert result["reef"]["data"]["training_mode"] == "manual"
-    assert config["reef"]["evolution"]["rollout_repeats"] == 2
+    assert config["reef"]["evolution"]["evaluation"]["repeats"] == 2
 
 
 @pytest.mark.parametrize("num_gpus,tp,valid", [(2, 2, True), (4, 2, False), (0, 1, False)])

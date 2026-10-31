@@ -1,0 +1,49 @@
+# Reef's own coding agent: a Python loop inside this tree, driven headless per
+# run, whose tools are the tree's native tool files and whose loop events
+# reach its native hook files. REEF_NATIVE_DIR relocates the whole rendered
+# native directory, so nothing is read from the working directory.
+name: native
+binary: reef-native
+# What Reef may evolve: each kind of file, at the path where native reads it. A config/<target>.json
+# of the tree merges into that config file (config, below).
+evolve:
+  rules: native/RULES.md
+  skill: native/skills/{name}/SKILL.md
+  native_tool: native/tools/{name}.py
+  native_hook: native/hooks/{name}.py
+  native_graph: native/graphs/{name}.json
+  native_agent: native/agents/{name}.json
+  # Loop code runs in the loop's own process with its privileges, so a change
+  # always waits for a person.
+  native_loop: native/loops/{name}.py
+# The agent's directories under the root, each with the variable that moves it there. What the agent writes
+# in them is its state, never residue, and a sandbox keeps them writable.
+dirs:
+  native: REEF_NATIVE_DIR
+  native/sessions: REEF_NATIVE_SESSION_DIR
+sessions: {format: native-jsonl, path: native/sessions}
+# The served model reaches the loop through this file only; the served tree
+# never carries a provider.
+model:
+  openai:
+    - target: models
+      data:
+        api: openai
+        base_url: "{base_url}"
+        api_key: "{api_key}"
+        model: "{model}"
+# How the agent runs: one evaluation run in a root of its own (the command, and variables
+# beside the dirs), and on a person's machine a layer over the person's own configuration.
+run:
+  task:
+    argv: ["-p", "{task}"]
+# The config files the agent reads, with the defaults Reef merges first and the checks the merged
+# file must pass. A tree's config/<target>.json merges into one of them. The defaults and checks
+# are optional: a new adapter can start with the paths alone.
+config:
+  primary:
+    path: "native/config.json"
+    defaults: {}
+  models:
+    path: "native/models.json"
+    defaults: {}

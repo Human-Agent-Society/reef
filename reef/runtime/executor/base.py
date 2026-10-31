@@ -256,10 +256,6 @@ class Executor(ABC):
     def shutdown(self) -> None:
         """Release owned workers; never terminate workers attached as borrowed."""
 
-    def reinitialize_distributed(self, topology: Mapping[str, Any]) -> None:
-        """Optional capability: ordinary executors do not imply elastic training."""
-        raise NotImplementedError(f"{type(self).__name__} does not support distributed reinitialization")
-
 
 class SubmittingExecutor(Executor):
     """An executor whose transport submits one RPC and hands back a future.

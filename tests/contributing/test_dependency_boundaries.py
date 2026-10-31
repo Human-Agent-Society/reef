@@ -340,8 +340,8 @@ def test_slime_job_preparation_resolves_tttd_torch_lazily() -> None:
 def test_harness_training_backend_does_not_require_gpu_dependencies() -> None:
     _assert_isolated_import(
         "import sys; sys.modules['ray'] = None; sys.modules['torch'] = None; "
-        "from reef.train.cordis_backend import CordisBackend; "
-        "assert CordisBackend"
+        "from reef.train.harness_backend.backend import HarnessBackend; "
+        "assert HarnessBackend"
     )
 
 

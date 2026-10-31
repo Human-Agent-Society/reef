@@ -197,8 +197,6 @@ def test_factory_auto_launches_multiple_process_workers_and_dispatches_ranked_rp
         executor.check_health()
         assert executor.collective_rpc("compute", args=(2,), kwargs={"scale": 4}) == [(0, 8), (1, 20)]
         assert executor.rpc(1, "compute", args=(0,)) == (1, 3)
-        with pytest.raises(NotImplementedError, match="distributed reinitialization"):
-            executor.reinitialize_distributed({"world_size": 1})
     finally:
         executor.shutdown()
 

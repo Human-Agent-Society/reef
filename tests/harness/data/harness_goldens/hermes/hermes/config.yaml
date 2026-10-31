@@ -22,4 +22,3 @@ skills:
   creation_nudge_interval: 0
   external_dirs:
   - ${HERMES_HOME}/../hermes-commands
-  - ${REEF_HARNESS_DEST}/hermes-commands

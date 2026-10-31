@@ -592,6 +592,8 @@ def test_objective_resolution_rejects_a_missing_required_objective_module(monkey
         assert name == module_path
         raise ModuleNotFoundError(f"No module named {name!r}", name=name)
 
+    # The family registers when its package imports; only its objective module is missing.
+    resolve_loss_family("tttd")
     monkeypatch.setattr(importlib, "import_module", missing_objective)
     with pytest.raises(RuntimeError, match="requires objective hooks"):
         resolve_objective_paths(SimpleNamespace(loss_family="tttd"))

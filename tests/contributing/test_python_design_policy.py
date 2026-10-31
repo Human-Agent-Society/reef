@@ -144,8 +144,6 @@ def test_protocol_ban_cannot_be_baselined(tmp_path, monkeypatch, capsys, relativ
         "build/lib/example.py",
         "docs/_build/example.py",
         "dist/example.py",
-        "recipes/skillclaw/harbor/environment/workspace/example.py",
-        "recipes/skillclaw/harbor/tests/grade.py",
         "recipes/tttd/examples/tttd/harbor/circle_packing_10/environment/score.py",
         "recipes/tttd/examples/tttd/results/run/best_solution.py",
         "recipes/meta_harness/results/reef_harness.py",
