@@ -298,3 +298,18 @@ def test_a_job_has_no_experiment_when_the_tracker_has_no_run():
     JobExperimentRecorder(RunTracker(open_run=False), queue).record(job_event("j1"))
     JobExperimentRecorder(ExperimentTracker(), queue).record(job_event("j1"))
     assert scenario_jobs(queue, "s")[0]["experiment"] is None
+
+
+@pytest.mark.unit
+def test_a_checkpoint_keeps_the_kinds_it_changed_through_the_queue_and_into_its_commit() -> None:
+    """The activation rule reads which kinds a harness checkpoint changed, so they cross the queue intact."""
+    from reef.runtime.jobs import SavedCheckpoint
+    from reef.train.job_queue import checkpoint_from_json
+    from reef.train.jobs import JobLoop, JobLoopState, RunningJob
+
+    saved = SavedCheckpoint(1, "/jobs/j/1", "/jobs/j/1", {"loss": 1.0}, frozenset({"extension", "rule"}))
+    assert checkpoint_from_json(checkpoint_json(saved)) == saved
+    assert checkpoint_json(saved)["changed_kinds"] == ["extension", "rule"]
+    loop = JobLoop(StepComponent(Path("/tmp/unused")), scenario="s")
+    commit = loop.publish(JobLoopState("steps:base", RunningJob("j")), saved)
+    assert commit.result.changed_kinds == frozenset({"extension", "rule"})

@@ -240,6 +240,7 @@ class JobLoop:
                 metrics=metrics,
                 artifact=Artifact.local(Path(checkpoint.release_path)),
                 training_job_id=job.job_id,
+                changed_kinds=checkpoint.changed_kinds,
             )
         )
 

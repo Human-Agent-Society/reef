@@ -99,12 +99,20 @@ def job_from_item(item: WorkItem) -> TrainingJob:
     )
 
 
+def json_texts(value: JsonValue, name: str) -> list[str]:
+    """``value`` as a list of non-empty strings; ``ValueError`` when it is another JSON value."""
+    if not isinstance(value, list) or not all(isinstance(item, str) and item for item in value):
+        raise ValueError(f"{name} is a list of non-empty strings")
+    return list(value)
+
+
 def checkpoint_json(checkpoint: SavedCheckpoint) -> dict[str, JsonValue]:
     return {
         "step": checkpoint.step,
         "path": checkpoint.path,
         "release_path": checkpoint.release_path,
         "metrics": cast(JsonValue, dict(checkpoint.metrics)),
+        "changed_kinds": cast(JsonValue, sorted(checkpoint.changed_kinds)),
     }
 
 
@@ -118,6 +126,7 @@ def checkpoint_from_json(entry: Mapping[str, JsonValue]) -> SavedCheckpoint:
         json_text(entry.get("path"), "a checkpoint's path"),
         json_text(entry.get("release_path"), "a checkpoint's release_path"),
         json_object(entry.get("metrics"), "a checkpoint's metrics"),
+        frozenset(json_texts(entry.get("changed_kinds"), "a checkpoint's changed_kinds")),
     )
 
 

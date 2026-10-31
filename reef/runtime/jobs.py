@@ -94,13 +94,17 @@ class SavedCheckpoint:
     (for example ``path`` itself, or its Hugging Face export).
     ``metrics`` is the backend's telemetry for the training that led to this
     checkpoint, a mapping that encodes as JSON, which Reef records without
-    reading. A component makes the value; ``JobLoop`` reads it.
+    reading. ``changed_kinds`` is the set of non-empty names of the parts that
+    the checkpoint changed from the job's start, which the scenario's
+    activation rule reads (``MadeArtifact.changed_kinds``); a weight
+    checkpoint names none. A component makes the value; ``JobLoop`` reads it.
     """
 
     step: int
     path: str
     release_path: str
     metrics: Mapping[str, Any] = field(default_factory=dict)
+    changed_kinds: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
         if not isinstance(self.step, int) or isinstance(self.step, bool) or self.step < 0:
@@ -112,6 +116,10 @@ class SavedCheckpoint:
         if not isinstance(self.metrics, Mapping):
             raise TypeError("SavedCheckpoint.metrics must be a mapping")
         json.dumps(dict(self.metrics), allow_nan=False)
+        if not isinstance(self.changed_kinds, frozenset) or not all(
+            isinstance(kind, str) and kind for kind in self.changed_kinds
+        ):
+            raise TypeError("SavedCheckpoint.changed_kinds must be a frozenset of non-empty strings")
 
 
 @dataclass(frozen=True)

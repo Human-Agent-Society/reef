@@ -102,7 +102,13 @@ class LocalJobComponent(TrainingComponent):
         if value is None:
             return ()
         return tuple(
-            SavedCheckpoint(entry["step"], entry["path"], entry["release_path"], entry["metrics"])
+            SavedCheckpoint(
+                entry["step"],
+                entry["path"],
+                entry["release_path"],
+                entry["metrics"],
+                frozenset(entry["changed_kinds"]),
+            )
             for entry in value["checkpoints"]
         )
 
@@ -122,6 +128,7 @@ class LocalJobComponent(TrainingComponent):
                     "path": saved.path,
                     "release_path": saved.release_path,
                     "metrics": dict(saved.metrics),
+                    "changed_kinds": sorted(saved.changed_kinds),
                 }
                 for saved in (*self.saved(directory), checkpoint)
             ]
