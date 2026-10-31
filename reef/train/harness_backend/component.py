@@ -29,12 +29,14 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from reef.artifact.artifact import Artifact
 from reef.artifact.files import ArtifactFiles
 from reef.artifact.repository import BaseArtifactSource
 from reef.core.evaluation import CandidateEvaluationPlugin, UpdateCandidate
 from reef.harness.tree import HarnessTree
 from reef.runtime.durable_files import read_json, write_json
 from reef.runtime.jobs import ReleaseFormat, SavedCheckpoint, TrainingJob
+from reef.surface.files import TextFileTree
 from reef.train.backend import ReleaseFiles
 from reef.train.harness_backend.backend import HarnessBackend, StepProgress
 from reef.train.harness_backend.state import HarnessState
@@ -197,8 +199,12 @@ class HarnessTrainingComponent(LocalJobComponent):
 
     def import_start(self, release: Path) -> str:
         """Copy the tree of ``release`` to ``starts/<checksum>`` and return that directory; ``ValueError`` when the
-        tree fails validation."""
-        tree = HarnessTree.read(release)
+        tree fails validation.
+
+        The tree is the release's text files without the repository's own files (``TextFileTree``), as a client
+        pulls it: a Git LFS release directory also holds ``.gitattributes``.
+        """
+        tree = HarnessTree(dict(TextFileTree().read_files(Artifact.local(release)) or {}))
         self.steps.check_tree(tree)
         directory = self.starts_root / tree.checksum()
         if not directory.is_dir():

@@ -19,7 +19,7 @@ from collections.abc import Mapping
 from typing import Any, cast
 
 from reef.artifact.artifact import ArtifactConflict, ArtifactError, ArtifactNotFound
-from reef.core.errors import UnknownScenario
+from reef.core.errors import ReefError, UnknownScenario
 from reef.core.records_types import RequestType
 from reef.execution.workers import QueueWorker
 from reef.service.request_service import RequestService
@@ -69,9 +69,10 @@ class DirectImports(HarnessImports):
 class QueuedImports(HarnessImports):
     """Adds each import to control's sync queue and waits for control's answer.
 
-    Values: ``queue`` is the deployment's work queue. An item's ID is a hash of its scenario and payload, so a retry
-    of the same import waits for the same item. ``HarnessImportPending`` when control does not answer within
-    ``SYNC_WAIT_SECONDS``.
+    Values: ``queue`` is the deployment's work queue. An item's ID is a hash of its scenario and payload, with
+    ``:<n>`` after it for the ``n``-th item of the same import: a retry of an import whose item is not final waits
+    for that item, and an import whose earlier items all ended gets a new one. ``HarnessImportPending`` when
+    control does not answer within ``SYNC_WAIT_SECONDS``.
     """
 
     def __init__(self, queue: WorkQueue) -> None:
@@ -82,7 +83,12 @@ class QueuedImports(HarnessImports):
         scenario = parse_request_headers(headers, RequestType.INFERENCE).scenario
         work = dict(payload)
         encoded = json.dumps({"scenario": scenario, "payload": work}, sort_keys=True, separators=(",", ":"))
-        item_id = f"{HARNESS_SYNC_KIND}:{hashlib.sha256(encoded.encode()).hexdigest()}"
+        base_id = f"{HARNESS_SYNC_KIND}:{hashlib.sha256(encoded.encode()).hexdigest()}"
+        item_id, number = base_id, 1
+        # An item that ended answered an earlier import: the active tree may have moved since, so it is not reused.
+        while (earlier := self.queue.get(HARNESS_SYNC_QUEUE, item_id)) is not None and earlier.final:
+            number += 1
+            item_id = f"{base_id}:{number}"
         self.queue.add(NewWork(HARNESS_SYNC_QUEUE, item_id, scenario, HARNESS_SYNC_KIND, work))
         deadline = time.monotonic() + SYNC_WAIT_SECONDS
         while True:
@@ -123,7 +129,8 @@ class HarnessSyncWorker(QueueWorker):
     """Control's worker of the ``harness_sync`` items: it commits each import with ``RequestService``.
 
     Values: as ``QueueWorker``, on ``HARNESS_SYNC_QUEUE``; ``request_service`` runs control. A refused import
-    finishes its item with ``{"refused": ...}``, so the harness service answers with its error.
+    finishes its item with ``{"refused": ...}``, so the harness service answers with its error; an artifact store
+    failure fails the attempt, which a later attempt retries.
 
     Purpose: the assembly of a process that runs control starts one.
     """
@@ -144,7 +151,11 @@ class HarnessSyncWorker(QueueWorker):
             return {"refused": {"kind": "conflict", "message": str(exc)}}
         except (ArtifactNotFound, UnknownScenario) as exc:
             return {"refused": {"kind": "not_found", "message": str(exc)}}
-        except ValueError as exc:
+        except ArtifactError:
+            # The artifact store failed: a retry of the same import can pass.
+            raise
+        except (ReefError, ValueError) as exc:
+            # The files or the scenario refuse the import, such as a tree that the trainer cannot start from.
             return {"refused": {"kind": "invalid", "message": str(exc)}}
         return {"answer": cast(JsonValue, answer)}
 

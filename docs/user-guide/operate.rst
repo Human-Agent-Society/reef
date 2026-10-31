@@ -347,6 +347,12 @@ must reach the same store:
   (``reef_records_coordination`` by default), so deployments with their own
   record schemas share no tables.
 
+Give each process its own ``storage.artifact-work-dir`` and
+``storage.artifact-cache-dir``, for example with ``--storage.artifact-work-dir``
+on its command line. A process keeps its working copy of the artifact
+repository there, and two processes in one working copy break each other's
+fetches.
+
 **Harness steps.** A harness evolution step is a training job of the
 ``harness`` training component, so the training service runs the method, the
 coding agent and the evaluation runs. Install the adapter's binary and the

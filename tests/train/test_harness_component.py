@@ -139,13 +139,16 @@ def test_starts_and_jobs_are_checked_before_a_job_runs(tmp_path: Path) -> None:
     assert component.start_tree(component.base_start) == PI_SEED
     assert component.release_format is None and component.shares_scenarios
     assert component.base_artifact_source().files == dict(PI_SEED.files)
-    # An imported start is a copy of the release's tree, under its checksum.
+    # An imported start is a copy of the release's tree, under its checksum, without the repository's own files.
     release = tmp_path / "release"
     PI_SEED.apply(MARKER).write(release)
+    # An import's directory holds the tree alone.
+    component.check_release(DirectoryFiles(release))
+    (release / ".gitattributes").write_text("* filter=lfs\n")
+    (release / "reef-artifact.json").write_text("{}\n")
     start = component.import_start(release)
     assert Path(start).name == PI_SEED.apply(MARKER).checksum()
     assert component.start_tree(start) == PI_SEED.apply(MARKER) and component.import_start(release) == start
-    component.check_release(DirectoryFiles(release))
     broken = tmp_path / "broken"
     HarnessTree({"rules.md": ""}).write(broken)
     with pytest.raises(ValueError, match="fails validation"):

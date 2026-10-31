@@ -81,6 +81,11 @@ def test_the_harness_service_serves_the_tree_and_control_commits_its_imports(tmp
             assert source["release_id"] == imported["release_id"] and source["files"]["rules.md"] == "Mine.\n"
             releases = await (await client.get("/reef/harness/releases", headers=HEADERS)).json()
             assert releases["releases"][-1]["release_id"] == imported["release_id"]
+            # The same files again are a new import, which merges onto the tree they made: nothing changes.
+            again = await client.post(
+                "/reef/harness/import", headers=HEADERS, json={"files": MINE, "base_release_id": base}
+            )
+            assert again.status == 200 and (await again.json())["changed"] is False
             # Control's refusals keep their status: a file that both sides changed, an import without its base,
             # and an unknown scenario.
             conflicting = {**MINE, "plugin/rules.md": "Theirs.\n"}
