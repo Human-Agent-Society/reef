@@ -108,7 +108,7 @@ position. Around the unmodified agent it makes three changes:
    and stable conversation tag, then forwards the request to Reef.
 2. It mints a Reef scenario id at position 0 and writes it to
    `$REEF_EVAL_STATE_DIR`. One stream is one scenario, which is one chain of
-   runtime load IDs in Reef.
+   artifacts in Reef.
 3. It writes the hermes config at the start of every position, with context
    compression, reasoning display and the tirith scanner turned off (the
    reply on stdout must be the answer alone).

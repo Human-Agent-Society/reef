@@ -206,7 +206,7 @@ def _turn_inference(agent_record_id: str, tokens: list[int], log_prob: float) ->
                     "tokens": tokens,
                     "loss_mask": [1],
                     "rollout_log_probs": [log_prob],
-                    "runtime_load_id": "wv-1",
+                    "artifact_id": "artifact-1",
                 }
             }
         },
@@ -421,7 +421,7 @@ def test_named_recipe_configs_resolve_by_name(monkeypatch, tmp_path) -> None:
     assert isinstance(runtime, InferenceProxyRuntime)
     assert runtime.model_path == "MiniMax-M3"
     assert runtime.base_url == "https://api.minimax.io/anthropic"
-    assert runtime.api_key == "test-minimax-key"
+    assert runtime.provider_key == "test-minimax-key"
 
 
 def test_cookbook_objectives_signal_their_recipes_loss_family() -> None:

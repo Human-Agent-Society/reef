@@ -384,7 +384,7 @@ def test_retracting_pause_clears_the_shared_cache_before_a_publication(
 
 
 @pytest.mark.unit
-def test_dp_packaging_preserves_runtime_load_ids_per_partition(
+def test_dp_packaging_preserves_producing_artifact_ids_per_partition(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     module = _load_manager_module(monkeypatch)
@@ -404,29 +404,20 @@ def test_dp_packaging_preserves_runtime_load_ids_per_partition(
     args = types.SimpleNamespace(
         global_batch_size=2,
         rollout_data_transport="object-store",
-        custom_rollout_data_keys=(
-            "producing_runtime_load_spans",
-            "producing_runtime_load_ids",
-        ),
+        custom_rollout_data_keys=("producing_artifact_ids",),
         reef_rollout_tensor_dtypes={},
     )
     manager = module.TrainingBatchProcessor(args, {"dp_size": 2})
-    spans = [
-        [{"start": 0, "end": 1, "runtime_load_id": "engine:1"}],
-        [{"start": 0, "end": 1, "runtime_load_id": "engine:2"}],
-    ]
     packed = manager._split_train_data_by_dp(
         {
             "tokens": [[10], [20]],
             "rollout_ids": [0, 1],
             "external_step_sizes": [2],
-            "producing_runtime_load_ids": ["engine:1", "engine:2"],
-            "producing_runtime_load_spans": spans,
+            "producing_artifact_ids": ["artifact-1", "artifact-2"],
         }
     )
 
-    assert [rank["producing_runtime_load_ids"] for rank in packed] == [["engine:1"], ["engine:2"]]
-    assert [rank["producing_runtime_load_spans"] for rank in packed] == [[spans[0]], [spans[1]]]
+    assert [rank["producing_artifact_ids"] for rank in packed] == [["artifact-1"], ["artifact-2"]]
 
 
 def _round_robin_dp_schedule(_args, config, total_lengths, *, global_batch_size, rollout_indices):

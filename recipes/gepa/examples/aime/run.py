@@ -58,6 +58,7 @@ from reef.service.app import create_app
 from reef.service.deploy.config_utils import load_config
 from reef.service.wire import SCENARIO_HEADER
 from reef.storage.records import RecordStore
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 
 HERE = Path(__file__).resolve().parent
@@ -201,6 +202,7 @@ class RunService:
             InMemoryRepositoryBackend.factory(bootstrap_tree, root=run_dir / "artifacts"),
             local_artifact_dir=run_dir / "staged",
             scenario_storage=SQLiteScenarioStorage(run_dir / "reef-data"),
+            coordination=memory_coordination(),
         )
         self._app = create_app(
             self.dispatcher,

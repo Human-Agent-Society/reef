@@ -25,6 +25,7 @@ from reef.core.errors import CommitPending, UnknownScenario
 from reef.dispatcher import Dispatcher
 from reef.service.app import create_app
 from reef.service.artifact_imports import ArtifactImports
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.jobs import JobLoopState
 from reef.train.trainer import Trainer
@@ -118,6 +119,7 @@ def test_an_import_publishes_beside_the_chain_and_changes_nothing_else(tmp_path)
         backend_factory,
         local_artifact_dir=tmp_path / "restarted-staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
+        coordination=memory_coordination(),
     )
     try:
         scenario = restarted.get_or_create_scenario("math")

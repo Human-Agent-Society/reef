@@ -16,8 +16,10 @@ from reef.artifact import (
     ArtifactConflict,
     ArtifactSourceError,
     BaseArtifactSource,
+    BaseModelFiles,
     GitLFSRepositoryBackend,
     GitLFSRepositoryBackendFactory,
+    ModelDirectory,
     RepositoryBackendContext,
 )
 from reef.artifact.git_client import GitClient
@@ -340,7 +342,9 @@ def test_git_lfs_repository_imports_forks_publishes_and_materializes(
         remote,
         work_dir=tmp_path / "work",
         cache_dir=tmp_path / "cache",
-        base=BaseArtifactSource(model_directory=snapshot, inputs={"model": "org/model", "version": "upstream-sha"}),
+        base=BaseArtifactSource(
+            model_files=ModelDirectory(snapshot), inputs={"model": "org/model", "version": "upstream-sha"}
+        ),
     )
 
     backend = backend_factory("math")
@@ -505,7 +509,7 @@ def test_the_base_model_goes_under_its_component_beside_the_seed_files(
         cache_dir=tmp_path / "cache",
         base=BaseArtifactSource(
             files={"harness/AGENTS.md": "seed rules\n"},
-            model_directory=snapshot,
+            model_files=ModelDirectory(snapshot),
             model_component="weights",
             inputs={"weights.model": "org/model"},
         ),
@@ -522,8 +526,49 @@ def test_the_base_model_goes_under_its_component_beside_the_seed_files(
             remote,
             work_dir=tmp_path / "w2",
             cache_dir=tmp_path / "c2",
-            base=BaseArtifactSource(model_directory=snapshot, model_component="../x"),
+            base=BaseArtifactSource(model_files=ModelDirectory(snapshot), model_component="../x"),
         )("agent")
+
+
+class CountedModelFiles(BaseModelFiles):
+    """Model files in ``path`` that count the calls of ``directory``."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.calls = 0
+
+    def directory(self) -> Path:
+        self.calls += 1
+        return self.path
+
+
+@pytest.mark.integration
+def test_only_the_import_of_a_missing_base_reads_its_model_files(tmp_path: Path, fake_git_lfs: None) -> None:
+    remote = tmp_path / "artifacts.git"
+    run_git("init", "--bare", str(remote))
+    snapshot = tmp_path / "snapshot"
+    snapshot.mkdir()
+    (snapshot / "config.json").write_text("{}")
+    files = CountedModelFiles(snapshot)
+    base = BaseArtifactSource(model_files=files, inputs={"model": "org/model"})
+
+    GitLFSRepositoryBackend.factory(remote, work_dir=tmp_path / "work", cache_dir=tmp_path / "cache", base=base)("a")
+    assert files.calls == 1
+    # Another process opens the repository, which has a base now, and makes no model files.
+    other = GitLFSRepositoryBackend.factory(
+        remote, work_dir=tmp_path / "other-work", cache_dir=tmp_path / "other-cache", base=base
+    )("b")
+    assert files.calls == 1
+    materialized = other.materialize(other.resolve_release("base"))
+    assert materialized.local_path is not None
+    assert (materialized.local_path / "config.json").read_text() == "{}"
+
+
+def test_a_model_directory_exists_and_a_model_component_needs_model_files(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="does not exist"):
+        ModelDirectory(tmp_path / "missing")
+    with pytest.raises(ValueError, match="requires model_files"):
+        BaseArtifactSource(model_component="weights")
 
 
 @pytest.mark.integration
@@ -629,7 +674,7 @@ def test_the_work_tree_never_writes_through_a_link(tmp_path: Path, fake_git_lfs:
         remote,
         work_dir=tmp_path / "work",
         cache_dir=tmp_path / "cache",
-        base=BaseArtifactSource(files={"AGENTS.md": "seed\n"}, model_directory=snapshot),
+        base=BaseArtifactSource(files={"AGENTS.md": "seed\n"}, model_files=ModelDirectory(snapshot)),
     )("agent")
     head = backend.fork()
     # The import rewrote .gitattributes in the work tree, not the Hugging Face blob behind the snapshot.

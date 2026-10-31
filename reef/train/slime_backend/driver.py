@@ -62,7 +62,12 @@ def main(argv: Sequence[str] | None = None) -> None:
     if submitted is None or settings_value is None:
         raise SystemExit(f"{directory} holds no {JOB_FILE} and {DRIVER_FILE}")
     job = TrainingJob(
-        directory.name, "slime", submitted["start"], JobData.from_dict(submitted["data"]), submitted["parameters"]
+        directory.name,
+        "slime",
+        submitted["start"],
+        JobData.from_dict(submitted["data"]),
+        submitted["parameters"],
+        scenario=submitted["scenario"],
     )
     settings = settings_from_json(settings_value)
     # A task job and a dataset job roll out on the serving session's engines; another job trains on the

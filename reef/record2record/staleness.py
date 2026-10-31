@@ -1,81 +1,63 @@
-"""The staleness check: whether the training data of samples is too many versions behind the served one."""
+"""The staleness check: whether the training data of samples is too many artifacts behind the served one."""
 
 from __future__ import annotations
 
 from collections.abc import Sequence
 
-from reef.core.artifact_ref import parse_runtime_load_spans
 from reef.core.job_data import Sample, TrajectorySample
-from reef.runtime.interfaces import RuntimeLoadId
 
 
-def producing_runtime_load_ids(samples: Sequence[Sample]) -> frozenset[str | None]:
-    """Return the runtime load IDs that produced the training data of ``samples``.
+def producing_artifact_ids(samples: Sequence[Sample]) -> frozenset[str | None]:
+    """Return the artifacts that produced the training data of ``samples``, by ``artifact_id``.
 
-    A sample whose tokens came from several versions gives each version of its
-    token spans. A sample without a recorded version gives None. A ``TaskSample``
-    gives nothing: the algorithm rolls it out with the weights it trains.
+    A sample without a recorded artifact gives None. A ``TaskSample`` gives nothing: the algorithm rolls it out
+    with the weights it trains.
     """
-    versions: set[str | None] = set()
+    artifacts: set[str | None] = set()
     for sample in samples:
         if not isinstance(sample, TrajectorySample):
             continue
-        spans = parse_runtime_load_spans(sample.training.get("runtime_load_spans", []))
-        if spans:
-            versions.update(span.runtime_load_id for span in spans)
-        else:
-            version = sample.training.get("runtime_load_id")
-            versions.add(version if isinstance(version, str) and version else None)
-    return frozenset(versions)
+        artifact_id = sample.training.get("artifact_id")
+        artifacts.add(artifact_id if isinstance(artifact_id, str) and artifact_id else None)
+    return frozenset(artifacts)
 
 
-def is_stale(versions: frozenset[str | None], served_runtime_load_ids: Sequence[str], max_staleness: int) -> bool:
-    """Whether training data that ``versions`` produced is more than ``max_staleness`` versions behind.
+def is_stale(artifact_ids: frozenset[str | None], served_artifact_ids: Sequence[str], max_staleness: int) -> bool:
+    """Whether training data that ``artifact_ids`` produced is more than ``max_staleness`` artifacts behind.
 
-    It is stale when a version is None, is not in ``served_runtime_load_ids``, or lags the last served version
-    by more than ``max_staleness``. An empty ``served_runtime_load_ids`` means that the serving version is
-    unknown, so no data is stale.
+    It is stale when an artifact is None, is not in ``served_artifact_ids``, or lags the artifact served last by
+    more than ``max_staleness``. An empty ``served_artifact_ids`` means that the served artifact is unknown, so no
+    data is stale.
     """
-    if not served_runtime_load_ids:
+    if not served_artifact_ids:
         return False
-    newest_position = len(served_runtime_load_ids) - 1
-    positions = {version: position for position, version in enumerate(served_runtime_load_ids)}
-    for version in versions:
-        position = None if version is None else positions.get(version)
+    newest_position = len(served_artifact_ids) - 1
+    positions = {artifact_id: position for position, artifact_id in enumerate(served_artifact_ids)}
+    for artifact_id in artifact_ids:
+        position = None if artifact_id is None else positions.get(artifact_id)
         if position is None or newest_position - position > max_staleness:
             return True
     return False
 
 
-class ServedVersions:
-    """The versions that a scenario served, oldest first, since its engine's current incarnation started.
+class ServedArtifacts:
+    """The artifacts that a scenario served, oldest first.
 
-    Values: ``versions`` is a finite list of runtime load IDs with no two neighbors equal; the last one is the
-    version that the scenario serves now. ``observe`` appends a version that differs from the last one, and
-    clears the list first when the version belongs to another incarnation than the last one, because no
-    earlier version can train after the engine restarted.
-    Purpose: a stage that runs the staleness check keeps one, fed by the pipeline's
-    ``observe_serving_runtime_load_id``, and gives ``versions`` to ``is_stale``.
+    Values: ``artifact_ids`` is a finite list of artifact IDs with no two neighbors equal; the last one is the
+    artifact that the scenario serves now. ``observe`` appends an artifact that differs from the last one. The list
+    lives with its pipeline: a pipeline built again (a reload or a restart) starts it empty, so data from the
+    artifacts served before it is stale.
+    Purpose: a stage that runs the staleness check keeps one, fed by the pipeline's ``observe_serving_artifact_id``,
+    and gives ``artifact_ids`` to ``is_stale``.
     """
 
     def __init__(self) -> None:
-        self.versions: list[str] = []
+        self.artifact_ids: list[str] = []
 
-    def observe(self, runtime_load_id: str) -> None:
-        """Add the version that the scenario serves now, if the version changed."""
-        if self.versions and self.versions[-1] == runtime_load_id:
-            return
-        previous = canonical_runtime_load_id(self.versions[-1]) if self.versions else None
-        current = canonical_runtime_load_id(runtime_load_id)
-        if previous is not None and current is not None and previous.incarnation != current.incarnation:
-            self.versions.clear()
-        self.versions.append(runtime_load_id)
+    def observe(self, artifact_id: str) -> None:
+        """Add the artifact that the scenario serves now, if it changed."""
+        if not self.artifact_ids or self.artifact_ids[-1] != artifact_id:
+            self.artifact_ids.append(artifact_id)
 
 
-def canonical_runtime_load_id(value: str) -> RuntimeLoadId | None:
-    """Parse a canonical runtime load ID. Return None for a non-canonical value."""
-    try:
-        parsed = RuntimeLoadId.parse(value)
-    except (TypeError, ValueError):
-        return None
-    return parsed if str(parsed) == value else None
+__all__ = ["ServedArtifacts", "is_stale", "producing_artifact_ids"]

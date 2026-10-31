@@ -89,7 +89,6 @@ def _sample(reward: float, cands: tuple | None = None, n: int = 3) -> Trajectory
         loss_mask=(1,) * n,
         rollout_log_probs=(-1.0,) * n,
         reward=reward,
-        runtime_load_id="v:1",
         topk_indices=tuple((1, 2, 3, 4) for _ in range(n)),
         topk_log_probs=tuple((-0.5, -1.0, -1.5, -2.0) for _ in range(n)),
         extras={"teacher_cands": cands},
@@ -577,7 +576,7 @@ def test_processor_attaches_topk_and_candidates() -> None:
                         "rollout_log_probs": [0.0, -0.3, -0.2],
                         "topk_indices": [[1, 2], [3, 4], [5, 6]],
                         "topk_log_probs": [[-0.1, -0.2], [-0.3, -0.4], [-0.5, -0.6]],
-                        "runtime_load_id": "v1",
+                        "artifact_id": "v1",
                     },
                 },
             },
@@ -610,6 +609,7 @@ def test_processor_attaches_topk_and_candidates() -> None:
     # The RL-only turn ships the un-enhanced anchor: the native ids verbatim.
     worker.push(TurnJudgment("i1", score=1.0, teacher_cands=({"hint": "", "teacher_tokens": [1, 2, 3, 4]},)))
 
+    processor.produce()
     batch = processor.build_job_data(2)
     by_source = {source_record_id(sample): sample for sample in batch.samples}
     sample = by_source["i0"]

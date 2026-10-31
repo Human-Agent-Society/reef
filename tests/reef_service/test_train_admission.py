@@ -127,13 +127,18 @@ def test_requests_beyond_eight_are_accepted_and_pending_status_tracks_consumptio
                 assert response.status == 200, await response.text()
                 ids.append((await response.json())["agent_record_id"])
             assert await asyncio.to_thread(entered.wait, 5)
-            # One is in flight and nine wait unread: the processor buffers one instruction at a time.
-            assert scenario.trainer.pipeline_status()["buffered_requests"] == 1
+            # One is in flight. The samples service reads every new record, whatever the cycle does, so the
+            # processor reads all ten instructions.
+            for _ in range(200):
+                if scenario.trainer.pipeline_status()["buffered_requests"] == 10:
+                    break
+                await asyncio.sleep(0.05)
+            assert scenario.trainer.pipeline_status()["buffered_requests"] == 10
             assert scenario.trainer.pending_instructions() == 10
             status = await client.get("/reef/status")
             assert status.status == 200, await status.text()
             processor = (await status.json())["scenarios"]["agents"]["processor"]
-            assert processor["buffered_requests"] == 1
+            assert processor["buffered_requests"] == 10
             assert processor["pending_instructions"] == 10
             # job_samples defaults to evolution.batch_size; the default buffer holds the data of one job.
             assert (processor["ready_samples"], processor["job_samples"], processor["buffer_size"]) == (0, 3, 3)

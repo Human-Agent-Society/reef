@@ -196,9 +196,10 @@ release-chain section of `Architecture <../getting-started/core-loop.rst>`__.
   and is exposed through a repository backend factory. To let a deployment
   select it in ``storage.artifact_backend``, the factory also inherits
   ``ConfigurableRepositoryBackendFactory``.
-- Put request preparation and response verification in ``InferenceHooks``,
-  activation and recovery behavior in ``ArtifactLoader``, and client-pull delivery in
-  ``FileTree`` under ``reef/surface/``.
+- Put activation and recovery behavior in ``ArtifactLoader``, and client-pull
+  delivery in ``FileTree``, under ``reef/surface/``. Reef does not change a
+  model request on its way to the engine: a client pulls the artifacts that
+  shape its requests.
 - Build the surface from the owning recipe; do not make the surface choose a
   method or evaluate a candidate.
 - Test surface behavior in ``tests/surface/test_surfaces.py`` or the

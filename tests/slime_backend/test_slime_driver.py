@@ -87,12 +87,15 @@ def parsed(tmp_path, monkeypatch):
 
 
 def sft_job(component: SlimeTrainingComponent, job_id: str = "job-0", start: str | None = None) -> TrainingJob:
-    return TrainingJob(job_id, "slime", start or component.base_start, batch_for(0), parameters(TrainingMethod("sft")))
+    return TrainingJob(
+        job_id, "slime", start or component.base_start, batch_for(0), parameters(TrainingMethod("sft")), scenario="s"
+    )
 
 
 @pytest.mark.unit
 def test_the_component_parses_the_arguments_at_deployment_and_starts_nothing(tmp_path, parsed):
     component = Component(SETTINGS)
+    component.start_jobs()
     try:
         # One parse, as a job that starts no rollout engines; a malformed option fails here.
         assert parsed == [("--lr=1e-06", NO_ROLLOUT_ENGINES)]
@@ -104,6 +107,7 @@ def test_the_component_parses_the_arguments_at_deployment_and_starts_nothing(tmp
 @pytest.mark.unit
 def test_a_jobs_driver_reports_its_checkpoints_and_the_next_job_continues_them(tmp_path, parsed):
     component = Component(SETTINGS)
+    component.start_jobs()
     try:
         component.submit(sft_job(component))
         status = finished(component, "job-0")
@@ -127,6 +131,7 @@ def test_a_jobs_driver_reports_its_checkpoints_and_the_next_job_continues_them(t
 @pytest.mark.unit
 def test_a_failed_driver_fails_its_job_with_the_end_of_its_output(tmp_path, parsed):
     component = Component(SETTINGS)
+    component.start_jobs()
     component.script = "import sys; print('Megatron could not load the checkpoint'); sys.exit(3)"
     try:
         component.submit(sft_job(component))
@@ -140,6 +145,7 @@ def test_a_failed_driver_fails_its_job_with_the_end_of_its_output(tmp_path, pars
 @pytest.mark.unit
 def test_a_cancel_stops_the_driver_and_a_close_leaves_the_job_to_resume(tmp_path, parsed):
     component = Component(SETTINGS)
+    component.start_jobs()
     component.script = (
         "import sys, time; from pathlib import Path; (Path(sys.argv[1]) / 'started').touch(); time.sleep(600)"
     )
@@ -157,6 +163,7 @@ def test_a_cancel_stops_the_driver_and_a_close_leaves_the_job_to_resume(tmp_path
         component.close()
     # A job whose driver a close stopped has not ended: a restarted component runs its driver again.
     component = Component(SETTINGS)
+    component.start_jobs()
     component.script = (
         "import sys, time; from pathlib import Path; (Path(sys.argv[1]) / 'started').touch(); time.sleep(600)"
     )
@@ -171,6 +178,7 @@ def test_a_cancel_stops_the_driver_and_a_close_leaves_the_job_to_resume(tmp_path
         component.close()
     assert component.status("job-1").state == "running"
     component = Component(SETTINGS)
+    component.start_jobs()
     try:
         assert finished(component, "job-1").state == "finished"
     finally:
@@ -180,11 +188,13 @@ def test_a_cancel_stops_the_driver_and_a_close_leaves_the_job_to_resume(tmp_path
 @pytest.mark.unit
 def test_closing_the_component_disposes_the_serving_session_that_a_driver_left(tmp_path, parsed):
     component = Component(SETTINGS)
+    component.start_jobs()
     root = component.root
     # No session: closing starts no disposal.
     component.dispose_command = lambda: [sys.executable, "-c", "raise SystemExit(5)"]  # type: ignore[method-assign]
     component.close()
     component = Component(SETTINGS)
+    component.start_jobs()
     write_json(root / SERVING_FILE, {"session": "rollout:abc", "lease": "0" * 32})
     component.dispose_command = lambda: [  # type: ignore[method-assign]
         sys.executable,
@@ -221,7 +231,10 @@ def job_directory(root: Path, data: JobData, rollout: bool) -> Path:
         **parameters(TrainingMethod("sft")),
         **({"rollout": {"rollouts_per_task": 2}} if rollout else {}),
     }
-    write_json(directory / JOB_FILE, {"start": str(start), "data": data.to_dict(), "parameters": job_parameters})
+    write_json(
+        directory / JOB_FILE,
+        {"scenario": "s", "start": str(start), "data": data.to_dict(), "parameters": job_parameters},
+    )
     write_json(directory / DRIVER_FILE, settings_to_json(SETTINGS))
     return directory
 

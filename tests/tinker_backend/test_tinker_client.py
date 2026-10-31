@@ -428,3 +428,23 @@ def test_an_imported_manifest_is_checked_by_its_state_path_alone(client):
     ):
         with pytest.raises(ValueError, match=message):
             client.check_remote(replace(checkpoint, state_path=state_path))
+
+
+def test_the_metrics_of_several_optimizer_steps_combine_by_their_suffixes():
+    from reef.train.tinker_backend.client import combined_step_metrics
+
+    combined = combined_step_metrics(
+        [
+            {"loss:sum": -2.0, "loss:mean": -0.2, "tokens:sum": 10.0, "packing_token_capacity:max": 4.0, "seed": 1.0},
+            {"loss:sum": 0.0, "loss:mean": 0.0, "tokens:sum": 30.0, "packing_token_capacity:max": 8.0, "seed": 2.0},
+        ]
+    )
+
+    assert combined == {
+        "loss:sum": -2.0,
+        "loss:mean": pytest.approx(-0.05),
+        "tokens:sum": 40.0,
+        "packing_token_capacity:max": 8.0,
+        "seed": 2.0,
+    }
+    assert combined_step_metrics([{"loss:mean": 1.0}, {"loss:mean": 3.0}]) == {"loss:mean": 2.0}
