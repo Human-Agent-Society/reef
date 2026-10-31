@@ -9,7 +9,7 @@ from pathlib import Path
 from reef.core.artifact_ref import decode_artifact_ref
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.tasks import HarborTask, HarborTaskError
-from reef.harness.client.tasks import RolloutTurn, TaskRollout
+from reef.harness.tasks.rollouts import RolloutTurn, TaskRollout
 from reef.record2sample.generator.designer import DesignerRequest
 from reef.record2sample.generator.harbor import OracleResult
 from reef.record2sample.generator.inputs import record_document

@@ -203,65 +203,38 @@ use the current version without restarting Reef.
 
 ### Harness-evolving deployment
 
-Refine a coding harness from plain-language asks, using a model API instead of GPUs.
+Evolve a coding agent's skills and rules from scored feedback, using a model
+API instead of GPUs.
 
-Reefine is the built-in harness-refinement recipe and includes a deployment
-configuration; specify the provider URL and model. From your Reef checkout and
-activated Python environment:
-
-```bash
-reef serve --recipe reefine \
-  --inference.upstream-url http://127.0.0.1:11434 \
-  --inference.upstream-model gemma4:26b
-```
-For another provider, change
-`--inference.upstream-url` and `--inference.upstream-model`, and set
-`REEF_UPSTREAM_API_KEY` if authentication is required. With this configuration, Reef
-listens on `127.0.0.1:8901` without authentication (set `REEF_TOKEN` before
-starting it to require that token) and keeps its state under
-`.reef/reefine/`. To change anything else, copy
-[the deployment configuration](reef/service/profiles/reefine.yaml) and pass
-your copy with `-c`.
-
-In another terminal with the same Python environment activated (the install
-bakes that terminal's `python3` into `reef-pi`), create a scenario, install the
-harness, and ask for a change:
+A harness deployment serves `reef.recipe.harness:HarnessEvolutionRecipe`. The
+recipe keeps the agent harness as a tree of text files. At each step, a method
+edits a copy of that tree from the step's traces, the evaluation runs the real
+agent on tasks with the candidate, and a candidate that wins publishes as a
+release that any client can pull. The
+[harness evolution tutorial](tutorials/evolve-your-harness/README.md) runs the
+smallest full loop on pi. It needs an OpenAI-compatible endpoint, and Node.js
+and npm for pi. From your Reef checkout and activated Python environment:
 
 ```bash
-curl -fsS -H "Content-Type: application/json" \
-  -d '{"name": "my-harness"}' http://127.0.0.1:8901/reef/scenarios
-curl -fsS -H "x-reef-scenario: my-harness" \
-  'http://127.0.0.1:8901/reef/harness/install?adapter=pi' | bash
-
-reef-pi evolve "when I ask you to fix a bug, reproduce it with a failing test first"
+cd tutorials/evolve-your-harness
+./run.sh
 ```
 
-The script installs into `~/reef-harness/<scenario>` (here
-`~/reef-harness/my-harness`); `bash -s -- <dir>` names another install root.
-Keep any install root outside the project the agent works in: a session can
-write files in its project, so with the install root there it could change
-what the next session runs. The same holds for the Python environment the
-install bakes into `reef-pi` and the Reef checkout it imports: code there runs
-as you when `reef-pi` starts. For codex and dsh, keep them out of `/tmp` and
-`$TMPDIR` too: their sandboxes let a command write there as well. The check
-`reef-pi` runs before a session holds only against a session that can write
-just its project, `/tmp` and `$TMPDIR`; pi runs commands with no sandbox (see
-[Recover a changed installation](https://reefinfra.ai/docs/user-guide/evolve-your-harness/#recover-a-changed-installation)).
+`configs/serve.yaml` names the endpoint (`inference.upstream-url`, no `/v1`
+suffix) and the model (`inference.upstream-model`). Edit them to point at your
+own provider, and set `REEF_UPSTREAM_API_KEY` if the endpoint needs a key.
+`run.sh` starts Reef on `127.0.0.1:8900`, sends the tasks through it, reports
+each score, and pulls the published tree. Each run writes `work/replay.html`
+with the release chain and the files each step changed.
 
-Inside a `reef-pi` session, `/reefine <text>` files the same ask. The served
-model writes the change as a skill, a rules entry, an agent command, or a pi
-extension. Where the host can isolate it (Linux with `bwrap` and `pasta`, as a
-non-root user), or with `REEF_PROPOSER_SANDBOX=none` on a machine you trust, it
-works as a coding agent that runs the changed harness before handing the change
-back. The next session's update notice offers the install; a step that
-settles while you are between turns offers its install right away. Review the
-versions with `/versions`, which opens a step's page, and install one with
-`/versions <version> install`. To change the model, restart
-`reef serve` with another `--inference.upstream-model` and rerun the install
-command: installation writes the model ID into the local harness configuration.
-See the [Reefine tutorial](tutorials/reefine/README.md) for scripted bug-fix and
-research demos and the [Reefine guide](docs/user-guide/recipes/reefine.rst) for
-configuration.
+`GET /reef/harness` serves the published tree, rendered for the deployment's
+adapter. The files carry no endpoint, key, or model: a client writes them
+where the agent reads them and binds the agent's model to this Reef (see
+[Use a published tree](https://reefinfra.ai/docs/user-guide/evolve-your-harness/#use-a-published-tree)).
+Write the tree outside the project the agent works in: a session can write
+files in its project, so a tree there could change what the next session
+runs. [Evolve agent prompts, rules, and skills](https://reefinfra.ai/docs/user-guide/evolve-your-harness/)
+explains the loop and its configuration.
 
 ## 📚 Recipes and examples
 
@@ -270,9 +243,9 @@ evolve**, model weights or the agent harness. Weight recipes need the GPU
 training stack, while harness recipes need only a model endpoint. Each recipe
 below links to its guide and each measured benchmark links to its results
 page, and the [recipe catalog](https://reefinfra.ai/docs/user-guide/recipes/)
-adds the code and example for every recipe. Reefine and
-[SFT](https://reefinfra.ai/docs/user-guide/recipes/sft/) ship with `reef-infra`,
-and SFT trains on demonstrations or imported examples for every task type.
+adds the code and example for every recipe.
+[SFT](https://reefinfra.ai/docs/user-guide/recipes/sft/) ships with `reef-infra`
+and trains on demonstrations or imported examples for every task type.
 The other implementations live in this repository's `recipes/` cookbook,
 selected by dotted class reference and not shipped in the Reef wheel.
 
@@ -280,7 +253,7 @@ selected by dotted class reference and not shipped in the Reef wheel.
 |---|---|---|---|---|
 | Open-ended discovery | Repeated attempts at one hard problem with a measurable objective and no known answer | [TTT-Discover](https://reefinfra.ai/docs/user-guide/recipes/tttd/), [Guidance-TTT](recipes/tttd/examples/guidance_ttt/README.md) | None yet | Measured: [TriMul](recipes/tttd/examples/guidance_ttt/results/README.md), [circle packing](recipes/tttd/examples/tttd/README.md#formal-8x64-results), [Erdős minimum overlap](recipes/tttd/examples/tttd/README.md#formal-8x64-results). |
 | Offline tasks with a known answer | Independent tasks from a fixed set, each with a reference answer | [SAO](https://reefinfra.ai/docs/user-guide/recipes/sao/), [SDFT](https://reefinfra.ai/docs/user-guide/recipes/sdft/), [SDPO](https://reefinfra.ai/docs/user-guide/recipes/sdpo/), [OPD](https://reefinfra.ai/docs/user-guide/recipes/opd/) | [GEPA](https://reefinfra.ai/docs/user-guide/recipes/gepa/), [Meta-Harness](recipes/meta_harness/README.md) | Measured: [IMOAnswerBench](recipes/sao/examples/imo_answerbench/README.md#results), [AIME 2024](recipes/opd/examples/math/README.md#results), [AIME 2025](recipes/gepa/examples/aime/README.md#the-validation-contract), [SciKnowEval](recipes/sdpo/examples/sciknoweval/README.md#results), [ToolAlpaca](recipes/sdft/examples/skill_stream/README.md#results), [Terminal-Bench](recipes/meta_harness/examples/terminal_bench/README.md#results). |
-| Online learning from usage | Sessions with a user, where the interaction itself is the signal | [OpenClaw-RL](https://reefinfra.ai/docs/user-guide/recipes/openclawrl/) | [SkillClaw](https://reefinfra.ai/docs/user-guide/recipes/skillclaw/), [Reefine](docs/user-guide/recipes/reefine.rst) | Measured: [GSM8K with a simulated student user](recipes/openclawrl/examples/openclawrl/README.md#results), [WildClawBench](recipes/skillclaw/README.md#the-2026-08-29-results-glm-53-flash-preliminary). |
+| Online learning from usage | Sessions with a user, where the interaction itself is the signal | [OpenClaw-RL](https://reefinfra.ai/docs/user-guide/recipes/openclawrl/) | [ACE](recipes/ace/README.md), [ReasoningBank](recipes/reasoning_bank/README.md) | Measured: [GSM8K with a simulated student user](recipes/openclawrl/examples/openclawrl/README.md#results). |
 
 [`recipes/basic/`](recipes/basic/) is the record-only starting stack and stays
 outside the catalog. For a small walkthrough of feedback, candidate edits, and
@@ -396,4 +369,3 @@ We are particularly grateful to these projects which power important parts of Re
 
 - [SGLang](https://github.com/sgl-project/sglang) — high-performance inference
 - [slime](https://github.com/THUDM/slime) — model weight training
-- [cordis](https://github.com/cordiverse/cordis) — harness evolution

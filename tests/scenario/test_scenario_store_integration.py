@@ -22,6 +22,7 @@ from reef.storage.scenario import ScenarioSettings, ScenarioStorage, ScenarioSto
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.tasks import TaskFileStore, TaskStorage
+from reef.train.backend import ComponentReleases
 from reef.train.trainer import Trainer
 from reef.train.types import TrainStepResult
 
@@ -133,6 +134,7 @@ class FailingRecipe(Recipe):
         algorithm_state: Mapping[str, Any] | None = None,
         experiment_logger: ExperimentLogger | None = None,
         task_storage: TaskStorage | None = None,
+        releases: ComponentReleases | None = None,
         samples: SampleStore | None = None,
     ) -> Trainer:
         raise RuntimeError("injected recipe failure")

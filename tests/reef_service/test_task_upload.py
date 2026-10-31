@@ -6,16 +6,19 @@ import asyncio
 import io
 import json
 import tarfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from urllib.parse import urlencode
 
+import pytest
 from aiohttp.test_utils import TestClient, TestServer
+from tests.support.harness_steps import evolution_config, runtime
 from tests.support.task_service_stubs import task_for
 from tests.support.trajectory_uploads import dispatcher_for
 
 from reef.core.tasks import write_harbor_task
 from reef.recipe import Recipe
+from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.record2sample import NoSamples
 from reef.sample2job import Sample2Job
 from reef.service.app import create_app
@@ -43,7 +46,15 @@ class TaskRecipe(Recipe):
     batch_stage: type[Sample2Job] = TaskReadingJobData
 
     def build(
-        self, scenario, records, *, algorithm_state=None, experiment_logger=None, task_storage=None, samples=None
+        self,
+        scenario,
+        records,
+        *,
+        algorithm_state=None,
+        experiment_logger=None,
+        task_storage=None,
+        releases=None,
+        samples=None,
     ):
         return Trainer.build(
             scenario,
@@ -148,6 +159,42 @@ def test_a_train_use_needs_a_recipe_that_reads_imported_tasks_and_an_eval_use_do
             assert evaluated.status == 201
             samples = dispatcher.get_or_create_scenario("s").store.samples
             assert [task.sample_id for task in samples.imported_tasks(split="eval")] == ["t"]
+
+    try:
+        asyncio.run(run())
+    finally:
+        dispatcher.close()
+
+
+OFFLINE_STAGE = {"pipeline": {"sample2job": {"module": "reef.sample2job.traces:TrainTaskJobData"}}}
+
+
+@pytest.mark.parametrize(
+    ("pipeline", "published"),
+    [(OFFLINE_STAGE, ["task-a"]), ({}, [])],
+    ids=["offline-runs", "traces-only"],
+)
+def test_a_harness_scenario_takes_a_train_upload_when_its_stage_trains_imported_tasks(
+    tmp_path: Path, pipeline: dict, published: list[str]
+) -> None:
+    """Only the offline stage trains imported tasks, so only it takes a train upload, even when the evaluation reads
+    the imported eval split. An eval upload is open to every recipe, because an evaluation runs it."""
+    evaluation = {"tasks": [], "imported_tasks": True}
+    config = {**evolution_config(evaluation=evaluation, state_dir=str(tmp_path / "state")), **pipeline}
+    # In manual mode no train task starts a step while the test runs.
+    recipe = HarnessEvolutionRecipe.from_environment({}, config=config, runtime=runtime())
+    dispatcher = dispatcher_for(tmp_path, replace(recipe, training_mode="manual"))
+
+    async def run() -> None:
+        async with TestClient(TestServer(create_app(dispatcher, tokens=TOKEN))) as client:
+            await create_scenario(client)
+            response = await client.post(tasks_url("train"), headers=GZIP, data=archive(tmp_path, "task-a"))
+            assert response.status == (201 if published else 400), await response.text()
+            held_out = archive(tmp_path, "held-out", port=9100)
+            assert (await client.post(tasks_url("eval"), headers=GZIP, data=held_out)).status == 201
+            samples = dispatcher.get_or_create_scenario("s").store.samples
+            assert [task.sample_id for task in samples.imported_tasks(split="train")] == published
+            assert [task.sample_id for task in samples.imported_tasks(split="eval")] == ["held-out"]
 
     try:
         asyncio.run(run())

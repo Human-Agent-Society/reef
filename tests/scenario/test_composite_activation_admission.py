@@ -8,16 +8,15 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pytest
-from tests.support.component_trainers import HARNESS, WEIGHTS, WeightsJobComponent, _ComponentBackend
+from tests.support.component_trainers import HARNESS, WEIGHTS, ComponentJobs, WeightsJobComponent
 from tests.support.component_trainers import _dispatcher as two_trainer_dispatcher
 from tests.support.component_trainers import _records
 from tests.support.component_trainers import _scenario as two_trainer_scenario
-from tests.support.component_trainers import _TwoTrainerRecipe, component_files, stop_workers
+from tests.support.component_trainers import _TwoTrainerRecipe, component_files, finish_job, stop_workers
 from tests.support.runtime_stubs import StubInferenceRuntime
 from tests.support.samples_service import make_samples
 
 from reef.artifact import InMemoryRepositoryBackend
-from reef.artifact.artifact import ArtifactNotFound
 from reef.artifact.files import ArtifactFiles
 from reef.artifact.sources import REFERENCE_FILE, DirectorySource, HuggingFaceRevision
 from reef.core.errors import CommitPending, ReefError, TrainingStartRefused
@@ -55,7 +54,7 @@ def _dispatcher(tmp_path: Path, recipe: type[_LoadedRecipe] = _LoadedRecipe) -> 
     for component in (WEIGHTS, HARNESS):
         (initial / component).mkdir(parents=True)
         (initial / component / f"{component}.txt").write_text(f"{component} seed", encoding="utf-8")
-    backends = {component: _ComponentBackend(component, tmp_path / "candidates") for component in (WEIGHTS, HARNESS)}
+    backends = {component: ComponentJobs(component, tmp_path / "candidates") for component in (WEIGHTS, HARNESS)}
     records = tmp_path / "records"
     return Dispatcher(
         recipe(backends=backends),
@@ -87,6 +86,7 @@ def _step(scenario, component: str, step: int) -> str:
     result = scenario.prepare_training_step(component)
     assert result is not None
     scenario.commit(result, component=component)
+    finish_job(scenario, component)
     return scenario.current_artifact_ref().release_id
 
 
@@ -415,7 +415,7 @@ def test_a_served_harness_binds_the_weights_served_now_and_leaves_the_active_rel
         runtime.answers_each_release = True
         served = scenario.serve(artifact_id, HARNESS)
         assert served.artifact_id == artifact_id and served.release_id != first
-        release = scenario.served_release(artifact_id)
+        release = scenario.served_beside()[artifact_id].release
         assert release.release_id == served.release_id
         assert component_files(scenario, release) == {WEIGHTS: "weights seed", HARNESS: "harness step 1"}
         assert scenario.current_artifact_ref() == active
@@ -426,7 +426,6 @@ def test_a_served_harness_binds_the_weights_served_now_and_leaves_the_active_rel
         stopped = scenario.stop_serving(artifact_id)
         assert stopped.release == release
         assert scenario.store.history()[-1].components == record.components
-        with pytest.raises(ArtifactNotFound):
-            scenario.served_release(artifact_id)
+        assert artifact_id not in scenario.served_beside()
     finally:
         dispatcher.close()

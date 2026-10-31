@@ -13,7 +13,7 @@ from pathlib import Path
 from threading import Event, Lock, Thread
 from typing import Any
 
-from reef.artifact.artifact import Artifact
+from reef.artifact.artifact import Artifact, ArtifactRef
 from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.artifact.repository import EnumerableRepositoryBackendFactory, RepositoryBackendFactory
 from reef.artifact.sources import SourceFiles
@@ -156,15 +156,23 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         self.services = ServiceSet.of(components)
         #: The work queue of the samples, jobs and evaluations queues.
         self.queue = coordination.work_queue
-        if recipe.training_component is not None:
-            queued = JobQueueComponent(
-                recipe.training_component, self.queue, owns_component=not self.services.runs_training
-            )
+        # Every job component's jobs go through the jobs queue: the weight trainer's and a harness's alike. The
+        # training service runs one worker for each of them.
+        job_components = recipe.job_components()
+        if job_components:
             if self.services.runs_training:
-                self.workers.add(
-                    TrainingJobWorker(recipe.training_component, self.queue, worker_id=instance_id("training"))
-                )
-            recipe = recipe.with_training_component(queued)
+                for component in job_components:
+                    self.workers.add(
+                        TrainingJobWorker(component, self.queue, worker_id=instance_id(f"training-{component.name}"))
+                    )
+            recipe = recipe.with_job_components(
+                {
+                    component.name: JobQueueComponent(
+                        component, self.queue, owns_component=not self.services.runs_training
+                    )
+                    for component in job_components
+                }
+            )
         #: The deployment's recipe, before any scenario's own model settings; its trainers submit to the jobs queue.
         self.recipe = recipe
         self.storage = scenario_storage
@@ -172,7 +180,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         self.data_store = data_store
         self.record_retention_lock = Lock()
         tracker = experiment_tracker if experiment_tracker is not None else NullExperimentTracker()
-        if recipe.training_component is not None and not isinstance(tracker, NullExperimentTracker):
+        if recipe.job_components() and not isinstance(tracker, NullExperimentTracker):
             # Control's tracker also writes each training job's run into the job's item, for the job listing.
             tracker = JobExperimentRecorder(tracker, self.queue)
         self.experiment_tracker = tracker
@@ -280,10 +288,6 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
             allow_implicit_creation=allow_implicit_creation,
         )
 
-    def loaded_scenario(self, scenario: str, *, release_id: str | None = None) -> Scenario | None:
-        """The loaded instance of ``scenario``, or None; see :meth:`ScenarioRegistry.get_loaded`."""
-        return self.registry.get_loaded(scenario, release_id)
-
     def configure_scenario_model(
         self, scenario: str, model: object, *, create: bool = False, release_id: str | None = None
     ) -> Scenario:
@@ -371,6 +375,18 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
                 "scenario %r: the commit is durable, but its served models were not written", instance.name
             )
 
+    def follow_commits(self, current: Scenario) -> Scenario:
+        """``current`` as the commit history holds it: ``current`` itself, or a new instance of the scenario when a
+        control process committed past the step that ``current`` loaded.
+
+        A process that runs no control, such as the harness service, calls it before it reads what a scenario
+        serves; control's own instance is never behind its history.
+        """
+        history = current.store.history()
+        if not history or history[-1].step <= current.scenario_step:
+            return current
+        return self.registry.reload(current.name)
+
     def scenario_reloaded(self, instance: Scenario) -> None:
         """A failure rebuilt ``instance``: ask the samples service again for the records after its progress. Its
         workers keep the failure until the samples come and the next cycle runs."""
@@ -389,6 +405,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         - Its storage is durable.
         - No request runs on it.
         - No trainer has records that it would still train on.
+        - No trainer has a training job that runs.
         - No reload or close of an instance waits.
 
         A weight-training scenario is never idle, because only a delete
@@ -401,7 +418,10 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
             return False
         if self.local_workers.instance_change_pending(current.name):
             return False
-        return not any(component_trainer.trainer.holds_untrained_records() for component_trainer in current.trainers)
+        return not any(
+            component_trainer.trainer.job_running or component_trainer.trainer.holds_untrained_records()
+            for component_trainer in current.trainers
+        )
 
     def unload_if_idle(self, scenario: str) -> bool:
         """Unload ``scenario`` if it is idle, and return whether it was unloaded.
@@ -449,11 +469,6 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
                 shutil.move(str(directory), str(destination))
                 moved.append(str(destination))
         return moved
-
-    def recipe_has_files(self) -> bool:
-        """Whether the served recipe creates a file-serving surface."""
-        # Capability probe only: file serving does not depend on the scenario.
-        return self.recipe.build_surface("").files is not None
 
     def list_artifacts(self, scenario: str) -> tuple[dict[str, Any], ...]:
         """Each component's artifacts of ``scenario``, newest first, with each component's active one marked."""
@@ -565,6 +580,25 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         self.request_artifact_copy(scenario)
         return imported
 
+    def sync_release(
+        self,
+        scenario: str,
+        artifact: Artifact,
+        *,
+        component: str,
+        expected_release_id: str,
+        metrics: Mapping[str, Any],
+    ) -> ArtifactRef:
+        """Make a person's merged ``component`` tree ``scenario``'s active release and training start, under the
+        scenario's lock, and write what the scenario serves now; see :meth:`ScenarioCommitter.sync_release`."""
+        with self.registry.lock_for(scenario):
+            current = self.registry.require(scenario)
+            published = current.sync_release(
+                artifact, component=component, expected_release_id=expected_release_id, metrics=metrics
+            )
+            self.scenario_committed(current)
+            return published
+
     def current_artifact(
         self,
         scenario: str,
@@ -629,8 +663,9 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         """Give ``scenario`` the owner ``owner``, and sync its uploads with that owner's items.
 
         A scenario gets its owner when it is created, so only a scenario that still has the default owner (its
-        own name) and no uploads can take another. Raise ``ValueError`` otherwise, and ``UnknownScenario`` for a
-        scenario that does not exist.
+        own name) and no uploads can take another. The data service then copies the scenario's artifacts and
+        records to items of ``owner``. Raise ``ValueError`` otherwise, and ``UnknownScenario`` for a scenario that
+        does not exist.
         """
         check_owner(owner)
         with self.locked_scenario(scenario) as current:
@@ -641,6 +676,10 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
                 raise ValueError(f"scenario {scenario!r} has the owner {settings.owner!r}; it is set at creation")
             self.storage.write_settings(scenario, replace(settings, owner=owner))
             self.apply_sync(current, owner)
+        # A copy that ran before, such as the one that the creation commit asked for, filled the default owner's
+        # store; the new owner's store gets the scenario's artifacts and records too.
+        self.request_artifact_copy(scenario)
+        self.request_record_copy(scenario)
 
     def check_use(
         self, scenario: str, trajectories: Sequence[tuple[str, TrajectorySample]], train_tasks: bool
@@ -805,6 +844,12 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         if current is not None:
             self.local_workers.wake(current)
 
+    def job_changed(self, scenario: str) -> None:
+        """A training job of ``scenario`` saved a checkpoint or ended: its local workers commit it now."""
+        current = self.registry.get_loaded(scenario)
+        if current is not None:
+            self.local_workers.wake(current)
+
     def request_samples(self, current: Scenario) -> None:
         """Ask the samples service for a selection of the new records of each trainer of ``current`` that trains."""
         for component_trainer in current.trainers:
@@ -911,7 +956,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
             self.storage.close()
         except BaseException as exc:
             errors.append(exc)
-        errors.extend(close_runtimes(self.recipe.training_component, self.recipe.runtime))
+        errors.extend(close_runtimes(self.recipe.job_components(), self.recipe.runtime))
         # Send the experiment events that are still queued before the tracker closes.
         self.registry.experiment_reports.close()
         try:

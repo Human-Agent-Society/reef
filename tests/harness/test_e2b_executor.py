@@ -1,7 +1,8 @@
-"""Hosted rollouts use the ordinary factory and preserve the runner's contracts."""
+"""Hosted runs use the ordinary factory and preserve the runner's contracts."""
 
 import json
 import shlex
+from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -9,11 +10,11 @@ import pytest
 
 from reef.execution.sandbox.config import build_executor
 from reef.execution.sandbox.e2b import E2BExecutor, E2BSession
-from reef.execution.sandbox.process import RolloutLaunchError, SandboxUnavailable
+from reef.execution.sandbox.process import ProgramLaunchError, SandboxUnavailable
 from reef.execution.sandbox.remote import protected_command, remote_root, unpack
 from reef.harness.adapters import get_adapter
-from reef.harness.rollouts.run import run_rollout
-from reef.harness.rollouts.vendor_install import AdapterProgram
+from reef.harness.tasks.run import run_task
+from reef.harness.tasks.vendor_install import AdapterProgram
 
 
 def test_factory_reads_only_explicit_environment_and_binds_the_remote_binary(monkeypatch):
@@ -57,8 +58,10 @@ def test_non_npm_agents_need_a_template_and_container_agents_keep_their_own_exec
         E2BExecutor(api_key="test-key").for_program(AdapterProgram(get_adapter("native")))
     _, binary = E2BExecutor(api_key="test-key", template="custom").for_program(AdapterProgram(get_adapter("native")))
     assert binary == "reef-native"
+    # An adapter whose runner starts its own containers, as the Terminal-Bench campaign's terminus does.
+    container_agent = replace(get_adapter("native"), self_isolating=True)
     with pytest.raises(SandboxUnavailable, match="own containers"):
-        E2BExecutor(api_key="test-key", template="custom").for_program(AdapterProgram(get_adapter("terminus")))
+        E2BExecutor(api_key="test-key", template="custom").for_program(AdapterProgram(container_agent))
 
 
 def test_preflight_checks_remote_readiness_once_and_always_closes(monkeypatch):
@@ -85,7 +88,7 @@ def test_unreachable_provider_refuses_startup(monkeypatch):
     pytest.importorskip("e2b")
 
     def fail(executor):
-        raise RolloutLaunchError("provider unavailable")
+        raise ProgramLaunchError("provider unavailable")
 
     monkeypatch.setattr(E2BExecutor, "open", fail)
     with pytest.raises(SandboxUnavailable, match="provider unavailable"):
@@ -122,16 +125,16 @@ def test_failed_copy_back_cannot_be_scored_as_a_success(tmp_path, monkeypatch):
 
     monkeypatch.setattr(session, "pull", fail)
     try:
-        with pytest.raises(RolloutLaunchError, match=r"copy .* back"):
+        with pytest.raises(ProgramLaunchError, match=r"copy .* back"):
             session.launch(["pi"], root=tmp_path, workspace=tmp_path, env={}, timeout=10)
     finally:
         session.close()
 
 
-def test_invalid_archive_does_not_destroy_the_local_rollout(tmp_path):
+def test_invalid_archive_does_not_destroy_the_local_run(tmp_path):
     import tarfile
 
-    root = tmp_path / "rollout"
+    root = tmp_path / "run"
     root.mkdir()
     (root / "input").write_text("original")
     with pytest.raises(tarfile.ReadError):
@@ -143,7 +146,7 @@ def test_cleanup_failure_is_reported_and_can_be_retried():
     sandbox = Mock()
     sandbox.kill.side_effect = [OSError("connection lost"), True]
     session = E2BSession(sandbox)
-    with pytest.raises(RolloutLaunchError, match="could not stop"):
+    with pytest.raises(ProgramLaunchError, match="could not stop"):
         session.close()
     session.close()
     session.close()
@@ -180,7 +183,7 @@ def test_session_applies_the_deployment_environment_over_the_callers(tmp_path, m
         session.close()
 
 
-def test_ordinary_rollout_reads_remote_trajectory_and_residue_and_closes(monkeypatch, tmp_path):
+def test_ordinary_run_reads_remote_trajectory_and_residue_and_closes(monkeypatch, tmp_path):
     pytest.importorskip("e2b")
     sandbox = Mock()
     sandbox.commands.run.return_value.wait.return_value = SimpleNamespace(exit_code=0, stdout="answer", stderr="")
@@ -196,7 +199,7 @@ def test_ordinary_rollout_reads_remote_trajectory_and_residue_and_closes(monkeyp
     monkeypatch.setattr(session, "pull", pull)
     monkeypatch.setattr(E2BExecutor, "preflight", lambda self: None)
     monkeypatch.setattr(E2BExecutor, "open", lambda self: session)
-    result = run_rollout(
+    result = run_task(
         get_adapter("pi"),
         {"pi-agent/models.json": "{}"},
         "answer",

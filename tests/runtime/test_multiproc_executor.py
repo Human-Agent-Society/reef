@@ -58,12 +58,12 @@ class Rendezvous:
         return self.rank
 
 
-class RolloutSleeper:
+class RunSleeper:
     def run(self, directory):
-        from reef.execution.sandbox.process import ROLLOUT_OWNER_LEASE, LocalExecutor
+        from reef.execution.sandbox.process import RUN_OWNER_LEASE, LocalExecutor
 
         root = Path(directory)
-        token = ROLLOUT_OWNER_LEASE.set(True)
+        token = RUN_OWNER_LEASE.set(True)
         try:
             return LocalExecutor().launch(
                 [
@@ -79,7 +79,7 @@ class RolloutSleeper:
                 timeout=120,
             )
         finally:
-            ROLLOUT_OWNER_LEASE.reset(token)
+            RUN_OWNER_LEASE.reset(token)
 
 
 def test_uni_is_one_in_process_worker():
@@ -217,7 +217,7 @@ def test_mp_rejects_unpickleable_worker_before_starting_any_rank():
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX process-group leases")
 def test_killed_worker_does_not_leave_running_harness(tmp_path):
-    executor = Executor.create(ExecutorConfig(backend="mp", workers=(WorkerSpec(RolloutSleeper),)))
+    executor = Executor.create(ExecutorConfig(backend="mp", workers=(WorkerSpec(RunSleeper),)))
     try:
         pending = executor.rpc(0, "run", args=(str(tmp_path),), non_block=True)
         marker = tmp_path / "child.pid"

@@ -48,10 +48,11 @@ from recipes.beta.autoenvscaling.author_credentials import CredentialChecks, Cre
 from recipes.beta.autoenvscaling.check_gateway import CheckGateway
 from recipes.beta.autoenvscaling.sources import SessionSource
 from reef.execution.sandbox.environment import execute
-from reef.execution.sandbox.process import ProgramExecutor, RolloutLaunchError, RolloutTimeout, SandboxUnavailable
+from reef.execution.sandbox.process import ProgramExecutor, ProgramLaunchError, ProgramTimeout, SandboxUnavailable
 from reef.harness.adapters import get_adapter
-from reef.harness.rollouts.vendor_install import AdapterProgram
-from reef.harness.tree.render import render_composition
+from reef.harness.tasks.vendor_install import AdapterProgram
+from reef.harness.tree import HarnessTree
+from reef.harness.tree.render import render_tree
 
 logger = logging.getLogger(__name__)
 
@@ -275,8 +276,9 @@ class ClaudeCodeAuthor(SeedVariantAuthor):
             raise AuthorError("the agent's run was stopped before it started")
         executor, binary = self.executor.for_program(AdapterProgram(self.descriptor))
         rules = agent_rules(tools.checks, self.has_behaviour_rule, extra_rules, is_seeded)
-        # The rules are Claude Code's CLAUDE.md, and settings.json its defaults: no model binding, so no endpoint.
-        files = render_composition((("rules", {"text": rules + CLAUDE_CHECK_TEXT}),), self.descriptor)
+        # The rules reach Claude Code as the plugin that --plugin-dir loads, as the adapter's run does, and
+        # settings.json holds its defaults: no model binding, so no endpoint.
+        files = render_tree(HarnessTree({"rules.md": rules + CLAUDE_CHECK_TEXT}), self.descriptor)
         files["tools/task_check.py"] = CHECK_SCRIPT.read_text(encoding="utf-8")
         for relative, text in files.items():
             target = work_dir / PurePosixPath(relative)
@@ -318,6 +320,8 @@ class ClaudeCodeAuthor(SeedVariantAuthor):
             AUTHOR_TOOLS,
             "--disable-slash-commands",
             "--strict-mcp-config",
+            "--plugin-dir",
+            str(work_dir / "plugin"),
         ]
         started = time.monotonic()
         session: ProgramExecutor | None = None
@@ -338,11 +342,11 @@ class ClaudeCodeAuthor(SeedVariantAuthor):
                 writable_paths=state,
                 readonly_paths=tuple(work_dir / PurePosixPath(relative) for relative in files),
             )
-        except RolloutTimeout:
+        except ProgramTimeout:
             # The sandbox copied the workspace back: the task stands as the agent left it.
             logger.info("AutoEnvScaling Claude Code timed out after %.0f s", time.monotonic() - started)
             return transcript_path(work_dir, "")
-        except (RolloutLaunchError, SandboxUnavailable) as exc:
+        except (ProgramLaunchError, SandboxUnavailable) as exc:
             if stop.is_set():
                 raise AuthorError("the agent's run was stopped") from None
             raise AuthorError(f"Claude Code could not run: {scrubbed(str(exc), self.claude_token)}") from None
@@ -351,7 +355,7 @@ class ClaudeCodeAuthor(SeedVariantAuthor):
             if session is not None:
                 try:
                     session.close()
-                except RolloutLaunchError as exc:
+                except ProgramLaunchError as exc:
                     logger.warning(
                         "the AutoEnvScaling agent's sandbox did not stop; its provider timeout applies: %s",
                         scrubbed(str(exc), self.claude_token),

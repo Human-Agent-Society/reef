@@ -18,8 +18,6 @@ from reef.storage.records import RecordStore
 from reef.evaluation import (
     ActivationRule,
     AlwaysSelectMixin,
-    BackendAlwaysSelectPlugin,
-    BackendEvaluateMixin,
     CandidateEvaluationPlugin,
     CandidateEvaluator,
     CandidateSelector,
@@ -45,8 +43,6 @@ __all__ = [
     "ActivationRule",
     "AgentRecord",
     "AlwaysSelectMixin",
-    "BackendAlwaysSelectPlugin",
-    "BackendEvaluateMixin",
     "CandidateEvaluationPlugin",
     "CandidateEvaluator",
     "CandidateSelector",

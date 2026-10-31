@@ -23,10 +23,11 @@ from tests.support._trajectories import policy_trajectory
 from tests.support.component_trainers import (
     HARNESS,
     WEIGHTS,
+    ComponentJobs,
     JudgedAtOnce,
     Judgment,
-    _ComponentBackend,
     _TwoTrainerRecipe,
+    finish_job,
 )
 from tests.support.samples_service import make_samples
 
@@ -51,6 +52,7 @@ from reef.storage.samples import TrainerSamples
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train import ComponentTrainer, Trainer
+from reef.train.jobs import JobLoop
 from reef.train.pipeline import TrainingPipeline
 from reef.train.types import JobData, Sample
 
@@ -153,7 +155,16 @@ class _Recipe(_TwoTrainerRecipe):
     pipelines: tuple[tuple[str, Any], ...] = ()
 
     def build_trainers(
-        self, scenario, records, *, surface, algorithm_states, experiment_logger=None, task_storage=None, samples=None
+        self,
+        scenario,
+        records,
+        *,
+        surface,
+        algorithm_states,
+        experiment_logger=None,
+        task_storage=None,
+        releases=None,
+        samples=None,
     ):
         pipelines = dict(self.pipelines)
         # Each trainer reads the stored samples of its component, so a rebuilt trainer finds the samples made live.
@@ -164,7 +175,7 @@ class _Recipe(_TwoTrainerRecipe):
                     scenario,
                     records,
                     pipeline_factory=pipelines[component],
-                    candidate_backend=backend,
+                    job_loop=JobLoop(backend, scenario=scenario),
                     algorithm_state=algorithm_states.get(component),
                     experiment_logger=experiment_logger,
                     report_type=TTTDGroupedRolloutReport if pipelines[component] is tttd_pipeline else None,
@@ -181,7 +192,7 @@ def _dispatcher(tmp_path: Path, pipelines: dict[str, Any]) -> Dispatcher:
     for component in (WEIGHTS, HARNESS):
         (initial / component).mkdir(parents=True, exist_ok=True)
         (initial / component / f"{component}.txt").write_text(f"{component} seed", encoding="utf-8")
-    backends = {component: _ComponentBackend(component, tmp_path / "candidates") for component in (WEIGHTS, HARNESS)}
+    backends = {component: ComponentJobs(component, tmp_path / "candidates") for component in (WEIGHTS, HARNESS)}
     return Dispatcher(
         _Recipe(backends=backends, pipelines=tuple(pipelines.items())),
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
@@ -232,6 +243,7 @@ def _step(scenario, component: str) -> list[tuple[str, ...]] | None:
     batch = scenario.trainer_for(component).pending_job_data
     sources = [tuple(item.source_agent_record_ids) for item in batch.samples]
     scenario.commit(result, component=component)
+    finish_job(scenario, component)
     return sources
 
 

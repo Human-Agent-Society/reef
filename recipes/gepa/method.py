@@ -1,528 +1,378 @@
-"""The two seams GEPA plugs into: the proposer and the selection policy.
+"""GEPA's reflective search as a harness evolution method, one GEPA iteration per step.
 
-One GEPA iteration is split across the mechanism's step. ``GEPAProposer``
-owns the half GEPA calls the reflective mutation: sample a parent from the
-archive's Pareto front, evaluate it on a minibatch, reflect on one component
-with the feedback that minibatch produced, evaluate the child on the same
-minibatch, and accept only a strict improvement. ``GEPASelectorMixin`` owns the
-other half, the full validation pass: the mechanism has already run every
-``evolution.tasks`` prompt on both compositions by the time ``decide`` is
-called, so the per-task scores in its evaluation are exactly GEPA's valset
-evaluation, and recording them is what updates the fronts and moves the
-served composition.
+``GEPA`` runs the part of an iteration that GEPA calls the reflective
+mutation. It samples a parent from the archive's Pareto front, takes the
+parent's minibatch, reflects on one component with the feedback that the
+minibatch produced, runs the child on the same minibatch, and accepts only a
+strict improvement. The accepted child is the step's candidate: the method
+writes it to ``harness/``.
 
-The parent's minibatch costs no rollouts when the parent is the served
-composition: the mechanism already batched that composition's real recorded
-traffic, scores included. Any other parent has to be re-run, because no
-traffic was ever served from it. The archive's metric-call count follows
-GEPA's accounting regardless - the seed's validation, every parent and child
-minibatch, every accepted candidate's validation - so a budget means what it
-means upstream. The mechanism's own re-run of the served composition over the
-validation set at every evaluated step is extra wall time and spend that the
-count leaves out.
+The rest of the iteration is GEPA's validation pass, and the step's
+evaluation runs it. The ``compare`` policy with ``statistic: mean`` scores
+the child on every evaluation task and keeps it only when its mean is
+strictly above the served tree's. The served tree's scores come from the
+history's score cache, so they are the scores it was validated with, as
+GEPA keeps them. The next step reads the validation and the decision from
+the history and folds them into the archive (``archive_for_step``) before it
+samples the next parent.
+
+The parent's minibatch costs no runs when the parent is the served
+tree: the step's traces are that tree's own run, scores included. Any other
+parent and every child run through ``services.evaluate``. The archive counts
+metric calls the way GEPA does, whatever the cache saves: the seed's
+validation, every parent and child minibatch, and every accepted candidate's
+validation. So a budget means what it means upstream. With
+``evolution.evaluation.repeats`` above 1, a validation pass costs one call
+per run, and a task's validation score is the mean of its repeats.
 """
 
 from __future__ import annotations
 
-import math
+import json
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from statistics import fmean
-from typing import Any
+from typing import Any, Self
 
-from reef.core.evaluation import (
-    CandidateEvaluationPlugin,
-    EvaluationResult,
-    RolloutScores,
-    SelectionDecision,
-    UpdateCandidate,
-)
-from reef.core.plugins import ConfiguredPlugin
-from reef.core.trajectories import recorded_payload
-from reef.evaluation.evaluators import BackendEvaluateMixin
-from reef.evaluation.harness import RolloutScorer
-from reef.execution.sandbox.process import ProgramExecutor
-from reef.harness.adapters.descriptor import AdapterDescriptor
-from reef.harness.rollouts.model_binding import ModelBinding, ModelBindings
-from reef.harness.rollouts.run import RolloutError, RolloutResult, run_rollout
-from reef.harness.rollouts.trajectory import TrajectoryError
-from reef.harness.tree.mutations import Mutation
-from reef.harness.tree.render import render_composition
-from reef.train.cordis_backend.manifest import FailureManifest
-from reef.train.cordis_backend.strategies import AgentHost, Proposer
-from reef.train.types import TrajectorySample
+from reef.core.config import config_option
+from reef.core.plugins import ConfiguredPlugin, PluginSettings
+from reef.evaluation.harness import History
+from reef.harness.adapters import get_adapter
+from reef.harness.tree import HarnessTree
+from reef.train.harness_backend import Method, Services, StepContext, Trace, Workspace
 
-from . import components, reflection
 from .archive import Archive
+from .components import candidate_tree, texts_of
+from .reflection import extract_new_text, render_prompt
 
-#: The rollout budget the evolution backend uses for its own scoring runs;
-#: the proposer's rollouts are the same work and get the same ceiling.
-ROLLOUT_TIMEOUT_S = 600.0
-
-#: GEPA's reflective dataset keys. The names are load bearing: they are what
-#: the copied prompt tells the reflection model to read.
+#: GEPA's reflective dataset keys. The names are load bearing: the copied
+#: prompt tells the reflection model to read them.
 INPUTS_KEY = "Inputs"
 OUTPUTS_KEY = "Generated Outputs"
 FEEDBACK_KEY = "Feedback"
+#: The archive's file in the method's ``state/`` directory.
+ARCHIVE_FILE = "archive.json"
 
 
 class Feedback(ConfiguredPlugin, ABC):
-    """The ``evolution.feedback`` hook: what the reflection model is told."""
+    """What the reflection model reads about one minibatch example.
+
+    Purpose: a deployment names a subclass in the ``feedback`` setting of
+    ``GEPA``; ``ScoreFeedback`` is the default. ``feedback`` returns the
+    sentence that the example's reflective record shows.
+    """
 
     @abstractmethod
-    def feedback(self, task: str, output: str, score: float) -> str: ...
-
-
-class GepaRolloutRunner(ABC):
-    """``reef.harness.rollouts.run.run_rollout``, as an injectable interface."""
-
-    @abstractmethod
-    def run(
-        self,
-        descriptor: AdapterDescriptor,
-        files: Mapping[str, str],
-        prompt: str,
-        *,
-        binary: str | None = None,
-        timeout: float = ROLLOUT_TIMEOUT_S,
-        executor: ProgramExecutor | None = None,
-    ) -> RolloutResult: ...
-
-
-class HarnessRolloutRunner(GepaRolloutRunner):
-    """Execute rollouts through Reef's harness runner."""
-
-    def run(
-        self,
-        descriptor: AdapterDescriptor,
-        files: Mapping[str, str],
-        prompt: str,
-        *,
-        binary: str | None = None,
-        timeout: float = ROLLOUT_TIMEOUT_S,
-        executor: ProgramExecutor | None = None,
-    ) -> RolloutResult:
-        return run_rollout(descriptor, files, prompt, binary=binary, timeout=timeout, executor=executor)
+    def feedback(self, task: str, output: str, score: float) -> str:
+        """The sentence about ``output``, the answer to ``task`` that scored ``score``."""
 
 
 class ScoreFeedback(Feedback):
-    """Explain a result using its numeric score."""
+    """GEPA's default feedback: the score restated as text.
+
+    It is weak on purpose. A benchmark that can say why an answer was wrong
+    should say so through its own ``Feedback``, because that sentence is the
+    whole signal that reflection gets.
+    Purpose: ``GEPA`` uses it when its settings name no ``feedback``.
+    """
 
     def feedback(self, task: str, output: str, score: float) -> str:
-        return default_feedback(task, output, score)
-
-
-def default_feedback(task: str, output: str, score: float) -> str:
-    """The score restated as text, for a benchmark with no richer signal.
-
-    GEPA's own default. It is weak on purpose: a benchmark that can say
-    *why* an answer was wrong should say so through ``evolution.feedback``,
-    because that sentence is the entire signal reflection gets.
-    """
-    return f"This response scored {score:.3f}. A better response would score higher."
+        return f"This response scored {score:.3f}. A better response would score higher."
 
 
 @dataclass(frozen=True)
-class _Example:
-    """One minibatch example as reflection sees it: input, output, grade."""
+class Example:
+    """One minibatch example as reflection sees it: input, output, grade.
+
+    Values: ``task`` is the prompt, ``output`` the final answer the parent's
+    run gave, and ``score`` its grade, 0.0 for a run that gave none.
+    ``error`` says why the run failed, empty when it did not; it replaces
+    the feedback, because the failure is the only feedback there is.
+    Purpose: ``GEPA.minibatch`` makes one per minibatch task, and
+    ``GEPA.records`` renders them into the reflective dataset.
+    """
 
     task: str
     output: str
     score: float
-    #: Set when the rollout never produced a trajectory; it replaces the
-    #: feedback hook, because the failure is the only feedback there is.
     error: str = ""
 
 
-class GEPAProposer(Proposer):
-    """GEPA's reflective mutation, as the evolution mechanism's ``propose``."""
+@dataclass(frozen=True)
+class GEPASettings(PluginSettings):
+    """The configuration of ``GEPA``.
 
-    def __init__(
-        self,
-        *,
-        archive: Archive,
-        descriptor: AdapterDescriptor,
-        binary: str | None,
-        executor: ProgramExecutor | None = None,
-        rollout_timeout_s: float = ROLLOUT_TIMEOUT_S,
-        forbid_residue: bool = False,
-        score_rollout: RolloutScorer,
-        feedback: Feedback,
-        minibatch_size: int,
-        rng_seed: int,
-        skip_perfect_score: bool,
-        perfect_score: float,
-        max_metric_calls: int | None,
-        kinds: Sequence[str],
-        valset_size: int,
-        reflection_model: str = "reflection",
-        rollout_runner: GepaRolloutRunner | None = None,
-    ) -> None:
-        self._archive = archive
-        self._descriptor = descriptor
-        self._binary = binary
-        self._executor = executor
-        if (
-            isinstance(rollout_timeout_s, bool)
-            or not isinstance(rollout_timeout_s, (int, float))
-            or rollout_timeout_s <= 0
-        ):
-            raise ValueError("rollout_timeout_s must be a positive number")
-        if not isinstance(forbid_residue, bool):
-            raise ValueError("forbid_residue must be a boolean")
-        self._rollout_timeout_s = float(rollout_timeout_s)
-        self._forbid_residue = forbid_residue
-        self._score_rollout = score_rollout
-        if not isinstance(feedback, Feedback):
+    Values: ``minibatch_size`` > 0 is the number of examples a parent and its
+    child are compared on. ``seed`` seeds the archive's random generator.
+    ``skip_perfect_score`` skips an iteration whose parent scored at least
+    ``perfect_score`` on every example. ``max_metric_calls`` > 0 is the
+    metric-call budget, ``None`` for none. ``components`` names the parts
+    of the adapter's tree GEPA may rewrite, distinct, each of a free text
+    format (``EVOLVABLE_FORMATS``).
+    ``trainset_size`` > 0, when set, plans each iteration over a training set
+    of that size in GEPA's epoch-shuffled order (``Archive.plan``), so a
+    driver that sends the planned problems as traffic walks GEPA's own order.
+    ``reflection_model`` names the model binding that reflects; the served
+    model reflects when the deployment declares no model of that name.
+    ``feedback`` is a plugin setting that names a ``Feedback``, ``None`` for
+    ``ScoreFeedback``.
+    Purpose: ``GEPA.from_config`` parses it from ``evolution.method.config``;
+    ``GEPA.step`` runs by it.
+    """
+
+    minibatch_size: int = config_option(3, help="The examples a parent and its child are compared on.")
+    seed: int = config_option(0, help="The seed of the random generator that draws parents and minibatches.")
+    skip_perfect_score: bool = config_option(
+        True, help="Skip an iteration whose parent scored perfect_score on every example."
+    )
+    perfect_score: float = config_option(1.0, help="The score that counts as perfect.")
+    max_metric_calls: int | None = config_option(None, help="The metric-call budget. None sets no budget.")
+    components: tuple[str, ...] = config_option(("rules", "skill"), help="The parts of the tree GEPA may rewrite.")
+    trainset_size: int | None = config_option(
+        None, help="Plan each iteration over a training set of this size, in GEPA's order."
+    )
+    reflection_model: str = config_option(
+        "reflection", help="The model that reflects. The served model reflects when none has this name."
+    )
+    feedback: str | Mapping[str, Any] | None = config_option(
+        None, help="The Feedback that explains each example to the reflection model. None restates the score."
+    )
+
+    def __post_init__(self) -> None:
+        if self.minibatch_size <= 0:
+            raise ValueError("minibatch_size must be positive")
+        if not self.components or len(set(self.components)) != len(self.components):
+            raise ValueError("components must name one or more distinct parts of the tree")
+        if self.max_metric_calls is not None and self.max_metric_calls <= 0:
+            raise ValueError("max_metric_calls must be positive when set")
+        if self.trainset_size is not None and self.trainset_size <= 0:
+            raise ValueError("trainset_size must be positive when set")
+
+
+class GEPA(Method):
+    """GEPA's reflective search, one iteration per step.
+
+    Values: ``settings`` is the configuration, and ``feedback`` writes the
+    feedback sentence of each reflective record.
+    Purpose: a deployment names the class in ``evolution.method``, and the
+    backend calls ``step`` once per step. The search lives in the archive,
+    ``state/archive.json``, which the backend commits with each step.
+    """
+
+    def __init__(self, settings: GEPASettings | None = None, feedback: Feedback | None = None) -> None:
+        if feedback is not None and not isinstance(feedback, Feedback):
             raise TypeError("GEPA feedback must inherit Feedback")
-        self._feedback = feedback
-        self._minibatch_size = minibatch_size
-        archive.rng_seed = rng_seed
-        self._valset_size = valset_size
-        self._skip_perfect_score = skip_perfect_score
-        self._perfect_score = perfect_score
-        self._max_metric_calls = max_metric_calls
-        self._kinds = tuple(kinds)
-        self._reflection_model = reflection_model
-        self._rollout_runner = HarnessRolloutRunner() if rollout_runner is None else rollout_runner
-        if not isinstance(self._rollout_runner, GepaRolloutRunner):
-            raise TypeError("GEPA rollout_runner must inherit GepaRolloutRunner")
+        self.settings = GEPASettings() if settings is None else settings
+        self.feedback = ScoreFeedback() if feedback is None else feedback
 
-    def propose(
-        self,
-        nodes: tuple[tuple[str, object], ...],
-        samples: tuple[TrajectorySample, ...],
-        models: ModelBindings,
-        *,
-        manifest: FailureManifest | None = None,
-        rejected: Sequence[Mapping[str, Any]] = (),
-        sources: Sequence[Mapping[str, Any]] = (),
-        requests: Sequence[Mapping[str, Any]] = (),
-        entries: Sequence[Mapping[str, Any]] = (),
-        agent_host: AgentHost | None = None,
-    ) -> tuple[Mutation, ...] | None:
-        archive = self._archive
-        archive.refresh()
-        served_texts = components.texts_of(nodes, self._kinds)
-        self._sync(served_texts)
+    @classmethod
+    def from_config(cls, config: Mapping[str, Any]) -> Self:
+        settings = GEPASettings.parse(config, plugin_class=cls)
+        feedback = (
+            None if settings.feedback is None else Feedback.from_setting(settings.feedback, setting="GEPA.feedback")
+        )
+        return cls(settings, feedback)
 
-        if self._max_metric_calls is not None and archive.metric_calls >= self._max_metric_calls:
-            return None
+    def step(self, context: StepContext) -> None:
+        workspace, services = context.workspace, context.services
+        path = workspace.state / ARCHIVE_FILE
+        tasks = workspace.tasks()
+        head = workspace.tree()
+        archive = archive_for_step(
+            path.read_text(encoding="utf-8") if path.is_file() else None,
+            workspace.history(),
+            tasks,
+            texts_of(head, get_adapter(str(workspace.host()["adapter"])).layout, self.settings.components),
+            # The evaluation's runs per task and tree: 0 without a scorer, and GEPA's count needs at least 1.
+            repeats=max(1, workspace.evaluation_repeats()),
+            rng_seed=self.settings.seed,
+        )
+        summary, record = self.iterate(archive, workspace, services, head, len(tasks))
+        path.write_text(json.dumps(archive.to_state(), indent=2) + "\n", encoding="utf-8")
+        workspace.write_output(summary, {**record, "metric_calls": archive.metric_calls})
 
-        parent = archive.take_parent(self._valset_size)
+    def iterate(
+        self, archive: Archive, workspace: Workspace, services: Services, head: HarnessTree, valset_size: int
+    ) -> tuple[str, dict[str, Any]]:
+        """One GEPA iteration on ``archive``: the step's summary and the iteration's record.
+
+        An accepted child goes to ``harness/``. Every other ending leaves
+        ``harness/`` as it is, so the backend skips the step.
+        """
+        settings = self.settings
+        if settings.max_metric_calls is not None and archive.metric_calls >= settings.max_metric_calls:
+            reason = f"the budget of {settings.max_metric_calls} metric calls is spent"
+            return reason, {"stopped": reason}
+        if settings.trainset_size is None:
+            parent = archive.take_parent(valset_size)
+        else:
+            parent = int(archive.plan(settings.trainset_size, valset_size, settings.minibatch_size)["parent"])
+        # A trace without a task (a request with no user prompt) is no example: there is nothing to run again.
+        traces = [(task, trace) for trace in workspace.traces() if (task := trace.task)][: settings.minibatch_size]
+        if not traces:
+            return skipped("the step's traces hold no task to run")
+        minibatch = self.minibatch(archive, parent, traces, services, head)
+        if settings.skip_perfect_score and all(example.score >= settings.perfect_score for example in minibatch):
+            return skipped("the parent scored perfectly on the minibatch")
         parent_texts = archive.candidates[parent].texts
-        minibatch = self._minibatch(nodes, parent, parent_texts, samples, models)
-        if not minibatch:
-            return None
-        if self._skip_perfect_score and all(example.score >= self._perfect_score for example in minibatch):
-            return None
-
         keys = sorted(parent_texts)
         if not keys:
-            return None
-        key = archive.next_component(parent, keys)
-        records = self._records(minibatch)
-        prompt = reflection.render_prompt(parent_texts[key], records)
-        reply = self._binding(models).chat([{"role": "user", "content": prompt}])
-        new_text = reflection.extract_new_text(reply)
-        row: dict[str, Any] = {
+            return skipped("the served tree holds no evolvable file")
+        component = archive.next_component(parent, keys)
+        prompt = render_prompt(parent_texts[component], self.records(minibatch))
+        reflection = services.models.get(settings.reflection_model, services.models.served)
+        reply = reflection.chat([{"role": "user", "content": prompt}])
+        new_text = extract_new_text(reply)
+        # The step's calls.json keeps the prompt and the reply. The record leaves them out: it goes into the archive,
+        # which every step commits whole, and into the step's notes.
+        record: dict[str, Any] = {
             "parent": parent,
             "served": archive.served,
-            "component": key,
-            "minibatch": records,
+            "component": component,
             "parent_scores": [example.score for example in minibatch],
-            "prompt": prompt,
-            "reply": reply,
             "child_scores": None,
             "accepted": False,
             "candidate": None,
         }
         if not new_text.strip():
-            return self._abandon(row)
+            archive.log_proposal(record)
+            return f"the reflection on {component} wrote no new text", record
+        child_texts = {**parent_texts, component: new_text}
+        child = candidate_tree(head, child_texts)
+        validation = services.check(child)
+        if not validation.passed:
+            record["problems"] = list(validation.problems)
+            archive.log_proposal(record)
+            return f"the child fails validation: {validation.message()}", record
+        task_runs = services.evaluate(child, [example.task for example in minibatch])
+        archive.charge(len(task_runs))
+        child_scores = task_scores([task_run.score.value for task_run in task_runs], repeats=1)
+        record["child_scores"] = child_scores
+        parent_total, child_total = sum(record["parent_scores"]), sum(child_scores)
+        if child_total <= parent_total:
+            # The one ending GEPA counts as a spent iteration: a child that lost the minibatch comparison.
+            archive.reject()
+            archive.log_proposal(record)
+            return f"the child scored {child_total:g} on the minibatch and its parent {parent_total:g}", record
+        if child == head:
+            # The child differs from its parent but not from the served tree: there is no candidate to evaluate.
+            archive.log_proposal(record)
+            return "the child holds the texts of the served tree", record
+        record["accepted"] = True
+        record["candidate"] = archive.add(child_texts, parent, child_scores, workspace.step)
+        archive.log_proposal(record)
+        workspace.write_tree(child)
+        return (
+            f"rewrote {component} of candidate {parent}: the child scored {child_total:g} on the minibatch "
+            f"and its parent {parent_total:g}, so candidate {record['candidate']} goes to validation"
+        ), record
 
-        child_texts = {**parent_texts, key: new_text}
-        child_scores = [self._score(nodes, child_texts, example.task, models)[0] for example in minibatch]
-        row["child_scores"] = child_scores
-        if sum(child_scores) <= sum(example.score for example in minibatch):
-            return self._abandon(row, rejected=True)
+    def minibatch(
+        self, archive: Archive, parent: int, traces: Sequence[tuple[str, Trace]], services: Services, head: HarnessTree
+    ) -> list[Example]:
+        """The parent's run on the tasks of ``traces``, charged as GEPA charges its evaluation of the parent.
 
-        # The proposal is stated against the served tree, so a child that
-        # differs from its parent but not from what is being served has
-        # nothing to apply; it is dropped rather than left pending.
-        proposal = components.mutations(served_texts, child_texts)
-        if not proposal:
-            return self._abandon(row)
-        row["accepted"] = True
-        row["candidate"] = archive.add(child_texts, parent, child_scores)
-        archive.log_proposal(row)
-        return proposal
-
-    def _abandon(self, row: dict[str, Any], *, rejected: bool = False) -> None:
-        """Log an iteration that produced no proposal, and propose nothing.
-
-        ``rejected`` marks the one case GEPA counts as a spent iteration: a
-        child that lost the minibatch comparison. An empty reflection or a
-        child that matches what is already served did not get that far.
+        The served parent's run is the traces themselves: free of runs,
+        not of budget. Any other parent's tree runs the tasks as runs.
         """
-        if rejected:
-            self._archive.reject()
-        self._archive.log_proposal(row)
-
-    def _sync(self, served_texts: Mapping[str, str]) -> int:
-        """Reconcile the archive with the tree the mechanism is actually serving.
-
-        A tree the archive does not recognise means the composition moved
-        without the method: a first boot, an operator edit, or a rollback.
-        Whatever it is, it becomes a new parentless candidate rather than
-        being mistaken for a descendant of the archive's last served one.
-        """
-        archive = self._archive
-        index = archive.served
-        if index is None or archive.candidates[index].texts != dict(served_texts):
-            index = archive.seed(served_texts)
-            # GEPA scores its seed on the validation set before the first
-            # iteration and charges it then; the mechanism runs that pass
-            # during the first evaluated step, but the budget is the same.
-            archive.charge(self._valset_size)
-        return index
-
-    def _minibatch(
-        self,
-        nodes: tuple[tuple[str, object], ...],
-        parent: int,
-        parent_texts: Mapping[str, str],
-        samples: Sequence[TrajectorySample],
-        models: ModelBindings,
-    ) -> list[_Example]:
-        """The parent's minibatch: free from traffic, or re-run on the parent."""
-        batch = _traffic(samples)[: self._minibatch_size]
-        if parent == self._archive.served:
-            # Free of rollouts, but not of budget: upstream evaluates the
-            # parent on the minibatch and counts it, so the traffic that
-            # stands in for that evaluation counts the same.
-            self._archive.charge(len(batch))
-            return [_Example(task, output, float(sample.metadata.get("reward"))) for sample, (task, output) in batch]
-        examples = []
-        for _, (task, _) in batch:
-            score, output, error = self._score(nodes, parent_texts, task, models)
-            examples.append(_Example(task, output, score, error))
-        return examples
-
-    def _score(
-        self,
-        nodes: tuple[tuple[str, object], ...],
-        texts: Mapping[str, str],
-        task: str,
-        models: ModelBindings,
-    ) -> tuple[float, str, str]:
-        """Run one task on a composition of ``texts`` and charge one metric call."""
-        files = render_composition(
-            (*_substituted(nodes, texts), *models.served.compose_nodes(self._descriptor)),
-            self._descriptor,
-        )
-        self._archive.charge(1)
-        try:
-            result = self._rollout_runner.run(
-                self._descriptor,
-                files,
+        if parent == archive.served:
+            archive.charge(len(traces))
+            return [
+                Example(task, trace.reply or "", 0.0 if trace.score is None else trace.score, trace.failure or "")
+                for task, trace in traces
+            ]
+        tasks = [task for task, _ in traces]
+        task_runs = services.evaluate(candidate_tree(head, archive.candidates[parent].texts), tasks)
+        archive.charge(len(task_runs))
+        return [
+            Example(
                 task,
-                binary=self._binary,
-                timeout=self._rollout_timeout_s,
-                executor=self._executor,
+                task_run.reply or "",
+                0.0 if task_run.score.value is None else task_run.score.value,
+                "" if task_run.failure is None else task_run.failure.cause,
             )
-        except (RolloutError, TrajectoryError) as error:
-            return 0.0, "", str(error)
-        if result.residue and self._forbid_residue:
-            cause = f"{len(result.residue)} file(s) outside the cleanup whitelist: {result.residue[0]}"
-            return 0.0, "", cause
-        score = float(self._score_rollout.score(task, result))
-        if not math.isfinite(score):
-            raise ValueError(f"rollout scorer returned a non-finite score {score!r} for task {task!r}")
-        return score, _rollout_output(result), ""
+            for task, task_run in zip(tasks, task_runs, strict=True)
+        ]
 
-    def _records(self, minibatch: Sequence[_Example]) -> list[dict[str, Any]]:
-        """The reflective dataset: one record per minibatch example."""
+    def records(self, minibatch: Sequence[Example]) -> list[dict[str, Any]]:
+        """GEPA's reflective dataset: one record per minibatch example."""
         return [
             {
                 INPUTS_KEY: example.task,
                 OUTPUTS_KEY: example.output,
-                FEEDBACK_KEY: example.error or self._feedback.feedback(example.task, example.output, example.score),
+                FEEDBACK_KEY: example.error or self.feedback.feedback(example.task, example.output, example.score),
             }
             for example in minibatch
         ]
 
-    def _binding(self, models: ModelBindings) -> ModelBinding:
-        """The reflection model, falling back to the model under test.
 
-        GEPA's reflection LM is normally a stronger model than the one being
-        optimized, but it does not have to be: a deployment that declares no
-        ``evolution.models.reflection`` reflects with the served model, which
-        is what makes the method runnable with no second endpoint at all.
-        """
-        try:
-            return models[self._reflection_model]
-        except KeyError:
-            return models.served
+def archive_for_step(
+    text: str | None,
+    history: History,
+    tasks: Sequence[str],
+    served_texts: Mapping[str, str],
+    *,
+    repeats: int,
+    rng_seed: int = 0,
+) -> Archive:
+    """The archive as a step starts: the committed one, its pending candidate settled, its served candidate current.
 
+    ``text`` is the committed ``archive.json``, ``None`` before the first
+    step. The pending candidate's validation pass is the evaluation of the
+    step that proposed it: ``history`` holds its scores on ``tasks``, the
+    scores of the tree that step served, and the step's decision. The
+    evaluation runs ``repeats`` ≥ 1 runs per task and tree, so a task's
+    score is the mean of its repeats, and a failed run reads as a zero,
+    never as a gap. A pending candidate whose step reached no decision (the
+    backend skipped the step) is dropped.
 
-class GEPASelectorMixin(CandidateEvaluationPlugin):
-    """GEPA's valset pass and Pareto update, as a plugin's ``decide()``.
-
-    Selection is strict mean improvement over the served composition, which
-    keeps the served tree equal to the archive's best candidate - GEPA's
-    ``best_idx``. The fronts still record everything, so a candidate that
-    loses on the mean can go on parenting proposals through its specialties.
+    ``served_texts`` are the evolvable texts of the tree the step serves. A
+    tree that does not hold the served candidate's texts moved without the
+    method: a first boot, an operator edit or a new training start. It becomes a new
+    parentless candidate, never a descendant of the last served one, and it
+    costs GEPA's seed validation, one metric call per run:
+    ``len(tasks) * repeats``. A driver that plans an iteration reads the same
+    inputs, so it draws the plan the method draws.
     """
-
-    def __init__(self, archive: Archive) -> None:
-        super().__init__()
-        self._archive = archive
-
-    def decide(self, candidate: UpdateCandidate, evaluation: EvaluationResult) -> SelectionDecision:
-        archive = self._archive
-        archive.refresh()
-        candidate_scores = _scores(evaluation.metrics.get("candidate_scores", ()))
-        served_scores = _scores(evaluation.metrics.get("current_scores", ()))
-
-        pending = archive.pending
-        parent = None
-        if pending is not None:
-            archive.record_validation(pending, candidate_scores)
-            archive.charge(len(candidate_scores))
-            parent = archive.candidates[pending].parent
-        served = archive.served
-        if served is not None and archive.candidates[served].val_scores is None:
-            # The seed's own validation arrives with the first evaluated
-            # step; its budget was charged when the archive was seeded.
-            archive.record_validation(served, served_scores)
-
-        # GEPA scores every candidate on the validation set once and keeps
-        # that number; the mechanism's fresh re-run of the served tree is
-        # redundant work, not a second opinion. Comparing against the stored
-        # mean is what keeps the served tree equal to the archive's best.
-        candidate_mean = fmean(candidate_scores) if candidate_scores else 0.0
-        served_mean = archive.mean_val(served) if served is not None else 0.0
-        selected = candidate_mean > served_mean
-        if selected and pending is not None:
-            archive.serve(pending)
-        archive.clear_pending()
-
-        fronts = archive.fronts()
-        return SelectionDecision(
-            selected=selected,
-            policy="gepa",
-            reason=(
-                f"candidate scored {candidate_mean:.4f} against {served_mean:.4f} served "
-                f"over {len(candidate_scores)} validation tasks"
-            ),
-            evaluation=evaluation,
-            metrics={
-                "candidate_val_mean": candidate_mean,
-                "served_val_mean": served_mean,
-                "parent": parent,
-                "archive_size": len(archive.candidates),
-                "front_size": len({index for front in fronts.values() for index in front}),
-                "metric_calls": archive.metric_calls,
-            },
-        )
-
-
-class GEPAPlugin(GEPASelectorMixin, BackendEvaluateMixin):
-    """GEPA's candidate evaluation: measure through the backend, decide by valset mean."""
-
-    def __init__(self, candidate_backend: Any, archive: Archive) -> None:
-        super().__init__(archive)
-        self._candidate_backend = candidate_backend
-
-
-def _scores(values: Any) -> list[float]:
-    """Per-rollout scores, task by task, with every failed rollout read as zero, never as missing: GEPA keeps one
-    validation score per task position. An empty list is no rollout."""
-    if not values:
-        return []
-    return [0.0 if score.value is None else score.value for score in RolloutScores.from_json(values).rollouts()]
-
-
-def _traffic(samples: Sequence[TrajectorySample]) -> list[tuple[TrajectorySample, tuple[str, str]]]:
-    """Each sample as its prompt and the answer the served composition gave.
-
-    A recorded request with no user message carries no task to re-run, so it
-    is not a minibatch example at all and is dropped here.
-    """
-    pairs = [
-        (sample, (_prompt_of(recorded_payload(sample)), _response_of(recorded_payload(sample)))) for sample in samples
-    ]
-    return [(sample, texts) for sample, texts in pairs if texts[0]]
-
-
-def _prompt_of(payload: Mapping[str, Any]) -> str:
-    for message in payload.get("messages", ()):
-        if isinstance(message, Mapping) and message.get("role") == "user":
-            return _text(message.get("content"))
-    return ""
-
-
-def _response_of(payload: Mapping[str, Any]) -> str:
-    """The answer the served composition gave, from either recorded shape.
-
-    A buffered reply is recorded as the provider's chat completion, with the
-    message under ``choices``; a streamed reply is recorded as the message
-    the proxy assembled from the chunks, under ``message`` beside the raw
-    stream body. Pi streams, so the second shape is the common one.
-    """
-    response = payload.get("response")
-    if not isinstance(response, Mapping):
-        return ""
-    choices = response.get("choices")
-    if isinstance(choices, Sequence) and choices and isinstance(choices[0], Mapping):
-        message = choices[0].get("message")
-    else:
-        message = response.get("message")
-    return _text(message.get("content")) if isinstance(message, Mapping) else ""
-
-
-def _text(content: Any) -> str:
-    """Message content as text, whether it is a string or typed parts."""
-    if isinstance(content, str):
-        return content
-    if isinstance(content, Sequence):
-        return "".join(str(part.get("text", "")) for part in content if isinstance(part, Mapping) and "text" in part)
-    return ""
-
-
-def _rollout_output(result: RolloutResult) -> str:
-    """The last assistant text in a trajectory, across both event shapes.
-
-    Harnesses log either a bare chat message or one wrapped in a typed
-    event; reflection only needs the text the agent finally produced, so
-    both are read and anything else reads as no output at all.
-    """
-    for event in reversed(result.trajectory):
-        message = event.get("message") if isinstance(event.get("message"), Mapping) else event
-        if isinstance(message, Mapping) and message.get("role") == "assistant":
-            text = _text(message.get("content"))
-            if text:
-                return text
-    return ""
-
-
-def _substituted(
-    nodes: Sequence[tuple[str, object]],
-    texts: Mapping[str, str],
-) -> tuple[tuple[str, Any], ...]:
-    """The served tree with the candidate's texts swapped into its nodes.
-
-    Only the evolvable nodes change: a composition is more than its
-    instructions, and the config and extension nodes that make rollouts
-    reach a model have to travel with every candidate the proposer runs.
-    """
-    rendered: list[tuple[str, Any]] = []
-    for kind, config in nodes:
-        options = config if isinstance(config, Mapping) else {}
-        key = components.component_key(kind, options)
-        if key is not None and key in texts:
-            rendered.append((kind, {**options, "text": texts[key]}))
+    if repeats < 1:
+        raise ValueError("repeats must be at least 1")
+    archive = Archive.from_state(None if text is None else json.loads(text), rng_seed=rng_seed)
+    if archive.pending_step is not None:
+        decision = history.decision(archive.pending_step)
+        if decision is None:
+            archive.clear_pending()
         else:
-            rendered.append((kind, config))
-    return tuple(rendered)
+            archive.settle(
+                task_scores(history.scores(decision.tree, tasks, repeats=repeats), repeats=repeats),
+                task_scores(history.scores(decision.head, tasks, repeats=repeats), repeats=repeats),
+                decision.selected,
+                repeats=repeats,
+            )
+    if archive.served is None or archive.candidates[archive.served].texts != dict(served_texts):
+        # GEPA scores its seed on the validation set before its first iteration; the step's evaluation runs that
+        # pass later, at the same price.
+        archive.seed(served_texts)
+        archive.charge(len(tasks) * repeats)
+    return archive
+
+
+def task_scores(values: Sequence[float | None], *, repeats: int) -> list[float]:
+    """One score per task from ``values``, task by task and repeat by repeat: each task's mean over its ``repeats``
+    values, with a failed run (``None``) read as zero, never as missing."""
+    zeroed = [0.0 if value is None else float(value) for value in values]
+    return [sum(zeroed[start : start + repeats]) / repeats for start in range(0, len(zeroed), repeats)]
+
+
+def skipped(reason: str) -> tuple[str, dict[str, Any]]:
+    """An iteration that ends before reflection: ``reason`` is its summary, and its record says it skipped."""
+    return reason, {"skipped": reason}
+
+
+__all__ = [
+    "ARCHIVE_FILE",
+    "GEPA",
+    "Feedback",
+    "GEPASettings",
+    "ScoreFeedback",
+    "archive_for_step",
+]

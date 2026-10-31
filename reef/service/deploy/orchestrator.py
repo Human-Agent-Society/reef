@@ -11,13 +11,12 @@ from __future__ import annotations
 import copy
 import json
 import os
-import shlex
 import signal
 import sys
 import tempfile
 import threading
 import time
-from collections.abc import Mapping, MutableMapping, Sequence
+from collections.abc import Mapping, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from contextlib import suppress
 from dataclasses import dataclass
@@ -27,7 +26,6 @@ from typing import Any
 
 import yaml
 
-from reef.harness.adapters import get_adapter
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.registry import recipe_class_for
 from reef.runtime.deployment import RuntimeConfigError
@@ -71,7 +69,6 @@ from reef.service.deploy.service_config import (
     service_override,
 )
 from reef.service.deploy.training import assemble_training_services, local_model_required
-from reef.service.profiles import PROFILES_DIR, UnknownProfileError, profile_path
 
 _DEFAULT_GRACE_TIMEOUT = 30
 _WATCHDOG_INTERVAL = 5
@@ -269,12 +266,6 @@ class _Stack:
             self.shutdown()
             raise
         _log(f"stack up. logs: {self.run_dir}/*.log")
-        hint = install_hint(self.config)
-        if hint is not None:
-            _log(
-                "install the harness in another terminal; keep its install root, the last argument, outside the "
-                f"project the agent works in: {hint}"
-            )
 
     def _watchdog(self) -> None:
         while not self._stopping.is_set():
@@ -360,37 +351,6 @@ class _Stack:
         return int(self._unexpected_exit.is_set())
 
 
-def install_hint(config: Mapping[str, Any]) -> str | None:
-    """The one line that installs a harness evolution deployment's harness, or None for a deployment without one.
-
-    Printed when the stack is up so nobody copies it from a README: the
-    address the service listens on (loopback when it binds every interface),
-    the adapter the deployment evolves, and the token the config holds. The
-    token is exported once, so curl's header and the script, whose binding
-    takes it from ``REEF_TOKEN``, read the same value: a script run without it
-    would install a harness every call of which answers 401. The script
-    installs under ``~/reef-harness/<scenario>`` by default, outside the
-    project the agent works in. An adapter Reef installs nothing for
-    (terminus) gets no line."""
-    adapter = config_value(config, "reef", "evolution", "adapter")
-    if not isinstance(adapter, str) or not adapter or get_adapter(adapter).install is None:
-        return None
-    host = str(config_value(config, "reef", "host", default="127.0.0.1"))
-    if host in ("0.0.0.0", "::", ""):
-        host = "127.0.0.1"
-    port = config_value(config, "reef", "port", default="8900")
-    token = config_value(config, "reef", "token", default=None)
-    if token is None:
-        tokens = config.get("reef", {}).get("tokens") if isinstance(config.get("reef"), Mapping) else None
-        if isinstance(tokens, list) and tokens:
-            token = str(tokens[0])
-    url = f"'http://{host}:{port}/reef/harness/install?adapter={adapter}'"
-    if token:
-        header = '-H "Authorization: Bearer $REEF_TOKEN"'
-        return f"export REEF_TOKEN={shlex.quote(str(token))}; curl -fsS {header} {url} | bash"
-    return f"curl -fsS {url} | bash"
-
-
 def _component_selection(
     config: dict[str, Any], overrides: dict[str, str], config_path: Path
 ) -> tuple[dict[str, Any], Path | None]:
@@ -458,11 +418,9 @@ def resolve_deployment_config(
 
 
 def _config_source(config_path: Path | None) -> str:
-    """Name the selected file, profile or command line for the startup log."""
+    """Name the selected file or the command line for the startup log."""
     if config_path is None:
         return "config: command line"
-    if config_path.parent == PROFILES_DIR.resolve():
-        return f"config: profile {config_path.stem} at {config_path}"
     return f"config: {config_path}"
 
 
@@ -628,38 +586,11 @@ def _model_overrides(
     return {"upstream_url": url, "upstream_model": model, "upstream_api_key": key}
 
 
-def _resolve_config(config: str | None, recipe: str | None) -> str | None:
-    """Select a file/profile, or return None for configuration-free provider startup."""
-    if config is not None and recipe is not None:
-        raise DeployConfigError("pass -c <file> or --recipe <name>, not both")
-    if config is not None:
-        if not config.strip():
-            raise DeployConfigError("--config must name a non-empty file path")
-        return config
-    if recipe is not None:
-        try:
-            path = profile_path(recipe)
-        except UnknownProfileError as exc:
-            raise DeployConfigError(str(exc)) from exc
-        return str(path)
-    return None
-
-
-def _prepare_profile(
-    recipe: str,
-    model: str | None,
-    environ: MutableMapping[str, str],
-    overrides: Mapping[str, str] | None = None,
-) -> None:
-    """What a profile needs from the environment before it loads: its own directory and a model."""
-    selected_model = model or environ.get("REEF_UPSTREAM_MODEL", "")
-    for key, value in (overrides or {}).items():
-        declared = service_override(key, value)
-        if declared is not None and declared[0].name == "upstream_model":
-            selected_model = value
-    if not selected_model.strip():
-        raise DeployConfigError(f"--recipe {recipe} needs the model: pass --inference.upstream-model MODEL")
-    environ["REEF_RECIPE_CONFIG_DIR"] = str(PROFILES_DIR)
+def _resolve_config(config: str | None) -> str | None:
+    """Select a config file, or return None for configuration-free provider startup."""
+    if config is not None and not config.strip():
+        raise DeployConfigError("--config must name a non-empty file path")
+    return config
 
 
 def main(argv: Sequence[str] | None = None) -> None:
@@ -668,20 +599,12 @@ def main(argv: Sequence[str] | None = None) -> None:
         bootstrap = build_serve_parser(service_arguments=False)
         selection, extras = bootstrap.parse_known_args([arg for arg in argv if arg not in ("--help", "-h")])
         help_config = None
-        if (
-            selection.config
-            or selection.recipe
-            or any(arg.startswith(("--reef.recipe", "--recipe.implementation")) for arg in extras)
-        ):
-            path = Path(selection.config or (profile_path(selection.recipe) if selection.recipe else "reef.yaml"))
-            config = (
-                translate_layout(load_config(path, interpolate_env=False))
-                if selection.config or selection.recipe
-                else {}
-            )
+        if selection.config or any(arg.startswith(("--reef.recipe", "--recipe.implementation")) for arg in extras):
+            path = Path(selection.config or "reef.yaml")
+            config = translate_layout(load_config(path, interpolate_env=False)) if selection.config else {}
             help_config, _ = _component_selection(config, _parse_overrides(extras), path.resolve())
         build_serve_parser(config=help_config).parse_args(argv)
-    # Discover the file/profile without applying defaults or converting
+    # Discover the file without applying defaults or converting
     # public values before YAML and environment references are available.
     parser = build_serve_parser(service_arguments=False)
     args, extras = parser.parse_known_args(argv)
@@ -694,9 +617,9 @@ def main(argv: Sequence[str] | None = None) -> None:
                 model_defaults.pop(key, None)
                 model_defaults[key] = value
             overrides = model_defaults
-        config_path = _resolve_config(args.config, args.recipe)
-        if args.recipe:
-            _prepare_profile(args.recipe, args.model, os.environ, overrides)
+        if args.recipe is not None:
+            raise DeployConfigError(f"--recipe {args.recipe}: built in profiles were removed; pass -c <config file>")
+        config_path = _resolve_config(args.config)
         if args.component is not None and not args.print_config:
             exit_code = run_component(config_path, overrides, args.component)
         else:

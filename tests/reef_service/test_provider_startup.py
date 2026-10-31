@@ -361,25 +361,8 @@ def test_provider_cli_serves_and_records_feedback_without_yaml_or_gpu_imports(tm
         assert sock.connect_ex(("127.0.0.1", port)) != 0
 
 
-@pytest.mark.usefixtures("provider_environment")
-@pytest.mark.parametrize("model_flag", ["--inference.upstream-model", "--upstream_model"])
-def test_profile_accepts_explicit_provider_fields_without_model_shorthand(captured_stack, model_flag):
+def test_removed_recipe_profile_flag_names_the_config_file_instead(capsys):
     with pytest.raises(SystemExit) as result:
-        main(
-            [
-                "serve",
-                "--recipe",
-                "reefine",
-                "--inference.upstream-url",
-                "http://127.0.0.1:11434",
-                model_flag,
-                "gemma4:26b",
-            ]
-        )
-    assert result.value.code == 0
-    config = captured_stack["config"]["reef"]
-    assert config["upstream_url"] == "http://127.0.0.1:11434"
-    assert config["upstream_model"] == "gemma4:26b"
-    assert config["recipe"] == "reef.recipe.reefine:ReefineRecipe"
-    assert config["data"]["training_mode"] == "manual"
-    assert captured_stack["started"] and captured_stack["stopped"]
+        main(["serve", "--recipe", "reefine", "--inference.upstream-model", "gemma4:26b"])
+    assert result.value.code == 2
+    assert "built in profiles were removed; pass -c <config file>" in capsys.readouterr().err

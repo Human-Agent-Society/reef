@@ -31,7 +31,7 @@ from recipes.tttd.examples.guidance_ttt.harness.prompts import (
     build_guidance_prompt,
     extract_strict_guidance,
 )
-from recipes.tttd.examples.guidance_ttt.harness.puct import archive_puct_score
+from recipes.tttd.examples.guidance_ttt.harness.puct import rank_archive_nodes
 from recipes.tttd.examples.guidance_ttt.harness.run_controller import (
     GuidanceRunIdentity,
     GuidanceRunStateError,
@@ -326,12 +326,11 @@ def test_discover_same_step_uses_independent_root_lineages(tmp_path: Path) -> No
 def test_best_child_puct_mode_matches_guidance_reference() -> None:
     root = make_root_node(problem_id="polyomino_packing", raw_score=100.0, reward=100.0)
 
-    score = archive_puct_score(
-        node=root,
-        visit_count=1,
-        best_reachable_value=50.0,
-        prior=0.0,
-        scale=1.0,
+    ((score, *_),) = rank_archive_nodes(
+        [root],
+        initial_ids={root.id},
+        visit_counts={root.id: 1},
+        best_reachable_values={root.id: 50.0},
         total_visits=1,
         puct_c=0.0,
         q_mode="best_child",

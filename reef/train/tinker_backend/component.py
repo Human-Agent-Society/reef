@@ -41,7 +41,7 @@ from reef.tinker.sampling import TinkerSampler
 from reef.train.algos.registry import job_training
 from reef.train.algos.schedule import StepScheduling
 from reef.train.local_jobs import LocalJobComponent
-from reef.train.task_rollouts import RolloutSettings, TaskJobRollouts, roll_out, task_name
+from reef.train.task_rollouts import RolloutSettings, TaskJobRollouts, run_train_tasks, task_name
 from reef.train.tinker_backend.client import TinkerClient
 from reef.train.tinker_backend.config import ScoreCentering, TinkerConfig, TinkerServiceConfig
 from reef.train.tinker_backend.preparation import prepare_tinker_job
@@ -331,7 +331,7 @@ class TinkerJobComponent(LocalJobComponent, ABC):
             runtime_load_id=f"tinker:{start.sampler_path or f'base:{self._model}'}",
             topk_logprobs=0 if self.score_centering is None else self.score_centering.top_k,
         )
-        rollouts = roll_out(
+        rollouts = run_train_tasks(
             tasks,
             settings,
             chat,

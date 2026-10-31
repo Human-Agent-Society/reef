@@ -34,7 +34,7 @@ from typing import Literal
 from recipes.beta.autoenvscaling.author import ModelReplies
 from reef.core.prompts import untrusted_text
 from reef.core.tasks import HarborTask
-from reef.harness.client.tasks import TaskRollout, rewards_of
+from reef.harness.tasks.rollouts import TaskRollout, rewards_of
 from reef.record2sample.generator.client import Generator, GeneratorError, WrittenTask
 from reef.record2sample.generator.designer import DesignerError
 
