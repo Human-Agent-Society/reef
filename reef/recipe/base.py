@@ -82,6 +82,13 @@ class ServedEndpoint:
         object.__setattr__(self, "url", self.url.strip().rstrip("/"))
 
 
+def check_job_components(recipe: Recipe, components: Mapping[str, TrainingComponent]) -> None:
+    """Raise ``ValueError`` unless ``components`` names exactly the job components of ``recipe``."""
+    names = sorted(component.name for component in recipe.job_components())
+    if sorted(components) != names:
+        raise ValueError(f"the job components of {type(recipe).__name__} are {names}, not {sorted(components)}")
+
+
 @dataclass(frozen=True, kw_only=True)
 class Recipe:
     """Default inference recipe and base contract for update recipes.
@@ -148,12 +155,18 @@ class Recipe:
         stage = self.stages().record2sample
         return Record2Sample.referenced_class(stage).scenario_state_dirs(stage.config, scenario)
 
-    def with_training_component(self, component: TrainingComponent) -> Recipe:
-        """This recipe with ``component`` in place of its training component: the same recipe, whose trainers
-        submit their jobs to ``component``. Only a recipe with a training component has one to replace."""
+    def job_components(self) -> tuple[TrainingComponent, ...]:
+        """The training components whose jobs this recipe's trainers submit, each under its own ``name``: the
+        weight trainer's ``training_component``, and the ones that a recipe adds, such as a harness's."""
+        return () if self.training_component is None else (self.training_component,)
+
+    def with_job_components(self, components: Mapping[str, TrainingComponent]) -> Recipe:
+        """This recipe whose trainers submit the jobs of each job component to ``components[name]``, such as the
+        jobs queue's view of it. Raise ``ValueError`` unless ``components`` names exactly the job components."""
+        check_job_components(self, components)
         if self.training_component is None:
-            raise ValueError(f"{type(self).__name__} has no training component to replace")
-        return replace(self, training_component=component)
+            return self
+        return replace(self, training_component=components[self.training_component.name])
 
     def with_model_config(self, config: ModelConfig) -> Recipe:
         """Bind model settings supplied for this scenario."""

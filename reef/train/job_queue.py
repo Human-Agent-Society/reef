@@ -101,9 +101,12 @@ def job_from_item(item: WorkItem) -> TrainingJob:
 
 def json_texts(value: JsonValue, name: str) -> list[str]:
     """``value`` as a list of non-empty strings; ``ValueError`` when it is another JSON value."""
-    if not isinstance(value, list) or not all(isinstance(item, str) and item for item in value):
+    if not isinstance(value, list):
         raise ValueError(f"{name} is a list of non-empty strings")
-    return list(value)
+    texts = [item for item in value if isinstance(item, str) and item]
+    if len(texts) != len(value):
+        raise ValueError(f"{name} is a list of non-empty strings")
+    return texts
 
 
 def checkpoint_json(checkpoint: SavedCheckpoint) -> dict[str, JsonValue]:

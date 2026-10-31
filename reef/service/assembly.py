@@ -157,7 +157,7 @@ def _training_recipe(
             recipe_config, resolved_recipe_data, environ=env, runtime=runtime, training_component=training_component
         )
     except BaseException:
-        close_runtimes(training_component, runtime)
+        close_runtimes(() if training_component is None else (training_component,), runtime)
         raise
 
 
@@ -210,7 +210,7 @@ def composed_training_recipe(
     try:
         return build_recipe(selected, env, config=config, runtime=runtime, training_component=training_component)
     except BaseException:
-        close_runtimes(training_component, runtime)
+        close_runtimes(() if training_component is None else (training_component,), runtime)
         raise
 
 
@@ -266,7 +266,7 @@ def _serving_recipe(selected: str, settings: ServiceConfig, env: Mapping[str, st
         try:
             return build_recipe(selected, env, config=config, runtime=runtime)
         except BaseException:
-            close_runtimes(None, runtime)
+            close_runtimes((), runtime)
             raise
     if settings.pipeline_settings is not None or settings.activation_settings is not None:
         raise ValueError(
@@ -502,7 +502,7 @@ def build_dispatcher(
         if scenario_storage is not None:
             with suppress(Exception):
                 scenario_storage.close()
-        close_runtimes(recipe.training_component, recipe.runtime)
+        close_runtimes(recipe.job_components(), recipe.runtime)
         if experiment_tracker is not None:
             with suppress(Exception):
                 experiment_tracker.close()

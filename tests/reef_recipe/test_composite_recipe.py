@@ -296,6 +296,21 @@ def test_service_connects_the_training_component_of_a_composite_weight_component
     assert all(component.training_component is recipe.training_component for component in recipe.components.values())
     assert all(component.runtime is recipe.runtime for component in recipe.components.values())
 
+    # The components share one job component; a replacement reaches every component that submits its jobs.
+    from tests.support.runtime_stubs import StubTrainingComponent
+
+    shared = recipe.training_component
+    assert recipe.job_components() == (shared,)
+    queued = StubTrainingComponent(name=shared.name)
+    moved = recipe.with_job_components({shared.name: queued})
+    assert moved.job_components() == (queued,)
+    assert all(
+        component.training_component is (None if original.training_component is None else queued)
+        for component, original in zip(moved.components.values(), recipe.components.values(), strict=True)
+    )
+    with pytest.raises(ValueError, match=r"the job components of CompositeRecipe are \['stub'\], not \[\]"):
+        recipe.with_job_components({})
+
     # A flat weight recipe setting has no place at the top of a composite.
     with pytest.raises(ValueError, match=r"reef\.training_mode is not a setting of CompositeRecipe"):
         _serving_recipe(COMPOSITE, composite_service(training_mode="manual"), {})

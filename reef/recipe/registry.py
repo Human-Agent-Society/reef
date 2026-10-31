@@ -128,5 +128,5 @@ def build_named_recipe(
     except BaseException:
         if runtime_config:
             # The build error stays the one raised.
-            close_runtimes(None, runtime)
+            close_runtimes((), runtime)
         raise

@@ -78,7 +78,7 @@ class InferenceApp(ComponentApp):
                 storage = ObservedScenarioStorage(storage, record_observer)
         except BaseException:
             coordination.close()
-            close_runtimes(recipe.training_component, runtime)
+            close_runtimes(recipe.job_components(), runtime)
             raise
         timeout_seconds = settings.inference_timeout_s if runtime is None else runtime.inference_timeout_s
         app = build_inference_app(
@@ -96,7 +96,7 @@ class InferenceApp(ComponentApp):
         async def close_inference(app: web.Application) -> None:
             storage.close()
             coordination.close()
-            close_runtimes(recipe.training_component, runtime)
+            close_runtimes(recipe.job_components(), runtime)
 
         app.on_cleanup.append(close_inference)
         return app
@@ -127,9 +127,9 @@ class QueueServiceApp(ComponentApp):
 
     def build(self, settings: ServiceConfig, environ: Mapping[str, str]) -> web.Application:
         dispatcher = build_dispatcher(settings, environ=environ, components=frozenset({self.name}))
-        if dispatcher.services.runs_training and dispatcher.recipe.training_component is None:
+        if dispatcher.services.runs_training and not dispatcher.recipe.job_components():
             dispatcher.close()
-            raise ValueError(f"recipe {settings.recipe!r} trains no weights, so it has no training service")
+            raise ValueError(f"recipe {settings.recipe!r} submits no training job, so it has no training service")
         app = service_application(settings.tokens)
 
         async def close_dispatcher(app: web.Application) -> None:

@@ -43,7 +43,7 @@ from reef.core.reports import ReportBase, ReportValidationError
 from reef.evaluation.activation import activation_reference
 from reef.inference.model_config import ModelConfig
 from reef.observability import ExperimentLogger
-from reef.recipe.base import Recipe, ServedEndpoint, WeightTrainingRecipe, every_check
+from reef.recipe.base import Recipe, ServedEndpoint, WeightTrainingRecipe, check_job_components, every_check
 from reef.recipe.config import recipe_config_from_mapping, recipe_config_from_section
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.registry import build_recipe, recipe_class_for
@@ -248,15 +248,26 @@ class CompositeRecipe(Recipe):
             },
         )
 
-    def with_training_component(self, component: TrainingComponent) -> CompositeRecipe:
-        # The components share the composite's training component; each one that has it gets ``component``.
-        if self.training_component is None:
-            raise ValueError("this composite recipe has no training component to replace")
+    def job_components(self) -> tuple[TrainingComponent, ...]:
+        """The job components of every component recipe, each once: the components share the composite's
+        training component. Raise ``ValueError`` when two different components share a name."""
+        found: dict[str, TrainingComponent] = {}
+        for recipe in self.components.values():
+            for component in recipe.job_components():
+                known = found.setdefault(component.name, component)
+                if known is not component:
+                    raise ValueError(f"two job components of this composite are named {component.name!r}")
+        return tuple(found.values())
+
+    def with_job_components(self, components: Mapping[str, TrainingComponent]) -> CompositeRecipe:
+        check_job_components(self, components)
         return replace(
             self,
-            training_component=component,
+            training_component=(None if self.training_component is None else components[self.training_component.name]),
             components={
-                name: recipe.with_training_component(component) if recipe.training_component is not None else recipe
+                name: recipe.with_job_components(
+                    {component.name: components[component.name] for component in recipe.job_components()}
+                )
                 for name, recipe in self.components.items()
             },
         )

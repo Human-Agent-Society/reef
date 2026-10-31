@@ -156,15 +156,23 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         self.services = ServiceSet.of(components)
         #: The work queue of the samples, jobs and evaluations queues.
         self.queue = coordination.work_queue
-        if recipe.training_component is not None:
-            queued = JobQueueComponent(
-                recipe.training_component, self.queue, owns_component=not self.services.runs_training
-            )
+        # Every job component's jobs go through the jobs queue: the weight trainer's and a harness's alike. The
+        # training service runs one worker for each of them.
+        job_components = recipe.job_components()
+        if job_components:
             if self.services.runs_training:
-                self.workers.add(
-                    TrainingJobWorker(recipe.training_component, self.queue, worker_id=instance_id("training"))
-                )
-            recipe = recipe.with_training_component(queued)
+                for component in job_components:
+                    self.workers.add(
+                        TrainingJobWorker(component, self.queue, worker_id=instance_id(f"training-{component.name}"))
+                    )
+            recipe = recipe.with_job_components(
+                {
+                    component.name: JobQueueComponent(
+                        component, self.queue, owns_component=not self.services.runs_training
+                    )
+                    for component in job_components
+                }
+            )
         #: The deployment's recipe, before any scenario's own model settings; its trainers submit to the jobs queue.
         self.recipe = recipe
         self.storage = scenario_storage
@@ -172,7 +180,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         self.data_store = data_store
         self.record_retention_lock = Lock()
         tracker = experiment_tracker if experiment_tracker is not None else NullExperimentTracker()
-        if recipe.training_component is not None and not isinstance(tracker, NullExperimentTracker):
+        if recipe.job_components() and not isinstance(tracker, NullExperimentTracker):
             # Control's tracker also writes each training job's run into the job's item, for the job listing.
             tracker = JobExperimentRecorder(tracker, self.queue)
         self.experiment_tracker = tracker
@@ -922,7 +930,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
             self.storage.close()
         except BaseException as exc:
             errors.append(exc)
-        errors.extend(close_runtimes(self.recipe.training_component, self.recipe.runtime))
+        errors.extend(close_runtimes(self.recipe.job_components(), self.recipe.runtime))
         # Send the experiment events that are still queued before the tracker closes.
         self.registry.experiment_reports.close()
         try:
