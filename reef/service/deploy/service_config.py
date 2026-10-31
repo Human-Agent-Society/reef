@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+import math
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -235,6 +236,18 @@ class ServiceConfig:
         public_path=("storage", "coordination_backend"),
         help="Coordination tables of the services: sqlite (one host) or postgres (record_database_url).",
     )
+    #: How many times a worker takes one work item before the item fails, for every queue.
+    work_max_attempts: int = config_option(
+        3,
+        public_path=("storage", "work_max_attempts"),
+        help="Attempts of one work item (a job, a selection, a rollout, a data task) before it fails.",
+    )
+    #: How long control keeps an ended work item, so that its producer reads its result; then control deletes it.
+    work_retention_s: float = config_option(
+        7 * 24 * 3600.0,
+        public_path=("storage", "work_retention_s"),
+        help="Seconds that control keeps an ended work item before it deletes it. Default: 7 days.",
+    )
     #: ``local``, or a ``TaskFileStore`` plugin: ``package.module:ClassName`` or module and config.
     task_file_backend: str | Mapping[str, Any] = config_option(
         "local",
@@ -383,6 +396,12 @@ class ServiceConfig:
             if isinstance(self.record_backend, str) and ":" not in self.record_backend:
                 raise ValueError("storage.record_backend must be sqlite, postgres, or 'package.module:ClassName'")
             ScenarioStorage.reference(self.record_backend, setting="storage.record_backend")
+        if isinstance(self.work_max_attempts, bool) or not isinstance(self.work_max_attempts, int):
+            raise ValueError("storage.work_max_attempts must be an integer")
+        if self.work_max_attempts < 1:
+            raise ValueError("storage.work_max_attempts must be at least 1")
+        if not math.isfinite(self.work_retention_s) or self.work_retention_s <= 0:
+            raise ValueError("storage.work_retention_s must be a positive number of seconds")
         if self.coordination_backend not in (None, "sqlite", "postgres"):
             raise ValueError("storage.coordination_backend must be sqlite or postgres")
         if self.coordination_backend is None and self.record_backend not in ("sqlite", "postgres"):

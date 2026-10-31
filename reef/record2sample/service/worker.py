@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from typing import cast
 
 from reef.execution.workers import QueueWorker
-from reef.storage.work_queue import JsonValue, WorkItem, WorkQueue, request_waiting
+from reef.storage.work_queue import JsonValue, WorkItem, WorkQueue
 
 #: The queue of sample work.
 SAMPLES_QUEUE = "samples"
@@ -50,8 +50,7 @@ def request_selection(
     """Ask for a selection of the new records of the trainer of ``component`` in ``scenario``; return the item that
     will read them: a queued one, or a new one."""
     payload = cast(dict[str, JsonValue], {"scenario": scenario, "component": component})
-    return request_waiting(
-        queue,
+    return queue.request(
         SAMPLES_QUEUE,
         scenario,
         RECORD_SELECTION_KIND,

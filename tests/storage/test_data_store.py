@@ -8,12 +8,29 @@ import pytest
 
 from reef.service.assembly import build_dispatcher
 from reef.service.deploy.service_config import ServiceConfig
-from reef.storage.data import ItemConflict, ItemNotFound, MemoryDataStore, NewItem, json_digest
+from reef.storage.data import ItemConflict, ItemNotFound, MemoryDataStore, NewItem
+from reef.storage.item_kinds import json_digest
 from reef.storage.sql_data import PostgresDataStore, SQLiteDataStore
 from reef.storage.tasks import LocalTaskFileStore, files_digest
 
 ATIF = {"schema_version": "ATIF-v1.4", "agent": {"name": "fixture"}, "steps": [{"step_id": 1, "message": "hi"}]}
 ORIGIN = {"scenario": "coding", "release_id": "r1", "artifact_id": "a1"}
+
+
+def record_content(record_id: str) -> dict:
+    """The content of the record item of the inference ``record_id`` (``reef.storage.record_items``)."""
+    return {
+        "agent_record_id": record_id,
+        "request_type": "inference",
+        "payload": {},
+        "created_at": 1.0,
+        "references": [],
+        "artifact_ref": None,
+    }
+
+
+def artifact_content(source_uri: str | None, component: str | None) -> dict:
+    return {"source_uri": source_uri, "kind": None, "component": component, "content_id": None}
 
 
 def trajectory(item_id: str, text: str = "hi", **metadata) -> NewItem:
@@ -82,20 +99,28 @@ def test_each_owner_sees_only_its_own_items(store):
 def test_metadata_says_what_an_item_is_and_which_scenarios_use_it(store):
     (record,) = store.create(
         "acme",
-        [NewItem("r1", {"request": {}}, {"kind": "record", "origin": ORIGIN, "scenarios": {"coding": "train"}})],
+        [
+            NewItem(
+                "coding/r1",
+                record_content("r1"),
+                {"kind": "record", "origin": ORIGIN, "scenarios": {"coding": "train"}},
+            )
+        ],
     )
     assert record.kind == "record"
     assert record.metadata["origin"] == ORIGIN
     # An imported record names no release and no artifact.
     unserved = {**ORIGIN, "release_id": None, "artifact_id": None}
-    (imported,) = store.create("acme", [NewItem("r2", {}, {"kind": "record", "origin": unserved})])
+    (imported,) = store.create(
+        "acme", [NewItem("coding/r2", record_content("r2"), {"kind": "record", "origin": unserved})]
+    )
     assert imported.metadata["origin"] == unserved
     # An artifact item has an origin when a scenario made it, and no scenarios: a scenario imports it.
     made, uploaded = store.create(
         "acme",
         [
-            NewItem("coding/a1", {"source_uri": None}, {"kind": "artifact", "origin": ORIGIN}),
-            NewItem("upload-1", {"source_uri": "s3://bucket/u/"}, {"kind": "artifact"}),
+            NewItem("coding/a1", artifact_content(None, "weights"), {"kind": "artifact", "origin": ORIGIN}),
+            NewItem("upload-1", artifact_content("s3://bucket/u/", None), {"kind": "artifact"}),
         ],
     )
     assert (made.metadata["origin"], made.metadata["scenarios"]) == (ORIGIN, {})
@@ -113,6 +138,11 @@ def test_metadata_says_what_an_item_is_and_which_scenarios_use_it(store):
         (trajectory("x", scenarios={"coding": "eval"}), "always train"),
         (trajectory("x", scenarios={"coding": "dev"}), "train or eval"),
         (NewItem("x", ATIF, {"kind": "task"}), "task directory"),
+        # The content of each kind follows its rules (reef.storage.item_kinds).
+        (NewItem("x", {"steps": []}, {"kind": "trajectory"}), "ATIF"),
+        (NewItem("coding/x", {"request": {}}, {"kind": "record", "origin": ORIGIN}), "exactly the keys"),
+        (NewItem("other/r1", record_content("r1"), {"kind": "record", "origin": ORIGIN}), "has the ID"),
+        (NewItem("x", artifact_content(None, None), {"kind": "artifact"}), "names its source_uri"),
     ]
     for item, reason in bad:
         with pytest.raises(ValueError, match=reason):

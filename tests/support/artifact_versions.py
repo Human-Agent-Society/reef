@@ -11,6 +11,7 @@ from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher
 from reef.observability import ExperimentTracker, NullExperimentLogger
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 
 
@@ -118,6 +119,7 @@ def dispatcher(tmp_path, *, experiment_tracker=None):
         local_artifact_dir=tmp_path / "staged",
         experiment_tracker=experiment_tracker,
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
+        coordination=memory_coordination(),
     )
     return value, runtime, backend_factory
 

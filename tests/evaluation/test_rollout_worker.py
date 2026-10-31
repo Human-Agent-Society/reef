@@ -17,8 +17,7 @@ from reef.evaluation.rollout_worker import (
     EvaluationRolloutWorker,
     rollout_item_id,
 )
-from reef.storage.coordination import memory_coordination
-from reef.storage.sql_coordination import SQLiteCoordinationDatabase, SQLWorkQueue
+from reef.storage.sql_coordination import SQLiteCoordinationDatabase, SQLWorkQueue, memory_coordination
 from reef.storage.work_queue import NewWork
 
 

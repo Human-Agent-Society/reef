@@ -42,13 +42,10 @@ from reef.service.data import (
     data_store,
     jsonl_trajectories,
 )
-from reef.storage.data import DATA_QUEUE, MAX_QUERY_LIMIT, ItemNotFound, StoredItem, check_owner
+from reef.storage.data import MAX_QUERY_LIMIT, ItemNotFound, StoredItem, check_owner
+from reef.storage.data_queue import DATA_EXPORT_KIND, DATA_IMPORT_KIND, DATA_QUEUE
 from reef.storage.work_queue import JsonValue, NewWork, WorkItem
 
-#: The kind of the ``data`` queue item that imports the files at a URI as items of one owner.
-DATA_IMPORT_KIND = "data_import"
-#: The kind of the ``data`` queue item that writes items of one owner to a tar.gz at a URI.
-DATA_EXPORT_KIND = "data_export"
 #: The transfer kinds by the route segment that names them.
 TRANSFER_KINDS = {"imports": DATA_IMPORT_KIND, "exports": DATA_EXPORT_KIND}
 #: The item kinds that an import creates.
@@ -304,8 +301,6 @@ class ArchiveWriters:
 
 
 __all__ = [
-    "DATA_EXPORT_KIND",
-    "DATA_IMPORT_KIND",
     "TRANSFER_KINDS",
     "ArchiveWriter",
     "ArchiveWriters",

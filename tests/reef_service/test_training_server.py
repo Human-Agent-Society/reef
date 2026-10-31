@@ -27,6 +27,7 @@ from reef.runtime.jobs import JobStatus, TrainingJob
 from reef.service import deploy
 from reef.service.app import create_app
 from reef.service.deploy.service_config import ServiceConfig
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.job_queue import JobQueueComponent
 
@@ -538,6 +539,7 @@ def test_status_reports_the_running_job_the_finished_jobs_and_the_served_adapter
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
+        coordination=memory_coordination(),
     )
 
     async def math_status(client: TestClient) -> dict:

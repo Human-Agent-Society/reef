@@ -16,15 +16,10 @@ import math
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
+from reef.core.values import require_text
+
 #: The name of a scenario's active artifact in ``ScenarioModel``.
 ACTIVE = "active"
-
-
-def require_text(value: object, name: str) -> str:
-    """``value`` when it is a non-empty string without surrounding spaces; else ``ValueError``."""
-    if not isinstance(value, str) or not value or value != value.strip():
-        raise ValueError(f"{name} must be a non-empty string without surrounding spaces")
-    return value
 
 
 @dataclass(frozen=True)
@@ -107,4 +102,4 @@ class ScheduledStop:
             raise ValueError("stop_after is a finite time")
 
 
-__all__ = ["ACTIVE", "ScenarioModel", "ScheduledStop", "ServedArtifact", "require_text"]
+__all__ = ["ACTIVE", "ScenarioModel", "ScheduledStop", "ServedArtifact"]

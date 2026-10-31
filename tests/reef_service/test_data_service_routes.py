@@ -30,7 +30,7 @@ from reef.artifact.repository import FileDownload
 from reef.core.tasks import write_harbor_task
 from reef.dispatcher import Dispatcher
 from reef.service.app import create_app
-from reef.storage.data import DATA_QUEUE
+from reef.storage.data_queue import DATA_QUEUE
 from reef.storage.work_queue import NewWork
 from reef.train.job_queue import JOB_CANCELLED_ERROR, JOBS_QUEUE
 

@@ -14,6 +14,7 @@ from reef.core import AgentRecord, RequestType
 from reef.core.errors import ReefError
 from reef.core.trajectories import source_record_id
 from reef.dispatcher import Dispatcher
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 
 
@@ -36,6 +37,7 @@ def _dispatcher(
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
+        coordination=memory_coordination(),
     )
     return dispatcher, component
 

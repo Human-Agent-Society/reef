@@ -19,6 +19,7 @@ from reef.artifact import Artifact, ArtifactConflict, ArtifactRef, InMemoryRepos
 from reef.core import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher, build_default_dispatcher
 from reef.runtime.jobs import SavedCheckpoint, TrainingJob
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.job_queue import TrainingJobWorker
 from reef.train.types import TrainStepResult
@@ -148,6 +149,7 @@ def test_concurrent_accepts_train_and_commit_exactly_once_per_batch(tmp_path, mo
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(),
+        coordination=memory_coordination(),
     )
     poll_jobs_quickly(dispatcher)
     base_artifact_id = dispatcher.get_or_create_scenario("math").serving_artifact_id()
@@ -190,6 +192,7 @@ def test_async_worker_serializes_slow_trainer_commits(tmp_path, monkeypatch) -> 
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(),
+        coordination=memory_coordination(),
     )
     poll_jobs_quickly(dispatcher)
     scenario = dispatcher.get_or_create_scenario("math")
@@ -222,6 +225,7 @@ def test_concurrent_checkpoint_commits_form_one_linear_chain(tmp_path) -> None:
         backend_factory=InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(),
+        coordination=memory_coordination(),
     )
     dispatcher.get_or_create_scenario("chat")
     commits_per_thread = 3

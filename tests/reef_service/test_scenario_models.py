@@ -27,6 +27,7 @@ from reef.inference.model_config import ModelConfig
 from reef.recipe.cordis import CordisRecipe
 from reef.runtime.executor.config import ExecutorSettings
 from reef.storage.scenario import ScenarioSettings
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train.cordis_backend import Mutation
 from reef.train.types import JobData
@@ -152,6 +153,7 @@ def test_full_evolution_uses_only_custom_binding(platform, tmp_path, monkeypatch
         recipe,
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repo"),
         scenario_storage=SQLiteScenarioStorage(),
+        coordination=memory_coordination(),
     )
     try:
         scenario = dispatcher.configure_scenario_model("alpha", configure(platform, "alpha", api), create=True)
@@ -303,6 +305,7 @@ def test_http_contract_updates_model_and_installs_selected_protocol(platform, tm
         recipe,
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repo"),
         scenario_storage=SQLiteScenarioStorage(),
+        coordination=memory_coordination(),
     )
 
     async def run():
@@ -384,10 +387,14 @@ def test_scenario_recovery_and_deletion_keep_model_lifecycle(platform, tmp_path)
     records = tmp_path / "records"
     factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
     recipe = make_recipe(platform, tmp_path)
-    first = Dispatcher(recipe, factory, scenario_storage=SQLiteScenarioStorage(records))
+    first = Dispatcher(
+        recipe, factory, scenario_storage=SQLiteScenarioStorage(records), coordination=memory_coordination()
+    )
     first.configure_scenario_model("alpha", configure(platform, "alpha", "anthropic"), create=True)
     first.close()
-    recovered = Dispatcher(recipe, factory, scenario_storage=SQLiteScenarioStorage(records))
+    recovered = Dispatcher(
+        recipe, factory, scenario_storage=SQLiteScenarioStorage(records), coordination=memory_coordination()
+    )
     try:
         scenario = recovered.get_or_create_scenario("alpha")
         assert (scenario.runtime.base_url, scenario.runtime.api_key) == (
@@ -424,6 +431,7 @@ def test_model_update_write_failure_keeps_active_config_and_saved_value(platform
         make_recipe(platform, tmp_path),
         factory,
         scenario_storage=SQLiteScenarioStorage(records),
+        coordination=memory_coordination(),
     )
     try:
         original = configure(platform, "alpha", "openai")

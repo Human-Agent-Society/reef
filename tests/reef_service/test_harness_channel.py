@@ -57,6 +57,7 @@ from reef.service.install_script import (
     render_streamed_install,
 )
 from reef.service.request_service import RequestService
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.cordis_backend import Mutation
 
@@ -201,6 +202,7 @@ def _dispatcher(
         # The commit history is what puts gate metrics on the release catalog.
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
         allow_implicit_creation=allow_implicit_creation,
+        coordination=memory_coordination(),
     )
     dispatcher.get_or_create_scenario("delivery")
     return dispatcher
@@ -2284,6 +2286,7 @@ def test_install_route_without_scenario_returns_404_when_no_harness_recipe_exist
         InMemoryRepositoryBackend.factory(bootstrap, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "local",
         scenario_storage=SQLiteScenarioStorage(None),
+        coordination=memory_coordination(),
     )
     dispatcher.get_or_create_scenario("weights-only")
 

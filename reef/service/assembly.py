@@ -324,6 +324,7 @@ def open_service_coordination(settings: ServiceConfig) -> Coordination:
         agent_record_dir=settings.agent_record_dir,
         record_database_url=settings.record_database_url,
         record_database_schema=settings.record_database_schema,
+        default_attempts=settings.work_max_attempts,
     )
 
 
@@ -465,6 +466,7 @@ def build_dispatcher(
             ),
             coordination=coordination,
             components=components,
+            work_retention_seconds=settings.work_retention_s,
         )
         if "evaluation" in components:
             # Each worker serves its rollout's candidate itself, from the scenario's repository.

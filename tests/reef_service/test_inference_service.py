@@ -17,7 +17,7 @@ from reef.inference.http import HttpInferenceHandler
 from reef.runtime.interfaces import EngineClients, InferenceHandler
 from reef.service.inference_service import RECORD_HEADER, RELEASE_HEADER, build_inference_app
 from reef.storage.commits import CommitRecord
-from reef.storage.coordination import memory_coordination
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 
 TOKEN = "service-token"

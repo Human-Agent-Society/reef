@@ -60,8 +60,8 @@ from reef.storage.data import (
     check_query,
     patched_metadata,
     prepared_items,
-    task_partition,
 )
+from reef.storage.item_kinds import task_partition
 from reef.storage.postgres import postgres_url, validate_postgres_schema
 from reef.storage.sqlite import enable_wal
 from reef.storage.tasks import TaskFileStore

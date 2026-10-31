@@ -12,10 +12,9 @@ import threading
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping
 
-from reef.core.served_models import require_text
+from reef.core.values import require_text
 from reef.execution.workers import QueueWorker
-from reef.storage.data import DATA_QUEUE
-from reef.storage.data_sync import DATA_SYNC_KIND
+from reef.storage.data_queue import DATA_SYNC_KIND, DATA_SYNC_QUEUE
 from reef.storage.work_queue import JsonValue, WorkItem, WorkQueue
 
 
@@ -31,13 +30,13 @@ class ItemSync(ABC):
 
 
 class DataSyncWorker(QueueWorker):
-    """Takes the ``data_sync`` items of the ``data`` queue and runs each sync with ``target``.
+    """Takes the ``data_sync`` items of control's sync queue and runs each sync with ``target``.
 
     Values: as ``QueueWorker``; ``target`` runs the syncs. Purpose: control runs one.
     """
 
     def __init__(self, queue: WorkQueue, target: ItemSync, *, worker_id: str, poll_seconds: float = 0.2) -> None:
-        super().__init__(queue, DATA_QUEUE, [DATA_SYNC_KIND], worker_id=worker_id, poll_seconds=poll_seconds)
+        super().__init__(queue, DATA_SYNC_QUEUE, [DATA_SYNC_KIND], worker_id=worker_id, poll_seconds=poll_seconds)
         self.target = target
 
     def run_item(self, item: WorkItem, lease_lost: threading.Event) -> Mapping[str, JsonValue]:

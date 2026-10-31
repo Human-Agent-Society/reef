@@ -17,6 +17,7 @@ from reef.core.served_models import ServedArtifact
 from reef.dispatcher import Dispatcher
 from reef.runtime.interfaces import InferenceHandler
 from reef.service.app import create_app
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.trainer import Trainer
 
@@ -63,6 +64,7 @@ def serving_dispatcher(tmp_path) -> tuple[Dispatcher, NamedComponent, Repository
         backend_factory,
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
+        coordination=memory_coordination(),
     )
     return value, component, backend_factory
 
@@ -175,6 +177,7 @@ def test_the_served_artifacts_survive_a_restart(tmp_path) -> None:
         backend_factory,
         local_artifact_dir=tmp_path / "restarted-staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
+        coordination=memory_coordination(),
     )
     scenario = restarted.get_or_create_scenario("math")
     assert scenario.served_release(older["artifact_id"]).release_id == older["release_id"]

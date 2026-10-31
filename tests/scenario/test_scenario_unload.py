@@ -20,6 +20,7 @@ from reef.evaluation import EvaluationResult, UpdateCandidate
 from reef.recipe import Recipe
 from reef.scenario import Scenario
 from reef.scenario.admission import LoadAdmission, LoadedScenario, ScenarioAdmission, ScenarioLimits
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train import CandidateBackend, PreparedStep, Trainer, TrainStepResult
 
@@ -96,6 +97,7 @@ def make_dispatcher(
         scenario_storage=storage if storage is not None else SQLiteScenarioStorage(tmp_path / "records"),
         scenario_admission=admission,
         scenario_idle_unload_seconds=idle_unload_seconds,
+        coordination=memory_coordination(),
     )
 
 

@@ -32,6 +32,7 @@ from reef.sample2job import Sample2Job
 from reef.service.app import create_app
 from reef.storage.samples import CONSUMED_SAMPLE_PREFIX
 from reef.storage.scenario import ScenarioSettings
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train.backend import PreparedStep
 from reef.train.cordis_backend.processor import InferenceSamples
@@ -907,6 +908,7 @@ def test_a_logless_scenario_keeps_the_failed_batch_and_skips_it_on_its_next_wake
         replace(_recipe(tmp_path, propose), training_mode="manual"),
         factory,
         scenario_storage=SQLiteScenarioStorage(),
+        coordination=memory_coordination(),
     )
     try:
         scenario = dispatcher.get_or_create_scenario("s")

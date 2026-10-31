@@ -8,7 +8,6 @@ from types import SimpleNamespace
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
-
 from tests.support._policy_recipe import TestPolicyRecipe
 from tests.support.artifact_versions import ImportingComponent
 from tests.support.runtime_stubs import runtime_bindings
@@ -19,6 +18,7 @@ from reef.dispatcher.data_sync_worker import DataSyncWorker
 from reef.dispatcher.samples import LocalSampleProducers
 from reef.dispatcher.served import ServedModelsPublisher
 from reef.dispatcher.store_changes import StoreChanges, StoreChangesWatcher
+from reef.dispatcher.work_retention import EndedWorkSweeper
 from reef.evaluation.rollout_worker import EvaluationRolloutWorker
 from reef.execution.workers import SERVICE_COMPONENTS, service_components
 from reef.record2sample.service import RECORD_SELECTION_KIND, SAMPLES_QUEUE, SamplesWorker, request_selection
@@ -28,8 +28,7 @@ from reef.service.components import build_component_app
 from reef.service.data_service import DataWorker
 from reef.service.deploy.cli import build_serve_parser
 from reef.service.deploy.service_config import ServiceConfig
-from reef.storage.coordination import memory_coordination
-from reef.storage.sql_coordination import open_coordination
+from reef.storage.sql_coordination import memory_coordination, open_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 
 MEMORY_BACKEND = "tests.support.artifact_backend_plugin:MemoryArtifactBackend"
@@ -57,7 +56,7 @@ def worker_types(tmp_path: Path, components: frozenset[str]) -> set[type]:
 
 @pytest.mark.unit
 def test_a_process_runs_the_workers_of_its_own_services_only(tmp_path: Path) -> None:
-    control = {ServedModelsPublisher, StoreChangesWatcher, DataSyncWorker}
+    control = {ServedModelsPublisher, StoreChangesWatcher, EndedWorkSweeper, DataSyncWorker}
     assert worker_types(tmp_path / "all", frozenset(SERVICE_COMPONENTS)) == control | {
         SamplesWorker,
         DataWorker,

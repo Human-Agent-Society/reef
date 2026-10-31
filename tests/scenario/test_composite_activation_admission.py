@@ -23,6 +23,7 @@ from reef.artifact.sources import REFERENCE_FILE, DirectorySource, HuggingFaceRe
 from reef.core.errors import CommitPending, ReefError, TrainingStartRefused
 from reef.dispatcher import Dispatcher
 from reef.dispatcher.errors import local_error_source
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.surface import ArtifactLayout, ComponentSurface, Surface, TextFileTree
 from reef.surface.weights import WeightLoader
@@ -60,6 +61,7 @@ def _dispatcher(tmp_path: Path, recipe: type[_LoadedRecipe] = _LoadedRecipe) -> 
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(records),
+        coordination=memory_coordination(),
     )
 
 

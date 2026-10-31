@@ -13,6 +13,7 @@ from reef.service.app import create_app
 from reef.storage.commit_history import CommitHistoryScenarioStore
 from reef.storage.commits import CommitRecord
 from reef.storage.records import RecordRetention
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 
 
@@ -20,6 +21,7 @@ def test_history_reads_preserve_compacted_bodies_and_isolate_scenarios(tmp_path)
     async def run():
         dispatcher = build_default_dispatcher(
             scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
+            coordination=memory_coordination(),
         )
         scenario = dispatcher.get_or_create_scenario("one")
         other = dispatcher.get_or_create_scenario("two")
@@ -138,6 +140,7 @@ def test_record_list_filters_by_request_type(tmp_path):
     async def run():
         dispatcher = build_default_dispatcher(
             scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
+            coordination=memory_coordination(),
         )
         scenario = dispatcher.get_or_create_scenario("one")
         for name, request_type in (

@@ -35,6 +35,7 @@ from reef.record2record import InferenceRecord2Record
 from reef.record2sample import NoSamples
 from reef.storage.records import RecordStore
 from reef.storage.samples import SampleStore
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.tasks import TaskStorage
 from reef.train.jobs import JobLoop, JobLoopState, RunningJob
@@ -96,6 +97,7 @@ def bound_dispatcher(scenario: SimpleNamespace) -> Dispatcher:
         Recipe(),
         InMemoryRepositoryBackend.factory(initial, root=root / "repository"),
         scenario_storage=SQLiteScenarioStorage(),
+        coordination=memory_coordination(),
     )
     dispatcher.registry = registry_double(scenario)
     dispatcher.local_workers.registry = dispatcher.registry
@@ -332,6 +334,7 @@ def background_step_dispatcher(tmp_path: Path) -> tuple[Dispatcher, BackgroundSt
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
+        coordination=memory_coordination(),
     )
     return dispatcher, recipe, component
 

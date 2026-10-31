@@ -13,7 +13,7 @@ from tests.support._trajectories import policy_trajectory
 from reef.artifact import BaseArtifactSource
 from reef.core.job_data import JobData
 from reef.runtime.jobs import JobStatus, ReleaseFormat, SavedCheckpoint, TrainingJob
-from reef.storage.coordination import memory_coordination
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.work_queue import NewWork
 from reef.train.job_queue import (
     JOBS_QUEUE,

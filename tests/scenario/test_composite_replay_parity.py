@@ -48,6 +48,7 @@ from reef.record2sample import JudgedSamples
 from reef.record2sample.assembly import SampleAssemblySettings
 from reef.sample2job import Sample2Job
 from reef.storage.samples import TrainerSamples
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train import ComponentTrainer, Trainer
 from reef.train.pipeline import TrainingPipeline
@@ -188,6 +189,7 @@ def _dispatcher(tmp_path: Path, pipelines: dict[str, Any]) -> Dispatcher:
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
         # Loading a scenario wakes its workers: held, they leave every step to the test.
         hold_local_cycles=True,
+        coordination=memory_coordination(),
     )
 
 

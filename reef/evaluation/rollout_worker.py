@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from reef.core.evaluation import PolicyHarness, PolicyModel, RolloutRequest, RolloutScore
-from reef.core.served_models import require_text
+from reef.core.values import require_text
 from reef.evaluation.artifact_endpoint import ArtifactEndpoint, CandidateArtifacts
 from reef.execution.workers import QueueWorker
 from reef.harness.client.tasks import DEFAULT_AGENT, TaskLab, TaskRolloutRunner

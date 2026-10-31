@@ -24,6 +24,7 @@ from reef.service.artifact_imports import ArtifactImports
 from reef.service.data_service import DataWorker, data_jobs
 from reef.service.data_transfer import ArchiveWriters
 from reef.service.task_import import DataScenarioStorage
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sql_data import SQLiteDataStore
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.tasks import LocalTaskFileStore
@@ -68,6 +69,7 @@ def cell(tmp_path: Path, name: str) -> Dispatcher:
         scenario_storage=DataScenarioStorage(storage, data),
         record_storage=storage,
         data_store=data,
+        coordination=memory_coordination(),
     )
     dispatcher.workers.add(
         DataWorker(

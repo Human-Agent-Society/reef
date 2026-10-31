@@ -20,6 +20,7 @@ from reef.dispatcher import Dispatcher
 from reef.evaluation.activation import AlwaysActivate
 from reef.recipe.base import Recipe
 from reef.service.request_service import RequestService
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.surface import ArtifactLoader, ComponentSurface, ServingRuntime, Surface, TextFileTree, WeightLoader
 from reef.surface.base import AcceptAnyArtifact
@@ -238,6 +239,7 @@ def test_multi_component_scenario_commits_one_component_and_carries_the_rest(tmp
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "store"),
+        coordination=memory_coordination(),
     )
     try:
         scenario = dispatcher.get_or_create_scenario("agent")
@@ -382,6 +384,7 @@ def test_a_held_release_activates_without_the_manifest_of_its_parent(tmp_path: P
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "store"),
+        coordination=memory_coordination(),
     )
     try:
         scenario = dispatcher.get_or_create_scenario("agent")
@@ -419,6 +422,7 @@ def test_an_activation_after_a_rejected_harness_step_adds_no_harness_release(tmp
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "store"),
+        coordination=memory_coordination(),
     )
     try:
         scenario = dispatcher.get_or_create_scenario("agent")
@@ -457,6 +461,7 @@ def test_an_activation_refused_by_validation_changes_nothing(tmp_path: Path, mon
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=staged_root,
         scenario_storage=SQLiteScenarioStorage(tmp_path / "store"),
+        coordination=memory_coordination(),
     )
     try:
         scenario = dispatcher.get_or_create_scenario("agent")

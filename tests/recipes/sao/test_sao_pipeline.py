@@ -36,6 +36,7 @@ from reef.runtime.jobs import SavedCheckpoint, TrainingJob
 from reef.service.deploy.config_utils import interpolate_config_values
 from reef.storage.commits import CommitRecord
 from reef.storage.samples import TrainerSamples
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train import PipelineContext, Trainer
 from reef.train.algos.schedule import StepScheduling
@@ -453,6 +454,7 @@ def _sao_dispatcher(
         _repository(tmp_path) if repository is None else repository,
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(agent_dir),
+        coordination=memory_coordination(),
     )
 
 

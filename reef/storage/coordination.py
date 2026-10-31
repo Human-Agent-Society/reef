@@ -56,13 +56,4 @@ class Coordination:
         self.database.close()
 
 
-def memory_coordination(*, lease_seconds: float = 60.0) -> Coordination:
-    """A coordination store in an in-memory SQLite database of this process, for a process that runs every service
-    and keeps no state across restarts, such as a test. ``lease_seconds`` is the lease of a work item."""
-    # Imported here: the SQL module imports this one, and a process that is given its store loads no adapter.
-    from reef.storage.sql_coordination import SQLiteCoordinationDatabase, coordination_on
-
-    return coordination_on(SQLiteCoordinationDatabase(None), lease_seconds=lease_seconds)
-
-
-__all__ = ["Coordination", "CoordinationResource", "instance_id", "memory_coordination"]
+__all__ = ["Coordination", "CoordinationResource", "instance_id"]

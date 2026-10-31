@@ -14,6 +14,7 @@ from reef.inference.http import InferenceProxyRuntime
 from reef.recipe import Recipe
 from reef.runtime.interfaces import InferenceHandler
 from reef.service.app import RequestService, create_app
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 
 
@@ -38,7 +39,9 @@ class StubInferenceHandler(InferenceHandler):
 )
 def test_a_report_creates_or_reuses_the_scenario(registered: bool, headers: dict) -> None:
     async def run() -> None:
-        dispatcher = build_default_dispatcher(scenario_storage=SQLiteScenarioStorage())
+        dispatcher = build_default_dispatcher(
+            scenario_storage=SQLiteScenarioStorage(), coordination=memory_coordination()
+        )
         if registered:
             RequestService(dispatcher).accept(
                 {"x-reef-scenario": "scenario"}, {"score": 1.0}, request_type=RequestType.REPORT
@@ -68,6 +71,7 @@ def test_inference_answers_a_created_scenario_and_never_creates_one(tmp_path, he
             Recipe(runtime=InferenceProxyRuntime(base_url="http://engine.test", model_path="reef")),
             InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
             scenario_storage=SQLiteScenarioStorage(),
+            coordination=memory_coordination(),
         )
         client = TestClient(TestServer(create_app(dispatcher, inference_handler=StubInferenceHandler())))
         await client.start_server()
@@ -105,7 +109,9 @@ def test_request_recovers_durable_scenario_without_resubmission(
     )
 
     first = RequestService(
-        build_default_dispatcher(backend_factory=first_factory, scenario_storage=SQLiteScenarioStorage())
+        build_default_dispatcher(
+            backend_factory=first_factory, scenario_storage=SQLiteScenarioStorage(), coordination=memory_coordination()
+        )
     )
     first.accept({"x-reef-scenario": "durable"}, {"score": 1.0}, request_type=RequestType.REPORT)
 
@@ -115,7 +121,7 @@ def test_request_recovers_durable_scenario_without_resubmission(
         cache_dir=tmp_path / "restarted-cache",
     )
     restarted_dispatcher = build_default_dispatcher(
-        backend_factory=restarted_factory, scenario_storage=SQLiteScenarioStorage()
+        backend_factory=restarted_factory, scenario_storage=SQLiteScenarioStorage(), coordination=memory_coordination()
     )
     restarted = RequestService(restarted_dispatcher)
     restarted.accept(
@@ -129,7 +135,7 @@ def test_request_recovers_durable_scenario_without_resubmission(
 
 @pytest.mark.unit
 def test_different_scenarios_do_not_share_a_creation_lock(monkeypatch) -> None:
-    dispatcher = build_default_dispatcher(scenario_storage=SQLiteScenarioStorage())
+    dispatcher = build_default_dispatcher(scenario_storage=SQLiteScenarioStorage(), coordination=memory_coordination())
     load_or_create = dispatcher.registry._scenario_factory.load_or_create
     entered = Barrier(2)
 
@@ -171,7 +177,9 @@ def test_create_freezes_head_selector_at_the_resolved_release(monkeypatch, tmp_p
         return resolve_release(release_id)
 
     monkeypatch.setattr(backend, "resolve_release", moving_head)
-    dispatcher = build_default_dispatcher(backend_factory=backend_factory, scenario_storage=SQLiteScenarioStorage())
+    dispatcher = build_default_dispatcher(
+        backend_factory=backend_factory, scenario_storage=SQLiteScenarioStorage(), coordination=memory_coordination()
+    )
 
     created = dispatcher.get_or_create_scenario(
         "moving-latest",

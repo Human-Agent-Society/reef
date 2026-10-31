@@ -38,6 +38,7 @@ from reef.runtime.jobs import SavedCheckpoint, TrainingJob
 from reef.storage.commit_history import CommitHistoryError, CommitHistoryScenarioStore
 from reef.storage.commits import CommitRecord, active_artifact_ref
 from reef.storage.samples import SAMPLE_KINDS, consumed_sample_id
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.surface import Surface
 from reef.surface.harnesses import create_harness_surface
@@ -378,6 +379,7 @@ def build_training_dispatcher(
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(agent_record_dir),
         hold_local_cycles=hold_local_cycles,
+        coordination=memory_coordination(),
     )
 
 
@@ -503,6 +505,7 @@ def _build_saved_artifact_dispatcher(tmp_path, *, agent_record_dir=None):
         scenario_storage=SQLiteScenarioStorage(agent_record_dir),
         # The tests drive the steps themselves; a local cycle would race them for the batch.
         hold_local_cycles=True,
+        coordination=memory_coordination(),
     )
     return dispatcher, backend
 
@@ -613,6 +616,7 @@ def test_recovery_resumes_record_progress_without_retraining(tmp_path) -> None:
             backend_factory,
             local_artifact_dir=tmp_path / "staged",
             scenario_storage=SQLiteScenarioStorage(agent_record_dir),
+            coordination=memory_coordination(),
         )
 
     first_component = RecordingComponent(tmp_path / "first")
@@ -902,6 +906,7 @@ def build_harness_evolve_dispatcher(
         backend_factory,
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(agent_record_dir),
+        coordination=memory_coordination(),
     )
 
 

@@ -33,6 +33,7 @@ from reef.runtime.jobs import TrainingJob, job_id_for
 from reef.service.deploy import orchestrator
 from reef.service.deploy.orchestrator import resolve_deployment_config
 from reef.service.deploy.training import local_model_required
+from reef.storage.sql_coordination import memory_coordination
 from reef.tinker.checkpoint import MANIFEST, TinkerCheckpoint
 from reef.tinker.sampling import SampleResult, TinkerSampler
 from reef.train.algos import TrainingSignal
@@ -826,6 +827,7 @@ def test_scenario_commits_recovers_activates_and_trains_from_remote_checkpoint(t
             factory,
             local_artifact_dir=tmp_path / "staged",
             scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
+            coordination=memory_coordination(),
         )
         return dispatcher, component, inference
 
@@ -936,6 +938,7 @@ def test_documented_smoke_runs_through_http_and_ttdd_recipe(tmp_path, monkeypatc
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(),
+        coordination=memory_coordination(),
     )
     script = Path(__file__).resolve().parents[2] / "tutorials" / "tinker" / "smoke.py"
     monkeypatch.setenv("REEF_TOKEN", "test-token")

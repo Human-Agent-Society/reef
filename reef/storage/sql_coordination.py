@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from abc import abstractmethod
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
@@ -55,7 +56,8 @@ from sqlalchemy.pool import NullPool
 from sqlalchemy.schema import CreateSchema
 
 from reef.core.errors import ReefError
-from reef.core.served_models import ScenarioModel, ScheduledStop, ServedArtifact, require_text
+from reef.core.served_models import ScenarioModel, ScheduledStop, ServedArtifact
+from reef.core.values import require_text
 from reef.storage.control_lease import ControlLease, ControlLeaseState
 from reef.storage.coordination import Coordination, CoordinationResource
 from reef.storage.marks import Marks, check_mark_name
@@ -139,6 +141,7 @@ def coordination_tables(metadata: MetaData) -> CoordinationTables:
         Column("serial_key", Text, nullable=True, index=True),
         Column("available_at", Float, nullable=False),
         Column("created_at", Float, nullable=False),
+        Column("changed_at", Float, nullable=False),
         Column("attempt_count", Integer, nullable=False),
         Column("worker_id", Text, nullable=True),
         Column("lease_expires_at", Float, nullable=True),
@@ -589,8 +592,9 @@ class SQLWorkQueue(WorkQueue):
         *,
         lease_seconds: float = 60.0,
         max_attempts: Mapping[str, int] | None = None,
+        default_attempts: int = 3,
     ) -> None:
-        super().__init__(lease_seconds=lease_seconds, max_attempts=max_attempts)
+        super().__init__(lease_seconds=lease_seconds, max_attempts=max_attempts, default_attempts=default_attempts)
         self.database = database
         self.table = database.tables.work_item
 
@@ -604,8 +608,11 @@ class SQLWorkQueue(WorkQueue):
         found = connection.execute(query).mappings().first()
         return None if found is None else item_from_row(found)
 
-    def save(self, connection: Connection, counter: SequenceCounter, item: WorkItem, **changes: object) -> WorkItem:
-        values: dict[str, object] = {"changed_sequence": counter.next()}
+    def save(
+        self, connection: Connection, counter: SequenceCounter, item: WorkItem, moment: float, **changes: object
+    ) -> WorkItem:
+        """Write ``changes`` to ``item`` as the change ``moment``, with the next change sequence."""
+        values: dict[str, object] = {"changed_sequence": counter.next(), "changed_at": moment}
         for name, value in changes.items():
             if name == "progress":
                 values["progress_json"] = canonical_json(list(cast(Sequence[object], value)))
@@ -639,28 +646,73 @@ class SQLWorkQueue(WorkQueue):
                 if canonical_json(dict(existing.payload)) != payload:
                     raise WorkConflict(f"{work.queue}/{work.id} exists with a different payload")
                 return existing
+            return self.insert(connection, work, counter.next(), moment)
+
+    def request(
+        self,
+        queue: str,
+        scenario: str,
+        kind: str,
+        serial_key: str,
+        payload: Mapping[str, JsonValue],
+        *,
+        available_at: float | None = None,
+        now: float | None = None,
+    ) -> WorkItem:
+        moment = clock(now)
+        waiting = (
+            select(self.table)
+            .where(self.table.c.queue == queue, self.table.c.serial_key == serial_key, self.table.c.state == "queued")
+            .order_by(self.table.c.created_sequence)
+            .limit(1)
+        )
+        with self.database.write(WORK_SEQUENCE) as (connection, counter):
+            found = connection.execute(waiting).mappings().first()
+            if found is not None:
+                return item_from_row(found)
             sequence = counter.next()
-            connection.execute(
-                insert(self.table).values(
-                    queue=require_text(work.queue, "queue"),
-                    item_id=require_text(work.id, "id"),
-                    scenario=require_text(work.scenario, "scenario"),
-                    kind=require_text(work.kind, "kind"),
-                    payload_json=payload,
-                    state="queued",
-                    serial_key=work.serial_key,
-                    available_at=moment if work.available_at is None else work.available_at,
-                    created_at=moment,
-                    attempt_count=0,
-                    progress_json="[]",
-                    created_sequence=sequence,
-                    changed_sequence=sequence,
-                )
+            work = NewWork(
+                queue,
+                f"{serial_key}:{sequence}",
+                scenario,
+                kind,
+                payload,
+                serial_key=serial_key,
+                available_at=available_at,
             )
-            added = self.row(connection, work.queue, work.id)
-            if added is None:
-                raise ReefError(f"work item {work.queue}/{work.id} was not added")
-            return added
+            return self.insert(connection, work, sequence, moment)
+
+    def insert(self, connection: Connection, work: NewWork, sequence: int, moment: float) -> WorkItem:
+        """Insert ``work`` as a queued item created at ``moment`` with the change sequence ``sequence``."""
+        connection.execute(
+            insert(self.table).values(
+                queue=require_text(work.queue, "queue"),
+                item_id=require_text(work.id, "id"),
+                scenario=require_text(work.scenario, "scenario"),
+                kind=require_text(work.kind, "kind"),
+                payload_json=canonical_json(dict(work.payload)),
+                state="queued",
+                serial_key=work.serial_key,
+                available_at=moment if work.available_at is None else work.available_at,
+                created_at=moment,
+                changed_at=moment,
+                attempt_count=0,
+                progress_json="[]",
+                created_sequence=sequence,
+                changed_sequence=sequence,
+            )
+        )
+        added = self.row(connection, work.queue, work.id)
+        if added is None:
+            raise ReefError(f"work item {work.queue}/{work.id} was not added")
+        return added
+
+    def delete_final(self, *, finished_before: float) -> int:
+        statement = delete(self.table).where(
+            self.table.c.state.in_(sorted(FINAL_STATES)), self.table.c.changed_at < finished_before
+        )
+        with self.database.write(WORK_SEQUENCE) as (connection, _counter):
+            return int(connection.execute(statement).rowcount or 0)
 
     def take(self, queue: str, worker_id: str, kinds: Sequence[str], *, now: float | None = None) -> WorkItem | None:
         require_text(worker_id, "worker_id")
@@ -700,6 +752,7 @@ class SQLWorkQueue(WorkQueue):
                 connection,
                 counter,
                 chosen,
+                moment,
                 state="assigned",
                 worker_id=worker_id,
                 lease_expires_at=moment + self.lease_seconds,
@@ -711,12 +764,13 @@ class SQLWorkQueue(WorkQueue):
         moment = clock(now)
         with self.database.write(WORK_SEQUENCE) as (connection, counter):
             item = self.held(connection, queue, item_id, worker_id, moment)
-            return self.save(connection, counter, item, lease_expires_at=moment + self.lease_seconds)
+            return self.save(connection, counter, item, moment, lease_expires_at=moment + self.lease_seconds)
 
     def start(self, queue: str, item_id: str, worker_id: str, *, now: float | None = None) -> WorkItem:
+        moment = clock(now)
         with self.database.write(WORK_SEQUENCE) as (connection, counter):
-            item = self.held(connection, queue, item_id, worker_id, clock(now))
-            return item if item.state == "running" else self.save(connection, counter, item, state="running")
+            item = self.held(connection, queue, item_id, worker_id, moment)
+            return item if item.state == "running" else self.save(connection, counter, item, moment, state="running")
 
     def add_progress(
         self,
@@ -728,21 +782,30 @@ class SQLWorkQueue(WorkQueue):
         number: int,
         now: float | None = None,
     ) -> WorkItem:
+        moment = clock(now)
         with self.database.write(WORK_SEQUENCE) as (connection, counter):
-            item = self.held(connection, queue, item_id, worker_id, clock(now))
+            item = self.held(connection, queue, item_id, worker_id, moment)
             if number < len(item.progress):
                 return item
             if number != len(item.progress):
                 raise ValueError(f"progress number {number} skips {len(item.progress)}")
-            return self.save(connection, counter, item, progress=(*item.progress, dict(progress)))
+            return self.save(connection, counter, item, moment, progress=(*item.progress, dict(progress)))
 
     def finish(
         self, queue: str, item_id: str, worker_id: str, result: Mapping[str, JsonValue], *, now: float | None = None
     ) -> WorkItem:
+        moment = clock(now)
         with self.database.write(WORK_SEQUENCE) as (connection, counter):
-            item = self.held(connection, queue, item_id, worker_id, clock(now))
+            item = self.held(connection, queue, item_id, worker_id, moment)
             return self.save(
-                connection, counter, item, state="finished", result=dict(result), worker_id=None, lease_expires_at=None
+                connection,
+                counter,
+                item,
+                moment,
+                state="finished",
+                result=dict(result),
+                worker_id=None,
+                lease_expires_at=None,
             )
 
     def fail(
@@ -756,13 +819,15 @@ class SQLWorkQueue(WorkQueue):
         now: float | None = None,
     ) -> WorkItem:
         require_text(error, "error")
+        moment = clock(now)
         with self.database.write(WORK_SEQUENCE) as (connection, counter):
-            item = self.held(connection, queue, item_id, worker_id, clock(now))
+            item = self.held(connection, queue, item_id, worker_id, moment)
             again = retryable and item.attempt_count < self.attempts_allowed(queue)
             return self.save(
                 connection,
                 counter,
                 item,
+                moment,
                 state="queued" if again else "failed",
                 error=error,
                 worker_id=None,
@@ -776,7 +841,14 @@ class SQLWorkQueue(WorkQueue):
             if item is None or item.final:
                 return item
             return self.save(
-                connection, counter, item, state="failed", error=error, worker_id=None, lease_expires_at=None
+                connection,
+                counter,
+                item,
+                time.time(),
+                state="failed",
+                error=error,
+                worker_id=None,
+                lease_expires_at=None,
             )
 
     def requeue_expired(self, *, now: float | None = None) -> tuple[WorkItem, ...]:
@@ -793,6 +865,7 @@ class SQLWorkQueue(WorkQueue):
                     connection,
                     counter,
                     item,
+                    moment,
                     state="queued" if item.attempt_count < self.attempts_allowed(item.queue) else "failed",
                     error="the worker's lease expired",
                     worker_id=None,
@@ -847,11 +920,12 @@ def open_coordination(
     record_database_url: str | None,
     record_database_schema: str = "reef_records",
     lease_seconds: float = 60.0,
+    default_attempts: int = 3,
 ) -> Coordination:
     """The coordination store of a deployment on ``backend``: ``postgres`` uses ``record_database_url`` with the
     schema ``<record_database_schema>_coordination``, so that deployments with their own record schemas keep their
-    own coordination tables; ``sqlite`` uses a SQLite file in ``<agent_record_dir>/coordination``. Raise
-    ``ValueError`` for another backend."""
+    own coordination tables; ``sqlite`` uses a SQLite file in ``<agent_record_dir>/coordination``. A worker takes
+    one item at most ``default_attempts`` times. Raise ``ValueError`` for another backend."""
     if backend not in ("sqlite", "postgres"):
         raise ValueError(f"the coordination backend is sqlite or postgres, not {backend!r}")
     if backend == "postgres":
@@ -863,19 +937,29 @@ def open_coordination(
         )
     else:
         database = open_coordination_database("sqlite", directory=Path(agent_record_dir) / "coordination")
-    return coordination_on(database, lease_seconds=lease_seconds)
+    return coordination_on(database, lease_seconds=lease_seconds, default_attempts=default_attempts)
 
 
-def coordination_on(database: CoordinationDatabase, *, lease_seconds: float = 60.0) -> Coordination:
-    """The coordination store whose tables ``database`` holds; ``lease_seconds`` is the lease of a work item."""
+def coordination_on(
+    database: CoordinationDatabase, *, lease_seconds: float = 60.0, default_attempts: int = 3
+) -> Coordination:
+    """The coordination store whose tables ``database`` holds; ``lease_seconds`` is the lease of a work item, and
+    ``default_attempts`` how many times a worker takes one item."""
     lease = SQLControlLease(database)
     return Coordination(
         database,
-        SQLWorkQueue(database, lease_seconds=lease_seconds),
+        SQLWorkQueue(database, lease_seconds=lease_seconds, default_attempts=default_attempts),
         SQLServedModels(database, lease),
         lease,
         SQLMarks(database),
     )
+
+
+def memory_coordination(*, lease_seconds: float = 60.0) -> Coordination:
+    """A coordination store in an in-memory SQLite database of this process, for a process that runs every service
+    and keeps no state across restarts, such as a test or an embedded dispatcher. ``lease_seconds`` is the lease of
+    a work item."""
+    return coordination_on(SQLiteCoordinationDatabase(None), lease_seconds=lease_seconds)
 
 
 __all__ = [
@@ -889,6 +973,7 @@ __all__ = [
     "SQLiteCoordinationDatabase",
     "coordination_on",
     "coordination_tables",
+    "memory_coordination",
     "open_coordination",
     "open_coordination_database",
 ]

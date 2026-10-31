@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from reef.storage.artifact_items import artifact_item, check_artifact_content
+from reef.storage.artifact_items import artifact_item
+from reef.storage.item_kinds import check_artifact_content
 
 ROW = {"artifact_id": "a1", "component": "weights", "release_id": "r1", "content_id": "c1"}
 

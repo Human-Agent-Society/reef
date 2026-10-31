@@ -12,7 +12,7 @@ import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
-from reef.core.served_models import require_text
+from reef.core.values import require_text
 
 
 @dataclass(frozen=True)

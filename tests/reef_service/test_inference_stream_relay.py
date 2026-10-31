@@ -27,7 +27,7 @@ from reef.core.served_models import ACTIVE, ScenarioModel, ServedArtifact
 from reef.runtime.interfaces import FixedEngineClients, InferenceHandler, InferenceStream
 from reef.service.inference_service import InferenceReplica, ServedModelsCache, add_inference_routes
 from reef.service.streaming import frame_for_codex
-from reef.storage.coordination import memory_coordination
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 
 #: One OpenRouter web search item, in the shape the OpenRouter SDK documents:

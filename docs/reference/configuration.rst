@@ -791,6 +791,8 @@ persistent.
    storage.agent-record-dir | .reef/agent-record | the SQLite scenario storage: records, commits and settings
    storage.record-backend | sqlite | where scenario records, commits and settings live: ``sqlite``, ``postgres``, or a ``ScenarioStorage`` plugin reference
    storage.coordination-backend | follows ``record-backend`` | where the services share their work queues, served models and control lease: ``sqlite`` (processes on one host) or ``postgres`` (``record-database-url``); required when ``record-backend`` is a plugin
+   storage.work-max-attempts | 3 | how many times a worker takes one work item (a training job, a record selection, an evaluation rollout, a data task) before the item fails
+   storage.work-retention-s | 604800 | seconds that control keeps an ended work item, so that its producer reads the result; then control deletes it
    storage.task-file-backend | local | where the files of generated tasks live: ``local``, or a ``TaskFileStore`` plugin reference
    storage.data-store | follows ``record-backend`` | where the deployment's data items live: ``sqlite``, ``postgres`` (``record-database-url``, schema ``reef_data``), or a ``DataStore`` plugin reference
    storage.task-file-dir | .reef/task-files | the files of generated tasks for ``local``, or the local cache of a plugin store

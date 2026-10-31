@@ -19,6 +19,7 @@ from reef.observability import ExperimentLogger, ExperimentTracker
 from reef.runtime.interfaces import InferenceHandler
 from reef.runtime.jobs import SavedCheckpoint, TrainingJob
 from reef.service.app import create_app
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.job_queue import JobQueueComponent
 from reef.train.trainer import Trainer
@@ -147,6 +148,7 @@ def start_dispatcher(tmp_path: Path):
             local_artifact_dir=tmp_path / "staged",
             experiment_tracker=experiment_tracker,
             scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
+            coordination=memory_coordination(),
         )
         opened.append((component, dispatcher))
         return component, dispatcher

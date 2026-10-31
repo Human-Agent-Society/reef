@@ -404,6 +404,7 @@ bundled ``SQLiteRecordStore``, ``CommitHistoryScenarioStore``, and
    from pathlib import Path
 
    from reef.dispatcher import Dispatcher
+   from reef.storage.sql_coordination import memory_coordination
    from reef.storage.sqlite import SQLiteScenarioStorage
 
    storage = SQLiteScenarioStorage(Path(".reef/agent-record"))
@@ -411,11 +412,17 @@ bundled ``SQLiteRecordStore``, ``CommitHistoryScenarioStore``, and
        recipe,
        repository_backend_factory,
        scenario_storage=storage,
+       coordination=memory_coordination(),
    )
 
 ``Dispatcher`` requires ``scenario_storage`` and passes it to scenario
-creation. It never selects or imports a record storage implementation. The
-``build_default_dispatcher`` convenience helper also requires this argument.
+creation. It never selects or imports a record storage implementation. It
+also requires ``coordination``, the store of the services' work queues,
+served models and control lease. One process that runs every service and
+keeps no queue state across restarts passes ``memory_coordination()``;
+deployment assembly opens the shared store that
+``storage.coordination_backend`` names. The ``build_default_dispatcher``
+convenience helper also requires both arguments.
 Deployment assembly builds the storage that ``storage.record_backend`` names:
 SQLite, PostgreSQL, or a ``ScenarioStorage`` plugin; embedded callers supply
 their chosen storage service explicitly. For ephemeral records, commits and

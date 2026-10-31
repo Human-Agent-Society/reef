@@ -11,7 +11,8 @@ from reef.core.records_types import AgentRecord, RequestType
 from reef.storage import record_items
 from reef.storage.data import ItemConflict, MemoryDataStore, NewItem
 from reef.storage.data_sync import release_items
-from reef.storage.record_items import copied_record, copy_records, record_item, sync_scenario_records
+from reef.storage.item_kinds import copied_record
+from reef.storage.record_items import copy_records, record_item, sync_scenario_records
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.tasks import LocalTaskFileStore
 
@@ -71,7 +72,8 @@ def test_a_copy_makes_one_page_of_items_skips_instructions_and_is_safe_to_repeat
 
         # A client item with a record item's ID and other content stops the copy.
         data.delete("acme", "math/r1")
-        data.create("acme", [NewItem("math/r1", {"other": True}, record_item(record("r1")).metadata)])
+        other = record_item(record("r1", score=0.5))
+        data.create("acme", [NewItem("math/r1", other.content, other.metadata)])
         with pytest.raises(ItemConflict):
             copy_records(session.records, data, "acme", "math", 0)
 
@@ -127,7 +129,8 @@ def test_another_scenario_of_the_owner_holds_copies_that_get_no_items_and_stay(t
 def test_an_archive_releases_the_items_of_the_scenario_but_not_the_records_it_made(tmp_path):
     data = MemoryDataStore(LocalTaskFileStore(tmp_path / "task-files"))
     data.create("acme", [record_item(record("r1", score=1.0))])
-    data.create("acme", [NewItem("t1", {"steps": []}, {"kind": "trajectory", "scenarios": {"math": "train"}})])
+    atif = {"schema_version": "ATIF-v1.4", "agent": {"name": "fixture"}, "steps": [{"step_id": 1, "message": "hi"}]}
+    data.create("acme", [NewItem("t1", atif, {"kind": "trajectory", "scenarios": {"math": "train"}})])
     release_items(data, "acme", "math")
     assert [(item.item_id, dict(item.scenarios)) for item in data.query("acme")] == [
         ("math/r1", {"math": "train"}),

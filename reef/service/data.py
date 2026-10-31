@@ -29,9 +29,7 @@ from reef.core.errors import ReefError
 from reef.core.job_data import TrajectorySample
 from reef.dispatcher import Dispatcher
 from reef.service.tasks import unpack_task_archive
-from reef.storage.artifact_items import check_artifact_content
 from reef.storage.data import (
-    DATA_QUEUE,
     ITEM_KINDS,
     MAX_QUERY_LIMIT,
     DataStore,
@@ -45,8 +43,8 @@ from reef.storage.data import (
     created_metadata,
     patched_metadata,
 )
+from reef.storage.data_queue import DATA_SYNC_QUEUE
 from reef.storage.data_sync import request_data_sync
-from reef.storage.record_items import copied_record
 
 #: The most items in one create call: the most trajectories of one upload before RFC #1028.
 MAX_ITEMS_PER_CREATE = 1000
@@ -110,7 +108,9 @@ def sync_touched(dispatcher: Dispatcher, owner: str, scenarios: Iterable[str], *
     while pending:
         # A sync item that is gone or final has ended.
         pending = {
-            item_id for item_id in pending if (item := queue.get(DATA_QUEUE, item_id)) is not None and not item.final
+            item_id
+            for item_id in pending
+            if (item := queue.get(DATA_SYNC_QUEUE, item_id)) is not None and not item.final
         }
         if not pending or time.monotonic() >= deadline:
             break
@@ -136,9 +136,8 @@ def check_uses(dispatcher: Dispatcher, owner: str, uses: Mapping[str, list[Use]]
 def create_items(dispatcher: Dispatcher, owner: str, body: Mapping[str, Any]) -> dict[str, Any]:
     """Create record and artifact items from ``{"items": [{"id", "content", "metadata"}]}``; return them.
 
-    1 to ``MAX_ITEMS_PER_CREATE`` items. A record's content and ID must be what ``copied_record`` takes, and an
-    artifact's content what ``check_artifact_content`` takes. A
-    trajectory comes as JSON Lines (``create_trajectory_items``), and a task needs its files
+    1 to ``MAX_ITEMS_PER_CREATE`` items, whose content follows the rules of their kind
+    (``reef.storage.item_kinds``). A trajectory comes as JSON Lines (``create_trajectory_items``), and a task needs its files
     (``create_task_items``), so this call refuses both. The response is ``{owner, items, synced}``, without content.
     """
     check_owner(owner)
@@ -207,9 +206,8 @@ def store_items(dispatcher: Dispatcher, owner: str, items: Sequence[NewItem], *,
     """Check and store 1 to ``MAX_ITEMS_PER_CREATE`` trajectory, record and artifact items of ``owner`` in one
     transaction, then sync the scenarios that they name; return ``{owner, items, synced}``, without content.
 
-    Each item's metadata passes ``created_metadata``; a trajectory's content is an ATIF document, a record's content
-    and ID are what ``copied_record`` takes, and an artifact's content is what ``check_artifact_content`` takes.
-    ``wait`` is as in ``sync_touched``.
+    Each item's metadata passes ``created_metadata``, and its content follows the rules of its kind
+    (``reef.storage.item_kinds``), which the store checks. ``wait`` is as in ``sync_touched``.
     """
     if not 1 <= len(items) <= MAX_ITEMS_PER_CREATE:
         raise ValueError(f"a create call holds 1 to {MAX_ITEMS_PER_CREATE} items")
@@ -219,12 +217,6 @@ def store_items(dispatcher: Dispatcher, owner: str, items: Sequence[NewItem], *,
         content = cast(Mapping[str, Any], item.content)
         for scenario, split in checked["scenarios"].items():
             uses.setdefault(scenario, []).append(new_use(item.item_id, checked["kind"], content, split))
-        if checked["kind"] == "trajectory":
-            TrajectorySample(content)
-        if checked["kind"] == "record":
-            copied_record(item.item_id, content, checked["origin"]["scenario"], checked["origin"]["scenario"])
-        if checked["kind"] == "artifact":
-            check_artifact_content(content, made_by_scenario="origin" in checked)
     check_uses(dispatcher, owner, uses)
     stored = data_store(dispatcher).create(owner, list(items))
     synced = sync_touched(dispatcher, owner, uses, wait=wait)

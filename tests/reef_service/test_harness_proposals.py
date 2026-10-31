@@ -25,6 +25,7 @@ from reef.recipe import Recipe
 from reef.recipe.cordis import CordisRecipe
 from reef.runtime.interfaces import InferenceHandler
 from reef.service.app import create_app
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.surface import Surface, create_harness_surface
 from reef.train.cordis_backend.contracts import ProposalValidator, StepRecords
@@ -79,6 +80,7 @@ def _dispatcher(tmp_path: Path, recipe: Recipe) -> Dispatcher:
         recipe,
         factory,
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
+        coordination=memory_coordination(),
     )
 
 

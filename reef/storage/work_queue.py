@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 from reef.core.errors import ReefError
-from reef.core.served_models import require_text
+from reef.core.values import require_text
 
 logger = logging.getLogger(__name__)
 
@@ -160,28 +160,67 @@ class WorkQueue(ABC):
 
     Values: the state is a finite set of ``WorkItem`` values with distinct ``(queue, id)`` pairs, and a sequence
     counter that numbers every change across the store. ``lease_seconds`` is the lease length that ``take`` and
-    ``extend_lease`` give, and ``max_attempts`` the number of times a worker can take one item.
+    ``extend_lease`` give. A worker can take one item of a queue ``max_attempts[queue]`` times, or
+    ``default_attempts`` times for a queue that ``max_attempts`` does not name; each is a positive int.
 
-    Purpose: control and the services add work (``add``); workers take, extend, progress, finish and fail it;
-    any service returns expired work (``requeue_expired``); readers follow it (``read_changes``, ``get``).
+    Purpose: control and the services add work (``add``, ``request``); workers take, extend, progress, finish and
+    fail it; any service returns expired work (``requeue_expired``); readers follow it (``read_changes``, ``get``);
+    control deletes old final items (``delete_final``).
     """
 
-    def __init__(self, *, lease_seconds: float = 60.0, max_attempts: Mapping[str, int] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        lease_seconds: float = 60.0,
+        max_attempts: Mapping[str, int] | None = None,
+        default_attempts: int = 3,
+    ) -> None:
         if not math.isfinite(lease_seconds) or lease_seconds <= 0:
             raise ValueError("lease_seconds is a positive number")
         self.lease_seconds = float(lease_seconds)
         self.max_attempts: dict[str, int] = dict(max_attempts or {})
         if any(isinstance(v, bool) or not isinstance(v, int) or v < 1 for v in self.max_attempts.values()):
             raise ValueError("max_attempts maps queue names to positive integers")
+        if isinstance(default_attempts, bool) or not isinstance(default_attempts, int) or default_attempts < 1:
+            raise ValueError("default_attempts is a positive integer")
+        self.default_attempts = default_attempts
 
     def attempts_allowed(self, queue: str) -> int:
-        """How many times a worker can take one item of ``queue``; three unless configured."""
-        return self.max_attempts.get(queue, 3)
+        """How many times a worker can take one item of ``queue``."""
+        return self.max_attempts.get(queue, self.default_attempts)
 
     @abstractmethod
     def add(self, work: NewWork, *, now: float | None = None) -> WorkItem:
         """Add ``work`` as a queued item and return it. When an item with the same queue and ID exists, return it
         unchanged if its payload equals ``work.payload``, else raise ``WorkConflict``."""
+
+    @abstractmethod
+    def request(
+        self,
+        queue: str,
+        scenario: str,
+        kind: str,
+        serial_key: str,
+        payload: Mapping[str, JsonValue],
+        *,
+        available_at: float | None = None,
+        now: float | None = None,
+    ) -> WorkItem:
+        """Ask for one run of the work that ``serial_key`` names; return the item that will do it.
+
+        The items of ``serial_key`` share it, so they run one at a time, in order. An item reads the state that it
+        works on when it runs, so a queued item of ``queue`` with ``serial_key`` covers this request: return it
+        unchanged. Otherwise add a queued item with the ID ``<serial_key>:<n>``, where ``n`` is the store's next
+        change sequence, which no earlier item used, and return it. The look and the add are one change, so two
+        requests at once add one item.
+        """
+
+    @abstractmethod
+    def delete_final(self, *, finished_before: float) -> int:
+        """Delete every final item of every queue that changed last before ``finished_before``; return how many.
+
+        A reader of a final item, such as the trainer of a job, reads it within the retention that control keeps,
+        so a deleted item is one that no reader needs."""
 
     @abstractmethod
     def take(self, queue: str, worker_id: str, kinds: Sequence[str], *, now: float | None = None) -> WorkItem | None:
@@ -267,34 +306,6 @@ def clock(now: float | None) -> float:
     return time.time() if now is None else float(now)
 
 
-def request_waiting(
-    queue: WorkQueue,
-    queue_name: str,
-    scenario: str,
-    kind: str,
-    key: str,
-    payload: Mapping[str, JsonValue],
-    *,
-    available_at: float | None = None,
-) -> WorkItem:
-    """Ask for one run of the work that ``key`` names; return the item that will do it: a queued one, or a new one.
-
-    The items of ``key`` share it as their ``serial_key``, so they run one at a time, in order. An item reads the
-    state that it works on when it runs, so a queued item covers every request made while it waits: a request adds
-    nothing then. Otherwise it adds ``<key>:<n>``, where ``n`` counts the earlier items of ``key``; two requests at
-    once compute the same ID, so they add one item.
-    """
-    earlier = [item for item in queue.items(queue_name, scenario=scenario, kind=kind) if item.serial_key == key]
-    waiting = [item for item in earlier if item.state == "queued"]
-    if waiting:
-        return waiting[0]
-    return queue.add(
-        NewWork(
-            queue_name, f"{key}:{len(earlier)}", scenario, kind, payload, serial_key=key, available_at=available_at
-        )
-    )
-
-
 class LeaseExtender:
     """Extends the lease of one held item every third of the lease, on a background thread, while its work runs.
 
@@ -350,5 +361,4 @@ __all__ = [
     "WorkQueue",
     "WorkState",
     "clock",
-    "request_waiting",
 ]

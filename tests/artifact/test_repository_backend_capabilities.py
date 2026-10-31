@@ -16,6 +16,7 @@ from reef.artifact import (
     StagedReleaseRepositoryBackend,
 )
 from reef.dispatcher import build_default_dispatcher
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 
 
@@ -93,7 +94,9 @@ def test_commit_history_rejects_basic_backend_before_reading_or_changing_registr
     backend = backend_type(InMemoryRepositoryBackend("math", tmp_path))
     if registered:
         dispatcher = build_default_dispatcher(
-            backend_factory=lambda name: backend, scenario_storage=SQLiteScenarioStorage()
+            backend_factory=lambda name: backend,
+            scenario_storage=SQLiteScenarioStorage(),
+            coordination=memory_coordination(),
         )
         try:
             dispatcher.get_or_create_scenario("math")
@@ -107,6 +110,7 @@ def test_commit_history_rejects_basic_backend_before_reading_or_changing_registr
     dispatcher = build_default_dispatcher(
         backend_factory=lambda name: backend,
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
+        coordination=memory_coordination(),
     )
     try:
         with monkeypatch.context() as patch:
@@ -122,7 +126,9 @@ def test_basic_backend_remains_usable_without_commit_log(tmp_path):
     backend = BasicBackend(InMemoryRepositoryBackend("math", tmp_path))
     for _ in range(2):
         dispatcher = build_default_dispatcher(
-            backend_factory=lambda name: backend, scenario_storage=SQLiteScenarioStorage()
+            backend_factory=lambda name: backend,
+            scenario_storage=SQLiteScenarioStorage(),
+            coordination=memory_coordination(),
         )
         try:
             scenario = dispatcher.get_or_create_scenario("math")
@@ -143,6 +149,7 @@ def test_custom_staged_backend_can_create_and_recover_scenario_with_commit_log(t
         dispatcher = build_default_dispatcher(
             backend_factory=lambda name: backend,
             scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
+            coordination=memory_coordination(),
         )
         try:
             scenario = dispatcher.get_or_create_scenario("math")

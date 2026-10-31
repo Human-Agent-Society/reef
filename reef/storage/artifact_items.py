@@ -28,35 +28,10 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from reef.core.evaluation import ARTIFACT_KINDS
-from reef.storage.data import DATA_QUEUE, NewItem
-from reef.storage.work_queue import WorkItem, WorkQueue, request_waiting
-
-#: The kind of the ``data`` queue item that copies the artifacts of one scenario to artifact items.
-ARTIFACT_COPY_KIND = "artifact_copy"
-#: The keys of an artifact item's content.
-ARTIFACT_CONTENT_KEYS = frozenset({"source_uri", "kind", "component", "content_id"})
-
-
-def check_artifact_content(content: Mapping[str, Any], *, made_by_scenario: bool) -> None:
-    """Raise ``ValueError`` unless ``content`` is the content of an artifact item, as the module docstring defines it.
-
-    ``made_by_scenario`` is whether the item has an ``origin``. Every value is a non-empty string or null;
-    ``kind`` is an ``ArtifactKind``; a client's item has a ``source_uri`` and no ``component``, and an item that a
-    scenario made has a ``component``.
-    """
-    if set(content) != ARTIFACT_CONTENT_KEYS:
-        raise ValueError(f"an artifact item's content holds exactly {sorted(ARTIFACT_CONTENT_KEYS)}")
-    for key in sorted(ARTIFACT_CONTENT_KEYS):
-        value = content[key]
-        if value is not None and not (isinstance(value, str) and value):
-            raise ValueError(f"an artifact item's content.{key} is a non-empty string or null")
-    if content["kind"] is not None and content["kind"] not in ARTIFACT_KINDS:
-        raise ValueError(f"an artifact item's content.kind is one of {ARTIFACT_KINDS} or null")
-    if made_by_scenario and content["component"] is None:
-        raise ValueError("the artifact item of a scenario's artifact names its component")
-    if not made_by_scenario and (content["source_uri"] is None or content["component"] is not None):
-        raise ValueError("a client's artifact item names its source_uri, and no component")
+from reef.storage.data import NewItem
+from reef.storage.data_queue import ARTIFACT_COPY_KIND, DATA_QUEUE
+from reef.storage.item_kinds import check_artifact_content
+from reef.storage.work_queue import WorkItem, WorkQueue
 
 
 def artifact_item(scenario: str, row: Mapping[str, Any], kind: str | None, source_uri: str | None) -> NewItem:
@@ -85,14 +60,11 @@ def artifact_copy_key(scenario: str) -> str:
 
 def request_artifact_copy(queue: WorkQueue, scenario: str) -> WorkItem:
     """Ask the data service to copy the artifacts of ``scenario``; return the item that will copy them."""
-    return request_waiting(queue, DATA_QUEUE, scenario, ARTIFACT_COPY_KIND, artifact_copy_key(scenario), {})
+    return queue.request(DATA_QUEUE, scenario, ARTIFACT_COPY_KIND, artifact_copy_key(scenario), {})
 
 
 __all__ = [
-    "ARTIFACT_CONTENT_KEYS",
-    "ARTIFACT_COPY_KIND",
     "artifact_copy_key",
     "artifact_item",
-    "check_artifact_content",
     "request_artifact_copy",
 ]

@@ -10,7 +10,7 @@ import pytest
 from aiohttp import web
 
 from reef.service.assembly import default_served_url
-from reef.storage.coordination import memory_coordination
+from reef.storage.sql_coordination import memory_coordination
 
 
 @pytest.mark.unit

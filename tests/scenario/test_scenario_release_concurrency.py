@@ -19,6 +19,7 @@ from reef.evaluation import EvaluationResult, UpdateCandidate
 from reef.recipe import Recipe
 from reef.scenario import Scenario
 from reef.storage.commit_history import CommitHistoryScenarioStore
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train import CandidateBackend, PreparedStep, Trainer, TrainStepResult
 
@@ -95,6 +96,7 @@ def local_scenario(tmp_path):
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
+        coordination=memory_coordination(),
     )
     scenario = dispatcher.get_or_create_scenario("math")
     assert scenario is not None

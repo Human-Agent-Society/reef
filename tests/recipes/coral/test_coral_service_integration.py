@@ -28,6 +28,7 @@ from reef.dispatcher import Dispatcher
 from reef.inference.http import InferenceProxyRuntime
 from reef.recipe import Recipe
 from reef.runtime.interfaces import InferenceHandler
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 
 
@@ -101,6 +102,7 @@ def test_full_loop_against_real_reef_service(tmp_path):
         Recipe(runtime=InferenceProxyRuntime(base_url="http://engine.test", model_path="reef")),
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         scenario_storage=SQLiteScenarioStorage(),
+        coordination=memory_coordination(),
     )
     # An inference call never creates a scenario.
     dispatcher.get_or_create_scenario("coral-demo")

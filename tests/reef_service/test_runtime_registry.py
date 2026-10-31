@@ -13,6 +13,7 @@ from reef.recipe.registry import build_named_recipe
 from reef.runtime.deployment import RuntimeConfigError, RuntimeRegistry
 from reef.runtime.interfaces import InferenceHandler, InferenceRuntime
 from reef.service.app import create_app
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 
 
@@ -98,6 +99,7 @@ inference:
         build_named_recipe("qwen", config_directory=recipes),
         InMemoryRepositoryBackend.factory(initial),
         scenario_storage=SQLiteScenarioStorage(),
+        coordination=memory_coordination(),
     )
 
     scenario = dispatcher.get_or_create_scenario("math")
@@ -138,6 +140,7 @@ def test_http_app_routes_scenarios_to_runtime_specific_inference_services(tmp_pa
                 Recipe(name=recipe, runtime=RoutingRuntime(recipe)),
                 backend_factory,
                 scenario_storage=SQLiteScenarioStorage(),
+                coordination=memory_coordination(),
             )
             for recipe in ("qwen", "gemma")
         }
@@ -174,6 +177,7 @@ def test_a_deployment_without_an_inference_engine_serves_no_model(tmp_path, path
             Recipe(name="sft", runtime=runtime),
             InMemoryRepositoryBackend.factory(initial),
             scenario_storage=SQLiteScenarioStorage(),
+            coordination=memory_coordination(),
         )
         dispatcher.get_or_create_scenario("roleplay")
         client = TestClient(TestServer(create_app(dispatcher)))

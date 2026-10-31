@@ -27,28 +27,22 @@ so it has no record item of its own.
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
-from typing import Any
 
-from reef.core.artifact_ref import decode_artifact_ref, encode_artifact_ref
+from reef.core.artifact_ref import encode_artifact_ref
 from reef.core.records_types import AgentRecord, RequestType
-from reef.storage.data import DATA_QUEUE, DataStore, NewItem, StoredItem
+from reef.storage.data import DataStore, NewItem, StoredItem
+from reef.storage.data_queue import DATA_QUEUE, RECORD_COPY_KIND
+from reef.storage.item_kinds import copied_record
 from reef.storage.marks import Marks
 from reef.storage.records import RecordConflict, RecordStore
 from reef.storage.scenario import ScenarioStorage
-from reef.storage.work_queue import WorkItem, WorkQueue, request_waiting
+from reef.storage.work_queue import WorkItem, WorkQueue
 
 logger = logging.getLogger(__name__)
 
-#: The kind of the ``data`` queue item that copies the new records of one scenario.
-RECORD_COPY_KIND = "record_copy"
 
 #: The most records that one ``copy_records`` call reads.
 RECORD_PAGE_SIZE = 256
-#: The keys of a record item's content.
-RECORD_CONTENT_KEYS = frozenset(
-    {"agent_record_id", "request_type", "payload", "created_at", "references", "artifact_ref"}
-)
 
 
 def record_item(record: AgentRecord) -> NewItem:
@@ -75,45 +69,6 @@ def record_item(record: AgentRecord) -> NewItem:
                 "artifact_id": artifact_id if isinstance(artifact_id, str) and artifact_id else None,
             },
         },
-    )
-
-
-def copied_record(item_id: str, content: Mapping[str, Any], origin: str, scenario: str) -> AgentRecord:
-    """The copy in ``scenario`` of the record item ``item_id`` with ``content``, made in the scenario ``origin``.
-
-    The copy has the record ID ``item_id``, and the request type, payload, time and release of ``content``. Each
-    reference ``x`` becomes ``<origin>/x``, and so does each entry of a ``references`` list in the payload. Raise
-    ``ValueError`` unless ``content`` has the keys ``RECORD_CONTENT_KEYS`` with the types that ``record_item``
-    gives them, for an inference or a report, and ``item_id`` is ``<origin>/<agent_record_id>``.
-    """
-    if not isinstance(content, Mapping) or content.keys() != RECORD_CONTENT_KEYS:
-        raise ValueError(f"a record item's content has exactly the keys {', '.join(sorted(RECORD_CONTENT_KEYS))}")
-    record_id, request_type, payload = content["agent_record_id"], content["request_type"], content["payload"]
-    created_at, references, artifact = content["created_at"], content["references"], content["artifact_ref"]
-    if not isinstance(record_id, str) or item_id != f"{origin}/{record_id}":
-        raise ValueError(f"a record item made in scenario {origin!r} has the ID {origin}/<agent_record_id>")
-    if request_type not in (RequestType.INFERENCE.value, RequestType.REPORT.value):
-        raise ValueError("a record item's request_type is 'inference' or 'report'")
-    if not isinstance(payload, Mapping):
-        raise ValueError("a record item's payload is an object")
-    if isinstance(created_at, bool) or not isinstance(created_at, (int, float)):
-        raise ValueError("a record item's created_at is a number")
-    if not isinstance(references, list) or not all(isinstance(reference, str) for reference in references):
-        raise ValueError("a record item's references is a list of strings")
-    if artifact is not None and not isinstance(artifact, Mapping):
-        raise ValueError("a record item's artifact_ref is an object or null")
-    copied = tuple(f"{origin}/{reference}" for reference in references)
-    payload = dict(payload)
-    if isinstance(payload.get("references"), list):
-        payload["references"] = [f"{origin}/{reference}" for reference in payload["references"]]
-    return AgentRecord(
-        agent_record_id=item_id,
-        scenario=scenario,
-        request_type=RequestType(request_type),
-        payload=payload,
-        created_at=float(created_at),
-        references=copied,
-        artifact_ref=None if artifact is None else decode_artifact_ref(artifact),
     )
 
 
@@ -153,12 +108,17 @@ def copy_records(records: RecordStore, data: DataStore, owner: str, scenario: st
 
 def record_copy_mark(scenario: str) -> str:
     """The name of the mark that keeps how far the records of ``scenario`` are copied."""
+    return f"record_copy:{scenario}"
+
+
+def record_copy_key(scenario: str) -> str:
+    """The serial key of the ``record_copy`` items of ``scenario``: its copies run one at a time."""
     return f"{RECORD_COPY_KIND}:{scenario}"
 
 
 def request_record_copy(queue: WorkQueue, scenario: str) -> WorkItem:
     """Ask the data service to copy the new records of ``scenario``; return the item that will copy them."""
-    return request_waiting(queue, DATA_QUEUE, scenario, RECORD_COPY_KIND, record_copy_mark(scenario), {})
+    return queue.request(DATA_QUEUE, scenario, RECORD_COPY_KIND, record_copy_key(scenario), {})
 
 
 def copy_scenario_records(storage: ScenarioStorage, data: DataStore, marks: Marks, scenario: str) -> int:
@@ -215,10 +175,7 @@ def sync_scenario_records(records: RecordStore, data: DataStore, owner: str, sce
 
 
 __all__ = [
-    "RECORD_CONTENT_KEYS",
-    "RECORD_COPY_KIND",
     "RECORD_PAGE_SIZE",
-    "copied_record",
     "copy_records",
     "copy_scenario_records",
     "is_record_copy",

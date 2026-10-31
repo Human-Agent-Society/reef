@@ -16,6 +16,7 @@ from reef.recipe.registry import build_named_recipe
 from reef.runtime.deployment import RuntimeRegistry
 from reef.service import assembly
 from reef.service.deploy.service_config import ServiceConfig
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 
 
@@ -56,6 +57,7 @@ def dispatcher_for(recipe: Recipe, tmp_path) -> Dispatcher:
         recipe,
         InMemoryRepositoryBackend.factory(initial),
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
+        coordination=memory_coordination(),
     )
 
 

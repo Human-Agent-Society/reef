@@ -186,6 +186,7 @@ def test_dispatcher_does_not_select_a_record_backend() -> None:
                 "reef.storage.control_lease",
                 "reef.storage.coordination",
                 "reef.storage.data",
+                "reef.storage.data_queue",
                 "reef.storage.data_sync",
                 "reef.storage.record_items",
                 "reef.storage.records",
@@ -222,7 +223,8 @@ def test_scenario_storage_contract_and_state_have_only_domain_dependencies() -> 
         "reef.storage.commits": ("reef.core",),
         "reef.storage.tasks": ("reef.core",),
         "reef.storage.samples": ("reef.core", "reef.storage.tasks"),
-        "reef.storage.data": ("reef.core", "reef.storage.tasks"),
+        "reef.storage.item_kinds": ("reef.core", "reef.storage.tasks"),
+        "reef.storage.data": ("reef.core", "reef.storage.item_kinds", "reef.storage.tasks"),
         "reef.storage.evaluations": ("reef.core",),
         "reef.storage.scenario": (
             "reef.core",

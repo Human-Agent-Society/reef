@@ -50,6 +50,7 @@ from reef.recipe.cordis import CordisRecipe
 from reef.recipe.registry import recipe_class_for
 from reef.runtime.executor.config import ExecutorSettings
 from reef.service.app import create_app
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train.cordis_backend import CordisBackend, FailureManifest, Mutation, MutationError, Promoter
 from reef.train.cordis_backend.backend import eval_task_paths
@@ -814,6 +815,7 @@ def open_dispatcher(built: CordisRecipe, factory, tmp_path: Path, **options) -> 
         factory,
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
         hold_local_cycles=True,
+        coordination=memory_coordination(),
         **options,
     )
 
@@ -1770,7 +1772,13 @@ def test_a_restart_without_a_durable_log_keeps_a_held_tree_inactive(tmp_path: Pa
     """The held tip's metadata names what served, so a restart that lost the history serves that, not the tip."""
     built = held_recipe(tmp_path)
     factory = repository_factory(tmp_path)
-    dispatcher = Dispatcher(built, factory, scenario_storage=SQLiteScenarioStorage(), hold_local_cycles=True)
+    dispatcher = Dispatcher(
+        built,
+        factory,
+        scenario_storage=SQLiteScenarioStorage(),
+        hold_local_cycles=True,
+        coordination=memory_coordination(),
+    )
     try:
         served = dispatcher.get_or_create_scenario("review").current_artifact_ref()
         commit_one_step(dispatcher, "review")
@@ -1780,7 +1788,13 @@ def test_a_restart_without_a_durable_log_keeps_a_held_tree_inactive(tmp_path: Pa
     finally:
         dispatcher.close()
 
-    reopened = Dispatcher(built, factory, scenario_storage=SQLiteScenarioStorage(), hold_local_cycles=True)
+    reopened = Dispatcher(
+        built,
+        factory,
+        scenario_storage=SQLiteScenarioStorage(),
+        hold_local_cycles=True,
+        coordination=memory_coordination(),
+    )
     try:
         recovered = reopened.get_or_create_scenario("review")
         assert recovered.repository.require_checkpoint_artifact() == tip

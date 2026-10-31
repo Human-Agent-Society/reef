@@ -35,6 +35,7 @@ from reef.runtime.interfaces import TrainingMethod
 from reef.storage.commit_history import CommitHistoryScenarioStore
 from reef.storage.commits import CommitRecord
 from reef.storage.samples import TrainerSamples
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train import PipelineContext, Trainer, TrainingPipeline
 from reef.train.algos.schedule import StepScheduling
@@ -800,6 +801,7 @@ def test_a_grouped_recipe_trains_one_comparison_set_as_one_job(tmp_path) -> None
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(),
+        coordination=memory_coordination(),
     )
     scenario = dispatcher.get_or_create_scenario("math")
     serving = scenario.serving_artifact_id()

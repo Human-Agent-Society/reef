@@ -34,6 +34,7 @@ from reef.runtime.interfaces import InferenceHandler
 from reef.service.app import create_app
 from reef.service.request_service import RequestService
 from reef.storage.samples import consumed_sample_id
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.surface import ComponentSurface, Surface, TextFileTree, create_harness_surface
 from reef.train import CandidateBackend, PreparedStep, Trainer, TrainStepResult
@@ -169,6 +170,7 @@ def _serve(recipe: CompositeRecipe, tmp_path: Path) -> Dispatcher:
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
+        coordination=memory_coordination(),
     )
 
 
@@ -587,6 +589,7 @@ def test_a_flat_scenario_without_a_durable_log_still_serves_its_head(tmp_path: P
         InMemoryRepositoryBackend.factory(tree, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(None),
+        coordination=memory_coordination(),
     )
     try:
         scenario = dispatcher.get_or_create_scenario("agent")

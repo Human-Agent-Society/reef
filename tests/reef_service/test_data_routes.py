@@ -15,6 +15,7 @@ from reef.artifact import InMemoryRepositoryBackend
 from reef.core.tasks import write_harbor_task
 from reef.dispatcher import Dispatcher
 from reef.service.app import create_app
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
@@ -88,6 +89,7 @@ def test_a_deployment_without_a_data_store_serves_no_data_route(tmp_path: Path) 
         UploadRecipe(),
         InMemoryRepositoryBackend.factory(tmp_path / "initial", root=tmp_path / "repository"),
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
+        coordination=memory_coordination(),
     )
 
     async def check(client: TestClient) -> None:

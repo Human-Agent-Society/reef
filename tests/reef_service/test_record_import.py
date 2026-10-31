@@ -21,6 +21,7 @@ from reef.runtime.interfaces import InferenceHandler
 from reef.sample2job import Sample2Job
 from reef.service.app import create_app
 from reef.service.routes.records import MAX_RECORD_IMPORT_BYTES
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train import JobData, PreparedStep, Trainer
 from reef.train.pipeline import TrainingPipeline
@@ -121,6 +122,7 @@ def dispatcher_for(tmp_path, recipe):
         recipe,
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
+        coordination=memory_coordination(),
     )
 
 

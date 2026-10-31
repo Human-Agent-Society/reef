@@ -131,6 +131,27 @@ def test_a_retryable_failure_requeues_until_the_attempts_run_out(open_coordinati
 
 
 @pytest.mark.unit
+def test_a_request_reuses_the_queued_item_of_its_key_and_ended_items_go_after_the_retention(open_coordination):
+    queue = open_coordination().queue
+    first = queue.request("data", "s", "record_copy", "record_copy:s", {}, now=0)
+    assert first.serial_key == "record_copy:s" and first.id.startswith("record_copy:s:")
+    # A queued item covers every request while it waits.
+    assert queue.request("data", "s", "record_copy", "record_copy:s", {}, now=1).id == first.id
+    queue.take("data", "w1", ["record_copy"], now=2)
+    second = queue.request("data", "s", "record_copy", "record_copy:s", {}, now=3)
+    assert second.id != first.id and second.state == "queued"
+    queue.finish("data", first.id, "w1", {}, now=4)
+
+    assert queue.delete_final(finished_before=4) == 0
+    assert queue.delete_final(finished_before=5) == 1
+    assert queue.get("data", first.id) is None and queue.get("data", second.id) is not None
+    # The next request after a deletion gets a new ID: no ID is used twice.
+    queue.take("data", "w1", ["record_copy"], now=6)
+    third = queue.request("data", "s", "record_copy", "record_copy:s", {}, now=7)
+    assert third.id not in (first.id, second.id)
+
+
+@pytest.mark.unit
 def test_an_item_waits_for_its_available_time_and_readers_follow_changes_in_order(open_coordination):
     queue = open_coordination().queue
     queue.add(NewWork("samples", "pass-1", "s", "record_selection", {}, available_at=50), now=0)

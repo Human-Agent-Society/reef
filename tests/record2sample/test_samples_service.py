@@ -13,8 +13,7 @@ from reef.record2sample.service import (
     request_selection,
     selection_key,
 )
-from reef.storage.coordination import memory_coordination
-from reef.storage.sql_coordination import SQLiteCoordinationDatabase, SQLWorkQueue
+from reef.storage.sql_coordination import SQLiteCoordinationDatabase, SQLWorkQueue, memory_coordination
 
 
 class Producers(SampleProducers):

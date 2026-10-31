@@ -13,8 +13,6 @@ This module defines the item values, the metadata rules, the ``DataStore`` plugi
 from __future__ import annotations
 
 import copy
-import hashlib
-import json
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -23,19 +21,15 @@ from typing import Any, Literal, Self, get_args
 
 from reef.core.errors import ReefError
 from reef.core.plugins import Plugin, PluginConfigError
+from reef.storage.item_kinds import ITEM_KIND_RULES, task_partition
 from reef.storage.tasks import SPLIT_NAMES, TaskFileStore
 
-#: The work queue of the data service: record copies, imports and exports, and the sync requests that control takes.
-DATA_QUEUE = "data"
 ItemKind = Literal["trajectory", "task", "record", "artifact"]
 ITEM_KINDS: tuple[ItemKind, ...] = get_args(ItemKind)
 #: The metadata keys that Reef reads. ``kind``, ``owner`` and ``origin`` are set at creation and never change.
 FIXED_KEYS = ("kind", "owner", "origin")
 #: The most items that one query returns.
 MAX_QUERY_LIMIT = 1000
-#: Prefixes the task file partition of an owner. A scenario name never contains ``/``, so no scenario's partition
-#: starts with it, and archiving a scenario never moves an owner's task files.
-TASK_PARTITION_PREFIX = "data/"
 
 
 class ItemConflict(ReefError):
@@ -61,12 +55,6 @@ def check_item_id(item_id: object) -> str:
     if not isinstance(item_id, str) or not item_id:
         raise ValueError(f"an item ID must be a non-empty string, got {item_id!r}")
     return item_id
-
-
-def json_digest(content: Mapping[str, Any]) -> str:
-    """The SHA-256 of the canonical JSON of ``content``: sorted keys, no spaces, UTF-8."""
-    encoded = json.dumps(content, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
 
 
 def check_scenarios(value: object, kind: ItemKind) -> dict[str, str]:
@@ -216,11 +204,6 @@ class StoredItem:
         return self.metadata["scenarios"]
 
 
-def task_partition(owner: str) -> str:
-    """The task file store partition that keeps the task directories of ``owner``."""
-    return TASK_PARTITION_PREFIX + owner
-
-
 class DataStore(Plugin, ABC):
     """The data of a deployment: items of content and metadata, each in one owner.
 
@@ -308,9 +291,10 @@ def prepared_items(
 ) -> list[tuple[NewItem, dict[str, Any], str]]:
     """Check a ``create`` call and return each item with its created metadata and digest.
 
-    A task directory is copied into the owner's task file partition, so its digest names stored files. The copy
-    happens before the store checks for conflicts; files are kept by digest, so a refused call leaves at most an
-    unused copy. Raise ``ValueError`` for an invalid owner, ID, metadata or content, or for an ID given twice.
+    Each item's content follows the rules of its kind (``ITEM_KIND_RULES``). A task directory is copied into the
+    owner's task file partition, so its digest names stored files. The copy happens before the store checks for
+    conflicts; files are kept by digest, so a refused call leaves at most an unused copy. Raise ``ValueError`` for
+    an invalid owner, ID, metadata or content, or for an ID given twice.
     """
     check_owner(owner)
     prepared: list[tuple[NewItem, dict[str, Any], str]] = []
@@ -321,17 +305,8 @@ def prepared_items(
             raise ValueError(f"item {item.item_id!r} is given twice")
         seen.add(item.item_id)
         metadata = created_metadata(owner, item.metadata)
-        if metadata["kind"] == "task":
-            if not isinstance(item.content, Path) or not item.content.is_dir():
-                raise ValueError(f"task item {item.item_id!r} needs a task directory as its content")
-            if item.content.name != item.item_id:
-                raise ValueError(f"task item {item.item_id!r} needs a task directory of the same name")
-            digest = task_files.put(task_partition(owner), item.content)
-        elif isinstance(item.content, Mapping):
-            digest = json_digest(item.content)
-        else:
-            raise ValueError(f"{metadata['kind']} item {item.item_id!r} needs a JSON object as its content")
-        prepared.append((item, metadata, digest))
+        rules = ITEM_KIND_RULES[metadata["kind"]]
+        prepared.append((item, metadata, rules.stored_digest(owner, item.item_id, item.content, metadata, task_files)))
     return prepared
 
 

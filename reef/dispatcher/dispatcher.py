@@ -29,6 +29,7 @@ from reef.dispatcher.samples import LocalSampleProducers
 from reef.dispatcher.served import CACHE_SECONDS, ControlInstance, ServedModelsPublisher, wait_for_control_lease
 from reef.dispatcher.status import TrainingStatus
 from reef.dispatcher.store_changes import StoreChanges, StoreChangesWatcher
+from reef.dispatcher.work_retention import EndedWorkSweeper
 from reef.evaluation.artifact_endpoint import CandidateArtifacts
 from reef.execution.workers import SERVICE_COMPONENTS, ServiceWorkers, service_components
 from reef.observability import ExperimentTracker, NullExperimentTracker
@@ -42,7 +43,7 @@ from reef.scenario.registry import ScenarioLifecycle, ScenarioRegistry
 from reef.scenario.releases import ServedBesideArtifact
 from reef.scenario.scenario import Scenario
 from reef.storage.artifact_items import request_artifact_copy
-from reef.storage.coordination import Coordination, instance_id, memory_coordination
+from reef.storage.coordination import Coordination, instance_id
 from reef.storage.data import DataStore, check_owner
 from reef.storage.data_sync import sync_scenario_samples, uploads
 from reef.storage.record_items import request_record_copy, sync_scenario_records
@@ -97,9 +98,10 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         hold_local_cycles: bool = False,
         scenario_idle_unload_seconds: float | None = None,
         scenario_admission: ScenarioAdmission | None = None,
-        coordination: Coordination | None = None,
+        coordination: Coordination,
         workers: ServiceWorkers | None = None,
         components: frozenset[str] = frozenset(SERVICE_COMPONENTS),
+        work_retention_seconds: float = 7 * 24 * 3600.0,
     ) -> None:
         """``hold_local_cycles``: run no local cycle until :meth:`open_local_cycles`.
         Use it when the recipe calls this same service. The service does not
@@ -116,8 +118,10 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         scenario's session does when it opens (the data sync); None means ``scenario_storage``.
 
         ``coordination`` and ``workers``: the coordination store and the background workers of the services
-        that this process runs; without a store, the dispatcher keeps one in memory (``memory_coordination``).
-        The constructor starts the workers; ``close`` stops them first and closes the store last.
+        that this process runs. A process that runs every service and keeps no state across restarts, such as an
+        embedded dispatcher, gives it ``reef.storage.sql_coordination.memory_coordination()``.
+        The constructor starts the workers; ``close`` stops them first and closes the store last. Control deletes
+        the work items that ended more than ``work_retention_seconds`` ago (``EndedWorkSweeper``).
 
         The recipe's training component gets its jobs through the jobs queue: the dispatcher gives the trainers a
         ``JobQueueComponent`` over it and, with ``training``, runs a ``TrainingJobWorker`` on it.
@@ -135,8 +139,6 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         """
         if scenario_idle_unload_seconds is not None and scenario_idle_unload_seconds <= 0:
             raise ValueError("scenario_idle_unload_seconds must be positive")
-        if coordination is None:
-            coordination = memory_coordination()
         #: The deployment's coordination store: ``served_models``, the work queues and the control lease.
         self.coordination = coordination
         #: The background workers of the services that this process runs; the dispatcher stops them first.
@@ -208,6 +210,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
             # The publisher extends the lease; it starts now, so a slow start-up does not let the lease expire.
             publisher.start()
             self.workers.add(StoreChangesWatcher(self.registry, coordination.work_queue, self))
+            self.workers.add(EndedWorkSweeper(coordination.work_queue, retention_seconds=work_retention_seconds))
             if data_store is not None:
                 self.workers.add(DataSyncWorker(coordination.work_queue, self, worker_id=instance_id("data-sync")))
         if "samples" in self.components:
@@ -913,6 +916,7 @@ def build_default_dispatcher(
     backend_factory: RepositoryBackendFactory | None = None,
     local_artifact_dir: Path | None = None,
     scenario_storage: ScenarioStorage,
+    coordination: Coordination,
 ) -> Dispatcher:
     """Build a Dispatcher serving the core record-only ``recipe``.
 
@@ -921,7 +925,7 @@ def build_default_dispatcher(
     from ``reef.recipe: recipe``.
     Uses an in-memory artifact backend when ``backend_factory`` is not
     provided. Record and commit storage must be supplied explicitly through
-    ``scenario_storage``; this helper does not select a record backend.
+    ``scenario_storage``, and the coordination store through ``coordination``; this helper selects neither.
     """
     if backend_factory is None:
         root = Path(tempfile.mkdtemp(prefix="reef-artifacts-"))
@@ -933,4 +937,5 @@ def build_default_dispatcher(
         backend_factory,
         local_artifact_dir=local_artifact_dir,
         scenario_storage=scenario_storage,
+        coordination=coordination,
     )
