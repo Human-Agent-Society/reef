@@ -304,3 +304,69 @@ def test_a_task_job_is_checked_at_submit(tmp_path):
                 )
     finally:
         component.close()
+
+
+class ColdSampler(Sampler):
+    """Times out on its first ``cold`` samples, as a sampler that is still starting does."""
+
+    def __init__(self, cold: int) -> None:
+        super().__init__()
+        self.cold = cold
+        self.requests: list[tuple[str | None, dict]] = []
+
+    def sample(self, sampler_path, prompt, params, *, topk_logprobs):
+        self.requests.append((sampler_path, dict(params)))
+        if self.cold:
+            self.cold -= 1
+            raise TimeoutError("the sampler is starting")
+        return super().sample(sampler_path, prompt, params, topk_logprobs=topk_logprobs)
+
+
+@pytest.mark.unit
+def test_a_task_job_waits_for_its_start_sampler_before_the_rollouts(tmp_path, monkeypatch):
+    import reef.recipe.generated_tasks  # noqa: F401 - registers the task_group objective
+
+    sampler = ColdSampler(cold=2)
+    rolled_out_after = []
+
+    def fake_roll_out(tasks, settings, chat, **options):
+        rolled_out_after.append(len(sampler.requests))
+        return grouped(tmp_path)
+
+    monkeypatch.setattr(component_module, "roll_out", fake_roll_out)
+    component = TinkerTrainingComponent(
+        MODEL, TinkerConfig(state_dir=str(tmp_path / "state")), Client(), sampler=sampler
+    )
+    component.start_jobs()
+    try:
+        parameters = {"method": TrainingMethod("task_group").to_dict(), "rollout": ROLLOUT, "batch_size": 2}
+        component.submit(
+            TrainingJob(
+                "job-0",
+                "tinker",
+                component.base_start,
+                JobData("d", (harbor_task(tmp_path, "add"),)),
+                parameters,
+                scenario="s",
+            )
+        )
+        assert finished(component, "job-0").state == "finished"
+    finally:
+        component.close()
+
+    # Two timed-out warm-up samples and the one that answered, all of one token on the start's sampler.
+    assert sampler.requests == [("tinker://base/sampler", {"max_tokens": 1})] * 3
+    assert rolled_out_after == [3]
+
+
+@pytest.mark.unit
+def test_a_sampler_that_never_answers_fails_the_warm_up_at_its_deadline(tmp_path, monkeypatch):
+    monkeypatch.setattr(component_module, "SAMPLER_WARM_TIMEOUT_S", 0.0)
+    component = TinkerTrainingComponent(
+        MODEL, TinkerConfig(state_dir=str(tmp_path / "state")), Client(), sampler=ColdSampler(cold=5)
+    )
+    try:
+        with pytest.raises(TimeoutError, match="starting"):
+            component.warm_sampler("tinker://base/sampler")
+    finally:
+        component.close()
