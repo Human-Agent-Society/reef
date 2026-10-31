@@ -96,7 +96,7 @@ def test_a_scenario_uses_a_trajectory_only_through_a_recipe_that_accepts_uploade
             response = await upload_trajectories(client, AUTH, "trajectory-1")
             assert response.status == 400
             assert "does not accept uploaded trajectories" in await response.text()
-            assert dispatcher.data_store.query("s") == ()
+            assert dispatcher.data_store.query("s", kind="trajectory") == ()
             assert sample_ids(dispatcher) == []
 
     try:
@@ -141,7 +141,7 @@ def test_an_invalid_upload_is_refused_and_stores_nothing(tmp_path):
             assert refused.status == 400 and "JSON Lines" in await refused.text()
             wrong = await client.post(f"{DATA}/trajectories", headers=AUTH, json=atif("t"))
             assert wrong.status == 415
-            assert dispatcher.data_store.query("s") == ()
+            assert dispatcher.data_store.query("s", kind="trajectory") == ()
 
     try:
         asyncio.run(run())
@@ -176,7 +176,7 @@ def test_a_trajectory_that_cannot_train_is_refused_and_jobs_get_the_rendered_sam
             response = await upload_trajectories(client, AUTH, "good", "bad")
             assert response.status == 400
             assert "trajectory 'bad' cannot train: it has no agent step" in await response.text()
-            assert dispatcher.data_store.query("s") == (), "nothing of it is stored"
+            assert dispatcher.data_store.query("s", kind="trajectory") == (), "nothing of it is stored"
             response = await upload_trajectories(client, AUTH, "t1", "t2")
             assert response.status == 201, await response.text()
             await wait_for_batches(recipe, 1)

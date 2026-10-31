@@ -706,7 +706,8 @@ def test_recovery_skips_consumption_after_processor_release_failure(tmp_path, mo
 
     train_pair(second, 2)
     assert second_component.trained_data == [["i2"]]
-    assert recovered.scenario_step == 6
+    # The job's three commits land on the scenario that serves now; a failed cycle can replace the instance.
+    wait_until(lambda: second.get_or_create_scenario("math").scenario_step == 6, "the job's commits did not all land")
 
 
 @pytest.mark.unit
