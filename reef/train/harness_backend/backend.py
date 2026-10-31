@@ -424,8 +424,8 @@ class HarnessBackend(HarnessCandidateEvaluator):
         vectors: the history holds every run. The metrics gain ``selected`` and ``selection``: the candidate
         id, the decision's ``selected``, ``policy``, ``reason`` and ``metrics``, and the ``evaluation`` that the
         decision read without its metrics (``evaluator``, ``evaluator_version``, ``metadata``). A rejected
-        candidate makes no artifact. A selected one is the result's artifact, and its ``changed_kinds`` are the
-        names of the parts its patch changes, from which the scenario's activation rule decides whether it serves.
+        candidate makes no artifact. A selected one is the result's artifact; ``patch_parts`` names the part of each
+        path that its patch changes.
         """
         self.progress = None
         candidate = require_harness_candidate(prepared.candidate)
@@ -476,9 +476,7 @@ class HarnessBackend(HarnessCandidateEvaluator):
         if self.pending_artifact is not None:
             self.pending_artifact.discard()
         self.pending_artifact = artifact
-        return TrainStepResult(
-            state.to_json(), metrics, artifact=artifact, changed_kinds=frozenset(patch_parts.values())
-        )
+        return TrainStepResult(state.to_json(), metrics, artifact=artifact)
 
     def abort_step(self, prepared: PreparedStep) -> None:
         self.progress = None

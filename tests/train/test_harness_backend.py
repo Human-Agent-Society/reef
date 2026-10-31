@@ -74,7 +74,7 @@ def test_a_winning_candidate_publishes_and_the_history_keeps_it(tmp_path: Path) 
     backend, _ = harness_backend(tmp_path, step)
     result = backend_step(backend, data(1), HarnessState().to_json())
     # The step names the tree kinds its patch changes; the scenario's activation rule decides from them.
-    assert result.metrics["selected"] is True and result.changed_kinds == {"rules"}
+    assert result.metrics["selected"] is True and set(result.metrics["patch_parts"].values()) == {"rules"}
     assert result.metrics["patch"] == MARKER.to_json() and result.metrics["head_release_id"] == "base"
     assert result.metrics["method_summary"] == "added the marker" and result.metrics["method_notes"] == {
         "why": "it scores"
@@ -335,12 +335,12 @@ def test_an_aborted_step_keeps_what_changed_for_the_failed_row(tmp_path: Path) -
     assert failed["failed_stage"] == "evaluating" and failed["patch"] == MARKER.to_json()
 
 
-def test_a_win_names_the_parts_its_patch_changes_for_the_activation_rule(tmp_path: Path) -> None:
+def test_a_win_names_the_parts_its_patch_changes(tmp_path: Path) -> None:
     patch = TreePatch({**MARKER.changes, "extensions/notify.ts": "export default function (pi) {}\n"})
     backend, _ = harness_backend(tmp_path, lambda workspace, services: patch)
     result = backend_step(backend, data(1), HarnessState().to_json())
     assert result.metrics["selected"] is True and result.artifact is not None
-    assert result.changed_kinds == {"rules", "extension"}
+    assert set(result.metrics["patch_parts"].values()) == {"rules", "extension"}
 
 
 def test_the_progress_follows_the_step_through_its_phases(tmp_path: Path) -> None:

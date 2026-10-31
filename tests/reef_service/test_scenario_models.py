@@ -169,7 +169,7 @@ def test_full_evolution_uses_only_custom_binding(platform, tmp_path, monkeypatch
                 )
             )
         # A job carries the scenario's model without its key; the training component binds the deployment's key.
-        selected = scenario.trainer.job_loop_required().submitted.parameters(
+        selected = scenario.trainer.job_loop_required().harness_parameters(
             JobData("batch"), JobLoopState.from_dict(scenario.trainer.state)
         )["scenario_model"]
         assert selected == configure(platform, "alpha", api)
@@ -390,7 +390,7 @@ def test_scenario_recovery_and_deletion_keep_model_lifecycle(platform, tmp_path)
             engine_url(platform, "alpha", "1"),
             PLATFORM_KEY,
         )
-        selected = scenario.trainer.job_loop_required().submitted.parameters(
+        selected = scenario.trainer.job_loop_required().harness_parameters(
             JobData("batch"), JobLoopState.from_dict(scenario.trainer.state)
         )["scenario_model"]
         assert job_backend(scenario.trainer, "harness", selected).models["judge"].base_url == engine_url(

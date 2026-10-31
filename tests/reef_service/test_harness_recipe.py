@@ -77,7 +77,7 @@ from reef.inference.http import InferenceProxyRuntime
 from reef.inference.model_config import ModelConfig
 from reef.recipe import RecipeConfigError
 from reef.recipe.base import ServedEndpoint
-from reef.recipe.harness import EvolutionSettings, HarnessEvolutionRecipe, HarnessJobParameters
+from reef.recipe.harness import EvolutionSettings, HarnessEvolutionRecipe, HarnessJobLoop
 from reef.recipe.registry import recipe_class_for
 from reef.runtime.executor.config import ExecutorSettings
 from reef.sample2job.traces import TrainTaskJobData
@@ -421,10 +421,18 @@ def test_each_step_evaluates_on_the_eval_split_of_the_imported_tasks_as_the_step
         backend = build_harness_backend(built, "s")
         batch = JobData("s:1", (recorded_trajectory("a1", {"messages": []}, 0.0),))
         # A job names the eval split as its trainer reads it at submit time, and its step evaluates on it.
-        submitted = HarnessJobParameters(releases_for(built), None, TrainerSamples(samples))
+        loop = HarnessJobLoop(
+            built.harness_component,
+            scenario="s",
+            releases=releases_for(built),
+            model=None,
+            eval_samples=TrainerSamples(samples),
+            seed=built.seed,
+            layout=get_adapter("pi").layout,
+        )
 
         def evaluation_tasks() -> list[str]:
-            tasks = submitted.parameters(batch, JobLoopState("base:x"))["evaluation_tasks"]
+            tasks = loop.harness_parameters(batch, JobLoopState("base:x"))["evaluation_tasks"]
             prepared = backend.prepare_step(
                 batch, HarnessState().to_json(), 0, head=head_of(backend), seed_tasks=tuple(tasks)
             )
@@ -610,8 +618,9 @@ def test_a_winning_step_binds_only_its_runs_records_its_context_and_names_its_ki
     assert published == PI_SEED.apply(MARKER)
     assert not any("dummy" in text or "localhost" in text for text in published.files.values())
 
-    assert result.artifact is not None and result.changed_kinds == {"rules"}
-    made = MadeArtifact(None, result.changed_kinds)
+    changed = frozenset(result.metrics["patch_parts"].values())
+    assert result.artifact is not None and changed == {"rules"}
+    made = MadeArtifact(None, changed)
     assert AlwaysActivate().activates(made)
     assert not AlwaysActivate(frozenset({"rules"})).activates(made)
     assert AlwaysActivate(frozenset({"skill"})).activates(made)

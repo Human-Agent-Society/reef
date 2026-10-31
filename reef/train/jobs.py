@@ -14,7 +14,6 @@ starts from the job's last saved checkpoint, whether or not it serves.
 
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -131,42 +130,22 @@ class JobCommit:
             raise TypeError("JobCommit.ended must be a JobOutcome or None")
 
 
-class SubmitParameters(ABC):
-    """The parameters of a scenario's job that only the scenario knows when the job is submitted.
-
-    Values: ``parameters(data, state)`` returns the parameters of the job that trains ``data`` from the trainer's
-    committed ``state``, a mapping that encodes as JSON, read from the scenario's state at that moment, such as the
-    scenario's own model, the tasks of its eval split, or the last job that ended (``state.last_job``). Purpose: a
-    recipe whose jobs depend on such state gives one to its ``JobLoop``; ``JobLoop.submit`` adds the parameters to
-    the ones that the pipeline's sample-to-job stage gives.
-    """
-
-    @abstractmethod
-    def parameters(self, data: JobData, state: JobLoopState) -> Mapping[str, Any]: ...
-
-
 class JobLoop:
     """Submit a weight trainer's jobs to its training component, and turn their checkpoints into commits.
 
     ``component`` runs the jobs; ``scenario`` is the non-empty name of the
     trainer's scenario, which is part of each job's identity, so two scenarios
-    never share a job. ``submitted`` adds the parameters that only the
-    scenario knows at submit time, or is None. ``submit`` and
+    never share a job. ``submit`` and
     ``poll`` return the ``JobCommit`` that the trainer commits next.
     """
 
-    def __init__(
-        self, component: TrainingComponent, *, scenario: str, submitted: SubmitParameters | None = None
-    ) -> None:
+    def __init__(self, component: TrainingComponent, *, scenario: str) -> None:
         if not isinstance(component, TrainingComponent):
             raise TypeError(f"component must be a TrainingComponent, got {type(component).__name__}")
         if not isinstance(scenario, str) or not scenario:
             raise ValueError("scenario must be a non-empty string")
-        if submitted is not None and not isinstance(submitted, SubmitParameters):
-            raise TypeError("submitted must be a SubmitParameters or None")
         self.component = component
         self.scenario = scenario
-        self.submitted = submitted
 
     def job_id(self, state: JobLoopState, start: str, data: JobData, parameters: Mapping[str, Any]) -> str:
         """The ID of the job that ``state``'s trainer submits next: a hash of the scenario, the job's ordinal
@@ -191,18 +170,11 @@ class JobLoop:
 
         The job starts from ``state.start``, under ``job_id``. ``parameters``
         is the mapping that the pipeline's sample-to-job stage gives for
-        ``data``, which encodes as JSON; ``submitted`` adds its own. Raise
-        ``ValueError`` when ``state`` has a running job, or when ``submitted``
-        names a parameter that the stage gives too.
+        ``data``, which encodes as JSON. Raise ``ValueError`` when ``state``
+        has a running job.
         """
         if state.job is not None:
             raise ValueError("a weight trainer runs one job at a time")
-        if self.submitted is not None:
-            added = dict(self.submitted.parameters(data, state))
-            shared = sorted(set(added) & set(parameters))
-            if shared:
-                raise ValueError(f"the stage's job parameters already name {shared}")
-            parameters = {**parameters, **added}
         backend = self.component.name
         job_id = self.job_id(state, state.start, data, parameters)
         self.component.submit(TrainingJob(job_id, backend, state.start, data, parameters, scenario=self.scenario))
@@ -268,7 +240,6 @@ class JobLoop:
                 metrics=metrics,
                 artifact=Artifact.local(Path(checkpoint.release_path)),
                 training_job_id=job.job_id,
-                changed_kinds=checkpoint.changed_kinds,
             )
         )
 

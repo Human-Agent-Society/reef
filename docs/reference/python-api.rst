@@ -2049,12 +2049,9 @@ loop:
      - Release the component's resources; safe to call repeatedly.
 
 A ``SavedCheckpoint`` has a ``step`` within its job, a ``path`` that a later
-job starts from, a ``release_path`` that Reef publishes and serving loads, the
-backend's ``metrics``, and ``changed_kinds``: the names of the parts that the
-checkpoint changed from the job's start, which the scenario's activation rule
-reads. A weight checkpoint names none; a harness checkpoint names the parts of
-the tree that its step changed. A finished job without checkpoints trained
-nothing, for example because its objective skipped the job's data.
+job starts from, a ``release_path`` that Reef publishes and serving loads, and
+the backend's ``metrics``. A finished job without checkpoints trained nothing,
+for example because its objective skipped the job's data.
 
 ``reef.train.local_jobs.LocalJobComponent`` is the base of the built-in
 components. It keeps one directory per job (``job.json``,
@@ -2065,20 +2062,23 @@ call ``start_jobs()`` once it can train. Until then no job runs, including
 the jobs that a restart left.
 
 ``reef.train.jobs.JobLoop`` is the control plane's side. It holds the
-trainer's one training component, and optionally a ``SubmitParameters``: the
-parameters of a job that only the scenario knows when the job is submitted,
-such as its own model or its eval split, read from the trainer's committed
-``JobLoopState``. It returns the result that the trainer commits:
+trainer's one training component. It returns the result that the trainer
+commits:
 
 1. When no job runs, the trainer reserves ready job data. The pipeline's
-   sample-to-job stage gives the job's parameters, ``SubmitParameters`` adds
-   its own (a name that both give is refused), the loop submits the job, and the
+   sample-to-job stage gives the job's parameters, the loop submits it, and the
    trainer commits the submission, which consumes the records of the job's
    data.
 2. While the job runs, the trainer commits each new saved checkpoint: its
    ``release_path`` becomes a new artifact, with the checkpoint's training
    metrics. The scenario's activation rule decides whether it serves.
 3. When the job ends, the trainer commits its outcome.
+
+A recipe may subclass the loop. The harness recipe's ``HarnessJobLoop``
+(``reef.recipe.harness``) adds the parameters that only the scenario knows at
+submit time, such as its model and its eval split. It also names, on each
+checkpoint's commit, the parts of the tree that the checkpoint changed from
+the job's start, which the scenario's activation rule reads.
 
 Training is linear: the next job starts from the newest saved checkpoint,
 whether or not it serves. A restarted job replaces the trainer's start

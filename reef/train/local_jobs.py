@@ -31,18 +31,6 @@ RESULT_FILE = "result.json"
 CHECKPOINTS_FILE = "checkpoints.json"
 
 
-class JobFailed(Exception):
-    """A job that ends as failed with the metrics of what it reached, which its result keeps.
-
-    Values: ``metrics`` is a mapping that encodes as JSON, and the message is the job's error. Purpose: a
-    subclass's ``run`` raises it; the job thread writes ``metrics`` into the failed job's result.
-    """
-
-    def __init__(self, message: str, metrics: Mapping[str, Any]) -> None:
-        super().__init__(message)
-        self.metrics = dict(metrics)
-
-
 class LocalJobComponent(TrainingComponent):
     """A training component that runs each job in its own thread, one job at a time.
 
@@ -99,7 +87,7 @@ class LocalJobComponent(TrainingComponent):
         """Train ``job`` to its end and return its metrics; record each checkpoint with :meth:`save_checkpoint`.
 
         A resumed job finds the checkpoints it saved before in :meth:`saved`
-        and continues after them. Raising ends the job as failed; ``JobFailed`` also keeps its metrics.
+        and continues after them. Raising ends the job as failed.
         """
 
     def close_resources(self) -> None:
@@ -114,13 +102,7 @@ class LocalJobComponent(TrainingComponent):
         if value is None:
             return ()
         return tuple(
-            SavedCheckpoint(
-                entry["step"],
-                entry["path"],
-                entry["release_path"],
-                entry["metrics"],
-                frozenset(entry["changed_kinds"]),
-            )
+            SavedCheckpoint(entry["step"], entry["path"], entry["release_path"], entry["metrics"])
             for entry in value["checkpoints"]
         )
 
@@ -140,7 +122,6 @@ class LocalJobComponent(TrainingComponent):
                     "path": saved.path,
                     "release_path": saved.release_path,
                     "metrics": dict(saved.metrics),
-                    "changed_kinds": sorted(saved.changed_kinds),
                 }
                 for saved in (*self.saved(directory), checkpoint)
             ]
@@ -233,9 +214,6 @@ class LocalJobComponent(TrainingComponent):
                         scenario=submitted["scenario"],
                     )
                     result = {"state": "finished", "metrics": dict(self.run(job, directory))}
-                except JobFailed as exc:
-                    logger.warning("%s training job %s failed: %s", self.name, job_id, exc)
-                    result = {"state": "failed", "metrics": exc.metrics, "error": str(exc)}
                 except Exception as exc:
                     logger.exception("%s training job %s failed", self.name, job_id)
                     result = {"state": "failed", "metrics": {}, "error": f"{type(exc).__name__}: {exc}"}

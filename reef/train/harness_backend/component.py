@@ -35,12 +35,12 @@ from reef.artifact.repository import BaseArtifactSource
 from reef.core.evaluation import CandidateEvaluationPlugin, UpdateCandidate
 from reef.harness.tree import HarnessTree
 from reef.runtime.durable_files import read_json, write_json
-from reef.runtime.jobs import ReleaseFormat, SavedCheckpoint, TrainingJob
+from reef.runtime.jobs import JobStatus, ReleaseFormat, SavedCheckpoint, TrainingJob
 from reef.surface.files import TextFileTree
 from reef.train.backend import ReleaseFiles
 from reef.train.harness_backend.backend import HarnessBackend, StepProgress
 from reef.train.harness_backend.state import HarnessState
-from reef.train.local_jobs import JOB_FILE, JobFailed, LocalJobComponent
+from reef.train.local_jobs import JOB_FILE, LocalJobComponent
 
 #: The name of the component, which its jobs carry.
 HARNESS_COMPONENT = "harness"
@@ -132,14 +132,24 @@ class ProgressFile:
             written = value
 
 
+def start_tree(start: str, seed: HarnessTree) -> HarnessTree:
+    """The tree of the job start ``start``: ``seed`` for the base start ``base:<seed checksum>``, else the tree in the
+    directory ``start``. ``ValueError`` for the base start of another seed tree."""
+    if start.startswith(BASE_START_PREFIX):
+        if start != f"{BASE_START_PREFIX}{seed.checksum()}":
+            raise ValueError(f"start {start!r} is the base of another seed tree")
+        return seed
+    return HarnessTree.read(Path(start))
+
+
 class HarnessTrainingComponent(LocalJobComponent):
     """The training component whose jobs are harness evolution steps, one step per job.
 
     Values: ``steps`` is the recipe's view (``HarnessSteps``). ``root`` holds ``jobs/``, one directory per job
     (``LocalJobComponent``), and ``starts/``, the trees that ``import_start`` took. A job's weights never exist:
-    its releases are trees, so ``release_format`` is ``None``, and its checkpoint names the parts of the tree that
-    it changed (``SavedCheckpoint.changed_kinds``). A job depends only on its start, data and parameters, and on
-    the state of its scenario component, which this component keeps per scenario; so scenarios share it.
+    its releases are trees, so ``release_format`` is ``None``. A job depends only on its start, data and
+    parameters, and on the state of its scenario component, which this component keeps per scenario; so scenarios
+    share it. ``status`` of a job whose step raised carries the step's metrics and error.
 
     Purpose: ``HarnessEvolutionRecipe`` makes one, and names it in ``job_components``; the dispatcher queues its
     jobs, and the training service runs them.
@@ -215,12 +225,18 @@ class HarnessTrainingComponent(LocalJobComponent):
         return str(directory)
 
     def start_tree(self, start: str) -> HarnessTree:
-        """The tree of ``start``: the seed tree for the base start, else the tree in the directory ``start``."""
-        if start.startswith(BASE_START_PREFIX):
-            if start != self.base_start:
-                raise ValueError(f"start {start!r} is the base of another seed tree")
-            return self.steps.seed
-        return HarnessTree.read(Path(start))
+        """The tree of ``start`` (``start_tree``)."""
+        return start_tree(start, self.steps.seed)
+
+    def status(self, job_id: str) -> JobStatus:
+        status = super().status(job_id)
+        if status.state != "failed":
+            return status
+        # A job whose step raised failed with the step's metrics and error, which its outcome keeps.
+        outcome = read_json(self.job_directory(job_id) / OUTCOME_FILE)
+        if outcome is None or outcome["error"] is None:
+            return status
+        return JobStatus(job_id, "failed", status.checkpoints, metrics=outcome["metrics"], error=outcome["error"])
 
     def backend_for(self, scenario: str, component: str, scenario_model: Mapping[str, Any] | None) -> HarnessBackend:
         """The backend of ``component``'s steps in ``scenario`` on ``scenario_model``: made at the first job, and
@@ -258,35 +274,29 @@ class HarnessTrainingComponent(LocalJobComponent):
 
         The step's outcome is durable before its checkpoint, so a resumed job runs no second step. The job's metrics
         are the step's metrics when the step kept no tree; a kept tree's checkpoint carries them instead. When the
-        step raises, ``JobFailed`` with the metrics of what the step reached, ``skipped`` (``step failed``, or
-        ``instruction failed`` for an instruction's step) and ``error``.
+        step raised, the job fails: ``status`` then reports the metrics of what the step reached, ``skipped``
+        (``step failed``, or ``instruction failed`` for an instruction's step) and ``error``.
         """
         outcome = read_json(directory / OUTCOME_FILE)
         if outcome is None:
             outcome = self.run_step(job, directory)
             write_json(directory / OUTCOME_FILE, outcome)
         if outcome["error"] is not None:
-            raise JobFailed(outcome["error"], outcome["metrics"])
+            raise RuntimeError(outcome["error"])
         checkpoint = outcome["checkpoint"]
         if checkpoint is None:
             return outcome["metrics"]
         if not self.saved(directory):
             self.save_checkpoint(
                 directory,
-                SavedCheckpoint(
-                    0,
-                    checkpoint["path"],
-                    checkpoint["path"],
-                    outcome["metrics"],
-                    frozenset(checkpoint["changed_kinds"]),
-                ),
+                SavedCheckpoint(0, checkpoint["path"], checkpoint["path"], outcome["metrics"]),
             )
         return {}
 
     def run_step(self, job: TrainingJob, directory: Path) -> dict[str, Any]:
         """The settled step of ``job``: ``{steps, harness, metrics, checkpoint, error}``. ``steps`` and ``harness``
-        are the steps that ended and the state after this one; ``checkpoint`` is ``None`` or ``{path,
-        changed_kinds}`` of the tree it kept in ``directory/tree``; ``error`` is ``None`` or the error of a step that
+        are the steps that ended and the state after this one; ``checkpoint`` is ``None`` or ``{path}`` of
+        the tree it kept in ``directory/tree``; ``error`` is ``None`` or the error of a step that
         raised, which counts as a step and keeps the state."""
         parameters = job.parameters
         request = job.data.request
@@ -338,7 +348,7 @@ class HarnessTrainingComponent(LocalJobComponent):
             shutil.rmtree(tree, ignore_errors=True)
             shutil.copytree(result.artifact.local_path, tree)
             backend.discard_kept_tree()
-            checkpoint = {"path": str(tree), "changed_kinds": sorted(result.changed_kinds)}
+            checkpoint = {"path": str(tree)}
         return {
             "steps": steps + 1,
             "harness": dict(result.state),
@@ -363,4 +373,5 @@ __all__ = [
     "HarnessTrainingComponent",
     "ProgressFile",
     "read_step_progress",
+    "start_tree",
 ]

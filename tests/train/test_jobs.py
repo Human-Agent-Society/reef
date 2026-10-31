@@ -22,7 +22,7 @@ from reef.runtime.jobs import JobStatus, ReleaseFormat, SavedCheckpoint, Trainin
 from reef.sample2job import Sample2Job
 from reef.storage.samples import TrainerSamples
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
-from reef.train.jobs import JobLoop, JobLoopState, RunningJob, SubmitParameters
+from reef.train.jobs import JobLoop, JobLoopState, RunningJob
 from reef.train.pipeline import TrainingPipeline
 from reef.train.trainer import Trainer
 from reef.train.types import JobData
@@ -471,30 +471,3 @@ def test_an_sft_job_and_then_an_rl_job_each_take_the_parameters_of_their_instruc
         "TrajectorySample",
         "TaskSample",
     ]
-
-
-class ScenarioModel(SubmitParameters):
-    """The scenario's own model, read when each job is submitted, and the job that ended before it."""
-
-    def __init__(self) -> None:
-        self.model = "first"
-
-    def parameters(self, data: JobData, state: JobLoopState) -> dict[str, str | None]:
-        return {"model": self.model, "previous_job": None if state.last_job is None else state.last_job.job_id}
-
-
-@pytest.mark.unit
-def test_a_job_gets_the_parameters_that_its_scenario_knows_when_it_is_submitted(component) -> None:
-    model = ScenarioModel()
-    loop = JobLoop(component, scenario="math", submitted=model)
-    state = JobLoopState.from_dict(loop.submit(JobLoopState("fake:base"), batch(), PARAMETERS).result.state)
-    assert component.jobs[-1].parameters == {"method": "sft", "model": "first", "previous_job": None}
-    # A later job reads the scenario again, and the trainer's state after the first job; the parameters name the
-    # job, so its ID differs.
-    model.model = "second"
-    ended = loop.end(state, JobStatus(state.job.job_id, "finished"))
-    loop.submit(JobLoopState.from_dict(ended.result.state), batch(), PARAMETERS)
-    assert component.jobs[-1].parameters["model"] == "second"
-    assert component.jobs[-1].parameters["previous_job"] == state.job.job_id
-    with pytest.raises(ValueError, match="already name"):
-        loop.submit(JobLoopState("fake:base"), batch(), {"model": "the stage's"})

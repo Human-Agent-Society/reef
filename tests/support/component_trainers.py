@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -28,7 +28,7 @@ from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.surface import ComponentSurface, Surface, TextFileTree
 from reef.surface.weights import WeightLoader
 from reef.train import ComponentTrainer, Trainer
-from reef.train.jobs import JobLoop
+from reef.train.jobs import JobCommit, JobLoop, JobLoopState
 from reef.train.pipeline import TrainingPipeline
 
 WEIGHTS = "weights"
@@ -42,8 +42,9 @@ class ComponentJobs(StubTrainingComponent):
     Each job runs ``step``, which saves one checkpoint holding ``<component>.txt`` = ``<component> step <n>`` for the
     ``n``-th job, with the metrics ``{prepared}``. ``prepared`` counts the steps that started, a step that raised
     included; a step that raises records no job, so ``submit`` raises as a refused job does and the trainer's cycle
-    fails. ``reject_next`` ends the next job without a checkpoint, with ``selected: False``. ``hold_next`` makes the
-    next checkpoint change the ``HELD`` kind, which the test recipe's activation rule does not activate. ``started``
+    fails. ``reject_next`` ends the next job without a checkpoint, with ``selected: False``. ``hold_next`` adds the
+    next checkpoint's release path to ``held_paths``, whose commit ``HeldJobLoop`` names as changing the ``HELD``
+    kind, which the test recipe's activation rule does not activate. ``started``
     is the text of the last start that ``import_start`` took. A subclass blocks or fails a step in ``step``.
     """
 
@@ -54,6 +55,7 @@ class ComponentJobs(StubTrainingComponent):
         self.prepared = 0
         self.reject_next = False
         self.hold_next = False
+        self.held_paths: set[str] = set()
         self.started: str | None = None
 
     def unblock(self) -> None:
@@ -73,13 +75,9 @@ class ComponentJobs(StubTrainingComponent):
         path = self.artifact_dir / self.component / uuid.uuid4().hex
         path.mkdir(parents=True)
         (path / f"{self.component}.txt").write_text(f"{self.component} step {number}", encoding="utf-8")
-        checkpoint = SavedCheckpoint(
-            0,
-            str(path),
-            str(path),
-            {"prepared": self.prepared},
-            frozenset({HELD}) if self.hold_next else frozenset(),
-        )
+        checkpoint = SavedCheckpoint(0, str(path), str(path), {"prepared": self.prepared})
+        if self.hold_next:
+            self.held_paths.add(str(path))
         self.hold_next = False
         return JobStatus(job.job_id, "finished", (checkpoint,))
 
@@ -159,6 +157,21 @@ HELD = "held"
 MAX_STALENESS = 100
 
 
+class HeldJobLoop(JobLoop):
+    """The ``JobLoop`` of a ``ComponentJobs``: the commit of a checkpoint that ``jobs`` held names the ``HELD``
+    kind, as a harness checkpoint names the parts that it changed (``HarnessJobLoop``)."""
+
+    def __init__(self, jobs: ComponentJobs, *, scenario: str) -> None:
+        super().__init__(jobs, scenario=scenario)
+        self.jobs = jobs
+
+    def publish(self, state: JobLoopState, checkpoint: SavedCheckpoint) -> JobCommit:
+        commit = super().publish(state, checkpoint)
+        if checkpoint.release_path not in self.jobs.held_paths:
+            return commit
+        return replace(commit, result=replace(commit.result, changed_kinds=frozenset({HELD})))
+
+
 @dataclass(frozen=True)
 class _TwoTrainerRecipe(Recipe):
     """A scenario serving weights and a harness tree, each evolved by its own training component."""
@@ -215,7 +228,7 @@ class _TwoTrainerRecipe(Recipe):
                     scenario,
                     records,
                     pipeline_factory=factory_for(component),
-                    job_loop=JobLoop(backend, scenario=scenario),
+                    job_loop=HeldJobLoop(backend, scenario=scenario),
                     algorithm_state=algorithm_states.get(component),
                     experiment_logger=experiment_logger,
                     default_job_samples=1,

@@ -405,15 +405,17 @@ def test_a_win_that_changes_a_loop_waits_for_a_person_whatever_review_kinds_list
     skill_reviewed = recipe.activation_rule(PluginReference(AlwaysActivate, {"review_kinds": ["skill"]}))
     held = loop_backend(tmp_path, "held", lambda workspace, services: loop)
     with_loop = backend_step(held, batch(), HarnessState().to_json())
-    assert with_loop.metrics["selected"] is True and with_loop.changed_kinds == {"native_loop"}
+    assert with_loop.metrics["selected"] is True and frozenset(with_loop.metrics["patch_parts"].values()) == {
+        "native_loop"
+    }
     # A list that names another part holds the loop just the same.
-    assert not default.activates(MadeArtifact(None, with_loop.changed_kinds))
-    assert not skill_reviewed.activates(MadeArtifact(None, with_loop.changed_kinds))
+    assert not default.activates(MadeArtifact(None, frozenset(with_loop.metrics["patch_parts"].values())))
+    assert not skill_reviewed.activates(MadeArtifact(None, frozenset(with_loop.metrics["patch_parts"].values())))
     free = loop_backend(tmp_path, "free", lambda workspace, services: skill)
     result = backend_step(free, batch(), HarnessState().to_json())
-    assert result.metrics["selected"] is True and result.changed_kinds == {"skill"}
-    assert default.activates(MadeArtifact(None, result.changed_kinds))
-    assert not skill_reviewed.activates(MadeArtifact(None, result.changed_kinds))
+    assert result.metrics["selected"] is True and frozenset(result.metrics["patch_parts"].values()) == {"skill"}
+    assert default.activates(MadeArtifact(None, frozenset(result.metrics["patch_parts"].values())))
+    assert not skill_reviewed.activates(MadeArtifact(None, frozenset(result.metrics["patch_parts"].values())))
     # The step that takes the loop out changes it too.
     without = loop_backend(
         tmp_path,
@@ -423,8 +425,10 @@ def test_a_win_that_changes_a_loop_waits_for_a_person_whatever_review_kinds_list
         seed={**NATIVE_SEED_FILES, **LOOP_FILE},
     )
     removed = backend_step(without, batch(), HarnessState().to_json())
-    assert removed.metrics["selected"] is True and removed.changed_kinds == {"native_loop"}
-    assert not default.activates(MadeArtifact(None, removed.changed_kinds))
+    assert removed.metrics["selected"] is True and frozenset(removed.metrics["patch_parts"].values()) == {
+        "native_loop"
+    }
+    assert not default.activates(MadeArtifact(None, frozenset(removed.metrics["patch_parts"].values())))
     assert removed.metrics["patch"] == {"native/loops/main.py": None}
 
 

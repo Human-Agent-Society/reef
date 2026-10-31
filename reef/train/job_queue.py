@@ -99,23 +99,12 @@ def job_from_item(item: WorkItem) -> TrainingJob:
     )
 
 
-def json_texts(value: JsonValue, name: str) -> list[str]:
-    """``value`` as a list of non-empty strings; ``ValueError`` when it is another JSON value."""
-    if not isinstance(value, list):
-        raise ValueError(f"{name} is a list of non-empty strings")
-    texts = [item for item in value if isinstance(item, str) and item]
-    if len(texts) != len(value):
-        raise ValueError(f"{name} is a list of non-empty strings")
-    return texts
-
-
 def checkpoint_json(checkpoint: SavedCheckpoint) -> dict[str, JsonValue]:
     return {
         "step": checkpoint.step,
         "path": checkpoint.path,
         "release_path": checkpoint.release_path,
         "metrics": cast(JsonValue, dict(checkpoint.metrics)),
-        "changed_kinds": cast(JsonValue, sorted(checkpoint.changed_kinds)),
     }
 
 
@@ -129,7 +118,6 @@ def checkpoint_from_json(entry: Mapping[str, JsonValue]) -> SavedCheckpoint:
         json_text(entry.get("path"), "a checkpoint's path"),
         json_text(entry.get("release_path"), "a checkpoint's release_path"),
         json_object(entry.get("metrics"), "a checkpoint's metrics"),
-        frozenset(json_texts(entry.get("changed_kinds"), "a checkpoint's changed_kinds")),
     )
 
 
@@ -343,8 +331,9 @@ class JobExperimentRecorder(ExperimentTracker):
     ``record(event)`` gives ``event`` to ``tracker``. Then, for an event of a training job, it sets
     ``metadata["experiment"]`` of the job's item to ``tracker.experiment_run(event.context).to_dict()``
     (``WorkQueue.set_metadata``). Nothing is written when the tracker has no run for the event, or the queue
-    has no such item, such as for a job that its component runs in the trainer's own process. Each commit of a job (its submission, its
-    checkpoints and its end) records the same run, so a write after the first changes nothing.
+    has no such item, such as for a job that its component runs in the trainer's own process. Each commit of a
+    job (its submission, its checkpoints and its end) records the same run, so a write after the first changes
+    nothing.
 
     Purpose: the dispatcher of control wraps its tracker in it when the recipe trains with a training component.
     The tracker reports from control's report thread (``ExperimentReportQueue``), after each commit lands. The

@@ -374,7 +374,8 @@ The extension points those packages expose are in `Python API
     running tasks, with the history as the score cache, and ``policy.py``
     decides.
   - Release: the harness backend turns a selected tree into the step's
-    release, with the parts it changes (``changed_kinds``). The scenario
+    release, and the recipe's ``HarnessJobLoop`` names the parts that it
+    changes from the job's start (``changed_kinds``). The scenario
     committer publishes it, and the scenario's activation rule
     (``reef/evaluation/activation.py``) decides whether it serves.
   - Sync: ``reef/harness/sync.py`` moves a tree between Reef and a person's

@@ -11,12 +11,23 @@ from pathlib import Path
 
 import pytest
 from tests.support._trajectories import recorded_trajectory
-from tests.support.harness_steps import COMPONENT, PI_SEED, UNCHANGED, changed_rules, harness_backend, harness_recipe
+from tests.support.harness_steps import (
+    COMPONENT,
+    PI_SEED,
+    UNCHANGED,
+    TreeReleases,
+    changed_rules,
+    harness_backend,
+    harness_recipe,
+)
 
 from reef.artifact.files import DirectoryFiles
 from reef.core.job_data import JobData
+from reef.harness.adapters import get_adapter
 from reef.harness.tree import HarnessTree, TreePatch
+from reef.recipe.harness import HarnessJobLoop
 from reef.runtime.jobs import JobStatus, TrainingJob
+from reef.train.backend import ComponentReleases
 from reef.train.harness_backend.backend import StepProgress
 from reef.train.harness_backend.component import (
     PROGRESS_FILE,
@@ -24,6 +35,7 @@ from reef.train.harness_backend.component import (
     ProgressFile,
     read_step_progress,
 )
+from reef.train.jobs import JobLoopState, RunningJob
 
 MARKER = TreePatch(changed_rules("marker rules\n"))
 
@@ -72,7 +84,7 @@ def test_a_kept_tree_is_the_jobs_checkpoint_and_names_the_parts_it_changed(tmp_p
         assert status.state == "finished" and status.metrics == {}
         (checkpoint,) = status.checkpoints
         # The step's metrics are the checkpoint's: the job's end carries none of its own.
-        assert checkpoint.metrics["selected"] is True and checkpoint.changed_kinds == {"rules"}
+        assert checkpoint.metrics["selected"] is True
         assert checkpoint.path == checkpoint.release_path
         assert HarnessTree.read(Path(checkpoint.path)) == PI_SEED.apply(MARKER)
         # The next job starts from the checkpoint and continues the state after this job.
@@ -83,6 +95,35 @@ def test_a_kept_tree_is_the_jobs_checkpoint_and_names_the_parts_it_changed(tmp_p
         assert component.state_after("two")[0] == 2 and component.state_after(None)[0] == 0
     finally:
         component.close()
+
+
+@pytest.mark.unit
+def test_a_checkpoint_commit_names_the_parts_that_its_tree_changed_from_the_jobs_start(tmp_path: Path) -> None:
+    component = component_of(tmp_path, lambda workspace, services: MARKER)
+    component.start_jobs()
+    try:
+        component.submit(job(component, "one"))
+        (checkpoint,) = ended(component, "one").checkpoints
+    finally:
+        component.close()
+    loop = HarnessJobLoop(
+        component,
+        scenario="demo",
+        releases=ComponentReleases(TreeReleases(PI_SEED), COMPONENT),
+        model=None,
+        eval_samples=None,
+        seed=PI_SEED,
+        layout=get_adapter("pi").layout,
+    )
+    # The activation rule reads the parts: the step rewrote the rules of the base tree.
+    published = loop.publish(JobLoopState(component.base_start, RunningJob("one")), checkpoint)
+    assert published.result.artifact is not None and published.result.changed_kinds == {"rules"}
+    # From a start that holds the same tree, nothing changed.
+    again = loop.publish(JobLoopState(checkpoint.path, RunningJob("two")), checkpoint)
+    assert again.result.changed_kinds == frozenset()
+    # The harness parameters are the loop's own: the stage cannot name them.
+    with pytest.raises(ValueError, match="already name"):
+        loop.submit(JobLoopState(component.base_start), JobData("three"), {"component": "other"})
 
 
 @pytest.mark.unit

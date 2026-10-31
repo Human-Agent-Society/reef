@@ -58,6 +58,7 @@ from reef.execution.sandbox.config import build_executor
 from reef.execution.sandbox.process import ProgramExecutor
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import AdapterDescriptor, DescriptorError
+from reef.harness.adapters.parts import TreeLayout
 from reef.harness.sync import create_harness_surface
 from reef.harness.tasks.harbor_task import can_run_in_task_container
 from reef.harness.tasks.model_binding import ModelBinding, ModelBindings
@@ -70,7 +71,7 @@ from reef.recipe.errors import RecipeConfigError
 from reef.record2record import ReportRecord2Record
 from reef.record2sample.traces import TraceSamples
 from reef.runtime.executor.config import ExecutorSettings, role_executor_settings
-from reef.runtime.jobs import TrainingComponent
+from reef.runtime.jobs import SavedCheckpoint, TrainingComponent
 from reef.sample2job.traces import TraceJobData, TrainTaskJobData
 from reef.storage.records import RecordStore
 from reef.storage.samples import TrainerSamples
@@ -79,10 +80,16 @@ from reef.surface.base import ArtifactLayout, Surface
 from reef.train.backend import ComponentReleases
 from reef.train.harness_backend.agent.settings import AgentSettings, agent_settings
 from reef.train.harness_backend.backend import HarnessBackend, StepLimits
-from reef.train.harness_backend.component import HISTORY_DIR, STEPS_DIR, HarnessSteps, HarnessTrainingComponent
+from reef.train.harness_backend.component import (
+    HISTORY_DIR,
+    STEPS_DIR,
+    HarnessSteps,
+    HarnessTrainingComponent,
+    start_tree,
+)
 from reef.train.harness_backend.contract import Method
 from reef.train.harness_backend.records import StepRecord
-from reef.train.jobs import JobLoop, JobLoopState, SubmitParameters
+from reef.train.jobs import JobCommit, JobLoop, JobLoopState
 from reef.train.pipeline import PipelineSpec
 from reef.train.trainer import Trainer
 
@@ -178,28 +185,49 @@ class HarnessLayout(ArtifactLayout):
             raise ValueError(f"the harness tree fails validation: {validation.message()}")
 
 
-@dataclass(frozen=True)
-class HarnessJobParameters(SubmitParameters):
-    """The parameters of a scenario component's harness job that only the scenario knows when the job is submitted.
+class HarnessJobLoop(JobLoop):
+    """The ``JobLoop`` of a harness scenario component: each job carries the harness parameters, and each
+    checkpoint names the parts of the tree that it changed.
 
-    Values: ``releases`` reads the component's head, whose release is the job's start. ``model`` is the scenario's
-    model selection, read at each submit, so a model change reaches the next job. ``eval_samples`` is the sample
-    store whose imported eval split the job evaluates on, or ``None`` for the configured tasks.
-    ``parameters(data, state)`` is ``{component, head_release_id, evaluation_tasks, scenario_model,
-    previous_job}``: the component's name, its head release, the eval split's task paths in arrival order or
-    ``None``, the scenario's model override without its key (``InferenceProxyRuntime.model_config``) or ``None``,
-    and the ID of the last job that the trainer committed the end of (``state.last_job``), whose harness state
-    the job continues, or ``None`` before the first.
+    Values: ``component`` and ``scenario`` as ``JobLoop``. ``releases`` reads the scenario component's head, whose
+    release is the job's start. ``model`` is the scenario's model selection, or ``None``. ``eval_samples`` is the
+    sample store whose imported eval split the job evaluates on, or ``None`` for the configured tasks. ``seed`` is
+    the recipe's seed tree, the tree of the base start, and ``layout`` is the adapter's tree layout.
 
-    Purpose: ``HarnessEvolutionRecipe.build`` gives one to its trainer's ``JobLoop``;
-    ``HarnessTrainingComponent`` reads the parameters.
+    Operations: ``submit(state, data, parameters)`` is ``JobLoop.submit`` with ``harness_parameters(data,
+    state)`` added to ``parameters``; ``ValueError`` when ``parameters`` names one of them. ``publish(state,
+    checkpoint)`` is ``JobLoop.publish`` whose result's ``changed_kinds`` are the names of the parts that take a
+    path of ``start_tree(state.start).diff(checkpoint tree)``, the tree at ``checkpoint.release_path``: the parts
+    that the job's step changed, which the scenario's activation rule reads.
+
+    Purpose: ``HarnessEvolutionRecipe.build`` makes one for its trainer; ``HarnessTrainingComponent`` reads the
+    parameters.
     """
 
-    releases: ComponentReleases
-    model: ModelConfig | None
-    eval_samples: TrainerSamples | None
+    def __init__(
+        self,
+        component: TrainingComponent,
+        *,
+        scenario: str,
+        releases: ComponentReleases,
+        model: ModelConfig | None,
+        eval_samples: TrainerSamples | None,
+        seed: HarnessTree,
+        layout: TreeLayout,
+    ) -> None:
+        super().__init__(component, scenario=scenario)
+        self.releases = releases
+        self.model = model
+        self.eval_samples = eval_samples
+        self.seed = seed
+        self.layout = layout
 
-    def parameters(self, data: JobData, state: JobLoopState) -> Mapping[str, Any]:
+    def harness_parameters(self, data: JobData, state: JobLoopState) -> dict[str, Any]:
+        """``{component, head_release_id, evaluation_tasks, scenario_model, previous_job}``: the component's name,
+        its head release, the eval split's task paths in arrival order or ``None``, the scenario's model override
+        without its key (``InferenceProxyRuntime.model_config``) or ``None``, and the ID of the last job that the
+        trainer committed the end of (``state.last_job``), whose harness state the job continues, or ``None``
+        before the first."""
         tasks = (
             None
             if self.eval_samples is None
@@ -217,6 +245,19 @@ class HarnessJobParameters(SubmitParameters):
             "scenario_model": None if runtime is None else runtime.model_config(),
             "previous_job": None if state.last_job is None else state.last_job.job_id,
         }
+
+    def submit(self, state: JobLoopState, data: JobData, parameters: Mapping[str, Any]) -> JobCommit:
+        added = self.harness_parameters(data, state)
+        shared = sorted(set(added) & set(parameters))
+        if shared:
+            raise ValueError(f"the stage's job parameters already name {shared}")
+        return super().submit(state, data, {**parameters, **added})
+
+    def publish(self, state: JobLoopState, checkpoint: SavedCheckpoint) -> JobCommit:
+        commit = super().publish(state, checkpoint)
+        changes = start_tree(state.start, self.seed).diff(HarnessTree.read(Path(checkpoint.release_path))).changes
+        changed_kinds = frozenset(self.layout.part_names(changes).values())
+        return replace(commit, result=replace(commit.result, changed_kinds=changed_kinds))
 
 
 @dataclass(frozen=True)
@@ -607,14 +648,19 @@ class HarnessEvolutionRecipe(Recipe):
             raise RecipeConfigError("evolution.evaluation.imported_tasks needs the sample store of a scenario session")
         if self.harness_component is None:
             raise RecipeConfigError("harness evolution has no training component to run its steps")
-        submitted = HarnessJobParameters(
-            releases, self.scenario_model, samples if self.evaluation.imported_tasks else None
-        )
         return Trainer.build(
             scenario,
             records,
             pipeline_factory=self.build_pipeline,
-            job_loop=JobLoop(self.harness_component, scenario=scenario, submitted=submitted),
+            job_loop=HarnessJobLoop(
+                self.harness_component,
+                scenario=scenario,
+                releases=releases,
+                model=self.scenario_model,
+                eval_samples=samples if self.evaluation.imported_tasks else None,
+                seed=self.seed,
+                layout=get_adapter(self.evolution.adapter).layout,
+            ),
             algorithm_state=algorithm_state,
             report_type=self.report_type,
             experiment_logger=experiment_logger,
