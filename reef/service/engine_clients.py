@@ -1,9 +1,10 @@
 """How a separate inference service reaches the engine of each ``served_models`` row: as control reaches it.
 
 ``DeploymentEngineClients`` holds the deployment's serving runtime, built from the same configuration as control's
-and never opened, so it changes no engine. A row at the runtime's ``base_url`` uses the runtime's own request handler,
-with its dialect and its credentials. A row at another URL is a scenario's own model (its model config): it uses a
-provider proxy with the deployment's provider key, as control's runtime of that scenario does.
+and never opened, so it changes no engine. A row at a URL that the runtime serves uses the runtime's own handler for
+that URL (``InferenceRuntime.handler_for``), with its dialect and its credentials. A row at another URL is a
+scenario's own model (its model config): it uses a provider proxy with the deployment's provider key, as control's
+runtime of that scenario does.
 """
 
 from __future__ import annotations
@@ -30,8 +31,10 @@ class DeploymentEngineClients(EngineClients):
         self.proxies: dict[str, InferenceHandler] = {}
 
     def handler(self, served: ServedArtifact) -> InferenceHandler:
-        if self.runtime is not None and served.url == self.runtime.base_url:
-            return self.runtime.inference_handler
+        if self.runtime is not None:
+            own = self.runtime.handler_for(served.url)
+            if own is not None:
+                return own
         found = self.proxies.get(served.url)
         if found is None:
             found = InferenceProxyRuntime(

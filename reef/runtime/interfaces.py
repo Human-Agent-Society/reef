@@ -526,6 +526,17 @@ class InferenceRuntime(AdapterWeightRuntime):
     def inference_handler(self) -> InferenceHandler:
         """The inference request handler owned by this runtime."""
 
+    def handler_for(self, url: str) -> InferenceHandler | None:
+        """The handler of the engine at ``url`` that this runtime serves, for a process that did not open the
+        runtime, or None when the runtime serves nothing at ``url``.
+
+        A separate inference service calls it for the URL of each ``served_models`` row, and reaches a URL with no
+        handler as a plain proxy. The default gives ``inference_handler`` for ``base_url`` and None for any other
+        URL. A runtime that serves artifacts at several URLs, or whose engines need credentials or retries that a
+        plain proxy does not send, gives a handler for each of them.
+        """
+        return self.inference_handler if url == self.base_url else None
+
     def served_model_name(self, scenario: str) -> str:
         """The name under which the engine serves ``scenario``'s weights now; ``model_path`` unless a runtime serves
         each scenario under its own name."""
