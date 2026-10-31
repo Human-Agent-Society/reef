@@ -71,6 +71,15 @@ class RepositoryBackend(ArtifactRepository):
         """
         return None
 
+    def release_uri(self, ref: ArtifactRef) -> str | None:
+        """The URI of the directory of the release ``ref``, as ``ArtifactSources`` reads it, ending with ``/``.
+
+        Another scenario imports the release from this URI, also in another deployment that can read the backend's
+        storage. None, the default, when the backend keeps no copy that a URI names. Raise ``ArtifactNotFound``
+        when the backend holds no release ``ref``.
+        """
+        return None
+
     @abstractmethod
     def resolve_release(self, release_id: str | None = None) -> ArtifactRef:
         """The release ``release_id`` names: a release ID, ``"base"`` for the repository's base artifact, or
@@ -346,6 +355,18 @@ class Repository(ArtifactRepository):
         if ref.release_id in self._local_artifacts:
             return None
         return self.backend.file_downloads(ref, expires_in_seconds)
+
+    def release_uri(self, ref: ArtifactRef) -> str | None:
+        """The backend's ``release_uri`` of the durable release ``ref``; None for a release staged on this host.
+
+        Raise ``ValueError`` when the backend gives a URI that does not end with ``/``.
+        """
+        if ref.release_id in self._local_artifacts:
+            return None
+        uri = self.backend.release_uri(ref)
+        if uri is not None and not uri.endswith("/"):
+            raise ValueError(f"the repository backend gave release URI {uri!r}, which does not end with '/'")
+        return uri
 
     @property
     def base_artifact(self) -> ArtifactRef:

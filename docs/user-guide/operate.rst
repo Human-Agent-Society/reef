@@ -358,8 +358,9 @@ goes from evaluation to control, for the candidate that a rollout evaluates.
    * - ``data``
      - Serves the `data routes <../reference/http-api.rst#data-items>`__ and
        the reads of what each scenario stores, copies new records to record
-       items, and runs data imports and exports
-     - data items, record items, data sync requests
+       items and new artifacts to artifact items, and runs data imports and
+       exports
+     - data items, record items, artifact items, data sync requests
 
 Start each service with the same config and ``--component``:
 

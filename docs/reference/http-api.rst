@@ -57,7 +57,7 @@ Routes
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/records/batch``                                                     | atomically import a batch of records              |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
-| ``POST /reef/namespaces/{owner}/data``                                           | create record items                               |
+| ``POST /reef/namespaces/{owner}/data``                                           | create record and artifact items                  |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/namespaces/{owner}/data/trajectories``                              | create trajectory items from JSON Lines           |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
@@ -368,17 +368,19 @@ Data items
 Reef keeps the data that scenarios train on as data items, in one data store
 for the deployment (RFC #1028). An item is content and metadata:
 
-- The content is an ATIF trajectory, a Harbor task directory, or a record. It
-  never changes. To change data, create a new item.
+- The content is an ATIF trajectory, a Harbor task directory, a record, or a
+  reference to the files of an artifact. It never changes. To change data,
+  create a new item.
 - The metadata is a JSON object. Reef reads ``kind`` (``trajectory``,
-  ``task`` or ``record``), ``owner``, ``scenarios`` and, for a record,
-  ``origin``. ``kind``, ``owner`` and ``origin`` never change. You can add
-  other keys.
+  ``task``, ``record`` or ``artifact``), ``owner``, ``scenarios`` and
+  ``origin``: the scenario that made a record or an artifact. ``kind``,
+  ``owner`` and ``origin`` never change. You can add other keys.
 
 Each item belongs to one owner. The routes have the owner in the path:
 ``/reef/namespaces/{owner}/data``. ``scenarios`` maps each scenario that uses
 the item to its split, ``train`` or ``eval``. A trajectory is always
-``train``.
+``train``. An artifact item has no ``scenarios``: a scenario uses it by
+importing it (`Artifact items`_).
 
 The data service answers the data routes. A one-process ``reef serve`` runs
 it with the other services. When the services run in separate processes,
@@ -525,6 +527,43 @@ for example records that you keep from an older system. The content must have
 the keys above, ``request_type`` must be ``inference`` or ``report``, and the
 ID must be ``<origin scenario>/<agent_record_id>``. Otherwise Reef returns 400.
 
+Artifact items
+~~~~~~~~~~~~~~
+
+The artifact items of an owner are its artifact library: the artifacts of all
+of its scenarios, also of scenarios in other deployments that share the data
+store, and artifacts whose files you stored yourself. An artifact item is a
+reference. Its content says where the files are; the files stay there. The
+content is ``{source_uri, kind, component, content_id}``:
+
+- ``source_uri``: the directory of the files, as an import reads it (`Import
+  an artifact`_), or null when there is none.
+- ``kind``: the artifact's kind, such as ``model`` or ``model_adapter``, or
+  null.
+- ``component``: the component of the scenario that made the artifact, or null
+  for your own item.
+- ``content_id``: the artifact's content ID, or null when it is not known.
+
+The data service makes an item for each artifact that a scenario lists
+(``GET /reef/scenarios/{scenario}/artifacts``), after each commit. Its ID is
+``<scenario>/<artifact_id>``, and its ``origin`` is ``{scenario, release_id,
+artifact_id}``. Its ``source_uri`` comes from the artifact backend: a backend
+that keeps releases where other deployments can read them, such as an object
+store, gives the URI of the release's directory. The built-in ``git_lfs``
+backend gives none, so its items have a null ``source_uri``.
+
+To add files that you stored, such as an upload to an S3 prefix, create an
+item with ``POST /reef/namespaces/{owner}/data``, ``metadata`` ``{"kind":
+"artifact"}`` and no ``origin``. Its content needs a ``source_uri`` and a null
+``component``.
+
+To use an artifact item in a scenario, import it:
+``POST /reef/scenarios/{scenario}/artifacts`` with ``{"item": "<id>"}``. The
+scenario must belong to the item's owner. Reef reads the item's
+``source_uri`` and imports the files as a new artifact of the scenario; the
+import's ``source`` names the item. An item without a ``source_uri`` returns
+400.
+
 Read, query, update and delete items
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -547,7 +586,8 @@ Read, query, update and delete items
 - ``DELETE /reef/namespaces/{owner}/data/{id}`` deletes one item and returns
   ``{"owner", "id", "deleted": true, "synced"}``. The scenarios that used a
   trajectory or a task lose its copy. A record stays in each record store that
-  holds it.
+  holds it. The item of an artifact that a scenario made returns 400 while
+  the scenario exists, because the next copy would make it again.
 
 An unknown ID returns 404. A deployment without a data store returns 503.
 An item that leaves a scenario keeps its train counts there, so ``auto`` does
@@ -1654,9 +1694,10 @@ Import an artifact
 
 ``POST /reef/scenarios/{scenario}/artifacts?component=<name>`` makes a new
 artifact from the directory that a URI names. Leave out ``component`` when
-the scenario has one component. The body is ``{"source": "<uri>"}``. Reef
-checks the layout below on the source, and then copies the directory from one
-of these URIs:
+the scenario has one component. The body is ``{"source": "<uri>"}``, or
+``{"item": "<id>"}`` for an `artifact item <#artifact-items>`__ of the
+scenario's owner, whose ``source_uri`` Reef reads. Reef checks the layout
+below on the source, and then copies the directory from one of these URIs:
 
 - ``hf://org/model@revision``: a Hugging Face snapshot. When ``revision`` is a
   full 40-digit commit SHA and the component holds model weights, Reef keeps a

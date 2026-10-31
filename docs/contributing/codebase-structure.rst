@@ -372,7 +372,9 @@ The extension points those packages expose are in `Python API
   runs imports, exports and item archives, and
   ``reef/service/scenario_files.py`` reads an artifact's files and a
   scenario's training jobs. ``reef/storage/record_items.py`` copies records
-  to record items. ``create_data_app`` in ``reef/service/app.py`` builds the
+  to record items. ``reef/storage/artifact_items.py`` defines the artifact
+  items of the artifact library, and ``copy_scenario_artifacts`` in
+  ``reef/service/data_service.py`` makes them. ``create_data_app`` in ``reef/service/app.py`` builds the
   data service's app; the aiohttp adapters are ``reef/service/routes/data.py``
   and ``reef/service/routes/scenario_files.py``.
 - Is it HTTP-specific? Keep the aiohttp adapter in ``reef/service/routes/``

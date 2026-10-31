@@ -90,12 +90,26 @@ def test_metadata_says_what_an_item_is_and_which_scenarios_use_it(store):
     unserved = {**ORIGIN, "release_id": None, "artifact_id": None}
     (imported,) = store.create("acme", [NewItem("r2", {}, {"kind": "record", "origin": unserved})])
     assert imported.metadata["origin"] == unserved
+    # An artifact item has an origin when a scenario made it, and no scenarios: a scenario imports it.
+    made, uploaded = store.create(
+        "acme",
+        [
+            NewItem("coding/a1", {"source_uri": None}, {"kind": "artifact", "origin": ORIGIN}),
+            NewItem("upload-1", {"source_uri": "s3://bucket/u/"}, {"kind": "artifact"}),
+        ],
+    )
+    assert (made.metadata["origin"], made.metadata["scenarios"]) == (ORIGIN, {})
+    assert "origin" not in uploaded.metadata
+    with pytest.raises(ValueError, match="importing it"):
+        store.update("acme", ["upload-1"], {"scenarios": {"coding": "train"}})
     bad = [
         (trajectory("x", kind="dataset"), "metadata.kind"),
         (NewItem("x", ATIF, {"kind": "trajectory", "owner": "globex"}), "metadata.owner"),
         (NewItem("x", {}, {"kind": "record"}), "metadata.origin"),
         (NewItem("x", {}, {"kind": "record", "origin": {**ORIGIN, "artifact_id": ""}}), "origin.artifact_id"),
-        (trajectory("x", origin=ORIGIN), "only a record"),
+        (trajectory("x", origin=ORIGIN), "only a record or an artifact"),
+        (NewItem("x", {}, {"kind": "artifact", "scenarios": {"coding": "train"}}), "importing it"),
+        (NewItem("x", {}, {"kind": "artifact", "origin": unserved}), "names its release_id and artifact_id"),
         (trajectory("x", scenarios={"coding": "eval"}), "always train"),
         (trajectory("x", scenarios={"coding": "dev"}), "train or eval"),
         (NewItem("x", ATIF, {"kind": "task"}), "task directory"),

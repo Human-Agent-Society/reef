@@ -820,6 +820,12 @@ default returns None, and Reef then lists and serves the files of the
 materialized release itself. The artifact file list of the HTTP API gives
 these URLs to clients, so that a large artifact downloads from the storage.
 
+Such a backend also overrides ``release_uri(ref)``: the URI of the release's
+directory, ending with ``/``, in a scheme that ``ArtifactSources`` reads. The
+`artifact items <http-api.rst#artifact-items>`__ of the data store carry it,
+so that a scenario, also in another deployment, imports the release from
+there. The default returns None.
+
 ``tests/artifact/test_reef_artifacts.py`` and
 ``tests/artifact/test_reef_git_lfs.py`` show the publication and recovery
 behavior that a backend must have. ``GitLFSRepositoryBackendFactory`` is the

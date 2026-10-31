@@ -182,6 +182,7 @@ def test_dispatcher_does_not_select_a_record_backend() -> None:
         any(
             target == contract or target.startswith(contract + ".")
             for contract in (
+                "reef.storage.artifact_items",
                 "reef.storage.control_lease",
                 "reef.storage.coordination",
                 "reef.storage.data",

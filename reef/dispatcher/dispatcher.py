@@ -39,6 +39,7 @@ from reef.scenario.committer import ComponentArtifact
 from reef.scenario.registry import ScenarioLifecycle, ScenarioRegistry
 from reef.scenario.releases import ServedBesideArtifact
 from reef.scenario.scenario import Scenario
+from reef.storage.artifact_items import request_artifact_copy
 from reef.storage.coordination import Coordination, instance_id, memory_coordination
 from reef.storage.data import DataStore, check_owner
 from reef.storage.data_sync import sync_scenario_samples, uploads
@@ -332,9 +333,11 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync):
             self.local_workers.wake(instance)
 
     def scenario_committed(self, instance: Scenario) -> None:
-        """Write what ``instance`` serves now to ``served_models``, in the step of the commit that changed it."""
+        """Write what ``instance`` serves now to ``served_models``, in the step of the commit that changed it, and
+        ask the data service to copy the scenario's artifacts to artifact items."""
         if self.publisher is not None:
             self.publisher.publish(instance)
+        self.request_artifact_copy(instance.name)
 
     def scenario_reloaded(self, instance: Scenario) -> None:
         """A failure rebuilt ``instance``: ask the samples service again for the records after its progress. Its
@@ -524,9 +527,11 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync):
         Nothing serves or trains it yet; see :meth:`ScenarioCommitter.import_artifact`.
         """
         with self.registry.lock_for(scenario):
-            return self.registry.require(scenario).import_artifact(
+            imported = self.registry.require(scenario).import_artifact(
                 files, component, source=source, directory=directory
             )
+        self.request_artifact_copy(scenario)
+        return imported
 
     def current_artifact(
         self,
@@ -737,6 +742,11 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync):
         the process ends (SIGTERM), so that its supervisor starts it again as a standby."""
         self.local_workers.stop()
         signal.raise_signal(signal.SIGTERM)
+
+    def request_artifact_copy(self, scenario: str) -> None:
+        """Ask the data service to copy the artifacts of ``scenario`` to artifact items, when there is a data store."""
+        if self.data_store is not None:
+            request_artifact_copy(self.queue, scenario)
 
     def request_record_copy(self, scenario: str) -> None:
         """Ask the data service to copy the new records of ``scenario`` to record items, when there is a data store."""

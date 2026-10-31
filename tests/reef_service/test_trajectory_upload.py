@@ -214,7 +214,8 @@ def test_an_item_that_leaves_a_scenario_leaves_its_samples_and_the_item_stays(tm
             response = await client.delete(f"{DATA}/t2", headers=AUTH)
             assert response.status == 200
             assert sample_ids(dispatcher) == []
-            response = await client.get(DATA, headers=AUTH)
+            # The scenario's artifacts are in the data store too, as artifact items.
+            response = await client.get(f"{DATA}?kind=trajectory", headers=AUTH)
             assert [item["id"] for item in (await response.json())["items"]] == ["t1"]
             response = await client.get(f"{DATA}/t1", headers=AUTH)
             assert (await response.json())["content"] == atif("t1")

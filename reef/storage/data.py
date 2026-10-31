@@ -27,7 +27,7 @@ from reef.storage.tasks import SPLIT_NAMES, TaskFileStore
 
 #: The work queue of the data service: record copies, imports and exports, and the sync requests that control takes.
 DATA_QUEUE = "data"
-ItemKind = Literal["trajectory", "task", "record"]
+ItemKind = Literal["trajectory", "task", "record", "artifact"]
 ITEM_KINDS: tuple[ItemKind, ...] = get_args(ItemKind)
 #: The metadata keys that Reef reads. ``kind``, ``owner`` and ``origin`` are set at creation and never change.
 FIXED_KEYS = ("kind", "owner", "origin")
@@ -73,10 +73,13 @@ def check_scenarios(value: object, kind: ItemKind) -> dict[str, str]:
     """Return ``value`` as the ``scenarios`` metadata of an item of ``kind``, or raise ``ValueError``.
 
     ``scenarios`` maps each scenario name (the rules of ``check_owner``) to a split, ``train`` or ``eval``. A
-    trajectory and a record are always ``train``.
+    trajectory and a record are always ``train``. An artifact has no ``scenarios``: a scenario uses an artifact
+    item by importing it, so its ``scenarios`` is always empty.
     """
     if not isinstance(value, Mapping):
         raise ValueError("metadata.scenarios must be an object from scenario name to split")
+    if kind == "artifact" and value:
+        raise ValueError("a scenario uses an artifact item by importing it, so metadata.scenarios is empty")
     scenarios: dict[str, str] = {}
     for scenario, split in value.items():
         check_owner(scenario)
@@ -107,8 +110,9 @@ def created_metadata(owner: str, metadata: Mapping[str, Any]) -> dict[str, Any]:
     """The metadata that an item of ``owner`` is created with, from the client's ``metadata``.
 
     ``kind`` is required. ``owner``, when given, must be ``owner``; it is set when it is missing. ``scenarios``
-    defaults to ``{}``. ``origin`` is required for a record and refused for any other kind. Other keys are kept
-    as they are. Raise ``ValueError`` for metadata that breaks these rules.
+    defaults to ``{}``. ``origin`` is required for a record; an artifact may have one, with a non-null
+    ``release_id`` and ``artifact_id``, when a scenario made it (``reef.storage.artifact_items``); any other kind
+    refuses it. Other keys are kept as they are. Raise ``ValueError`` for metadata that breaks these rules.
     """
     if not isinstance(metadata, Mapping):
         raise ValueError("metadata must be an object")
@@ -122,8 +126,13 @@ def created_metadata(owner: str, metadata: Mapping[str, Any]) -> dict[str, Any]:
     created["scenarios"] = check_scenarios(metadata.get("scenarios", {}), kind)
     if kind == "record":
         created["origin"] = check_origin(metadata.get("origin"))
+    elif kind == "artifact" and "origin" in metadata:
+        origin = check_origin(metadata["origin"])
+        if origin["release_id"] is None or origin["artifact_id"] is None:
+            raise ValueError("an artifact item's metadata.origin names its release_id and artifact_id")
+        created["origin"] = origin
     elif "origin" in metadata:
-        raise ValueError(f"only a record has metadata.origin, not a {kind}")
+        raise ValueError(f"only a record or an artifact has metadata.origin, not a {kind}")
     return created
 
 
@@ -165,7 +174,7 @@ def patched_metadata(metadata: Mapping[str, Any], patch: Mapping[str, Any]) -> d
 class NewItem:
     """An item that a client creates.
 
-    Values: ``item_id`` passes ``check_item_id``. ``content`` is a JSON object for a trajectory or a record, and
+    Values: ``item_id`` passes ``check_item_id``. ``content`` is a JSON object for a trajectory, a record or an artifact, and
     the path of a task directory for a task; a task's ``item_id`` is the name of that directory. ``metadata`` is the client's metadata, which ``created_metadata``
     checks against the owner.
 
@@ -185,7 +194,7 @@ class StoredItem:
     ``owner`` and ``item_id`` identify the item; no two items of one owner have the same ``item_id``.
     ``metadata`` passes ``created_metadata`` for ``owner``, and its ``kind`` is the item's kind. ``digest`` is the
     SHA-256 of the content: ``json_digest`` of the JSON content, or the task file store's digest of a task
-    directory. A trajectory or a record has its JSON ``content``. A task has no ``content``: the task file store
+    directory. A trajectory, a record or an artifact has its JSON ``content``. A task has no ``content``: the task file store
     keeps its directory under ``digest``, in the owner's partition (``task_partition``).
 
     Purpose: what ``DataStore`` returns. Training reads a scenario's items, and clients read and query them.

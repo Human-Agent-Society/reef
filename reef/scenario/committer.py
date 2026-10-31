@@ -549,7 +549,7 @@ class ScenarioCommitter:
         component as the active release binds it; its parent is the chain tip,
         and it is published beside the chain. An ``"import"`` record lands at
         the next step with ``source``, the ``{"uri", "version"}`` that the
-        files were read from, as its metrics. The active release, the chain
+        files were read from (and the ``item`` of an artifact item's import), as its metrics. The active release, the chain
         tip, every training start and the activation rule are left alone.
         Raise ``ValueError`` for an unknown component, a component that takes
         no import, or files that the layout or the admission check refuses;
