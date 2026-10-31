@@ -177,6 +177,12 @@ Routes
 | ``GET /reef/status``                                                             | training, serving, and storage state              |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 
+In the split layout, the harness service answers ``GET /reef/harness``,
+``POST /reef/harness/import``, ``GET /reef/harness/releases`` and
+``GET /reef/harness/adapters``; control answers the other harness routes (`Run
+the services in separate processes
+<../user-guide/operate.rst#run-the-services-in-separate-processes>`__).
+
 Headers
 -------
 

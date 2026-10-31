@@ -318,6 +318,10 @@ goes from evaluation to control, for the candidate that a rollout evaluates.
        items and new artifacts to artifact items, and runs data imports and
        exports
      - data items, record items, artifact items, data sync requests
+   * - ``harness``
+     - Serves the routes that a harness client calls: the active tree, the
+       harness releases, the import of a person's files, and the adapters
+     - harness import requests
 
 Start each service with the same config and ``--component``:
 
@@ -330,6 +334,7 @@ Start each service with the same config and ``--component``:
    reef serve -c deploy.yaml --component training --reef.port 8904
    reef serve -c deploy.yaml --component evaluation --reef.port 8905
    reef serve -c deploy.yaml --component data --reef.port 8906
+   reef serve -c deploy.yaml --component harness --reef.port 8907
 
 A ``--component`` process starts no other child. Start the inference engines
 and the training backend that the config names on their own. All processes
@@ -350,6 +355,23 @@ records and the running step's progress under ``evolution.state_dir``. Control
 reads them for the release and request pages, so both must reach that
 directory, as they reach the artifact backend.
 
+.. _Harness clients:
+
+**Harness clients.** Send ``GET /reef/harness``, ``GET /reef/harness/releases``,
+``POST /reef/harness/import`` and ``GET /reef/harness/adapters`` to the harness
+service. It reads the commit history and the artifact backend, and loads a
+scenario without activating it. It writes no release: an import goes to control
+as a ``harness_sync`` request, control merges the files onto the newest active
+tree and commits the sync, and the harness service answers with control's
+answer. It waits up to 30 seconds for control, and answers ``503`` when control
+did not commit the import in that time; the import stays queued, and the same
+files sent again wait for the same request. The harness service needs no control
+lease, so you can run several replicas of it behind one address. The release and
+request pages, the step records and ``/reef/status`` stay with control. Set
+``harness.inference_url`` to the address at which clients reach the inference
+service: a client's layer then sends its model calls there, not to the harness
+service.
+
 Every service except inference must also reach the same data store
 (``storage.data-store``, which follows the record backend by default; see
 `Choose the data store`_). Control, training, evaluation and data must reach
@@ -362,8 +384,9 @@ layout, control does not serve these routes. The data service also answers the
 reads of what each scenario stores: the scenario list, settings, contract,
 records, commits, artifacts, samples, tasks, and evaluations with their
 rollouts. Control answers these reads too. Writes to a scenario, the buffer
-routes, the cancel of a training job, ``/reef/status`` and the harness routes
-stay with control. The data service needs no control lease,
+routes, the cancel of a training job, ``/reef/status`` and the harness pages
+stay with control; the harness client routes go to the harness service (see
+`Harness clients`_ below). The data service needs no control lease,
 so you can run several replicas of it behind one address.
 
 After each data write, the data service asks control to sync the scenarios

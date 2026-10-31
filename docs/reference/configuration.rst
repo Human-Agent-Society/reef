@@ -90,6 +90,7 @@ The public layout groups fields by their owner:
 * ``evaluation`` / ``observability``: their existing component-owned settings.
 * ``pipeline``: the stage classes that replace a weight-training recipe's own, with their config.
 * ``generator``: the generator service that writes and checks Harbor tasks and runs their rollouts.
+* ``harness``: how harness clients reach the deployment's services.
 
 A configuration file contains no process definitions. ``service`` and
 ``services`` are rejected; HTTP settings belong in ``reef``. The selected Recipe and inference
@@ -759,7 +760,7 @@ Service and storage settings
 ----------------------------
 
 The HTTP service reads these fields from the ``recipe``, ``reef``,
-``inference`` and ``storage`` sections.
+``inference``, ``harness`` and ``storage`` sections.
 
 .. config::
 
@@ -777,6 +778,7 @@ The HTTP service reads these fields from the ``recipe``, ``reef``,
    inference.upstream-model | the model to request upstream
    inference.upstream-api | openai | the provider dialect: ``openai`` for Chat Completions, ``responses`` for OpenAI Responses, or ``anthropic`` for an Anthropic-style endpoint
    inference.url | reserved: every built-in deployment refuses it, because Reef starts or names its engines itself (``inference.model-path``, ``inference.upstream-url`` or ``inference.remote``)
+   harness.inference-url | | the URL at which clients reach the inference service. A client's harness layer (``GET /reef/harness?form=client``) sends its model calls to ``<url>/reef/scenarios/<scenario>/v1``. The default is the ``service_url`` that the client gave, which is right when one process runs every service
 
 Storage paths default under ``.reef/``, which the basic and sao stacks keep;
 the openclawrl stack overrides them to ``/var/lib/reef``. Point them somewhere

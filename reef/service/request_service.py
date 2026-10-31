@@ -67,8 +67,16 @@ def normalize_request_payload(
 
 
 class RequestService:
-    def __init__(self, dispatcher: Dispatcher) -> None:
+    """The request handling of one service app over ``dispatcher``.
+
+    Values: ``inference_url`` is the address at which clients reach the inference service
+    (``harness.inference_url``), or ``None``; a client's harness layer sends its model calls there, else to the
+    address that the client gave.
+    """
+
+    def __init__(self, dispatcher: Dispatcher, *, inference_url: str | None = None) -> None:
         self._dispatcher = dispatcher
+        self.inference_url = None if inference_url is None else inference_url.rstrip("/")
         # The harness head of a scenario with several components, by scenario step and active release: it is
         # read on every inference answer and changes only when a commit lands.
         self.harness_heads: dict[str, tuple[int, str, str]] = {}
@@ -154,7 +162,7 @@ class RequestService:
         is the release rendered for the scenario's adapter, ``source`` is
         its source tree, the paths a patch names, and ``client`` is the
         release as a layer for a client that installs it at ``root``, bound
-        to ``service_url``'s route of the scenario
+        to the scenario's route at ``inference_url``, else at ``service_url``
         (``reef.harness.sync.layer_install``). The client form adds ``run``,
         the command that runs the agent on the files (``binary``, ``args``,
         ``env``), the agent's commands that record and remove the install
@@ -182,7 +190,9 @@ class RequestService:
             )
             if served is None:
                 raise ArtifactNotFound(f"scenario {scenario.name!r} evolves no harness that calls a model")
-            scenario_url = f"{service_url.rstrip('/')}/reef/scenarios/{scenario.name}"
+            # The layer's model calls go to the inference service when the deployment names its address.
+            model_url = service_url.rstrip("/") if self.inference_url is None else self.inference_url
+            scenario_url = f"{model_url}/reef/scenarios/{scenario.name}"
             layer = layer_install(HarnessTree(manifest["files"]), descriptor, served, scenario_url, root)
             manifest["files"] = dict(layer.files)
             install = descriptor.install
@@ -612,6 +622,9 @@ class RequestService:
                 "carries no harness surface (record-only or weight-training recipes have "
                 "no file tree). Point 'recipe.implementation' at a harness evolution recipe."
             )
+        if not self._dispatcher.services.runs_control:
+            # Control commits in another process: serve the release of its newest commit.
+            return self._dispatcher.follow_commits(scenario)
         return scenario
 
     def _accept(

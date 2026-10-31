@@ -172,6 +172,12 @@ def test_the_evaluation_service_runs_on_its_own_and_an_unknown_service_is_refuse
 
 
 @pytest.mark.unit
+def test_the_harness_service_needs_a_recipe_that_evolves_a_harness(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="evolves no harness, so it has no harness service"):
+        build_component_app("harness", settings(tmp_path))
+
+
+@pytest.mark.unit
 def test_reef_serve_names_one_service_with_component() -> None:
     parser = build_serve_parser()
     assert parser.parse_args(["--component", "evaluation"]).component == "evaluation"

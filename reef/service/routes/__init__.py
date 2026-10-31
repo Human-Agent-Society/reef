@@ -4,11 +4,13 @@ from aiohttp import web
 
 from reef.service.artifact_evaluations import ArtifactEvaluations
 from reef.service.artifact_imports import ArtifactImports
+from reef.service.harness_imports import DirectImports
 from reef.service.inference_service import InferenceReplica, add_inference_routes
 from reef.service.request_service import RequestService
 from reef.service.routes.artifact_imports import register_artifact_import_routes
 from reef.service.routes.data import register_data_routes
 from reef.service.routes.evaluations import register_evaluation_reads, register_evaluation_writes
+from reef.service.routes.harness import register_harness_routes
 from reef.service.routes.records import register_record_routes
 from reef.service.routes.samples import register_buffer_routes, register_sample_reads
 from reef.service.routes.scenario_files import register_scenario_file_routes
@@ -30,6 +32,8 @@ def register_routes(
     register_scenario_reads(app, request_service=request_service)
     register_scenario_writes(app, request_service=request_service, evaluations=evaluations)
     register_system_routes(app, request_service=request_service)
+    # Control commits a harness import itself.
+    register_harness_routes(app, request_service=request_service, imports=DirectImports(request_service))
     register_record_routes(app, request_service=request_service)
     if request_service.dispatcher.services.runs_data:
         register_data_routes(app, request_service=request_service)

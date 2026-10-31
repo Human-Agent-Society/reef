@@ -46,6 +46,8 @@ from reef.service.data_transfer import ArchiveWriters
 from reef.service.deploy.service_config import ServiceConfig, service_owned_keys
 from reef.service.deploy.serving import serving_runtime_config
 from reef.service.deploy.training import training_deployment_for
+from reef.service.harness_imports import HarnessSyncWorker
+from reef.service.request_service import RequestService
 from reef.service.task_import import DataScenarioStorage, TaskImport
 from reef.storage.coordination import Coordination, instance_id
 from reef.storage.data import DataStore
@@ -485,6 +487,11 @@ def build_dispatcher(
                         dispatcher.queue, LocalCandidateEndpoints(dispatcher), worker_id=instance_id("evaluation")
                     )
                 )
+        if dispatcher.services.runs_control and not dispatcher.services.runs_harness and recipe.harness_adapter:
+            # The harness service runs in another process: it sends each import here to commit.
+            dispatcher.workers.add(
+                HarnessSyncWorker(dispatcher.queue, RequestService(dispatcher), worker_id=instance_id("harness-sync"))
+            )
         if dispatcher.services.runs_data and data_store is not None:
             dispatcher.workers.add(
                 DataWorker(
@@ -562,6 +569,7 @@ def build_app(
                 ArtifactSources.from_setting(settings.artifact_sources),
                 Path(settings.artifact_cache_dir) / "imports",
             ),
+            harness_inference_url=settings.harness_inference_url,
         )
     except BaseException:
         with suppress(Exception):

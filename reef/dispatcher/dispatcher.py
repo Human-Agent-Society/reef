@@ -379,6 +379,18 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
                 "scenario %r: the commit is durable, but its served models were not written", instance.name
             )
 
+    def follow_commits(self, current: Scenario) -> Scenario:
+        """``current`` as the commit history holds it: ``current`` itself, or a new instance of the scenario when a
+        control process committed past the step that ``current`` loaded.
+
+        A process that runs no control, such as the harness service, calls it before it reads what a scenario
+        serves; control's own instance is never behind its history.
+        """
+        history = current.store.history()
+        if not history or history[-1].step <= current.scenario_step:
+            return current
+        return self.registry.reload(current.name)
+
     def scenario_reloaded(self, instance: Scenario) -> None:
         """A failure rebuilt ``instance``: ask the samples service again for the records after its progress. Its
         workers keep the failure until the samples come and the next cycle runs."""

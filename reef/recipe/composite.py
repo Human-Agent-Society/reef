@@ -249,6 +249,11 @@ class CompositeRecipe(Recipe):
             },
         )
 
+    @property
+    def harness_adapter(self) -> str | None:
+        """The adapter of the component recipe that serves a harness tree; a composite serves at most one."""
+        return next((recipe.harness_adapter for recipe in self.components.values() if recipe.harness_adapter), None)
+
     def harness_served_model(self, scenario: str, component: str, model: ModelConfig) -> ModelBinding | None:
         recipe = self.components.get(component)
         return None if recipe is None else recipe.harness_served_model(scenario, component, model)
