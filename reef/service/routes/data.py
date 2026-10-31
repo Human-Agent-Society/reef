@@ -14,6 +14,7 @@ from aiohttp import web
 
 from reef.service.auth import add_signed_download, signed_download_url
 from reef.service.data import (
+    DataAccess,
     create_items,
     create_task_items,
     create_trajectory_items,
@@ -53,18 +54,18 @@ def download_seconds(request: web.Request) -> int:
 
 
 def register_data_routes(app: web.Application, *, request_service: RequestService) -> None:
-    dispatcher = request_service.dispatcher
+    data = DataAccess.of(request_service.dispatcher)
 
     async def start(request: web.Request) -> web.Response:
         body = await read_object(request)
         segment = request.match_info["transfer"]
-        status = await asyncio.to_thread(start_transfer, dispatcher, request.match_info["owner"], segment, body)
+        status = await asyncio.to_thread(start_transfer, data, request.match_info["owner"], segment, body)
         return web.json_response(status, status=202)
 
     async def transfer(request: web.Request) -> web.Response:
         status = await asyncio.to_thread(
             transfer_status,
-            dispatcher,
+            data,
             request.match_info["owner"],
             request.match_info["transfer"],
             request.match_info["transfer_id"],
@@ -78,7 +79,7 @@ def register_data_routes(app: web.Application, *, request_service: RequestServic
             return web.json_response({"url": url, "expires_at": expires_at})
         with tempfile.TemporaryDirectory(prefix="reef-item-archive-") as work:
             file, media_type = await asyncio.to_thread(
-                item_archive, dispatcher, request.match_info["owner"], request.match_info["item_id"], Path(work)
+                item_archive, data, request.match_info["owner"], request.match_info["item_id"], Path(work)
             )
             response = web.StreamResponse(
                 headers={"Content-Type": media_type, "Content-Disposition": f'attachment; filename="{file.name}"'}
@@ -94,7 +95,7 @@ def register_data_routes(app: web.Application, *, request_service: RequestServic
 
     async def create(request: web.Request) -> web.Response:
         body = await read_object(request.clone(client_max_size=MAX_CREATE_BYTES))
-        receipt = await asyncio.to_thread(create_items, dispatcher, request.match_info["owner"], body)
+        receipt = await asyncio.to_thread(create_items, data, request.match_info["owner"], body)
         return web.json_response(receipt, status=201)
 
     async def create_trajectories(request: web.Request) -> web.Response:
@@ -111,9 +112,7 @@ def register_data_routes(app: web.Application, *, request_service: RequestServic
         owner = request.match_info["owner"]
 
         def create() -> dict[str, Any]:
-            return create_trajectory_items(
-                dispatcher, owner, jsonl_trajectories(text.splitlines(), "the body"), metadata
-            )
+            return create_trajectory_items(data, owner, jsonl_trajectories(text.splitlines(), "the body"), metadata)
 
         return web.json_response(await asyncio.to_thread(create), status=201)
 
@@ -133,15 +132,13 @@ def register_data_routes(app: web.Application, *, request_service: RequestServic
                     if size > MAX_UNPACKED_BYTES:
                         raise web.HTTPRequestEntityTooLarge(max_size=MAX_UNPACKED_BYTES, actual_size=size)
                     file.write(chunk)
-            receipt = await asyncio.to_thread(
-                create_task_items, dispatcher, request.match_info["owner"], archive, metadata
-            )
+            receipt = await asyncio.to_thread(create_task_items, data, request.match_info["owner"], archive, metadata)
         return web.json_response(receipt, status=201)
 
     async def query(request: web.Request) -> web.Response:
         listing = await asyncio.to_thread(
             query_items,
-            dispatcher,
+            data,
             request.match_info["owner"],
             kind=request.query.get("kind") or None,
             scenario=request.query.get("scenario") or None,
@@ -151,19 +148,17 @@ def register_data_routes(app: web.Application, *, request_service: RequestServic
         return web.json_response(listing)
 
     async def read(request: web.Request) -> web.Response:
-        item = await asyncio.to_thread(
-            read_item, dispatcher, request.match_info["owner"], request.match_info["item_id"]
-        )
+        item = await asyncio.to_thread(read_item, data, request.match_info["owner"], request.match_info["item_id"])
         return web.json_response(item)
 
     async def update(request: web.Request) -> web.Response:
         body = await read_object(request)
-        receipt = await asyncio.to_thread(update_items, dispatcher, request.match_info["owner"], body)
+        receipt = await asyncio.to_thread(update_items, data, request.match_info["owner"], body)
         return web.json_response(receipt)
 
     async def delete(request: web.Request) -> web.Response:
         receipt = await asyncio.to_thread(
-            delete_item, dispatcher, request.match_info["owner"], request.match_info["item_id"]
+            delete_item, data, request.match_info["owner"], request.match_info["item_id"]
         )
         return web.json_response(receipt)
 

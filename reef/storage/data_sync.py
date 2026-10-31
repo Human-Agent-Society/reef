@@ -18,7 +18,8 @@ a ``data_sync`` item in control's sync queue (``request_data_sync``). A scenario
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from abc import ABC, abstractmethod
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 
 from reef.core.job_data import TaskSample, TrajectorySample
@@ -27,6 +28,25 @@ from reef.storage.data_queue import DATA_SYNC_KIND, DATA_SYNC_QUEUE
 from reef.storage.samples import SampleStore, StoredSample
 from reef.storage.tasks import SPLIT_NAMES
 from reef.storage.work_queue import WorkItem, WorkQueue
+
+
+class ScenarioUses(ABC):
+    """What a data write asks of the scenarios that its items name.
+
+    ``scenario_owner(scenario)`` is the owner of ``scenario`` in the data store, or None when the scenario does not
+    exist. ``check_use(scenario, trajectories, train_tasks)`` raises ``ValueError`` unless ``scenario`` can train
+    on the new ``trajectories`` (pairs of item ID and sample), and on train tasks when ``train_tasks``.
+
+    Purpose: the dispatcher implements it; the data writes (``reef.service.data``) call it before they store.
+    """
+
+    @abstractmethod
+    def scenario_owner(self, scenario: str) -> str | None: ...
+
+    @abstractmethod
+    def check_use(
+        self, scenario: str, trajectories: Sequence[tuple[str, TrajectorySample]], train_tasks: bool
+    ) -> None: ...
 
 
 @dataclass(frozen=True)
@@ -158,6 +178,7 @@ def data_sync_key(scenario: str) -> str:
 
 
 __all__ = [
+    "ScenarioUses",
     "SyncResult",
     "adopt_uploads",
     "release_items",

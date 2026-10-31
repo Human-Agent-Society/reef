@@ -46,7 +46,7 @@ from reef.storage.artifact_items import request_artifact_copy
 from reef.storage.control_lease import ControlLeaseState
 from reef.storage.coordination import Coordination, instance_id
 from reef.storage.data import DataStore, check_owner
-from reef.storage.data_sync import sync_scenario_samples, uploads
+from reef.storage.data_sync import ScenarioUses, sync_scenario_samples, uploads
 from reef.storage.record_items import request_record_copy, sync_scenario_records
 from reef.storage.records import RecordRetention
 from reef.storage.samples import StoredSample
@@ -66,7 +66,7 @@ class BackgroundThreads:
     idle_unload_thread: Thread | None = None
 
 
-class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, CandidateArtifacts):
+class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, CandidateArtifacts, ScenarioUses):
     """Coordinate scenario creation, inference state, training, and model commits.
 
     A process trains the weights of one scenario on the deployment's

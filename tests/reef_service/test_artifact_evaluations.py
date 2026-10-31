@@ -367,7 +367,7 @@ def test_reef_evaluates_each_new_artifact_with_the_scenarios_settings_through_th
             new_artifacts.record_committed(replace(commit, checkpoint=False))
             queued = await until(client, lambda listing: len(listing) == 1)
             assert queued[0]["request"]["artifact_id"] == artifact_id
-            rollouts = evaluations.rollouts(queued[0]["evaluation_id"], "s")
+            rollouts = evaluations.results.rollouts(queued[0]["evaluation_id"], "s")
             assert [EvaluationRollout.from_item(item).repeat for item in rollouts] == [0, 1]
             answer = await finished(client, queued[0]["evaluation_id"])
             assert answer["state"] == "finished" and answer["mean_score"] == 1.0

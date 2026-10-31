@@ -18,7 +18,7 @@ from typing import Any
 from reef.artifact.sources import ArtifactSources
 from reef.core.errors import UnknownScenario
 from reef.dispatcher import Dispatcher
-from reef.service.data import data_store
+from reef.service.data import DataAccess
 from reef.storage.data import ItemNotFound
 
 
@@ -77,7 +77,7 @@ class ArtifactImports:
         owner = dispatcher.scenario_owner(scenario)
         if owner is None:
             raise UnknownScenario(f"unknown scenario {scenario!r}")
-        item = data_store(dispatcher).read(owner, item_id)
+        item = DataAccess.of(dispatcher).require_store().read(owner, item_id)
         if item is None:
             raise ItemNotFound(f"{owner!r} stores no item {item_id!r}")
         if item.kind != "artifact" or item.content is None:

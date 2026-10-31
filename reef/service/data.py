@@ -44,7 +44,8 @@ from reef.storage.data import (
     patched_metadata,
 )
 from reef.storage.data_queue import DATA_SYNC_QUEUE
-from reef.storage.data_sync import request_data_sync
+from reef.storage.data_sync import ScenarioUses, request_data_sync
+from reef.storage.work_queue import WorkQueue
 
 #: The most items in one create call: the most trajectories of one upload before RFC #1028.
 MAX_ITEMS_PER_CREATE = 1000
@@ -60,10 +61,30 @@ class NoDataStore(ReefError):
     """The deployment has no data store, so it serves no data route."""
 
 
-def data_store(dispatcher: Dispatcher) -> DataStore:
-    if dispatcher.data_store is None:
-        raise NoDataStore("this deployment has no data store")
-    return dispatcher.data_store
+@dataclass(frozen=True)
+class DataAccess:
+    """What the data writes and reads use of a process.
+
+    Values: ``store`` is the deployment's data store, or None for a deployment without one; ``queue`` is the work
+    queue that carries the data syncs and transfers; ``scenarios`` checks the scenarios that the items name.
+
+    Purpose: the data routes and the data service make one from their dispatcher (``of``); the functions of this
+    module and of ``reef.service.data_transfer`` read it, and no other part of the dispatcher.
+    """
+
+    store: DataStore | None
+    queue: WorkQueue
+    scenarios: ScenarioUses
+
+    @classmethod
+    def of(cls, dispatcher: Dispatcher) -> DataAccess:
+        return cls(dispatcher.data_store, dispatcher.queue, dispatcher)
+
+    def require_store(self) -> DataStore:
+        """The data store; ``NoDataStore`` for a deployment without one."""
+        if self.store is None:
+            raise NoDataStore("this deployment has no data store")
+        return self.store
 
 
 def item_json(item: StoredItem, *, content: bool) -> dict[str, Any]:
@@ -99,10 +120,10 @@ def new_use(item_id: str, kind: str, content: Mapping[str, Any] | None, split: s
     return Use(item_id, trajectory, kind == "task" and split == "train")
 
 
-def sync_touched(dispatcher: Dispatcher, owner: str, scenarios: Iterable[str], *, wait: bool = True) -> bool:
+def sync_touched(data: DataAccess, owner: str, scenarios: Iterable[str], *, wait: bool = True) -> bool:
     """Ask control to sync each scenario in ``scenarios`` with the items of ``owner``; return whether every sync
     ended, within ``SYNC_WAIT_SECONDS`` when ``wait``, or at once otherwise."""
-    queue = dispatcher.queue
+    queue = data.queue
     pending = {request_data_sync(queue, owner, scenario).id for scenario in sorted(set(scenarios))}
     deadline = time.monotonic() + (SYNC_WAIT_SECONDS if wait else 0.0)
     while pending:
@@ -118,22 +139,22 @@ def sync_touched(dispatcher: Dispatcher, owner: str, scenarios: Iterable[str], *
     return not pending
 
 
-def check_uses(dispatcher: Dispatcher, owner: str, uses: Mapping[str, list[Use]]) -> None:
+def check_uses(data: DataAccess, owner: str, uses: Mapping[str, list[Use]]) -> None:
     """Check the new uses of each scenario, step 1 of every write.
 
     Raise ``ValueError`` for an existing scenario of another owner, or one that cannot train on its new items.
     """
     for scenario, scenario_uses in sorted(uses.items()):
-        scenario_owner = dispatcher.scenario_owner(scenario)
+        scenario_owner = data.scenarios.scenario_owner(scenario)
         if scenario_owner is None:
             continue
         if scenario_owner != owner:
             raise ValueError(f"scenario {scenario!r} has the owner {scenario_owner!r}, not {owner!r}")
         trajectories = [(use.item_id, use.trajectory) for use in scenario_uses if use.trajectory is not None]
-        dispatcher.check_use(scenario, trajectories, any(use.train_task for use in scenario_uses))
+        data.scenarios.check_use(scenario, trajectories, any(use.train_task for use in scenario_uses))
 
 
-def create_items(dispatcher: Dispatcher, owner: str, body: Mapping[str, Any]) -> dict[str, Any]:
+def create_items(data: DataAccess, owner: str, body: Mapping[str, Any]) -> dict[str, Any]:
     """Create record and artifact items from ``{"items": [{"id", "content", "metadata"}]}``; return them.
 
     1 to ``MAX_ITEMS_PER_CREATE`` items, whose content follows the rules of their kind
@@ -157,7 +178,7 @@ def create_items(dispatcher: Dispatcher, owner: str, body: Mapping[str, Any]) ->
         if kind == "task":
             raise ValueError("a task item needs its files: create it with POST .../data/tasks")
         items.append(NewItem(item_id, content, metadata))
-    return store_items(dispatcher, owner, items)
+    return store_items(data, owner, items)
 
 
 def jsonl_trajectories(lines: Iterable[str], source: str) -> list[tuple[str, Mapping[str, Any]]]:
@@ -186,7 +207,7 @@ def jsonl_trajectories(lines: Iterable[str], source: str) -> list[tuple[str, Map
 
 
 def create_trajectory_items(
-    dispatcher: Dispatcher,
+    data: DataAccess,
     owner: str,
     documents: Sequence[tuple[str, Mapping[str, Any]]],
     metadata: Mapping[str, Any],
@@ -199,10 +220,10 @@ def create_trajectory_items(
     if not isinstance(metadata, Mapping) or metadata.get("kind", "trajectory") != "trajectory":
         raise ValueError("the metadata of trajectory items is an object whose kind is trajectory")
     items = [NewItem(item_id, document, {**metadata, "kind": "trajectory"}) for item_id, document in documents]
-    return store_items(dispatcher, owner, items, wait=wait)
+    return store_items(data, owner, items, wait=wait)
 
 
-def store_items(dispatcher: Dispatcher, owner: str, items: Sequence[NewItem], *, wait: bool = True) -> dict[str, Any]:
+def store_items(data: DataAccess, owner: str, items: Sequence[NewItem], *, wait: bool = True) -> dict[str, Any]:
     """Check and store 1 to ``MAX_ITEMS_PER_CREATE`` trajectory, record and artifact items of ``owner`` in one
     transaction, then sync the scenarios that they name; return ``{owner, items, synced}``, without content.
 
@@ -217,25 +238,23 @@ def store_items(dispatcher: Dispatcher, owner: str, items: Sequence[NewItem], *,
         content = cast(Mapping[str, Any], item.content)
         for scenario, split in checked["scenarios"].items():
             uses.setdefault(scenario, []).append(new_use(item.item_id, checked["kind"], content, split))
-    check_uses(dispatcher, owner, uses)
-    stored = data_store(dispatcher).create(owner, list(items))
-    synced = sync_touched(dispatcher, owner, uses, wait=wait)
+    check_uses(data, owner, uses)
+    stored = data.require_store().create(owner, list(items))
+    synced = sync_touched(data, owner, uses, wait=wait)
     return {"owner": owner, "items": [item_json(item, content=False) for item in stored], "synced": synced}
 
 
-def create_task_items(
-    dispatcher: Dispatcher, owner: str, archive: Path, metadata: Mapping[str, Any]
-) -> dict[str, Any]:
+def create_task_items(data: DataAccess, owner: str, archive: Path, metadata: Mapping[str, Any]) -> dict[str, Any]:
     """Create a task item for each Harbor task of the tar.gz ``archive``, each with ``metadata``; return them.
 
     Raise ``ValueError`` for an archive that ``unpack_task_archive`` refuses, and as ``create_task_directories``.
     """
     with tempfile.TemporaryDirectory(prefix="reef-task-items-") as work:
-        return create_task_directories(dispatcher, owner, unpack_task_archive(archive, Path(work)), metadata)
+        return create_task_directories(data, owner, unpack_task_archive(archive, Path(work)), metadata)
 
 
 def create_task_directories(
-    dispatcher: Dispatcher,
+    data: DataAccess,
     owner: str,
     directories: Sequence[Path],
     metadata: Mapping[str, Any],
@@ -261,16 +280,16 @@ def create_task_directories(
         scenario: [new_use(directory.name, "task", None, split) for directory in directories]
         for scenario, split in scenarios.items()
     }
-    check_uses(dispatcher, owner, new_uses)
-    stored = data_store(dispatcher).create(
+    check_uses(data, owner, new_uses)
+    stored = data.require_store().create(
         owner, [NewItem(directory.name, directory, {**metadata, "kind": "task"}) for directory in directories]
     )
-    synced = sync_touched(dispatcher, owner, scenarios, wait=wait)
+    synced = sync_touched(data, owner, scenarios, wait=wait)
     return {"owner": owner, "items": [item_json(item, content=False) for item in stored], "synced": synced}
 
 
 def query_items(
-    dispatcher: Dispatcher, owner: str, *, kind: str | None, scenario: str | None, after: int, limit: int
+    data: DataAccess, owner: str, *, kind: str | None, scenario: str | None, after: int, limit: int
 ) -> dict[str, Any]:
     """The items of ``owner`` after ``after``, at most ``limit``: ``{owner, items, next}``, without content.
 
@@ -279,7 +298,7 @@ def query_items(
     if kind is not None and kind not in KINDS:
         raise ValueError(f"kind must be one of {', '.join(ITEM_KINDS)}, got {kind!r}")
     checked_kind = None if kind is None else KINDS[kind]
-    found = data_store(dispatcher).query(owner, kind=checked_kind, scenario=scenario, after=after, limit=limit)
+    found = data.require_store().query(owner, kind=checked_kind, scenario=scenario, after=after, limit=limit)
     return {
         "owner": owner,
         "items": [item_json(item, content=False) for item in found],
@@ -287,15 +306,15 @@ def query_items(
     }
 
 
-def read_item(dispatcher: Dispatcher, owner: str, item_id: str) -> dict[str, Any]:
+def read_item(data: DataAccess, owner: str, item_id: str) -> dict[str, Any]:
     """One item of ``owner`` with its content; ``ItemNotFound`` for an unknown ID."""
-    item = data_store(dispatcher).read(owner, item_id)
+    item = data.require_store().read(owner, item_id)
     if item is None:
         raise ItemNotFound(f"{owner!r} stores no item {item_id!r}")
     return {"owner": owner, **item_json(item, content=True)}
 
 
-def update_items(dispatcher: Dispatcher, owner: str, body: Mapping[str, Any]) -> dict[str, Any]:
+def update_items(data: DataAccess, owner: str, body: Mapping[str, Any]) -> dict[str, Any]:
     """Apply ``{"ids": [...], "patch": {...}}``, one JSON merge patch on each item's metadata; return the items.
 
     The scenarios that the patch adds to an item, or moves to another split, are checked first. Raise
@@ -307,7 +326,7 @@ def update_items(dispatcher: Dispatcher, owner: str, body: Mapping[str, Any]) ->
         raise ValueError("the body holds only 'ids', an array of item IDs, and 'patch', a JSON merge patch")
     if not 1 <= len(ids) <= MAX_QUERY_LIMIT:
         raise ValueError(f"an update names 1 to {MAX_QUERY_LIMIT} items")
-    store = data_store(dispatcher)
+    store = data.require_store()
     current = touched_items(store, owner, ids)
     uses: dict[str, list[Use]] = {}
     touched: set[str] = set()
@@ -317,28 +336,28 @@ def update_items(dispatcher: Dispatcher, owner: str, body: Mapping[str, Any]) ->
         for scenario, split in after.items():
             if item.scenarios.get(scenario) != split:
                 uses.setdefault(scenario, []).append(new_use(item.item_id, item.kind, item.content, split))
-    check_uses(dispatcher, owner, uses)
+    check_uses(data, owner, uses)
     updated = store.update(owner, ids, patch)
-    synced = sync_touched(dispatcher, owner, touched)
+    synced = sync_touched(data, owner, touched)
     return {"owner": owner, "items": [item_json(item, content=False) for item in updated], "synced": synced}
 
 
-def delete_item(dispatcher: Dispatcher, owner: str, item_id: str) -> dict[str, Any]:
+def delete_item(data: DataAccess, owner: str, item_id: str) -> dict[str, Any]:
     """Delete one item of ``owner``; the scenarios that used it lose its upload. ``ItemNotFound`` if unknown.
 
     Raise ``ValueError`` for the artifact item of an artifact that a scenario of ``owner`` made while the scenario
     exists: the next artifact copy would make the item again (``reef.storage.artifact_items``).
     """
-    store = data_store(dispatcher)
+    store = data.require_store()
     (item,) = touched_items(store, owner, [item_id])
     if item.kind == "artifact" and "origin" in item.metadata:
         made_by = item.metadata["origin"]["scenario"]
-        if dispatcher.scenario_owner(made_by) == owner:
+        if data.scenarios.scenario_owner(made_by) == owner:
             raise ValueError(
                 f"artifact item {item_id!r} lists an artifact of scenario {made_by!r}, which still exists"
             )
     store.delete(owner, item_id)
-    synced = sync_touched(dispatcher, owner, item.scenarios)
+    synced = sync_touched(data, owner, item.scenarios)
     return {"owner": owner, "id": item_id, "deleted": True, "synced": synced}
 
 
@@ -371,12 +390,12 @@ def parsed_metadata(text: str | None) -> Mapping[str, Any]:
 __all__ = [
     "MAX_ITEMS_PER_CREATE",
     "SYNC_WAIT_SECONDS",
+    "DataAccess",
     "NoDataStore",
     "create_items",
     "create_task_directories",
     "create_task_items",
     "create_trajectory_items",
-    "data_store",
     "delete_item",
     "item_json",
     "jsonl_trajectories",

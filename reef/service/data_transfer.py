@@ -33,13 +33,12 @@ from typing import Any, cast
 from urllib.parse import unquote, urlsplit
 
 from reef.artifact.sources import ArtifactSources
-from reef.dispatcher import Dispatcher
 from reef.service.data import (
     KINDS,
     MAX_ITEMS_PER_CREATE,
+    DataAccess,
     create_task_directories,
     create_trajectory_items,
-    data_store,
     jsonl_trajectories,
 )
 from reef.storage.data import MAX_QUERY_LIMIT, ItemNotFound, StoredItem, check_owner
@@ -52,7 +51,7 @@ TRANSFER_KINDS = {"imports": DATA_IMPORT_KIND, "exports": DATA_EXPORT_KIND}
 IMPORT_ITEM_KINDS = ("task", "trajectory")
 
 
-def start_transfer(dispatcher: Dispatcher, owner: str, segment: str, body: Mapping[str, Any]) -> dict[str, Any]:
+def start_transfer(data: DataAccess, owner: str, segment: str, body: Mapping[str, Any]) -> dict[str, Any]:
     """Check the request ``body`` of an import or an export of ``owner`` and queue it; return its status.
 
     An import body is ``{uri, metadata}``, whose ``metadata.kind`` is one of ``IMPORT_ITEM_KINDS``. An export body
@@ -83,13 +82,13 @@ def start_transfer(dispatcher: Dispatcher, owner: str, segment: str, body: Mappi
         if body.get("kind") is not None and body["kind"] not in KINDS:
             raise ValueError(f"an export's kind is one of {', '.join(KINDS)}")
     payload = cast(dict[str, JsonValue], {"owner": owner, **body})
-    item = dispatcher.queue.add(NewWork(DATA_QUEUE, f"{kind}:{uuid.uuid4().hex}", owner, kind, payload))
+    item = data.queue.add(NewWork(DATA_QUEUE, f"{kind}:{uuid.uuid4().hex}", owner, kind, payload))
     return transfer_json(item)
 
 
-def transfer_status(dispatcher: Dispatcher, owner: str, segment: str, transfer_id: str) -> dict[str, Any]:
+def transfer_status(data: DataAccess, owner: str, segment: str, transfer_id: str) -> dict[str, Any]:
     """The status of the import or export ``transfer_id`` of ``owner``; ``ItemNotFound`` for another ID."""
-    item = dispatcher.queue.get(DATA_QUEUE, transfer_id)
+    item = data.queue.get(DATA_QUEUE, transfer_id)
     if item is None or item.kind != TRANSFER_KINDS[segment] or item.payload.get("owner") != owner:
         raise ItemNotFound(f"{owner!r} has no {segment[:-1]} {transfer_id!r}")
     return transfer_json(item)
@@ -108,7 +107,7 @@ def transfer_json(item: WorkItem) -> dict[str, Any]:
     }
 
 
-def run_import(dispatcher: Dispatcher, sources: ArtifactSources, payload: Mapping[str, Any]) -> dict[str, JsonValue]:
+def run_import(data: DataAccess, sources: ArtifactSources, payload: Mapping[str, Any]) -> dict[str, JsonValue]:
     """Import the files at ``payload["uri"]`` as items of ``payload["owner"]``; return ``{items}``, the count."""
     owner, uri, metadata = payload["owner"], payload["uri"], payload["metadata"]
     with tempfile.TemporaryDirectory(prefix="reef-data-import-") as work:
@@ -129,7 +128,7 @@ def run_import(dispatcher: Dispatcher, sources: ArtifactSources, payload: Mappin
                 if not name:
                     raise ValueError(f"{uri} holds one task, and its path names no directory to name it after")
                 directories = [root.rename(Path(work) / name)]
-            create_task_directories(dispatcher, owner, directories, metadata, wait=False)
+            create_task_directories(data, owner, directories, metadata, wait=False)
             return {"items": len(directories)}
         files = sorted(root.glob("*.jsonl"))
         if not files:
@@ -144,15 +143,13 @@ def run_import(dispatcher: Dispatcher, sources: ArtifactSources, payload: Mappin
         if repeated:
             raise ValueError(f"{uri} holds the session_ids {repeated} in more than one file")
         for start in range(0, len(documents), MAX_ITEMS_PER_CREATE):
-            create_trajectory_items(
-                dispatcher, owner, documents[start : start + MAX_ITEMS_PER_CREATE], metadata, wait=False
-            )
+            create_trajectory_items(data, owner, documents[start : start + MAX_ITEMS_PER_CREATE], metadata, wait=False)
         return {"items": len(documents)}
 
 
-def run_export(dispatcher: Dispatcher, writers: ArchiveWriters, payload: Mapping[str, Any]) -> dict[str, JsonValue]:
+def run_export(data: DataAccess, writers: ArchiveWriters, payload: Mapping[str, Any]) -> dict[str, JsonValue]:
     """Write the items that ``payload`` selects to a tar.gz at ``payload["uri"]``; return ``{items, bytes}``."""
-    store = data_store(dispatcher)
+    store = data.require_store()
     owner = payload["owner"]
     ids = payload.get("ids")
     items: list[StoredItem] = []
@@ -193,13 +190,13 @@ def run_export(dispatcher: Dispatcher, writers: ArchiveWriters, payload: Mapping
     return {"items": len(items), "bytes": size}
 
 
-def item_archive(dispatcher: Dispatcher, owner: str, item_id: str, directory: Path) -> tuple[Path, str]:
+def item_archive(data: DataAccess, owner: str, item_id: str, directory: Path) -> tuple[Path, str]:
     """Write the archive of the item ``item_id`` of ``owner`` into ``directory``; return its file and media type.
 
     A task's archive is the tar.gz of its files under its name; another item's is its content as JSON. Raise
     ``ItemNotFound`` for an unknown ID.
     """
-    store = data_store(dispatcher)
+    store = data.require_store()
     item = store.read(owner, item_id)
     if item is None:
         raise ItemNotFound(f"{owner!r} stores no item {item_id!r}")

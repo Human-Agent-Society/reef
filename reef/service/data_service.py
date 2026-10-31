@@ -19,7 +19,7 @@ from collections.abc import Mapping, Sequence
 from reef.artifact.sources import ArtifactSources
 from reef.dispatcher import Dispatcher
 from reef.execution.workers import QueueWorker
-from reef.service.data import MAX_ITEMS_PER_CREATE, NoDataStore, data_store
+from reef.service.data import MAX_ITEMS_PER_CREATE, DataAccess, NoDataStore
 from reef.service.data_transfer import ArchiveWriters, run_export, run_import
 from reef.storage.artifact_items import artifact_item
 from reef.storage.data import ItemConflict, ItemNotFound, NewItem
@@ -44,7 +44,7 @@ def copy_scenario_artifacts(dispatcher: Dispatcher, scenario: str) -> int:
     owner = dispatcher.record_storage.read_settings(scenario).owner
     if owner is None:
         return 0
-    store = data_store(dispatcher)
+    store = DataAccess.of(dispatcher).require_store()
     with dispatcher.locked_scenario(scenario) as current:
         surface = current.surface
         missing: list[NewItem] = []
@@ -93,7 +93,10 @@ class RecordCopy(DataJob):
     def run(self, item: WorkItem) -> Mapping[str, JsonValue]:
         dispatcher = self.dispatcher
         pages = copy_scenario_records(
-            dispatcher.record_storage, data_store(dispatcher), dispatcher.coordination.marks, item.scenario
+            dispatcher.record_storage,
+            DataAccess.of(dispatcher).require_store(),
+            dispatcher.coordination.marks,
+            item.scenario,
         )
         return {"pages": pages}
 
@@ -120,7 +123,7 @@ class DataImport(DataJob):
         self.sources = sources
 
     def run(self, item: WorkItem) -> Mapping[str, JsonValue]:
-        return run_import(self.dispatcher, self.sources, item.payload)
+        return run_import(DataAccess.of(self.dispatcher), self.sources, item.payload)
 
 
 class DataExport(DataJob):
@@ -133,7 +136,7 @@ class DataExport(DataJob):
         self.writers = writers
 
     def run(self, item: WorkItem) -> Mapping[str, JsonValue]:
-        return run_export(self.dispatcher, self.writers, item.payload)
+        return run_export(DataAccess.of(self.dispatcher), self.writers, item.payload)
 
 
 def data_jobs(dispatcher: Dispatcher, sources: ArtifactSources, writers: ArchiveWriters) -> tuple[DataJob, ...]:
