@@ -1,4 +1,4 @@
-"""Loopback HTTP transport for an author's task checks and result polls."""
+"""Loopback HTTP transport for a Designer's task checks and result polls."""
 
 from __future__ import annotations
 
@@ -13,11 +13,11 @@ from reef.recipe.reefine.trial import trial_script
 
 
 class CheckGateway:
-    """Serve WorkspaceTools on a token-prefixed loopback URL for one author run.
+    """Serve WorkspaceTools on a token-prefixed loopback URL for one Designer run.
 
     Values: ``tools`` implements WorkspaceTools, ``token`` is a random URL token,
     and ``server`` is either None (stopped) or the running loopback HTTP server.
-    Purpose: ClaudeCodeAuthor starts the server for task_check.py and stops it
+    Purpose: ClaudeCodeDesigner starts the server for task_check.py and stops it
     after the run. Only POST /check and /trial reach tools. All other routes
     return 404. The gateway has no model binding, provider, or model-call budget.
     """

@@ -536,7 +536,7 @@ def test_a_generation_past_its_deadline_is_skipped(tmp_path: Path) -> None:
 
 
 def sourced(name: str, *record_ids: str, port: int, designer_record_id: str = "") -> HarborTask:
-    """A task made from ``record_ids``; ``designer_record_id`` names the one that is the author's own record."""
+    """A task made from ``record_ids``; ``designer_record_id`` names the one that is the Designer's own record."""
     task = task_for(name, record_ids[0], port)
     metadata = {**task.metadata, "designer_record_id": designer_record_id} if designer_record_id else task.metadata
     return dataclasses.replace(task, source_agent_record_ids=record_ids, metadata=metadata)
@@ -550,7 +550,7 @@ def test_a_task_joins_the_split_of_its_sources_and_a_task_that_joins_both_splits
     task_generator = ScriptedGenerator([(follower, bridge, renamed)])
     pipeline, _ = rounds(tmp_path, task_generator)
     store = pipeline.record2sample.task_store
-    # The author's record is a source of a train task too; it must not join the follower to the train split.
+    # The Designer's record is a source of a train task too; it must not join the follower to the train split.
     earlier = (
         sourced("train-task", "designer-1", "train-source", port=9100, designer_record_id="designer-1"),
         sourced("eval-task", "eval-source", port=9101),
