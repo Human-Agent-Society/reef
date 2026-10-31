@@ -146,15 +146,20 @@ Change the deployment's evaluation and add a ``pipeline`` section:
        module: reef.sample2job.traces:TrainTaskJobData
        config: {buffer_size: 4}
 
-Then upload Harbor task directories. The first train task starts the run:
+Then upload Harbor task directories as task items of the scenario's owner,
+which is the scenario's own name unless it was given another. Each item's
+metadata names the scenario and the split. The first train task starts the
+run:
 
 .. code:: bash
 
    tar -czf train.tar.gz -C <tasks-directory> <task-a> <task-b>
-   curl -f "http://127.0.0.1:8901/reef/scenarios/<scenario>/tasks?split=train" \
+   curl -f "http://127.0.0.1:8901/reef/namespaces/<scenario>/data/tasks" \
+     --get --data-urlencode 'metadata={"scenarios": {"<scenario>": "train"}}' -X POST \
      -H "Content-Type: application/gzip" --data-binary @train.tar.gz
    tar -czf eval.tar.gz -C <tasks-directory> <task-c>
-   curl -f "http://127.0.0.1:8901/reef/scenarios/<scenario>/tasks?split=eval" \
+   curl -f "http://127.0.0.1:8901/reef/namespaces/<scenario>/data/tasks" \
+     --get --data-urlencode 'metadata={"scenarios": {"<scenario>": "eval"}}' -X POST \
      -H "Content-Type: application/gzip" --data-binary @eval.tar.gz
 
 Run the example
@@ -308,9 +313,9 @@ split of the scenario's imported tasks:
 - The eval split is the evaluation's task source. The stage needs a scorer
   and task directories (see `Task directories`_).
 
-Upload tasks with ``POST /reef/scenarios/<scenario>/tasks?split=train`` or
-``?split=eval`` (`Upload Harbor tasks
-<../reference/http-api.rst#upload-harbor-tasks>`__), or import them with the
+Upload tasks as task items whose metadata names the scenario in the ``train``
+or ``eval`` split (`Create task items
+<../reference/http-api.rst#create-task-items>`__), or import them with the
 deployment's ``task-import`` section.
 
 Evaluation: the publication policy

@@ -619,9 +619,9 @@ store: they are tasks in the scenario's ``SampleStore``, which the factory
 gives to ``Recipe.build_trainers`` as ``samples`` and every component reads
 from ``PipelineContext.samples``.
 
-The service takes a task upload (``POST /reef/scenarios/{scenario}/tasks``)
-to the ``train`` split only when a trainer of the scenario trains imported
-tasks (``Trainer.accepts_imported_tasks``). A sample-to-job stage that trains
+The service takes a task item in the ``train`` split of a scenario
+(``POST /reef/namespaces/{owner}/data/tasks``) only when a trainer of the
+scenario trains imported tasks (``Trainer.accepts_imported_tasks``). A sample-to-job stage that trains
 them sets the class attribute ``accepts_imported_tasks``. An upload to the
 ``eval`` split is open to every recipe, because an evaluation runs those
 tasks.
