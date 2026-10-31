@@ -34,10 +34,11 @@ from reef.recipe import Recipe
 from reef.record2record import InferenceRecord2Record
 from reef.record2sample import NoSamples
 from reef.storage.records import RecordStore
-from reef.storage.samples import SampleStore
+from reef.storage.samples import TrainerSamples
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.tasks import TaskStorage
+from reef.train.backend import ComponentReleases
 from reef.train.jobs import JobLoop, JobLoopState, RunningJob
 from reef.train.pipeline import TrainingPipeline
 from reef.train.trainer import Trainer
@@ -310,7 +311,8 @@ class BackgroundStepRecipe(TestPolicyRecipe):
         algorithm_state: Mapping[str, object] | None = None,
         experiment_logger: ExperimentLogger | None = None,
         task_storage: TaskStorage | None = None,
-        samples: SampleStore | None = None,
+        releases: ComponentReleases | None = None,
+        samples: TrainerSamples | None = None,
     ) -> Trainer:
         return Trainer.build(
             scenario,

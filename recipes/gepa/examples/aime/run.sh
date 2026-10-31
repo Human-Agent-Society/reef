@@ -7,7 +7,7 @@ cd "$(dirname "$0")"
 mkdir -p work
 
 # Env defaults: the work directory gepa.yaml interpolates, the task model
-# under evolution, the pinned pi binary, and the rollout concurrency. run.py reads OPENAI_API_KEY
+# under evolution, the pinned pi binary, and the run concurrency. run.py reads OPENAI_API_KEY
 # itself, and only for a live run: --dry-run needs no key.
 : "${REEF_WORK:=$PWD/work}"
 : "${REEF_MODEL:=gpt-4.1-mini-2025-04-14}"
@@ -17,8 +17,8 @@ mkdir -p work
 export REEF_WORK REEF_MODEL REEF_PI_BINARY REEF_GEPA_WORKERS REEF_GEPA_EXECUTOR
 
 # The driver owns the whole run: it embeds the Reef service (gepa.yaml's
-# recipe on an ephemeral port), runs the minibatch rollouts against it,
+# recipe on an ephemeral port), runs the minibatch runs against it,
 # reports every score, and seals the two test passes under ./work. The
-# repository root on PYTHONPATH exposes recipes.gepa.recipe, the method
+# repository root on PYTHONPATH exposes recipes.gepa, the method
 # gepa.yaml names.
 PYTHONPATH=../../../.. python3 run.py "$@"

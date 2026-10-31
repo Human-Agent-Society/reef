@@ -80,14 +80,15 @@ def to_json_value(value: Any) -> Any:
 
 
 #: What a commit record does: a training step, the activation of an artifact, a trainer's new training start, an
-#: import, or the start or the end of serving an artifact beside the active release.
-CommitOperation = Literal["training", "activate", "train_from", "import", "serve", "stop_serving"]
+#: import, a sync of a person's tree that is active and the training start at once, or the start or the end of
+#: serving an artifact beside the active release.
+CommitOperation = Literal["training", "activate", "train_from", "import", "sync", "serve", "stop_serving"]
 
 
 @dataclass(frozen=True, kw_only=True, eq=False)
 class CommitRecord:
-    """One committed step of a scenario: a training step, an activation, a new training start, an import, or a
-    change of the artifacts served beside the active release.
+    """One committed step of a scenario: a training step, an activation, a new training start, an import, a sync,
+    or a change of the artifacts served beside the active release.
 
     Values: ``scenario`` is a non-empty name and ``step`` a positive int.
     ``recorded_at`` is the time of the commit in seconds. ``operation`` is a
@@ -128,6 +129,12 @@ class CommitRecord:
       where the content was read from, and ``source.item`` names the
       artifact item of an import of one; it is no part of the artifact's
       identity.
+    - ``"sync"``: ``artifact_ref`` is a release that the sync published
+      beside the chain from a person's merged tree. ``checkpoint`` is true.
+      ``component`` and ``components`` are as for an ``"import"`` record.
+      In this one commit the release becomes the active release and the
+      training start of the component's trainer. ``metrics`` is the sync's
+      own description (``None`` or an object), not trainer state.
     - ``"serve"``: Reef serves one artifact beside the active release from
       now on. ``artifact_ref`` is the release that serves it, and the served
       artifact is the one that it binds as ``component``. In a scenario of
@@ -139,12 +146,12 @@ class CommitRecord:
       ``"serve"`` record with the same ``artifact_ref``, ``component`` and
       ``components``.
 
-    An ``"activate"``, ``"train_from"``, ``"import"``, ``"serve"`` or
+    An ``"activate"``, ``"train_from"``, ``"import"``, ``"sync"``, ``"serve"`` or
     ``"stop_serving"`` record carries no trainer state and is not
     ``activated``: ``algorithm_state`` and
     ``training_job_id`` are ``None``, ``metrics`` is ``None`` except for an
-    import's source, both high-water values are 0 and
-    ``consumed_ids`` is empty. Only an ``"import"`` record among them has
+    import's source and a sync's own metrics, both high-water values are 0 and
+    ``consumed_ids`` is empty. Only an ``"import"`` or ``"sync"`` record among them has
     ``checkpoint`` set.
 
     ``algorithm_state`` and ``metrics`` hold JSON values: the constructor
@@ -155,7 +162,8 @@ class CommitRecord:
     Purpose: the scenario committer makes the records and appends them to the
     commit history. Recovery reads them back: trainer state from training
     records, the active release from :func:`active_record`, and each
-    trainer's training start from its newest ``"train_from"`` record.
+    trainer's training start from its newest record that
+    ``sets_training_start``.
     """
 
     scenario: str
@@ -215,15 +223,15 @@ class CommitRecord:
         ):
             raise CommitHistoryError("commit record training_job_id must be a non-empty string or null")
         if self.operation != "training":
-            imports = self.operation == "import"
-            if self.checkpoint != imports:
-                made = "makes an artifact" if imports else "makes no artifact"
-                raise CommitHistoryError(f"a {self.operation} commit {made}: its checkpoint is {imports}")
+            publishes = self.operation in ("import", "sync")
+            if self.checkpoint != publishes:
+                made = "makes an artifact" if publishes else "makes no artifact"
+                raise CommitHistoryError(f"a {self.operation} commit {made}: its checkpoint is {publishes}")
             carried = [
                 name
                 for name, value in (
                     ("algorithm_state", self.algorithm_state is not None),
-                    ("metrics", self.metrics is not None and self.operation != "import"),
+                    ("metrics", self.metrics is not None and not publishes),
                     ("training_job_id", self.training_job_id is not None),
                     ("high_water_sequence", self.high_water_sequence != 0),
                     ("high_water_offset", self.high_water_offset != 0),
@@ -251,7 +259,7 @@ class CommitRecord:
                 )
         if self.operation == "train_from" and self.components is not None:
             raise CommitHistoryError("a train_from commit publishes no release and carries no components")
-        if self.operation in ("activate", "import", "serve", "stop_serving") and (
+        if self.operation in ("activate", "import", "sync", "serve", "stop_serving") and (
             (self.component is None) != (self.components is None)
             or (self.components is not None and self.component not in self.components)
         ):
@@ -273,7 +281,8 @@ class CommitRecord:
 
     @property
     def made_artifact(self) -> bool:
-        """Whether ``artifact_ref`` made a new artifact: a training step that saved a checkpoint, or an import."""
+        """Whether ``artifact_ref`` made a new artifact: a training step that saved a checkpoint, an import, or a
+        sync."""
         return self.checkpoint
 
     @property
@@ -283,10 +292,16 @@ class CommitRecord:
         return self.operation == "training" and self.checkpoint
 
     @property
+    def sets_training_start(self) -> bool:
+        """Whether ``artifact_ref`` becomes the training start of the record's trainer: a new training start, a
+        sync, or a training step that saved an artifact."""
+        return self.operation in ("train_from", "sync") or self.trained_artifact
+
+    @property
     def activates(self) -> bool:
-        """Whether ``artifact_ref`` is the active release after this record: an activation, or a training step whose
-        release the activation rule activated."""
-        return self.operation == "activate" or self.activated
+        """Whether ``artifact_ref`` is the active release after this record: an activation, a sync, or a training
+        step whose release the activation rule activated."""
+        return self.operation in ("activate", "sync") or self.activated
 
     def to_dict(self) -> dict[str, Any]:
         record_progress: dict[str, Any] = {

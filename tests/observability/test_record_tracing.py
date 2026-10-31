@@ -6,7 +6,7 @@ import json
 import time
 
 import pytest
-from tests.reef_service.test_skill_delivery import FakeStream
+from tests.reef_service.test_sse_streams import FakeStream
 from tests.support._policy_recipe import TestPolicyRecipe
 from tests.support.artifact_versions import ImportingComponent, finished_jobs
 from tests.support.runtime_stubs import runtime_bindings

@@ -445,7 +445,7 @@ class RolloutRunner[RolloutT](ABC):
 
     Values: an implementation holds what all its rollouts share, such as the environment and the model endpoint.
     ``RolloutT`` is the result of one rollout, with its trajectory. The Harbor agent runner
-    (``TaskRolloutRunner``) and the harness tree runner (``HarnessRolloutEvaluator``) implement it.
+    (``TaskRolloutRunner``) and the harness tree runner (``HarnessTaskEvaluator``) implement it.
     Purpose: a harness evaluation, a checkpoint evaluation and training on tasks run their rollouts through it.
     To run a task ``count`` times, a caller repeats its request ``count`` times.
     """

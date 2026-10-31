@@ -147,8 +147,9 @@ class CommitExperimentObserver(RecordObserver):
 
     @staticmethod
     def moves_start(commit: CommitRecord) -> bool:
-        """Whether ``commit`` moves the training start: a new start, or an artifact the trainer goes on from."""
-        return commit.operation == "train_from" or commit.trained_artifact
+        """Whether ``commit`` moves the training start: a new start, a sync, or an artifact the trainer goes on
+        from."""
+        return commit.sets_training_start
 
     def record_committed(self, commit: CommitRecord) -> None:
         if commit.step <= self.last_reported_step:
@@ -167,7 +168,7 @@ class CommitExperimentObserver(RecordObserver):
                 self.run_segment, self.run_step = commit.step, 0
             elif commit.operation == "training":
                 self.run_step += 1
-        if commit.operation in ("activate", "import", "serve", "stop_serving"):
+        if commit.operation in ("activate", "import", "sync", "serve", "stop_serving"):
             # These change what serves or what exists, not the training run: no tracker event.
             return
         if commit.operation == "train_from":

@@ -1,11 +1,12 @@
-"""Control's watcher of the shared store: records and samples that other processes add.
+"""Control's watcher of the shared store: records, samples and job progress that other processes add.
 
-In the split layout, the inference service appends records and the samples service stores samples in other
-processes. Control learns of both from the store alone: each round, ``StoreChangesWatcher`` reads the newest record
-sequence of each loaded scenario and the changed items of the samples queue. New records make control ask the
-samples service for a selection; a finished selection wakes the scenario's local workers, which build the next job
-from the sample store. In the one-process layout the same events also arrive in process; a second request or wake
-changes nothing.
+In the split layout, the inference service appends records, the samples service stores samples and the training
+service runs jobs in other processes. Control learns of all three from the store alone: each round,
+``StoreChangesWatcher`` reads the newest record sequence of each loaded scenario and the changed items of the
+samples and jobs queues. New records make control ask the samples service for a selection; a finished selection
+wakes the scenario's local workers, which build the next job from the sample store; a job that saved a checkpoint
+or ended wakes them too, so they commit it without waiting for their next poll. In the one-process layout the same
+events also arrive in process; a second request or wake changes nothing.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ from reef.record2sample.service import RECORD_SELECTION_KIND, SAMPLES_QUEUE
 from reef.scenario.registry import ScenarioRegistry
 from reef.scenario.scenario import Scenario
 from reef.storage.work_queue import WorkQueue
+from reef.train.job_queue import JOBS_QUEUE
 
 logger = logging.getLogger(__name__)
 
@@ -37,14 +39,18 @@ class StoreChanges(ABC):
     def samples_added(self, scenario: str) -> None:
         """The samples service finished a selection of ``scenario``."""
 
+    @abstractmethod
+    def job_changed(self, scenario: str) -> None:
+        """A training job of ``scenario`` saved a checkpoint or ended."""
+
 
 class StoreChangesWatcher(ServiceWorker):
     """Reads the record store and the samples queue for changes that other processes make.
 
     Values: ``registry`` holds the loaded scenarios; ``queue`` is the work queue; ``changes`` is called for each
     change; ``interval_seconds`` is the time between rounds. ``record_sequences`` holds the newest record sequence
-    seen for each loaded scenario, and ``queue_sequence`` the newest ``changed_sequence`` read from the samples
-    queue.
+    seen for each loaded scenario, ``queue_sequence`` the newest ``changed_sequence`` read from the samples queue,
+    and ``jobs_sequence`` the newest one read from the jobs queue.
 
     Purpose: the dispatcher of a control instance runs it.
     """
@@ -60,6 +66,7 @@ class StoreChangesWatcher(ServiceWorker):
         self.interval_seconds = interval_seconds
         self.record_sequences: dict[str, int] = {}
         self.queue_sequence = 0
+        self.jobs_sequence = 0
         self.stopped = threading.Event()
         self.thread: threading.Thread | None = None
 
@@ -84,7 +91,8 @@ class StoreChangesWatcher(ServiceWorker):
             self.stopped.wait(self.interval_seconds)
 
     def run_once(self) -> None:
-        """One round: report the scenarios with new records, then the scenarios with new samples.
+        """One round: report the scenarios with new records, then those with new samples, then those whose jobs
+        saved a checkpoint or ended.
 
         A sequence advances only after its report returns, so a report that raises comes again next round.
         """
@@ -113,6 +121,10 @@ class StoreChangesWatcher(ServiceWorker):
             for scenario in finished:
                 self.changes.samples_added(scenario)
             self.queue_sequence = changed[-1].changed_sequence
+        while changed := self.queue.read_changes(JOBS_QUEUE, self.jobs_sequence):
+            for scenario in sorted({item.scenario for item in changed if item.final or item.progress}):
+                self.changes.job_changed(scenario)
+            self.jobs_sequence = changed[-1].changed_sequence
 
 
 __all__ = ["StoreChanges", "StoreChangesWatcher"]

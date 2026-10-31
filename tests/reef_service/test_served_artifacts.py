@@ -143,7 +143,7 @@ def test_an_activation_leaves_the_served_artifacts_and_stop_serving_ends_one(tmp
     value.serve("math", newest["artifact_id"])
     value.activate("math", older["artifact_id"])
     assert scenario.current_artifact_ref().release_id == older["release_id"]
-    assert scenario.served_release(newest["artifact_id"]).release_id == newest["release_id"]
+    assert scenario.served_beside()[newest["artifact_id"]].release.release_id == newest["release_id"]
     rows = {row["artifact_id"]: row for row in value.list_artifacts("math")}
     assert (rows[newest["artifact_id"]]["served"], rows[newest["artifact_id"]]["active"]) == (True, False)
     assert (rows[older["artifact_id"]]["served"], rows[older["artifact_id"]]["active"]) == (False, True)
@@ -155,12 +155,12 @@ def test_an_activation_leaves_the_served_artifacts_and_stop_serving_ends_one(tmp
     stopped = value.stop_serving("math", newest["artifact_id"])
     assert (stopped.artifact_id, stopped.release.release_id) == (newest["artifact_id"], newest["release_id"])
     assert [record.operation for record in scenario.store.history()[-3:]] == ["serve", "activate", "stop_serving"]
-    with pytest.raises(ArtifactNotFound):
-        scenario.served_release(newest["artifact_id"])
+    assert newest["artifact_id"] not in scenario.served_beside()
     with pytest.raises(ArtifactNotFound):
         value.stop_serving("math", newest["artifact_id"])
-    # The active release still answers at its artifact's URL.
-    assert scenario.served_release(older["artifact_id"]).release_id == older["release_id"]
+    # The active release still answers at its artifact's URL; the stopped artifact has no row.
+    rows = value.coordination.served_models.read_scenario("math")
+    assert older["artifact_id"] in rows and newest["artifact_id"] not in rows
     value.close()
 
 
@@ -180,7 +180,7 @@ def test_the_served_artifacts_survive_a_restart(tmp_path) -> None:
         coordination=memory_coordination(),
     )
     scenario = restarted.get_or_create_scenario("math")
-    assert scenario.served_release(older["artifact_id"]).release_id == older["release_id"]
+    assert scenario.served_beside()[older["artifact_id"]].release.release_id == older["release_id"]
     assert [row["artifact_id"] for row in restarted.list_artifacts("math") if row["served"]] == [older["artifact_id"]]
     restarted.close()
 

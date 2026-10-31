@@ -163,11 +163,11 @@ naming each component's ``content_id``.
 Candidate selection
 -------------------
 
-A harness trainer's decision about which candidate tree its search keeps. A
+A harness trainer's decision about which candidate tree its step keeps. A
 ``CandidateEvaluator`` measures the candidate, a ``CandidateSelector`` makes
 the select-or-reject decision, and a ``CandidateEvaluationPlugin`` implements
-both. A harness recipe names it in ``evolution.selection``. Selection does
-not decide what serves; the activation rule does.
+both. A harness recipe builds it for each scenario from its publication
+policy. Selection does not decide what serves; the activation rule does.
 
 Activation rule
 ---------------
@@ -236,22 +236,28 @@ Harness tree
 
 Reef's versioned representation of the mutable files in a harness: config,
 rules, prompt templates, skills, extension code, and, for the ``native``
-adapter, the loop's own tools, hook listeners, and control flow graph. Reef
-serves it over
-``GET /reef/harness``. An adapter combines the rendered tree with a harness
-executable; that harness and its configured model form the running agent.
+adapter, the loop's own tools, hook listeners, control flow graphs, delegate
+agents and loop code. A tree is one directory of text files, and each release
+stores one as its source tree. The adapter decides which parts a tree may
+hold: the ``evolve`` section of its ``adapter.yaml`` declares each part's tree path, format and render
+path, and a path that no part takes is refused. Reef serves the tree
+over ``GET /reef/harness``, rendered for the adapter or as source. An adapter
+combines the rendered tree with a harness executable; that harness and its
+configured model form the running agent.
 
 Render
 ------
 
-Turning a harness tree into the files one agent uses: harness tree entries in,
-paths and their text out. This process does not touch disk or start an agent.
+Turning a source tree, and optionally a model binding, into the files one
+agent reads: source paths and their text in, the adapter's paths and their
+text out. Rendering writes nothing to disk and starts no agent.
 
-Reef's shared engine and the adapter own it together. The engine goes first,
-merging and writing by rules that are the same for every agent and rejecting a
-tree that breaks them. The adapter gets the last word: its paths decide where
-each file goes, and its quirks module may rewrite, drop, or refuse what the
-engine produced before an agent ever reads it.
+Reef's shared rules and the adapter own it together. Each config file merges
+the adapter's enforced defaults, the tree's config, and the model binding, in
+that order, and the shared checks refuse a tree that breaks them. The adapter
+gets the last word: its paths decide where each file goes, and its renderer
+may rewrite, drop, or refuse what the shared step produced before an agent
+ever reads it.
 
 Skill
 -----
@@ -354,7 +360,9 @@ Method
 ------
 
 The learning algorithm itself. A recipe is the object that binds one method to a
-scenario; ``harness_evolve`` is one mechanism running many possible methods.
+scenario; ``HarnessEvolutionRecipe`` is one mechanism running many possible
+methods. Each is a ``Method`` whose ``step`` edits the harness tree in a
+step's workspace, with a scorer when its evaluation runs tasks.
 
 Adapter
 -------
@@ -364,23 +372,66 @@ tree with an executable to make a running harness (`Harness adapters
 <../developer-guide/harness-adapters.rst>`__). For weight
 serving, a LoRA/PEFT adapter layered on a frozen base model.
 
+Task
+----
+
+What an agent is asked to do. An instruction task is text that the agent
+reads. A Harbor task is a directory with an instruction, an environment and
+tests that score the result. A harness evaluation scores trees on tasks, and a
+weight training job can train on Harbor tasks.
+
+Run
+---
+
+One run of one task by a harness tree, in one environment. It goes from the
+task's first step to its scored end, and gives one trajectory and one score.
+The score is a value, 0 when the agent gave no answer, or ``failed`` when the
+environment could not run the task. A harness evaluation runs each task
+``evolution.evaluation.repeats`` times on each tree it scores: the ``compare``
+policy on the candidate and the head, ``floor`` on the candidate only. Each
+run uses a throwaway root that holds nothing but the rendered tree, and the
+history keeps every scored run and reuses it.
+
 Rollout
 -------
 
-One run of one task by an agent, a harness and a model, in one environment. It
-goes from the task's first step to its scored end, and gives one trajectory and
-one score. The score is a value, 0 when the agent gave no answer, or
-``failed`` when the environment could not run the rollout. In each
-step, harness evolution runs each evaluation task ``rollout_repeats`` times on
-each side. A Tinker task job runs each task ``rollouts_per_task`` times on the
-job's start weights.
+One run of one task by the policy model in weight training or in a checkpoint
+evaluation. It gives one trajectory and one score, as a harness run does. A
+Tinker task job runs each task ``rollouts_per_task`` times on the job's start
+weights.
 
-Mutation
---------
+Patch
+-----
 
-One proposed edit to a harness tree: ``create``, ``update``, or ``remove`` on a
-single root-level entry. A sequence applies as one composite proposal under one
-selection result.
+One change to a harness tree: each changed source path mapped to the file's
+new text, or to ``null`` to remove the file. A step's patch is the difference
+between the head tree and its candidate, and a client proposes a change to the
+served tree as a patch.
+
+Workspace
+---------
+
+The directory of one harness evolution step. It holds a copy of the head tree
+(``harness/``), what the step learns from (``material/``), and the method's
+own files (``state/``). The tree that the method leaves in ``harness/`` is the
+step's candidate, and Reef keeps the directory as the step record.
+
+History
+-------
+
+Every tree that a harness scenario's steps proposed or evaluated, published or
+not, with every run and every decision. It is the evaluation's score
+cache, and methods read it.
+
+Publication policy
+------------------
+
+How a harness evaluation decides whether a candidate is published, set in
+``evolution.evaluation.policy``: ``compare`` publishes a candidate that scores
+better than the head tree (the training start), ``floor`` one whose every
+run that completed reaches the floor score, and ``none`` every candidate that
+passes validation. A published tree serves only when the activation rule
+activates it.
 
 Preset
 ------

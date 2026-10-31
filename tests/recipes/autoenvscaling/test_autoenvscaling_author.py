@@ -44,7 +44,7 @@ from recipes.beta.autoenvscaling.author import (
     call_receipt,
     repository_snapshot,
 )
-from reef.harness.rollouts.model_binding import ModelBinding
+from reef.harness.tasks.model_binding import ModelBinding
 from reef.record2sample.generator.designer import HARBOR_OUTPUT_TEXT, SYSTEM_PROMPT
 
 
@@ -65,10 +65,10 @@ class HeldChecks(CandidateChecks):
 def test_asking_for_a_check_while_one_runs_waits_for_that_one(tmp_path: Path) -> None:
     checks = HeldChecks()
     tools = AgentTools(tmp_path, checks)
-    assert tools.check() == tools.check() == {"state": "running", "check_id": 1}
-    assert tools.trial("check 1") == {"state": "running", "check_id": 1}
+    assert tools.call({}) == tools.call({}) == {"state": "running", "check_id": 1}
+    assert tools.call({"check_id": 1}) == {"state": "running", "check_id": 1}
     checks.release.set()
-    while (result := tools.trial("check 1"))["state"] == "running":
+    while (result := tools.call({"check_id": 1}))["state"] == "running":
         time.sleep(0.01)
     assert result == {"state": "done", "check_id": 1, "check": 1, "ran": True, "passed": True}
     assert checks.count == 1, "the second ask started no check of its own"

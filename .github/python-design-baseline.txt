@@ -2,16 +2,7 @@
 # exact AST fingerprint, so new locations or additional parameters fail the
 # design check. Delete an entry when its implementation moves to an ABC or
 # cohesive object interface.
-PYD002|reef/harness/rollouts/trajectory.py|_CallableTrajectoryReader.__init__|fn
+PYD002|reef/harness/tasks/trajectory.py|_CallableTrajectoryReader.__init__|fn
 PYD002|reef/runtime/interfaces.py|InferenceStream.__init__|close
 PYD002|reef/runtime/deployment.py|_CallableRuntimeFactory.__init__|fn
-PYD002|reef/harness/compose/loader.py|Loader.__init__|resolver
 PYD002|reef/train/slime_backend/reef_adapters/training_job/storage.py|CheckpointStorage.__init__|measure,disk_usage
-PYD003|reef/harness/tree/nodes.py|<module>|NODE_KINDS
-PYD003|reef/harness/compose/events.py|Hook|callback
-PYD003|reef/harness/compose/fiber.py|EffectHandle|self._collected
-PYD003|reef/harness/compose/fiber.py|Fiber|self._hooks
-PYD003|reef/harness/compose/fiber.py|Fiber|self._remove_from_runtime
-PYD003|reef/harness/compose/reflect.py|Impl|check
-PYD003|reef/harness/compose/registry.py|Runtime|callback
-PYD004|reef/harness/compose/fiber.py|_drive|collect,live

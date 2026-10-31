@@ -53,26 +53,26 @@ See `Choose the storage backend <operate.rst#choose-the-storage-backend>`__.
 Harness evolution
 -----------------
 
-A harness evolution step captures one model configuration before proposing.
-It replaces ``models.served`` and each named binding (including teacher and
-judge) with that endpoint. The proposer, baseline and candidate rollouts,
-gates and model-based scoring share the captured bindings, including across
+A harness evolution step captures one model configuration before the method
+runs. It replaces ``models.served`` and each named binding (including teacher
+and judge) with that endpoint. The method's model calls, the rollouts of both
+trees, and model-based scoring share the captured bindings, including across
 worker processes. A configuration change affects new inference requests and
 new steps. An active step continues with its captured settings; a revoked
 provider key fails without falling back to another provider.
 
 Use the supplied bindings for every model call. A model-based judge is an
-``RolloutScorer`` that overrides ``score_with_models(task, result, models)``::
+``TaskScorer`` that overrides ``score_with_models(task, result, models)``::
 
-    class Judge(RolloutScorer):
+    class Judge(TaskScorer):
         def score(self, task, result):
             raise ValueError("the judge needs the step's model bindings")
 
         def score_with_models(self, task, result, models):
-            verdict = models["judge"].chat([
+            reply = models["judge"].chat([
                 {"role": "user", "content": "Evaluate the rollout: " + str(result.trajectory)}
             ])
-            return float(verdict.strip() == "pass")
+            return float(reply.strip() == "pass")
 
 A deterministic scorer implements ``score(task, result)`` only. Methods that construct clients from environment credentials must use
 these bindings to participate in scenario model selection.

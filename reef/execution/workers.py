@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 #: The services of a deployment. ``reef serve --component NAME`` runs one in a process; the one-process layout runs
 #: all of them in one process, on the same interfaces.
-SERVICE_COMPONENTS = ("control", "inference", "samples", "training", "evaluation", "data")
+SERVICE_COMPONENTS = ("control", "inference", "samples", "training", "evaluation", "data", "harness")
 
 
 def service_components(names: object) -> frozenset[str]:
@@ -81,6 +81,10 @@ class ServiceSet:
     @property
     def runs_data(self) -> bool:
         return "data" in self.names
+
+    @property
+    def runs_harness(self) -> bool:
+        return "harness" in self.names
 
 
 class ServiceWorker(ABC):

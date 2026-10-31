@@ -31,12 +31,7 @@ from reef.artifact.repository import (
 )
 from reef.core.activation import ActivationRule
 from reef.core.errors import ReefError, ScenarioCapacityFull, UnknownScenario
-from reef.evaluation.activation import (
-    EvaluatedActivation,
-    activation_setting,
-    build_activation_rule,
-    scenario_activation_reference,
-)
+from reef.evaluation.activation import EvaluatedActivation, activation_setting, scenario_activation_reference
 from reef.inference.model_config import ModelConfig
 from reef.observability import ExperimentTracker, NullExperimentTracker
 from reef.observability.commits import ExperimentReportQueue
@@ -379,7 +374,7 @@ class ScenarioRegistry:
         (``Recipe.activation_rule``)."""
         if settings.activation is None:
             return self._recipe.activation_rule()
-        return build_activation_rule(scenario_activation_reference(settings.activation))
+        return self._recipe.activation_rule(scenario_activation_reference(settings.activation))
 
     def effective_activation(self, settings: ScenarioSettings) -> Mapping[str, object]:
         """The JSON form of the rule that applies to a scenario with ``settings``: its own ``activation``, else the

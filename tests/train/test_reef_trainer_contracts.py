@@ -1,24 +1,17 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any
 
 import pytest
+from tests.support.runtime_stubs import StubTrainingComponent
 from tests.support.samples_service import make_samples
 
 from reef.core import AgentRecord, RequestType
-from reef.evaluation import EvaluationResult, SelectionDecision, UpdateCandidate
+from reef.evaluation import UpdateCandidate
+from reef.runtime.jobs import SavedCheckpoint, TrainingComponent, TrainingJob
 from reef.storage.sqlite import SQLiteRecordStore
-from reef.train import (
-    CandidateBackend,
-    JobData,
-    PipelineContext,
-    PreparedStep,
-    Trainer,
-    TrainingPipeline,
-    TrainStepResult,
-)
+from reef.train import JobData, PipelineContext, PreparedStep, Trainer, TrainingPipeline, TrainStepResult
+from reef.train.jobs import JobLoop, JobLoopState
 
 
 @dataclass(frozen=True)
@@ -61,44 +54,21 @@ class ExamplePipeline(TrainingPipeline):
         return consumed
 
 
-class ExampleBackend(CandidateBackend):
-    def __init__(self, scenario: str, events: list[str]) -> None:
-        self.scenario = scenario
+class ExampleComponent(StubTrainingComponent):
+    """A training component that logs each job it takes, as ``submit:<data_id>``, and ends it without a checkpoint."""
+
+    def __init__(self, events: list[str]) -> None:
+        super().__init__(name="example")
         self.events = events
 
-    def initial_state(self) -> Mapping[str, Any]:
-        self.events.append(f"initialize:{self.scenario}")
-        return {"version": 0}
+    def train(self, job: TrainingJob) -> tuple[SavedCheckpoint, ...]:
+        assert isinstance(job.data, ExampleJobData)
+        self.events.append(f"submit:{job.data.data_id}")
+        return ()
 
-    def prepare_step(
-        self,
-        batch: JobData,
-        state: Mapping[str, Any],
-        scenario_step: int,
-    ) -> PreparedStep:
-        del scenario_step
-        assert isinstance(batch, ExampleJobData)
-        self.events.append(f"prepare:{batch.data_id}")
-        return PreparedStep.with_candidate(
-            UpdateCandidate(batch.data_id),
-            state={"version": int(state["version"]) + 1},
-        )
 
-    def evaluate(self, candidate: UpdateCandidate) -> EvaluationResult:
-        return EvaluationResult("example", "1", {})
-
-    def settle_step(
-        self,
-        prepared: PreparedStep,
-        decision: SelectionDecision,
-    ) -> TrainStepResult:
-        return TrainStepResult(
-            state=prepared.state,
-            metrics={"trained": 1, "selection": decision.to_dict()},
-        )
-
-    def abort_step(self, prepared: PreparedStep) -> None:
-        del prepared
+def example_jobs(events: list[str]) -> JobLoop:
+    return JobLoop(ExampleComponent(events), scenario="math")
 
 
 @pytest.mark.unit
@@ -117,9 +87,9 @@ def test_training_pipeline_is_the_no_update_default() -> None:
 
 
 @pytest.mark.unit
-def test_training_backend_cannot_be_instantiated_without_contract_methods() -> None:
+def test_training_component_cannot_be_instantiated_without_contract_methods() -> None:
     with pytest.raises(TypeError):
-        CandidateBackend()
+        TrainingComponent()  # type: ignore[abstract]
 
 
 @pytest.mark.unit
@@ -149,7 +119,7 @@ def test_trainer_dispatches_only_required_data_types() -> None:
         "math",
         records,
         pipeline_factory=lambda context: ExamplePipeline(context, events),
-        candidate_backend=ExampleBackend("math", events),
+        job_loop=example_jobs(events),
         default_job_samples=1,
     )
 
@@ -181,7 +151,7 @@ def test_trainer_waits_for_commit_before_acknowledging_batch() -> None:
         "math",
         records,
         pipeline_factory=lambda context: ExamplePipeline(context, events),
-        candidate_backend=ExampleBackend("math", events),
+        job_loop=example_jobs(events),
         default_job_samples=1,
     )
     records.append(
@@ -194,42 +164,16 @@ def test_trainer_waits_for_commit_before_acknowledging_batch() -> None:
     result = trainer.run_once()
 
     assert result is not None
-    assert result.metrics["selection"]["policy"] == "always"
-    assert events == [
-        "initialize:math",
-        "push:report",
-        "build",
-        "prepare:batch-1",
-    ]
-    assert result.state is not None
-    events.append(f"commit:math:{result.state['version']}")
+    assert result.metrics["training_job"]["event"] == "submitted"
+    assert events == ["push:report", "build", "submit:batch-1"]
+    events.append("commit:math")
     prepared = trainer.prepare_commit(result)
     trainer.commit(prepared)
-    assert events == [
-        "initialize:math",
-        "push:report",
-        "build",
-        "prepare:batch-1",
-        "commit:math:1",
-        "ack:batch-1",
-    ]
+    assert events == ["push:report", "build", "submit:batch-1", "commit:math", "ack:batch-1"]
 
 
 @pytest.mark.unit
-def test_trainer_finishes_a_skipped_preparation_without_selection() -> None:
-    class SkippingBackend(ExampleBackend):
-        def prepare_step(
-            self,
-            batch: JobData,
-            state: Mapping[str, Any],
-            scenario_step: int,
-        ) -> PreparedStep:
-            del batch, scenario_step
-            return PreparedStep.skipped(state=state, metrics={"skipped": "no update"})
-
-        def evaluate(self, candidate: UpdateCandidate) -> EvaluationResult:
-            raise AssertionError("a skipped preparation must not be evaluated")
-
+def test_a_job_without_a_checkpoint_ends_without_an_artifact() -> None:
     records = SQLiteRecordStore()
     records.append(
         AgentRecord.create(
@@ -243,16 +187,20 @@ def test_trainer_finishes_a_skipped_preparation_without_selection() -> None:
         "math",
         records,
         pipeline_factory=lambda context: ExamplePipeline(context, []),
-        candidate_backend=SkippingBackend("math", []),
+        job_loop=example_jobs([]),
         default_job_samples=1,
     )
     make_samples(trainer)
+    submitted = trainer.run_once()
+    assert submitted is not None
+    trainer.commit(trainer.prepare_commit(submitted))
 
-    result = trainer.run_once()
+    ended = trainer.run_once()
 
-    assert result is not None
-    assert result.metrics == {"skipped": "no update"}
-    assert result.state == {"version": 0}
+    assert ended is not None and ended.artifact is None
+    assert ended.metrics["training_job"]["event"] == "finished"
+    trainer.commit(trainer.prepare_commit(ended))
+    assert JobLoopState.from_dict(trainer.state).finished_jobs == 1
 
 
 @pytest.mark.unit
@@ -261,15 +209,14 @@ def test_trainer_keeps_pending_result_when_external_commit_fails() -> None:
     records = SQLiteRecordStore()
 
     def fail_commit(result: TrainStepResult) -> None:
-        assert result.state is not None
-        events.append(f"commit:{result.state['version']}")
+        events.append("commit")
         raise RuntimeError("storage failed")
 
     trainer = Trainer.build(
         "math",
         records,
         pipeline_factory=lambda context: ExamplePipeline(context, events),
-        candidate_backend=ExampleBackend("math", events),
+        job_loop=example_jobs(events),
         default_job_samples=1,
     )
     records.append(
@@ -285,7 +232,7 @@ def test_trainer_keeps_pending_result_when_external_commit_fails() -> None:
         fail_commit(result)
 
     assert "ack:batch-1" not in events
-    assert trainer.state == {"version": 0}
+    assert trainer.state == JobLoopState("example:base").to_dict()
     assert trainer.run_once() is result
 
 
@@ -301,7 +248,7 @@ def test_trainer_reads_only_new_records() -> None:
         "math",
         records,
         pipeline_factory=lambda context: ExamplePipeline(context, events),
-        candidate_backend=ExampleBackend("math", events),
+        job_loop=example_jobs(events),
         default_job_samples=1,
     )
 

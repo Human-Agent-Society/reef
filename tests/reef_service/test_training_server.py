@@ -16,6 +16,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from tests.support._activation_rule_plugin import ComponentRule
 from tests.support._policy_recipe import TestPolicyRecipe
 from tests.support.artifact_versions import inference, report
+from tests.support.harness_steps import IdleMethod, evolution_config
 from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, runtime_bindings
 
 from reef.artifact import Artifact, GitLFSRepositoryBackendFactory, InMemoryRepositoryBackend, RepositoryBackendContext
@@ -306,29 +307,16 @@ def test_build_dispatcher_loads_recipe_for_inference_service_under_the_recipe_na
 
 
 @pytest.mark.unit
-def test_build_dispatcher_passes_recipe_settings_to_a_dotted_reference(stub_repository, monkeypatch, tmp_path) -> None:
-    module = tmp_path / "demo_evolution.py"
-    module.write_text(
-        "from reef.evaluation.harness import RolloutScorer\n"
-        "from reef.train.cordis_backend.strategies import Proposer\n\n"
-        "class Propose(Proposer):\n"
-        "    def propose(self, nodes, samples, models, **keywords):\n        return None\n\n"
-        "class Evaluate(RolloutScorer):\n"
-        "    def score(self, task, result):\n        return 0.0\n"
+def test_build_dispatcher_passes_recipe_settings_to_a_dotted_reference(stub_repository, tmp_path) -> None:
+    dispatcher = build(
+        tmp_path,
+        recipe="reef.recipe.harness:HarnessEvolutionRecipe",
+        recipe_settings=evolution_config(adapter="pi", state_dir=str(tmp_path / "state")),
     )
-    monkeypatch.syspath_prepend(str(tmp_path))
-    evolution = {
-        "propose": "demo_evolution:Propose",
-        "evaluate": "demo_evolution:Evaluate",
-        "tasks": ["task one"],
-        "adapter": "pi",
-    }
-
-    dispatcher = build(tmp_path, recipe="reef.recipe.cordis:CordisRecipe", recipe_settings={"evolution": evolution})
 
     recipe = dispatcher.recipe
-    assert recipe.adapter == "pi"
-    assert recipe.tasks == ("task one",)
+    assert recipe.evolution.adapter == "pi" and isinstance(recipe.method, IdleMethod)
+    assert recipe.configured_tasks() == ("t",)
 
 
 @pytest.mark.unit

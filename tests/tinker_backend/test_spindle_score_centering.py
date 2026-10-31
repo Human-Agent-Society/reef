@@ -262,7 +262,7 @@ def test_a_task_job_samples_the_head_and_trains_score_centered_cispo(tmp_path, m
             samples, RolloutScores((("add", (RolloutScore.scored(1.0), RolloutScore.scored(0.0))),))
         )
 
-    monkeypatch.setattr(component_module, "roll_out", fake_roll_out)
+    monkeypatch.setattr(component_module, "run_train_tasks", fake_roll_out)
     client = Client()
     component = SpindleFullTrainingComponent(
         MODEL, spindle(tmp_path, score_centering=True, score_centering_top_k=3), client, Exporter(), sampler=client

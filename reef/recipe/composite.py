@@ -23,7 +23,7 @@ uses the deployment's model:
            config:
              pipeline: {sample2job: {config: {job_samples: 8, buffer_size: 32}}}
          harness:
-           implementation: reef.recipe.cordis:CordisRecipe
+           implementation: reef.recipe.harness:HarnessEvolutionRecipe
            config:
              evolution: {adapter: pi, ...}
 """
@@ -41,9 +41,10 @@ from reef.core.components import validate_component_name
 from reef.core.plugins import PluginConfigError
 from reef.core.reports import ReportBase, ReportValidationError
 from reef.evaluation.activation import activation_reference
+from reef.harness.tasks.model_binding import ModelBinding
 from reef.inference.model_config import ModelConfig
 from reef.observability import ExperimentLogger
-from reef.recipe.base import Recipe, ServedEndpoint, WeightTrainingRecipe, every_check
+from reef.recipe.base import Recipe, ServedEndpoint, WeightTrainingRecipe, check_job_components, every_check
 from reef.recipe.config import recipe_config_from_mapping, recipe_config_from_section
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.registry import build_recipe, recipe_class_for
@@ -52,7 +53,8 @@ from reef.runtime.jobs import TrainingComponent
 from reef.storage.records import RecordStore
 from reef.storage.samples import SampleStore, TrainerSamples
 from reef.storage.tasks import TaskStorage, TaskStore
-from reef.surface.base import ComponentSurface, HarnessInfo, Surface
+from reef.surface.base import ComponentSurface, Surface
+from reef.train.backend import CommittedReleases, ComponentReleases
 from reef.train.trainer import ComponentTrainer
 
 #: Metric prefixes experiment tracking keeps for itself; a component's metrics are prefixed with its name.
@@ -247,15 +249,39 @@ class CompositeRecipe(Recipe):
             },
         )
 
-    def with_training_component(self, component: TrainingComponent) -> CompositeRecipe:
-        # The components share the composite's training component; each one that has it gets ``component``.
-        if self.training_component is None:
-            raise ValueError("this composite recipe has no training component to replace")
+    @property
+    def harness_adapter(self) -> str | None:
+        """The adapter of the component recipe that serves a harness tree; a composite serves at most one."""
+        return next((recipe.harness_adapter for recipe in self.components.values() if recipe.harness_adapter), None)
+
+    def harness_served_model(self, scenario: str, component: str, model: ModelConfig) -> ModelBinding | None:
+        recipe = self.components.get(component)
+        return None if recipe is None else recipe.harness_served_model(scenario, component, model)
+
+    def harness_state_dir(self, scenario: str, component: str) -> Path | None:
+        recipe = self.components.get(component)
+        return None if recipe is None else recipe.harness_state_dir(scenario, component)
+
+    def job_components(self) -> tuple[TrainingComponent, ...]:
+        """The job components of every component recipe, each once: the components share the composite's
+        training component. Raise ``ValueError`` when two different components share a name."""
+        found: dict[str, TrainingComponent] = {}
+        for recipe in self.components.values():
+            for component in recipe.job_components():
+                known = found.setdefault(component.name, component)
+                if known is not component:
+                    raise ValueError(f"two job components of this composite are named {component.name!r}")
+        return tuple(found.values())
+
+    def with_job_components(self, components: Mapping[str, TrainingComponent]) -> CompositeRecipe:
+        check_job_components(self, components)
         return replace(
             self,
-            training_component=component,
+            training_component=(None if self.training_component is None else components[self.training_component.name]),
             components={
-                name: recipe.with_training_component(component) if recipe.training_component is not None else recipe
+                name: recipe.with_job_components(
+                    {component.name: components[component.name] for component in recipe.job_components()}
+                )
                 for name, recipe in self.components.items()
             },
         )
@@ -292,9 +318,8 @@ class CompositeRecipe(Recipe):
         return any_component_report(tuple(declared))
 
     def build_surface(self, scenario: str) -> Surface:
-        """Every component's serving capabilities under its own name; one component may carry harness info."""
+        """Every component's serving capabilities under its own name."""
         components: dict[str, ComponentSurface] = {}
-        harness: HarnessInfo | None = None
         for component, recipe in self.components.items():
             surface = recipe.serving_surface(scenario)
             if len(surface.components) > 1:
@@ -304,11 +329,7 @@ class CompositeRecipe(Recipe):
             # this component here: inside the composite, the component is that recipe's release.
             checks = every_check(surface.validator, served.validator)
             components[component] = served if checks is served.validator else replace(served, validator=checks)
-            if surface.harness is not None:
-                if harness is not None:
-                    raise RecipeConfigError("only one component may serve harness information")
-                harness = surface.harness
-        return Surface(components=components, harness=harness)
+        return Surface(components=components)
 
     def build_trainers(
         self,
@@ -319,6 +340,7 @@ class CompositeRecipe(Recipe):
         algorithm_states: Mapping[str, Mapping[str, Any] | None],
         experiment_logger: ExperimentLogger | None = None,
         task_storage: TaskStorage | None = None,
+        releases: CommittedReleases | None = None,
         samples: SampleStore | None = None,
     ) -> tuple[ComponentTrainer, ...]:
         trainers = []
@@ -332,6 +354,7 @@ class CompositeRecipe(Recipe):
                 algorithm_state=algorithm_states.get(component),
                 experiment_logger=experiment_logger,
                 task_storage=None if task_storage is None else ComponentTaskStorage(task_storage, component),
+                releases=None if releases is None else ComponentReleases(releases, component),
                 samples=None if samples is None else TrainerSamples(samples, component),
             )
             # Ingress admits what any component accepts; each trainer then releases the reports shaped for another.

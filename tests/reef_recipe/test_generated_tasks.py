@@ -397,7 +397,6 @@ def rounds(
         task_storage=session.tasks,
         samples=TrainerSamples(session.samples),
         training_mode=str(config.pop("training_mode", "auto")),
-        manual_enabled=True,
     )
     group_settings, round_settings, batch_settings = stage_settings(
         {"buffer_size": 2, "rounds": 3, "description": DESCRIPTION, **config}

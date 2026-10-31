@@ -80,7 +80,8 @@ class _ArtifactHeadSync:
 
 
 class ScenarioCommitter:
-    """Order one scenario's commits, activations, new training starts and retries; delegate release queries."""
+    """Order one scenario's commits, activations, new training starts, imports, syncs and retries; delegate release
+    queries."""
 
     def __init__(
         self,
@@ -199,13 +200,28 @@ class ScenarioCommitter:
         """
         return record.operation == "training" and record.component == component
 
+    def starts_trainer(self, record: CommitRecord, component: str) -> bool:
+        """Whether ``record`` sets the training start of ``component``'s trainer.
+
+        It does when it ``sets_training_start`` and names that trainer: a
+        training or ``"train_from"`` record names it as
+        ``component_on_record`` does, and a ``"sync"`` record names
+        ``component`` or, in a scenario of one component, no component.
+        """
+        if not record.sets_training_start:
+            return False
+        if record.operation == "sync":
+            return record.component in (None, component)
+        return record.component == self.component_on_record(component)
+
     def artifact_status(self) -> dict[str, dict[str, str | None]]:
         """Each component's active artifact and training start, by ``artifact_id``; ``None`` where none is known.
 
         The active artifact is the component's artifact in the active
         release. A trainer's training start is the artifact of its newest
-        ``"train_from"`` record or the newest artifact it made, whichever is
-        later, and the creation's artifact before either. A component whose
+        record that sets it (``starts_trainer``): a ``"train_from"`` or
+        ``"sync"`` record, or the newest artifact it made, and the creation's
+        artifact before any of them. A component whose
         artifact the records do not name, or that no trainer trains, reads
         ``None``.
         """
@@ -229,19 +245,10 @@ class ScenarioCommitter:
         for name in names:
             start: str | None = None
             if name in trainers:
-                on_record = self.component_on_record(name)
-                latest = next(
-                    (
-                        record
-                        for record in reversed(records)
-                        if (record.operation == "train_from" and record.component == on_record)
-                        or (self.own_record(record, on_record) and record.trained_artifact)
-                    ),
-                    None,
-                )
+                latest = next((record for record in reversed(records) if self.starts_trainer(record, name)), None)
                 if latest is None:
                     start = bound(creation, name)
-                elif latest.operation == "train_from":
+                elif latest.operation in ("train_from", "sync"):
                     start = bound(latest.artifact_ref.release_id, name)
                 else:
                     start = made_artifact_id(latest.artifact_ref.release_id, name, single=len(names) == 1)
@@ -599,8 +606,78 @@ class ScenarioCommitter:
                 published_ref.release_id,
             )
 
+    def sync_release(
+        self, artifact: Artifact, *, component: str, expected_release_id: str, metrics: Mapping[str, Any]
+    ) -> ArtifactRef:
+        """Publish ``artifact``, a person's merged tree of ``component``, as the active release and its training start.
+
+        The release binds ``artifact`` as ``component`` and every other
+        component as the active release binds it. Its parent is the chain
+        tip, and it is published beside the chain, as an import is. The
+        surface's admission check runs on the staged release first. The
+        component's trainer then takes the release as its training start
+        (``Trainer.start_from``), the runtime activates it, and one ``"sync"``
+        record with ``metrics`` lands at the next step. The active release
+        moves to it last; a crash before the record leaves the active release
+        that the log names. The chain tip and the activation rule stay.
+
+        ``expected_release_id`` is the active release that ``artifact`` was
+        merged against. Raise ``ArtifactConflict``, and change nothing, while
+        a step holds job data or a training job runs (the step was prepared
+        against the training start that the sync replaces) or when the active
+        release is no longer ``expected_release_id``. Raise ``ReefError`` when no trainer
+        trains ``component``, the admission check's error when it refuses the
+        tree, and ``TrainingStartRefused`` when the trainer cannot start from
+        it.
+        """
+        with self._lock, self._publication_lock:
+            if any(
+                component_trainer.trainer.has_pending_commit or component_trainer.trainer.job_running
+                for component_trainer in self.trainers
+            ):
+                raise ArtifactConflict(f"scenario {self._name!r} is running a step; sync again when it ends")
+            current_ref, checkpoint = self._artifacts.current, self._artifacts.checkpoint
+            if current_ref.release_id != expected_release_id:
+                raise ArtifactConflict(
+                    f"scenario {self._name!r} moved to release {current_ref.release_id} during the sync; sync again"
+                )
+            component_trainer = self.component_trainer(component)
+            next_step = self._step + 1
+            staged = self.stage_publication(next_step, SavedArtifactPublication(artifact, component), checkpoint)
+            try:
+                self._activate(staged)
+                # Published beside the chain: the chain tip and the backend head stay.
+                published_ref = self._artifacts.publish(
+                    staged,
+                    expected_parent=checkpoint,
+                    metadata={
+                        **dict(staged.metadata),
+                        COMPONENTS_METADATA_KEY: self.release_manifest(staged).to_dict(),
+                    },
+                    advance_heads=False,
+                )
+                published = self._artifacts.resolve(published_ref)
+                self.start_trainer(component_trainer, published)
+                self._activate(published, source=staged)
+                record = self.append_operation_record(
+                    "sync",
+                    published_ref,
+                    component=None if self._binding.surface.single else component,
+                    components=self.recorded_components(published, published_ref.release_id),
+                    metrics=metrics,
+                )
+            except Exception:
+                # A lost append acknowledgment can leave the record on file: its bytes must survive for the retry.
+                if not any(row.artifact_ref == staged.ref for row in self._store.history()):
+                    self._artifacts.discard(staged)
+                raise
+            self._artifacts.activate(published_ref, expected=current_ref)
+            self.advance_to(record.step)
+            return published_ref
+
     def resume_training_starts(self) -> None:
-        """After a restart, give each trainer its newest ``"train_from"`` start that its training records do not hold.
+        """After a restart, give each trainer its newest ``"train_from"`` or ``"sync"`` start that its training
+        records do not hold.
 
         The trainer's next training commit records the start in its state;
         a restart before that commit recovers the state of the earlier
@@ -608,14 +685,15 @@ class ScenarioCommitter:
         """
         records = self._store.history() if self._store.durable else ()
         for component_trainer in self.trainers:
-            name = self.component_on_record(component_trainer.component)
             last = self.last_record_for(component_trainer.component)
             last_step = 0 if last is None else last.step
             start = next(
                 (
                     record
                     for record in reversed(records)
-                    if record.step > last_step and record.operation == "train_from" and record.component == name
+                    if record.step > last_step
+                    and record.operation in ("train_from", "sync")
+                    and self.starts_trainer(record, component_trainer.component)
                 ),
                 None,
             )
@@ -626,42 +704,6 @@ class ScenarioCommitter:
         """Start ``component_trainer`` from its component of ``release``."""
         artifact = self._binding.surface.component_artifact(release, component_trainer.component).materialize()
         component_trainer.trainer.start_from(artifact)
-
-    def publish_shipped_content(self) -> ArtifactRef | None:
-        """Commit the backend's update of the content this Reef ships, when the active release is stale.
-
-        The update is a training commit with no job data behind it: it consumes no
-        records and runs no evaluation, since its content is Reef's own. It is
-        activated at once for the same reason. Returns the new active release, or
-        ``None`` when the active release already carries the content.
-        """
-        with self._lock, self._publication_lock:
-            current_ref = self._artifacts.current
-            if self._store.durable:
-                self._synchronize_checkpoint()
-            surface = self._binding.surface
-            served = self._artifacts.resolve(current_ref)
-            files_component = surface.files_component
-            published_tree = (
-                served if files_component is None else surface.component_artifact(served, files_component)
-            ).local_path
-            if published_tree is None:
-                return None
-            component = self.trainers[0].component if files_component is None else files_component
-            trainer = self.trainer_for(component)
-            result = trainer.shipped_content_update(published_tree)
-            if result is None:
-                return None
-            publication = result.publication
-            if not isinstance(publication, SavedArtifactPublication) or result.state is None:
-                raise ReefError("a shipped content update must publish durable bytes at once, with its state")
-            prepared = replace(
-                trainer.prepare_commit(None), algorithm_state=dict(result.state), metrics=dict(result.metrics)
-            )
-            # The content that this Reef ships replaces the served tree whatever the activation rule says.
-            self.commit_saved_artifact(publication, prepared, trainer, component, activated=True)
-            trainer.apply_committed_state(result.state)
-            return self._artifacts.current
 
     def commit(self, result: TrainStepResult, *, component: str | None = None) -> Any:
         """Commit ``component``'s pending training result as one atomic version record.
@@ -709,24 +751,14 @@ class ScenarioCommitter:
         observer = self.experiment_observer
         if observer is None:
             return result
-        backend = trainer.candidate_backend
         job_loop = trainer.job_loop
-        try:
-            if backend is not None:
-                backend_config: dict[str, Any] | None = dict(backend.experiment_config())
-            elif job_loop is not None:
+        backend_config: dict[str, Any] | None = None
+        if job_loop is not None:
+            try:
                 backend_config = dict(trainer.pipeline.sample2job.experiment_config())
-            else:
-                backend_config = None
-        except Exception:
-            logger.exception("training backend failed to describe experiment configuration")
-            backend_config = None
-        if backend is not None:
-            backend_name: str | None = type(backend).__name__
-        elif job_loop is not None:
-            backend_name = job_loop.component.name
-        else:
-            backend_name = None
+            except Exception:
+                logger.exception("training backend failed to describe experiment configuration")
+        backend_name = None if job_loop is None else job_loop.component.name
         context = TrainingExperimentContext(
             scenario=self._name,
             recipe=observer.recipe,
@@ -933,7 +965,7 @@ class ScenarioCommitter:
 
     def _activate(self, artifact: Artifact, *, source: Artifact | None = None) -> None:
         # A component the engine already serves is not activated again, so a
-        # harness step never reloads weights; the active release is compared by
+        # harness release never reloads weights; the active release is compared by
         # identity and materialized only when a composed manifest is needed.
         previous = Artifact(self._artifacts.current, self._artifacts.repository)
         self._binding.surface.activate(artifact, self._binding.runtime, source=source, previous=previous)
@@ -969,7 +1001,6 @@ class ScenarioCommitter:
                     expected_checkpoint=expected_checkpoint,
                     activate=record.activated,
                 )
-        trainer.commit_applied(prepared.algorithm_state)
         trainer.commit(prepared)
         if not self._store.durable:
             self._artifact_head_sync = _ArtifactHeadSync("synchronized", self._artifacts.checkpoint.release_id)
@@ -1029,17 +1060,17 @@ class ScenarioCommitter:
         metrics: Mapping[str, Any] | None = None,
     ) -> CommitRecord:
         """Append a record that carries no trainer state at the next step: an ``"activate"``, ``"train_from"``,
-        ``"import"``, ``"serve"`` or ``"stop_serving"`` record.
+        ``"import"``, ``"sync"``, ``"serve"`` or ``"stop_serving"`` record.
 
-        ``components`` is the manifest of a release that an activation, an import or a serve published.
-        ``component`` then names the component that it activated, imported or served. ``metrics`` is an import's
-        source.
+        ``components`` is the manifest of a release that an activation, an import, a sync or a serve published.
+        ``component`` then names the component that it activated, imported, synced or served. ``metrics`` is an
+        import's source or a sync's own metrics.
         """
         record = CommitRecord(
             scenario=self._name,
             step=self._step + 1,
             artifact_ref=artifact_ref,
-            checkpoint=operation == "import",
+            checkpoint=operation in ("import", "sync"),
             metrics=metrics,
             algorithm_state=None,
             high_water_sequence=0,

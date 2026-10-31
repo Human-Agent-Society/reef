@@ -47,6 +47,7 @@ from reef.core.artifact_ref import ArtifactRef
 from reef.core.errors import ReefError
 from reef.core.records_types import ROLLOUT_HEADER, AgentRecord, RequestType
 from reef.core.served_models import ACTIVE, CACHE_SECONDS, ServedArtifact
+from reef.inference.provider_protocol import SSEFrameDecoder
 from reef.runtime.interfaces import (
     INFERENCE_ABORT_ERROR,
     EngineClients,
@@ -55,7 +56,6 @@ from reef.runtime.interfaces import (
     inference_aborted,
 )
 from reef.service.streaming import (
-    SSEFrameDecoder,
     chat_completion_chunk_identity,
     frame_for_codex,
     is_terminal_sse_event,
@@ -488,6 +488,18 @@ def add_inference_routes(app: web.Application, replica: InferenceReplica) -> Non
 
         return inference
 
+    async def scenario_inference(request: web.Request) -> web.StreamResponse:
+        """A call to ``/v1/*`` with the scenario in the path, answered and recorded as the same call to ``/v1/*``.
+
+        A harness that a client installed sends no scenario header: its model binding names the scenario in its
+        base URL (``reef.harness.sync``).
+        """
+        path = checked(request.match_info["route"])
+        rollout = request.headers.get(ROLLOUT_HEADER, "").strip().lower() in ("1", "true")
+        return await replica.answer(
+            request, path, scenario=request.match_info["scenario"], record=not rollout, keep_training=rollout
+        )
+
     async def evaluation(request: web.Request) -> web.StreamResponse:
         path = checked(request.match_info["route"])
         return await replica.answer(
@@ -518,6 +530,7 @@ def add_inference_routes(app: web.Application, replica: InferenceReplica) -> Non
 
     for path in INFERENCE_PATHS:
         app.router.add_post(path, recorded(path))
+    app.router.add_post("/reef/scenarios/{scenario}/v1/{route:.+}", scenario_inference)
     app.router.add_post("/reef/scenarios/{scenario}/evaluation/v1/{route:.+}", evaluation)
     app.router.add_post("/reef/scenarios/{scenario}/components/{component}/evaluation/v1/{route:.+}", evaluation)
     app.router.add_post("/reef/scenarios/{scenario}/artifacts/{artifact_id}/v1/{route:.+}", artifact)

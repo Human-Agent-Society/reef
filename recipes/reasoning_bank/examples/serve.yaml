@@ -1,0 +1,56 @@
+# ReasoningBank on pi, online and without ground truth: the served model's own traffic teaches the memory.
+#
+# Every model call that a pi client sends through this Reef is one trace (the inference stages of the pipeline
+# section), so no client has to report a score. A call that ends with a reply ends a run. The judge labels the run
+# a success or a failure, the extractor writes at most three memory items from it, and the step publishes the bank
+# at once as the skills skills/rb-*/SKILL.md (evaluation policy none). Start it from the repository root:
+#
+#   reef serve -c recipes/reasoning_bank/examples/serve.yaml
+#
+# When the clients report a score for each run (POST /reef/report), delete the pipeline section. Each trace is then
+# a scored run, and its score decides the outcome instead of the judge.
+
+reef:
+  host: 127.0.0.1
+  port: 8900
+  # Unset REEF_TOKEN leaves this loopback demo without authentication; set it to require a Bearer token.
+  token: ${REEF_TOKEN}
+  run-dir: .reef/reasoning-bank/run
+
+recipe:
+  implementation: reef.recipe.harness:HarnessEvolutionRecipe
+  config:
+    evolution:
+      adapter: pi
+      # One step reads eight model calls. Most of them are calls in the middle of a run, which cost nothing.
+      batch_size: 8
+      method:
+        module: recipes.reasoning_bank:ReasoningBank
+        config:
+          # The served model judges and extracts, as in the paper. To use another model, declare it under
+          # evolution.models (url, model, api_key_env) and give its name here.
+          judge_model: served
+          extract_model: served
+          max_items_per_trace: 3
+          max_items: 50
+      state_dir: .reef/reasoning-bank/harness
+      evaluation:
+        # No runs: every step whose tree passes validation publishes.
+        policy: none
+
+pipeline:
+  record2record:
+    module: reef.record2record:InferenceRecord2Record
+  record2sample:
+    module: reef.record2sample.traces:InferenceSamples
+
+inference:
+  upstream-url: http://127.0.0.1:8000
+  upstream-api-key: ${REEF_UPSTREAM_API_KEY}
+  upstream-model: qwen3-8b
+
+storage:
+  agent-record-dir: .reef/reasoning-bank/agent-record
+  artifact-repository: .reef/reasoning-bank/artifacts.git
+  artifact-work-dir: .reef/reasoning-bank/artifact-work
+  artifact-cache-dir: .reef/reasoning-bank/artifact-cache

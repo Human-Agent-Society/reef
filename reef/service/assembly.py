@@ -46,6 +46,8 @@ from reef.service.data_transfer import ArchiveWriters
 from reef.service.deploy.service_config import ServiceConfig, service_owned_keys
 from reef.service.deploy.serving import serving_runtime_config
 from reef.service.deploy.training import training_deployment_for
+from reef.service.harness_imports import HarnessSyncWorker
+from reef.service.request_service import RequestService
 from reef.service.task_import import DataScenarioStorage, TaskImport
 from reef.storage.coordination import Coordination, instance_id
 from reef.storage.data import DataStore
@@ -157,7 +159,7 @@ def _training_recipe(
             recipe_config, resolved_recipe_data, environ=env, runtime=runtime, training_component=training_component
         )
     except BaseException:
-        close_runtimes(training_component, runtime)
+        close_runtimes(() if training_component is None else (training_component,), runtime)
         raise
 
 
@@ -210,7 +212,7 @@ def composed_training_recipe(
     try:
         return build_recipe(selected, env, config=config, runtime=runtime, training_component=training_component)
     except BaseException:
-        close_runtimes(training_component, runtime)
+        close_runtimes(() if training_component is None else (training_component,), runtime)
         raise
 
 
@@ -266,7 +268,7 @@ def _serving_recipe(selected: str, settings: ServiceConfig, env: Mapping[str, st
         try:
             return build_recipe(selected, env, config=config, runtime=runtime)
         except BaseException:
-            close_runtimes(None, runtime)
+            close_runtimes((), runtime)
             raise
     if settings.pipeline_settings is not None or settings.activation_settings is not None:
         raise ValueError(
@@ -485,6 +487,11 @@ def build_dispatcher(
                         dispatcher.queue, LocalCandidateEndpoints(dispatcher), worker_id=instance_id("evaluation")
                     )
                 )
+        if dispatcher.services.runs_control and not dispatcher.services.runs_harness and recipe.harness_adapter:
+            # The harness service runs in another process: it sends each import here to commit.
+            dispatcher.workers.add(
+                HarnessSyncWorker(dispatcher.queue, RequestService(dispatcher), worker_id=instance_id("harness-sync"))
+            )
         if dispatcher.services.runs_data and data_store is not None:
             dispatcher.workers.add(
                 DataWorker(
@@ -502,7 +509,7 @@ def build_dispatcher(
         if scenario_storage is not None:
             with suppress(Exception):
                 scenario_storage.close()
-        close_runtimes(recipe.training_component, recipe.runtime)
+        close_runtimes(recipe.job_components(), recipe.runtime)
         if experiment_tracker is not None:
             with suppress(Exception):
                 experiment_tracker.close()
@@ -531,7 +538,7 @@ def build_app(
     """
     record_retention = RecordRetention(max_bytes=settings.agent_record_retention_max_bytes)
     # A composite's model calls come back to this service, which answers only once the app listens: its local
-    # cycles wait for that, so a harness step started by the preload never fails its calls into a skip.
+    # cycles wait for that, so a harness job started by the preload never fails its calls into a skip.
     # Evaluation calls run candidate code, so they get a token of their own that opens the evaluation routes alone,
     # never a service token. Every process derives the same one from the service tokens.
     evaluation_token = evaluation_token_for(settings.tokens)
@@ -562,6 +569,7 @@ def build_app(
                 ArtifactSources.from_setting(settings.artifact_sources),
                 Path(settings.artifact_cache_dir) / "imports",
             ),
+            harness_inference_url=settings.harness_inference_url,
         )
     except BaseException:
         with suppress(Exception):

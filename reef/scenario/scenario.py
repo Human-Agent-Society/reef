@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from reef.artifact.artifact import Artifact, ArtifactNotFound, ArtifactRef
+from reef.artifact.artifact import Artifact, ArtifactRef
 from reef.artifact.release_chain import ArtifactReleaseChain, ReleaseNotRestorable
 from reef.artifact.repository import Repository
 from reef.artifact.sources import SourceFiles
@@ -287,7 +287,7 @@ class Scenario:
         return running
 
     def prepare_training_step(self, component: str | None = None) -> TrainStepResult | None:
-        """Prepare ``component``'s next commit: a harness step, a job submission or a job's checkpoint decision.
+        """Prepare ``component``'s next commit: a job's submission, or a running job's checkpoint or end.
 
         The caller runs one step of the scenario at a time, as the
         dispatcher's cycle lock does. Thus no training commit of another
@@ -303,14 +303,14 @@ class Scenario:
             # serves one fixed model, so its data never goes stale.
             weights_load = self._binding.surface.loader_component is not None and self.runtime is not None
             serving = self.serving_artifact_id() if weights_load else None
-            return trainer.run_once(self.scenario_step, serving_artifact_id=serving)
+            return trainer.run_once(serving_artifact_id=serving)
 
     def served_component(self) -> str | None:
-        """The component whose artifact the runtime serves: the weight trainer's component, or the only component;
-        None when the scenario has several components and no weight trainer."""
-        weights = [item.component for item in self.trainers if item.trainer.job_loop is not None]
-        if weights:
-            return weights[0]
+        """The component whose artifact the runtime serves: the component that the runtime loads, or the only
+        component; None when the scenario has several components and the runtime loads none of them."""
+        loader = self._binding.surface.loader_component
+        if loader is not None:
+            return loader
         names = self._committer.component_names()
         return names[0] if len(names) == 1 else None
 
@@ -380,25 +380,6 @@ class Scenario:
         with self.release_queries.publication_lock:
             return self.release_queries.served_beside(self._committer.step, self._committer.component_names())
 
-    def served_release(self, artifact_id: str) -> ArtifactRef:
-        """The release that answers a call to the URL of ``artifact_id``.
-
-        When the scenario serves the artifact beside its active release, it is
-        the release that serves it there. Else it is the active release, when
-        that release binds the artifact. Raise ``ArtifactNotFound`` when
-        neither serves it.
-        """
-        with self.release_queries.publication_lock:
-            step = self._committer.step
-            names = self._committer.component_names()
-            served = self.release_queries.served_beside(step, names).get(artifact_id)
-            if served is not None:
-                return served.release
-            current = self._artifact_chain.current
-            if artifact_id in self.release_queries.bound_artifact_ids(current.release_id, names, step).values():
-                return current
-        raise ArtifactNotFound(f"scenario {self._name!r} serves no artifact {artifact_id!r}")
-
     def train_from(self, artifact_id: str, component: str | None = None) -> ComponentArtifact:
         """Start ``component``'s trainer from ``artifact_id``; see :meth:`ScenarioCommitter.train_from`."""
         return self._committer.train_from(artifact_id, component)
@@ -429,13 +410,18 @@ class Scenario:
         with self.release_queries.publication_lock:
             return self._committer.resolve_artifact(artifact_id, component)
 
+    def sync_release(
+        self, artifact: Artifact, *, component: str, expected_release_id: str, metrics: Mapping[str, Any]
+    ) -> ArtifactRef:
+        """Make a person's merged ``component`` tree active and the training start; see
+        :meth:`ScenarioCommitter.sync_release`."""
+        return self._committer.sync_release(
+            artifact, component=component, expected_release_id=expected_release_id, metrics=metrics
+        )
+
     def commit(self, result: TrainStepResult, *, component: str | None = None) -> Any:
         """Commit ``component``'s pending result as one atomic version record."""
         return self._committer.commit(result, component=component)
-
-    def publish_shipped_content(self) -> ArtifactRef | None:
-        """Republish the head with the content this Reef ships when it is stale; the new head, or ``None``."""
-        return self._committer.publish_shipped_content()
 
     def close(self) -> None:
         """Tear down what this scenario instance owns: trainers, then its storage session.
