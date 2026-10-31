@@ -100,6 +100,7 @@ def build_execution_prompt(
     solution_contract: str,
     score_direction: str,
     raw_score_label: str,
+    execution_context: str = "",
 ) -> Prompt:
     """Build the executor prompt; unlike the policy prompt, include full parent code."""
     if not selected_entry.solution.strip():
@@ -123,9 +124,14 @@ def build_execution_prompt(
 Include enough information for a later model to understand the overall algorithm from the summary alone. If a
 guidance component was simplified, approximated, or omitted, say so. Do not include source code, code fences,
 copied constants, raw candidate parameters, benchmark profiles, or these output instructions."""
+    context = (
+        f"\n\n<repository_context>\n{execution_context.strip()}\n</repository_context>"
+        if execution_context.strip()
+        else ""
+    )
     user = f"""<problem>
 {problem_prompt}
-</problem>
+</problem>{context}
 
 <selected_parent>
 {parent}

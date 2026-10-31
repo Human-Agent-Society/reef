@@ -204,6 +204,14 @@ function terminologySource(path, source) {
       (_, prefix, examples) => prefix + examples.replace(/[^\n]/g, " "),
     );
   }
+  // FrontierCS defines these verifier environment keys and the archive path.
+  // Preserve only those exact string literals at its adapter boundary.
+  if (path === "recipes/tttd/examples/guidance_ttt/judges/frontiercs2_server.py") {
+    source = source.replace(
+      /"(?:FRONTIER_EVIDENCE_PATH|FRONTIER_MAX_EVIDENCE_BYTES|\/out\/evidence\.tar\.zst)"/g,
+      (text) => " ".repeat(text.length),
+    );
+  }
   const prompt = preservedModelPrompts.get(path);
   if (!prompt) return source;
   // Keep newlines so failures below still point to the original source lines.

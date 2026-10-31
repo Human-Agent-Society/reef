@@ -1,0 +1,9 @@
+{
+  "solution_language": "python",
+  "solution_contract": "The <solution> block must contain the complete new text of `polar_express.py` in one ```python fenced block. It replaces that file in the task repository; every other file stays unchanged.",
+  "mechanism_constraint": "Every proposed mechanism must be implementable inside `polar_express.py` alone, with only the imports, calls and resources that the task statement allows. Do not rely on helper files, other edited files, network access, the held-out workloads, or reference measurements.",
+  "objective": "Provide the next evolutionary guidance that can improve the FrontierCS 2 train score. Higher score is better. The PASS conditions of the statement come first: a candidate must stay correct and valid on every workload.",
+  "raw_score_label": "FrontierCS 2 train score",
+  "score_direction": "max",
+  "judge_problem_id": "polar_express"
+}

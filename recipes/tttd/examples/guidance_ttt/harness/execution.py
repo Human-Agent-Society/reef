@@ -11,6 +11,7 @@ import urllib.request
 from abc import ABC, abstractmethod
 from contextlib import suppress
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from .state import LLMRequest, LLMResponse
@@ -28,6 +29,8 @@ class ExecutionBackend:
     model: str
     base_url: str
     api_key_env: str | None = None
+    # A dotenv file that holds ``api_key_env``, read again for every request so a rotated key is used.
+    api_key_file: str | None = None
     temperature: float = 1.0
     max_tokens: int | None = None
     timeout_s: float = 1_200.0
@@ -52,6 +55,7 @@ class ExecutionBackend:
             "model": self.model,
             "base_url": self.base_url,
             "api_key_env": self.api_key_env,
+            "api_key_file": self.api_key_file,
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,
             "timeout_s": self.timeout_s,
@@ -94,6 +98,38 @@ def openrouter_glm_5_2_backend(*, concurrency: int = 16) -> ExecutionBackend:
     )
 
 
+def openai_compatible_backend(
+    *,
+    model: str,
+    base_url: str,
+    api_key_env: str,
+    api_key_file: str | None = None,
+    concurrency: int = 16,
+) -> ExecutionBackend:
+    """Any OpenAI-compatible chat endpoint, for example a model proxy that rotates its key."""
+    return ExecutionBackend(
+        name=f"openai_compatible:{model}",
+        model=model,
+        base_url=base_url,
+        api_key_env=api_key_env,
+        api_key_file=api_key_file,
+        temperature=1.0,
+        concurrency=concurrency,
+        max_retries=6,
+    )
+
+
+def read_api_key(backend: ExecutionBackend) -> str:
+    """The backend's key: from its dotenv file when it names one, else from the environment."""
+    if backend.api_key_file:
+        for line in Path(backend.api_key_file).read_text().splitlines():
+            name, separator, value = line.strip().partition("=")
+            if separator and name.strip() == backend.api_key_env:
+                return value.strip().strip("\"'")
+        return ""
+    return os.environ.get(backend.api_key_env or "", "").strip()
+
+
 class ExecutionClient(ABC):
     backend: ExecutionBackend
 
@@ -107,9 +143,9 @@ class OpenAICompatibleExecutionClient(ExecutionClient):
     def __init__(self, backend: ExecutionBackend) -> None:
         self.backend = backend
         if backend.api_key_env:
-            self._api_key = os.environ.get(backend.api_key_env, "").strip()
+            self._api_key = read_api_key(backend)
             if not self._api_key:
-                raise ValueError(f"executor credential environment variable {backend.api_key_env!r} is not set")
+                raise ValueError(f"executor credential {backend.api_key_env!r} is not set")
         else:
             # OpenAI-compatible local servers usually require a syntactically
             # present bearer value even when authentication is disabled.
@@ -167,6 +203,8 @@ class OpenAICompatibleExecutionClient(ExecutionClient):
         started_at = time.monotonic()
         endpoint = self.backend.base_url.rstrip("/") + "/chat/completions"
         for attempt in range(self.backend.max_retries + 1):
+            if self.backend.api_key_file:
+                self._api_key = read_api_key(self.backend) or self._api_key
             request = urllib.request.Request(
                 endpoint,
                 data=json.dumps(payload).encode(),
@@ -185,7 +223,10 @@ class OpenAICompatibleExecutionClient(ExecutionClient):
                     raise _RetryableExecutorResponse("executor returned an API error object")
                 return data, attempt + 1, time.monotonic() - started_at
             except urllib.error.HTTPError as exc:
-                retryable = exc.code in {408, 429, 500, 502, 503, 504}
+                # A rotating key can expire between reads; the next attempt reads the file again.
+                retryable = exc.code in {408, 429, 500, 502, 503, 504} or (
+                    exc.code == 401 and bool(self.backend.api_key_file)
+                )
                 if not retryable or attempt >= self.backend.max_retries:
                     body = exc.read().decode(errors="replace")[:1_000]
                     raise ExecutorUnavailableError(f"executor request failed with HTTP {exc.code}: {body}") from exc

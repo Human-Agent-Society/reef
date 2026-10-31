@@ -1,0 +1,21 @@
+schema_version = "1.4"
+artifacts = []
+[task]
+name = "reef-eval/guidance-ttt-polar-express"
+description = "Guidance-TTT search on the FrontierCS 2 task polar_express, scored by the task's own verifier."
+[metadata]
+category = "autoresearch"
+author_name = "Reef"
+difficulty = "hard"
+tags = ["reef", "guidance-ttt", "tttd", "frontiercs", "discovery"]
+[agent]
+timeout_sec = 604800.0
+[verifier]
+timeout_sec = 2400.0
+[environment]
+build_timeout_sec = 600.0
+cpus = 1
+memory_mb = 4096
+storage_mb = 4096
+network_mode = "allowlist"
+allowed_hosts = ["host.docker.internal"]

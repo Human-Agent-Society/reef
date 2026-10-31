@@ -238,6 +238,7 @@ class ReefGuidanceTTTHarness(SearchHarness):
                 solution_contract=self.contract.solution_contract,
                 score_direction=self.contract.score_direction,
                 raw_score_label=self.contract.raw_score_label,
+                execution_context=self.contract.execution_context,
             )
             try:
                 with self._execution_slots:

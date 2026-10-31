@@ -5,6 +5,7 @@ cd "$(dirname "$0")"
 export GUIDANCE_TASK="${GUIDANCE_TASK:-polyomino_packing}"
 case "$GUIDANCE_TASK" in
     polyomino_packing|lasso_path|ahc058|trimul) ;;
+    join_tree_rewriting|approximate_mips_query_stopping|lejepa_world_model|polar_express) ;;
     *) echo "Unknown GUIDANCE_TASK: $GUIDANCE_TASK" >&2; exit 2 ;;
 esac
 export GUIDANCE_CONFIG="${GUIDANCE_CONFIG:-$PWD/serve.yaml}"
@@ -39,4 +40,5 @@ while ! curl -sf "$service_url/healthz" > /dev/null; do
     fi
     sleep 5
 done
-python3 run.py
+# run_local.py runs the same trajectory without Harbor, for hosts without Docker.
+python3 "${GUIDANCE_DRIVER:-run.py}"

@@ -1,0 +1,47 @@
+{
+  "join_tree_rewriting": {
+    "editable_file": "2phase_nsa/binary_plan/rewrite_policy.py",
+    "language": "python",
+    "context_files": [
+      "2phase_nsa/binary_plan/binary_plan.py",
+      "2phase_nsa/binary_plan/to_semijoin_plan.py",
+      "2phase_nsa/binary_plan/util.py"
+    ],
+    "bootstrap_summary": "The shipped identity policy: rewrite_plan returns the optimizer's binary plan unchanged, with no reordering of joins."
+  },
+  "approximate_mips_query_stopping": {
+    "editable_file": "src/alg.cpp",
+    "language": "cpp",
+    "context_files": [
+      "src/alg.h",
+      "src/StructType.h",
+      "src/basis.h",
+      "src/basis.cpp",
+      "src/performance.h",
+      "src/Preprocess.h",
+      "src/Preprocess.cpp",
+      "src/mf_alsh.h",
+      "src/mf_alsh.cpp",
+      "src/fastL2_ip.h",
+      "src/main.cpp",
+      "Makefile"
+    ],
+    "bootstrap_summary": "The shipped fixed-budget policy: should_stop ends probing of a partition once the number of verified candidates reaches the candidate budget, independent of the query or the current results."
+  },
+  "lejepa_world_model": {
+    "editable_file": "experiments/lejepa_id/losses.py",
+    "language": "python",
+    "context_files": [
+      "experiments/lejepa_id/engine.py",
+      "experiments/lejepa_id/models.py",
+      "experiments/lejepa_id/data.py",
+      "experiments/lejepa_id/mixing.py",
+      "experiments/lejepa_id/metrics.py"
+    ]
+  },
+  "polar_express": {
+    "editable_file": "polar_express.py",
+    "language": "python",
+    "context_files": []
+  }
+}

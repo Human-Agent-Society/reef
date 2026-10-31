@@ -1,0 +1,148 @@
+# Qwen3-8B LoRA stack (tttd recipe) for summary-only Guidance-TTT on
+# the FrontierCS 2 tasks, at the paper's search budget: 8 groups of 16 rollouts
+# for 30 steps. Two GPUs train the actor; two GPUs serve single-GPU engines.
+# The FrontierCS 2 statements are long, so the sequence limit is
+# 16384 tokens instead of serve.yaml's 12288.
+# The cardinalities and sequence limits below are deployment inputs, not
+# algorithm constants; harness/config.py reads the same values so a
+# qualification and a full run cannot silently disagree.
+
+reef:
+  host: 127.0.0.1
+  port: 8900
+  token: reef-local
+  run-dir: ${GUIDANCE_STATE_DIR}/stack
+  ready-timeout: 120
+
+inference:
+  num-gpus: "2"
+  tensor-parallel-size: "1"
+  options:
+    context-length: "${training.config.seq_length}"
+    router-port: "30000"
+    mem-fraction-static: "0.5"
+    disable-prefill-cuda-graph: true
+    cuda-graph-max-bs-decode: "8"
+  model-path: ${GUIDANCE_MODEL_PATH}
+  timeout-s: 7200
+  handler-factory: reef.inference.sglang.chat.SGLangInferenceHandler
+recipe:
+  implementation: recipes.tttd.recipe:TTTDRecipe
+# TTTD's stages. The record stage owns the step grid; the later stages read it from there.
+# harness/config.py reads this grid, so the harness and the stack cannot disagree about the step.
+pipeline:
+  record2record:
+    config:
+      groups_per_step: 8
+      rollouts_per_group: 16
+  task2job:
+    config:
+      # One job trains the complete grid of 8 groups and 16 rollouts.
+      job_samples: 128
+training:
+  backend: slime
+  ready-timeout: 3600
+  ray-namespace: reef
+  timeout-s: 7200
+  config:
+    num_gpus: 2
+    # The step count and model limits. harness/config.py reads these same keys,
+    # so the harness and the stack cannot disagree about the run.
+    steps: 30
+    max_tokens: 8192
+    seq_length: 16384
+    lora_rank: 32
+    tensor_parallel_size: 2
+    checkpoint_dir: ${GUIDANCE_STATE_DIR}/checkpoints
+
+  options:
+    hf-checkpoint: "${inference.model-path}"
+    load: "${training.config.checkpoint_dir}/megatron"
+    ref-load: "${inference.model-path}"
+    save: "${training.config.checkpoint_dir}/megatron"
+    save-interval: "1"
+    save-hf: "${training.config.checkpoint_dir}/hf/{rollout_id}"
+    megatron-to-hf-mode: "bridge"
+    num-rollout: "${training.config.steps}"
+    rollout-batch-size: "${pipeline.record2record.config.groups_per_step}"
+    n-samples-per-prompt: "${pipeline.record2record.config.rollouts_per_group}"
+    global-batch-size: "128"
+    disable-rollout-global-dataset: true
+    actor-num-nodes: "1"
+    actor-num-gpus-per-node: "${training.config.num_gpus}"
+    num-gpus-per-node: "4"
+    tensor-model-parallel-size: "${training.config.tensor_parallel_size}"
+    pipeline-model-parallel-size: "1"
+    context-parallel-size: "1"
+    expert-model-parallel-size: "1"
+    expert-tensor-parallel-size: "1"
+    padded-vocab-size: "151936"
+    position-embedding-type: "rope"
+    rotary-base: "1000000"
+    swiglu: true
+    disable-bias-linear: true
+    normalization: "RMSNorm"
+    group-query-attention: true
+    qk-layernorm: true
+    seq-length: "${training.config.seq_length}"
+    use-dynamic-batch-size: true
+    max-tokens-per-gpu: "16384"
+    recompute-granularity: "full"
+    recompute-method: "uniform"
+    recompute-num-layers: "1"
+    megatron-lora-rank: "${training.config.lora_rank}"
+    megatron-lora-alpha: "32"
+    megatron-lora-dropout: "0"
+    megatron-lora-target-modules:
+      - linear_qkv
+      - linear_proj
+      - linear_fc1
+      - linear_fc2
+    optimizer: "adam"
+    lr: "4e-5"
+    lr-decay-style: "constant"
+    override-opt-param-scheduler: true
+    weight-decay: "0"
+    adam-beta1: "0.9"
+    adam-beta2: "0.95"
+    adam-eps: "1e-8"
+    clip-grad: "0"
+    loss-type: "custom_loss"
+    custom-loss-function-path: "recipes.tttd.slime.objective.tttd_loss"
+    use-rollout-logprobs: true
+    advantage-estimator: "grpo"
+    kl-coef: "0.1"
+    custom-advantage-function-path: "recipes.tttd.slime.objective.tttd_advantages"
+    entropy-coef: "0"
+    rollout-temperature: "1"
+    rollout-max-response-len: "${training.config.max_tokens}"
+    rollout-max-context-len: "${training.config.seq_length}"
+    train-env-vars: "{\"PYTORCH_CUDA_ALLOC_CONF\":\"max_split_size_mb:512\"}"
+    log-probs-chunk-size: "1024"
+    attention-dropout: "0"
+    hidden-dropout: "0"
+    accumulate-allreduce-grads-in-fp32: true
+    attention-softmax-in-fp32: true
+    attention-backend: "flash"
+storage:
+  artifact-repository: ${GUIDANCE_STATE_DIR}/artifacts.git
+  artifact-work-dir: ${GUIDANCE_STATE_DIR}/artifact-work
+  artifact-cache-dir: ${GUIDANCE_STATE_DIR}/artifact-cache
+  agent-record-dir: ${GUIDANCE_STATE_DIR}/agent-record
+
+# Service processes launch locally; Slime's training workers and the engines run on Ray.
+execution:
+  training: ray
+  rollout: ray
+
+observability:
+  wandb:
+    enabled: false                     # omitted or false means no tracking
+    project: reef
+    # entity: your-team
+    # group_prefix: guidance-ttt      # produces group guidance-ttt/<scenario>
+    # name_prefix: guidance-ttt
+    tags: []
+    mode: online                       # online, offline, or disabled
+    directory: ${GUIDANCE_STATE_DIR}/wandb
+    upload_checkpoints: false

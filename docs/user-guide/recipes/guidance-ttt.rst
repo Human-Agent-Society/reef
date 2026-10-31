@@ -72,10 +72,31 @@ Choose a task
    * - ``trimul``
      - Python module with Triton kernels
      - 18 correctness tests and seven H100 timing cases, latency decreases
+   * - ``join_tree_rewriting``
+     - Python ``rewrite_policy.py``
+     - FrontierCS 2 verifier, 20 train queries, train score increases
+   * - ``approximate_mips_query_stopping``
+     - C++ ``alg.cpp``
+     - FrontierCS 2 verifier, 12 train workloads, train score increases
+   * - ``lejepa_world_model``
+     - Python ``losses.py``
+     - FrontierCS 2 verifier, 3 train runs, train score increases
+   * - ``polar_express``
+     - Python ``polar_express.py``
+     - FrontierCS 2 verifier, 12 train matrices, train score increases
 
 Each task has its own instruction, contract, bootstrap, verifier, scenario,
 and state directory. The shared harness uses the same guidance loop for all
-four tasks.
+eight tasks.
+
+The four `FrontierCS 2 <https://github.com/FrontierCS/FrontierCS-2>`__ tasks
+need CPUs only for verification. A candidate is the complete text of the
+task's one editable file, and the task's own verifier image scores it on the
+development suite. ``serve-frontiercs2.yaml`` runs them at the paper's search
+budget. The final verifier scores the best candidate once on the held-out
+suite and records whether it beats the human reference. The
+`judge guide <../../../recipes/tttd/examples/guidance_ttt/judges/README.md>`__
+covers preparation and verifier images.
 
 Run an example
 --------------

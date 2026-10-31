@@ -11,9 +11,18 @@ from pathlib import Path
 import yaml
 
 from .contract import TaskContract
-from .execution import ExecutionBackend, gpt_oss_120b_backend, openrouter_glm_5_2_backend
+from .execution import ExecutionBackend, gpt_oss_120b_backend, openai_compatible_backend, openrouter_glm_5_2_backend
 
 TASKS = ("polyomino_packing", "lasso_path", "ahc058", "trimul")
+# CPU-only FrontierCS 2 tasks scored by judges/frontiercs2_server.py; a task's name is its FrontierCS 2 id.
+FRONTIERCS2_TASKS = ("join_tree_rewriting", "approximate_mips_query_stopping", "lejepa_world_model", "polar_express")
+# Seconds for one judge call: the task's evaluation timeout plus a margin for queueing behind other candidates.
+FRONTIERCS2_TIMEOUTS = {
+    "join_tree_rewriting": 2_700,
+    "approximate_mips_query_stopping": 2_700,
+    "lejepa_world_model": 1_200,
+    "polar_express": 5_400,
+}
 EXAMPLE_DIR = Path(__file__).resolve().parents[1]
 
 
@@ -45,9 +54,16 @@ class RunConfig:
     def scenario(self) -> str:
         return f"guidance-ttt-{self.task.replace('_', '-')}"
 
+    def execution_context(self) -> str:
+        """The repository code that prepare.py wrote for a FrontierCS 2 task; empty for the other tasks."""
+        path = self.state_dir / "execution_context.md"
+        return path.read_text(encoding="utf-8") if path.is_file() else ""
+
     def contract(self) -> TaskContract:
         return TaskContract.load(
-            self.task_dir / "contract.json", problem_prompt=(self.task_dir / "instruction.md").read_text()
+            self.task_dir / "contract.json",
+            problem_prompt=(self.task_dir / "instruction.md").read_text(),
+            execution_context=self.execution_context(),
         )
 
     def validate_state(self) -> None:
@@ -73,8 +89,8 @@ class RunConfig:
     @classmethod
     def load(cls) -> RunConfig:
         task = os.environ.get("GUIDANCE_TASK", TASKS[0])
-        if task not in TASKS:
-            raise ValueError(f"unknown GUIDANCE_TASK {task!r}; choose {', '.join(TASKS)}")
+        if task not in TASKS + FRONTIERCS2_TASKS:
+            raise ValueError(f"unknown GUIDANCE_TASK {task!r}; choose {', '.join(TASKS + FRONTIERCS2_TASKS)}")
         config_path = Path(os.environ.get("GUIDANCE_CONFIG", EXAMPLE_DIR / "serve.yaml")).resolve()
         stack = yaml.safe_load(config_path.read_text())
         grid = stack["pipeline"]["record2record"]["config"]
@@ -93,11 +109,25 @@ class RunConfig:
             )
         elif executor == "openrouter":
             backend = openrouter_glm_5_2_backend(concurrency=workers)
+        elif executor == "openai":
+            backend = openai_compatible_backend(
+                model=os.environ["GUIDANCE_EXECUTOR_MODEL"],
+                base_url=os.environ["GUIDANCE_EXECUTOR_URL"],
+                api_key_env=os.environ.get("GUIDANCE_EXECUTOR_API_KEY_ENV", "OPENAI_API_KEY"),
+                api_key_file=os.environ.get("GUIDANCE_EXECUTOR_API_KEY_FILE"),
+                concurrency=workers,
+            )
         else:
-            raise ValueError("GUIDANCE_EXECUTOR must be local or openrouter")
+            raise ValueError("GUIDANCE_EXECUTOR must be local, openrouter, or openai")
         if "GUIDANCE_EXECUTOR_MAX_TOKENS" in os.environ:
             backend = replace(backend, max_tokens=int(os.environ["GUIDANCE_EXECUTOR_MAX_TOKENS"]))
-        default_timeout = {"polyomino_packing": 340, "lasso_path": 660, "ahc058": 530, "trimul": 1160}[task]
+        default_timeout = {
+            "polyomino_packing": 340,
+            "lasso_path": 660,
+            "ahc058": 530,
+            "trimul": 1160,
+            **FRONTIERCS2_TIMEOUTS,
+        }[task]
         state_dir = Path(os.environ.get("GUIDANCE_STATE_DIR", EXAMPLE_DIR / "work" / task)).resolve()
         port = int(stack["reef"]["port"])
         return cls(
