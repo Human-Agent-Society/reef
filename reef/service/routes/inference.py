@@ -157,9 +157,10 @@ async def _relay_inference_stream(
                     pending,
                     stream_record(upstream, bytes(body), complete=True),
                 )
+                # No receipt when Reef stored nothing: an evaluation call, or a response it cannot train on.
                 frames = (
                     receipt_sse_events(path, relay.chat_identity, relay.terminal, item.agent_record_id)
-                    if record
+                    if item is not None and record
                     else (relay.terminal,)
                 )
                 for frame in frames:

@@ -4,7 +4,8 @@ The shared OpenAI and Anthropic handling lives in :mod:`reef.inference.chat`.
 This module shapes SGLang's request, reads the exact sample out of its
 ``meta_info`` (sampled ids beside log-probs, and the per-token weight versions
 Reef's scheduler plugin stamps), and relays SGLang's incremental stream so
-clients see tokens as they are produced.
+clients see tokens as they are produced. An image request sends the prepared
+PNG as ``image_data`` and asks for the ``prompt_token_ids`` SGLang ran.
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ from collections.abc import AsyncIterator, Mapping, Sequence
 from typing import Any
 
 from reef.artifact.artifact import Artifact, is_local_release
+from reef.core.images import PreparedImage
 from reef.inference.chat import (
     CapturedGeneration,
     ChatCall,
@@ -21,12 +23,14 @@ from reef.inference.chat import (
     ReasoningStreamSplitter,
     TokenNativeChatHandler,
     finite_log_prob,
+    integer_tokens,
     normalize_finish_reason,
     positive_max_tokens,
     sse_json_events,
     stream_ids,
 )
 from reef.inference.http import HttpInferenceHandler, RequestHeadersFactory
+from reef.inference.images import DEFAULT_IMAGE_MAX_PIXELS
 from reef.runtime.interfaces import InferenceStream
 
 SGLANG_GENERATE_PATH = "/generate"
@@ -63,6 +67,7 @@ class SGLangGenerateClient(NativeGenerateClient):
 
     generate_path = SGLANG_GENERATE_PATH
     error_label = "SGLang /generate"
+    accepts_image_input = True
 
     def sampling_params(self, request: Mapping[str, Any], defaults: Mapping[str, Any]) -> dict[str, Any]:
         sampling: dict[str, Any] = {"max_new_tokens": positive_max_tokens(request, defaults, "max_new_tokens")}
@@ -102,6 +107,7 @@ class SGLangGenerateClient(NativeGenerateClient):
         *,
         capture_topk: int,
         stream: bool,
+        images: Sequence[PreparedImage] = (),
     ) -> dict[str, Any]:
         native_payload: dict[str, Any] = {
             "input_ids": prompt_ids,
@@ -109,6 +115,10 @@ class SGLangGenerateClient(NativeGenerateClient):
             "return_logprob": True,
             "stream": stream,
         }
+        if images:
+            # SGLang expands each image placeholder; the record keeps the ids it ran.
+            native_payload["image_data"] = [image.data_url() for image in images]
+            native_payload["return_prompt_token_ids"] = True
         top_logprobs = request.get("top_logprobs")
         if isinstance(top_logprobs, int) and not isinstance(top_logprobs, bool) and top_logprobs >= 0:
             native_payload["top_logprobs_num"] = top_logprobs
@@ -130,6 +140,8 @@ class SGLangGenerateClient(NativeGenerateClient):
         if len(stamped) != len(output_ids):
             raise ValueError("SGLang response has incomplete token runtime load IDs")
         topk = captured_topk(meta, len(output_ids), capture_topk)
+        # SGLang puts the prompt ids beside ``meta_info``, not inside it.
+        prompt_ids = normalized.get("prompt_token_ids")
         return CapturedGeneration(
             output_ids=output_ids,
             rollout_log_probs=rollout_log_probs,
@@ -139,6 +151,7 @@ class SGLangGenerateClient(NativeGenerateClient):
             public_meta={key: value for key, value in meta.items() if key not in PRIVATE_META_KEYS},
             topk_indices=topk[0],
             topk_log_probs=topk[1],
+            prompt_ids=None if prompt_ids is None else integer_tokens(prompt_ids, "SGLang prompt_token_ids"),
         )
 
     def tool_parser(self, tools: list[dict[str, Any]], parser_name: str, tokenizer: Any) -> Any:
@@ -229,11 +242,19 @@ class NativeStreamCapture:
         self.meta: dict[str, Any] = {}
         self.last_output_logprobs: list[Any] = []
         self.seen = False
+        # SGLang repeats the prompt ids in every event. Events that disagree leave none, which keeps no record.
+        self.prompt_ids: list[Any] | None = None
+        self.prompt_ids_agree = True
 
     def accept(self, event: Mapping[str, Any]) -> str:
         meta = event.get("meta_info")
         if not isinstance(meta, Mapping):
             raise ValueError("SGLang stream event lacks meta_info")
+        prompt_ids = event.get("prompt_token_ids")
+        if not self.seen:
+            self.prompt_ids = prompt_ids
+        elif prompt_ids != self.prompt_ids:
+            self.prompt_ids_agree = False
         self.seen = True
         self.last_output_logprobs = []
         total = meta.get("completion_tokens")
@@ -282,6 +303,8 @@ class NativeStreamCapture:
         versions = self.meta.get("_reef_token_runtime_load_ids")
         if versions is not None:
             response["_reef_token_runtime_load_ids"] = versions
+        if self.prompt_ids is not None and self.prompt_ids_agree:
+            response["prompt_token_ids"] = self.prompt_ids
         return response
 
 
@@ -303,6 +326,7 @@ class SGLangInferenceHandler(TokenNativeChatHandler):
         rollout_continuation: bool = False,
         client: NativeGenerateClient | None = None,
         request_headers: RequestHeadersFactory | None = None,
+        image_max_pixels: int = DEFAULT_IMAGE_MAX_PIXELS,
     ) -> None:
         super().__init__(
             upstream_url,
@@ -317,17 +341,23 @@ class SGLangInferenceHandler(TokenNativeChatHandler):
             chat_template_kwargs=chat_template_kwargs,
             rollout_continuation=rollout_continuation,
             request_headers=request_headers,
+            image_max_pixels=image_max_pixels,
         )
 
     async def inference_stream(self, artifact: Artifact, path: str, payload: dict[str, Any]) -> InferenceStream:
         self._validate_stream_path(path)
-        call = self._chat_call(path, payload)
+        call = await self._chat_call(path, payload)
         # Force the scheduler to flush every available decode step. This is a
         # request-local knob; deployments using SGLang's disjoint incremental
         # output mode are supported by NativeStreamCapture as well.
         call.sampling_params.setdefault("stream_interval", 1)
         native_payload = self.client.payload(
-            call.request, call.prompt_ids, call.sampling_params, capture_topk=self.capture_topk, stream=True
+            call.request,
+            call.prompt_ids,
+            call.sampling_params,
+            capture_topk=self.capture_topk,
+            stream=True,
+            **call.payload_images(),
         )
         upstream = await HttpInferenceHandler.inference_stream(self, artifact, SGLANG_GENERATE_PATH, native_payload)
         chat_id, message_id, created = stream_ids()

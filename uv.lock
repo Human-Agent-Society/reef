@@ -4301,6 +4301,7 @@ s3 = [
 ]
 sglang = [
     { name = "httpx" },
+    { name = "pillow" },
     { name = "psutil" },
     { name = "ray", extra = ["default"] },
     { name = "requests" },
@@ -4367,6 +4368,7 @@ requires-dist = [
     { name = "opentelemetry-exporter-otlp-proto-http", marker = "extra == 'opentelemetry'", specifier = ">=1.25" },
     { name = "opentelemetry-sdk", marker = "extra == 'opentelemetry'", specifier = ">=1.25" },
     { name = "peft", marker = "extra == 'slime'" },
+    { name = "pillow", marker = "extra == 'sglang'", specifier = ">=9.1" },
     { name = "pillow", marker = "extra == 'slime'" },
     { name = "pre-commit", marker = "extra == 'dev'" },
     { name = "psutil", marker = "extra == 'sglang'", specifier = ">=5.9" },

@@ -37,7 +37,7 @@ dependencies = [
 
 [project.optional-dependencies]
 # Python-side inference adapters; install native SGLang in its GPU environment.
-sglang = ["httpx", "requests", "ray[default]", "sglang-router>=0.3.2", "psutil>=5.9"]
+sglang = ["httpx", "pillow>=9.1", "requests", "ray[default]", "sglang-router>=0.3.2", "psutil>=5.9"]
 # Python-side vLLM adapter; install native vLLM in its GPU environment.
 vllm = ["httpx", "requests", "ray[default]", "psutil>=5.9"]
 tinker = [

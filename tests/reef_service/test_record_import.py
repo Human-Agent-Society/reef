@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -16,7 +17,7 @@ from reef.dispatcher import Dispatcher
 from reef.recipe import Recipe
 from reef.record2record import ReportGrouping, ReportRecord2Record
 from reef.record2sample import ReportSamples
-from reef.runtime.interfaces import InferenceHandler
+from reef.runtime.interfaces import InferenceHandler, InferenceStream
 from reef.sample2job import Sample2Job
 from reef.service.app import create_app
 from reef.service.routes.records import MAX_RECORD_IMPORT_BYTES
@@ -26,6 +27,7 @@ from reef.train.pipeline import TrainingPipeline
 from reef.train.types import TaskSample
 
 HEADERS = {"x-reef-scenario": "s", "Authorization": "Bearer import-test-token"}
+IMAGE_URL_PART = {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}
 
 
 def inference_payload(text):
@@ -394,6 +396,59 @@ def test_batch_admission_is_atomic_and_ordered(tmp_path):
             assert response.status == 413
             assert scenario.records.get("s", "large") is None
             assert not dispatcher.recipe.batches
+
+    try:
+        asyncio.run(run())
+    finally:
+        dispatcher.close()
+
+
+class UnrecordedHandler(InferenceHandler):
+    """Answers like a token-native handler whose image capture failed: served, marked unrecorded."""
+
+    response = {
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": "a red square"}}],
+        "training": {"unrecorded": "the engine's prompt ids differ", "runtime_load_id": "initial"},
+    }
+
+    async def inference(self, artifact, path, payload):
+        return dict(self.response)
+
+    async def inference_stream(self, artifact, path, payload):
+        chunk = {"choices": [{"index": 0, "delta": {"content": "a red square"}, "finish_reason": "stop"}]}
+
+        async def chunks():
+            yield f"data: {json.dumps(chunk)}\n\n".encode()
+            yield b"data: [DONE]\n\n"
+
+        return InferenceStream(
+            status=200,
+            headers={"Content-Type": "text/event-stream"},
+            chunks=chunks(),
+            record_response=self.response,
+        )
+
+
+@pytest.mark.parametrize("stream", (False, True))
+def test_a_response_the_handler_marks_unrecorded_is_served_and_not_stored(tmp_path, stream):
+    dispatcher = dispatcher_for(tmp_path, LearningRecipe())
+    body = {"model": "example-model", "stream": stream, "messages": [{"role": "user", "content": [IMAGE_URL_PART]}]}
+
+    async def run():
+        async with TestClient(
+            TestServer(create_app(dispatcher, tokens="import-test-token", inference_handler=UnrecordedHandler()))
+        ) as client:
+            response = await client.post("/v1/chat/completions", headers=HEADERS, json=body)
+            text = await response.text()
+            assert response.status == 200, text
+            assert "a red square" in text
+            # No receipt: Reef stored nothing that a report could reference.
+            assert "x-reef-agent-record-id" not in response.headers
+            assert "agent_record_id" not in text
+            assert "unrecorded" not in text
+            scenario = dispatcher.get_or_create_scenario("s")
+            assert scenario.records.replay("s") == ()
+            assert scenario.operations.snapshot()["serve/unrecorded_total"] == 1
 
     try:
         asyncio.run(run())

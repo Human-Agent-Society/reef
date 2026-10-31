@@ -219,6 +219,34 @@ def test_a_request_that_does_not_extend_its_rollout_is_refused_before_generation
 
 
 @pytest.mark.unit
+def test_a_text_continuation_after_a_refused_image_request_extends_the_same_tokens(tmp_path) -> None:
+    image = {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}
+
+    async def scenario():
+        async with ScriptedEngine([([ord("a"), IM_END], "stop"), ([ord("c"), IM_END], "stop")]) as engine:
+            handler = engine.handler()
+            first = await handler.inference(artifact(tmp_path), "/v1/chat/completions", first_request())
+            with pytest.raises(ValueError, match="rollout continuation does not support image content"):
+                await handler.inference(
+                    artifact(tmp_path),
+                    "/v1/chat/completions",
+                    continued(first_request(), {"role": "user", "content": [image]}),
+                )
+            later = continued(first_request(), {"role": "user", "content": "next"})
+            second = await handler.inference(artifact(tmp_path), "/v1/chat/completions", later)
+        return engine, first, second
+
+    engine, first, second = run(scenario())
+    first_tokens = first["training"]["tokens"]
+    assert len(engine.prompts) == 2
+    assert engine.prompts[1] == [
+        *first_tokens,
+        *TOKENIZER.encode("\n<|im_start|>user\nnext<|im_end|>\n<|im_start|>assistant\n"),
+    ]
+    assert second["training"]["tokens"][: len(first_tokens)] == first_tokens
+
+
+@pytest.mark.unit
 def test_a_new_rollout_and_a_request_without_user_render_from_the_template(tmp_path) -> None:
     async def scenario():
         async with ScriptedEngine([([ord("a"), IM_END], "stop")] * 3) as engine:
