@@ -9,12 +9,13 @@ from pathlib import Path
 
 from aiohttp.test_utils import TestClient, TestServer
 from tests.support.task_service_stubs import task_for
-from tests.support.trajectory_uploads import TOKEN, UploadRecipe, dispatcher_for, trajectory_items
+from tests.support.trajectory_uploads import TOKEN, UploadRecipe, dispatcher_for, upload_trajectories
 
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core.tasks import write_harbor_task
 from reef.dispatcher import Dispatcher
 from reef.service.app import create_app
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
@@ -38,16 +39,12 @@ def test_a_scenario_created_with_an_owner_uses_that_owners_items_only(tmp_path: 
         response = await client.post("/reef/scenarios", headers=AUTH, json={"name": "math", "owner": "acme"})
         assert response.status == 201, await response.text()
         assert (await response.json())["owner"] == "acme"
-        created = await client.post(
-            "/reef/namespaces/acme/data", headers=AUTH, json=trajectory_items("t1", scenario="math")
-        )
+        created = await upload_trajectories(client, AUTH, "t1", scenario="math", base="/reef/namespaces/acme/data")
         assert created.status == 201, await created.text()
         listing = await (await client.get("/reef/scenarios/math/samples", headers=AUTH)).json()
         assert [sample["sample_id"] for sample in listing["samples"]] == ["t1"]
         # Another owner's items cannot name the scenario.
-        refused = await client.post(
-            "/reef/namespaces/globex/data", headers=AUTH, json=trajectory_items("t2", scenario="math")
-        )
+        refused = await upload_trajectories(client, AUTH, "t2", scenario="math", base="/reef/namespaces/globex/data")
         assert refused.status == 400
         assert "has the owner 'acme'" in await refused.text()
         # The owner is set at creation: a scenario that holds data keeps it.
@@ -66,7 +63,7 @@ def test_a_query_pages_by_sequence_and_a_task_item_reads_without_content(tmp_pat
 
     async def check(client: TestClient) -> None:
         base = "/reef/namespaces/acme/data"
-        await client.post(base, headers=AUTH, json=trajectory_items("t1", "t2", "t3", scenario=None))
+        await upload_trajectories(client, AUTH, "t1", "t2", "t3", scenario=None, base=base)
         response = await client.post(
             f"{base}/tasks", headers={**AUTH, "Content-Type": "application/gzip"}, data=buffer.getvalue()
         )
@@ -92,6 +89,7 @@ def test_a_deployment_without_a_data_store_serves_no_data_route(tmp_path: Path) 
         UploadRecipe(),
         InMemoryRepositoryBackend.factory(tmp_path / "initial", root=tmp_path / "repository"),
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
+        coordination=memory_coordination(),
     )
 
     async def check(client: TestClient) -> None:
@@ -112,7 +110,7 @@ def test_a_client_record_item_needs_the_content_and_id_of_a_record(tmp_path: Pat
         "references": [],
         "artifact_ref": None,
     }
-    metadata = {"kind": "record", "origin": {"scenario": "old", "release_id": None, "load_id": None}}
+    metadata = {"kind": "record", "origin": {"scenario": "old", "release_id": None, "artifact_id": None}}
 
     async def check(client: TestClient) -> None:
         good = {"items": [{"id": "old/r1", "content": content, "metadata": metadata}]}

@@ -362,6 +362,9 @@ class Campaign:
                 saved = [path for path in saved if path.name != "eval-0000.jsonl"]
             if saved:
                 raise RuntimeError("Saved samples exist but their Reef scenario is missing")
+        if not history:
+            # The inference routes serve only a scenario that exists: create it at its initial release.
+            self.client.post("/reef/scenarios", self.args.scenario, {"name": self.args.scenario})
         evaluation = load_questions(self.args.eval_data)
         training = load_questions(self.args.train_data) if self.args.steps else []
         if self.args.steps * self.args.prompts_per_step > len(training):

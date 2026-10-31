@@ -25,8 +25,7 @@ from reef.recipe.cordis import CordisRecipe
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.reefine.agent import AgentProposer
 from reef.recipe.reefine.evolution import EXTENSION_ADAPTER, HEALTH_TASK_DIRECTORY
-from reef.recipe.reefine.multimodal import MultimodalProvider, MultimodalSettings, ProviderRelay
-from reef.runtime.interfaces import MultimodalRelay
+from reef.recipe.reefine.multimodal import MultimodalProvider, MultimodalSettings
 
 logger = logging.getLogger(__name__)
 
@@ -73,11 +72,6 @@ class ReefineRecipe(CordisRecipe):
         return self.multimodal.provider(
             None if binding is None else binding.base_url, None if binding is None else binding.api_key
         )
-
-    @property
-    def multimodal_relay(self) -> MultimodalRelay | None:
-        provider = self.multimodal_provider
-        return None if provider is None else ProviderRelay(provider)
 
     @classmethod
     def _recipe_kwargs(cls, settings: Mapping[str, Any], values: Mapping[str, str]) -> dict[str, Any]:

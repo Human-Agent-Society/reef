@@ -123,7 +123,12 @@ def recovered_trainer_states(
 
 
 class ScenarioFactory:
-    """Register, assemble, and recover complete scenario instances."""
+    """Register, assemble, and recover complete scenario instances.
+
+    ``activates_runtime`` is whether a recovered scenario's active artifact is activated on the runtime. Only the
+    process that runs control activates: a process of another service that loads a scenario on demand (samples,
+    evaluation, data) must not load weights onto the engines that control manages.
+    """
 
     def __init__(
         self,
@@ -134,8 +139,10 @@ class ScenarioFactory:
         experiment_tracker: ExperimentTracker,
         scenario_storage: ScenarioStorage,
         experiment_reports: ExperimentReportQueue | None = None,
+        activates_runtime: bool = True,
     ) -> None:
         self._recipe = recipe
+        self._activates_runtime = activates_runtime
         self._backend_factory = backend_factory
         self._local_artifact_dir = local_artifact_dir
         self._experiment_tracker = experiment_tracker
@@ -371,7 +378,8 @@ class ScenarioFactory:
             repository.synchronize_checkpoint()
             # Traffic must not reach a recovered scenario before its committed
             # head is servable; a failed activation leaves the scenario unloaded.
-            surface.activate(Artifact(current_artifact, repository), runtime)
+            if self._activates_runtime:
+                surface.activate(Artifact(current_artifact, repository), runtime)
 
             experiment_logger = self._experiment_tracker.bind_scenario(
                 scenario=name,
@@ -419,7 +427,6 @@ class ScenarioFactory:
                     surface=surface,
                     runtime=runtime,
                     training_component=recipe.training_component,
-                    inference_handler=recipe.inference_handler,
                     activation_rule=recipe.activation_rule(),
                     # The recipe's own contract, not the first trainer's: a composite agrees
                     # one across its components, whatever order they are listed in.

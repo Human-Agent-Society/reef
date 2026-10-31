@@ -554,6 +554,13 @@ class SQLRecordStore(RecordStore):
         with self._transaction(write=False) as connection:
             return int(connection.execute(statement).scalar_one())
 
+    def last_sequence(self, scenario: str) -> int:
+        statement = select(func.max(self._tables.records.c.sequence)).where(
+            self._tables.condition(self._tables.records), self._tables.records.c.scenario == scenario
+        )
+        with self._transaction(write=False) as connection:
+            return int(connection.execute(statement).scalar_one() or 0)
+
     def get_for_audit(self, scenario: str, agent_record_id: str) -> StoredRecord | None:
         """Read a retained record with its append sequence."""
         with self._transaction(write=False) as connection:
@@ -626,7 +633,6 @@ class SQLRecordStore(RecordStore):
             artifact_evaluation=values.get("artifact_evaluation"),
             activation=values.get("activation"),
             owner=values.get("owner"),
-            record_items_sequence=values.get("record_items_sequence", 0),
         )
 
     def write_settings(self, settings: ScenarioSettings) -> None:
@@ -640,7 +646,6 @@ class SQLRecordStore(RecordStore):
             ),
             "activation": None if settings.activation is None else dict(settings.activation),
             "owner": settings.owner,
-            "record_items_sequence": settings.record_items_sequence or None,
         }
         rows = [
             {**self._tables.scope, "name": name, "value_json": json.dumps(value, ensure_ascii=False)}

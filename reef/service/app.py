@@ -12,22 +12,19 @@ from aiohttp import web
 
 from reef.artifact.sources import ArtifactSources
 from reef.dispatcher import Dispatcher
-from reef.runtime.interfaces import InferenceHandler
+from reef.dispatcher.served import PublishedEngines
+from reef.runtime.interfaces import FixedEngineClients, InferenceHandler
 from reef.service.artifact_evaluations import ArtifactEvaluations
 from reef.service.artifact_imports import ArtifactImports
-from reef.service.auth import create_authentication_middleware
 from reef.service.cors import configure_browser_access
-from reef.service.errors import translate_errors
-from reef.service.request_service import InferenceRetryPolicy, RequestService
-from reef.service.routes import register_routes
+from reef.service.inference_service import InferenceReplica, ServedModelsCache
+from reef.service.request_service import RequestService
+from reef.service.routes import register_data_service_routes, register_routes
+from reef.service.web import service_application
 from reef.storage.records import RecordRetention
 
 logger = logging.getLogger(__name__)
 _RECORD_RETENTION_INTERVAL_SECONDS = 60.0
-#: The largest request body the service reads. aiohttp's default is 1 MiB, and a coding agent's first call carries
-#: its whole context: Claude Code with a dozen MCP servers and a few hundred skills sends several MiB, which the
-#: default answered with 413 and the agent reported as a request too large.
-MAX_REQUEST_BYTES = 64 * 1024 * 1024
 REQUEST_SERVICE_KEY = web.AppKey("reef_request_service", RequestService)
 
 
@@ -53,6 +50,32 @@ async def _maintain_records(dispatcher: Dispatcher, retention: RecordRetention, 
             continue
 
 
+def create_data_app(
+    dispatcher: Dispatcher,
+    *,
+    tokens: str | Iterable[str] | None = None,
+    console_origins: Iterable[str] = (),
+) -> web.Application:
+    """The HTTP app of the data service: the data routes and the reads of what each scenario stores.
+
+    ``dispatcher`` runs the data service and no control (``reef serve --component data``): it loads each scenario
+    on demand, for the checks of a data write and for the reads. The app closes it on cleanup.
+    """
+    if not dispatcher.services.runs_data:
+        raise ValueError("the data app runs the data service: build its dispatcher with the data service")
+    request_service = RequestService(dispatcher)
+    app = service_application(tokens)
+    configure_browser_access(app, console_origins)
+    app[REQUEST_SERVICE_KEY] = request_service
+    register_data_service_routes(app, request_service=request_service, evaluations=ArtifactEvaluations(dispatcher))
+
+    async def cleanup(app: web.Application) -> None:
+        await asyncio.to_thread(dispatcher.close)
+
+    app.on_cleanup.append(cleanup)
+    return app
+
+
 def create_app(
     dispatcher: Dispatcher,
     *,
@@ -60,7 +83,6 @@ def create_app(
     evaluation_tokens: str | Iterable[str] | None = None,
     console_origins: Iterable[str] = (),
     inference_handler: InferenceHandler | None = None,
-    inference_retry_policy: InferenceRetryPolicy | None = None,
     close_dispatcher: bool = False,
     record_retention: RecordRetention | None = None,
     open_local_cycles_at: str | None = None,
@@ -78,19 +100,31 @@ def create_app(
     with reef-eval's Harbor lab and evaluates no new artifact.
     ``artifact_imports`` reads and holds artifact imports; None reads the
     built-in sources into the system's temporary directory.
+
+    The app runs the inference routes in the same process (``reef.service.inference_service``): they read
+    ``served_models`` and reach each row's engine through the runtime that control serves it with, or through
+    ``inference_handler`` when the caller gives one.
     """
-    request_service = RequestService(dispatcher, retry_policy=inference_retry_policy)
-    app = web.Application(
-        middlewares=[create_authentication_middleware(tokens, evaluation_tokens=evaluation_tokens), translate_errors],
-        client_max_size=MAX_REQUEST_BYTES,
+    publisher = dispatcher.publisher
+    if publisher is None:
+        raise ValueError("the Reef app runs control: build its dispatcher with the control service")
+    runtime = dispatcher.recipe.runtime
+    replica = InferenceReplica(
+        ServedModelsCache(dispatcher.coordination.served_models),
+        dispatcher.record_storage,
+        PublishedEngines(publisher) if inference_handler is None else FixedEngineClients(inference_handler),
+        timeout_seconds=300.0 if runtime is None else runtime.inference_timeout_s,
+        for_codex=dispatcher.recipe.harness_adapter == "codex",
     )
+    request_service = RequestService(dispatcher)
+    app = service_application(tokens, evaluation_tokens=evaluation_tokens)
     configure_browser_access(app, console_origins)
     app[REQUEST_SERVICE_KEY] = request_service
     artifact_evaluations = ArtifactEvaluations(dispatcher) if evaluations is None else evaluations
     register_routes(
         app,
         request_service=request_service,
-        inference_handler=inference_handler,
+        replica=replica,
         evaluations=artifact_evaluations,
         imports=(
             ArtifactImports(ArtifactSources.from_setting(()), Path(tempfile.gettempdir()) / "reef-artifact-imports")
@@ -161,8 +195,8 @@ def create_app(
 
 
 __all__ = [
-    "InferenceRetryPolicy",
     "RequestService",
     "create_app",
+    "create_data_app",
     "get_dispatcher",
 ]

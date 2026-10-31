@@ -10,17 +10,43 @@ component. The sync makes ``U(s)`` match ``I(s)``:
 
 The data store is the source of the content; an upload is a copy, so training reads it as before. Records are
 items too, but the sync leaves them alone: the scenario's record store keeps its records.
+
+Control runs the sync, because the trainers of a loaded scenario must forget the uploads that leave it. The data
+service writes the data store; after each write it asks control to sync each scenario that the write touched, with
+a ``data_sync`` item in control's sync queue (``request_data_sync``). A scenario that is not loaded syncs when it opens.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from abc import ABC, abstractmethod
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 
 from reef.core.job_data import TaskSample, TrajectorySample
 from reef.storage.data import DataStore, NewItem, StoredItem
+from reef.storage.data_queue import DATA_SYNC_KIND, DATA_SYNC_QUEUE
 from reef.storage.samples import SampleStore, StoredSample
 from reef.storage.tasks import SPLIT_NAMES
+from reef.storage.work_queue import WorkItem, WorkQueue
+
+
+class ScenarioUses(ABC):
+    """What a data write asks of the scenarios that its items name.
+
+    ``scenario_owner(scenario)`` is the owner of ``scenario`` in the data store, or None when the scenario does not
+    exist. ``check_use(scenario, trajectories, train_tasks)`` raises ``ValueError`` unless ``scenario`` can train
+    on the new ``trajectories`` (pairs of item ID and sample), and on train tasks when ``train_tasks``.
+
+    Purpose: the dispatcher implements it; the data writes (``reef.service.data``) call it before they store.
+    """
+
+    @abstractmethod
+    def scenario_owner(self, scenario: str) -> str | None: ...
+
+    @abstractmethod
+    def check_use(
+        self, scenario: str, trajectories: Sequence[tuple[str, TrajectorySample]], train_tasks: bool
+    ) -> None: ...
 
 
 @dataclass(frozen=True)
@@ -138,10 +164,25 @@ def release_items(data: DataStore, owner: str, scenario: str) -> None:
             data.update(owner, ids, {"scenarios": {scenario: None}})
 
 
+def request_data_sync(queue: WorkQueue, owner: str, scenario: str) -> WorkItem:
+    """Ask control to sync ``scenario`` with the items of ``owner``; return the item that will run the sync.
+
+    A sync reads the items when it runs, so a queued sync covers every write made while it waits.
+    """
+    return queue.request(DATA_SYNC_QUEUE, scenario, DATA_SYNC_KIND, data_sync_key(scenario), {"owner": owner})
+
+
+def data_sync_key(scenario: str) -> str:
+    """The serial key of the ``data_sync`` items of ``scenario``: its syncs run one at a time."""
+    return f"{DATA_SYNC_KIND}:{scenario}"
+
+
 __all__ = [
+    "ScenarioUses",
     "SyncResult",
     "adopt_uploads",
     "release_items",
+    "request_data_sync",
     "scenario_items",
     "sync_scenario_samples",
     "uploads",

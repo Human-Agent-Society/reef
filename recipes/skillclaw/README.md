@@ -11,8 +11,8 @@ skillclaw/
   skillclaw.yaml      the recipe the driver boots: explicit implementation, selection
                       always, batch_size 60, probe tasks, seed composition
   recipe.py           the Reef recipe subclass: build_surface returns
-                      create_skill_surface([SkillCatalogModule(...)]) so every /v1
-                      request carries the pool catalog; seed_skills seeds
+                      create_skill_surface([SkillCatalogModule(...)]), which
+                      admits the pool; seed_skills seeds
                       the benchmark's shipped skills library
   harbor/             one Harbor-format task (the standard layout the
                       sibling examples follow): the benchmark's
@@ -62,7 +62,7 @@ skillclaw/
 
 `propose` is the sealed night, unchanged in shape: rebuild each task's session digest from the recorded traffic, summarize every session, judge the unscored ones, group by referenced skill, then one decision per skill group plus the no-skill bucket - `improve_skill`, `optimize_description`, `create_skill`, or `skip`. The decisions land on a scratch pool (merge and registry semantics included) and the pool diff becomes one composite mutation sequence: one `create` or `update` per changed skill, applied under one snapshot and settled under one gate verdict. The sealed night never removes a skill, so no `remove` is ever proposed. The night's LLM is the served model itself, through the same upstream binding the day uses.
 
-The day is the sealed day: each task runs in its WildClawBench container, the agent's model calls go through the embedded Reef service (which injects the served pool's catalog and records the exchange), and the benchmark's own checks and judge grade the outcome. The report references the task's recorded traffic, so the night learns from exactly what the proxy saw.
+The day is the sealed day: each task runs in its WildClawBench container, the served pool's skills are copied into the container, the agent's model calls go through the embedded Reef service (which records the exchange and adds nothing to the request), and the benchmark's own checks and judge grade the outcome. The report references the task's recorded traffic, so the night learns from exactly what the proxy saw.
 
 The night trigger is the job's data: `evolution.batch_size` in skillclaw.yaml is the frozen task count (60 at the paper setting), no score window, so the whole day goes into one job's data - failures and passes - and the day's last report schedules the background night step. The driver waits for that step before sealing the round and pulling the next day's pool.
 

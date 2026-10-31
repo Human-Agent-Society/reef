@@ -13,6 +13,7 @@ from threading import Event
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
+from tests.reef_service.test_served_artifacts import serving_dispatcher
 from tests.support._policy_recipe import TestPolicyRecipe
 from tests.support.artifact_versions import (
     ImportingComponent,
@@ -28,8 +29,9 @@ from reef.dispatcher import Dispatcher
 from reef.observability import TrainFromExperimentEvent, TrainingExperimentContext, TrainingExperimentEvent
 from reef.runtime.interfaces import InferenceHandler
 from reef.runtime.jobs import SavedCheckpoint
-from reef.service.app import RequestService, create_app
+from reef.service.app import create_app
 from reef.storage.commit_history import CommitHistoryScenarioStore
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.jobs import JobLoopState
 from reef.train.trainer import Trainer
@@ -46,7 +48,7 @@ class BlockingBackend(InferenceHandler):
         self.release_id = artifact.ref.release_id
         self.started.set()
         await self.finish.wait()
-        return {"choices": [{"message": {"content": "ok"}}], "metadata": {"runtime_load_id": "w1"}}
+        return {"choices": [{"message": {"content": "ok"}}]}
 
 
 def stored_paths(tmp_path: Path) -> set[Path]:
@@ -62,6 +64,7 @@ def restart(tmp_path: Path, backend_factory) -> tuple[Dispatcher, ImportingCompo
         backend_factory,
         local_artifact_dir=tmp_path / "restarted-staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
+        coordination=memory_coordination(),
     )
     return value, component
 
@@ -174,8 +177,8 @@ def test_train_from_sets_the_next_job_start_and_leaves_serving_alone(tmp_path) -
     assert [row["artifact_id"] for row in value.list_artifacts("math") if row["active"]] == [served.release_id]
     imported = str(runtime.imported[-1])
     assert JobLoopState.from_dict(scenario.trainer.state).start == imported
-    # The next job starts from the imported release; the engine still serves w2.
-    train(value, 3, "w2")
+    # The next job starts from the imported release.
+    train(value, 3)
     assert runtime.submitted[-1].start == imported
     value.close()
 
@@ -200,7 +203,7 @@ def test_activation_and_training_start_survive_a_restart(tmp_path) -> None:
     assert [row["artifact_id"] for row in recovered.artifacts() if row["active"]] == [first["artifact_id"]]
     # The training start is taken again: the trainer's own commits do not record it yet.
     assert JobLoopState.from_dict(recovered.trainer.state).start == str(component.imported[-1])
-    train(restarted, 3, "w1")
+    train(restarted, 3)
     assert component.submitted[-1].start == str(component.imported[-1])
     restarted.close()
 
@@ -241,8 +244,7 @@ def test_train_from_starts_a_new_experiment_run_segment_and_activate_does_not(tm
 
     value.activate("math", target_version)
     value.train_from("math", created)
-    # The engine serves the activated checkpoint under the version that its weights name.
-    train(value, 3, "w1")
+    train(value, 3)
     value.registry.experiment_reports.flush()
 
     # Each job reports three commits; the activation at step 7 reports nothing, the new start at step 8 opens the
@@ -278,29 +280,36 @@ def test_older_versions_and_version_catalog_survive_restart(tmp_path) -> None:
 
 @pytest.mark.unit
 def test_request_records_the_artifact_ref_captured_before_inference(tmp_path) -> None:
+    """A request keeps the served artifact it read first: a commit during the call changes neither the release
+    the engine got nor the release its record names."""
+
     async def run() -> None:
-        value, _, _ = dispatcher(tmp_path)
+        value, _, _ = serving_dispatcher(tmp_path)
         train(value, 1)
         selected_version = value.get_or_create_scenario("math").current_artifact_ref().release_id
         backend = BlockingBackend()
-        service = RequestService(value)
-        request = asyncio.create_task(
-            service.infer_with_data(
-                {"x-reef-scenario": "math"},
-                {"model": "reef", "messages": [{"role": "user", "content": "hi"}]},
-                "/v1/chat/completions",
-                backend,
+        async with TestClient(TestServer(create_app(value, inference_handler=backend))) as client:
+            request = asyncio.create_task(
+                client.post(
+                    "/v1/chat/completions",
+                    headers={"x-reef-scenario": "math"},
+                    json={"model": "reef", "messages": [{"role": "user", "content": "hi"}]},
+                )
             )
-        )
-        await backend.started.wait()
+            await backend.started.wait()
 
-        train(value, 2)
+            await asyncio.to_thread(train, value, 2)
+            assert value.get_or_create_scenario("math").current_artifact_ref().release_id != selected_version
 
-        backend.finish.set()
-        _, item = await request
+            backend.finish.set()
+            response = await request
+            assert response.status == 200
+            record_id = response.headers["x-reef-agent-record-id"]
+        item = value.get_or_create_scenario("math").records.get("math", record_id)
         assert backend.release_id == selected_version
         assert item.artifact_ref is not None
         assert item.artifact_ref.release_id == selected_version
+        value.close()
 
     asyncio.run(run())
 
@@ -549,7 +558,7 @@ def test_slow_correlation_tracker_does_not_block_published_artifact_reads(
     monkeypatch.setattr(tracker, "correlation_metrics", correlation)
     monkeypatch.setattr(tracker, "record", record)
     try:
-        value.accept_record(inference(1))
+        value.accept_record(inference(1, scenario.serving_artifact_id()))
         value.accept_record(report(1))
         with ThreadPoolExecutor(max_workers=1) as executor:
             try:
@@ -591,7 +600,7 @@ def test_slow_training_tracker_does_not_block_scenario_resolution(
 
     monkeypatch.setattr(tracker, "record", record)
     try:
-        value.accept_record(inference(1))
+        value.accept_record(inference(1, scenario.serving_artifact_id()))
         value.accept_record(report(1))
         with ThreadPoolExecutor(max_workers=1) as executor:
             try:
@@ -630,8 +639,8 @@ def test_each_saved_checkpoint_becomes_an_artifact_version(tmp_path, monkeypatch
     monkeypatch.setattr(runtime, "train", save_checkpoints)
     try:
         scenario = value.get_or_create_scenario("math")
-        train(value, 1, scenario.serving_runtime_load_id())
-        train(value, 2, scenario.serving_runtime_load_id())
+        train(value, 1)
+        train(value, 2)
         assert [record.checkpoint for record in scenario.store.history()] == [False, *[True] * checkpoints, False] * 2
         state = JobLoopState.from_dict(scenario.trainer.state)
         assert state.finished_jobs == runtime.trained == 2

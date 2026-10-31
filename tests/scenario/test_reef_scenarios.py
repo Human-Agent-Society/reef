@@ -9,6 +9,7 @@ from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher, build_default_dispatcher
 from reef.scenario.registry import InstanceState
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 
 
@@ -27,7 +28,9 @@ def test_artifact_state_and_metadata_are_not_parallel_public_types() -> None:
 
 
 def test_scenario_owns_recipe_derived_policy_and_base_artifact() -> None:
-    scenario = build_default_dispatcher(scenario_storage=SQLiteScenarioStorage()).get_or_create_scenario("math")
+    scenario = build_default_dispatcher(
+        scenario_storage=SQLiteScenarioStorage(), coordination=memory_coordination()
+    ).get_or_create_scenario("math")
 
     assert not hasattr(scenario, "recipe")
     assert scenario.repository.base_artifact.release_id
@@ -35,7 +38,9 @@ def test_scenario_owns_recipe_derived_policy_and_base_artifact() -> None:
 
 
 def test_scenario_step_is_owned_by_scenario() -> None:
-    scenario = build_default_dispatcher(scenario_storage=SQLiteScenarioStorage()).get_or_create_scenario("math")
+    scenario = build_default_dispatcher(
+        scenario_storage=SQLiteScenarioStorage(), coordination=memory_coordination()
+    ).get_or_create_scenario("math")
 
     assert not hasattr(scenario.repository.base_artifact, "scenario")
     assert scenario.scenario_step == 0
@@ -46,7 +51,9 @@ def test_scenario_step_is_owned_by_scenario() -> None:
 
 
 def test_scenario_owns_scenario_scoped_repository() -> None:
-    scenario = build_default_dispatcher(scenario_storage=SQLiteScenarioStorage()).get_or_create_scenario("math")
+    scenario = build_default_dispatcher(
+        scenario_storage=SQLiteScenarioStorage(), coordination=memory_coordination()
+    ).get_or_create_scenario("math")
 
     repository = scenario.repository
 
@@ -62,7 +69,9 @@ def test_scenario_owns_scenario_scoped_repository() -> None:
 def test_scenario_metadata_round_trips() -> None:
     from reef.storage.commits import parse_scenario_metadata, scenario_metadata_for
 
-    scenario = build_default_dispatcher(scenario_storage=SQLiteScenarioStorage()).get_or_create_scenario("math")
+    scenario = build_default_dispatcher(
+        scenario_storage=SQLiteScenarioStorage(), coordination=memory_coordination()
+    ).get_or_create_scenario("math")
     metadata = scenario_metadata_for(
         name=scenario.name, base_artifact=scenario.repository.base_artifact, scenario_step=scenario.scenario_step
     )
@@ -108,6 +117,7 @@ def test_dispatcher_restores_agent_record_from_configured_directory(tmp_path) ->
     first = build_default_dispatcher(
         backend_factory=backend,
         scenario_storage=SQLiteScenarioStorage(agent_record_dir),
+        coordination=memory_coordination(),
     )
     record = AgentRecord.create(
         agent_record_id="persisted",
@@ -121,6 +131,7 @@ def test_dispatcher_restores_agent_record_from_configured_directory(tmp_path) ->
     second = build_default_dispatcher(
         backend_factory=backend,
         scenario_storage=SQLiteScenarioStorage(agent_record_dir),
+        coordination=memory_coordination(),
     )
 
     assert second.get_or_create_scenario("math").records.replay("math") == (record,)
@@ -134,6 +145,7 @@ def test_dispatcher_restores_algorithm_state_from_artifact_metadata(tmp_path) ->
     first = build_default_dispatcher(
         backend_factory=backend,
         scenario_storage=SQLiteScenarioStorage(agent_record_dir),
+        coordination=memory_coordination(),
     )
     first.accept_record(
         AgentRecord.create(
@@ -150,6 +162,7 @@ def test_dispatcher_restores_algorithm_state_from_artifact_metadata(tmp_path) ->
     second = build_default_dispatcher(
         backend_factory=backend,
         scenario_storage=SQLiteScenarioStorage(agent_record_dir),
+        coordination=memory_coordination(),
     )
     recovered = second.get_or_create_scenario("math")
 
@@ -169,7 +182,9 @@ def test_dispatcher_restores_algorithm_state_from_artifact_metadata(tmp_path) ->
 
 
 def test_scenario_close_closes_processor_before_records() -> None:
-    scenario = build_default_dispatcher(scenario_storage=SQLiteScenarioStorage()).get_or_create_scenario("math")
+    scenario = build_default_dispatcher(
+        scenario_storage=SQLiteScenarioStorage(), coordination=memory_coordination()
+    ).get_or_create_scenario("math")
     calls: list[str] = []
 
     def _spy(name: str, original):
@@ -191,7 +206,7 @@ def test_scenario_close_closes_processor_before_records() -> None:
 
 
 def test_dispatcher_close_tears_down_scenarios_through_close() -> None:
-    dispatcher = build_default_dispatcher(scenario_storage=SQLiteScenarioStorage())
+    dispatcher = build_default_dispatcher(scenario_storage=SQLiteScenarioStorage(), coordination=memory_coordination())
     scenario = dispatcher.get_or_create_scenario("math")
     closed: list[str] = []
     original = scenario.close
@@ -203,7 +218,7 @@ def test_dispatcher_close_tears_down_scenarios_through_close() -> None:
 
 
 def test_dispatcher_reload_closes_the_dropped_scenario_instance() -> None:
-    dispatcher = build_default_dispatcher(scenario_storage=SQLiteScenarioStorage())
+    dispatcher = build_default_dispatcher(scenario_storage=SQLiteScenarioStorage(), coordination=memory_coordination())
     dropped = dispatcher.get_or_create_scenario("math")
     closed: list[str] = []
     original = dropped.close
@@ -217,7 +232,7 @@ def test_dispatcher_reload_closes_the_dropped_scenario_instance() -> None:
 
 
 def test_lock_instance_tells_a_replaced_instance_from_a_removed_one() -> None:
-    dispatcher = build_default_dispatcher(scenario_storage=SQLiteScenarioStorage())
+    dispatcher = build_default_dispatcher(scenario_storage=SQLiteScenarioStorage(), coordination=memory_coordination())
     registry = dispatcher.registry
     try:
         dropped = dispatcher.get_or_create_scenario("math")

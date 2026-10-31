@@ -22,7 +22,7 @@ from reef.pipeline_context import PipelineContext
 from reef.recipe.errors import RecipeConfigError
 from reef.runtime.interfaces import TrainingMethod
 from reef.storage.sqlite import SQLiteRecordStore
-from reef.surface import Surface, WeightInferenceHooks, WeightLoader
+from reef.surface import Surface, WeightLoader
 from reef.train.algos.schedule import StepScheduling
 from reef.train.pipeline import TrainingPipeline
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
@@ -60,7 +60,7 @@ def _turn(
     tokens=(1, 2, 3, 4),
     loss_mask=(1, 1),
     logprobs=(-0.1, -0.2),
-    runtime_load_id="v1",
+    artifact_id="v1",
     topk_rows=None,
     session=None,
 ):
@@ -72,7 +72,7 @@ def _turn(
         # every response token.
         "topk_indices": [[1, 2] for _ in loss_mask] if topk_rows is None else topk_rows,
         "topk_log_probs": [[-0.1, -2.0] for _ in loss_mask],
-        "runtime_load_id": runtime_load_id,
+        "artifact_id": artifact_id,
         "response_length": len(loss_mask),
     }
     return AgentRecord.create(
@@ -126,15 +126,18 @@ def test_next_state_binds_by_trace_matching_and_verdicts_batch() -> None:
     assert [job.receipt for job in worker.jobs] == ["t1"]
     assert worker.jobs[0].next_state_text == "Great, that works!"
     assert worker.jobs[0].next_state_role == "user"
+    processor.produce()
     assert not processor.ready(1)
 
     worker.push(TurnJudgment("t1", score=1.0, teacher_cands=ANCHOR))
+    processor.produce()
     assert processor.ready(1)
     batch = processor.build_job_data(1)
     assert isinstance(batch, JobData)
     assert [trajectory_reward(sample) for sample in batch.samples] == [1.0]
     assert source_record_id(batch.samples[0]) == "t1"
     processor.acknowledge(batch.data_id)
+    processor.produce()
     assert not processor.ready(1)
     decision = processor.releasable_record_ids()
     assert "t1" in decision
@@ -183,6 +186,7 @@ def test_session_ttl_flushes_the_final_turn_terminal() -> None:
     processor = _processor(worker=worker, ttl_s=1e-6)
     processor.push(_turn("t1", Q1))
     time.sleep(0.001)
+    processor.produce()
     assert not processor.ready(1)  # catches up: the TTL pass runs
     decision = processor.releasable_record_ids()
     assert "t1" in decision
@@ -196,6 +200,7 @@ def test_untrainable_verdicts_and_bad_tensors_are_terminal() -> None:
     processor.push(_turn("declined", Q1))
     processor.push(_turn("cont1", _successor(Q1, "meh")))
     worker.push(TurnJudgment("declined"))  # judge declined: no RL, no directive
+    processor.produce()
     assert not processor.ready(1)
     assert "declined" in processor.releasable_record_ids()
 
@@ -203,22 +208,24 @@ def test_untrainable_verdicts_and_bad_tensors_are_terminal() -> None:
     processor.push(_turn("ragged", Q2, topk_rows=[[1, 2]]))
     processor.push(_turn("cont2", _successor(Q2, "ok")))
     worker.push(TurnJudgment("ragged", score=-1.0, teacher_cands=ANCHOR))
+    processor.produce()
     assert not processor.ready(1)
     assert "ragged" in processor.releasable_record_ids()
 
 
 @pytest.mark.unit
-def test_candidates_behind_the_serving_version_leave_the_buffer() -> None:
+def test_candidates_behind_the_served_artifact_leave_the_buffer() -> None:
     worker = FakeWorker()
     processor = _processor(worker=worker)
-    processor.observe_serving_runtime_load_id("v1")
-    processor.push(_turn("old", Q1, runtime_load_id="v1"))
+    processor.observe_serving_artifact_id("v1")
+    processor.push(_turn("old", Q1, artifact_id="v1"))
     processor.push(_turn("cont1", _successor(Q1, "ok")))
-    processor.observe_serving_runtime_load_id("v2")
-    processor.push(_turn("new", Q2, runtime_load_id="v2"))
+    processor.observe_serving_artifact_id("v2")
+    processor.push(_turn("new", Q2, artifact_id="v2"))
     processor.push(_turn("cont2", _successor(Q2, "ok")))
     worker.push(TurnJudgment("old", score=1.0, teacher_cands=ANCHOR))
     worker.push(TurnJudgment("new", score=1.0, teacher_cands=ANCHOR))
+    processor.produce()
     assert not processor.ready(2)  # the stale candidate is not in the buffer, 1 < 2
     assert {"old", "new"} <= processor.releasable_record_ids()
     assert [source_record_id(sample) for sample in processor.build_job_data(1).samples] == ["new"]
@@ -229,6 +236,7 @@ def test_correlate_only_mode_never_trains_and_releases_everything() -> None:
     processor = _processor(worker=None)  # no prm_url, no injected worker
     processor.push(_turn("t1", Q1))
     processor.push(_turn("t2", _successor(Q1, "ok")))
+    processor.produce()
     assert not processor.ready(1)
     assert "t1" in processor.releasable_record_ids()
 
@@ -295,8 +303,10 @@ def test_scoring_worker_threads_the_combine_dispatch() -> None:
     processor.push(_turn("t2", _successor(Q1, "Great, that works!")))
 
     deadline = time.monotonic() + 10.0
+    processor.produce()
     while not processor.ready(1) and time.monotonic() < deadline:
         time.sleep(0.01)
+        processor.produce()
     assert processor.ready(1), "worker judgment never landed"
     batch = processor.build_job_data(1)
     sample = batch.samples[0]
@@ -336,7 +346,6 @@ def test_recipe_uses_weight_surface_and_builds_a_trainer() -> None:
     surface = recipe.build_surface("s")
     assert type(surface) is Surface
     assert isinstance(surface.loader, WeightLoader)
-    assert isinstance(surface.inference, WeightInferenceHooks)
     trainer = recipe.build("s", SQLiteRecordStore())
     assert trainer.job_loop is not None
     assert trainer.pipeline.context.job_parameters["trajectory"]["method"]["objective"] == "openclawrl"
@@ -566,6 +575,7 @@ def test_the_prm_record_file_reports_the_judged_population(tmp_path) -> None:
     processor.push(_turn("t1", Q1))
     processor.push(_turn("t2", _successor(Q1, "that works")))
     worker.push(TurnJudgment("t1", score=1.0, teacher_cands=ANCHOR))
+    processor.produce()
     assert processor.ready(1)
     processor.build_job_data(1)
 

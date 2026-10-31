@@ -46,7 +46,7 @@ def grade(**kwargs) -> dict:
             req = urllib.request.Request(url, method="GET")
             with urllib.request.urlopen(req, timeout=5) as resp:
                 return json.loads(resp.read())
-        except Exception as e:
+        except Exception:
             return {}
 
     gmail_audit = fetch_audit(GMAIL_AUDIT_URL)
@@ -375,7 +375,7 @@ def grade(**kwargs) -> dict:
         if "room b" in loc or "conference room b" in loc:
             room_score = 1.0
             break
-        elif "room a" in loc:
+        if "room a" in loc:
             room_score = 0.0
 
     # ── 13. Title contains Q2 or Product Review (2%) ──

@@ -57,8 +57,13 @@ def no_git_lfs(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.mark.unit
 def test_build_app_serves_through_an_injected_handler_and_exposes_its_dispatcher(tmp_path, no_git_lfs) -> None:
     handler = EchoHandler()
-    app = assembly.build_app(_settings(tmp_path, tokens=("secret",)), inference_handler=handler)
+    # The upstream gives the recipe a runtime with an HTTP engine, so a scenario has a served model; the injected
+    # handler answers for that engine.
+    settings = _settings(tmp_path, tokens=("secret",), upstream_url="http://upstream.test", upstream_model="reef")
+    app = assembly.build_app(settings, inference_handler=handler)
     dispatcher = get_dispatcher(app)
+    # An inference call never creates a scenario.
+    dispatcher.get_or_create_scenario("math")
 
     async def scenario_names(request: web.Request) -> web.Response:
         return web.json_response(get_dispatcher(request.app).list_scenarios())
@@ -73,7 +78,7 @@ def test_build_app_serves_through_an_injected_handler_and_exposes_its_dispatcher
                 headers={**authorization, "x-reef-scenario": "math"},
                 json={"model": "reef", "messages": []},
             )
-            assert response.status == 200
+            assert response.status == 200, await response.text()
             assert (await response.json())["model"] == "reef"
             # The service tokens also protect the routes that the application adds.
             assert (await client.get("/extension/scenarios")).status == 401

@@ -52,10 +52,12 @@ and settles under one verdict.
 
 Two choices distinguish it from the tutorial method. ``selection: always``
 publishes every night that produces a proposal, because the next day is the
-gate. And the skill catalog must reach the model on every live request, so the
-recipe overrides ``build_surface``, the hook controlling how a published
-artifact reaches the request path (`recipe.py
-<../../../recipes/skillclaw/recipe.py>`__). That override is
+gate. And the published pool needs its own admission rules, so the recipe
+overrides ``build_surface``, the hook that controls how a published artifact
+is admitted and delivered (`recipe.py
+<../../../recipes/skillclaw/recipe.py>`__). Reef adds nothing to an inference
+request: the pool reaches each task as files. The day copies the served pool's
+skills into the task container, where the agent reads them. That override is
 the one extension point beyond the method's own plugin classes; with it the recipe
 names no ``harness_adapter``, since no harness tree is installed.
 

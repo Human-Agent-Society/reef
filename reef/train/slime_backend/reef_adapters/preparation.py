@@ -12,7 +12,6 @@ import bisect
 from collections.abc import Mapping
 from typing import Any
 
-from reef.core.artifact_ref import parse_runtime_load_spans
 from reef.runtime.interfaces import TrainingMethod
 from reef.train.algos.registry import resolve_objective
 from reef.train.algos.schedule import MaterializedSchedule, StepScheduling, schedule_job_data
@@ -93,20 +92,11 @@ def build_slime_payload(
         "samples": [shape_row(samples[row]) for row in schedule.row_indices],
         "rollout_ids": list(schedule.rollout_ids),
         "loss": loss_family,
-        # Each wire row's producing versions, in the schedule's row order: a schedule may
-        # repeat (epochs) and reorder (shuffle) rows. They are training metadata, not a check;
-        # the record-to-record stage dropped stale samples before the data formed.
-        "producing_runtime_load_ids": [samples[row].training.get("runtime_load_id") for row in schedule.row_indices],
+        # Each wire row's producing artifact, in the schedule's row order: a schedule may repeat (epochs) and
+        # reorder (shuffle) rows. It is training metadata, not a check; the record-to-record stage dropped stale
+        # samples before the data formed.
+        "producing_artifact_ids": [samples[row].training.get("artifact_id") for row in schedule.row_indices],
     }
-    spans = [
-        [
-            {"start": span.start, "end": span.end, "runtime_load_id": span.runtime_load_id}
-            for span in parse_runtime_load_spans(samples[row].training.get("runtime_load_spans", []))
-        ]
-        for row in schedule.row_indices
-    ]
-    if any(spans):
-        payload["producing_runtime_load_spans"] = spans
     if advantages is not None:
         payload["advantages"] = [advantages[row] for row in schedule.row_indices]
     if sampler_topk:

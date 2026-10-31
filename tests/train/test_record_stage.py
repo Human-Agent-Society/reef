@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 from tests.support._threshold_processor import threshold_pipeline
+from tests.support.samples_service import make_samples
 from tests.support.task_service_stubs import task_for
 from tests.train.test_record_stage_job_data_parity import CountingBackend, inference, instruction, report
 
@@ -244,6 +245,7 @@ def test_a_record_the_stage_ends_is_consumed_by_the_next_commit_and_then_release
         candidate_backend=CountingBackend(),
         default_job_samples=1,
     )
+    make_samples(trainer)
     result = trainer.run_once(0)
     assert result is not None
     prepared = trainer.prepare_commit(result)
@@ -319,10 +321,10 @@ def test_a_batch_holds_the_tasks_of_every_report_in_a_group_in_arrival_order() -
 @pytest.mark.unit
 def test_the_report_stage_releases_a_report_whose_data_is_behind_the_serving_version() -> None:
     processor = threshold_pipeline(PipelineContext("s"))
-    processor.observe_serving_runtime_load_id("e:1")
+    processor.observe_serving_artifact_id("e:1")
     processor.push(inference("i1", version="e:1"))
     processor.push(report("r1", "i1"))
-    processor.observe_serving_runtime_load_id("e:2")
+    processor.observe_serving_artifact_id("e:2")
     processor.push(inference("i2", version="e:2"))
     processor.push(report("r2", "i2"))
     batch = processor.build_job_data(1)
@@ -349,8 +351,10 @@ def test_a_waiting_set_holds_its_records_and_settles_when_its_result_comes_back(
     processor.push(inference("i2"))
     assert not processor.ready(1) and processor.background_jobs_running()
     processor.later_tasks.finish("i2", SampleResult.skipped())
+    processor.produce()
     assert not processor.ready(1) and processor.releasable_record_ids() == {"i2"}
     processor.later_tasks.finish("i1", SampleResult.ready((TaskSample(Path("t1")),)))
+    processor.produce()
     assert processor.ready(1), "the result alone makes a batch, without another record"
     assert not processor.background_jobs_running()
     assert [str(item.task_path) for item in processor.build_job_data(1).samples] == ["t1"]
@@ -362,10 +366,11 @@ def test_a_second_result_for_a_settled_set_is_refused() -> None:
     processor.push(inference("i1"))
     result = SampleResult.ready((TaskSample(Path("t1")),))
     processor.later_tasks.finish("i1", result)
+    processor.produce()
     assert processor.ready(1)
     processor.later_tasks.finish("i1", result)
     with pytest.raises(ValueError, match="set 'i1', which no set waits for"):
-        processor.ready(1)
+        processor.produce()
 
 
 @pytest.mark.unit
@@ -375,11 +380,13 @@ def test_the_trainer_reserves_a_batch_when_a_waiting_set_finishes() -> None:
     trainer = Trainer.build(
         "s", records, pipeline_factory=WaitingPipeline, candidate_backend=CountingBackend(), default_job_samples=1
     )
+    make_samples(trainer)
     assert trainer.run_once() is None
     assert trainer.holds_untrained_records(), "the trainer keeps polling while the set waits"
     processor = trainer.pipeline
     assert isinstance(processor, WaitingPipeline)
     processor.later_tasks.finish("i1", SampleResult.ready((TaskSample(Path("t1")),)))
+    make_samples(trainer)
     assert trainer.run_once() is not None
     batch = trainer.pending_job_data
     assert batch is not None and [str(item.task_path) for item in batch.samples] == ["t1"]
@@ -491,10 +498,11 @@ def ready_tasks(*names: str) -> SampleResult:
 
 
 @pytest.mark.unit
-def test_advancing_collects_later_results_without_reserving_or_replacing_a_batch() -> None:
+def test_producing_collects_later_results_without_reserving_or_replacing_a_batch() -> None:
     processor = WaitingPipeline(PipelineContext("s"))
     processor.push(inference("i1"))
     processor.later_tasks.finish("i1", ready_tasks("a", "b"))
+    processor.produce()
     processor.advance()
     assert processor.status()["ready_samples"] == 2
     assert not processor.ready(3)
@@ -502,6 +510,7 @@ def test_advancing_collects_later_results_without_reserving_or_replacing_a_batch
 
     processor.push(inference("i2"))
     processor.later_tasks.finish("i2", ready_tasks("c"))
+    processor.produce()
     processor.advance()
     assert processor.build_job_data(2) is batch
     assert processor.acknowledge(batch.data_id) == {"sample:i1:0", "sample:i1:1"}
@@ -524,13 +533,14 @@ def test_samples_beyond_the_buffer_size_wait_and_stale_samples_leave_the_buffer(
     processor.push(inference("i2"))
     later_tasks.finish("i1", SampleResult.ready((TRAJECTORY,)))
     later_tasks.finish("i2", SampleResult.ready((TRAJECTORY,)))
+    processor.produce()
     processor.advance()
     # Both units are stored and their records consumed; the buffer takes one sample, and the other waits.
     assert processor.status()["ready_samples"] == 1
     assert len(processor.store.page()) == 2
     assert processor.releasable_record_ids() == {"i1", "i2"}
-    # Trajectories without a producing version become stale once the serving version is known.
-    processor.observe_serving_runtime_load_id("e:1")
+    # Trajectories without a producing artifact become stale once the served artifact is known.
+    processor.observe_serving_artifact_id("e:1")
     processor.advance()
     assert processor.status()["ready_samples"] == 0
     assert len(processor.store.page()) == 2, "a stale sample stays in the store untrained"
@@ -544,9 +554,11 @@ def test_the_pipeline_is_ready_when_its_held_units_hold_the_asked_sample_count()
         processor.push(inference(record_id))
     processor.later_tasks.finish("i1", ready_tasks("a", "b"))
     processor.later_tasks.finish("i2", SampleResult.skipped())
+    processor.produce()
     assert not processor.ready(3), "one unit of two tasks and one skipped set hold two samples"
     assert processor.status()["ready_samples"] == 2
     processor.later_tasks.finish("i3", ready_tasks("c"))
+    processor.produce()
     assert processor.ready(3)
     assert processor.status()["ready_samples"] == 3
 
@@ -566,6 +578,7 @@ def test_a_batch_takes_the_buffer_size_in_store_order_and_the_rest_of_each_unit_
     later_tasks.finish("i3", ready_tasks("c"))
     later_tasks.finish("i2", ready_tasks("b1", "b2"))
     later_tasks.finish("i1", ready_tasks("a1", "a2"))
+    processor.produce()
     batch = processor.build_job_data(2)
     # Units go to the store in the order they became ready. The second unit passes the buffer size; the batch
     # keeps it whole and leaves the third unit held.
@@ -621,6 +634,7 @@ def test_the_pipeline_keeps_the_newest_unit_even_when_it_alone_is_over_the_buffe
     )
     processor.push(inference("i1"))
     later_tasks.finish("i1", ready_tasks("a", "b", "c"))
+    processor.produce()
     assert processor.ready(1)
     assert [str(item.task_path) for item in processor.build_job_data(1).samples] == ["a", "b", "c"]
 
@@ -665,8 +679,10 @@ def test_samples_that_a_stage_made_from_no_record_set_are_stored_and_train_from_
     )
     assert not processor.ready(1)
     samples.made = (("made/a", TaskSample(Path("a"))),)
+    processor.produce()
     assert processor.ready(1)
     samples.made = (("made/a", TaskSample(Path("a"))),)
+    processor.produce()
     assert processor.buffer() == ("made/a",), "a sample made again is stored once"
     (stored,) = processor.store.page()
     assert (stored.sample_id, stored.component, stored.group, stored.record_ids) == ("made/a", "", None, ())
@@ -713,6 +729,7 @@ def test_aborted_report_references_are_released_and_stay_excluded_after_replay(
     )
     if replay_before_commit:
         trainer.replay_retained(up_to_sequence=5, consumed_ids=frozenset())
+    make_samples(trainer)
     result = trainer.run_once(0)
     assert result is not None
     batch = trainer.pending_job_data
@@ -735,6 +752,7 @@ def test_aborted_report_references_are_released_and_stay_excluded_after_replay(
     )
     restored.replay_retained(up_to_sequence=5, consumed_ids=prepared.consumed_ids)
     records.append(report("later-report", "aborted"))
+    make_samples(restored)
     assert restored.run_once() is None
     assert "later-report" in restored.skipped_record_ids
     # Consumption changes training eligibility, not the stored diagnostic payload.

@@ -16,7 +16,7 @@ from reef.inference.remote.runtime import RemoteServingRuntimeFactory
 from reef.runtime.deployment import RuntimeConfigError
 from reef.runtime.interfaces import InferenceBackend, InferenceHandler, TrainingMethod
 from reef.runtime.jobs import ReleaseFormat, TrainingJob, job_id_for
-from reef.runtime.serving import AdapterServingRuntime, ReleaseWeights
+from reef.runtime.serving import AdapterServingRuntime, ReleaseWeights, RunningEngines
 from reef.service.assembly import connect_training_component
 from reef.service.deploy.config_utils import DeployConfigError
 from reef.service.deploy.orchestrator import resolve_deployment_config
@@ -214,12 +214,19 @@ def build(config, monkeypatch, engines):
     def serve(factory, config, model_path, recipe_config, environ):
         seen.update(config)
         weights = ReleaseWeights.from_setting(config["weights"], setting="runtime.weights")
-        return AdapterServingRuntime(engines, Handler(), adapter_capacity=config["adapter_capacity"], weights=weights)
+        runtime = AdapterServingRuntime(
+            RunningEngines(engines), Handler(), adapter_capacity=config["adapter_capacity"], weights=weights
+        )
+        # The test drives the runtime as control does, which opens it.
+        runtime.open()
+        return runtime
 
     monkeypatch.setattr(RemoteServingRuntimeFactory, "__call__", serve)
     component, inference = connect_training_component(
         service_config_from_mapping(config), model_path="Qwen/Qwen3-8B", loss_family="tttd"
     )
+    # The test runs the jobs in this process, as the training service does.
+    component.start_jobs()
     return component, inference, seen
 
 
@@ -229,7 +236,7 @@ def train(component, inference, objective, scenario, sample, start=None):
     parameters = {"method": TrainingMethod(objective.name).to_dict()}
     start = component.base_start if start is None else start
     job_id = job_id_for(component.name, start, data.to_dict()["samples"], parameters)
-    component.submit(TrainingJob(job_id, component.name, start, data, parameters))
+    component.submit(TrainingJob(job_id, component.name, start, data, parameters, scenario="s"))
     deadline = time.monotonic() + 10
     while (status := component.status(job_id)).state == "running":
         assert time.monotonic() < deadline
