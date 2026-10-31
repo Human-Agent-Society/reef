@@ -663,8 +663,9 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         """Give ``scenario`` the owner ``owner``, and sync its uploads with that owner's items.
 
         A scenario gets its owner when it is created, so only a scenario that still has the default owner (its
-        own name) and no uploads can take another. Raise ``ValueError`` otherwise, and ``UnknownScenario`` for a
-        scenario that does not exist.
+        own name) and no uploads can take another. The data service then copies the scenario's artifacts and
+        records to items of ``owner``. Raise ``ValueError`` otherwise, and ``UnknownScenario`` for a scenario that
+        does not exist.
         """
         check_owner(owner)
         with self.locked_scenario(scenario) as current:
@@ -675,6 +676,10 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
                 raise ValueError(f"scenario {scenario!r} has the owner {settings.owner!r}; it is set at creation")
             self.storage.write_settings(scenario, replace(settings, owner=owner))
             self.apply_sync(current, owner)
+        # A copy that ran before, such as the one that the creation commit asked for, filled the default owner's
+        # store; the new owner's store gets the scenario's artifacts and records too.
+        self.request_artifact_copy(scenario)
+        self.request_record_copy(scenario)
 
     def check_use(
         self, scenario: str, trajectories: Sequence[tuple[str, TrajectorySample]], train_tasks: bool
