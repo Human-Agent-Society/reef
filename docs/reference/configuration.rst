@@ -1805,6 +1805,14 @@ Commit correlation
 Durable commit metrics carry ``experiment/provider``, ``experiment/project``,
 ``experiment/group``, and ``experiment/run_id``. Use them to open the run from
 a Reef version, and use the run's ``reef/training_job_id`` to go the other way.
+
+The job listing, ``GET /reef/scenarios/{scenario}/jobs``, gives the run of
+each training job as ``experiment``. Control writes it into the job's work
+item when its tracker records the job, so every service that lists jobs reads
+it. Its ``url`` is the URL that the open W&B run gives. An offline run gives
+none: the URL is then ``https://wandb.ai/<entity>/<project>/runs/<run_id>``,
+where the run is once it is synced, with the configured ``entity``. Without a
+configured ``entity``, the URL of an offline run is ``null``.
 Checkpoint paths are metadata only unless ``upload_checkpoints: true``.
 
 Import, initialization, logging, summary, and upload failures are reported in

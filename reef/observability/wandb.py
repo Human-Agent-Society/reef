@@ -22,6 +22,7 @@ from typing import Any, Literal
 from reef.core.artifact_ref import ArtifactRef, encode_artifact_ref
 from reef.observability.base import (
     ExperimentLogger,
+    ExperimentRun,
     ExperimentTracker,
     TrainFromExperimentEvent,
     TrainingExperimentContext,
@@ -239,6 +240,35 @@ class WandbExperimentTracker(ExperimentTracker):
         if self.config.entity is not None:
             metrics["experiment/entity"] = self.config.entity
         return metrics
+
+    def experiment_run(self, context: TrainingExperimentContext) -> ExperimentRun | None:
+        """The W&B run of ``context`` while this tracker has it open; None when tracking is off, or the run never
+        opened in this process or ended.
+
+        The URL is the one that the open run gives (``run.url``). When the run gives none, such as an offline run,
+        it is ``https://wandb.ai/<entity>/<project>/runs/<run_id>`` with the configured entity, where the run is once
+        it is synced; without a configured entity it is None.
+        """
+        if not self.config.active:
+            return None
+        run_id = self._run_id(context)
+        with self._lock:
+            run = self._runs.get(run_id)
+        if run is None:
+            return None
+        try:
+            run_url = run.url
+        except Exception as exc:
+            logger.warning("W&B run URL lookup failed (%s)", type(exc).__name__)
+            run_url = None
+        entity = self.config.entity
+        if isinstance(run_url, str) and run_url:
+            url: str | None = run_url
+        elif entity is not None:
+            url = f"https://wandb.ai/{entity}/{self.config.project}/runs/{run_id}"
+        else:
+            url = None
+        return ExperimentRun("wandb", self.config.project, run_id, entity, url)
 
     def record(self, event: TrainingExperimentEvent) -> None:
         with self._lock:

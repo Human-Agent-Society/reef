@@ -12,7 +12,10 @@ A jobs-queue item:
 - ``scenario`` and ``serial_key`` are the job's scenario, so the jobs of one scenario run one at a time, in the order control added them;
 - ``payload`` is the job (``job_payload``);
 - each ``progress`` entry is one ``SavedCheckpoint``, in step order;
-- ``result`` is ``{"state": "finished", "metrics": {...}}``.
+- ``result`` is ``{"state": "finished", "metrics": {...}}``;
+- ``metadata["experiment"]``, when present, is the ``ExperimentRun`` that records the job, as ``to_dict`` gives
+  it. Control writes it (``JobExperimentRecorder``) when its experiment tracker records a commit of the job, so the
+  job listing of any service reads it from the item.
 
 A checkpoint's ``path`` and ``release_path`` are paths of the training service. In the one-process layout they
 are local; a split deployment gives control and the training service one volume for them.
@@ -23,13 +26,23 @@ from __future__ import annotations
 import logging
 import threading
 from collections.abc import Mapping
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
 from reef.artifact.files import ArtifactFiles
 from reef.artifact.repository import BaseArtifactSource
+from reef.core.artifact_ref import ArtifactRef
 from reef.core.job_data import JobData
 from reef.execution.workers import ItemFailed, QueueWorker, WorkerStopped
+from reef.observability.base import (
+    ExperimentLogger,
+    ExperimentRun,
+    ExperimentTracker,
+    TrainFromExperimentEvent,
+    TrainingExperimentContext,
+    TrainingExperimentEvent,
+)
 from reef.runtime.jobs import JobStatus, ReleaseFormat, SavedCheckpoint, TrainingComponent, TrainingJob
 from reef.storage.work_queue import JsonValue, NewWork, WorkItem, WorkLeaseLost, WorkQueue
 
@@ -37,6 +50,8 @@ logger = logging.getLogger(__name__)
 
 #: The queue of training jobs.
 JOBS_QUEUE = "jobs"
+#: The key of a job item's ``metadata`` that holds the experiment run that records the job.
+EXPERIMENT_METADATA_KEY = "experiment"
 
 
 def job_kind(component_name: str) -> str:
@@ -124,8 +139,49 @@ JOB_CANCELLED_ERROR = "cancelled by request"
 
 
 def job_json(item: WorkItem) -> dict[str, JsonValue]:
-    """The jobs-queue ``item`` as ``{id, state, attempt_count, checkpoints, result, error}``; ``checkpoints`` are the
-    saved checkpoints that the job reported."""
+    """The jobs-queue ``item`` as the JSON object that the job listing gives; ``ValueError`` for an item whose
+    payload ``job_payload`` did not write.
+
+    The object has these keys:
+
+    - ``id``, ``state``, ``attempt_count`` and ``error``: the item's fields (``WorkItem``).
+    - ``checkpoints``: the saved checkpoints that the job reported, in step order, each as ``checkpoint_json``.
+    - ``result``: ``{"state": "finished", "metrics": {...}}`` once the job finished, else None.
+    - ``parameters``: the job's parameters, a JSON object: the recipe's parameters for the kind of the job's
+      samples, with the instruction's parameters over them. They hold the training ``method`` and the
+      ``scheduling`` when the recipe or the instruction gives them.
+    - ``sample_count``: the number of samples in the job's data, an integer from 0.
+    - ``sample_kind``: ``"trajectory"`` or ``"task"``, the kind of the job's samples, which one job never mixes;
+      None for data with no sample.
+    - ``instruction``: ``{id, text, parameters}`` of the training instruction (``POST /reef/train``) that the job
+      trains, where ``parameters`` is the JSON object that the instruction gave, ``{}`` when it gave none; None for
+      a job that the training mode ``auto`` made without an instruction.
+    - ``created_at``, ``started_at`` and ``ended_at``: ISO 8601 UTC times of the item, when control added the job,
+      when a worker first took it, and when it finished or failed. ``started_at`` is None until a worker takes the
+      job, and ``ended_at`` until the job ends.
+    - ``experiment``: ``{tracker, project, entity, run_id, url}`` of the experiment run that records the job
+      (``ExperimentRun.to_dict``), once control's tracker recorded a commit of the job; else None, and always None
+      without an experiment tracker.
+    """
+    payload = item.payload
+    data = json_object(payload.get("data"), "a job's data")
+    samples = data.get("samples")
+    if not isinstance(samples, list):
+        raise ValueError("a job's samples are a JSON array")
+    kinds = {json_text(json_object(sample, "a job's sample").get("kind"), "a sample's kind") for sample in samples}
+    if len(kinds) > 1:
+        raise ValueError(f"job {item.id} mixes the sample kinds {sorted(kinds)}")
+    request_value = data.get("request")
+    if request_value is None:
+        instruction: JsonValue = None
+    else:
+        request = json_object(request_value, "a job's instruction")
+        instruction = {
+            "id": json_text(request.get("id"), "an instruction's id"),
+            "text": json_text(request.get("text"), "an instruction's text"),
+            "parameters": dict(json_object(request.get("parameters", {}), "an instruction's parameters")),
+        }
+    experiment = item.metadata.get(EXPERIMENT_METADATA_KEY)
     return {
         "id": item.id,
         "state": item.state,
@@ -133,7 +189,24 @@ def job_json(item: WorkItem) -> dict[str, JsonValue]:
         "checkpoints": [dict(progress) for progress in item.progress],
         "result": None if item.result is None else dict(item.result),
         "error": item.error,
+        "parameters": dict(json_object(payload.get("parameters"), "a job's parameters")),
+        "sample_count": len(samples),
+        "sample_kind": next(iter(kinds), None),
+        "instruction": instruction,
+        "created_at": utc_time(item.created_at),
+        "started_at": None if item.started_at is None else utc_time(item.started_at),
+        "ended_at": None if item.ended_at is None else utc_time(item.ended_at),
+        "experiment": (
+            None
+            if experiment is None
+            else cast(JsonValue, ExperimentRun.from_dict(json_object(experiment, "a job's experiment")).to_dict())
+        ),
     }
+
+
+def utc_time(seconds: float) -> str:
+    """The time ``seconds`` after the epoch as an ISO 8601 string in UTC, such as ``2026-10-31T08:15:00.250000+00:00``."""
+    return datetime.fromtimestamp(seconds, UTC).isoformat()
 
 
 def scenario_jobs(queue: WorkQueue, scenario: str) -> list[dict[str, JsonValue]]:
@@ -242,6 +315,65 @@ class JobQueueComponent(TrainingComponent):
             self.component.close()
 
 
+class JobExperimentRecorder(ExperimentTracker):
+    """Control's experiment tracker: ``tracker``, which also writes into each training job's item the run that
+    records the job.
+
+    Values: ``tracker`` is the experiment tracker that records the scenarios' training, and not a
+    ``JobExperimentRecorder``; ``queue`` holds the jobs queue. Every method but ``record`` is ``tracker``'s.
+
+    ``record(event)`` gives ``event`` to ``tracker``. Then, for an event of a training job, it sets
+    ``metadata["experiment"]`` of the job's item to ``tracker.experiment_run(event.context).to_dict()``
+    (``WorkQueue.set_metadata``). Nothing is written when the tracker has no run for the event, or the queue
+    has no such item, such as for the step of a candidate backend. Each commit of a job (its submission, its
+    checkpoints and its end) records the same run, so a write after the first changes nothing.
+
+    Purpose: the dispatcher of control wraps its tracker in it when the recipe trains with a training component.
+    The tracker reports from control's report thread (``ExperimentReportQueue``), after each commit lands. The
+    run is open in this process, so its URL is the one that the run gives; the job listing of any service reads
+    it from the item (``job_json``).
+    """
+
+    def __init__(self, tracker: ExperimentTracker, queue: WorkQueue) -> None:
+        if isinstance(tracker, JobExperimentRecorder):
+            raise TypeError("a job experiment recorder wraps the tracker that records the training")
+        self.tracker = tracker
+        self.queue = queue
+
+    @property
+    def operational_metrics_enabled(self) -> bool:
+        return self.tracker.operational_metrics_enabled
+
+    def bind_scenario(
+        self, *, scenario: str, recipe: str, source_artifact_ref: ArtifactRef, run_segment: int
+    ) -> ExperimentLogger:
+        return self.tracker.bind_scenario(
+            scenario=scenario, recipe=recipe, source_artifact_ref=source_artifact_ref, run_segment=run_segment
+        )
+
+    def correlation_metrics(self, context: TrainingExperimentContext) -> Mapping[str, Any]:
+        return self.tracker.correlation_metrics(context)
+
+    def experiment_run(self, context: TrainingExperimentContext) -> ExperimentRun | None:
+        return self.tracker.experiment_run(context)
+
+    def record(self, event: TrainingExperimentEvent) -> None:
+        self.tracker.record(event)
+        if event.training_job_id is None:
+            return
+        run = self.tracker.experiment_run(event.context)
+        if run is not None:
+            self.queue.set_metadata(
+                JOBS_QUEUE, event.training_job_id, EXPERIMENT_METADATA_KEY, cast(JsonValue, run.to_dict())
+            )
+
+    def record_train_from(self, event: TrainFromExperimentEvent) -> None:
+        self.tracker.record_train_from(event)
+
+    def close(self) -> None:
+        self.tracker.close()
+
+
 class TrainingJobWorker(QueueWorker):
     """One worker of the training service: it takes the jobs of one component from the jobs queue and runs them.
 
@@ -315,8 +447,10 @@ class TrainingJobWorker(QueueWorker):
 
 
 __all__ = [
+    "EXPERIMENT_METADATA_KEY",
     "JOBS_QUEUE",
     "JOB_CANCELLED_ERROR",
+    "JobExperimentRecorder",
     "JobQueueComponent",
     "TrainingJobWorker",
     "cancel_scenario_job",
