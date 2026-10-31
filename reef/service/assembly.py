@@ -8,9 +8,11 @@ orchestrates processes around the result.
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import os
-from collections.abc import Mapping
+import signal
+from collections.abc import AsyncIterator, Mapping
 from contextlib import suppress
 from dataclasses import asdict
 from pathlib import Path
@@ -21,8 +23,9 @@ from aiohttp import web
 from reef.artifact.repository import ConfigurableRepositoryBackendFactory, RepositoryBackendContext
 from reef.artifact.sources import ArtifactSources
 from reef.dispatcher import Dispatcher
+from reef.dispatcher.served import wait_for_control_lease
 from reef.evaluation.rollout_worker import EvaluationRolloutWorker, LocalCandidateEndpoints
-from reef.execution.workers import SERVICE_COMPONENTS
+from reef.execution.workers import SERVICE_COMPONENTS, ServiceSet
 from reef.inference.http import InferenceProxyRuntime
 from reef.observability import build_experiment_tracker, build_record_observer
 from reef.recipe import Recipe, WeightTrainingRecipe
@@ -465,10 +468,16 @@ def build_dispatcher(
                 else ScenarioAdmission.from_setting(settings.scenario_admission, setting="reef.scenario_admission")
             ),
             coordination=coordination,
+            # A standby waits here, before it loads or serves anything, until the active instance stops.
+            control_lease=(
+                wait_for_control_lease(coordination.control_lease, instance_id("control"))
+                if ServiceSet.of(components).runs_control
+                else None
+            ),
             components=components,
             work_retention_seconds=settings.work_retention_s,
         )
-        if "evaluation" in components:
+        if dispatcher.services.runs_evaluation:
             # Each worker serves its rollout's candidate itself, from the scenario's repository.
             for _ in range(ROLLOUT_WORKERS):
                 dispatcher.workers.add(
@@ -476,7 +485,7 @@ def build_dispatcher(
                         dispatcher.queue, LocalCandidateEndpoints(dispatcher), worker_id=instance_id("evaluation")
                     )
                 )
-        if "data" in components and data_store is not None:
+        if dispatcher.services.runs_data and data_store is not None:
             dispatcher.workers.add(
                 DataWorker(
                     dispatcher.queue,
@@ -539,7 +548,7 @@ def build_app(
     # No tokens (e.g. REEF_TOKEN="" in the environment) means no auth,
     # not auth with the empty string.
     try:
-        return create_app(
+        app = create_app(
             dispatcher,
             tokens=settings.tokens,
             evaluation_tokens=evaluation_token,
@@ -558,3 +567,31 @@ def build_app(
         with suppress(Exception):
             dispatcher.close()
         raise
+    app.cleanup_ctx.append(EndOnLeaseLoss(dispatcher).run)
+    return app
+
+
+class EndOnLeaseLoss:
+    """Ends the process of a control instance that lost the control lease, with SIGTERM, so that its supervisor
+    starts it again as a standby.
+
+    Values: ``dispatcher`` sets ``lease_lost``; ``poll_seconds`` is the time between two looks at it. Purpose: the
+    app that ``build_app`` returns runs ``run`` for its life (``cleanup_ctx``); an embedded dispatcher, which no
+    process owns, never ends a process.
+    """
+
+    def __init__(self, dispatcher: Dispatcher, *, poll_seconds: float = 1.0) -> None:
+        self.dispatcher = dispatcher
+        self.poll_seconds = poll_seconds
+
+    async def run(self, app: web.Application) -> AsyncIterator[None]:
+        task = asyncio.create_task(self.watch())
+        yield
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
+
+    async def watch(self) -> None:
+        while not self.dispatcher.lease_lost.is_set():
+            await asyncio.sleep(self.poll_seconds)
+        signal.raise_signal(signal.SIGTERM)

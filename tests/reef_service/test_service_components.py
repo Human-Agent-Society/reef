@@ -33,6 +33,9 @@ from reef.storage.sqlite import SQLiteScenarioStorage
 
 MEMORY_BACKEND = "tests.support.artifact_backend_plugin:MemoryArtifactBackend"
 TOKEN = "service-token"
+import signal
+from reef.core.errors import ReefError
+from reef.dispatcher.dispatcher import build_default_dispatcher
 
 
 def settings(tmp_path: Path) -> ServiceConfig:
@@ -216,3 +219,26 @@ def test_the_data_service_serves_the_data_routes_and_the_reads_and_control_alone
             assert (await client.get("/reef/namespaces/o/data", headers=auth)).status == 404
 
     asyncio.run(run())
+
+
+@pytest.mark.unit
+def test_a_control_dispatcher_refuses_a_lease_that_another_instance_holds(tmp_path: Path) -> None:
+    coordination = memory_coordination()
+    assert coordination.control_lease.acquire("control-other") is not None
+    with pytest.raises(ReefError, match="holds the control lease"):
+        build_default_dispatcher(scenario_storage=SQLiteScenarioStorage(), coordination=coordination)
+
+
+@pytest.mark.unit
+def test_a_lost_lease_stops_the_local_cycles_and_the_app_owner_ends_the_process(monkeypatch) -> None:
+    dispatcher = build_default_dispatcher(scenario_storage=SQLiteScenarioStorage(), coordination=memory_coordination())
+    signals: list[int] = []
+    monkeypatch.setattr(assembly.signal, "raise_signal", signals.append)
+    try:
+        dispatcher.control_lease_lost()
+        # An embedded dispatcher ends no process: it only says that the lease is lost.
+        assert dispatcher.lease_lost.is_set() and not dispatcher.local_workers.cycles_run() and signals == []
+        asyncio.run(assembly.EndOnLeaseLoss(dispatcher, poll_seconds=0.01).watch())
+        assert signals == [signal.SIGTERM]
+    finally:
+        dispatcher.close()

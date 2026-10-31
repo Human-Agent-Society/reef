@@ -20,6 +20,7 @@ all of them in one process, on the same interfaces.
 from __future__ import annotations
 
 import os
+from abc import ABC, abstractmethod
 from collections.abc import Mapping
 
 from aiohttp import web
@@ -43,31 +44,36 @@ from reef.service.web import service_application
 from reef.storage.observer import ObservedScenarioStorage
 
 
-def build_component_app(
-    component: str,
-    settings: ServiceConfig,
-    *,
-    environ: Mapping[str, str] | None = None,
-) -> web.Application:
-    """The app of the service ``component`` (one of ``SERVICE_COMPONENTS``), which owns what it opens.
+class ComponentApp(ABC):
+    """How ``reef serve --component NAME`` builds the app of one service.
 
-    Raise ``ValueError`` for an unknown service.
+    Values: ``build(settings, environ)`` returns the app of the service, which owns what it opens and closes it at
+    cleanup. Purpose: ``COMPONENT_APPS`` holds one per service; ``build_component_app`` calls it.
     """
-    env = os.environ if environ is None else environ
-    if component not in SERVICE_COMPONENTS:
-        raise ValueError(f"unknown service {component!r}; the services are {SERVICE_COMPONENTS}")
-    if component == "control":
-        return build_app(settings, environ=env, components=frozenset({"control"}))
-    if component == "inference":
-        # The same recipe as control's, whose runtime this process never opens: it reaches each engine with the
-        # runtime's own request handler, as control does, and changes no engine.
-        recipe = serving_recipe(settings, env)
+
+    @abstractmethod
+    def build(self, settings: ServiceConfig, environ: Mapping[str, str]) -> web.Application: ...
+
+
+class ControlApp(ComponentApp):
+    """Control: the Reef HTTP API except the data routes."""
+
+    def build(self, settings: ServiceConfig, environ: Mapping[str, str]) -> web.Application:
+        return build_app(settings, environ=environ, components=frozenset({"control"}))
+
+
+class InferenceApp(ComponentApp):
+    """The inference service. It builds the same recipe as control's, whose runtime this process never opens: it
+    reaches each engine with the runtime's own request handler, as control does, and changes no engine."""
+
+    def build(self, settings: ServiceConfig, environ: Mapping[str, str]) -> web.Application:
+        recipe = serving_recipe(settings, environ)
         runtime = recipe.runtime
         coordination = open_service_coordination(settings)
         try:
             storage, _ = open_scenario_storage(settings)
             # Records that this service appends are traced as the records that control appends are.
-            record_observer = build_record_observer(settings.tracing_config, environ=env)
+            record_observer = build_record_observer(settings.tracing_config, environ=environ)
             if record_observer is not None:
                 storage = ObservedScenarioStorage(storage, record_observer)
         except BaseException:
@@ -94,28 +100,70 @@ def build_component_app(
 
         app.on_cleanup.append(close_inference)
         return app
-    if component == "data":
-        # The data service is a dispatcher too: it loads each scenario on demand, for the checks of a write and for
-        # the reads, and runs the data workers.
+
+
+class DataApp(ComponentApp):
+    """The data service: a dispatcher that loads each scenario on demand, for the checks of a write and for the
+    reads, and runs the data workers."""
+
+    def build(self, settings: ServiceConfig, environ: Mapping[str, str]) -> web.Application:
         return create_data_app(
-            build_dispatcher(settings, environ=env, components=frozenset({"data"})),
+            build_dispatcher(settings, environ=environ, components=frozenset({"data"})),
             tokens=settings.tokens,
             console_origins=settings.console_origins,
         )
-    # The samples, training and evaluation services: a dispatcher that runs only the service's own workers on the
-    # shared store. The evaluation service loads each rollout's scenario on demand, resolves the candidate artifact
-    # and serves it itself.
-    dispatcher = build_dispatcher(settings, environ=env, components=frozenset({component}))
-    if component == "training" and dispatcher.recipe.training_component is None:
-        dispatcher.close()
-        raise ValueError(f"recipe {settings.recipe!r} trains no weights, so it has no training service")
-    app = service_application(settings.tokens)
-
-    async def close_dispatcher(app: web.Application) -> None:
-        dispatcher.close()
-
-    app.on_cleanup.append(close_dispatcher)
-    return app
 
 
-__all__ = ["build_component_app"]
+class QueueServiceApp(ComponentApp):
+    """A service that only takes work from a queue (samples, training, evaluation): a dispatcher that runs only the
+    service's own workers on the shared store, and answers ``/healthz`` alone. The evaluation service loads each
+    rollout's scenario on demand, resolves the candidate artifact and serves it itself.
+
+    Values: ``name`` is the service.
+    """
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+    def build(self, settings: ServiceConfig, environ: Mapping[str, str]) -> web.Application:
+        dispatcher = build_dispatcher(settings, environ=environ, components=frozenset({self.name}))
+        if dispatcher.services.runs_training and dispatcher.recipe.training_component is None:
+            dispatcher.close()
+            raise ValueError(f"recipe {settings.recipe!r} trains no weights, so it has no training service")
+        app = service_application(settings.tokens)
+
+        async def close_dispatcher(app: web.Application) -> None:
+            dispatcher.close()
+
+        app.on_cleanup.append(close_dispatcher)
+        return app
+
+
+#: The app builder of each service.
+COMPONENT_APPS: dict[str, ComponentApp] = {
+    "control": ControlApp(),
+    "inference": InferenceApp(),
+    "samples": QueueServiceApp("samples"),
+    "training": QueueServiceApp("training"),
+    "evaluation": QueueServiceApp("evaluation"),
+    "data": DataApp(),
+}
+
+
+def build_component_app(
+    component: str,
+    settings: ServiceConfig,
+    *,
+    environ: Mapping[str, str] | None = None,
+) -> web.Application:
+    """The app of the service ``component`` (one of ``SERVICE_COMPONENTS``), which owns what it opens.
+
+    Raise ``ValueError`` for an unknown service.
+    """
+    builder = COMPONENT_APPS.get(component)
+    if builder is None:
+        raise ValueError(f"unknown service {component!r}; the services are {SERVICE_COMPONENTS}")
+    return builder.build(settings, os.environ if environ is None else environ)
+
+
+__all__ = ["COMPONENT_APPS", "ComponentApp", "build_component_app"]

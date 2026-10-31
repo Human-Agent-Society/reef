@@ -79,7 +79,7 @@ def test_the_recipe_evaluation_token_is_its_own_and_opens_the_evaluation_routes_
     def create_app(dispatcher, **kwargs):
         seen["tokens"] = kwargs["tokens"]
         seen["evaluation_tokens"] = kwargs["evaluation_tokens"]
-        return object()
+        return web.Application()
 
     monkeypatch.setattr(assembly, "build_dispatcher", build_dispatcher)
     monkeypatch.setattr(assembly, "create_app", create_app)

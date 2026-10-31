@@ -20,6 +20,7 @@ import time
 from abc import ABC, abstractmethod
 
 from reef.artifact.artifact import Artifact
+from reef.core.errors import ReefError
 from reef.core.served_models import ACTIVE, CACHE_SECONDS, ScenarioModel, ScheduledStop, ServedArtifact
 from reef.execution.workers import ServiceWorker
 from reef.runtime.interfaces import EngineClients, InferenceHandler, InferenceRuntime
@@ -49,6 +50,18 @@ def wait_for_control_lease(
             reported = True
         time.sleep(interval)
     logger.info("control instance %s holds the control lease, number %d", instance_id, state.number)
+    return state
+
+
+def take_control_lease(lease: ControlLease, instance_id: str) -> ControlLeaseState:
+    """Take the control lease for ``instance_id`` now; raise ``ReefError`` when another instance holds it."""
+    state = lease.acquire(instance_id)
+    if state is None:
+        holder = lease.current()
+        raise ReefError(
+            f"control instance {None if holder is None else holder.instance_id} holds the control lease: a standby "
+            "waits for it (wait_for_control_lease) and gives the dispatcher its state"
+        )
     return state
 
 
@@ -262,4 +275,10 @@ class PublishedEngines(EngineClients):
         return found
 
 
-__all__ = ["ControlInstance", "PublishedEngines", "ServedModelsPublisher", "wait_for_control_lease"]
+__all__ = [
+    "ControlInstance",
+    "PublishedEngines",
+    "ServedModelsPublisher",
+    "take_control_lease",
+    "wait_for_control_lease",
+]

@@ -61,7 +61,7 @@ def create_data_app(
     ``dispatcher`` runs the data service and no control (``reef serve --component data``): it loads each scenario
     on demand, for the checks of a data write and for the reads. The app closes it on cleanup.
     """
-    if "data" not in dispatcher.components:
+    if not dispatcher.services.runs_data:
         raise ValueError("the data app runs the data service: build its dispatcher with the data service")
     request_service = RequestService(dispatcher)
     app = service_application(tokens)

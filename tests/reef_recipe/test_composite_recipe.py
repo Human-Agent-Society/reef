@@ -9,6 +9,7 @@ from collections.abc import Mapping
 from contextlib import closing
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -25,6 +26,7 @@ from reef.core.reports import ReportValidationError, ScoredRolloutReport
 from reef.dispatcher import Dispatcher
 from reef.evaluation import EvaluationResult, UpdateCandidate
 from reef.evaluation.activation import AlwaysActivate, NeverActivate
+from reef.execution.workers import ServiceSet
 from reef.inference.http import InferenceProxyRuntime
 from reef.pipeline_context import PipelineContext
 from reef.recipe import CompositeRecipe, Recipe, RecipeConfigError, build_recipe
@@ -725,9 +727,9 @@ def test_only_a_composite_evaluates_through_the_service(
     )
     built: dict[str, Any] = {}
 
-    def dispatcher(recipe: Recipe, *args: Any, **kwargs: Any) -> object:
+    def dispatcher(recipe: Recipe, *args: Any, **kwargs: Any) -> SimpleNamespace:
         built.update(recipe=recipe, hold=kwargs["hold_local_cycles"])
-        return object()
+        return SimpleNamespace(services=ServiceSet.of(kwargs["components"]))
 
     monkeypatch.setattr(assembly, "_serving_recipe", lambda *args: recipe)
     monkeypatch.setattr(assembly, "Dispatcher", dispatcher)

@@ -4,14 +4,13 @@ from __future__ import annotations
 
 import logging
 import shutil
-import signal
 import tempfile
 import time
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
-from threading import Lock, Thread
+from threading import Event, Lock, Thread
 from typing import Any
 
 from reef.artifact.artifact import Artifact
@@ -27,12 +26,12 @@ from reef.dispatcher.data_sync_worker import DataSyncWorker, ItemSync
 from reef.dispatcher.errors import TrainingErrors
 from reef.dispatcher.local_workers import LocalTrainingWorkers
 from reef.dispatcher.samples import LocalSampleProducers
-from reef.dispatcher.served import ControlInstance, ServedModelsPublisher, wait_for_control_lease
+from reef.dispatcher.served import ControlInstance, ServedModelsPublisher, take_control_lease
 from reef.dispatcher.status import TrainingStatus
 from reef.dispatcher.store_changes import StoreChanges, StoreChangesWatcher
 from reef.dispatcher.work_retention import EndedWorkSweeper
 from reef.evaluation.artifact_endpoint import CandidateArtifacts
-from reef.execution.workers import SERVICE_COMPONENTS, ServiceWorkers, service_components
+from reef.execution.workers import SERVICE_COMPONENTS, ServiceSet, ServiceWorkers
 from reef.observability import ExperimentTracker, NullExperimentTracker
 from reef.recipe.base import Recipe
 from reef.record2sample.service import SamplesWorker, request_selection
@@ -44,6 +43,7 @@ from reef.scenario.registry import ScenarioLifecycle, ScenarioRegistry
 from reef.scenario.releases import ServedBesideArtifact
 from reef.scenario.scenario import Scenario
 from reef.storage.artifact_items import request_artifact_copy
+from reef.storage.control_lease import ControlLeaseState
 from reef.storage.coordination import Coordination, instance_id
 from reef.storage.data import DataStore, check_owner
 from reef.storage.data_sync import sync_scenario_samples, uploads
@@ -100,6 +100,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         scenario_idle_unload_seconds: float | None = None,
         scenario_admission: ScenarioAdmission | None = None,
         coordination: Coordination,
+        control_lease: ControlLeaseState | None = None,
         workers: ServiceWorkers | None = None,
         components: frozenset[str] = frozenset(SERVICE_COMPONENTS),
         work_retention_seconds: float = 7 * 24 * 3600.0,
@@ -117,6 +118,12 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         ``record_storage``: the scenario storage that the work outside a loaded scenario uses, such as the inference
         path that appends records and the data service that copies them. It is ``scenario_storage`` without what a
         scenario's session does when it opens (the data sync); None means ``scenario_storage``.
+
+        ``control_lease``: the control lease of this instance, when it runs control. A standby waits for it before
+        it builds the dispatcher (``wait_for_control_lease``); None takes the lease now, and raises ``ReefError``
+        when another instance holds it. When another instance takes the lease, the local cycles stop and
+        ``lease_lost`` is set: the process that owns the dispatcher ends, so that its supervisor starts it again as a
+        standby.
 
         ``coordination`` and ``workers``: the coordination store and the background workers of the services
         that this process runs. A process that runs every service and keeps no state across restarts, such as an
@@ -144,17 +151,16 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         self.coordination = coordination
         #: The background workers of the services that this process runs; the dispatcher stops them first.
         self.workers = workers if workers is not None else ServiceWorkers()
-        #: The services that this process runs.
-        self.components = service_components(components)
-        #: Whether this process runs control: the trainers' local workers, ``served_models`` and the store watcher.
-        self.runs_control = "control" in self.components
+        #: The services that this process runs. Control runs the trainers' local workers, ``served_models`` and
+        #: the store watcher.
+        self.services = ServiceSet.of(components)
         #: The work queue of the samples, jobs and evaluations queues.
         self.queue = coordination.work_queue
         if recipe.training_component is not None:
             queued = JobQueueComponent(
-                recipe.training_component, self.queue, owns_component="training" not in self.components
+                recipe.training_component, self.queue, owns_component=not self.services.runs_training
             )
-            if "training" in self.components:
+            if self.services.runs_training:
                 self.workers.add(
                     TrainingJobWorker(recipe.training_component, self.queue, worker_id=instance_id("training"))
                 )
@@ -176,17 +182,21 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
             admission=scenario_admission,
             lifecycle=self,
             # Only control activates a scenario's artifact on the engines when it loads the scenario.
-            activates_runtime=self.runs_control,
+            activates_runtime=self.services.runs_control,
         )
         self.errors = TrainingErrors()
         self.background_threads = BackgroundThreads()
         self.local_workers = LocalTrainingWorkers(self.registry, self.errors, held=hold_local_cycles)
         #: The writer of ``served_models``, when this process runs control.
         self.publisher: ServedModelsPublisher | None = None
-        if self.runs_control:
-            # A standby instance waits here, before it loads or serves anything, until the active one stops.
-            control_id = instance_id("control")
-            lease = wait_for_control_lease(coordination.control_lease, control_id)
+        #: Set when another control instance took the lease (``control_lease_lost``).
+        self.lease_lost = Event()
+        if self.services.runs_control:
+            lease = (
+                take_control_lease(coordination.control_lease, instance_id("control"))
+                if control_lease is None
+                else control_lease
+            )
             runtime = recipe.runtime
             request_timeout_seconds = 300.0 if runtime is None else runtime.inference_timeout_s
             publisher = ServedModelsPublisher(
@@ -195,7 +205,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
                 self,
                 lease,
                 runtime=runtime,
-                instance_id=control_id,
+                instance_id=lease.instance_id,
                 stop_delay_seconds=CACHE_SECONDS + request_timeout_seconds,
             )
             self.workers.add(publisher)
@@ -214,16 +224,16 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
             self.workers.add(EndedWorkSweeper(coordination.work_queue, retention_seconds=work_retention_seconds))
             if data_store is not None:
                 self.workers.add(DataSyncWorker(coordination.work_queue, self, worker_id=instance_id("data-sync")))
-        if "samples" in self.components:
+        if self.services.runs_samples:
             self.workers.add(
                 SamplesWorker(
                     self.queue,
-                    LocalSampleProducers(self.registry, self.local_workers if self.runs_control else None),
+                    LocalSampleProducers(self.registry, self.local_workers if self.services.runs_control else None),
                     worker_id=instance_id("samples"),
                 )
             )
         self.training_status = TrainingStatus(recipe, self.registry, self.errors)
-        if self.runs_control and isinstance(backend_factory, EnumerableRepositoryBackendFactory):
+        if self.services.runs_control and isinstance(backend_factory, EnumerableRepositoryBackendFactory):
             self.background_threads.preload_thread = Thread(
                 target=self.preload_scenarios,
                 args=(backend_factory.list_registrations(),),
@@ -331,7 +341,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         The data sync can add uploads while the scenario opens, and no record wakes a worker for them, so the
         workers wake when a trainer holds untrained samples.
         """
-        if not self.runs_control:
+        if not self.services.runs_control:
             # Another process runs control: this one loaded the scenario only to make its samples.
             return
         self.scenario_committed(instance)
@@ -360,7 +370,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
     def scenario_reloaded(self, instance: Scenario) -> None:
         """A failure rebuilt ``instance``: ask the samples service again for the records after its progress. Its
         workers keep the failure until the samples come and the next cycle runs."""
-        if self.runs_control:
+        if self.services.runs_control:
             self.request_samples(instance)
 
     def close_replaced(self, instance: Scenario) -> None:
@@ -757,9 +767,9 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
 
     def control_lease_lost(self) -> None:
         """Another control instance took the lease: no local cycle of this instance runs or commits any more, and
-        the process ends (SIGTERM), so that its supervisor starts it again as a standby."""
+        ``lease_lost`` is set for the process that owns the dispatcher."""
         self.local_workers.stop()
-        signal.raise_signal(signal.SIGTERM)
+        self.lease_lost.set()
 
     def candidate(self, scenario: str, artifact_id: str, component: str | None) -> tuple[InferenceRuntime, Artifact]:
         """The runtime of ``scenario`` and the materialized artifact ``artifact_id`` (``CandidateArtifacts``)."""

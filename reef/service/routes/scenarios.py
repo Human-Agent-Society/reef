@@ -14,13 +14,77 @@ from reef.storage.data import check_owner
 from reef.train.job_queue import cancel_scenario_job
 
 
-def register_scenario_routes(
-    app: web.Application, *, request_service: RequestService, evaluations: ArtifactEvaluations, writes: bool = True
-) -> None:
-    """The scenario routes; without ``writes``, only the reads of what the scenario stores."""
+def register_scenario_reads(app: web.Application, *, request_service: RequestService) -> None:
+    """The reads of what each scenario stores, which every service with the scenarios' stores answers."""
 
     async def list_scenarios(request: web.Request) -> web.Response:
         return web.json_response({"scenarios": list(request_service.dispatcher.list_scenarios())})
+
+    async def scenario_settings(request: web.Request) -> web.Response:
+        result = await asyncio.to_thread(request_service.dispatcher.scenario_settings, request.match_info["scenario"])
+        return web.json_response(result, headers={"Cache-Control": "no-store"})
+
+    async def list_artifacts(request: web.Request) -> web.Response:
+        scenario = request.match_info["scenario"]
+        artifacts = await asyncio.to_thread(request_service.dispatcher.list_artifacts, scenario)
+        return web.json_response({"scenario": scenario, "artifacts": artifacts})
+
+    async def record_list(request: web.Request) -> web.Response:
+        request_type = request.query.get("request_type")
+        result = await asyncio.to_thread(
+            request_service.dispatcher.read_records,
+            request.match_info["scenario"],
+            after_sequence=int(request.query.get("after_sequence", "0")),
+            limit=int(request.query.get("limit", "50")),
+            # An unknown type is a ValueError, which answers HTTP 400.
+            request_type=None if request_type is None else RequestType(request_type),
+        )
+        return web.json_response(result, headers={"Cache-Control": "no-store"})
+
+    async def commit_list(request: web.Request) -> web.Response:
+        result = await asyncio.to_thread(
+            request_service.dispatcher.read_commits,
+            request.match_info["scenario"],
+            after_step=int(request.query.get("after_step", "0")),
+            limit=int(request.query.get("limit", "50")),
+            record_ids=tuple(request.query.getall("record_id", [])),
+        )
+        return web.json_response(result, headers={"Cache-Control": "no-store"})
+
+    async def record_detail(request: web.Request) -> web.Response:
+        result = await asyncio.to_thread(
+            request_service.dispatcher.read_record,
+            request.match_info["scenario"],
+            request.match_info["record_id"],
+        )
+        if result is None:
+            return web.json_response(
+                {"error": "Trace body is unavailable. It may have expired or never been retained."},
+                status=404,
+                headers={"Cache-Control": "no-store"},
+            )
+        return web.json_response(result, headers={"Cache-Control": "no-store"})
+
+    async def scenario_contract(request: web.Request) -> web.Response:
+        scenario = request.match_info["scenario"]
+        return web.json_response(
+            request_service.dispatcher.scenario_contract(scenario), headers={"Cache-Control": "no-store"}
+        )
+
+    app.router.add_get("/reef/scenarios", list_scenarios)
+    app.router.add_get("/reef/scenarios/{scenario}/settings", scenario_settings)
+    app.router.add_get("/reef/scenarios/{scenario}/contract", scenario_contract)
+    app.router.add_get("/reef/scenarios/{scenario}/records", record_list)
+    app.router.add_get("/reef/scenarios/{scenario}/commits", commit_list)
+    app.router.add_get("/reef/scenarios/{scenario}/records/{record_id}", record_detail)
+    app.router.add_get("/reef/scenarios/{scenario}/artifacts", list_artifacts)
+
+
+def register_scenario_writes(
+    app: web.Application, *, request_service: RequestService, evaluations: ArtifactEvaluations
+) -> None:
+    """The changes of scenarios, which only control makes: create, update, delete, activate, serve, train from an
+    artifact, and cancel a job."""
 
     async def create_scenario(request: web.Request) -> web.Response:
         payload = await read_object(request)
@@ -95,60 +159,9 @@ def register_scenario_routes(
             result.update(await asyncio.to_thread(evaluations.configure, name, changes))
         return web.json_response(result)
 
-    async def scenario_settings(request: web.Request) -> web.Response:
-        result = await asyncio.to_thread(request_service.dispatcher.scenario_settings, request.match_info["scenario"])
-        return web.json_response(result, headers={"Cache-Control": "no-store"})
-
     async def delete_scenario(request: web.Request) -> web.Response:
         result = await asyncio.to_thread(request_service.dispatcher.delete_scenario, request.match_info["scenario"])
         return web.json_response(result)
-
-    async def list_artifacts(request: web.Request) -> web.Response:
-        scenario = request.match_info["scenario"]
-        artifacts = await asyncio.to_thread(request_service.dispatcher.list_artifacts, scenario)
-        return web.json_response({"scenario": scenario, "artifacts": artifacts})
-
-    async def record_list(request: web.Request) -> web.Response:
-        request_type = request.query.get("request_type")
-        result = await asyncio.to_thread(
-            request_service.dispatcher.read_records,
-            request.match_info["scenario"],
-            after_sequence=int(request.query.get("after_sequence", "0")),
-            limit=int(request.query.get("limit", "50")),
-            # An unknown type is a ValueError, which answers HTTP 400.
-            request_type=None if request_type is None else RequestType(request_type),
-        )
-        return web.json_response(result, headers={"Cache-Control": "no-store"})
-
-    async def commit_list(request: web.Request) -> web.Response:
-        result = await asyncio.to_thread(
-            request_service.dispatcher.read_commits,
-            request.match_info["scenario"],
-            after_step=int(request.query.get("after_step", "0")),
-            limit=int(request.query.get("limit", "50")),
-            record_ids=tuple(request.query.getall("record_id", [])),
-        )
-        return web.json_response(result, headers={"Cache-Control": "no-store"})
-
-    async def record_detail(request: web.Request) -> web.Response:
-        result = await asyncio.to_thread(
-            request_service.dispatcher.read_record,
-            request.match_info["scenario"],
-            request.match_info["record_id"],
-        )
-        if result is None:
-            return web.json_response(
-                {"error": "Trace body is unavailable. It may have expired or never been retained."},
-                status=404,
-                headers={"Cache-Control": "no-store"},
-            )
-        return web.json_response(result, headers={"Cache-Control": "no-store"})
-
-    async def scenario_contract(request: web.Request) -> web.Response:
-        scenario = request.match_info["scenario"]
-        return web.json_response(
-            request_service.dispatcher.scenario_contract(scenario), headers={"Cache-Control": "no-store"}
-        )
 
     async def read_artifact_selection(request: web.Request) -> tuple[str, str | None]:
         """The ``artifact_id`` and the optional ``component`` that an activation, a train-from or a serve names."""
@@ -222,15 +235,6 @@ def register_scenario_routes(
             {"scenario": scenario, "component": start.component, "artifact_id": start.artifact_id}
         )
 
-    app.router.add_get("/reef/scenarios", list_scenarios)
-    app.router.add_get("/reef/scenarios/{scenario}/settings", scenario_settings)
-    app.router.add_get("/reef/scenarios/{scenario}/contract", scenario_contract)
-    app.router.add_get("/reef/scenarios/{scenario}/records", record_list)
-    app.router.add_get("/reef/scenarios/{scenario}/commits", commit_list)
-    app.router.add_get("/reef/scenarios/{scenario}/records/{record_id}", record_detail)
-    app.router.add_get("/reef/scenarios/{scenario}/artifacts", list_artifacts)
-    if not writes:
-        return
     app.router.add_post("/reef/scenarios", create_scenario)
     app.router.add_post("/reef/scenarios/{scenario}/update", update_scenario)
     app.router.add_delete("/reef/scenarios/{scenario}", delete_scenario)
@@ -241,4 +245,4 @@ def register_scenario_routes(
     app.router.add_post("/reef/scenarios/{scenario}/jobs/{job_id}/cancel", cancel_job)
 
 
-__all__ = ["register_scenario_routes"]
+__all__ = ["register_scenario_reads", "register_scenario_writes"]

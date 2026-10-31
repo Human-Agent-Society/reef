@@ -8,13 +8,8 @@ from reef.service.artifact_evaluations import ArtifactEvaluations
 from reef.service.routes.payload import read_object
 
 
-def register_evaluation_routes(app: web.Application, *, evaluations: ArtifactEvaluations, writes: bool = True) -> None:
-    """The evaluation routes; without ``writes``, only the reads of stored evaluations."""
-
-    async def start(request: web.Request) -> web.Response:
-        body = await read_object(request)
-        stored = await asyncio.to_thread(evaluations.start, request.match_info["scenario"], body)
-        return web.json_response(stored.to_json(), status=202)
+def register_evaluation_reads(app: web.Application, *, evaluations: ArtifactEvaluations) -> None:
+    """The reads of stored evaluations and their rollouts."""
 
     async def evaluation(request: web.Request) -> web.Response:
         evaluation_id = request.match_info["evaluation_id"]
@@ -45,8 +40,17 @@ def register_evaluation_routes(app: web.Application, *, evaluations: ArtifactEva
     app.router.add_get("/reef/scenarios/{scenario}/evaluations", newest)
     app.router.add_get("/reef/scenarios/{scenario}/evaluations/{evaluation_id}", evaluation)
     app.router.add_get("/reef/scenarios/{scenario}/evaluations/{evaluation_id}/rollouts", rollouts)
-    if writes:
-        app.router.add_post("/reef/scenarios/{scenario}/evaluations", start)
 
 
-__all__ = ["register_evaluation_routes"]
+def register_evaluation_writes(app: web.Application, *, evaluations: ArtifactEvaluations) -> None:
+    """The start of an evaluation, which control accepts."""
+
+    async def start(request: web.Request) -> web.Response:
+        body = await read_object(request)
+        stored = await asyncio.to_thread(evaluations.start, request.match_info["scenario"], body)
+        return web.json_response(stored.to_json(), status=202)
+
+    app.router.add_post("/reef/scenarios/{scenario}/evaluations", start)
+
+
+__all__ = ["register_evaluation_reads", "register_evaluation_writes"]
