@@ -21,7 +21,7 @@ from reef.artifact.sources import ArtifactSources
 from reef.dispatcher import Dispatcher
 from reef.service.app import create_app
 from reef.service.artifact_imports import ArtifactImports
-from reef.service.data_service import DataWorker
+from reef.service.data_service import DataWorker, data_jobs
 from reef.service.data_transfer import ArchiveWriters
 from reef.service.task_import import DataScenarioStorage
 from reef.storage.sql_data import SQLiteDataStore
@@ -70,7 +70,11 @@ def cell(tmp_path: Path, name: str) -> Dispatcher:
         data_store=data,
     )
     dispatcher.workers.add(
-        DataWorker(dispatcher, ArtifactSources.from_setting(()), ArchiveWriters(), worker_id="data-test")
+        DataWorker(
+            dispatcher.queue,
+            data_jobs(dispatcher, ArtifactSources.from_setting(()), ArchiveWriters()),
+            worker_id="data-test",
+        )
     )
     return dispatcher
 

@@ -19,7 +19,7 @@ from reef.dispatcher import Dispatcher
 from reef.recipe import Recipe
 from reef.record2sample import NoSamples
 from reef.sample2job import Sample2Job
-from reef.service.data_service import DataWorker
+from reef.service.data_service import DataWorker, data_jobs
 from reef.service.data_transfer import ArchiveWriters
 from reef.service.task_import import DataScenarioStorage
 from reef.storage.sql_data import SQLiteDataStore
@@ -160,6 +160,10 @@ def dispatcher_for(tmp_path: Path, recipe: Recipe, factory: RepositoryBackendFac
     )
     # The data service copies the records to record items, as assembly runs it.
     dispatcher.workers.add(
-        DataWorker(dispatcher, ArtifactSources.from_setting(()), ArchiveWriters(), worker_id="data-test")
+        DataWorker(
+            dispatcher.queue,
+            data_jobs(dispatcher, ArtifactSources.from_setting(()), ArchiveWriters()),
+            worker_id="data-test",
+        )
     )
     return dispatcher

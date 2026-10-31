@@ -30,10 +30,9 @@ from reef.artifact.repository import FileDownload
 from reef.core.tasks import write_harbor_task
 from reef.dispatcher import Dispatcher
 from reef.service.app import create_app
-from reef.service.scenario_files import JOB_CANCELLED_ERROR
 from reef.storage.data import DATA_QUEUE
 from reef.storage.work_queue import NewWork
-from reef.train.job_queue import JOBS_QUEUE
+from reef.train.job_queue import JOB_CANCELLED_ERROR, JOBS_QUEUE
 
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
 DATA = "/reef/namespaces/acme/data"

@@ -9,7 +9,7 @@ A jobs-queue item:
 
 - ``id`` is the job ID, which ``JobLoop.job_id`` makes from the job's inputs;
 - ``kind`` is ``training_job:<component name>``, so a worker takes only the jobs of its component;
-- ``serial_key`` is the scenario, so the jobs of one scenario run one at a time, in the order control added them;
+- ``scenario`` and ``serial_key`` are the job's scenario, so the jobs of one scenario run one at a time, in the order control added them;
 - ``payload`` is the job (``job_payload``);
 - each ``progress`` entry is one ``SavedCheckpoint``, in step order;
 - ``result`` is ``{"state": "finished", "metrics": {...}}``.
@@ -22,16 +22,14 @@ from __future__ import annotations
 
 import logging
 import threading
-import time
 from collections.abc import Mapping
-from contextlib import suppress
 from pathlib import Path
 from typing import Any, cast
 
 from reef.artifact.files import ArtifactFiles
 from reef.artifact.repository import BaseArtifactSource
 from reef.core.job_data import JobData
-from reef.execution.workers import ServiceWorker
+from reef.execution.workers import ItemFailed, QueueWorker, WorkerStopped
 from reef.runtime.jobs import JobStatus, ReleaseFormat, SavedCheckpoint, TrainingComponent, TrainingJob
 from reef.storage.work_queue import JsonValue, NewWork, WorkItem, WorkLeaseLost, WorkQueue
 
@@ -82,6 +80,7 @@ def job_from_item(item: WorkItem) -> TrainingJob:
         json_text(payload.get("start"), "a job's start"),
         JobData.from_dict(json_object(payload.get("data"), "a job's data")),
         json_object(payload.get("parameters"), "a job's parameters"),
+        scenario=item.scenario,
     )
 
 
@@ -120,13 +119,49 @@ def status_from_item(item: WorkItem) -> JobStatus:
     return JobStatus(item.id, "running", checkpoints)
 
 
+#: The error of a job that a client cancelled.
+JOB_CANCELLED_ERROR = "cancelled by request"
+
+
+def job_json(item: WorkItem) -> dict[str, JsonValue]:
+    """The jobs-queue ``item`` as ``{id, state, attempt_count, checkpoints, result, error}``; ``checkpoints`` are the
+    saved checkpoints that the job reported."""
+    return {
+        "id": item.id,
+        "state": item.state,
+        "attempt_count": item.attempt_count,
+        "checkpoints": [dict(progress) for progress in item.progress],
+        "result": None if item.result is None else dict(item.result),
+        "error": item.error,
+    }
+
+
+def scenario_jobs(queue: WorkQueue, scenario: str) -> list[dict[str, JsonValue]]:
+    """The training jobs of ``scenario`` in ``queue``, oldest first, each as ``job_json`` gives it."""
+    return [job_json(item) for item in queue.items(JOBS_QUEUE, scenario=scenario)]
+
+
+def cancel_scenario_job(queue: WorkQueue, scenario: str, job_id: str) -> dict[str, JsonValue] | None:
+    """Cancel the training job ``job_id`` of ``scenario``; return the job, as ``job_json`` gives it, after the cancel.
+
+    A job that has not ended fails with ``JOB_CANCELLED_ERROR``: a queued job at once, and a running job's training
+    worker cancels the run at its next poll. The trainer reads the failed job and records its end. A job that ended
+    stays as it is. Return None when ``scenario`` has no job ``job_id``.
+    """
+    item = queue.get(JOBS_QUEUE, job_id)
+    if item is None or item.scenario != scenario:
+        return None
+    cancelled = queue.cancel(JOBS_QUEUE, job_id, JOB_CANCELLED_ERROR)
+    return job_json(item if cancelled is None else cancelled)
+
+
 class JobQueueComponent(TrainingComponent):
     """The training component that control uses: it adds jobs to the jobs queue instead of running them.
 
     Values: ``component`` is the training component whose jobs the queue carries; its name, release format, base
-    artifact and starts describe the jobs. ``queue`` is the work queue. ``scenario`` is None for the component
-    itself, and the scenario name for the view that ``for_scenario`` returns; only a view submits jobs.
-    ``owns_component`` is whether ``close`` closes ``component``; a training worker owns it otherwise.
+    artifact and starts describe the jobs. ``queue`` is the work queue. ``owns_component`` is whether ``close``
+    closes ``component``; a training worker owns it otherwise. A job goes to the queue under its scenario, which is
+    also its serial key, so the jobs of one scenario run one at a time, in the order of their submission.
 
     Purpose: control's trainers submit jobs and read their status through it (``JobLoop``); the training service
     runs the jobs with ``TrainingJobWorker``.
@@ -137,14 +172,12 @@ class JobQueueComponent(TrainingComponent):
         component: TrainingComponent,
         queue: WorkQueue,
         *,
-        scenario: str | None = None,
         owns_component: bool = False,
     ) -> None:
         if isinstance(component, JobQueueComponent):
             raise TypeError("a jobs-queue component wraps the component that runs the jobs")
         self.component = component
         self.queue = queue
-        self.scenario = scenario
         #: Whether ``close`` closes ``component``: true in a process that runs no training worker for it.
         self.owns_component = owns_component
 
@@ -183,12 +216,7 @@ class JobQueueComponent(TrainingComponent):
     def import_start(self, release: Path) -> str:
         return self.component.import_start(release)
 
-    def for_scenario(self, scenario: str) -> TrainingComponent:
-        return JobQueueComponent(self.component, self.queue, scenario=scenario)
-
     def submit(self, job: TrainingJob) -> None:
-        if self.scenario is None:
-            raise RuntimeError("submit jobs through the view that for_scenario returns")
         if job.backend != self.name:
             raise ValueError(f"the job is for {job.backend!r}, not the {self.name!r} training component")
         if self.queue.get(JOBS_QUEUE, job.job_id) is not None:
@@ -196,7 +224,7 @@ class JobQueueComponent(TrainingComponent):
         self.component.check_job(job)
         self.queue.add(
             NewWork(
-                JOBS_QUEUE, job.job_id, self.scenario, job_kind(self.name), job_payload(job), serial_key=self.scenario
+                JOBS_QUEUE, job.job_id, job.scenario, job_kind(self.name), job_payload(job), serial_key=job.scenario
             )
         )
 
@@ -210,20 +238,20 @@ class JobQueueComponent(TrainingComponent):
         self.queue.cancel(JOBS_QUEUE, job_id, "cancelled")
 
     def close(self) -> None:
-        if self.owns_component and self.scenario is None:
+        if self.owns_component:
             self.component.close()
 
 
-class TrainingJobWorker(ServiceWorker):
+class TrainingJobWorker(QueueWorker):
     """One worker of the training service: it takes the jobs of one component from the jobs queue and runs them.
 
-    Values: ``component`` runs the jobs; ``queue`` is the work queue; ``worker_id`` names this worker in leases;
-    ``poll_seconds`` is the wait between two looks at the queue or at a running job.
+    Values: as ``QueueWorker``, on the jobs of ``component``, which runs them; ``poll_seconds`` is also the wait
+    between two looks at a running job.
 
     Purpose: the training service starts one per training component (``start``); ``stop`` stops taking jobs and
-    closes the component, which the worker owns. Each job runs to its end on this worker unless the worker loses the lease; then the
-    component cancels its local run, and the worker that takes the job next continues it from the job's
-    checkpoints.
+    closes the component, which the worker owns. Each job runs to its end on this worker unless the worker loses
+    the lease; then the component cancels its local run, and the worker that takes the job next continues it from
+    the job's checkpoints. A job that the component reports failed fails for good.
     """
 
     def __init__(
@@ -231,119 +259,71 @@ class TrainingJobWorker(ServiceWorker):
     ) -> None:
         if isinstance(component, JobQueueComponent):
             raise TypeError("a training worker runs jobs on the component itself, not on a jobs-queue component")
-        if poll_seconds <= 0:
-            raise ValueError("poll_seconds is positive")
+        super().__init__(queue, JOBS_QUEUE, [job_kind(component.name)], worker_id=worker_id, poll_seconds=poll_seconds)
         self.component = component
-        self.queue = queue
-        self.worker_id = worker_id
-        self.poll_seconds = poll_seconds
-        self.stopped = threading.Event()
-        self.thread: threading.Thread | None = None
 
     def start(self) -> None:
-        """Start the component's jobs in this process (``TrainingComponent.start_jobs``), and run the worker on a
-        daemon thread."""
-        if self.thread is not None:
-            return
-        self.component.start_jobs()
-        self.thread = threading.Thread(target=self.run, name=f"reef-training-{self.component.name}", daemon=True)
-        self.thread.start()
+        """Start the component's jobs in this process (``TrainingComponent.start_jobs``), then the worker."""
+        if self.thread is None:
+            self.component.start_jobs()
+        super().start()
 
     def stop(self) -> None:
         """Stop taking jobs, give a job in progress back to the queue, wait for the thread, and close the
         component. Another worker continues the job."""
-        self.stopped.set()
-        if self.thread is not None:
-            self.thread.join()
-            self.thread = None
+        super().stop()
         self.component.close()
 
-    def run(self) -> None:
-        while not self.stopped.is_set():
-            try:
-                took = self.run_once()
-            except Exception:
-                # The store can fail for a moment; the worker tries again after its poll time.
-                logger.exception("training worker %s could not read the jobs queue", self.worker_id)
-                took = False
-            if not took:
-                self.stopped.wait(self.poll_seconds)
+    def run_item(self, item: WorkItem, lease_lost: threading.Event) -> Mapping[str, JsonValue]:
+        """Run the job of ``item`` on the component and mirror its checkpoints, by step, into the item's progress.
 
-    def run_once(self) -> bool:
-        """Take one job and run it to its end; return whether there was a job."""
-        self.queue.requeue_expired()
-        item = self.queue.take(JOBS_QUEUE, self.worker_id, [job_kind(self.component.name)])
-        if item is None:
-            return False
+        At each poll the worker reads the item: a job that control cancelled, or that another worker took, ends
+        here, and the component cancels its local run. A worker that continues a job reports only the checkpoints
+        whose step the item does not hold yet. When the worker stops, the job goes back to the queue, so another
+        worker continues it at once: the component keeps running it, and that worker's ``submit`` continues from
+        the job's latest checkpoint.
+        """
+        job = job_from_item(item)
+        self.component.submit(job)
+        reported = {checkpoint_from_json(entry).step for entry in item.progress}
+        progress_count = len(item.progress)
         try:
-            self.run_job(item)
+            while True:
+                status = self.component.status(job.job_id)
+                for checkpoint in status.checkpoints:
+                    if checkpoint.step in reported:
+                        continue
+                    self.queue.add_progress(
+                        JOBS_QUEUE, item.id, self.worker_id, checkpoint_json(checkpoint), number=progress_count
+                    )
+                    reported.add(checkpoint.step)
+                    progress_count += 1
+                if status.state == "finished":
+                    return {"state": "finished", "metrics": cast(JsonValue, dict(status.metrics))}
+                if status.state == "failed":
+                    raise ItemFailed(status.error or "the job failed")
+                if self.stopped.wait(self.poll_seconds):
+                    raise WorkerStopped
+                # Control can cancel the job (a deleted scenario, a new training start): stop at the next poll.
+                held = self.queue.get(JOBS_QUEUE, item.id)
+                if lease_lost.is_set() or held is None or held.worker_id != self.worker_id or held.final:
+                    raise WorkLeaseLost(f"job {item.id} is no longer held by {self.worker_id}")
         except WorkLeaseLost:
             logger.warning("training worker %s lost job %s; cancelling its local run", self.worker_id, item.id)
             self.component.cancel(item.id)
-        except Exception as exc:
-            logger.exception("training worker %s could not run job %s", self.worker_id, item.id)
-            # A raised error can pass, such as a dropped connection to the backend: the job runs again under its
-            # ID until it uses up its attempts. A job that the component reports failed fails at once (``run_job``).
-            with suppress(WorkLeaseLost):
-                self.queue.fail(JOBS_QUEUE, item.id, self.worker_id, f"{type(exc).__name__}: {exc}", retryable=True)
-        return True
-
-    def run_job(self, item: WorkItem) -> None:
-        """Run the job of ``item`` on the component and mirror its checkpoints, by step, into the item's progress.
-
-        The lease is extended a third of a lease after each extension, measured on a monotonic clock, so a slow
-        ``submit`` or ``status`` call counts too. At each poll the worker reads the item, and a job that control
-        cancelled, or that another worker took, ends here with ``WorkLeaseLost``, which cancels the local run. A worker that continues a job reports only the checkpoints whose
-        step the item does not hold yet.
-        """
-        job = job_from_item(item)
-        extend_every = self.queue.lease_seconds / 3
-        self.component.submit(job)
-        self.queue.start(JOBS_QUEUE, item.id, self.worker_id)
-        extended_at = time.monotonic()
-        reported = {checkpoint_from_json(entry).step for entry in item.progress}
-        progress_count = len(item.progress)
-        while True:
-            status = self.component.status(job.job_id)
-            for checkpoint in status.checkpoints:
-                if checkpoint.step in reported:
-                    continue
-                self.queue.add_progress(
-                    JOBS_QUEUE, item.id, self.worker_id, checkpoint_json(checkpoint), number=progress_count
-                )
-                reported.add(checkpoint.step)
-                progress_count += 1
-            if status.state == "finished":
-                self.queue.finish(
-                    JOBS_QUEUE,
-                    item.id,
-                    self.worker_id,
-                    {"state": "finished", "metrics": cast(JsonValue, dict(status.metrics))},
-                )
-                return
-            if status.state == "failed":
-                self.queue.fail(JOBS_QUEUE, item.id, self.worker_id, status.error or "the job failed", retryable=False)
-                return
-            if time.monotonic() - extended_at >= extend_every:
-                self.queue.extend_lease(JOBS_QUEUE, item.id, self.worker_id)
-                extended_at = time.monotonic()
-            if self.stopped.wait(self.poll_seconds):
-                # The job goes back to the queue, so another worker continues it at once: the component keeps
-                # running it, and that worker's ``submit`` continues from the job's latest checkpoint.
-                self.queue.fail(JOBS_QUEUE, item.id, self.worker_id, "the training worker stopped", retryable=True)
-                return
-            # Control can cancel the job (a deleted scenario, a new training start): stop at the next poll.
-            held = self.queue.get(JOBS_QUEUE, item.id)
-            if held is None or held.worker_id != self.worker_id or held.final:
-                raise WorkLeaseLost(f"job {item.id} is no longer held by {self.worker_id}")
+            raise
 
 
 __all__ = [
     "JOBS_QUEUE",
+    "JOB_CANCELLED_ERROR",
     "JobQueueComponent",
     "TrainingJobWorker",
+    "cancel_scenario_job",
     "job_from_item",
+    "job_json",
     "job_kind",
     "job_payload",
+    "scenario_jobs",
     "status_from_item",
 ]

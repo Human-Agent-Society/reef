@@ -254,7 +254,7 @@ class SaoStack:
         )
         method = {"method": TrainingMethod("sao").to_dict()}
         job_id = f"job-{step}"
-        self.component.submit(TrainingJob(job_id, "slime", self.start, batch, method))
+        self.component.submit(TrainingJob(job_id, "slime", self.start, batch, method, scenario="s"))
         status = finished(self.component, job_id)
         if status.checkpoints:
             self.start = status.checkpoints[-1].path

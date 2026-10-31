@@ -36,8 +36,9 @@ class TrainingJob:
     A value has a non-empty ``job_id``, a non-empty ``backend`` name, ``start``
     (the non-empty start that the component reads, ``TrainingComponent.base_start`` for the base artifact),
     ``data`` (the job data that the job trains; the component cuts it into
-    optimizer batches by its own batch size)
-    and ``parameters``, a mapping that encodes as JSON.
+    optimizer batches by its own batch size),
+    ``parameters``, a mapping that encodes as JSON, and ``scenario``, the non-empty name of the scenario whose
+    trainer submits the job. The jobs of one scenario run one at a time, in the order of their submission.
 
     Reef makes the value and names the job with ``job_id_for``, so a retry of
     the same request has the same ID. A component reads it in ``submit``.
@@ -48,10 +49,13 @@ class TrainingJob:
     start: str
     data: JobData
     parameters: Mapping[str, Any] = field(default_factory=dict)
+    scenario: str = field(kw_only=True)
 
     def __post_init__(self) -> None:
         if not isinstance(self.job_id, str) or not self.job_id:
             raise ValueError("TrainingJob.job_id must be a non-empty string")
+        if not isinstance(self.scenario, str) or not self.scenario:
+            raise ValueError("TrainingJob.scenario must be a non-empty string")
         if not isinstance(self.backend, str) or not self.backend:
             raise ValueError("TrainingJob.backend must be a non-empty string")
         if not isinstance(self.start, str) or not self.start:
@@ -280,14 +284,6 @@ class TrainingComponent(ABC):
         in the queue.
         """
         return
-
-    def for_scenario(self, scenario: str) -> TrainingComponent:
-        """The component that runs the jobs of ``scenario``. The default is this component.
-
-        ``JobLoop`` calls it once. A queue-backed component returns a view that adds each job to the jobs queue
-        under ``scenario``.
-        """
-        return self
 
     def check_task_jobs(self, parameters: Mapping[str, Any]) -> None:
         """Raise ``ValueError`` unless the component can train jobs whose data are ``TaskSample`` values, with ``parameters``.

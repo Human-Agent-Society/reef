@@ -21,17 +21,15 @@ selection of the same trainer waits in the queue; it adds one when the trainer's
 
 from __future__ import annotations
 
-import logging
 import threading
 import time
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import cast
 
-from reef.execution.workers import ServiceWorker
-from reef.storage.work_queue import JsonValue, LeaseExtender, WorkItem, WorkLeaseLost, WorkQueue, request_waiting
-
-logger = logging.getLogger(__name__)
+from reef.execution.workers import QueueWorker
+from reef.storage.work_queue import JsonValue, WorkItem, WorkQueue, request_waiting
 
 #: The queue of sample work.
 SAMPLES_QUEUE = "samples"
@@ -96,86 +94,35 @@ class SampleProducers(ABC):
         nothing."""
 
 
-class SamplesWorker(ServiceWorker):
+class SamplesWorker(QueueWorker):
     """One worker of the samples service.
 
-    Values: ``queue`` is the work queue; ``producers`` makes the samples; ``worker_id`` names this worker in
-    leases; ``poll_seconds`` is the wait between two looks at the queue.
+    Values: as ``QueueWorker``, on the record selections of the samples queue; ``producers`` makes the samples.
+    A selection that names no component fails for good.
 
-    Purpose: the samples service starts one or more (``start``) and stops them (``stop``).
+    Purpose: the samples service starts one or more (``start``) and stops them (``stop``). A selection that left
+    work in the background asks for the next selection after ``BACKGROUND_POLL_SECONDS``.
     """
 
     def __init__(
         self, queue: WorkQueue, producers: SampleProducers, *, worker_id: str, poll_seconds: float = 0.2
     ) -> None:
-        if poll_seconds <= 0:
-            raise ValueError("poll_seconds is positive")
-        self.queue = queue
+        super().__init__(queue, SAMPLES_QUEUE, [RECORD_SELECTION_KIND], worker_id=worker_id, poll_seconds=poll_seconds)
         self.producers = producers
-        self.worker_id = worker_id
-        self.poll_seconds = poll_seconds
-        self.stopped = threading.Event()
-        self.thread: threading.Thread | None = None
 
-    def start(self) -> None:
-        if self.thread is not None:
-            return
-        self.thread = threading.Thread(target=self.run, name=f"reef-samples-{self.worker_id}", daemon=True)
-        self.thread.start()
-
-    def stop(self) -> None:
-        self.stopped.set()
-        if self.thread is not None:
-            self.thread.join()
-            self.thread = None
-
-    def run(self) -> None:
-        while not self.stopped.is_set():
-            try:
-                took = self.run_once()
-            except Exception:
-                # The store can fail for a moment; the worker tries again after its poll time.
-                logger.exception("samples worker %s could not read the samples queue", self.worker_id)
-                took = False
-            if not took:
-                self.stopped.wait(self.poll_seconds)
-
-    def run_once(self) -> bool:
-        """Take one record selection and make its samples; return whether there was one.
-
-        The lease is extended while the producers run, so a long selection stays with this worker.
-        """
-        self.queue.requeue_expired()
-        item = self.queue.take(SAMPLES_QUEUE, self.worker_id, [RECORD_SELECTION_KIND])
-        if item is None:
-            return False
-        scenario = item.scenario
+    def run_item(self, item: WorkItem, lease_lost: threading.Event) -> Mapping[str, JsonValue]:
         component = item.payload.get("component")
-        try:
-            if not isinstance(component, str) or not component:
-                raise ValueError("a record selection names its component")
-            with LeaseExtender(self.queue, item, self.worker_id):
-                self.queue.start(SAMPLES_QUEUE, item.id, self.worker_id)
-                produced = self.producers.produce(scenario, component)
-            self.queue.finish(
-                SAMPLES_QUEUE,
-                item.id,
-                self.worker_id,
-                {"changed": produced.changed, "background": produced.background},
-            )
-        except WorkLeaseLost:
-            logger.warning("samples worker %s lost %s", self.worker_id, item.id)
-            return True
-        except Exception as exc:
-            logger.exception("samples worker %s could not make the samples of %s", self.worker_id, item.id)
-            try:
-                self.queue.fail(SAMPLES_QUEUE, item.id, self.worker_id, f"{type(exc).__name__}: {exc}", retryable=True)
-            except WorkLeaseLost:
-                logger.warning("samples worker %s lost %s", self.worker_id, item.id)
-            return True
-        if produced.background:
-            request_selection(self.queue, scenario, component, available_at=time.time() + BACKGROUND_POLL_SECONDS)
-        return True
+        if not isinstance(component, str) or not component:
+            raise ValueError("a record selection names its component")
+        produced = self.producers.produce(item.scenario, component)
+        return {"changed": produced.changed, "background": produced.background}
+
+    def item_finished(self, item: WorkItem, result: Mapping[str, JsonValue]) -> None:
+        # The next selection is a new item: the finished one keeps its ID until it ends, and an add of the same ID
+        # changes nothing.
+        if result["background"]:
+            component = cast(str, item.payload["component"])
+            request_selection(self.queue, item.scenario, component, available_at=time.time() + BACKGROUND_POLL_SECONDS)
 
 
 __all__ = [

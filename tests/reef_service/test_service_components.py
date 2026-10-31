@@ -19,6 +19,7 @@ from reef.dispatcher.data_sync_worker import DataSyncWorker
 from reef.dispatcher.samples import LocalSampleProducers
 from reef.dispatcher.served import ServedModelsPublisher
 from reef.dispatcher.store_changes import StoreChanges, StoreChangesWatcher
+from reef.evaluation.rollout_worker import EvaluationRolloutWorker
 from reef.execution.workers import SERVICE_COMPONENTS, service_components
 from reef.record2sample.service import RECORD_SELECTION_KIND, SAMPLES_QUEUE, SamplesWorker, request_selection
 from reef.service import assembly
@@ -57,10 +58,15 @@ def worker_types(tmp_path: Path, components: frozenset[str]) -> set[type]:
 @pytest.mark.unit
 def test_a_process_runs_the_workers_of_its_own_services_only(tmp_path: Path) -> None:
     control = {ServedModelsPublisher, StoreChangesWatcher, DataSyncWorker}
-    assert worker_types(tmp_path / "all", frozenset(SERVICE_COMPONENTS)) == control | {SamplesWorker, DataWorker}
+    assert worker_types(tmp_path / "all", frozenset(SERVICE_COMPONENTS)) == control | {
+        SamplesWorker,
+        DataWorker,
+        EvaluationRolloutWorker,
+    }
     assert worker_types(tmp_path / "control", frozenset({"control"})) == control
     assert worker_types(tmp_path / "samples", frozenset({"samples"})) == {SamplesWorker}
     assert worker_types(tmp_path / "data", frozenset({"data"})) == {DataWorker}
+    assert worker_types(tmp_path / "evaluation", frozenset({"evaluation"})) == {EvaluationRolloutWorker}
     with pytest.raises(ValueError, match="unknown services"):
         service_components({"control", "router"})
     with pytest.raises(ValueError, match="one or more"):

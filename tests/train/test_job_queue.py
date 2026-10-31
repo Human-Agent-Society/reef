@@ -23,7 +23,6 @@ from reef.train.job_queue import (
     job_kind,
     job_payload,
 )
-from reef.train.jobs import JobLoop
 from reef.train.local_jobs import LocalJobComponent
 
 WAIT_SECONDS = 10.0
@@ -73,7 +72,7 @@ class StepComponent(LocalJobComponent):
 
 def job(job_id: str, **parameters: Any) -> TrainingJob:
     data = JobData(job_id, (policy_trajectory(f"s-{job_id}", (1, 2, 3), (1, 1), (-0.1, -0.2), 1.0, artifact_id="v1"),))
-    return TrainingJob(job_id, "steps", "steps:base", data, parameters)
+    return TrainingJob(job_id, "steps", "steps:base", data, parameters, scenario="s")
 
 
 def wait_for(status: Callable[[], JobStatus], state: str) -> JobStatus:
@@ -99,8 +98,7 @@ def worked(tmp_path):
 @pytest.mark.unit
 def test_a_queued_job_runs_on_the_worker_and_reports_its_checkpoints_through_the_queue(worked):
     queue, component, _worker = worked
-    control = JobQueueComponent(component, queue)
-    view = control.for_scenario("s")
+    view = JobQueueComponent(component, queue)
     assert (view.name, view.base_start, view.release_format) == ("steps", "steps:base", ReleaseFormat("full"))
 
     view.submit(job("j1"))
@@ -118,7 +116,7 @@ def test_a_queued_job_runs_on_the_worker_and_reports_its_checkpoints_through_the
 @pytest.mark.unit
 def test_a_refused_job_never_enters_the_queue_and_a_failed_job_reports_its_error(worked):
     queue, component, _worker = worked
-    view = JobQueueComponent(component, queue).for_scenario("s")
+    view = JobQueueComponent(component, queue)
     with pytest.raises(ValueError, match="cannot train"):
         view.submit(job("bad", invalid=True))
     assert queue.get(JOBS_QUEUE, "bad") is None
@@ -129,18 +127,10 @@ def test_a_refused_job_never_enters_the_queue_and_a_failed_job_reports_its_error
 
 
 @pytest.mark.unit
-def test_job_loop_submits_through_the_scenario_view(worked):
-    queue, component, _worker = worked
-    loop = JobLoop(JobQueueComponent(component, queue), scenario="s")
-    assert isinstance(loop.component, JobQueueComponent) and loop.component.scenario == "s"
-    assert loop.component.base_start == "steps:base"
-
-
-@pytest.mark.unit
 def test_a_cancelled_job_fails_and_the_worker_owns_the_component(tmp_path):
     queue = memory_coordination(lease_seconds=30).work_queue
     component = StepComponent(tmp_path / "jobs")
-    view = JobQueueComponent(component, queue).for_scenario("s")
+    view = JobQueueComponent(component, queue)
     view.submit(job("waiting"))
     view.cancel("waiting")
     assert view.status("waiting").state == "failed" and view.status("waiting").error == "cancelled"
@@ -152,15 +142,12 @@ def test_a_cancelled_job_fails_and_the_worker_owns_the_component(tmp_path):
 
 
 @pytest.mark.unit
-def test_only_a_scenario_view_submits_and_a_control_only_component_closes_what_it_owns(tmp_path):
+def test_a_control_only_component_closes_what_it_owns(tmp_path):
     queue = memory_coordination().work_queue
     component = StepComponent(tmp_path / "jobs")
-    control = JobQueueComponent(component, queue, owns_component=True)
-    with pytest.raises(RuntimeError, match="for_scenario"):
-        control.submit(job("j"))
-    control.for_scenario("s").close()
+    JobQueueComponent(component, queue).close()
     assert component.closed_count == 0
-    control.close()
+    JobQueueComponent(component, queue, owns_component=True).close()
     assert component.closed_count == 1
 
 
@@ -200,4 +187,3 @@ def test_a_queue_component_reports_whether_its_component_starts_from_releases(tm
     assert JobQueueComponent(StepComponent(tmp_path / "a"), queue).starts_from_releases is True
     refusing = JobQueueComponent(ReleaseRefusingComponent(tmp_path / "b"), queue)
     assert refusing.starts_from_releases is False
-    assert refusing.for_scenario("s").starts_from_releases is False

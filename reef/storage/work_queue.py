@@ -299,8 +299,8 @@ class LeaseExtender:
     """Extends the lease of one held item every third of the lease, on a background thread, while its work runs.
 
     Values: ``queue`` holds the item; ``item`` is the item that ``worker_id`` holds; ``done`` ends the extension.
-    The thread ends at ``stop`` or when the worker no longer holds the item; a failed extension that is no lost
-    lease is logged and tried again at the next third.
+    The thread ends at ``stop`` or when the worker no longer holds the item, and then sets ``lease_lost``; a failed
+    extension that is no lost lease is logged and tried again at the next third.
 
     Purpose: a worker opens one around work that can take longer than the lease (``with LeaseExtender(...)``).
     """
@@ -310,6 +310,8 @@ class LeaseExtender:
         self.item = item
         self.worker_id = worker_id
         self.done = threading.Event()
+        #: Set when the worker no longer holds the item: another worker took it, or control cancelled it.
+        self.lease_lost = threading.Event()
         self.thread = threading.Thread(target=self.run, name=f"reef-lease-{item.id}", daemon=True)
 
     def __enter__(self) -> LeaseExtender:
@@ -329,6 +331,7 @@ class LeaseExtender:
             try:
                 self.queue.extend_lease(self.item.queue, self.item.id, self.worker_id)
             except WorkLeaseLost:
+                self.lease_lost.set()
                 return
             except Exception:
                 logger.exception("could not extend the lease of %s", self.item.id)

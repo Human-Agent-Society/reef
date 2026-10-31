@@ -25,18 +25,12 @@ from reef.core.evaluation import ArtifactEvaluationRequest, PolicyModel
 from reef.core.tasks import write_harbor_task
 from reef.dispatcher import Dispatcher
 from reef.evaluation.activation import AlwaysActivate, EvaluatedActivation, NeverActivate, activation_reference
-from reef.evaluation.rollout_worker import EvaluationRollout
+from reef.evaluation.rollout_worker import EvaluationRollout, EvaluationRolloutWorker, LocalCandidateEndpoints
 from reef.harness.client.tasks import RolloutRow, TaskLab
 from reef.recipe import Recipe
 from reef.runtime.interfaces import InferenceHandler, InferenceRuntime
 from reef.service.app import create_app
-from reef.service.artifact_evaluations import (
-    STOPPED_ERROR,
-    ArtifactEvaluations,
-    LocalCandidateEndpoints,
-    NewArtifact,
-    NewArtifacts,
-)
+from reef.service.artifact_evaluations import STOPPED_ERROR, ArtifactEvaluations, NewArtifact, NewArtifacts
 from reef.storage.commits import CommitRecord
 from reef.storage.observer import ObservedScenarioStorage
 from reef.storage.sqlite import SQLiteScenarioStorage
@@ -154,7 +148,12 @@ def archive(root: Path, *names: str) -> bytes:
 def evaluating_server(dispatcher: Dispatcher, lab: TaskLab, **options: Any) -> tuple[TestServer, ArtifactEvaluations]:
     """The service and its evaluations. As in one process, the evaluation workers serve each candidate themselves;
     ``options`` go to ``ArtifactEvaluations``."""
-    evaluations = ArtifactEvaluations(dispatcher, lab=lab, endpoints=LocalCandidateEndpoints(dispatcher), **options)
+    evaluations = ArtifactEvaluations(dispatcher, **options)
+    dispatcher.workers.add(
+        EvaluationRolloutWorker(
+            dispatcher.queue, LocalCandidateEndpoints(dispatcher), worker_id="evaluation-test", lab=lab
+        )
+    )
     return TestServer(create_app(dispatcher, tokens=TOKEN, evaluations=evaluations)), evaluations
 
 

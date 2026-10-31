@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
@@ -100,4 +101,20 @@ class ArtifactEndpoint:
             self.server = None
 
 
-__all__ = ["ArtifactEndpoint"]
+class CandidateArtifacts(ABC):
+    """Finds the candidate of an evaluation rollout.
+
+    ``candidate(scenario, artifact_id, component)`` returns the runtime of ``scenario`` and the materialized
+    artifact that ``artifact_id`` names for ``component``. It raises ``ReefError`` for a scenario without a
+    runtime, and as ``Scenario.resolve_artifact`` does for an unknown artifact or component.
+
+    Purpose: the dispatcher implements it; ``LocalCandidateEndpoints`` calls it for each rollout.
+    """
+
+    @abstractmethod
+    def candidate(
+        self, scenario: str, artifact_id: str, component: str | None
+    ) -> tuple[InferenceRuntime, Artifact]: ...
+
+
+__all__ = ["ArtifactEndpoint", "CandidateArtifacts"]

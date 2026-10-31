@@ -284,6 +284,7 @@ def test_a_task_job_samples_the_head_and_trains_score_centered_cispo(tmp_path, m
                 component.base_start,
                 JobData("d", (TaskSample(task, metadata={"task": {"name": "add"}}),)),
                 parameters,
+                scenario="s",
             )
         )
         deadline = time.monotonic() + 10

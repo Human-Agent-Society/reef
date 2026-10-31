@@ -8,6 +8,7 @@ it opens, so the item does nothing for it.
 
 from __future__ import annotations
 
+import threading
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping
 
@@ -39,7 +40,7 @@ class DataSyncWorker(QueueWorker):
         super().__init__(queue, DATA_QUEUE, [DATA_SYNC_KIND], worker_id=worker_id, poll_seconds=poll_seconds)
         self.target = target
 
-    def run_item(self, item: WorkItem) -> Mapping[str, JsonValue]:
+    def run_item(self, item: WorkItem, lease_lost: threading.Event) -> Mapping[str, JsonValue]:
         owner = require_text(item.payload.get("owner"), "owner")
         self.target.sync_items(owner, [item.scenario])
         return {}

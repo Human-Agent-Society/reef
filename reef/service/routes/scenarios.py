@@ -4,13 +4,14 @@ import asyncio
 
 from aiohttp import web
 
+from reef.core.errors import UnknownScenario
 from reef.core.records_types import RequestType
 from reef.scenario.scenario import Scenario
 from reef.service.artifact_evaluations import ArtifactEvaluations
 from reef.service.request_service import RequestService
 from reef.service.routes.payload import read_object
-from reef.service.scenario_files import cancel_scenario_job
 from reef.storage.data import check_owner
+from reef.train.job_queue import cancel_scenario_job
 
 
 def register_scenario_routes(
@@ -205,7 +206,10 @@ def register_scenario_routes(
 
     async def cancel_job(request: web.Request) -> web.Response:
         scenario, job_id = request.match_info["scenario"], request.match_info["job_id"]
-        job = await asyncio.to_thread(cancel_scenario_job, request_service.dispatcher, scenario, job_id)
+        dispatcher = request_service.dispatcher
+        if not await asyncio.to_thread(dispatcher.has_scenario, scenario):
+            raise UnknownScenario(f"unknown scenario {scenario!r}")
+        job = await asyncio.to_thread(cancel_scenario_job, dispatcher.queue, scenario, job_id)
         if job is None:
             raise web.HTTPNotFound(text=f"scenario {scenario!r} has no training job {job_id!r}")
         return web.json_response({"scenario": scenario, "job": job})

@@ -144,7 +144,12 @@ class LocalJobComponent(TrainingComponent):
             self.check_job(job)
             write_json(
                 directory / JOB_FILE,
-                {"start": job.start, "data": job.data.to_dict(), "parameters": dict(job.parameters)},
+                {
+                    "scenario": job.scenario,
+                    "start": job.start,
+                    "data": job.data.to_dict(),
+                    "parameters": dict(job.parameters),
+                },
             )
             self.queue.append(job.job_id)
             self.jobs_lock.notify_all()
@@ -206,6 +211,7 @@ class LocalJobComponent(TrainingComponent):
                         submitted["start"],
                         JobData.from_dict(submitted["data"]),
                         submitted["parameters"],
+                        scenario=submitted["scenario"],
                     )
                     result = {"state": "finished", "metrics": dict(self.run(job, directory))}
                 except Exception as exc:

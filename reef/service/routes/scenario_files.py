@@ -9,10 +9,12 @@ import asyncio
 
 from aiohttp import web
 
+from reef.core.errors import UnknownScenario
 from reef.service.auth import signed_download_url
 from reef.service.request_service import RequestService
 from reef.service.routes.data import download_seconds
-from reef.service.scenario_files import artifact_file, artifact_files, scenario_jobs
+from reef.service.scenario_files import artifact_file, artifact_files
+from reef.train.job_queue import scenario_jobs
 
 
 def register_scenario_file_routes(app: web.Application, *, request_service: RequestService) -> None:
@@ -36,8 +38,11 @@ def register_scenario_file_routes(app: web.Application, *, request_service: Requ
         return web.FileResponse(file, headers={"Content-Disposition": f'attachment; filename="{file.name}"'})
 
     async def jobs(request: web.Request) -> web.Response:
-        listing = await asyncio.to_thread(scenario_jobs, dispatcher, request.match_info["scenario"])
-        return web.json_response(listing, headers={"Cache-Control": "no-store"})
+        scenario = request.match_info["scenario"]
+        if not await asyncio.to_thread(dispatcher.has_scenario, scenario):
+            raise UnknownScenario(f"unknown scenario {scenario!r}")
+        listing = await asyncio.to_thread(scenario_jobs, dispatcher.queue, scenario)
+        return web.json_response({"scenario": scenario, "jobs": listing}, headers={"Cache-Control": "no-store"})
 
     app.router.add_get("/reef/scenarios/{scenario}/artifacts/{artifact_id}/files", files)
     app.router.add_get("/reef/scenarios/{scenario}/jobs", jobs)

@@ -213,7 +213,7 @@ def submit(component, data, objective_name, *, start=None, schedule=None, **para
     }
     start = component.base_start if start is None else start
     job_id = job_id_for(component.name, start, data.to_dict()["samples"], parameters)
-    component.submit(TrainingJob(job_id, component.name, start, data, parameters))
+    component.submit(TrainingJob(job_id, component.name, start, data, parameters, scenario="s"))
     return job_id
 
 
@@ -342,7 +342,9 @@ def test_a_job_with_parameters_tinker_does_not_take_is_refused_and_records_nothi
 ):
     parameters = {"method": TrainingMethod(objective.name).to_dict(), **overrides}
     with pytest.raises(ValueError, match=message):
-        component.submit(TrainingJob("refused", component.name, component.base_start, batch(), parameters))
+        component.submit(
+            TrainingJob("refused", component.name, component.base_start, batch(), parameters, scenario="s")
+        )
     with pytest.raises(KeyError):
         component.status("refused")
     assert client.calls == []

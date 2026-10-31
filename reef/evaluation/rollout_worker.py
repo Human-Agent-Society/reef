@@ -13,7 +13,6 @@ scenario.
 
 from __future__ import annotations
 
-import logging
 import tempfile
 import threading
 from abc import ABC, abstractmethod
@@ -25,11 +24,10 @@ from typing import Any, cast
 
 from reef.core.evaluation import PolicyHarness, PolicyModel, RolloutRequest, RolloutScore
 from reef.core.served_models import require_text
-from reef.execution.workers import ServiceWorker
+from reef.evaluation.artifact_endpoint import ArtifactEndpoint, CandidateArtifacts
+from reef.execution.workers import QueueWorker
 from reef.harness.client.tasks import DEFAULT_AGENT, TaskLab, TaskRolloutRunner
-from reef.storage.work_queue import JsonValue, LeaseExtender, WorkItem, WorkLeaseLost, WorkQueue
-
-logger = logging.getLogger(__name__)
+from reef.storage.work_queue import JsonValue, WorkItem, WorkQueue
 
 #: The queue of evaluations and their rollouts.
 EVALUATIONS_QUEUE = "evaluations"
@@ -183,15 +181,35 @@ class CandidateEndpoints(ABC):
         """The endpoint of ``rollout``'s candidate, until the block ends."""
 
 
-class EvaluationRolloutWorker(ServiceWorker):
+class LocalCandidateEndpoints(CandidateEndpoints):
+    """The candidate's model, served in the process of the evaluation workers: an ``ArtifactEndpoint`` that
+    answers from the candidate artifact with its scenario's runtime.
+
+    Values: ``artifacts`` finds the candidate of each rollout. Purpose: the evaluation workers open it around each
+    rollout, so neither control nor the inference service serves the candidate.
+    """
+
+    def __init__(self, artifacts: CandidateArtifacts) -> None:
+        self.artifacts = artifacts
+
+    @contextmanager
+    def open(self, rollout: EvaluationRollout) -> Iterator[CandidateEndpoint]:
+        runtime, artifact = self.artifacts.candidate(rollout.scenario, rollout.artifact_id, rollout.component)
+        with ArtifactEndpoint(runtime, artifact) as endpoint:
+            yield CandidateEndpoint(endpoint.url, None)
+
+
+class EvaluationRolloutWorker(QueueWorker):
     """One worker of the evaluation service.
 
-    Values: ``queue`` is the work queue; ``endpoints`` opens the candidate's model for each rollout; ``lab`` runs
-    each Harbor trial, None for reef-eval's lab; ``worker_id`` names this worker in leases; ``poll_seconds`` is the
-    wait between two looks at the queue.
+    Values: as ``QueueWorker``, on the rollouts of the evaluations queue; ``endpoints`` opens the candidate's model
+    for each rollout; ``lab`` runs each Harbor trial, None for reef-eval's lab. Every failed rollout is retried:
+    a trial fails for reasons outside its input, such as a sandbox that did not start.
 
     Purpose: the evaluation service starts one or more (``start``) and stops them (``stop``).
     """
+
+    permanent_errors = ()
 
     def __init__(
         self,
@@ -202,61 +220,14 @@ class EvaluationRolloutWorker(ServiceWorker):
         lab: TaskLab | None = None,
         poll_seconds: float = 0.5,
     ) -> None:
-        if poll_seconds <= 0:
-            raise ValueError("poll_seconds is positive")
-        self.queue = queue
+        super().__init__(
+            queue, EVALUATIONS_QUEUE, [EVALUATION_ROLLOUT_KIND], worker_id=worker_id, poll_seconds=poll_seconds
+        )
         self.endpoints = endpoints
         self.lab = lab
-        self.worker_id = worker_id
-        self.poll_seconds = poll_seconds
-        self.stopped = threading.Event()
-        self.thread: threading.Thread | None = None
 
-    def start(self) -> None:
-        if self.thread is not None:
-            return
-        self.thread = threading.Thread(target=self.run, name=f"reef-evaluation-{self.worker_id}", daemon=True)
-        self.thread.start()
-
-    def stop(self) -> None:
-        self.stopped.set()
-        if self.thread is not None:
-            self.thread.join()
-            self.thread = None
-
-    def run(self) -> None:
-        while not self.stopped.is_set():
-            try:
-                took = self.run_once()
-            except Exception:
-                # The store can fail for a moment; the worker tries again after its poll time.
-                logger.exception("evaluation worker %s could not read the evaluations queue", self.worker_id)
-                took = False
-            if not took:
-                self.stopped.wait(self.poll_seconds)
-
-    def run_once(self) -> bool:
-        """Take one rollout and run it; return whether there was one."""
-        self.queue.requeue_expired()
-        item = self.queue.take(EVALUATIONS_QUEUE, self.worker_id, [EVALUATION_ROLLOUT_KIND])
-        if item is None:
-            return False
-        try:
-            with LeaseExtender(self.queue, item, self.worker_id):
-                self.queue.start(EVALUATIONS_QUEUE, item.id, self.worker_id)
-                score = self.score(EvaluationRollout.from_item(item))
-            self.queue.finish(EVALUATIONS_QUEUE, item.id, self.worker_id, {"score": score.to_json()})
-        except WorkLeaseLost:
-            logger.warning("evaluation worker %s lost rollout %s", self.worker_id, item.id)
-        except Exception as exc:
-            logger.exception("evaluation worker %s could not run rollout %s", self.worker_id, item.id)
-            try:
-                self.queue.fail(
-                    EVALUATIONS_QUEUE, item.id, self.worker_id, f"{type(exc).__name__}: {exc}", retryable=True
-                )
-            except WorkLeaseLost:
-                logger.warning("evaluation worker %s lost rollout %s", self.worker_id, item.id)
-        return True
+    def run_item(self, item: WorkItem, lease_lost: threading.Event) -> Mapping[str, JsonValue]:
+        return {"score": self.score(EvaluationRollout.from_item(item)).to_json()}
 
     def score(self, rollout: EvaluationRollout) -> RolloutScore:
         """Run ``rollout`` once and return its score."""
@@ -290,6 +261,7 @@ __all__ = [
     "CandidateEndpoints",
     "EvaluationRollout",
     "EvaluationRolloutWorker",
+    "LocalCandidateEndpoints",
     "agent_harness",
     "evaluation_item_id",
     "harbor_agent",

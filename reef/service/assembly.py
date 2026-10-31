@@ -21,6 +21,7 @@ from aiohttp import web
 from reef.artifact.repository import ConfigurableRepositoryBackendFactory, RepositoryBackendContext
 from reef.artifact.sources import ArtifactSources
 from reef.dispatcher import Dispatcher
+from reef.evaluation.rollout_worker import EvaluationRolloutWorker, LocalCandidateEndpoints
 from reef.execution.workers import SERVICE_COMPONENTS
 from reef.inference.http import InferenceProxyRuntime
 from reef.observability import build_experiment_tracker, build_record_observer
@@ -34,10 +35,10 @@ from reef.runtime.interfaces import InferenceHandler, InferenceRuntime
 from reef.runtime.jobs import TrainingComponent
 from reef.scenario.admission import ScenarioAdmission, ScenarioLimits
 from reef.service.app import create_app
-from reef.service.artifact_evaluations import ArtifactEvaluations, LocalCandidateEndpoints, NewArtifacts
+from reef.service.artifact_evaluations import ArtifactEvaluations, NewArtifacts
 from reef.service.artifact_imports import ArtifactImports
 from reef.service.auth import evaluation_token_for
-from reef.service.data_service import DataWorker
+from reef.service.data_service import DataWorker, data_jobs
 from reef.service.data_transfer import ArchiveWriters
 from reef.service.deploy.service_config import ServiceConfig, service_owned_keys
 from reef.service.deploy.serving import serving_runtime_config
@@ -78,6 +79,8 @@ def _recipe_owned_settings(settings: ServiceConfig) -> dict[str, Any]:
     return {key: value for key, value in settings.recipe_settings.items() if key not in service_owned}
 
 
+#: The evaluation rollout workers of a process that runs the evaluation service.
+ROLLOUT_WORKERS = 4
 #: The factory that ``storage.artifact_backend: git_lfs`` selects, over ``storage.artifact_repository``.
 GIT_LFS_ARTIFACT_BACKEND = "reef.artifact.git_lfs:GitLFSRepositoryBackendFactory"
 
@@ -463,12 +466,19 @@ def build_dispatcher(
             coordination=coordination,
             components=components,
         )
+        if "evaluation" in components:
+            # Each worker serves its rollout's candidate itself, from the scenario's repository.
+            for _ in range(ROLLOUT_WORKERS):
+                dispatcher.workers.add(
+                    EvaluationRolloutWorker(
+                        dispatcher.queue, LocalCandidateEndpoints(dispatcher), worker_id=instance_id("evaluation")
+                    )
+                )
         if "data" in components and data_store is not None:
             dispatcher.workers.add(
                 DataWorker(
-                    dispatcher,
-                    ArtifactSources.from_setting(settings.artifact_sources),
-                    ArchiveWriters(),
+                    dispatcher.queue,
+                    data_jobs(dispatcher, ArtifactSources.from_setting(settings.artifact_sources), ArchiveWriters()),
                     worker_id=instance_id("data"),
                 )
             )
@@ -523,11 +533,7 @@ def build_app(
         new_artifacts=new_artifacts,
         components=components,
     )
-    evaluations = ArtifactEvaluations(
-        dispatcher,
-        new_artifacts=new_artifacts,
-        endpoints=LocalCandidateEndpoints(dispatcher) if "evaluation" in components else None,
-    )
+    evaluations = ArtifactEvaluations(dispatcher, new_artifacts=new_artifacts)
     # No tokens (e.g. REEF_TOKEN="" in the environment) means no auth,
     # not auth with the empty string.
     try:

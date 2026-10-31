@@ -24,12 +24,10 @@ from collections.abc import Mapping
 
 from aiohttp import web
 
-from reef.evaluation.rollout_worker import EvaluationRolloutWorker
-from reef.execution.workers import SERVICE_COMPONENTS, ServiceWorkers
+from reef.execution.workers import SERVICE_COMPONENTS
 from reef.observability import build_record_observer
 from reef.runtime.deployment import close_runtimes
 from reef.service.app import create_data_app
-from reef.service.artifact_evaluations import LOCAL_ROLLOUT_WORKERS, LocalCandidateEndpoints
 from reef.service.assembly import (
     build_app,
     build_dispatcher,
@@ -42,7 +40,6 @@ from reef.service.deploy.service_config import ServiceConfig
 from reef.service.engine_clients import DeploymentEngineClients
 from reef.service.inference_service import build_inference_app
 from reef.service.web import service_application
-from reef.storage.coordination import instance_id
 from reef.storage.observer import ObservedScenarioStorage
 
 
@@ -105,37 +102,19 @@ def build_component_app(
             tokens=settings.tokens,
             console_origins=settings.console_origins,
         )
-    if component in ("samples", "training"):
-        # A queue service is a dispatcher that runs only its own workers on the shared store.
-        dispatcher = build_dispatcher(settings, environ=env, components=frozenset({component}))
-        if component == "training" and dispatcher.recipe.training_component is None:
-            dispatcher.close()
-            raise ValueError(f"recipe {settings.recipe!r} trains no weights, so it has no training service")
-        app = service_application(settings.tokens)
-
-        async def close_dispatcher(app: web.Application) -> None:
-            dispatcher.close()
-
-        app.on_cleanup.append(close_dispatcher)
-        return app
-    # The evaluation service is a dispatcher too: it loads each rollout's scenario on demand, resolves the candidate
-    # artifact and serves it to the rollout itself.
-    dispatcher = build_dispatcher(settings, environ=env, components=frozenset({"evaluation"}))
-    workers = ServiceWorkers()
-    for _ in range(LOCAL_ROLLOUT_WORKERS):
-        workers.add(
-            EvaluationRolloutWorker(
-                dispatcher.queue, LocalCandidateEndpoints(dispatcher), worker_id=instance_id("evaluation")
-            )
-        )
-    workers.start()
+    # The samples, training and evaluation services: a dispatcher that runs only the service's own workers on the
+    # shared store. The evaluation service loads each rollout's scenario on demand, resolves the candidate artifact
+    # and serves it itself.
+    dispatcher = build_dispatcher(settings, environ=env, components=frozenset({component}))
+    if component == "training" and dispatcher.recipe.training_component is None:
+        dispatcher.close()
+        raise ValueError(f"recipe {settings.recipe!r} trains no weights, so it has no training service")
     app = service_application(settings.tokens)
 
-    async def close_evaluation(app: web.Application) -> None:
-        workers.stop()
+    async def close_dispatcher(app: web.Application) -> None:
         dispatcher.close()
 
-    app.on_cleanup.append(close_evaluation)
+    app.on_cleanup.append(close_dispatcher)
     return app
 
 

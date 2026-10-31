@@ -48,18 +48,37 @@ class ServiceWorker(ABC):
         """Stop, wait for the thread, and release what the worker owns."""
 
 
+class WorkerStopped(Exception):
+    """``run_item`` stopped because its worker stops: the item goes back to the queue, and another worker runs it."""
+
+
+class ItemFailed(Exception):
+    """The work of an item ran and failed, so a retry fails again: the item fails for good with this message."""
+
+
 class QueueWorker(ServiceWorker):
     """A worker that takes the items of some kinds from one queue and runs each one, until it stops.
 
     Values: ``queue`` holds the items; ``queue_name`` and ``kinds`` name the items that it takes; ``worker_id``
     names it in leases; ``poll_seconds`` is the wait after a look that found no item, a positive number.
+    ``permanent_errors`` are the errors of ``run_item`` that a retry cannot fix, since the item's input stays the
+    same: ``ValueError`` by default, and a subclass names its own.
 
     Purpose: a service subclasses it and defines ``run_item``. Each round requeues the expired items, takes one
-    item, starts it, extends its lease while ``run_item`` runs, and finishes the item with what ``run_item``
-    returns. A ``ValueError`` that ``run_item`` raises fails the item for good, since its input does not change on a
-    retry; any other error fails it as retryable. A lost lease leaves the item to the worker that holds it now. A
-    store error ends the round, and the worker looks again after ``poll_seconds``.
+    item, starts it, extends its lease while ``run_item`` runs, finishes the item with what ``run_item`` returns,
+    and then calls ``item_finished``. ``run_item`` gets the event that the lease extension sets when the worker no
+    longer holds the item, so that long work can stop. Its errors end the item as follows:
+
+    - ``ItemFailed``: the item fails for good, with the error's message;
+    - one of ``permanent_errors``: the item fails for good;
+    - ``WorkerStopped``: the item goes back to the queue at once;
+    - ``WorkLeaseLost``: the item stays with the worker that holds it now;
+    - any other error: the item fails as retryable, until it uses up its attempts.
+
+    A store error ends the round, and the worker looks again after ``poll_seconds``.
     """
+
+    permanent_errors: tuple[type[Exception], ...] = (ValueError,)
 
     def __init__(
         self,
@@ -83,8 +102,13 @@ class QueueWorker(ServiceWorker):
         self.thread: threading.Thread | None = None
 
     @abstractmethod
-    def run_item(self, item: WorkItem) -> Mapping[str, JsonValue]:
-        """Do the work of ``item`` and return its result."""
+    def run_item(self, item: WorkItem, lease_lost: threading.Event) -> Mapping[str, JsonValue]:
+        """Do the work of ``item`` and return its result; ``lease_lost`` is set when the worker no longer holds
+        the item."""
+
+    def item_finished(self, item: WorkItem, result: Mapping[str, JsonValue]) -> None:
+        """React to ``item``, which finished with ``result``; the default does nothing."""
+        return
 
     def start(self) -> None:
         if self.thread is not None:
@@ -116,25 +140,32 @@ class QueueWorker(ServiceWorker):
         if item is None:
             return False
         try:
-            with LeaseExtender(self.queue, item, self.worker_id):
+            with LeaseExtender(self.queue, item, self.worker_id) as extender:
                 self.queue.start(self.queue_name, item.id, self.worker_id)
-                result = self.run_item(item)
+                result = self.run_item(item, extender.lease_lost)
             self.queue.finish(self.queue_name, item.id, self.worker_id, dict(result))
         except WorkLeaseLost:
             logger.warning("worker %s lost %s", self.worker_id, item.id)
+            return True
+        except WorkerStopped:
+            self.fail(item, "the worker stopped", retryable=True)
+            return True
+        except ItemFailed as exc:
+            self.fail(item, str(exc), retryable=False)
+            return True
         except Exception as exc:
             logger.exception("worker %s could not run %s", self.worker_id, item.id)
-            try:
-                self.queue.fail(
-                    self.queue_name,
-                    item.id,
-                    self.worker_id,
-                    f"{type(exc).__name__}: {exc}",
-                    retryable=not isinstance(exc, ValueError),
-                )
-            except WorkLeaseLost:
-                logger.warning("worker %s lost %s", self.worker_id, item.id)
+            self.fail(item, f"{type(exc).__name__}: {exc}", retryable=not isinstance(exc, self.permanent_errors))
+            return True
+        self.item_finished(item, result)
         return True
+
+    def fail(self, item: WorkItem, error: str, *, retryable: bool) -> None:
+        """Fail ``item`` with ``error``; nothing happens when another worker holds it now."""
+        try:
+            self.queue.fail(self.queue_name, item.id, self.worker_id, error, retryable=retryable)
+        except WorkLeaseLost:
+            logger.warning("worker %s lost %s", self.worker_id, item.id)
 
 
 @dataclass
@@ -177,8 +208,10 @@ class ServiceWorkers:
 
 __all__ = [
     "SERVICE_COMPONENTS",
+    "ItemFailed",
     "QueueWorker",
     "ServiceWorker",
     "ServiceWorkers",
+    "WorkerStopped",
     "service_components",
 ]

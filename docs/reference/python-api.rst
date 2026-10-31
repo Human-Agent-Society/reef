@@ -1879,6 +1879,8 @@ these fields:
   for the backend's base model.
 - ``parameters``: the backend's parameters. Reef reads none of them; they
   override the backend's own configuration.
+- ``scenario``: the scenario whose trainer submits the job. The jobs of one
+  scenario run one at a time, in the order of their submission.
 
 ``job_id_for`` names a job by a hash of its backend, its start, its data and
 its parameters. The weight trainer puts the scenario and the records of the

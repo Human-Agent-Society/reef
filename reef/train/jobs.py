@@ -144,7 +144,7 @@ class JobLoop:
             raise TypeError(f"component must be a TrainingComponent, got {type(component).__name__}")
         if not isinstance(scenario, str) or not scenario:
             raise ValueError("scenario must be a non-empty string")
-        self.component = component.for_scenario(scenario)
+        self.component = component
         self.scenario = scenario
 
     def job_id(self, state: JobLoopState, start: str, data: JobData, parameters: Mapping[str, Any]) -> str:
@@ -177,7 +177,7 @@ class JobLoop:
             raise ValueError("a weight trainer runs one job at a time")
         backend = self.component.name
         job_id = self.job_id(state, state.start, data, parameters)
-        self.component.submit(TrainingJob(job_id, backend, state.start, data, parameters))
+        self.component.submit(TrainingJob(job_id, backend, state.start, data, parameters, scenario=self.scenario))
         submitted = JobLoopState(state.start, RunningJob(job_id), state.finished_jobs, state.last_job)
         event: dict[str, Any] = {"job_id": job_id, "backend": backend, "event": "submitted"}
         return JobCommit(

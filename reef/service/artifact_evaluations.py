@@ -23,8 +23,7 @@ import queue
 import threading
 import time
 import uuid
-from collections.abc import Iterator, Mapping
-from contextlib import contextmanager
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from typing import Any, Literal, cast
 
@@ -41,30 +40,22 @@ from reef.core.evaluation import (
 )
 from reef.core.job_data import TaskSample
 from reef.dispatcher import Dispatcher
-from reef.evaluation.artifact_endpoint import ArtifactEndpoint
 from reef.evaluation.rollout_worker import (
     EVALUATION_ROLLOUT_KIND,
     EVALUATIONS_QUEUE,
-    CandidateEndpoint,
-    CandidateEndpoints,
     EvaluationRollout,
-    EvaluationRolloutWorker,
     agent_harness,
     harbor_agent,
     rollout_item_id,
 )
-from reef.harness.client.tasks import TaskLab
 from reef.scenario.scenario import Scenario
 from reef.storage.commits import CommitRecord
-from reef.storage.coordination import instance_id
 from reef.storage.evaluations import StoredEvaluation
 from reef.storage.observer import RecordObserver
 from reef.storage.work_queue import NewWork, WorkItem
 
 logger = logging.getLogger(__name__)
 
-#: The evaluation workers that a service runs when it runs its own (the one-process layout).
-LOCAL_ROLLOUT_WORKERS = 4
 #: The error of an evaluation whose rollouts are no longer in the queue, so they never end.
 STOPPED_ERROR = "the service that held this evaluation stopped before it ended"
 #: The owner that every evaluation of the work queue stores: any service instance reads its rollouts.
@@ -138,72 +129,34 @@ def request_settings(body: object) -> tuple[str, ArtifactEvaluationSettings]:
     )
 
 
-class LocalCandidateEndpoints(CandidateEndpoints):
-    """The candidate's model, served in the process of the evaluation workers: a loopback endpoint that answers from
-    the candidate artifact with the scenario's runtime.
-
-    Values: ``dispatcher`` loads the scenario of each rollout (on demand, in a process that runs no control).
-    Purpose: the evaluation workers of this process open it around each rollout. The candidate is resolved from the
-    scenario's repository, so neither control nor the inference service serves it.
-    """
-
-    def __init__(self, dispatcher: Dispatcher) -> None:
-        self.dispatcher = dispatcher
-
-    @contextmanager
-    def open(self, rollout: EvaluationRollout) -> Iterator[CandidateEndpoint]:
-        with self.dispatcher.locked_scenario(rollout.scenario) as current:
-            runtime = current.runtime
-            if runtime is None:
-                raise ReefError(f"scenario {rollout.scenario!r} has no runtime")
-            _, release = current.resolve_artifact(rollout.artifact_id, rollout.component)
-            artifact = release.materialize()
-        with ArtifactEndpoint(runtime, artifact) as endpoint:
-            yield CandidateEndpoint(endpoint.url, None)
-
-
 class ArtifactEvaluations:
     """Accepts, queues, reads and ends the artifact evaluations of a service's scenarios.
 
-    Values: ``dispatcher`` holds the scenarios. ``queue`` is the dispatcher's work queue, which carries the rollouts.
-    ``endpoints`` opens a candidate's model for the workers that this object runs itself, or is None when the
-    evaluation service runs elsewhere. ``new_artifacts`` reports the new artifacts that Reef evaluates with each
-    scenario's settings, or is None for no automatic evaluation. ``workers`` are ``LOCAL_ROLLOUT_WORKERS``
-    evaluation workers with ``endpoints``, none without them.
+    Values: ``dispatcher`` holds the scenarios. ``queue`` is the dispatcher's work queue, which carries the rollouts
+    to the evaluation service's workers. ``new_artifacts`` reports the new artifacts that Reef evaluates with each
+    scenario's settings, or is None for no automatic evaluation.
 
     Purpose: the evaluation routes call ``start``, ``get`` and ``newest``, and the scenario update route calls
-    ``configure``. ``open`` starts the threads that evaluate new artifacts, that run this object's workers, and
-    that end each evaluation when its rollouts end; ``close`` stops them. ``get`` and ``newest`` only read.
+    ``configure``. ``open`` starts the threads that evaluate new artifacts and that end each evaluation when its
+    rollouts end; ``close`` stops them. ``get`` and ``newest`` only read.
     """
 
     def __init__(
         self,
         dispatcher: Dispatcher,
         *,
-        lab: TaskLab | None = None,
         new_artifacts: NewArtifacts | None = None,
-        endpoints: CandidateEndpoints | None = None,
     ) -> None:
         self.dispatcher = dispatcher
         self.new_artifacts = new_artifacts
         self.queue = dispatcher.queue
-        self.workers = (
-            []
-            if endpoints is None
-            else [
-                EvaluationRolloutWorker(self.queue, endpoints, worker_id=instance_id("evaluation"), lab=lab)
-                for _ in range(LOCAL_ROLLOUT_WORKERS)
-            ]
-        )
         self.reader: threading.Thread | None = None
         self.results: threading.Thread | None = None
         self.stopped = threading.Event()
 
     def open(self) -> None:
-        """Start the workers, the thread that ends evaluations, and the reader of ``new_artifacts``."""
+        """Start the thread that ends evaluations, and the reader of ``new_artifacts``."""
         self.stopped.clear()
-        for worker in self.workers:
-            worker.start()
         if self.results is None:
             self.results = threading.Thread(target=self.read_results, name="reef-evaluation-results", daemon=True)
             self.results.start()
@@ -218,8 +171,6 @@ class ArtifactEvaluations:
             self.new_artifacts.queue.put(None)
             self.reader.join(timeout=5)
             self.reader = None
-        for worker in self.workers:
-            worker.stop()
         if self.results is not None:
             self.results.join(timeout=5)
             self.results = None
@@ -573,11 +524,9 @@ class ArtifactEvaluations:
 
 
 __all__ = [
-    "LOCAL_ROLLOUT_WORKERS",
     "QUEUE_OWNER",
     "STOPPED_ERROR",
     "ArtifactEvaluations",
-    "LocalCandidateEndpoints",
     "NewArtifact",
     "NewArtifacts",
 ]

@@ -29,11 +29,13 @@ from reef.dispatcher.samples import LocalSampleProducers
 from reef.dispatcher.served import CACHE_SECONDS, ControlInstance, ServedModelsPublisher, wait_for_control_lease
 from reef.dispatcher.status import TrainingStatus
 from reef.dispatcher.store_changes import StoreChanges, StoreChangesWatcher
+from reef.evaluation.artifact_endpoint import CandidateArtifacts
 from reef.execution.workers import SERVICE_COMPONENTS, ServiceWorkers, service_components
 from reef.observability import ExperimentTracker, NullExperimentTracker
 from reef.recipe.base import Recipe
 from reef.record2sample.service import SamplesWorker, request_selection
 from reef.runtime.deployment import close_runtimes
+from reef.runtime.interfaces import InferenceRuntime
 from reef.scenario.admission import ScenarioAdmission
 from reef.scenario.committer import ComponentArtifact
 from reef.scenario.registry import ScenarioLifecycle, ScenarioRegistry
@@ -62,7 +64,7 @@ class BackgroundThreads:
     idle_unload_thread: Thread | None = None
 
 
-class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync):
+class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, CandidateArtifacts):
     """Coordinate scenario creation, inference state, training, and model commits.
 
     A process trains the weights of one scenario on the deployment's
@@ -754,6 +756,15 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync):
         the process ends (SIGTERM), so that its supervisor starts it again as a standby."""
         self.local_workers.stop()
         signal.raise_signal(signal.SIGTERM)
+
+    def candidate(self, scenario: str, artifact_id: str, component: str | None) -> tuple[InferenceRuntime, Artifact]:
+        """The runtime of ``scenario`` and the materialized artifact ``artifact_id`` (``CandidateArtifacts``)."""
+        with self.locked_scenario(scenario) as current:
+            runtime = current.runtime
+            if runtime is None:
+                raise ReefError(f"scenario {scenario!r} has no runtime")
+            _, release = current.resolve_artifact(artifact_id, component)
+            return runtime, release.materialize()
 
     def request_artifact_copy(self, scenario: str) -> None:
         """Ask the data service to copy the artifacts of ``scenario`` to artifact items, when there is a data store."""

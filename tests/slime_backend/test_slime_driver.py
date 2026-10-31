@@ -87,7 +87,9 @@ def parsed(tmp_path, monkeypatch):
 
 
 def sft_job(component: SlimeTrainingComponent, job_id: str = "job-0", start: str | None = None) -> TrainingJob:
-    return TrainingJob(job_id, "slime", start or component.base_start, batch_for(0), parameters(TrainingMethod("sft")))
+    return TrainingJob(
+        job_id, "slime", start or component.base_start, batch_for(0), parameters(TrainingMethod("sft")), scenario="s"
+    )
 
 
 @pytest.mark.unit
@@ -229,7 +231,10 @@ def job_directory(root: Path, data: JobData, rollout: bool) -> Path:
         **parameters(TrainingMethod("sft")),
         **({"rollout": {"rollouts_per_task": 2}} if rollout else {}),
     }
-    write_json(directory / JOB_FILE, {"start": str(start), "data": data.to_dict(), "parameters": job_parameters})
+    write_json(
+        directory / JOB_FILE,
+        {"scenario": "s", "start": str(start), "data": data.to_dict(), "parameters": job_parameters},
+    )
     write_json(directory / DRIVER_FILE, settings_to_json(SETTINGS))
     return directory
 
