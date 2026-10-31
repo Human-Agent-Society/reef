@@ -163,6 +163,29 @@ class AdapterResidencyManager:
             self.current[scenario] = name
             return name
 
+    def adopt(self, scenario: str, runtime_load_id: str, *, files: WeightFiles) -> str:
+        """Record that the engine already holds ``runtime_load_id`` for ``scenario``, as it did before this manager
+        existed (a control restart), and make it the scenario's current revision without loading it; return its
+        engine name. ``files`` is where the engine would load it from again after an engine restart."""
+        require_name(scenario, "scenario")
+        require_name(runtime_load_id, "runtime_load_id")
+        name = adapter_name(scenario, runtime_load_id)
+        with self.lock:
+            if name not in self.adapters:
+                self.adapters[name] = ResidentAdapter(name, scenario, runtime_load_id, files, self.next_order)
+                self.next_order += 1
+                self.note("adopted", name, scenario)
+            self.current[scenario] = name
+            return name
+
+    def retire(self, name: str, engine: AdapterEngine) -> None:
+        """Unload the adapter ``name`` when it is resident and no scenario's current revision; else do nothing."""
+        with self.lock:
+            adapter = self.adapters.get(name)
+            if adapter is None or self.is_current(adapter):
+                return
+            self.unload(adapter, engine)
+
     def current_adapter(self, scenario: str) -> ResidentAdapter | None:
         """The resident adapter ``scenario`` serves, or None when it serves none."""
         with self.lock:

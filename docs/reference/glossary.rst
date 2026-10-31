@@ -8,9 +8,11 @@ Scenario
 --------
 
 One workload: its records, training state, and release chain, isolated from
-every other scenario. The first request carrying a new ``x-reef-scenario``
-creates it and permanently binds its recipe. The request may also bind a
-starting release, whose content becomes the scenario's creation artifact.
+every other scenario. ``POST /reef/scenarios``, a harness install, or the
+first report or imported record carrying a new ``x-reef-scenario`` creates it
+and permanently binds its recipe. An inference request never creates a scenario. The creating
+request may also bind a starting release, whose content becomes the scenario's
+creation artifact.
 
 Agent
 -----
@@ -74,7 +76,7 @@ four kinds:
 - ``harness``: a whole agent harness that Reef runs as it is, such as a Harbor
   agent or an adapter's binary.
 - ``harness_plugin``: a part that installs into a base harness, such as a
-  harness tree that Reef evolves, a skill tree, or the request defaults of a
+  harness tree that Reef evolves, a skill tree, or the configuration file of a
   ``config`` component.
 - ``model``: a whole model, such as a provider's model or full weights.
 - ``model_adapter``: a LoRA adapter on a base model.
@@ -154,7 +156,7 @@ Component
 
 One named part of a release's content, such as ``weights``, ``harness``, or
 ``skills``. A recipe's surface declares the components its releases bind and
-how each is admitted, loaded, injected, and read. A one-component release is
+how each is admitted, loaded, and read. A one-component release is
 flat; a release with several keeps one directory per component and a manifest
 naming each component's ``content_id``.
 
@@ -178,9 +180,9 @@ way. See `Configuration <configuration.rst#the-activation-section>`__.
 Surface
 -------
 
-How a published artifact reaches whoever uses it: runtime loading, inference
-hooks, and an optional client-pulled file tree, composed as fields on one
-``Surface`` value.
+How a published artifact reaches whoever uses it: validation, runtime
+loading, and an optional client-pulled file tree, composed as fields on one
+``Surface`` value. No surface changes an inference request.
 
 Training pipeline
 -----------------
@@ -255,8 +257,8 @@ Skill
 -----
 
 A ``SKILL.md`` instruction file the model reads, stored under ``skills/`` in a
-harness tree. Reef can inject one into each request or let a client pull it with
-the rest of the tree. Updating one needs no GPU.
+harness tree. A client pulls it with the rest of the tree, and the client
+harness applies it. Updating one needs no GPU.
 
 Runtime
 -------
@@ -327,14 +329,16 @@ load that produced a span of generated tokens. It is a serving fence, not a
 publication or content identity. Reloading the same ``content_id`` can produce
 a new runtime load ID, for example when an older release is activated
 again. A restart invalidates runtime load IDs but not the release chain.
+Runtime load IDs stay inside the engines and training; records name the
+artifact that answered by ``artifact_id``.
 
 Staleness
 ---------
 
-The number of versions that a scenario served after the runtime load that
+The number of artifacts that a scenario served after the artifact that
 produced a sample, bounded by the record-to-record stage's ``max_staleness``
-(``pipeline.record2record.config.max_staleness``). Zero requires a sample to
-train against the weights that generated it. The record-to-record stage checks
+(``pipeline.record2record.config.max_staleness``). Zero trains a sample only
+while the artifact that produced it serves. The record-to-record stage checks
 it before job data forms.
 
 Reported and computed feedback

@@ -69,6 +69,8 @@ RELEASE_FILE = ".reef-harness-release"
 def main():
     tasks = json.loads(TASKS_FILE.read_text())
     client = ReefClient(SERVICE_URL, token=TOKEN, timeout_s=300.0)
+    # The inference routes serve only a scenario that exists: create it first.
+    client.post("/reef/scenarios", SCENARIO, {"name": SCENARIO})
 
     before = _steps_before(client)
     # record + report: the traffic the evolve steps learn from.
@@ -179,24 +181,14 @@ def _wait_for_steps(client, before, expected, deadline):
 
 
 def _manifest(client):
-    # A scenario exists once traffic has named it: the manifest route answers 404 for a name it has never
-    # seen, so one minimal inference creates the scenario, whose base release is the seed tree.
-    try:
-        return client.get("/reef/harness", extra_headers={"x-reef-scenario": SCENARIO})
-    except ReefClientError as exc:
-        if exc.status != 404:
-            raise
-    client.inference_with_record(
-        SCENARIO,
-        "/v1/chat/completions",
-        {"model": MODEL, "messages": [{"role": "user", "content": "Reply with one word."}], "max_tokens": 1},
-    )
     return client.get("/reef/harness", extra_headers={"x-reef-scenario": SCENARIO})
 
 
 def pull():
     """Write the served tree, its release metadata, and the model binding under work/tree."""
     client = ReefClient(SERVICE_URL, token=TOKEN, timeout_s=300.0)
+    # Create the scenario if it does not exist yet: its base release is the seed tree.
+    client.post("/reef/scenarios", SCENARIO, {"name": SCENARIO})
     manifest = _manifest(client)
     shutil.rmtree(TREE_DIR, ignore_errors=True)
     for relative, text in manifest["files"].items():

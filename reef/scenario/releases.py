@@ -21,7 +21,7 @@ from reef.surface.files import ENTRIES_FILE, read_entries
 
 
 @dataclass(frozen=True)
-class ServedArtifact:
+class ServedBesideArtifact:
     """An artifact that a scenario serves beside its active release, and the release that serves it.
 
     Values: ``component`` is a non-empty component name and ``artifact_id`` a non-empty artifact ID. ``release`` is
@@ -63,7 +63,7 @@ class ScenarioReleases:
         self.creation_components_read = False
         self.creation_read_failed_at: int | None = None
         #: The scenario step that ``served_beside`` last read, and what it returned then.
-        self.served_read: tuple[int, Mapping[str, ServedArtifact]] | None = None
+        self.served_read: tuple[int, Mapping[str, ServedBesideArtifact]] | None = None
 
     @property
     def creation_artifact(self) -> ArtifactRef:
@@ -270,7 +270,7 @@ class ScenarioReleases:
         manifest = self.manifests(scenario_step).get(release_id) or {}
         return {name: manifest[name] for name in components if name in manifest}
 
-    def served_beside(self, scenario_step: int, components: tuple[str, ...]) -> Mapping[str, ServedArtifact]:
+    def served_beside(self, scenario_step: int, components: tuple[str, ...]) -> Mapping[str, ServedBesideArtifact]:
         """The artifacts that the scenario serves beside its active release, by ``artifact_id``.
 
         The result is the fold of the commit history. A ``"serve"`` record adds its artifact, and a
@@ -280,7 +280,7 @@ class ScenarioReleases:
         """
         if self.served_read is not None and self.served_read[0] == scenario_step:
             return self.served_read[1]
-        served: dict[str, ServedArtifact] = {}
+        served: dict[str, ServedBesideArtifact] = {}
         for record in self.records():
             if record.operation in ("serve", "stop_serving"):
                 component = components[0] if record.component is None else record.component
@@ -289,7 +289,7 @@ class ScenarioReleases:
                 )
                 artifact_id = bound[component]
                 if record.operation == "serve":
-                    served[artifact_id] = ServedArtifact(component, artifact_id, record.artifact_ref)
+                    served[artifact_id] = ServedBesideArtifact(component, artifact_id, record.artifact_ref)
                 else:
                     served.pop(artifact_id, None)
         self.served_read = (scenario_step, served)

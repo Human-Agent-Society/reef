@@ -74,8 +74,9 @@ SGLang after the optimizer step succeeds.
 
 The controller writes the updated PUCT archive to
 ``tttd-search-state.json`` with phase ``pending``. It waits for Reef's scenario
-step to advance and for the serving runtime load ID to change. It then records
-phase ``committed`` with the new scenario step and starts the next search step.
+step to advance and for the served artifact (``served_artifact_id``) to
+change. It then records phase ``committed`` with the new scenario step and
+starts the next search step.
 
 Configuration
 -------------
@@ -102,7 +103,7 @@ the grid from the record stage.
 
    pipeline.record2record.config.groups_per_step | 8 | comparison groups in one step; at least one.
    pipeline.record2record.config.rollouts_per_group | 64 | siblings per group; at least two, since a group of one has no relative reward.
-   pipeline.record2record.config.max_staleness | 0 | accepted lag, in versions, between the producing and serving version.
+   pipeline.record2record.config.max_staleness | 0 | accepted lag, in artifacts that the scenario served, between the producing and served artifact.
    pipeline.record2sample.config.accept_multi_turn_policy_samples | false | train on a report that references several model calls as one multi-turn sample.
    pipeline.sample2job.config.job_samples | required | the fewest samples of one job; at most the grid's rollouts. Set it to the grid.
 
@@ -196,7 +197,8 @@ groups of two rollouts, one step, and thinking disabled; that run checks the
 integration path rather than the sampling budget used for the formal results.
 
 Reef writes its service log to ``work/erdos_min_overlap/reef.log``. The public
-status endpoint reports the scenario step and runtime load ID:
+status endpoint reports the scenario step and the served artifact
+(``served_artifact_id``):
 
 .. code:: bash
 
@@ -468,11 +470,12 @@ before it can use an incompatible archive.
 
 A ``pending`` state contains the evaluated children for a step that the
 controller has not observed as committed. On restart, the controller waits for
-that transaction. A ``committed`` state records the scenario step and serving
-runtime load ID that completed it. Serving runtime-load-ID strings belong to one
-engine session, so a restored checkpoint can receive a new string after the
-runtime starts. The controller accepts the new string after Reef restores the
-expected scenario step.
+that transaction. A ``committed`` state records the scenario step and the
+served artifact ID that completed it. The served artifact can change without a
+step, for example when an operator activates another artifact. On restart, the
+controller accepts the artifact that serves after Reef restores the expected
+scenario step, and records it. The controller refuses a state file of an older
+format, such as one that names a runtime load ID.
 
 The repository example creates a checkpoint every two versions and retains the
 latest checkpoint under its storage policy. The formal circle-packing jobs used

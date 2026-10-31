@@ -62,6 +62,8 @@ def main() -> None:
     if STEPS:
         schedule = schedule[:STEPS]
     client = chemistry.make_client(timeout_s=TRAIN_TIMEOUT_S)
+    # The inference routes serve only a scenario that exists: create it before the first model call.
+    client.post("/reef/scenarios", chemistry.SCENARIO, {"name": chemistry.SCENARIO})
     print(
         f"[chemistry] {len(train)} training and {len(test)} test questions; {len(schedule)} steps of "
         f"{GROUPS_PER_STEP}x{ROLLOUTS_PER_GROUP} (seed {SEED}); service {chemistry.SERVICE_URL}, "

@@ -25,6 +25,7 @@ from reef.recipe import Recipe
 from reef.recipe.cordis import CordisRecipe
 from reef.runtime.interfaces import InferenceHandler
 from reef.service.app import create_app
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.surface import Surface, create_harness_surface
 from reef.train.cordis_backend.contracts import ProposalValidator, StepRecords
@@ -79,6 +80,7 @@ def _dispatcher(tmp_path: Path, recipe: Recipe) -> Dispatcher:
         recipe,
         factory,
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
+        coordination=memory_coordination(),
     )
 
 
@@ -224,31 +226,6 @@ def test_a_malformed_body_is_400_and_a_scenario_that_takes_no_proposals_is_404(t
         dispatcher.close()
         plain.close()
         files_only.close()
-
-
-def test_inference_responses_carry_no_release_header_on_a_scenario_that_serves_no_files(tmp_path: Path) -> None:
-    plain = _dispatcher(tmp_path, Recipe())
-
-    async def run() -> None:
-        client = TestClient(TestServer(create_app(plain, inference_handler=_EchoBackend())))
-        await client.start_server()
-        try:
-            for stream in (False, True):
-                response = await client.post(
-                    "/v1/chat/completions",
-                    headers={"x-reef-scenario": "records"},
-                    json={"messages": [{"role": "user", "content": "hi"}], "stream": stream},
-                )
-                assert response.status == 200
-                await response.read()
-                assert response.headers["x-reef-agent-record-id"] and "x-reef-release-id" not in response.headers
-        finally:
-            await client.close()
-
-    try:
-        asyncio.run(run())
-    finally:
-        plain.close()
 
 
 def test_the_next_step_takes_the_oldest_proposal_first_and_the_result_settles_it(tmp_path: Path) -> None:

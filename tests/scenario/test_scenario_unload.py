@@ -20,6 +20,7 @@ from reef.evaluation import EvaluationResult, UpdateCandidate
 from reef.recipe import Recipe
 from reef.scenario import Scenario
 from reef.scenario.admission import LoadAdmission, LoadedScenario, ScenarioAdmission, ScenarioLimits
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train import CandidateBackend, PreparedStep, Trainer, TrainStepResult
 
@@ -96,6 +97,7 @@ def make_dispatcher(
         scenario_storage=storage if storage is not None else SQLiteScenarioStorage(tmp_path / "records"),
         scenario_admission=admission,
         scenario_idle_unload_seconds=idle_unload_seconds,
+        coordination=memory_coordination(),
     )
 
 
@@ -144,7 +146,8 @@ def test_idle_scenario_unloads_and_loads_again_with_its_history_and_model(tmp_pa
         before = trained(dispatcher, "math", 1)
         releases = before.releases()
 
-        assert dispatcher.unload_if_idle("math")
+        # The samples of the step's records come from the samples queue, so the scenario is idle a moment later.
+        wait_for(lambda: dispatcher.unload_if_idle("math"))
         assert loaded_names(dispatcher) == []
         assert [row["scenario"] for row in dispatcher.list_scenarios()] == ["math"]
         assert dispatcher.build_training_status()["loaded_scenarios"] == 0
@@ -153,7 +156,7 @@ def test_idle_scenario_unloads_and_loads_again_with_its_history_and_model(tmp_pa
         assert after is not None and after is not before
         assert after.scenario_step == 1
         assert after.releases() == releases
-        assert after.model_config.view() == {**MODEL_CONFIG, "api": "openai", "has_api_key": False}
+        assert after.model_config.view() == {**MODEL_CONFIG, "api": "openai"}
         assert [row["agent_record_id"] for row in dispatcher.read_records("math")["records"]] == ["i1", "r1"]
         # The reloaded scenario trains on, with a new local worker.
         trained(dispatcher, "math", 2)
@@ -209,7 +212,7 @@ def test_scenario_with_a_request_in_flight_stays_loaded(tmp_path) -> None:
     try:
         current = dispatcher.get_or_create_scenario("math")
         assert current is not None
-        measurement = current.operations.start("serve/request")
+        measurement = current.operations.start("ingest/write")
         assert not dispatcher.unload_if_idle("math")
         measurement.finish(succeeded=True)
         assert dispatcher.unload_if_idle("math")
@@ -239,7 +242,7 @@ def test_full_service_refuses_a_load_when_no_scenario_is_idle(tmp_path) -> None:
     try:
         busy = dispatcher.get_or_create_scenario("a")
         assert busy is not None
-        measurement = busy.operations.start("serve/request")
+        measurement = busy.operations.start("ingest/write")
 
         with pytest.raises(ScenarioCapacityFull) as refused:
             dispatcher.get_or_create_scenario("b")

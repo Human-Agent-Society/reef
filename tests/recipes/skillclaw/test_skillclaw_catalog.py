@@ -1,4 +1,4 @@
-"""SkillCatalogModule: the pool-serving skills layer and its catalog injection.
+"""SkillCatalogModule: the pool-serving skills layer and its catalog text.
 
 Ported from the sealed campaign's test_skill_catalog.py (branch #223, commit
 0c81580e); the module now lives in the skillclaw method package and
@@ -115,60 +115,20 @@ def test_catalog_escapes_xml_in_names_and_descriptions(module_cls) -> None:
     assert "<description>Uses &lt;tags&gt; &amp; &quot;quotes&quot;</description>" in text
 
 
-def test_prepare_request_appends_after_existing_system_content(module_cls) -> None:
-    payload = {"messages": [{"role": "system", "content": "Base."}, {"role": "user", "content": "q"}]}
-    prepared = _module(module_cls).prepare_request(_POOL, "/v1/chat/completions", payload)
-    content = prepared["messages"][0]["content"]
-    assert content.startswith("Base.\n\n## Skills (mandatory)")
-    assert prepared["messages"][1] == {"role": "user", "content": "q"}
-    assert payload["messages"][0]["content"] == "Base."
-
-
-def test_prepare_request_flattens_a_parts_list_system_message(module_cls) -> None:
-    payload = {"messages": [{"role": "system", "content": [{"type": "text", "text": "Base."}]}]}
-    prepared = _module(module_cls).prepare_request(_POOL, "/v1/chat/completions", payload)
-    assert prepared["messages"][0]["content"].startswith("Base.\n\n## Skills (mandatory)")
-
-
-def test_prepare_request_inserts_a_system_message_when_none_exists(module_cls) -> None:
-    payload = {"messages": [{"role": "user", "content": "q"}]}
-    prepared = _module(module_cls).prepare_request(_POOL, "/v1/chat/completions", payload)
-    assert prepared["messages"][0] == {"role": "system", "content": _FULL_SECTION}
-
-
-def test_prepare_request_appends_to_the_anthropic_system_shapes(module_cls) -> None:
-    module = _module(module_cls)
-    text = module.served_text(_POOL)
-    assert module.prepare_request(_POOL, "/v1/messages", {"messages": []})["system"] == text
-    assert module.prepare_request(_POOL, "/v1/messages", {"system": "Base.", "messages": []})["system"] == (
-        f"Base.\n\n{text}"
-    )
-    blocks = module.prepare_request(
-        _POOL, "/v1/messages", {"system": [{"type": "text", "text": "Base."}], "messages": []}
-    )["system"]
-    assert blocks == [{"type": "text", "text": "Base."}, {"type": "text", "text": text}]
-
-
-def test_prepare_request_passes_an_empty_pool_through(module_cls) -> None:
-    payload = {"messages": [{"role": "user", "content": "q"}]}
-    assert _module(module_cls).prepare_request({}, "/v1/chat/completions", payload) is payload
-
-
 def test_catalog_names_recovers_the_listed_skills_from_a_recorded_request(module_cls) -> None:
-    prepared = _module(module_cls).prepare_request(
-        _POOL, "/v1/chat/completions", {"messages": [{"role": "user", "content": "q"}]}
+    text = _module(module_cls).served_text(_POOL)
+    recorded = {"messages": [{"role": "system", "content": text}, {"role": "user", "content": "q"}]}
+    assert module_cls.catalog_names(recorded) == ("alpha", "beta")
+    assert module_cls.catalog_names({"system": [{"type": "text", "text": text}], "messages": []}) == (
+        "alpha",
+        "beta",
     )
-    assert module_cls.catalog_names(prepared) == ("alpha", "beta")
     assert module_cls.catalog_names({"messages": []}) == ()
 
 
 def test_catalog_names_unescapes_xml(module_cls) -> None:
-    prepared = _module(module_cls).prepare_request(
-        {"skills/amp/SKILL.md": "---\nname: a&b\ndescription: d\n---\n\nBody.\n"},
-        "/v1/chat/completions",
-        {"messages": []},
-    )
-    assert module_cls.catalog_names(prepared) == ("a&b",)
+    text = _module(module_cls).served_text({"skills/amp/SKILL.md": "---\nname: a&b\ndescription: d\n---\n\nBody.\n"})
+    assert module_cls.catalog_names({"system": text, "messages": []}) == ("a&b",)
 
 
 def test_validate_requires_skill_directories_with_a_skill_md(module_cls) -> None:

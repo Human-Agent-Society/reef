@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+import math
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -186,17 +187,6 @@ class ServiceConfig:
             "Inference request handler options as a JSON/YAML object.", public_path=("inference", "handler_config")
         ),
     )
-    inference_retry_initial_s: float = config_option(
-        0.05, public_path=("inference", "retry_initial_s"), help="Initial inference retry delay in seconds."
-    )
-    inference_retry_max_s: float = config_option(
-        1.0, public_path=("inference", "retry_max_s"), help="Maximum inference retry delay in seconds."
-    )
-    inference_retry_timeout_s: float = config_option(
-        300.0,
-        public_path=("inference", "retry_timeout_s"),
-        help="Retry deadline in seconds; defaults to the inference timeout.",
-    )
     #: ``git_lfs``, or a ``ConfigurableRepositoryBackendFactory`` plugin: ``package.module:ClassName`` or module
     #: and config.
     artifact_backend: str | Mapping[str, Any] = config_option(
@@ -237,6 +227,26 @@ class ServiceConfig:
         None,
         public_path=("storage", "data_store"),
         help="Data store of the deployment's items (RFC #1028): sqlite, postgres, or a DataStore plugin reference.",
+    )
+    #: ``sqlite`` or ``postgres``: where the coordination tables (served models, work queues, the control lease) live.
+    #: Unset follows a built-in ``record_backend``; a plugin record backend must name it, because every process of
+    #: the deployment must share these tables. ``postgres`` uses ``record_database_url``.
+    coordination_backend: str | None = config_option(
+        None,
+        public_path=("storage", "coordination_backend"),
+        help="Coordination tables of the services: sqlite (one host) or postgres (record_database_url).",
+    )
+    #: How many times a worker takes one work item before the item fails, for every queue.
+    work_max_attempts: int = config_option(
+        3,
+        public_path=("storage", "work_max_attempts"),
+        help="Attempts of one work item (a job, a selection, a rollout, a data task) before it fails.",
+    )
+    #: How long control keeps an ended work item, so that its producer reads its result; then control deletes it.
+    work_retention_s: float = config_option(
+        7 * 24 * 3600.0,
+        public_path=("storage", "work_retention_s"),
+        help="Seconds that control keeps an ended work item before it deletes it. Default: 7 days.",
     )
     #: ``local``, or a ``TaskFileStore`` plugin: ``package.module:ClassName`` or module and config.
     task_file_backend: str | Mapping[str, Any] = config_option(
@@ -386,6 +396,19 @@ class ServiceConfig:
             if isinstance(self.record_backend, str) and ":" not in self.record_backend:
                 raise ValueError("storage.record_backend must be sqlite, postgres, or 'package.module:ClassName'")
             ScenarioStorage.reference(self.record_backend, setting="storage.record_backend")
+        if isinstance(self.work_max_attempts, bool) or not isinstance(self.work_max_attempts, int):
+            raise ValueError("storage.work_max_attempts must be an integer")
+        if self.work_max_attempts < 1:
+            raise ValueError("storage.work_max_attempts must be at least 1")
+        if not math.isfinite(self.work_retention_s) or self.work_retention_s <= 0:
+            raise ValueError("storage.work_retention_s must be a positive number of seconds")
+        if self.coordination_backend not in (None, "sqlite", "postgres"):
+            raise ValueError("storage.coordination_backend must be sqlite or postgres")
+        if self.coordination_backend is None and self.record_backend not in ("sqlite", "postgres"):
+            raise ValueError(
+                "storage.record_backend is a plugin, so name where the services share their coordination tables: "
+                "set storage.coordination_backend to sqlite (processes on one host) or postgres"
+            )
         if self.data_store not in (None, "sqlite", "postgres"):
             if isinstance(self.data_store, str) and ":" not in self.data_store:
                 raise ValueError("storage.data_store must be sqlite, postgres, or 'package.module:ClassName'")
@@ -402,13 +425,18 @@ class ServiceConfig:
             raise ValueError("task-import needs both manifest and tasks-root")
         if self.task_import_manifest == "" or self.task_import_tasks_root == "":
             raise ValueError("task-import.manifest and task-import.tasks-root must be non-empty paths")
-        if self.record_backend == "postgres":
+        if "postgres" in (self.record_backend, self.coordination_backend):
             if not isinstance(self.record_database_url, str) or not self.record_database_url:
-                raise ValueError("reef.record_database_url is required for the postgres backend")
+                raise ValueError(
+                    "storage.record_database_url is required for a postgres record or coordination backend"
+                )
             postgres_url(self.record_database_url)
             validate_postgres_schema(self.record_database_schema)
         elif self.record_database_url is not None or self.record_database_schema != "reef_records":
-            raise ValueError("record_database_url and record_database_schema require reef.record_backend: postgres")
+            raise ValueError(
+                "record_database_url and record_database_schema require storage.record_backend or "
+                "storage.coordination_backend: postgres"
+            )
 
 
 def _config_service_value(config: Mapping[str, Any], *path: str, default: Any = None, expand: bool = True) -> Any:
@@ -538,9 +566,6 @@ def service_config_from_mapping(config: Mapping[str, Any]) -> ServiceConfig:
     tokens = (token.strip() for token in (values.pop("token") or "", *values["tokens"]))
     values["tokens"] = tuple(dict.fromkeys(token for token in tokens if token))
     values["console_origins"] = console_origins(values["console_origins"])
-    # The legacy retry deadline follows the request timeout unless supplied.
-    if _config_service_value(config, "reef", "inference_retry_timeout_s") is None:
-        values["inference_retry_timeout_s"] = values["inference_timeout_s"]
     # Preserve shared execution settings for directly selected recipes.
     preset = dict(config) if ":" in values["recipe"] else None
     execution = {key: config[key] for key in ("execution", "executors") if key in config}

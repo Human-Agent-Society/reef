@@ -112,7 +112,7 @@ def test_the_method_takes_part_in_the_job_identity() -> None:
 
 
 def batch(name: str) -> JobData:
-    return JobData(name, (policy_trajectory(f"s-{name}", (1, 2, 3), (1, 1), (-0.1, -0.2), 1.0, "v1"),))
+    return JobData(name, (policy_trajectory(f"s-{name}", (1, 2, 3), (1, 1), (-0.1, -0.2), 1.0, artifact_id="v1"),))
 
 
 def task(name: str) -> JobData:

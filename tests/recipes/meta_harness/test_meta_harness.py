@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 from tests.support._strategies import resolve_rollout_scorer
 from tests.support._trajectories import recorded_trajectory
+from tests.support.samples_service import make_samples
 
 from recipes.meta_harness.backend import POPULATION_STATE_KEY, MetaHarnessBackend
 from recipes.meta_harness.method import MetaHarnessPlugin, MetaHarnessProposer, mutations_between
@@ -28,6 +29,7 @@ from reef.inference.http import InferenceProxyRuntime
 from reef.recipe import RecipeConfigError
 from reef.recipe.registry import build_recipe
 from reef.storage.commit_history import CommitHistoryScenarioStore
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train.trainer import Trainer
 
@@ -171,6 +173,7 @@ def _report_once(scenario, name: str, suffix: str) -> None:
             agent_record_id=f"r{suffix}",
         )
     )
+    make_samples(scenario)
 
 
 # -- composition translation ------------------------------------------------
@@ -488,6 +491,7 @@ def test_one_step_commits_population_and_composition_together(tmp_path: Path) ->
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
         hold_local_cycles=True,
+        coordination=memory_coordination(),
     )
     scenario_name = "../general-meta-harness"
     try:
@@ -592,6 +596,7 @@ def test_terminus_extension_uses_shared_recipe_rollout_runner_and_publication(tm
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         scenario_storage=SQLiteScenarioStorage(),
         hold_local_cycles=True,
+        coordination=memory_coordination(),
     )
     try:
         scenario = dispatcher.get_or_create_scenario("terminus-meta")
@@ -620,6 +625,7 @@ def test_failed_evaluation_restores_population_and_writes_no_mirror(tmp_path: Pa
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
         hold_local_cycles=True,
+        coordination=memory_coordination(),
     )
     try:
         scenario = dispatcher.get_or_create_scenario("failed-evaluation")
@@ -649,7 +655,13 @@ def test_failed_commit_keeps_mirror_at_previous_population_and_restart_heals_sta
     initial.mkdir()
     factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
     records = tmp_path / "records"
-    dispatcher = Dispatcher(recipe, factory, scenario_storage=SQLiteScenarioStorage(records), hold_local_cycles=True)
+    dispatcher = Dispatcher(
+        recipe,
+        factory,
+        scenario_storage=SQLiteScenarioStorage(records),
+        hold_local_cycles=True,
+        coordination=memory_coordination(),
+    )
     mirror = scenario_population_path(tmp_path / "meta-harness", "commit-failure")
     try:
         scenario = dispatcher.get_or_create_scenario("commit-failure")
@@ -680,7 +692,13 @@ def test_failed_commit_keeps_mirror_at_previous_population_and_restart_heals_sta
     # A stale/corrupt mirror is never loaded as search state.  Recovery gets
     # the prior durable commit and rewrites the mirror from that value.
     mirror.write_text('{"stale": true}\n')
-    restarted = Dispatcher(recipe, factory, scenario_storage=SQLiteScenarioStorage(records), hold_local_cycles=True)
+    restarted = Dispatcher(
+        recipe,
+        factory,
+        scenario_storage=SQLiteScenarioStorage(records),
+        hold_local_cycles=True,
+        coordination=memory_coordination(),
+    )
     try:
         recovered = restarted.get_or_create_scenario("commit-failure")
         assert recovered is not None
@@ -704,6 +722,7 @@ def test_failed_publication_does_not_advance_population_or_loader(tmp_path, monk
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
         hold_local_cycles=True,
+        coordination=memory_coordination(),
     )
     try:
         scenario = dispatcher.get_or_create_scenario("publish-failure")

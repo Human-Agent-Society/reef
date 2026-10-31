@@ -17,6 +17,7 @@ from reef.core.reports import ReportBase, ReportValidationError, ScoredRolloutRe
 from reef.dispatcher import Dispatcher
 from reef.recipe.base import Recipe
 from reef.record2sample.assembly import SampleAssemblySettings
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train import PipelineContext
 from reef.train.pipeline import TrainingPipeline
@@ -204,6 +205,7 @@ def _dispatcher(recipe: Recipe, name: str, *, record_dir: Path | None = None) ->
         recipe,
         InMemoryRepositoryBackend.factory(initial, root=root / "repository"),
         scenario_storage=SQLiteScenarioStorage(record_dir),
+        coordination=memory_coordination(),
     )
 
 

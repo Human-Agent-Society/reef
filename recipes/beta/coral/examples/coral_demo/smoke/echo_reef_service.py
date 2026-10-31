@@ -19,6 +19,7 @@ from aiohttp import web
 from reef.dispatcher import build_default_dispatcher
 from reef.runtime.interfaces import InferenceHandler
 from reef.service.app import create_app
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 
 CORRECT = """\
@@ -77,7 +78,7 @@ def main() -> None:
     parser.add_argument("--token", default="reef-local")
     args = parser.parse_args()
     app = create_app(
-        build_default_dispatcher(scenario_storage=SQLiteScenarioStorage()),
+        build_default_dispatcher(scenario_storage=SQLiteScenarioStorage(), coordination=memory_coordination()),
         tokens=args.token,
         inference_handler=CannedSolutionHandler(),
         close_dispatcher=True,

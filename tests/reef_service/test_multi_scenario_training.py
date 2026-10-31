@@ -14,6 +14,7 @@ from reef.core import AgentRecord, RequestType
 from reef.core.errors import ReefError
 from reef.core.trajectories import source_record_id
 from reef.dispatcher import Dispatcher
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 
 
@@ -36,13 +37,14 @@ def _dispatcher(
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
+        coordination=memory_coordination(),
     )
     return dispatcher, component
 
 
-def _train(dispatcher: Dispatcher, runtime: StubInferenceRuntime, scenario: str) -> None:
-    """Feed one scored exchange of ``scenario``, served by the current version, and wait until its job ends."""
-    dispatcher.get_or_create_scenario(scenario)
+def _train(dispatcher: Dispatcher, scenario: str) -> None:
+    """Feed one scored exchange of ``scenario``, answered by the artifact it serves, and wait until its job ends."""
+    served = dispatcher.get_or_create_scenario(scenario).serving_artifact_id()
     inference = f"{scenario}-i1"
     dispatcher.accept_record(
         AgentRecord.create(
@@ -52,7 +54,7 @@ def _train(dispatcher: Dispatcher, runtime: StubInferenceRuntime, scenario: str)
                 "tokens": [1, 2],
                 "loss_mask": [0, 1],
                 "rollout_log_probs": [-0.2],
-                "runtime_load_id": runtime.current_runtime_load_id(),
+                "artifact_id": served,
             },
             agent_record_id=inference,
         )
@@ -101,9 +103,8 @@ def test_a_shared_runtime_trains_each_scenario_on_the_one_training_component(tmp
     runtime = SharedRuntime()
     dispatcher, component = _dispatcher(tmp_path, runtime, shares_scenarios=True)
     try:
-        # The stub serves one version for every scenario, so each exchange names the version served when it arrives.
-        _train(dispatcher, runtime, "math")
-        _train(dispatcher, runtime, "code")
+        _train(dispatcher, "math")
+        _train(dispatcher, "code")
         # Each scenario submitted its own job of its own records, and each one's checkpoint became its head.
         assert [source_record_id(job.data.samples[0]) for job in component.submitted] == ["math-i1", "code-i1"]
         for scenario, version in (("math", "w1"), ("code", "w2")):

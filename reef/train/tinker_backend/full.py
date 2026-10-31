@@ -19,7 +19,7 @@ from reef.runtime.jobs import ReleaseFormat
 from reef.tinker.checkpoint import MANIFEST, FreshStart, TinkerCheckpoint
 from reef.tinker.sampling import TinkerSampler
 from reef.train.tinker_backend.client import TinkerClient
-from reef.train.tinker_backend.component import TinkerJobComponent
+from reef.train.tinker_backend.component import TinkerBaseFiles, TinkerJobComponent
 from reef.train.tinker_backend.config import SpindleFullConfig
 from reef.train.tinker_backend.spindle_export import CheckpointExporter
 
@@ -31,7 +31,8 @@ class SpindleFullTrainingComponent(TinkerJobComponent):
     Its artifacts are full weights (kind ``model``):
 
     - the base: a reference to the base revision (``REFERENCE_FILE``), which ``base/`` holds; a job from it starts a
-      new model with the base's own weights (``FreshStart``);
+      new model with the base's own weights (``FreshStart``). ``base/`` is written on first use: before the training
+      process runs jobs, or when a repository imports the base artifact (``prepared_base``);
     - a saved checkpoint: a manifest of all the parameters (``lora_rank`` null) of the base model on the
       configured service, whose ``state_path`` a job restores, beside a reference to the commit of
       ``config.release_repo`` that holds the checkpoint's weights, which ``exporter`` made.
@@ -108,7 +109,7 @@ class SpindleFullTrainingComponent(TinkerJobComponent):
     def base_artifact_source(self) -> BaseArtifactSource:
         """The base's release: the reference to the base revision."""
         inputs = {"model": self._revision.uri, "service": str(self._config.base_url)}
-        return BaseArtifactSource(model_directory=self._base, inputs=inputs)
+        return BaseArtifactSource(model_files=TinkerBaseFiles(self), inputs=inputs)
 
     def check_release(self, files: ArtifactFiles) -> None:
         """A full-parameter manifest of this component's model and service whose state resolves, or the base's files."""

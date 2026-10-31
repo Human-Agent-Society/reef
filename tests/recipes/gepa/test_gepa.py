@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 from tests.support._strategies import resolve_rollout_scorer
 from tests.support._trajectories import recorded_trajectory
+from tests.support.samples_service import make_samples
 
 from recipes.gepa import components, reflection
 from recipes.gepa.archive import Archive, Candidate
@@ -34,6 +35,7 @@ from reef.inference.http import InferenceProxyRuntime
 from reef.recipe import RecipeConfigError
 from reef.recipe.registry import build_recipe
 from reef.storage.commit_history import CommitHistoryScenarioStore
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train.trainer import Trainer
 
@@ -743,6 +745,7 @@ def _report_once(scenario, name: str, suffix: str) -> None:
             agent_record_id=f"r{suffix}",
         )
     )
+    make_samples(scenario)
 
 
 def test_one_step_publishes_and_the_gate_carries_the_gepa_metrics(tmp_path: Path) -> None:
@@ -763,6 +766,7 @@ def test_one_step_publishes_and_the_gate_carries_the_gepa_metrics(tmp_path: Path
         factory,
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
         hold_local_cycles=True,
+        coordination=memory_coordination(),
     )
     scenario_name = "../gepa-demo"
     try:
@@ -811,7 +815,13 @@ def test_archive_mirror_does_not_advance_when_a_no_artifact_commit_fails(tmp_pat
     initial.mkdir()
     factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
     data_dir = tmp_path / "agent-record"
-    dispatcher = Dispatcher(built, factory, scenario_storage=SQLiteScenarioStorage(data_dir), hold_local_cycles=True)
+    dispatcher = Dispatcher(
+        built,
+        factory,
+        scenario_storage=SQLiteScenarioStorage(data_dir),
+        hold_local_cycles=True,
+        coordination=memory_coordination(),
+    )
     try:
         scenario = dispatcher.get_or_create_scenario("gepa-demo")
         assert scenario is not None
@@ -845,7 +855,11 @@ def test_archive_mirror_does_not_advance_when_a_no_artifact_commit_fails(tmp_pat
         dispatcher.close()
 
     recovered_dispatcher = Dispatcher(
-        built, factory, scenario_storage=SQLiteScenarioStorage(data_dir), hold_local_cycles=True
+        built,
+        factory,
+        scenario_storage=SQLiteScenarioStorage(data_dir),
+        hold_local_cycles=True,
+        coordination=memory_coordination(),
     )
     try:
         recovered = recovered_dispatcher.get_or_create_scenario("gepa-demo")

@@ -257,6 +257,7 @@ class TestHarness:
         from types import SimpleNamespace
 
         from recipes.openclawrl.examples.openclawrl.harness import HermesStreamAgent
+        from recipes.openclawrl.examples.openclawrl.harness import agent as agent_module
 
         problem = {"index": 0, "question": "What is 2+2?", "answer": "4"}
         states = iter(
@@ -302,6 +303,13 @@ class TestHarness:
 
         health = iter([(0, ""), (1, ""), (1, ""), (2, "")])
         stamped: list[str] = []
+        created: list[tuple[str, str, dict]] = []
+
+        def create_scenario(client, path, scenario, payload):
+            created.append((path, scenario, payload))
+            return {"scenario": scenario}, {}
+
+        monkeypatch.setattr(agent_module.ReefClient, "post", create_scenario)
         monkeypatch.setattr(agent, "_start_shim", lambda _scenario, session: (stamped.append(session), FakeShim())[1])
         monkeypatch.setattr(agent, "_upstream_health", lambda: next(health))
         environment = FakeEnvironment()
@@ -311,6 +319,9 @@ class TestHarness:
         assert context.metadata["openclawrl"]["turns"] == 2
         assert context.metadata["openclawrl"]["failure"] is None
         assert context.metadata["openclawrl"]["scenario"].startswith("openclawrl-stream-")
+        # The harness creates its scenario on Reef before hermes makes its first call.
+        scenario = context.metadata["openclawrl"]["scenario"]
+        assert created == [("/reef/scenarios", scenario, {"name": scenario})]
         # One position, one tagged conversation: the processor correlates on
         # this rather than on whatever transcript hermes resends.
         assert stamped == [f"{context.metadata['openclawrl']['scenario']}-s0"]

@@ -28,8 +28,57 @@ from reef.core.components import validate_component_name
 from reef.core.plugins import Plugin
 
 
+@dataclass(frozen=True)
+class FileDownload:
+    """One file of a release that a client downloads straight from a repository backend's storage.
+
+    Values: ``path`` is the file's path in the release, as the materialized release names it: a relative POSIX
+    path, not empty, with no ``.`` or ``..`` part. ``byte_count`` is the file's size, at least 0. ``url`` is an
+    absolute ``https`` or ``http`` URL that opens the file with a GET and no Reef credential until ``expires_at``
+    (Unix seconds, positive).
+
+    Purpose: ``RepositoryBackend.file_downloads`` makes them, and the data service's artifact file list gives them
+    to clients, so that the bytes of a large artifact do not pass through a Reef process.
+    """
+
+    path: str
+    byte_count: int
+    url: str
+    expires_at: int
+
+    def __post_init__(self) -> None:
+        parts = PurePosixPath(self.path).parts if isinstance(self.path, str) else ()
+        if not parts or PurePosixPath(self.path).is_absolute() or any(part in (".", "..") for part in parts):
+            raise ValueError(f"a file download's path is a relative path in the release, got {self.path!r}")
+        if isinstance(self.byte_count, bool) or not isinstance(self.byte_count, int) or self.byte_count < 0:
+            raise ValueError("a file download's byte_count is an int of at least 0")
+        if not isinstance(self.url, str) or not self.url.startswith(("https://", "http://")):
+            raise ValueError("a file download's url is an absolute http or https URL")
+        if isinstance(self.expires_at, bool) or not isinstance(self.expires_at, int) or self.expires_at <= 0:
+            raise ValueError("a file download's expires_at is a positive int of Unix seconds")
+
+
 class RepositoryBackend(ArtifactRepository):
     """Durable storage bound to one scenario repository."""
+
+    def file_downloads(self, ref: ArtifactRef, expires_in_seconds: int) -> tuple[FileDownload, ...] | None:
+        """Every file of the release ``ref``, in path order, each with a URL that opens it for ``expires_in_seconds``
+        seconds; the backend lists and signs them without materializing the release.
+
+        None, the default, when this backend keeps no copy of its releases that a client can open; Reef then lists
+        the files of the materialized release, and serves them itself. Raise ``ArtifactNotFound`` when the backend
+        holds no release ``ref``.
+        """
+        return None
+
+    def release_uri(self, ref: ArtifactRef) -> str | None:
+        """The URI of the directory of the release ``ref``, as ``ArtifactSources`` reads it, ending with ``/``.
+
+        Another scenario imports the release from this URI, also in another deployment that can read the backend's
+        storage. None, the default, when the backend keeps no copy that a URI names. Raise ``ArtifactNotFound``
+        when the backend holds no release ``ref``.
+        """
+        return None
 
     @abstractmethod
     def resolve_release(self, release_id: str | None = None) -> ArtifactRef:
@@ -100,6 +149,37 @@ class EnumerableRepositoryBackendFactory(RepositoryBackendFactory):
     def list_registrations(self) -> tuple[str, ...]: ...
 
 
+class BaseModelFiles(ABC):
+    """The model files of a base artifact, which a process makes only when a repository imports them.
+
+    Purpose: a recipe gives a value in ``BaseArtifactSource.model_files``. A repository backend calls ``directory``
+    only when it imports the base into a repository that has none. Thus a process that opens only repositories that
+    have a base makes no model files.
+    """
+
+    @abstractmethod
+    def directory(self) -> Path:
+        """A directory of the model files. The first call makes them; a later call gives the same directory."""
+
+
+@dataclass(frozen=True)
+class ModelDirectory(BaseModelFiles):
+    """Model files that exist already.
+
+    Values: ``path`` is an existing directory; the constructor raises ``ValueError`` for another path.
+    ``directory`` returns ``path``.
+    """
+
+    path: Path
+
+    def __post_init__(self) -> None:
+        if not self.path.is_dir():
+            raise ValueError(f"model directory {self.path} does not exist")
+
+    def directory(self) -> Path:
+        return self.path
+
+
 @dataclass(frozen=True)
 class BaseArtifactSource:
     """The content of a repository's base artifact, and the configuration that the content comes from.
@@ -107,19 +187,20 @@ class BaseArtifactSource:
     Values:
 
     - ``files`` maps relative POSIX paths inside the release to the text of each file.
-    - ``model_directory`` is a directory of model files, or ``None``.
+    - ``model_files`` gives the directory of model files, or is ``None`` for no model files.
     - ``model_component`` is the component directory that the model files go into. ``None`` is the release root.
-      It is ``None`` when ``model_directory`` is ``None``.
+      It is ``None`` when ``model_files`` is ``None``.
     - ``inputs`` maps non-empty names to non-empty strings. They identify the configuration, for example the
       configured model and the checksum of the configured seed.
 
     Purpose: a recipe makes the value (``Recipe.base_artifact_source``). A repository backend imports it as the
-    base artifact of a repository that has none. A repository that has a base opens only when its base came from
-    equal ``inputs``. Thus Reef reads the configuration once, to make the base.
+    base artifact of a repository that has none; only that import reads the model files. A repository that has a
+    base opens only when its base came from equal ``inputs``. Thus Reef reads the configuration once, to make the
+    base, and a process that opens only repositories that have a base makes no model files.
     """
 
     files: Mapping[str, str] = field(default_factory=dict)
-    model_directory: Path | None = None
+    model_files: BaseModelFiles | None = None
     model_component: str | None = None
     inputs: Mapping[str, str] = field(default_factory=dict)
 
@@ -128,10 +209,8 @@ class BaseArtifactSource:
             path = PurePosixPath(relative)
             if not relative or path.is_absolute() or ".." in path.parts:
                 raise ValueError(f"base artifact file {relative!r} must be a relative path inside the release")
-        if self.model_directory is None and self.model_component is not None:
-            raise ValueError("model_component names where model files go, so it requires model_directory")
-        if self.model_directory is not None and not self.model_directory.is_dir():
-            raise ValueError(f"model directory {self.model_directory} does not exist")
+        if self.model_files is None and self.model_component is not None:
+            raise ValueError("model_component names where model files go, so it requires model_files")
         if self.model_component is not None:
             validate_component_name(self.model_component)
         for name, value in self.inputs.items():
@@ -299,6 +378,25 @@ class Repository(ArtifactRepository):
     @property
     def backend(self) -> RepositoryBackend:
         return self._backend
+
+    def file_downloads(self, ref: ArtifactRef, expires_in_seconds: int) -> tuple[FileDownload, ...] | None:
+        """The backend's ``file_downloads`` of the durable release ``ref``; None for a release staged on this host,
+        which only the local copy holds."""
+        if ref.release_id in self._local_artifacts:
+            return None
+        return self.backend.file_downloads(ref, expires_in_seconds)
+
+    def release_uri(self, ref: ArtifactRef) -> str | None:
+        """The backend's ``release_uri`` of the durable release ``ref``; None for a release staged on this host.
+
+        Raise ``ValueError`` when the backend gives a URI that does not end with ``/``.
+        """
+        if ref.release_id in self._local_artifacts:
+            return None
+        uri = self.backend.release_uri(ref)
+        if uri is not None and not uri.endswith("/"):
+            raise ValueError(f"the repository backend gave release URI {uri!r}, which does not end with '/'")
+        return uri
 
     @property
     def base_artifact(self) -> ArtifactRef:

@@ -162,3 +162,18 @@ class ProposalPayload:
             "session": self.session,
             "release_id": self.release_id,
         }
+
+
+def with_request_tags(payload: Mapping[str, Any], parsed: RequestHeaders) -> Mapping[str, Any]:
+    """Carry ``x-reef-tag-*`` through to the INFERENCE record's metadata.
+
+    Only inference: a tag is context about a served exchange, and the
+    processors that read one correlate on the inference side. This stores
+    every pair as sent (method-integration RFC §3.2); only
+    :func:`recorded_ref` reads a value.
+    """
+    if parsed.request_type is not RequestType.INFERENCE or not parsed.tags:
+        return payload
+    metadata = dict(payload.get("metadata") or {})
+    metadata["tags"] = {**(metadata.get("tags") or {}), **parsed.tags}
+    return {**payload, "metadata": metadata}

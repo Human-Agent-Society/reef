@@ -343,7 +343,7 @@ Embed the service
 
 An application can run the complete Reef service in its own process.
 ``reef.service.assembly.build_app`` makes the dispatcher and the HTTP app from
-a ``ServiceConfig``. The app includes record retention, inference retries,
+a ``ServiceConfig``. The app includes record retention, the inference routes,
 the evaluation token, readiness of local cycles, and cleanup.
 
 .. code:: python
@@ -404,6 +404,7 @@ bundled ``SQLiteRecordStore``, ``CommitHistoryScenarioStore``, and
    from pathlib import Path
 
    from reef.dispatcher import Dispatcher
+   from reef.storage.sql_coordination import memory_coordination
    from reef.storage.sqlite import SQLiteScenarioStorage
 
    storage = SQLiteScenarioStorage(Path(".reef/agent-record"))
@@ -411,11 +412,17 @@ bundled ``SQLiteRecordStore``, ``CommitHistoryScenarioStore``, and
        recipe,
        repository_backend_factory,
        scenario_storage=storage,
+       coordination=memory_coordination(),
    )
 
 ``Dispatcher`` requires ``scenario_storage`` and passes it to scenario
-creation. It never selects or imports a record storage implementation. The
-``build_default_dispatcher`` convenience helper also requires this argument.
+creation. It never selects or imports a record storage implementation. It
+also requires ``coordination``, the store of the services' work queues,
+served models and control lease. One process that runs every service and
+keeps no queue state across restarts passes ``memory_coordination()``;
+deployment assembly opens the shared store that
+``storage.coordination_backend`` names. The ``build_default_dispatcher``
+convenience helper also requires both arguments.
 Deployment assembly builds the storage that ``storage.record_backend`` names:
 SQLite, PostgreSQL, or a ``ScenarioStorage`` plugin; embedded callers supply
 their chosen storage service explicitly. For ephemeral records, commits and
@@ -431,10 +438,11 @@ Harbor tasks of its task stores (see `Task stores`_). ``archive``
 retires the settings and tasks with the records and commits.
 
 ``Recipe.with_model_config(config)`` accepts the concrete ``ModelConfig`` from
-``reef.inference.model_config``. ``ModelConfig.from_value(value)`` validates the
-model override; its ``runtime`` field holds an ``InferenceProxyRuntime``, or
-``None`` for the recipe default. ``view()`` returns the credential-redacted
-API representation. The type holds no file path and performs no file I/O.
+``reef.inference.model_config``. ``ModelConfig.from_value(value, api_key=...)``
+validates the model override (``url``, ``model`` and ``api``); ``api_key`` is
+the deployment's provider key, which the override's engine is called with. Its
+``runtime`` field holds an ``InferenceProxyRuntime``, or ``None`` for the
+recipe default. ``view()`` returns the API representation without the key. The type holds no file path and performs no file I/O.
 It replaces ``ScenarioModelConfig`` and the former read-only configuration
 protocol; there is no separate configuration collection class.
 
@@ -771,14 +779,18 @@ plugin implements one class method:
 - ``context`` is a ``RepositoryBackendContext``. ``work_dir`` and ``cache_dir``
   are ``storage.artifact_work_dir`` and ``storage.artifact_cache_dir``.
   ``base`` is a ``BaseArtifactSource``: the content of the recipe's base
-  artifact (``files``, and ``model_directory`` under ``model_component``) and
-  the configuration it comes from (``inputs``).
+  artifact (``files``, and ``model_files`` under ``model_component``) and
+  the configuration it comes from (``inputs``). ``model_files`` is a
+  ``BaseModelFiles``: its ``directory()`` makes the model files on its first
+  call and returns their directory.
 
 Every repository starts from its base artifact. A backend must:
 
 - Import ``context.base`` as the repository's base release when the
   repository has none. The release has no parent, and its content ID is
-  ``base.content_id``.
+  ``base.content_id``. Call ``base.model_files.directory()`` only for this
+  import, so that a process that opens only repositories that have a base
+  makes no model files.
 - Refuse to open a repository whose base was imported from other
   ``base.inputs``. Name both in the error. Refuse a repository whose base was
   not imported.
@@ -809,6 +821,21 @@ that the backend supports:
      - The backend side: ``publish(advance_head=False)`` stores a release
        without moving the head, and ``commit_release`` moves the head
        after the scenario commit. A durable scenario store requires it.
+
+A backend whose storage can give clients a URL for each file, such as an
+object store, overrides ``file_downloads(ref, expires_in_seconds)``. It
+returns every file of the release as a ``FileDownload``: ``path`` in the
+release, ``byte_count``, and a ``url`` that opens the file without a Reef
+credential until ``expires_at``. It must not materialize the release. The
+default returns None, and Reef then lists and serves the files of the
+materialized release itself. The artifact file list of the HTTP API gives
+these URLs to clients, so that a large artifact downloads from the storage.
+
+Such a backend also overrides ``release_uri(ref)``: the URI of the release's
+directory, ending with ``/``, in a scheme that ``ArtifactSources`` reads. The
+`artifact items <http-api.rst#artifact-items>`__ of the data store carry it,
+so that a scenario, also in another deployment, imports the release from
+there. The default returns None.
 
 ``tests/artifact/test_reef_artifacts.py`` and
 ``tests/artifact/test_reef_git_lfs.py`` show the publication and recovery
@@ -1077,7 +1104,7 @@ record2sample=..., sample2job=...)``):
   (``reef.record2record``). It decides which records train and which train together:
   it groups reports, judges records, and ends records that can no longer
   train. Its staleness check (``is_stale``) keeps samples with data more than
-  ``max_staleness`` versions behind the serving version out of the buffer.
+  ``max_staleness`` artifacts behind the served artifact out of the buffer.
   ``max_staleness`` is the stage's own setting, from
   ``Record2RecordSettings`` (see `the staleness check
   <../developer-guide/processors.rst#staleness>`__). Without
@@ -1362,15 +1389,14 @@ Reef-specific fields live inside ``trajectory.extra.reef``:
 - ``source_agent_record_id`` identifies the primary source;
 - ``records`` preserves ordered source ids, timestamps and original provider
   payloads, including provider-specific fields;
-- ``training`` holds exact captured ``tokens``, ``loss_mask``,
-  ``rollout_log_probs``, ``runtime_load_id`` and ``runtime_load_spans``.
+- ``training`` holds exact captured ``tokens``, ``loss_mask`` and
+  ``rollout_log_probs``, and ``artifact_id``, the artifact that produced them.
   Recipes may also supply ``action_mask``, ``rollout_created_at``, ``turn_count``,
   ``topk_indices``, ``topk_log_probs`` and method-specific ``extras``.
 
 ``item.metadata`` and ``item.training`` read these extension objects.
 ``with_metadata`` and ``with_training`` return updated documents while preserving
-other extensions. Training arrays are JSON lists, and runtime load spans are
-objects with ``start``, ``end`` and ``runtime_load_id``.
+other extensions. Training arrays are JSON lists.
 
 ``TrajectorySample.group_id`` is an optional string, scoped to the job data.
 None means an independent trajectory. Group-relative policy algorithms require
@@ -1713,11 +1739,12 @@ and ``CordisRecipe`` calls
 ``None`` means the capability is absent, and bare ``Surface()`` is the
 complete record-only configuration. A one-component surface serves a flat
 release; a surface with several components serves a release with one
-directory per component, and ``Surface.loader``, ``inference``, and ``files``
-route to their components.
+directory per component, and ``Surface.loader`` and ``files`` route to their
+components. No surface changes an inference request: the inference routes
+forward each request to the engine that ``served_models`` names.
 
 Migration: code written before components keeps working.
-``Surface(loader=..., inference=..., files=...)`` builds a one-component
+``Surface(loader=..., files=...)`` builds a one-component
 surface whose component is named ``release``; beside one component in
 ``components``, those keywords replace that component's fields, as
 ``dataclasses.replace`` does. A surface of several components refuses them:
@@ -1731,17 +1758,11 @@ set the capabilities on each ``ComponentSurface``.
 +---------------+-----------------------------+----------------------------------------------+
 | ``loader``    | ``ArtifactLoader | None``   | make published releases servable             |
 +---------------+-----------------------------+----------------------------------------------+
-| ``inference`` | ``InferenceHooks | None``   | prepare provider requests, verify responses  |
-+---------------+-----------------------------+----------------------------------------------+
 | ``files``     | ``FileTree | None``         | back client pulls                            |
 +---------------+-----------------------------+----------------------------------------------+
 
 ``loader.activate(artifact, runtime, source=...)`` makes a version servable
-once it is published, and returns the runtime load ID that serves it. One
-optional interface extends the hooks, and the scenario checks for it with
-``isinstance``: ``LeasingInferenceHooks`` adds ``inference.begin_request(artifact, path)``,
-returning a lease the service releases when the attempt ends, so serving state
-such as a resident adapter stays protected for its duration.
+once it is published, and returns the runtime load ID that serves it.
 
 A surface does not decide which records train, compute candidates, execute a
 training job, or mutate the release chain. Native streaming
@@ -1770,12 +1791,18 @@ Neither inherits from the other, and no trainer holds a serving engine.
   kind of the weights that the runtime serves from a release: ``model``, the
   default, for full weights, or ``model_adapter`` for a LoRA adapter on its
   base model. A runtime that serves adapters must override it.
+  ``served_artifact(artifact_id, scenario)`` gives the engine's HTTP(S) URL
+  and the model name (``served_model_name(scenario)``) that control writes to
+  ``served_models`` for the scenario. It returns None when the engine has no
+  such URL; the scenario then serves no model on the inference routes.
   ``artifact_model(artifact)`` is the ``PolicyModel`` that the runtime serves
   for an artifact on request, without loading it, or None, the default, for a
   runtime that serves only its loaded artifact. A runtime whose handler answers
   each call from the artifact that the call names overrides it, as the Tinker
   runtime does; the `artifact evaluation <http-api.rst#evaluate-an-artifact>`__
-  of a model artifact needs it.
+  of a model artifact needs it. Such a runtime also returns True from
+  ``serves_artifacts_on_request``, which the scenario contract's
+  ``capabilities`` read.
   ``shared_by_training_scenarios`` is true for a runtime that serves each
   training scenario its own weights.
 * ``ScenarioCommitter`` orders both around each commit. It publishes a
@@ -1863,6 +1890,8 @@ these fields:
   for the backend's base model.
 - ``parameters``: the backend's parameters. Reef reads none of them; they
   override the backend's own configuration.
+- ``scenario``: the scenario whose trainer submits the job. The jobs of one
+  scenario run one at a time, in the order of their submission.
 
 ``job_id_for`` names a job by a hash of its backend, its start, its data and
 its parameters. The weight trainer puts the scenario and the records of the
@@ -1894,7 +1923,9 @@ loop:
        out as one of its releases, with the ``inputs`` that decide its
        content. Reef imports it as the base artifact. Slime gives the
        ``hf_checkpoint`` directory, or with LoRA an adapter whose weights are
-       zero. Tinker gives the checkpoint of its untrained adapter.
+       zero. Tinker gives the checkpoint of its untrained adapter, which it
+       makes only when a repository imports the base artifact or the
+       training process runs jobs.
    * - ``base_start``
      - The start of a job from the untrained checkpoint, a non-empty string.
        The first job of every trainer starts from it.
@@ -1914,6 +1945,14 @@ loop:
        it as a start. Reef calls it
        for a ``train-from``. Raise ``ValueError`` when no job can start from
        those weights.
+   * - ``start_jobs()``
+     - Start running jobs in this process: the training service's job worker
+       calls it once. Other processes use the component without running jobs.
+       The default does nothing.
+   * - ``starts_from_releases``
+     - False when ``import_start`` refuses every release, as Slime's does;
+       True, the default, otherwise. The scenario contract's
+       ``capabilities`` read it.
    * - ``check_release(directory)``
      - Raise ``ValueError`` unless ``directory`` holds a release in the
        layout of this component's releases. An artifact import calls it.

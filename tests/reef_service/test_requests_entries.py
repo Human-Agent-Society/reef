@@ -33,6 +33,7 @@ from reef.harness.rollouts.version_check import VERSION_CHECK_ENTRY_ID, version_
 from reef.harness.tree.render import render_composition
 from reef.recipe import RecipeConfigError
 from reef.recipe.cordis import CordisRecipe
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.cordis_backend import CordisBackend
 
@@ -284,7 +285,12 @@ def test_a_scenario_opened_by_an_upgraded_reef_commits_the_shipped_entries_once(
             seed=request_entries("pi"),
             runtime=runtime(),
         )
-        dispatcher = Dispatcher(built, factory, scenario_storage=SQLiteScenarioStorage(agent_record_dir))
+        dispatcher = Dispatcher(
+            built,
+            factory,
+            scenario_storage=SQLiteScenarioStorage(agent_record_dir),
+            coordination=memory_coordination(),
+        )
         try:
             scenario = dispatcher.get_or_create_scenario("upgrade")
             assert scenario is not None

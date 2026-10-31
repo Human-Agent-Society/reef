@@ -14,9 +14,10 @@ class ModelConfig:
     runtime: InferenceProxyRuntime | None = field(default=None, repr=False)
 
     @classmethod
-    def from_value(cls, value: object) -> ModelConfig:
-        """Validate a model override; null selects the recipe's default."""
-        return cls(runtime=InferenceProxyRuntime.from_model_config(value))
+    def from_value(cls, value: object, *, api_key: str | None = None) -> ModelConfig:
+        """Validate a model override; null selects the recipe's default. ``api_key`` is the deployment's provider
+        key, which the override's engine is called with."""
+        return cls(runtime=InferenceProxyRuntime.from_model_config(value, api_key=api_key))
 
     def view(self) -> dict[str, object] | None:
         """Describe the selection for API acknowledgements without its credential."""
@@ -27,5 +28,4 @@ class ModelConfig:
             "url": runtime.base_url,
             "model": runtime.model_path,
             "api": runtime.api,
-            "has_api_key": bool(runtime.api_key),
         }
