@@ -90,9 +90,6 @@ class ReleaseRuntime(InferenceRuntime):
     def activate_checkpoint(self, artifact, *, scenario=None):
         return "load-0"
 
-    def current_runtime_load_id(self) -> str:
-        return "load-0"
-
 
 @dataclass(frozen=True, kw_only=True)
 class WeightRecipe(Recipe):

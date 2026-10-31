@@ -127,7 +127,7 @@ def serving(engines):
 def test_the_engines_start_serving_the_base_model_under_a_fresh_version(serving, engines):
     [(_, version), resumed] = engines.events
     assert (engines.events[0][0], resumed) == ("initialize", "resume")
-    assert serving.current_runtime_load_id() == version == serving.base_version
+    assert version == serving.base_version
     assert serving.serving_adapter_runtime_load_id("math") is None
     assert serving.base_url == "http://component.example"
     assert serving.per_scenario_adapters and serving.shared_by_training_scenarios
@@ -238,14 +238,13 @@ def test_shutdown_closes_admission_and_the_service_that_owns_the_engines(engines
 
 def test_full_weights_load_under_a_new_version_and_the_same_content_loads_nothing(engines, tmp_path):
     serving = FullWeightServingRuntime(engines, Handler(), model_path="Qwen/Qwen3-8B")
-    initial = serving.current_runtime_load_id()
+    initial = serving.base_version
     assert not serving.per_scenario_adapters and not serving.shared_by_training_scenarios
     assert serving.served_weight_kind == "model"
     weights = saved_full_weights(tmp_path / "step-1")
     version = serving.activate_checkpoint(release(weights, "w1"))
     assert version != initial
     assert engines.events[-4:] == ["pause", ("recover", 0), ("load", "full", None, version, weights), "resume"]
-    assert serving.current_runtime_load_id() == version
     calls = len(engines.events)
     assert serving.activate_checkpoint(release(weights, "w1")) == version
     assert len(engines.events) == calls
@@ -277,17 +276,16 @@ def test_a_release_that_refers_to_a_revision_loads_the_revisions_snapshot(engine
 
 def test_engines_that_report_another_version_after_a_full_load_fail_it_and_keep_the_served_version(engines, tmp_path):
     serving = FullWeightServingRuntime(engines, Handler())
-    initial = serving.current_runtime_load_id()
+    initial = serving.base_version
     engines.misreport = "stale:1"
     weights = saved_full_weights(tmp_path / "step-1")
     with pytest.raises(RuntimeContractError, match=r"report \['stale:1'\] after loading"):
         serving.activate_checkpoint(release(weights, "w1"))
     assert engines.events[-1] == "resume"
-    assert serving.current_runtime_load_id() == initial
     # The release is not recorded as served: a retry loads it again under a new version.
     engines.misreport = None
     retried = serving.activate_checkpoint(release(weights, "w1"))
-    assert len(engines.loads()) == 2 and retried == serving.current_runtime_load_id()
+    assert len(engines.loads()) == 2 and retried not in (initial, "stale:1")
 
 
 def test_each_full_weight_load_first_replaces_the_dead_engines_while_they_are_paused(engines, tmp_path):
@@ -406,7 +404,7 @@ def test_a_failed_health_check_loads_the_served_full_weights_again_under_their_v
         service.restart()
         assert engines.recovered.wait(timeout=10)
         assert engines.events[calls:] == ["pause", ("recover", 1), ("load", "full", None, version, weights), "resume"]
-        assert serving.current_runtime_load_id() == version and engines.runtime_load_ids() == [version]
+        assert engines.runtime_load_ids() == [version]
     finally:
         serving.shutdown()
 

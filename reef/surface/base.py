@@ -47,13 +47,6 @@ class WeightRuntime(ServingRuntime):
     """
 
     @abstractmethod
-    def current_runtime_load_id(self) -> str | None:
-        """The runtime load ID of the last release the runtime activated, of any scenario.
-
-        ``None`` when the runtime activated none, or loads nothing and names no load.
-        """
-
-    @abstractmethod
     def activate_checkpoint(self, artifact: Artifact, *, scenario: str | None = None) -> str:
         """Serve the published release ``artifact``; return the runtime load ID that serves it.
 

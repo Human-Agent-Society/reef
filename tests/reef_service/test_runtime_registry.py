@@ -127,9 +127,6 @@ def test_http_app_routes_scenarios_to_runtime_specific_inference_services(tmp_pa
 
                 return _Backend()
 
-            def current_runtime_load_id(self) -> str | None:
-                return None
-
             def activate_checkpoint(self, artifact, *, scenario=None) -> str:
                 return artifact.ref.release_id
 

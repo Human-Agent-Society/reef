@@ -58,10 +58,6 @@ class NullInferenceRuntime(InferenceRuntime):
     async def acquire_inference(self) -> InferenceAdmissionHandle:
         raise InferenceUnavailable(UNAVAILABLE_MESSAGE)
 
-    def current_runtime_load_id(self) -> str | None:
-        # The runtime loads nothing, so no load names what serves.
-        return None
-
     def activate_checkpoint(self, artifact: Artifact, *, scenario: str | None = None) -> str:
         return artifact.ref.release_id
 

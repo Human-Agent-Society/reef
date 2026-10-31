@@ -122,9 +122,6 @@ class StubInferenceRuntime(InferenceProxyRuntime):
         self.activated: list[str] = []
         self.served: str | None = None
 
-    def current_runtime_load_id(self) -> str | None:
-        return self.served
-
     def activate_checkpoint(self, artifact: Artifact, *, scenario: str | None = None) -> str:
         version = self.serve(artifact)
         self.activated.append(version)

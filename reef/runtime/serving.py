@@ -108,9 +108,8 @@ class SavedWeightServingRuntime(InferenceRuntime):
     ``ReleaseFiles``.
     Runtime load IDs belong to one fresh incarnation, so a restart never
     reuses an ID for other weights. The base model serves under the first one,
-    ``base_version``, and each load under the next unused one.
-    ``current_runtime_load_id`` is the version of the last release activated,
-    of any scenario. Each load
+    ``base_version``, and each load under the next unused one;
+    ``activate_checkpoint`` returns it. Each load
     first replaces the engines that died since the last one
     (``InferenceBackend.recover``), while the engines are paused.
 
@@ -162,10 +161,6 @@ class SavedWeightServingRuntime(InferenceRuntime):
     @property
     def model_path(self) -> str:
         return self._model_path
-
-    def current_runtime_load_id(self) -> str:
-        with self._lock:
-            return self._version
 
     def next_version(self) -> str:
         version = str(RuntimeLoadId(self._incarnation, self._next_sequence))

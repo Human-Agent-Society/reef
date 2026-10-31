@@ -41,9 +41,6 @@ class Runtime(InferenceRuntime):
     def activate_checkpoint(self, artifact, *, scenario=None):
         return "load-0"
 
-    def current_runtime_load_id(self):
-        return "load-0"
-
 
 def call(url: str, path: str, body: object) -> tuple[int, dict]:
     request = urllib.request.Request(f"{url}{path}", data=json.dumps(body).encode(), method="POST")

@@ -477,7 +477,6 @@ def test_adapter_runtime_starts_the_engines_and_loads_each_published_adapter_thr
     # The engines start paused, then serve the base model under the runtime's first version.
     assert started_engines(events[0]) == ("sglang", "Qwen/Qwen3-8B", 1, 2, "placement-2")
     assert events[1:4] == ["health", "pause", "resume"]
-    assert runtime.current_runtime_load_id() == runtime.base_version
     version = runtime.activate_checkpoint(Artifact.local(saved_adapter(tmp_path / "job-1")), scenario="math")
     _, layout, name, loaded, contents, served = events[-2]
     assert (layout, name, loaded, contents) == (
@@ -487,7 +486,6 @@ def test_adapter_runtime_starts_the_engines_and_loads_each_published_adapter_thr
         {"adapter_config.json": '{"r": 16}'},
     )
     assert served.parent == work_dir and events[-1] == "resume"
-    assert runtime.current_runtime_load_id() == version
     assert runtime.serving_adapter_runtime_load_id("math") == version
     arguments = runtime.inference_handler._post_arguments(Artifact.local(tmp_path), "/generate", {"input_ids": [1]})
     assert (arguments["url"], arguments["headers"]["Authorization"]) == (
@@ -513,7 +511,6 @@ def test_full_weight_runtime_loads_a_published_checkpoint_through_the_component(
     version = runtime.activate_checkpoint(Artifact.local(weights))
     _, layout, name, loaded, contents, _ = events[-2]
     assert (layout, name, loaded, contents) == ("full", None, version, {"config.json": "{}"})
-    assert runtime.current_runtime_load_id() == version
     runtime.shutdown()
     assert events[-2:] == ["close", "release"]
 

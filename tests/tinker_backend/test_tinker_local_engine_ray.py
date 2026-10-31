@@ -344,7 +344,7 @@ def test_tinker_trains_in_the_control_plane_and_serves_on_an_inference_component
             monkeypatch.delenv(key)
     with inference_component(tmp_path) as (url, control):
         with control_plane(tmp_path, monkeypatch, url, repository) as (dispatcher, _, inference):
-            initial = inference.current_runtime_load_id()
+            initial = inference.base_version
             assert control.call("GET", "runtime-load-ids")["runtime_load_ids"] == [initial] * 2
             assert inference.base_url == url
             train_one_step(dispatcher, inference)

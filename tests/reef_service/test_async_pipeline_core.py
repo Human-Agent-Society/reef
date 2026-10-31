@@ -295,7 +295,7 @@ def test_lost_ack_publication_commits_the_checkpoint_once(start_dispatcher) -> N
     assert len(component.calls) == 1
     published = [row for row in dispatcher.list_artifacts("math") if row["operation"] == "training"]
     assert len(published) == 1
-    assert component.inference.current_runtime_load_id() == "w1"
+    assert component.inference.served == "w1"
 
 
 @pytest.mark.unit

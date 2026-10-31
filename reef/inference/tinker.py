@@ -146,11 +146,6 @@ class TinkerInferenceRuntime(InferenceRuntime):
     def model_path(self) -> str:
         return self._model
 
-    def current_runtime_load_id(self) -> str:
-        """The version of the active sampler: the base model's until a release is activated."""
-        with self._lock:
-            return self._version
-
     # -- Snapshots
 
     def _remember(self, sampler_path: str | None) -> tuple[str | None, str]:

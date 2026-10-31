@@ -146,7 +146,7 @@ def test_activating_a_held_harness_release_leaves_held_admission_closed(tmp_path
             HARNESS: "harness step 1",
         }
         assert not runtime.inference_admission_status["open"]
-        assert runtime.current_runtime_load_id() == "before"
+        assert runtime.served == "before"
     finally:
         dispatcher.close()
 
@@ -166,7 +166,7 @@ def test_a_harness_only_activation_leaves_held_admission_closed(tmp_path: Path) 
         scenario.activate(f"{first}:{HARNESS}", HARNESS)
         assert component_files(scenario, scenario.current_artifact_ref())[HARNESS] == "harness step 1"
         assert not runtime.inference_admission_status["open"]
-        assert runtime.current_runtime_load_id() == "before"
+        assert runtime.served == "before"
     finally:
         dispatcher.close()
 
