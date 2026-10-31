@@ -21,7 +21,7 @@ import time
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from harbor.models.task.task import Task as HarborTaskLoader
 
@@ -132,39 +132,96 @@ def check_uses(dispatcher: Dispatcher, owner: str, uses: Mapping[str, list[Use]]
         dispatcher.check_use(scenario, trajectories, any(use.train_task for use in scenario_uses))
 
 
-def create_items(dispatcher: Dispatcher, owner: str, body: Mapping[str, Any], *, wait: bool = True) -> dict[str, Any]:
-    """Create trajectory and record items from ``{"items": [{"id", "content", "metadata"}]}``; return them.
+def create_items(dispatcher: Dispatcher, owner: str, body: Mapping[str, Any]) -> dict[str, Any]:
+    """Create record items from ``{"items": [{"id", "content", "metadata"}]}``; return them.
 
-    1 to ``MAX_ITEMS_PER_CREATE`` items. A trajectory's content must be an ATIF document. A record's content and ID
-    must be what ``copied_record`` takes. A task needs its files, so ``create_task_items`` creates it. The response
-    is ``{owner, items, synced}``, without content; ``wait`` is as in ``sync_touched``.
+    1 to ``MAX_ITEMS_PER_CREATE`` items. A record's content and ID must be what ``copied_record`` takes. A
+    trajectory comes as JSON Lines (``create_trajectory_items``), and a task needs its files
+    (``create_task_items``), so this call refuses both. The response is ``{owner, items, synced}``, without content.
     """
     check_owner(owner)
     entries = body.get("items")
     if body.keys() != {"items"} or not isinstance(entries, list):
         raise ValueError("the body holds only 'items', an array of {id, content, metadata} objects")
-    if not 1 <= len(entries) <= MAX_ITEMS_PER_CREATE:
-        raise ValueError(f"a create call holds 1 to {MAX_ITEMS_PER_CREATE} items")
     items: list[NewItem] = []
-    uses: dict[str, list[Use]] = {}
     for entry in entries:
         if not isinstance(entry, Mapping) or entry.keys() != {"id", "content", "metadata"}:
             raise ValueError("each item holds only 'id', 'content' and 'metadata'")
         item_id, content, metadata = check_item_id(entry["id"]), entry["content"], entry["metadata"]
         if not isinstance(content, Mapping):
             raise ValueError(f"item {item_id!r} needs a JSON object as its content")
-        checked = created_metadata(owner, metadata)
-        if checked["kind"] == "task":
+        kind = created_metadata(owner, metadata)["kind"]
+        if kind == "trajectory":
+            raise ValueError("trajectories come as JSON Lines: upload them with POST .../data/trajectories")
+        if kind == "task":
             raise ValueError("a task item needs its files: create it with POST .../data/tasks")
+        items.append(NewItem(item_id, content, metadata))
+    return store_items(dispatcher, owner, items)
+
+
+def jsonl_trajectories(lines: Iterable[str], source: str) -> list[tuple[str, Mapping[str, Any]]]:
+    """The ATIF documents of the JSON Lines ``lines``, in order, each with its item ID: its ``session_id``.
+
+    A blank line is skipped. Raise ``ValueError``, naming ``source`` and the line, for a line that is not a JSON
+    object or not an ATIF document, a document without a ``session_id`` that ``check_item_id`` takes, or a
+    ``session_id`` that an earlier line has.
+    """
+    documents: list[tuple[str, Mapping[str, Any]]] = []
+    seen: set[str] = set()
+    for number, line in enumerate(lines, start=1):
+        if not line.strip():
+            continue
+        try:
+            document = json.loads(line)
+            TrajectorySample(document)
+            item_id = check_item_id(document.get("session_id"))
+        except (ValueError, TypeError, AttributeError) as exc:
+            raise ValueError(f"{source} line {number}: {exc}") from exc
+        if item_id in seen:
+            raise ValueError(f"{source} line {number}: session_id {item_id!r} is on an earlier line")
+        seen.add(item_id)
+        documents.append((item_id, document))
+    return documents
+
+
+def create_trajectory_items(
+    dispatcher: Dispatcher,
+    owner: str,
+    documents: Sequence[tuple[str, Mapping[str, Any]]],
+    metadata: Mapping[str, Any],
+    *,
+    wait: bool = True,
+) -> dict[str, Any]:
+    """Create a trajectory item for each ATIF document of ``documents`` (``jsonl_trajectories``), each with
+    ``metadata``, whose ``kind`` is ``trajectory``; return ``{owner, items, synced}`` as ``store_items`` does."""
+    check_owner(owner)
+    if not isinstance(metadata, Mapping) or metadata.get("kind", "trajectory") != "trajectory":
+        raise ValueError("the metadata of trajectory items is an object whose kind is trajectory")
+    items = [NewItem(item_id, document, {**metadata, "kind": "trajectory"}) for item_id, document in documents]
+    return store_items(dispatcher, owner, items, wait=wait)
+
+
+def store_items(dispatcher: Dispatcher, owner: str, items: Sequence[NewItem], *, wait: bool = True) -> dict[str, Any]:
+    """Check and store 1 to ``MAX_ITEMS_PER_CREATE`` trajectory and record items of ``owner`` in one transaction,
+    then sync the scenarios that they name; return ``{owner, items, synced}``, without content.
+
+    Each item's metadata passes ``created_metadata``; a trajectory's content is an ATIF document, and a record's
+    content and ID are what ``copied_record`` takes. ``wait`` is as in ``sync_touched``.
+    """
+    if not 1 <= len(items) <= MAX_ITEMS_PER_CREATE:
+        raise ValueError(f"a create call holds 1 to {MAX_ITEMS_PER_CREATE} items")
+    uses: dict[str, list[Use]] = {}
+    for item in items:
+        checked = created_metadata(owner, item.metadata)
+        content = cast(Mapping[str, Any], item.content)
         for scenario, split in checked["scenarios"].items():
-            uses.setdefault(scenario, []).append(new_use(item_id, checked["kind"], content, split))
+            uses.setdefault(scenario, []).append(new_use(item.item_id, checked["kind"], content, split))
         if checked["kind"] == "trajectory":
             TrajectorySample(content)
         if checked["kind"] == "record":
-            copied_record(item_id, content, checked["origin"]["scenario"], checked["origin"]["scenario"])
-        items.append(NewItem(item_id, content, metadata))
+            copied_record(item.item_id, content, checked["origin"]["scenario"], checked["origin"]["scenario"])
     check_uses(dispatcher, owner, uses)
-    stored = data_store(dispatcher).create(owner, items)
+    stored = data_store(dispatcher).create(owner, list(items))
     synced = sync_touched(dispatcher, owner, uses, wait=wait)
     return {"owner": owner, "items": [item_json(item, content=False) for item in stored], "synced": synced}
 
@@ -311,11 +368,14 @@ __all__ = [
     "create_items",
     "create_task_directories",
     "create_task_items",
+    "create_trajectory_items",
     "data_store",
     "delete_item",
     "item_json",
+    "jsonl_trajectories",
     "parsed_metadata",
     "query_items",
     "read_item",
+    "store_items",
     "update_items",
 ]

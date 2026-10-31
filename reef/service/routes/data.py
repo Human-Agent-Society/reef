@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import tempfile
 from pathlib import Path
+from typing import Any
 
 from aiohttp import web
 
@@ -15,7 +16,9 @@ from reef.service.auth import signed_download_url
 from reef.service.data import (
     create_items,
     create_task_items,
+    create_trajectory_items,
     delete_item,
+    jsonl_trajectories,
     parsed_metadata,
     query_items,
     read_item,
@@ -29,9 +32,11 @@ from reef.storage.data import MAX_QUERY_LIMIT
 
 #: The content types of a task archive.
 TASK_ARCHIVE_TYPES = frozenset({"application/gzip", "application/x-gzip"})
+#: The content types of a JSON Lines upload of trajectories: one ATIF document a line.
+TRAJECTORY_LINES_TYPES = frozenset({"application/x-ndjson", "application/jsonl"})
 #: The bytes read from the body at a time.
 CHUNK_BYTES = 1024 * 1024
-#: The most bytes of a JSON create body: 1000 trajectories of an ATIF upload before RFC #1028.
+#: The most bytes of a create body, JSON or JSON Lines: 1000 trajectories of an ATIF upload before RFC #1028.
 MAX_CREATE_BYTES = 10 * 1024 * 1024
 
 
@@ -92,6 +97,26 @@ def register_data_routes(app: web.Application, *, request_service: RequestServic
         receipt = await asyncio.to_thread(create_items, dispatcher, request.match_info["owner"], body)
         return web.json_response(receipt, status=201)
 
+    async def create_trajectories(request: web.Request) -> web.Response:
+        if request.content_type not in TRAJECTORY_LINES_TYPES:
+            raise web.HTTPUnsupportedMediaType(
+                text="trajectory items come as JSON Lines with Content-Type application/x-ndjson"
+            )
+        metadata = parsed_metadata(request.query.get("metadata"))
+        body = await request.clone(client_max_size=MAX_CREATE_BYTES).read()
+        try:
+            text = body.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise web.HTTPBadRequest(text=f"the JSON Lines body is not UTF-8: {exc}") from None
+        owner = request.match_info["owner"]
+
+        def create() -> dict[str, Any]:
+            return create_trajectory_items(
+                dispatcher, owner, jsonl_trajectories(text.splitlines(), "the body"), metadata
+            )
+
+        return web.json_response(await asyncio.to_thread(create), status=201)
+
     async def create_tasks(request: web.Request) -> web.Response:
         if request.content_type not in TASK_ARCHIVE_TYPES:
             raise web.HTTPUnsupportedMediaType(
@@ -146,6 +171,7 @@ def register_data_routes(app: web.Application, *, request_service: RequestServic
     transfers = "{transfer:" + "|".join(TRANSFER_KINDS) + "}"
     app.router.add_post(base, create)
     app.router.add_get(base, query)
+    app.router.add_post(f"{base}/trajectories", create_trajectories)
     app.router.add_post(f"{base}/tasks", create_tasks)
     app.router.add_post(f"{base}/metadata", update)
     # These come before the item routes, whose ID takes the rest of the path.

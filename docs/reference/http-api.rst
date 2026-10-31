@@ -57,7 +57,9 @@ Routes
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/records/batch``                                                     | atomically import a batch of records              |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
-| ``POST /reef/namespaces/{owner}/data``                                           | create trajectory and record items                |
+| ``POST /reef/namespaces/{owner}/data``                                           | create record items                               |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/namespaces/{owner}/data/trajectories``                              | create trajectory items from JSON Lines           |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/namespaces/{owner}/data/tasks``                                     | create task items from a tar.gz of Harbor tasks   |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
@@ -405,32 +407,31 @@ waits runs when control takes it, or when the scenario loads.
 Create trajectory items
 ~~~~~~~~~~~~~~~~~~~~~~~
 
-Send 1 to 1000 items in one request to ``POST
-/reef/namespaces/{owner}/data``. The body is at most 10 MiB. Each item has an
-``id`` that you choose, its ``content`` and its ``metadata``. A trajectory
-must have an ``ATIF-v`` ``schema_version``, an ``agent`` object and one or
-more steps:
+Send trajectories as JSON Lines to ``POST
+/reef/namespaces/{owner}/data/trajectories`` with ``Content-Type:
+application/x-ndjson`` (or ``application/jsonl``). Each line is one ATIF
+document, and Reef skips blank lines. A document must have an ``ATIF-v``
+``schema_version``, an ``agent`` object, one or more steps, and a
+``session_id``, which is the item's ID. One request holds 1 to 1000
+trajectories, two of which never share a ``session_id``, and at most 10 MiB.
+The query parameter ``metadata`` is the JSON metadata of every trajectory of
+the request; its ``kind`` is ``trajectory``:
 
 .. code:: bash
 
-   curl -f http://127.0.0.1:8900/reef/namespaces/my-agent/data \
+   curl -f "http://127.0.0.1:8900/reef/namespaces/my-agent/data/trajectories" \
+     --get --data-urlencode 'metadata={"scenarios": {"my-agent": "train"}}' \
+     -X POST \
      -H "Authorization: Bearer $REEF_TOKEN" \
-     -H 'Content-Type: application/json' \
-     -d '{"items": [{
-       "id": "trajectory-0001",
-       "content": {
-         "schema_version": "ATIF-v1.4",
-         "session_id": "trajectory-0001",
-         "agent": {"name": "my-agent", "version": "1"},
-         "steps": [{"step_id": 1, "source": "user", "message": "What is 2 + 2?"}]
-       },
-       "metadata": {"kind": "trajectory", "scenarios": {"my-agent": "train"}}
-     }]}'
+     -H 'Content-Type: application/x-ndjson' \
+     --data-binary @trajectories.jsonl
 
 The response has status 201: ``{"owner", "items": [{"id", "sequence",
 "digest", "metadata"}], "synced"}``. Reef stores all of the items in one transaction,
 or none. An identical retry changes nothing. The same ID with other content
-returns 409.
+returns 409. A line that is not an ATIF document returns 400 and names the
+line. ``POST /reef/namespaces/{owner}/data`` refuses a trajectory; it creates
+record items only.
 
 Before Reef stores the items, it checks each scenario that they name. The
 scenario must have the owner, and its recipe must train on the items:
@@ -609,8 +610,11 @@ adds. It finds the items as follows:
   named after the last segment of the URI's path. Otherwise each directory
   directly under the root that holds ``task.toml`` is one task, named after
   the directory.
-- ``trajectory``: each ``*.json`` file at the root is an ATIF document. Its
-  item ID is the file name without ``.json``.
+- ``trajectory``: each ``*.jsonl`` file at the root holds one ATIF document a
+  line, as the upload takes them. Each document's ``session_id`` is its item
+  ID; two documents of the import never share one. Reef stores the items in
+  transactions of at most 1000, so an import that fails can leave the items of
+  its earlier transactions. Reef reads no other file.
 
 The import checks and stores the items as the create routes do. It does not
 wait for the syncs of the scenarios that it touched.

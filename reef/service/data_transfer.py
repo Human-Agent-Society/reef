@@ -7,8 +7,9 @@ a scenario.
 - An import (``data_import``) reads the files at a URI with the deployment's source readers (``ArtifactSources``)
   and stores them as items of the owner with the request's metadata. For ``kind: task`` each Harbor task directory
   becomes a task item: the URI's root when it holds ``task.toml``, else each directory under the root that holds
-  one. For ``kind: trajectory`` each ``*.json`` file at the root is an ATIF document and becomes a trajectory item
-  named after the file. It checks and stores the items as an upload does, and asks control to sync the scenarios
+  one. For ``kind: trajectory`` each ``*.jsonl`` file at the root holds one ATIF document a line, and each line
+  becomes a trajectory item named after its ``session_id``. The items are stored in transactions of at most
+  ``MAX_ITEMS_PER_CREATE``, so an import that fails can leave the items of its earlier transactions. It checks and stores the items as an upload does, and asks control to sync the scenarios
   without waiting.
 - An export (``data_export``) writes the items that the request names, or that match its ``kind`` and ``scenario``,
   to a tar.gz at a URI (``ArchiveWriters``). The archive holds ``manifest.jsonl``, one line ``{id, kind, metadata,
@@ -24,6 +25,7 @@ import tarfile
 import tempfile
 import uuid
 from abc import ABC, abstractmethod
+from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,7 +34,14 @@ from urllib.parse import unquote, urlsplit
 
 from reef.artifact.sources import ArtifactSources
 from reef.dispatcher import Dispatcher
-from reef.service.data import KINDS, MAX_ITEMS_PER_CREATE, create_items, create_task_directories, data_store
+from reef.service.data import (
+    KINDS,
+    MAX_ITEMS_PER_CREATE,
+    create_task_directories,
+    create_trajectory_items,
+    data_store,
+    jsonl_trajectories,
+)
 from reef.storage.data import DATA_QUEUE, MAX_QUERY_LIMIT, ItemNotFound, StoredItem, check_owner
 from reef.storage.work_queue import JsonValue, NewWork, WorkItem
 
@@ -125,15 +134,22 @@ def run_import(dispatcher: Dispatcher, sources: ArtifactSources, payload: Mappin
                 directories = [root.rename(Path(work) / name)]
             create_task_directories(dispatcher, owner, directories, metadata, wait=False)
             return {"items": len(directories)}
-        documents = sorted(root.glob("*.json"))
-        if not documents:
-            raise ValueError(f"{uri} holds no *.json trajectory at its root")
+        files = sorted(root.glob("*.jsonl"))
+        if not files:
+            raise ValueError(f"{uri} holds no *.jsonl file of trajectories at its root")
+        documents = []
+        for path in files:
+            with path.open(encoding="utf-8") as lines:
+                documents.extend(jsonl_trajectories(lines, path.name))
+        repeated = sorted(
+            item_id for item_id, count in Counter(item_id for item_id, _ in documents).items() if count > 1
+        )
+        if repeated:
+            raise ValueError(f"{uri} holds the session_ids {repeated} in more than one file")
         for start in range(0, len(documents), MAX_ITEMS_PER_CREATE):
-            entries = [
-                {"id": path.stem, "content": json.loads(path.read_text(encoding="utf-8")), "metadata": metadata}
-                for path in documents[start : start + MAX_ITEMS_PER_CREATE]
-            ]
-            create_items(dispatcher, owner, {"items": entries}, wait=False)
+            create_trajectory_items(
+                dispatcher, owner, documents[start : start + MAX_ITEMS_PER_CREATE], metadata, wait=False
+            )
         return {"items": len(documents)}
 
 

@@ -12,7 +12,14 @@ from typing import Any
 
 from aiohttp.test_utils import TestClient, TestServer
 from tests.support.task_service_stubs import task_for
-from tests.support.trajectory_uploads import TOKEN, UploadRecipe, atif, dispatcher_for
+from tests.support.trajectory_uploads import (
+    TOKEN,
+    UploadRecipe,
+    atif,
+    dispatcher_for,
+    trajectory_lines,
+    upload_trajectories,
+)
 
 from reef.core.tasks import write_harbor_task
 from reef.dispatcher import Dispatcher
@@ -52,8 +59,9 @@ def test_an_import_from_a_uri_stores_tasks_and_trajectories_and_an_export_writes
         write_harbor_task(task_for(name, "record-1", 9000), tasks)
     trajectories = tmp_path / "source-trajectories"
     trajectories.mkdir()
-    for name in ("t1", "t2"):
-        (trajectories / f"{name}.json").write_text(json.dumps(atif(name)))
+    # One ATIF document a line; a file of another type is not read.
+    (trajectories / "batch.jsonl").write_bytes(trajectory_lines("t1", "t2"))
+    (trajectories / "t3.json").write_text(json.dumps(atif("t3")))
     exported = tmp_path / "out" / "export.tar.gz"
     exported.parent.mkdir()
     dispatcher = dispatcher_for(tmp_path, UploadRecipe())
@@ -108,8 +116,7 @@ def test_an_import_from_a_uri_stores_tasks_and_trajectories_and_an_export_writes
 
 def test_an_item_archive_downloads_with_the_token_or_with_a_signed_url_alone(tmp_path: Path) -> None:
     async def check(client: TestClient) -> None:
-        body = {"items": [{"id": "t1", "content": atif("t1"), "metadata": {"kind": "trajectory"}}]}
-        assert (await client.post(DATA, headers=AUTH, json=body)).status == 201
+        assert (await upload_trajectories(client, AUTH, "t1", scenario=None, base=DATA)).status == 201
         archive = f"{DATA}/t1/archive"
         assert json.loads(await (await client.get(archive, headers=AUTH)).read()) == atif("t1")
         assert (await client.get(archive)).status == 401

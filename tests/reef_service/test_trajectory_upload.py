@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
@@ -15,7 +16,8 @@ from tests.support.trajectory_uploads import (
     UploadRecipe,
     atif,
     dispatcher_for,
-    trajectory_items,
+    trajectory_lines,
+    upload_trajectories,
 )
 
 from reef.dispatcher import Dispatcher
@@ -47,7 +49,7 @@ def test_trajectory_items_train_once_also_after_a_restart(tmp_path):
     async def create_and_train(dispatcher: Dispatcher) -> None:
         async with TestClient(TestServer(create_app(dispatcher, tokens=TOKEN))) as client:
             await create_scenario(client)
-            response = await client.post(DATA, headers=AUTH, json=trajectory_items("t1", "t2"))
+            response = await upload_trajectories(client, AUTH, "t1", "t2")
             assert response.status == 201, await response.text()
             body = await response.json()
             assert [item["id"] for item in body["items"]] == ["t1", "t2"]
@@ -55,15 +57,15 @@ def test_trajectory_items_train_once_also_after_a_restart(tmp_path):
             await wait_for_batches(recipe, 1)
 
             # A retry after training changes nothing. The same ID with another trajectory conflicts.
-            response = await client.post(DATA, headers=AUTH, json=trajectory_items("t1"))
+            response = await upload_trajectories(client, AUTH, "t1")
             assert response.status == 201
-            conflict = {"items": [{"id": "t1", "content": atif("other"), "metadata": {"kind": "trajectory"}}]}
-            response = await client.post(DATA, headers=AUTH, json=conflict)
+            conflict = json.dumps({**atif("other"), "session_id": "t1"}).encode()
+            response = await upload_trajectories(client, AUTH, lines=conflict)
             assert response.status == 409
 
     async def create_after_restart(dispatcher: Dispatcher) -> None:
         async with TestClient(TestServer(create_app(dispatcher, tokens=TOKEN))) as client:
-            response = await client.post(DATA, headers=AUTH, json=trajectory_items("t3", "t4"))
+            response = await upload_trajectories(client, AUTH, "t3", "t4")
             assert response.status == 201, await response.text()
             await create_scenario(client)
             await wait_for_batches(recipe, 2)
@@ -91,7 +93,7 @@ def test_a_scenario_uses_a_trajectory_only_through_a_recipe_that_accepts_uploade
     async def run():
         async with TestClient(TestServer(create_app(dispatcher, tokens=TOKEN))) as client:
             await create_scenario(client)
-            response = await client.post(DATA, headers=AUTH, json=trajectory_items("trajectory-1"))
+            response = await upload_trajectories(client, AUTH, "trajectory-1")
             assert response.status == 400
             assert "does not accept uploaded trajectories" in await response.text()
             assert dispatcher.data_store.query("s") == ()
@@ -103,31 +105,42 @@ def test_a_scenario_uses_a_trajectory_only_through_a_recipe_that_accepts_uploade
         dispatcher.close()
 
 
-def test_an_invalid_create_is_refused_and_stores_nothing(tmp_path):
+def test_an_invalid_upload_is_refused_and_stores_nothing(tmp_path):
     dispatcher = dispatcher_for(tmp_path, UploadRecipe())
 
-    def item(**fields):
-        return {"id": "t", "content": atif("t"), "metadata": {"kind": "trajectory"}, **fields}
+    def line(**fields) -> bytes:
+        return json.dumps({**atif("t"), **fields}).encode() + b"\n"
 
     async def run():
         async with TestClient(TestServer(create_app(dispatcher, tokens=TOKEN))) as client:
-            response = await client.post(DATA, json=trajectory_items("t"))
+            response = await upload_trajectories(client, {}, "t")
             assert response.status == 401
-            for body in (
-                {},
-                {"items": []},
-                {"items": [item(extra=1)]},
-                {"items": [item(id="")]},
-                {"items": [item(content={**atif("t"), "steps": []})]},
-                {"items": [item(content={**atif("t"), "schema_version": "v1"})]},
-                {"items": [item(metadata={"kind": "dataset"})]},
-                {"items": [item(metadata={"kind": "task"})]},
-                {"items": [item(metadata={"kind": "trajectory", "scenarios": {"s": "eval"}})]},
-                {**trajectory_items("t"), "scenario": "other"},
-                trajectory_items(*(f"t{index}" for index in range(1001))),
+            for lines in (
+                b"",
+                b"not json\n",
+                b"[1]\n",
+                line(session_id=""),
+                line(steps=[]),
+                line(schema_version="v1"),
+                line() + line(),
+                trajectory_lines(*(f"t{index}" for index in range(1001))),
             ):
-                response = await client.post(DATA, headers=AUTH, json=body)
-                assert response.status == 400, (body, await response.text())
+                response = await upload_trajectories(client, AUTH, lines=lines)
+                assert response.status == 400, (lines[:80], await response.text())
+            for metadata in ({"kind": "task"}, {"kind": "trajectory", "scenarios": {"s": "eval"}}):
+                response = await client.post(
+                    f"{DATA}/trajectories",
+                    headers={**AUTH, "Content-Type": "application/x-ndjson"},
+                    params={"metadata": json.dumps(metadata)},
+                    data=trajectory_lines("t"),
+                )
+                assert response.status == 400, (metadata, await response.text())
+            # Trajectories come as JSON Lines alone: not as a JSON body, and not with another content type.
+            body = {"items": [{"id": "t", "content": atif("t"), "metadata": {"kind": "trajectory"}}]}
+            refused = await client.post(DATA, headers=AUTH, json=body)
+            assert refused.status == 400 and "JSON Lines" in await refused.text()
+            wrong = await client.post(f"{DATA}/trajectories", headers=AUTH, json=atif("t"))
+            assert wrong.status == 415
             assert dispatcher.data_store.query("s") == ()
 
     try:
@@ -160,11 +173,11 @@ def test_a_trajectory_that_cannot_train_is_refused_and_jobs_get_the_rendered_sam
     async def run():
         async with TestClient(TestServer(create_app(dispatcher, tokens=TOKEN))) as client:
             await create_scenario(client)
-            response = await client.post(DATA, headers=AUTH, json=trajectory_items("good", "bad"))
+            response = await upload_trajectories(client, AUTH, "good", "bad")
             assert response.status == 400
             assert "trajectory 'bad' cannot train: it has no agent step" in await response.text()
             assert dispatcher.data_store.query("s") == (), "nothing of it is stored"
-            response = await client.post(DATA, headers=AUTH, json=trajectory_items("t1", "t2"))
+            response = await upload_trajectories(client, AUTH, "t1", "t2")
             assert response.status == 201, await response.text()
             await wait_for_batches(recipe, 1)
 
@@ -184,7 +197,7 @@ def test_an_item_that_leaves_a_scenario_leaves_its_samples_and_the_item_stays(tm
     async def run():
         async with TestClient(TestServer(create_app(dispatcher, tokens=TOKEN))) as client:
             # Items that name no scenario, or a scenario that does not exist yet, wait in the data store.
-            response = await client.post(DATA, headers=AUTH, json=trajectory_items("t1", "t2", scenario=None))
+            response = await upload_trajectories(client, AUTH, "t1", "t2", scenario=None)
             assert response.status == 201
             await create_scenario(client)
             assert sample_ids(dispatcher) == []
