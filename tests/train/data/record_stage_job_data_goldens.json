@@ -176,21 +176,7 @@
       "r1"
      ],
      "training": {
-      "loss_mask": [
-       0,
-       1,
-       1
-      ],
-      "rollout_log_probs": [
-       -0.1,
-       -0.2
-      ],
-      "artifact_id": "wv-1",
-      "tokens": [
-       1,
-       2,
-       3
-      ]
+      "artifact_id": "wv-1"
      }
     },
     {
@@ -212,21 +198,7 @@
       "r2"
      ],
      "training": {
-      "loss_mask": [
-       0,
-       1,
-       1
-      ],
-      "rollout_log_probs": [
-       -0.1,
-       -0.2
-      ],
-      "artifact_id": "wv-1",
-      "tokens": [
-       1,
-       2,
-       3
-      ]
+      "artifact_id": "wv-1"
      }
     }
    ],
@@ -270,21 +242,7 @@
       "r3"
      ],
      "training": {
-      "loss_mask": [
-       0,
-       1,
-       1
-      ],
-      "rollout_log_probs": [
-       -0.1,
-       -0.2
-      ],
-      "artifact_id": "wv-1",
-      "tokens": [
-       1,
-       2,
-       3
-      ]
+      "artifact_id": "wv-1"
      }
     },
     {
@@ -306,21 +264,7 @@
       "r4"
      ],
      "training": {
-      "loss_mask": [
-       0,
-       1,
-       1
-      ],
-      "rollout_log_probs": [
-       -0.1,
-       -0.2
-      ],
-      "artifact_id": "wv-1",
-      "tokens": [
-       1,
-       2,
-       3
-      ]
+      "artifact_id": "wv-1"
      }
     }
    ],
@@ -419,42 +363,32 @@
    "items": [
     {
      "group": null,
-     "recipe": {},
+     "recipe": {
+      "teacher": {
+       "max_prompt_tokens": 0,
+       "max_tokens": 30,
+       "messages": [
+        {
+         "content": "What is the boiling point of water?",
+         "role": "user"
+        }
+       ],
+       "tools": [
+        {
+         "function": {
+          "name": "lookup"
+         },
+         "type": "function"
+        }
+       ]
+      }
+     },
      "reward": 0.0,
      "sources": [
       "i0",
       "r0"
      ],
-     "training": {
-      "loss_mask": [
-       1,
-       1,
-       1
-      ],
-      "rollout_log_probs": [
-       -0.1,
-       -0.2,
-       -0.3
-      ],
-      "artifact_id": null,
-      "teacher_tokens": [
-       100,
-       101,
-       102,
-       103,
-       1,
-       2,
-       3
-      ],
-      "tokens": [
-       5,
-       6,
-       7,
-       1,
-       2,
-       3
-      ]
-     }
+     "training": {}
     }
    ],
    "released": [
@@ -469,48 +403,77 @@
   },
   {
    "consumed": [
-    "sample:r2:0"
+    "sample:r1:0"
    ],
    "data_id": "s:data:2",
    "items": [
     {
      "group": null,
-     "recipe": {},
+     "recipe": {
+      "teacher": {
+       "max_prompt_tokens": 0,
+       "max_tokens": 30,
+       "messages": [
+        {
+         "content": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+         "role": "user"
+        }
+       ],
+       "tools": [
+        {
+         "function": {
+          "name": "lookup"
+         },
+         "type": "function"
+        }
+       ]
+      }
+     },
+     "reward": 0.0,
+     "sources": [
+      "i1",
+      "r1"
+     ],
+     "training": {}
+    }
+   ],
+   "released": [],
+   "request": null
+  },
+  {
+   "consumed": [
+    "sample:r2:0"
+   ],
+   "data_id": "s:data:3",
+   "items": [
+    {
+     "group": null,
+     "recipe": {
+      "teacher": {
+       "max_prompt_tokens": 0,
+       "max_tokens": 30,
+       "messages": [
+        {
+         "content": "What is the boiling point of water?",
+         "role": "user"
+        }
+       ],
+       "tools": [
+        {
+         "function": {
+          "name": "lookup"
+         },
+         "type": "function"
+        }
+       ]
+      }
+     },
      "reward": 0.0,
      "sources": [
       "i2",
       "r2"
      ],
-     "training": {
-      "loss_mask": [
-       1,
-       1,
-       1
-      ],
-      "rollout_log_probs": [
-       -0.1,
-       -0.2,
-       -0.3
-      ],
-      "artifact_id": null,
-      "teacher_tokens": [
-       100,
-       101,
-       102,
-       103,
-       1,
-       2,
-       3
-      ],
-      "tokens": [
-       5,
-       6,
-       7,
-       1,
-       2,
-       3
-      ]
-     }
+     "training": {}
     }
    ],
    "released": [],
@@ -540,23 +503,7 @@
       "i-z-0",
       "r-z-0"
      ],
-     "training": {
-      "loss_mask": [
-       0,
-       1,
-       1
-      ],
-      "rollout_log_probs": [
-       -0.1,
-       -0.2
-      ],
-      "artifact_id": null,
-      "tokens": [
-       1,
-       2,
-       3
-      ]
-     }
+     "training": {}
     },
     {
      "group": null,
@@ -566,23 +513,7 @@
       "i-a-0",
       "r-a-0"
      ],
-     "training": {
-      "loss_mask": [
-       0,
-       1,
-       1
-      ],
-      "rollout_log_probs": [
-       -0.1,
-       -0.2
-      ],
-      "artifact_id": null,
-      "tokens": [
-       1,
-       2,
-       3
-      ]
-     }
+     "training": {}
     },
     {
      "group": null,
@@ -592,23 +523,7 @@
       "i-single-0",
       "r-single-0"
      ],
-     "training": {
-      "loss_mask": [
-       0,
-       1,
-       1
-      ],
-      "rollout_log_probs": [
-       -0.1,
-       -0.2
-      ],
-      "artifact_id": null,
-      "tokens": [
-       1,
-       2,
-       3
-      ]
-     }
+     "training": {}
     }
    ],
    "released": [
@@ -666,6 +581,24 @@
          "type": "function"
         }
        ]
+      },
+      "teacher": {
+       "max_prompt_tokens": 10240,
+       "max_tokens": 18432,
+       "messages": [
+        {
+         "content": "What is 2+2?",
+         "role": "user"
+        }
+       ],
+       "tools": [
+        {
+         "function": {
+          "name": "lookup"
+         },
+         "type": "function"
+        }
+       ]
       }
      },
      "reward": 1.0,
@@ -674,33 +607,7 @@
       "report-s0r0"
      ],
      "training": {
-      "distill_sample_weight": 0.0,
-      "loss_mask": [
-       1,
-       1,
-       1
-      ],
-      "rollout_log_probs": [
-       -0.1,
-       -0.2,
-       -0.3
-      ],
-      "artifact_id": null,
-      "teacher_tokens": [
-       100,
-       101,
-       1,
-       2,
-       3
-      ],
-      "tokens": [
-       5,
-       6,
-       7,
-       1,
-       2,
-       3
-      ]
+      "distill_sample_weight": 0.0
      }
     },
     {
@@ -727,6 +634,24 @@
          "type": "function"
         }
        ]
+      },
+      "teacher": {
+       "max_prompt_tokens": 10240,
+       "max_tokens": 18432,
+       "messages": [
+        {
+         "content": "What is 2+2?\nCorrect solution:\n\nAnswer from s0r0\n\nCorrectly solve the original question.",
+         "role": "user"
+        }
+       ],
+       "tools": [
+        {
+         "function": {
+          "name": "lookup"
+         },
+         "type": "function"
+        }
+       ]
       }
      },
      "reward": 0.0,
@@ -735,40 +660,7 @@
       "report-s0r1"
      ],
      "training": {
-      "distill_sample_weight": 1.0,
-      "loss_mask": [
-       1,
-       1,
-       1
-      ],
-      "rollout_log_probs": [
-       -0.1,
-       -0.2,
-       -0.3
-      ],
-      "artifact_id": null,
-      "teacher_tokens": [
-       100,
-       101,
-       102,
-       103,
-       104,
-       105,
-       106,
-       107,
-       108,
-       1,
-       2,
-       3
-      ],
-      "tokens": [
-       5,
-       6,
-       7,
-       1,
-       2,
-       3
-      ]
+      "distill_sample_weight": 1.0
      }
     }
    ],
@@ -819,6 +711,24 @@
          "type": "function"
         }
        ]
+      },
+      "teacher": {
+       "max_prompt_tokens": 10240,
+       "max_tokens": 18432,
+       "messages": [
+        {
+         "content": "What is 2+2?",
+         "role": "user"
+        }
+       ],
+       "tools": [
+        {
+         "function": {
+          "name": "lookup"
+         },
+         "type": "function"
+        }
+       ]
       }
      },
      "reward": 1.0,
@@ -827,33 +737,7 @@
       "report-s2r0"
      ],
      "training": {
-      "distill_sample_weight": 0.0,
-      "loss_mask": [
-       1,
-       1,
-       1
-      ],
-      "rollout_log_probs": [
-       -0.1,
-       -0.2,
-       -0.3
-      ],
-      "artifact_id": null,
-      "teacher_tokens": [
-       100,
-       101,
-       1,
-       2,
-       3
-      ],
-      "tokens": [
-       5,
-       6,
-       7,
-       1,
-       2,
-       3
-      ]
+      "distill_sample_weight": 0.0
      }
     },
     {
@@ -880,6 +764,24 @@
          "type": "function"
         }
        ]
+      },
+      "teacher": {
+       "max_prompt_tokens": 10240,
+       "max_tokens": 18432,
+       "messages": [
+        {
+         "content": "What is 2+2?\nCorrect solution:\n\nAnswer from s2r0\n\nCorrectly solve the original question.",
+         "role": "user"
+        }
+       ],
+       "tools": [
+        {
+         "function": {
+          "name": "lookup"
+         },
+         "type": "function"
+        }
+       ]
       }
      },
      "reward": 0.0,
@@ -888,40 +790,7 @@
       "report-s2r1"
      ],
      "training": {
-      "distill_sample_weight": 1.0,
-      "loss_mask": [
-       1,
-       1,
-       1
-      ],
-      "rollout_log_probs": [
-       -0.1,
-       -0.2,
-       -0.3
-      ],
-      "artifact_id": null,
-      "teacher_tokens": [
-       100,
-       101,
-       102,
-       103,
-       104,
-       105,
-       106,
-       107,
-       108,
-       1,
-       2,
-       3
-      ],
-      "tokens": [
-       5,
-       6,
-       7,
-       1,
-       2,
-       3
-      ]
+      "distill_sample_weight": 1.0
      }
     }
    ],
@@ -957,23 +826,7 @@
       "i-g1-0",
       "r-g1-0"
      ],
-     "training": {
-      "loss_mask": [
-       0,
-       1,
-       1
-      ],
-      "rollout_log_probs": [
-       -0.1,
-       -0.2
-      ],
-      "artifact_id": null,
-      "tokens": [
-       1,
-       2,
-       3
-      ]
-     }
+     "training": {}
     },
     {
      "group": "r-g1-0",
@@ -983,23 +836,7 @@
       "i-g1-1",
       "r-g1-1"
      ],
-     "training": {
-      "loss_mask": [
-       0,
-       1,
-       1
-      ],
-      "rollout_log_probs": [
-       -0.1,
-       -0.2
-      ],
-      "artifact_id": null,
-      "tokens": [
-       1,
-       2,
-       3
-      ]
-     }
+     "training": {}
     }
    ],
    "released": [
@@ -1037,23 +874,7 @@
       "i-g1-2",
       "r-g1-2"
      ],
-     "training": {
-      "loss_mask": [
-       0,
-       1,
-       1
-      ],
-      "rollout_log_probs": [
-       -0.1,
-       -0.2
-      ],
-      "artifact_id": null,
-      "tokens": [
-       1,
-       2,
-       3
-      ]
-     }
+     "training": {}
     },
     {
      "group": "r-g1-2",
@@ -1063,23 +884,7 @@
       "i-g1-3",
       "r-g1-3"
      ],
-     "training": {
-      "loss_mask": [
-       0,
-       1,
-       1
-      ],
-      "rollout_log_probs": [
-       -0.1,
-       -0.2
-      ],
-      "artifact_id": null,
-      "tokens": [
-       1,
-       2,
-       3
-      ]
-     }
+     "training": {}
     }
    ],
    "released": [
@@ -1132,23 +937,7 @@
       "i-1-0-0",
       "r-1-0-0"
      ],
-     "training": {
-      "loss_mask": [
-       0,
-       1,
-       1
-      ],
-      "rollout_log_probs": [
-       -0.1,
-       -0.2
-      ],
-      "artifact_id": null,
-      "tokens": [
-       1,
-       2,
-       3
-      ]
-     }
+     "training": {}
     },
     {
      "group": "0",
@@ -1165,23 +954,7 @@
       "i-1-0-1",
       "r-1-0-1"
      ],
-     "training": {
-      "loss_mask": [
-       0,
-       1,
-       1
-      ],
-      "rollout_log_probs": [
-       -0.1,
-       -0.2
-      ],
-      "artifact_id": null,
-      "tokens": [
-       1,
-       2,
-       3
-      ]
-     }
+     "training": {}
     },
     {
      "group": "1",
@@ -1198,23 +971,7 @@
       "i-1-1-0",
       "r-1-1-0"
      ],
-     "training": {
-      "loss_mask": [
-       0,
-       1,
-       1
-      ],
-      "rollout_log_probs": [
-       -0.1,
-       -0.2
-      ],
-      "artifact_id": null,
-      "tokens": [
-       1,
-       2,
-       3
-      ]
-     }
+     "training": {}
     },
     {
      "group": "1",
@@ -1231,23 +988,7 @@
       "i-1-1-1",
       "r-1-1-1"
      ],
-     "training": {
-      "loss_mask": [
-       0,
-       1,
-       1
-      ],
-      "rollout_log_probs": [
-       -0.1,
-       -0.2
-      ],
-      "artifact_id": null,
-      "tokens": [
-       1,
-       2,
-       3
-      ]
-     }
+     "training": {}
     }
    ],
    "released": [
@@ -1291,23 +1032,7 @@
       "i-a-0",
       "r-a-0"
      ],
-     "training": {
-      "loss_mask": [
-       0,
-       1,
-       1
-      ],
-      "rollout_log_probs": [
-       -0.1,
-       -0.2
-      ],
-      "artifact_id": null,
-      "tokens": [
-       1,
-       2,
-       3
-      ]
-     }
+     "training": {}
     },
     {
      "group": null,
@@ -1317,23 +1042,7 @@
       "i-a-1",
       "r-a-1"
      ],
-     "training": {
-      "loss_mask": [
-       0,
-       1,
-       1
-      ],
-      "rollout_log_probs": [
-       -0.1,
-       -0.2
-      ],
-      "artifact_id": null,
-      "tokens": [
-       1,
-       2,
-       3
-      ]
-     }
+     "training": {}
     }
    ],
    "released": [
@@ -1365,23 +1074,7 @@
       "i-a-2",
       "r-a-2"
      ],
-     "training": {
-      "loss_mask": [
-       0,
-       1,
-       1
-      ],
-      "rollout_log_probs": [
-       -0.1,
-       -0.2
-      ],
-      "artifact_id": null,
-      "tokens": [
-       1,
-       2,
-       3
-      ]
-     }
+     "training": {}
     },
     {
      "group": null,
@@ -1391,23 +1084,7 @@
       "i-a-3",
       "r-a-3"
      ],
-     "training": {
-      "loss_mask": [
-       0,
-       1,
-       1
-      ],
-      "rollout_log_probs": [
-       -0.1,
-       -0.2
-      ],
-      "artifact_id": null,
-      "tokens": [
-       1,
-       2,
-       3
-      ]
-     }
+     "training": {}
     }
    ],
    "released": [
@@ -1441,23 +1118,7 @@
       "i-a-0",
       "r-a-0"
      ],
-     "training": {
-      "loss_mask": [
-       0,
-       1,
-       1
-      ],
-      "rollout_log_probs": [
-       -0.1,
-       -0.2
-      ],
-      "artifact_id": null,
-      "tokens": [
-       1,
-       2,
-       3
-      ]
-     }
+     "training": {}
     },
     {
      "group": null,
@@ -1467,23 +1128,7 @@
       "i-a-1",
       "r-a-1"
      ],
-     "training": {
-      "loss_mask": [
-       0,
-       1,
-       1
-      ],
-      "rollout_log_probs": [
-       -0.1,
-       -0.2
-      ],
-      "artifact_id": null,
-      "tokens": [
-       1,
-       2,
-       3
-      ]
-     }
+     "training": {}
     }
    ],
    "released": [
@@ -1515,23 +1160,7 @@
       "i-a-2",
       "r-a-2"
      ],
-     "training": {
-      "loss_mask": [
-       0,
-       1,
-       1
-      ],
-      "rollout_log_probs": [
-       -0.1,
-       -0.2
-      ],
-      "artifact_id": null,
-      "tokens": [
-       1,
-       2,
-       3
-      ]
-     }
+     "training": {}
     },
     {
      "group": null,
@@ -1541,23 +1170,7 @@
       "i-a-3",
       "r-a-3"
      ],
-     "training": {
-      "loss_mask": [
-       0,
-       1,
-       1
-      ],
-      "rollout_log_probs": [
-       -0.1,
-       -0.2
-      ],
-      "artifact_id": null,
-      "tokens": [
-       1,
-       2,
-       3
-      ]
-     }
+     "training": {}
     }
    ],
    "released": [

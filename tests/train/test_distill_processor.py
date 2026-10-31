@@ -1,76 +1,38 @@
-"""The shared distillation processor: the student's rollout plus the teacher's prompt, one sample per report.
+"""The shared distillation processor: the student's call plus the teacher's request, one sample per report.
 
-Torch/ray free. The tokenizer is a fake installed as ``transformers.AutoTokenizer``
-that counts tokens deterministically, so neither transformers nor model files
-are needed; a test subclass stands in for a recipe's.
+Torch/ray free. The record-to-sample stage renders nothing: a sample is the student's call as an ATIF trajectory
+with the teacher's request in its metadata. ``CharTemplate`` stands in for the training component's chat template
+to check the teacher sequence that the component renders; a test subclass stands in for a recipe's composition.
 """
 
 from __future__ import annotations
 
-import sys
-from collections.abc import Mapping, Sequence
-from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from tests.support.chat_templates import CharTemplate
 
 from reef.artifact.artifact import ArtifactRef
 from reef.core import AgentRecord, RequestType
+from reef.core.chat_rendering import TeacherRequest, rendered_job_data
+from reef.core.plugins import PluginConfigError
 from reef.core.reports import TeacherContextReport
 from reef.core.trajectories import source_record_id
-from reef.record2record import ExclusiveReportRecord2Record
-from reef.record2sample.distill import DistillSamples, DistillSettings, TeacherRenderer
+from reef.record2sample.distill import DistillSamples, DistillSettings
 from reef.record2sample.samples import recorded_response
 from reef.sample2job import DistillJobData
 from reef.train import PipelineContext
 from reef.train.pipeline import TrainingPipeline
 from reef.train.types import JobData
 
-STUDENT_TOKENS = (5, 6, 7, 1, 2, 3)  # three prompt ids, three response ids
-STUDENT_LOSS_MASK = (1, 1, 1)
-STUDENT_LOG_PROBS = (-0.1, -0.2, -0.3)
 QUESTION = "What is the boiling point of water?"
-
-
-class CountingTokenizer:
-    """The served model's tokenizer: one token per message plus one per ten characters of text.
-
-    It records where it was loaded from and what it rendered, and like
-    transformers 5 returns a mapping unless ``return_dict=False``.
-    """
-
-    def __init__(self) -> None:
-        self.loaded: list[tuple[str, dict[str, Any]]] = []
-        self.calls: list[tuple[list[Mapping[str, Any]], Sequence[Any] | None]] = []
-
-    def from_pretrained(self, path: str, **options: Any) -> CountingTokenizer:
-        self.loaded.append((path, options))
-        return self
-
-    def apply_chat_template(
-        self,
-        conversation: Sequence[Mapping[str, Any]],
-        tools: Sequence[Any] | None = None,
-        *,
-        tokenize: bool = True,
-        add_generation_prompt: bool = False,
-        return_dict: bool = True,
-    ) -> list[int] | dict[str, list[int]]:
-        self.calls.append((list(conversation), tools))
-        ids = self.count_ids(conversation)
-        return ids if not return_dict else {"input_ids": ids}
-
-    @staticmethod
-    def count_ids(messages: Sequence[Mapping[str, Any]]) -> list[int]:
-        text = "".join(str(message.get("content") or "") for message in messages)
-        return [100 + index for index in range(len(messages) + len(text) // 10)]
-
-
-@pytest.fixture
-def tokenizer(monkeypatch: pytest.MonkeyPatch) -> CountingTokenizer:
-    fake = CountingTokenizer()
-    monkeypatch.setitem(sys.modules, "transformers", SimpleNamespace(AutoTokenizer=fake))
-    return fake
+REPLY = "About 90 degrees."
+TOOLS = [
+    {
+        "type": "function",
+        "function": {"name": "lookup", "description": "Look up a fact.", "parameters": {"type": "object"}},
+    }
+]
 
 
 class FeedbackSamples(DistillSamples):
@@ -83,14 +45,12 @@ class FeedbackSamples(DistillSamples):
         return [system, *messages], None
 
 
-def _inference(agent_record_id: str, *, messages: list[dict[str, Any]] | None = None) -> AgentRecord:
+def inference_record(agent_record_id: str, *, question: str = QUESTION) -> AgentRecord:
+    """A served call: the request and the reply, with no training tensors."""
     payload: dict[str, Any] = {
-        "messages": messages or [{"role": "user", "content": QUESTION}],
-        "tools": [{"type": "function", "function": {"name": "lookup"}}],
-        "response": {"choices": [{"message": {"role": "assistant", "content": "About 90 degrees."}}]},
-        "tokens": list(STUDENT_TOKENS),
-        "loss_mask": list(STUDENT_LOSS_MASK),
-        "rollout_log_probs": list(STUDENT_LOG_PROBS),
+        "messages": [{"role": "user", "content": question}],
+        "tools": TOOLS,
+        "response": {"choices": [{"message": {"role": "assistant", "content": REPLY}}]},
     }
     return AgentRecord.create(
         scenario="science",
@@ -101,7 +61,7 @@ def _inference(agent_record_id: str, *, messages: list[dict[str, Any]] | None = 
     )
 
 
-def _report(
+def report_record(
     agent_record_id: str, references: tuple[str, ...], teacher_context: str = "100 degrees Celsius."
 ) -> AgentRecord:
     body = TeacherContextReport(teacher_context=teacher_context).to_dict(references=references)
@@ -114,118 +74,106 @@ def _report(
     )
 
 
-def _processor(**config: Any) -> TrainingPipeline:
+def distill_pipeline(record2sample_type: type[DistillSamples] = DistillSamples, **config: Any) -> TrainingPipeline:
     context = PipelineContext("science", TeacherContextReport)
-    settings = DistillSettings(**{"tokenizer_path": "/models/science", **config})
     return TrainingPipeline(
         context,
-        record2record=ExclusiveReportRecord2Record(context),
-        record2sample=DistillSamples(settings),
-        sample2job=DistillJobData(context, 1, None),
+        record2sample=record2sample_type(context, DistillSettings(**config)),
+        sample2job=DistillJobData(context, None, None),
     )
 
 
 @pytest.mark.unit
-def test_by_default_the_teacher_reads_the_request_as_recorded(tokenizer: CountingTokenizer) -> None:
-    processor = _processor()
-    processor.push(_inference("i1"))
-    processor.push(_report("r1", ("i1",), teacher_context=""))
+def test_by_default_the_teacher_reads_the_request_as_recorded() -> None:
+    processor = distill_pipeline()
+    processor.push(inference_record("i1"))
+    processor.push(report_record("r1", ("i1",), teacher_context=""))
 
     batch = processor.build_job_data(1)
 
     assert isinstance(batch, JobData)
+    assert batch.data_id == "science:data:1"
     (sample,) = batch.samples
     assert source_record_id(sample) == "i1"
-    assert tokenizer.loaded == [("/models/science", {"trust_remote_code": True})]
-    rendered, tools = tokenizer.calls[0]
-    assert rendered == [{"role": "user", "content": QUESTION}]
-    assert tools == [{"type": "function", "function": {"name": "lookup"}}]
-    # The teacher sequence is the rendered prompt plus the response ids verbatim.
-    prompt_ids = tokenizer.count_ids(rendered)
-    assert list(sample.training["teacher_tokens"]) == [*prompt_ids, 1, 2, 3]
-    assert list(sample.training["tokens"]) == list(STUDENT_TOKENS)
-    assert batch.data_id == "science:data:1"
-    assert processor.operational_metrics()["teacher_overflow_reports"] == 0
+    # The stage renders nothing: the sample carries no tokens, only the teacher's request.
+    assert "tokens" not in sample.training
+    assert sample.metadata["teacher"] == TeacherRequest([{"role": "user", "content": QUESTION}], TOOLS).as_json()
+    # The teacher reads what the student read, so the component renders the same sequence for both.
+    rendered_data, left_out = rendered_job_data(batch, CharTemplate())
+    assert left_out == ()
+    (rendered,) = rendered_data.samples
+    assert rendered.training["teacher_tokens"] == rendered.training["tokens"]
 
 
 @pytest.mark.unit
-def test_a_recipe_composes_the_teacher_request_from_the_response_and_the_context(tokenizer: CountingTokenizer) -> None:
-    context = PipelineContext("science", TeacherContextReport)
-    processor = TrainingPipeline(
-        context,
-        record2record=ExclusiveReportRecord2Record(context),
-        record2sample=FeedbackSamples(DistillSettings(tokenizer_path="/models/science")),
-        sample2job=DistillJobData(context, 1, None),
-    )
-    processor.push(_inference("i1"))
-    processor.push(_report("r1", ("i1",), teacher_context="Too low."))
+def test_a_recipe_composes_the_teacher_request_from_the_response_and_the_context() -> None:
+    processor = distill_pipeline(FeedbackSamples)
+    processor.push(inference_record("i1"))
+    processor.push(report_record("r1", ("i1",), teacher_context="Too low."))
 
     batch = processor.build_job_data(1)
 
-    rendered, tools = tokenizer.calls[0]
-    assert rendered[0] == {"role": "system", "content": "You answered: About 90 degrees.\nVerifier: Too low."}
-    assert rendered[1:] == [{"role": "user", "content": QUESTION}]
-    assert tools is None
-    assert list(batch.samples[0].training["teacher_tokens"]) == [*tokenizer.count_ids(rendered), 1, 2, 3]
-    assert batch.data_id == "science:data:1"
+    teacher = TeacherRequest.of_sample(batch.samples[0])
+    assert teacher is not None
+    assert teacher.messages == [
+        {"role": "system", "content": f"You answered: {REPLY}\nVerifier: Too low."},
+        {"role": "user", "content": QUESTION},
+    ]
+    assert teacher.tools is None
+    # The teacher sequence is the rendered teacher request plus the student's reply tokens verbatim.
+    template = CharTemplate()
+    (rendered,) = rendered_job_data(batch, template)[0].samples
+    reply_ids = rendered.training["tokens"][-len(rendered.training["loss_mask"]) :]
+    assert rendered.training["teacher_tokens"] == [*template.render(teacher.messages, None, prompt=True), *reply_ids]
 
 
 @pytest.mark.unit
-def test_the_processor_skips_and_counts_a_teacher_sequence_over_the_window(tokenizer: CountingTokenizer) -> None:
-    long_request = _inference("i1")
-    short_request = _inference("i2", messages=[{"role": "user", "content": "q"}])
+def test_a_teacher_sequence_over_the_window_is_left_out_when_the_component_renders() -> None:
+    template = CharTemplate()
+    short_question = "q"
     # The window admits the short request's teacher sequence and not the long one's.
-    window = len(tokenizer.count_ids(short_request.payload["messages"])) + 3
-    processor = _processor(max_teacher_tokens=window)
-    processor.push(long_request)
-    processor.push(_report("r1", ("i1",)))
+    short_prompt = template.render([{"role": "user", "content": short_question}], TOOLS, prompt=True)
+    window = len(short_prompt) + 1 + len(REPLY)
+    processor = distill_pipeline(max_teacher_tokens=window)
+    processor.push(inference_record("i1"))
+    processor.push(report_record("r1", ("i1",)))
+    processor.push(inference_record("i2", question=short_question))
+    processor.push(report_record("r2", ("i2",), teacher_context="ok"))
 
-    assert not processor.ready(1)
-    assert processor.operational_metrics()["teacher_overflow_reports"] == 1
-    # The report and its inference are released for compaction.
-    assert {"r1", "i1"} <= processor.releasable_record_ids()
+    batch = processor.build_job_data(2)
 
-    # A later report that fits still trains.
-    processor.push(short_request)
-    processor.push(_report("r2", ("i2",), teacher_context="ok"))
-    assert len(processor.build_job_data(1).samples) == 1
-    assert processor.operational_metrics()["teacher_overflow_reports"] == 1
-
-
-@pytest.mark.unit
-def test_teacher_tokens_render_the_request_cut_the_prompt_and_append_the_response(
-    tokenizer: CountingTokenizer,
-) -> None:
-    messages = [{"role": "user", "content": QUESTION}]
-    prompt_ids = tokenizer.count_ids(messages)
-
-    renderer = TeacherRenderer("/models/science")
-    assert renderer.teacher_tokens(messages, None, (1, 2, 3)) == [*prompt_ids, 1, 2, 3]
-    # A prompt window cuts the rendered prompt on the right and leaves the response whole.
-    assert renderer.teacher_tokens(messages, None, (1, 2, 3), max_prompt_tokens=2) == [*prompt_ids[:2], 1, 2, 3]
+    assert [sample.metadata["teacher"]["max_tokens"] for sample in batch.samples] == [window, window]
+    rendered, left_out = rendered_job_data(batch, template)
+    assert left_out == (0,)
+    assert [source_record_id(sample) for sample in rendered.samples] == ["i2"]
 
 
 @pytest.mark.unit
-def test_the_processor_requires_one_recorded_request_per_report(tokenizer: CountingTokenizer) -> None:
-    processor = _processor(accept_multi_turn_policy_samples=True)
-    processor.push(_inference("i1"))
-    processor.push(_inference("i2"))
+def test_the_processor_requires_one_recorded_request_per_report() -> None:
+    processor = distill_pipeline(accept_multi_turn_policy_samples=True)
+    processor.push(inference_record("i1"))
+    processor.push(inference_record("i2"))
 
     with pytest.raises(ValueError, match="one recorded request per report"):
-        processor.push(_report("r1", ("i1", "i2")))
+        processor.push(report_record("r1", ("i1", "i2")))
 
 
 @pytest.mark.unit
-def test_the_processor_requires_the_tokenizer_path_and_a_valid_window() -> None:
-    with pytest.raises(ValueError, match="tokenizer_path"):
-        _processor(tokenizer_path="")
+def test_the_processor_refuses_a_tokenizer_path_and_an_invalid_window() -> None:
+    # The training component renders with its own chat template; the stage has no tokenizer to configure.
+    with pytest.raises(PluginConfigError, match="unknown config fields: tokenizer_path"):
+        DistillSamples.from_config(
+            {"tokenizer_path": "/models/science"},
+            context=PipelineContext("science", TeacherContextReport),
+            environ={},
+        )
     with pytest.raises(ValueError, match="max_teacher_tokens"):
-        _processor(max_teacher_tokens=-1)
+        distill_pipeline(max_teacher_tokens=-1)
 
 
 @pytest.mark.unit
 def test_recorded_response_reads_the_final_assistant_message() -> None:
-    assert recorded_response(_inference("i1").payload) == "About 90 degrees."
+    assert recorded_response(inference_record("i1").payload) == REPLY
     assert recorded_response({"response": {"choices": [{"text": "plain"}]}}) == "plain"
     assert (
         recorded_response(

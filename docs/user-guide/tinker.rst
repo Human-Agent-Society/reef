@@ -63,10 +63,17 @@ per request, ``max_tokens`` or ``max_completion_tokens``, ``temperature``,
 multimodal messages, and Anthropic routes fail explicitly.
 
 Streaming is buffered: the complete sampled response is emitted as valid
-OpenAI SSE events, with the exact private training capture retained separately.
-It does not provide token-by-token latency. Prompt IDs come from the tokenizer's
-chat template. Sampled IDs and log probabilities come directly from Tinker;
-the backend never recovers training tokens by tokenizing decoded output.
+OpenAI SSE events. It does not provide token-by-token latency. Prompt IDs come
+from the tokenizer's chat template.
+
+Serving returns and records no training tensors. The training component
+renders each recorded call with the base model's tokenizer and
+``training.options.chat_template_kwargs``, which must equal the chat template
+arguments of serving, for example ``{enable_thinking: false}``. It computes
+the rollout log probabilities with a forward pass at the job's start, before
+the first optimizer step. A sample that cannot render does not train, and the
+job metric ``unrenderable_samples`` counts it. A task job's own rollouts keep
+the sampled IDs and log probabilities that Tinker returns.
 
 Reef's normal ``WeightTrainingRecipe`` drives the integration. The backend is
 one training component (``reef.train.tinker_backend``) and one inference
@@ -104,8 +111,8 @@ locally and no shipped recipe uses it. The TTTD recipe's
 ``recipes/tttd/tinker.py`` keeps its unmasked policy term and masked,
 centered frozen-base KL on ``importance_sampling``, matching its Slime
 objective. ``training.options.kl-coef`` controls that penalty. The base
-sampler scores the original token IDs, and those probabilities never replace
-the captured behavior-policy probabilities. SAO and OpenClaw-RL losses are
+sampler scores the same token IDs, and those probabilities never replace
+the rollout log probabilities. SAO and OpenClaw-RL losses are
 not implemented by this integration; selecting an unregistered loss family
 fails before training.
 
@@ -230,16 +237,15 @@ that the manifest's ``sampler_path`` names, as ``tinker-cookbook``'s
 downloads once. A service that serves no checkpoint archives, such as Spindle,
 fails the load. The control plane loads the PEFT adapter into every engine under a
 new adapter name for the scenario. Requests reach that adapter through the
-weight surface. The engines capture the sampled tokens and log probabilities
-as they do for Slime. A rejected candidate loads nothing. A restart starts the
+weight surface. A rejected candidate loads nothing. A restart starts the
 engines again and loads each scenario's committed adapter before the scenario
 serves. The converter is pinned in the ``tinker`` extra; it brings torch and
 transformers.
 
 The trajectories then come from Reef's engines while Tinker computes the loss,
-so the base model and tokenizer on both sides must match, and the
-importance-sampling ratio carries the numerical difference between the two
-engines' log probabilities. ``reef serve`` refuses ``training.colocate``:
+so the base model and tokenizer on both sides must match. Set
+``training.options.chat_template_kwargs`` to the engines' chat template
+arguments, so that Tinker renders each sample as the engines served it. ``reef serve`` refuses ``training.colocate``:
 there are no training GPUs to share. Tinker's adapters also carry a LoRA on ``lm_head``,
 which the Slime configuration never targets; whether the installed SGLang
 accepts that module is checked only when the engines load the adapter.
@@ -292,8 +298,8 @@ GPU host downloads ``model-path``; the Reef host keeps it as a remote
 identifier.
 
 The HTTP service sends inference requests to the component, and the
-component forwards each request and its answer unchanged. Token capture and
-version stamps therefore come from the engines. When the control plane stops,
+component forwards each request and its answer unchanged. Version stamps
+therefore come from the engines. When the control plane stops,
 the component stops its engines and keeps running. When the component
 restarts, for example because its host replaced the container, it runs no
 engines. The control plane notices within 30 seconds, starts the engines
@@ -403,9 +409,9 @@ task job, as Spindle's ``cispo`` loss with the centering term:
   temperature 1 without truncation. A model call that sets another
   ``temperature``, or a ``top_p`` or ``top_k``, gets HTTP 400. Harbor's
   ``terminus-2`` agent sets none of them by default.
-- A job of uploaded trajectories trains only when every response token has
-  the sampler's top-k (``topk_indices`` and ``topk_log_probs`` in its training
-  capture, as an inference handler with ``capture_topk`` records them).
+- Only a task job's rollouts record the sampler's top-k. Serving records
+  none, so a job of samples that serving recorded, or of uploaded
+  trajectories, fails with score centering on.
 - ``sft`` jobs train as they are. A job of another policy-gradient loss family
   is refused, since the term must match the gradient it corrects. So is a
   nonzero ``kl-coef``.

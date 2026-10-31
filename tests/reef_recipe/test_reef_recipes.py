@@ -35,19 +35,19 @@ def pipeline_stages(recipe_type: type[Recipe], section: dict) -> PipelineConfig:
 def tttd_grid(groups_per_step: int, rollouts_per_group: int) -> PipelineConfig:
     return pipeline_stages(
         TTTDRecipe,
-        {"record2record": {"config": {"groups_per_step": groups_per_step, "rollouts_per_group": rollouts_per_group}}},
+        {"record2sample": {"config": {"groups_per_step": groups_per_step, "rollouts_per_group": rollouts_per_group}}},
     )
 
 
 @pytest.mark.unit
 @pytest.mark.parametrize("recipe_type", [OpenClawRLRecipe, SAORecipe, TTTDRecipe])
-def test_training_recipes_take_max_staleness_in_their_record_stage_config(recipe_type) -> None:
+def test_training_recipes_take_max_staleness_in_their_record2sample_config(recipe_type) -> None:
     default = recipe_type(**runtime_bindings(), pipeline_stages=pipeline_stages(recipe_type, {}))
-    assert default.build("scenario", SQLiteRecordStore()).pipeline.record2record.max_staleness == 0
-    section = {"record2record": {"config": {"max_staleness": 2}}}
+    assert default.build("scenario", SQLiteRecordStore()).pipeline.record2sample.max_staleness == 0
+    section = {"record2sample": {"config": {"max_staleness": 2}}}
     recipe = recipe_type(**runtime_bindings(), pipeline_stages=pipeline_stages(recipe_type, section))
-    assert recipe.build("scenario", SQLiteRecordStore()).pipeline.record2record.max_staleness == 2
-    negative = {"record2record": {"config": {"max_staleness": -1}}}
+    assert recipe.build("scenario", SQLiteRecordStore()).pipeline.record2sample.max_staleness == 2
+    negative = {"record2sample": {"config": {"max_staleness": -1}}}
     refused = recipe_type(**runtime_bindings(), pipeline_stages=pipeline_stages(recipe_type, negative))
     with pytest.raises(RecipeConfigError, match="max_staleness must be a non-negative int"):
         refused.build("scenario", SQLiteRecordStore())
@@ -181,7 +181,7 @@ def test_tttd_build_resolves_its_backend_registered_objective_in_a_fresh_process
                 "from reef.storage.sqlite import SQLiteRecordStore\n"
                 "from reef.train.pipeline import PipelineConfig\n"
                 "from tests.support.runtime_stubs import runtime_bindings\n"
-                "grid = {'record2record': {'config': {'groups_per_step': 1, 'rollouts_per_group': 2}},"
+                "grid = {'record2sample': {'config': {'groups_per_step': 1, 'rollouts_per_group': 2}},"
                 " 'sample2job': {'config': {'job_samples': 2}}}\n"
                 "stages = PipelineConfig.from_setting(grid, spec=TTTDRecipe.pipeline_spec(), environ={})\n"
                 "trainer = TTTDRecipe(**runtime_bindings(), pipeline_stages=stages)"
@@ -253,7 +253,7 @@ def test_cookbook_recipes_reject_multi_turn_policy_samples(recipe, metadata) -> 
 
 
 def test_openclawrl_recipe_never_trains_on_reports() -> None:
-    # The judging half lives inside the pipeline's record stage: a report is consumed
+    # The judging lives inside the pipeline's record2sample stage: a report is consumed
     # held for retention only — terminal on sight, releasable, never a candidate.
     trainer = OpenClawRLRecipe(**runtime_bindings(), pipeline_stages=pipeline_stages(OpenClawRLRecipe, {})).build(
         "math", SQLiteRecordStore()
@@ -281,19 +281,19 @@ def test_recipe_factory_keeps_method_configuration_inside_recipe() -> None:
     recipe = build_recipe(
         "recipes.tttd.recipe:TTTDRecipe",
         {"REEF_TRAINER_URL": "http://trainer:8901", "REEF_TRAINER_TOKEN": "secret"},
-        config={"pipeline": {"record2record": {"config": {"groups_per_step": 2, "rollouts_per_group": 3}}}},
+        config={"pipeline": {"record2sample": {"config": {"groups_per_step": 2, "rollouts_per_group": 3}}}},
         **runtime_bindings(component, runtime),
     )
 
     assert isinstance(recipe, TTTDRecipe)
-    record2record = recipe.build_pipeline(PipelineContext("math")).record2record
-    assert (record2record.groups_per_step, record2record.rollouts_per_group) == (2, 3)
+    record2sample = recipe.build_pipeline(PipelineContext("math")).record2sample
+    assert (record2sample.groups_per_step, record2sample.rollouts_per_group) == (2, 3)
     assert recipe.training_component is component
     assert recipe.runtime is runtime
 
 
 def test_recipe_factory_refuses_a_stage_setting_in_the_recipe_config() -> None:
-    # The step grid is the record stage's config, not the recipe's.
+    # The step grid is the record2sample stage's config, not the recipe's.
     with pytest.raises(RecipeConfigError, match="does not consume"):
         build_recipe(
             "recipes.tttd.recipe:TTTDRecipe",

@@ -19,7 +19,6 @@ TEST_DIRECTORIES = {
     "packaging",
     "plugin_contracts",
     "recipes",
-    "record2record",
     "record2sample",
     "reef_client",
     "reef_recipe",

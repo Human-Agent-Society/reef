@@ -145,7 +145,7 @@ def serving_release() -> str | None:
 class TrainerPacer:
     """Hold new submissions while more than AHEAD batches are out beyond the trainer.
 
-    Reef drops rollouts that exceed pipeline.record2record.config.max_staleness, and the driver
+    Reef drops rollouts that exceed pipeline.record2sample.config.max_staleness, and the driver
     cannot see that, so an idle trainer (no progress for STALL_S) releases one
     batch of credit; otherwise a burst of dropped rollouts would deadlock.
     """

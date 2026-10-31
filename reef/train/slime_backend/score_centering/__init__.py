@@ -34,8 +34,9 @@ log-prob gap and the same sample weights and effective loss masks.
 
 The sampler's log-probs are those at the point the trainer reads (after
 temperature, before top-k, top-p and min-p filters; see the configuration
-reference), so records must come from a token-native handler with
-``capture_topk`` at least ``--score-centering-top-k``.
+reference). Only the task rollouts of a training component record them, at
+least ``--score-centering-top-k`` per position: serving records no tensors,
+so a sample that serving recorded cannot train with score centering.
 """
 
 from __future__ import annotations
@@ -60,8 +61,7 @@ class ScoreCenteringSettings:
     """The term's own settings.
 
     ``top_k`` is the number of sampler log-probs per position the term reads;
-    a record must carry at least that many (the inference handler's
-    ``capture_topk``). The paper's default is 128; a smaller head leaves more
+    a task rollout must record at least that many. The paper's default is 128; a smaller head leaves more
     of the drift uncorrected when the sampler's tail differs from the
     trainer's. ``min_tail_mass`` is the floor both tail masses are clipped to
     before their ratio is taken (the paper uses ``1e-6``).

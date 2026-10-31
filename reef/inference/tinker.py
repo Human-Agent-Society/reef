@@ -3,9 +3,11 @@
 The trainer in ``reef.train.tinker_backend`` publishes checkpoints as
 artifacts holding a ``tinker-checkpoint.json`` manifest that names the
 immutable remote sampler; this module serves whatever sampler a frozen
-artifact names, through Tinker's SDK, as an OpenAI text chat endpoint with
-the exact training capture Reef records. The sampling itself is
-``reef.tinker.sampling``, which the trainer's rollouts use too;
+artifact names, through Tinker's SDK, as an OpenAI text chat endpoint. The
+service returns and records no training tensors (``provider_response`` of
+``reef.service.inference_service``). The sampling itself is
+``reef.tinker.sampling``, which the trainer's rollouts use too, with their
+training tensors;
 the manifest in the artifact is the whole contract about which sampler
 serves.
 """

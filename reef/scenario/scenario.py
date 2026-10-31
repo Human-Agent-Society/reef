@@ -28,6 +28,7 @@ from reef.storage.commits import SCENARIO_METADATA_KEY, CommitRecord
 from reef.storage.records import RecordStore
 from reef.storage.scenario import ScenarioStore
 from reef.surface.base import Surface
+from reef.train.instructions import ScenarioInstructions
 from reef.train.trainer import ComponentTrainer, Trainer
 from reef.train.types import TrainStepResult
 
@@ -91,7 +92,11 @@ class Scenario:
         scenario_step: int = 0,
         recovered_head_record: CommitRecord | None = None,
         experiment_observer: CommitExperimentObserver | None = None,
+        instructions: ScenarioInstructions | None = None,
     ) -> None:
+        #: The scenario's training instructions; None for a scenario built without an instructions queue, which takes
+        #: no instruction.
+        self.instructions = instructions
         self.operations = OperationMetrics(
             ("ingest/write",),
             counters=(
@@ -298,12 +303,28 @@ class Scenario:
         for a long evaluation.
         """
         trainer = self.trainer_for(component)
+        self.refresh_instructions()
         with self._committer.lock if len(self.trainers) == 1 else nullcontext():
             # The staleness check measures data against the weights that serve; a scenario that loads no weights
             # serves one fixed model, so its data never goes stale.
             weights_load = self._binding.surface.loader_component is not None and self.runtime is not None
             serving = self.serving_artifact_id() if weights_load else None
             return trainer.run_once(serving_artifact_id=serving)
+
+    def pending_instructions(self) -> int:
+        """The queued instructions that no trainer's commit consumed yet; 0 for a scenario without instructions."""
+        if self.instructions is None:
+            return 0
+        ids = [request.id for request in self.instructions.queued()]
+        consumed: set[str] = set()
+        for component_trainer in self.trainers:
+            consumed |= component_trainer.trainer.consumed_among(ids)
+        return len(set(ids) - consumed)
+
+    def refresh_instructions(self) -> None:
+        """Give every trainer the queued instructions that no commit consumed (``ScenarioInstructions.give``)."""
+        if self.instructions is not None:
+            self.instructions.give(component_trainer.trainer for component_trainer in self.trainers)
 
     def served_component(self) -> str | None:
         """The component whose artifact the runtime serves: the component that the runtime loads, or the only

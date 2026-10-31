@@ -23,7 +23,6 @@ from reef.core.plugins import NoSettings, Plugin, PluginConfigError, PluginSetti
 from reef.core.records_types import RequestType
 from reef.observability import ExperimentLogger
 from reef.pipeline_context import PipelineContext
-from reef.record2record import Record2Record
 from reef.record2sample import Record2Sample
 from reef.storage.samples import SampleKind
 
@@ -150,13 +149,12 @@ class Sample2Job(ABC, Plugin):
         config: Mapping[str, Any],
         *,
         context: PipelineContext,
-        record2record: Record2Record,
         record2sample: Record2Sample,
         environ: Mapping[str, str],
     ) -> Self:
         """Build the stage of one scenario from its config.
 
-        ``record2record`` and ``record2sample`` are the scenario's earlier stages, built first.
+        ``record2sample`` is the scenario's record-to-sample stage, built first.
         ``environ`` holds the environment the deployment was read with.
         """
         raise PluginConfigError(f"{cls.__name__} cannot be built from a deployment file: it has no from_config")
@@ -231,7 +229,6 @@ class NoJobData(Sample2Job):
         config: Mapping[str, Any],
         *,
         context: PipelineContext,
-        record2record: Record2Record,
         record2sample: Record2Sample,
         environ: Mapping[str, str],
     ) -> Self:

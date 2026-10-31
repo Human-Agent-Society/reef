@@ -20,7 +20,6 @@ from reef.core.artifact_ref import ArtifactRef
 class RequestType(str, Enum):
     INFERENCE = "inference"
     REPORT = "report"
-    TRAIN = "train"
 
 
 #: The request header that marks an inference call of a rollout that Reef runs itself. The service

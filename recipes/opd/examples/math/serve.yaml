@@ -36,11 +36,9 @@ inference:
 recipe:
   implementation: recipes.opd.recipe:OPDRecipe
 pipeline:
-  record2record:
-    config:
-      max_staleness: 0
   record2sample:
     config:
+      max_staleness: 0
       max_teacher_tokens: 32768
   sample2job:
     config:
@@ -116,7 +114,6 @@ training:
     adam-beta1: '0.9'
     adam-beta2: '0.95'
     loss-type: custom_loss
-    use-rollout-logprobs: true
     disable-compute-advantages-and-returns: true
     opd-teacher: separate
     opd-teacher-update-rate: '0'

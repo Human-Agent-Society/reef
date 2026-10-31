@@ -11,10 +11,9 @@ Routes:
 - ``/v1/chat/completions``, ``/v1/responses``, ``/v1/messages`` and ``/v1/messages/count_tokens``: a recorded call.
   ``x-reef-scenario`` names the scenario; the request's ``model`` names a row of the scenario (an artifact served
   beside the active one), and any other ``model`` means ``active``. ``x-reef-tag-*`` pairs go to the record's
-  metadata. With ``x-reef-rollout``, the call is one of Reef's own rollouts: no record, and the answer keeps its
-  ``training`` block.
+  metadata. With ``x-reef-rollout``, the call is one of Reef's own rollouts: no record.
 - ``/reef/scenarios/{s}/evaluation/v1/...`` and ``/reef/scenarios/{s}/components/{c}/evaluation/v1/...``: an
-  evaluation rollout's call to the active model; no record, and the answer keeps its ``training`` block.
+  evaluation rollout's call to the active model; no record.
 - ``/reef/scenarios/{s}/artifacts/{a}/v1/...``: a recorded call to the row named ``a``;
   ``/reef/scenarios/{s}/artifacts/{a}/evaluation/v1/...``: the same call, unrecorded.
 
@@ -190,33 +189,11 @@ def upstream_artifact(served: ServedArtifact, ref: ArtifactRef | None) -> Artifa
     return Artifact(ref or ArtifactRef(served.artifact_id, served.artifact_id, None), None)
 
 
-#: The engine's own names for the weights that answered; they stay inside training and never reach a record.
-ENGINE_LOAD_KEYS = ("runtime_load_id", "runtime_load_spans")
-
-
-def recorded_response(response: Mapping[str, Any]) -> dict[str, Any]:
-    """``response`` as a record keeps it: its ``training`` block without the engine's load versions. The record
-    names the artifact that answered by its ``artifact_id`` instead."""
-    training = response.get("training")
-    if not isinstance(training, Mapping):
-        return dict(response)
-    return {**response, "training": {key: value for key, value in training.items() if key not in ENGINE_LOAD_KEYS}}
-
-
-def client_response(response: Mapping[str, Any]) -> dict[str, Any]:
-    """``response`` without Reef's private ``training`` block; the record keeps the block."""
+def provider_response(response: Mapping[str, Any]) -> dict[str, Any]:
+    """``response`` as the client gets it and the record keeps it: without a ``training`` block, which an engine
+    handler may return. Serving returns no training tensors; a training component computes the ones it needs. The
+    record names the artifact that answered by its ``artifact_id``."""
     return {key: value for key, value in response.items() if key != "training"}
-
-
-def rollout_response(response: Mapping[str, Any], artifact_id: str) -> dict[str, Any]:
-    """The answer of a rollout's call: the ``training`` block stays, naming the artifact that answered."""
-    training = response.get("training")
-    if not isinstance(training, Mapping):
-        return dict(response)
-    return {
-        **recorded_response(response),
-        "training": {**recorded_response(response)["training"], "artifact_id": artifact_id},
-    }
 
 
 class SSERelay:
@@ -295,7 +272,7 @@ class InferenceReplica:
         item = AgentRecord.create(
             scenario=parsed.scenario,
             request_type=RequestType.INFERENCE,
-            payload={**with_request_tags(payload, parsed), "response": recorded_response(response)},
+            payload={**with_request_tags(payload, parsed), "response": provider_response(response)},
             artifact_ref=ref,
         )
         store = self.storage.open(parsed.scenario)
@@ -354,10 +331,11 @@ class InferenceReplica:
         scenario: str | None = None,
         name: str | None = None,
         record: bool,
-        keep_training: bool,
+        rollout: bool = False,
     ) -> web.StreamResponse:
         """Answer one model request; see the module rules. ``scenario`` overrides the scenario header (a route
-        names it), ``name`` the row; ``record`` keeps a record; ``keep_training`` keeps the ``training`` block."""
+        names it), ``name`` the row; ``record`` keeps a record; ``rollout`` marks a call of Reef's own rollouts, which
+        does not stream."""
         headers = dict(request.headers) if scenario is None else {**dict(request.headers), "x-reef-scenario": scenario}
         try:
             parsed = parse_request_headers(headers, RequestType.INFERENCE)
@@ -366,7 +344,7 @@ class InferenceReplica:
         payload = await read_object(request)
         served, ref = await self.resolve(parsed.scenario, payload.get("model"), name=name, refresh=False)
         if payload.get("stream") is True:
-            if keep_training:
+            if rollout:
                 raise web.HTTPBadRequest(text="a rollout's call does not stream; send it without stream")
             return await self.relay_stream(request, path, parsed, payload, served, ref, record=record)
         for attempt in range(2):
@@ -384,8 +362,7 @@ class InferenceReplica:
             except Exception as exc:
                 logger.exception("could not append the record of a request to %s", parsed.scenario)
                 raise web.HTTPServiceUnavailable(text="the record store cannot take the request's record") from exc
-        body = rollout_response(response, served.artifact_id) if keep_training else client_response(response)
-        return web.json_response(body, headers=reply_headers)
+        return web.json_response(provider_response(response), headers=reply_headers)
 
     async def relay_stream(
         self,
@@ -484,7 +461,7 @@ def add_inference_routes(app: web.Application, replica: InferenceReplica) -> Non
     def recorded(path: str) -> Callable[[web.Request], Awaitable[web.StreamResponse]]:
         async def inference(request: web.Request) -> web.StreamResponse:
             rollout = request.headers.get(ROLLOUT_HEADER, "").strip().lower() in ("1", "true")
-            return await replica.answer(request, path, record=not rollout, keep_training=rollout)
+            return await replica.answer(request, path, record=not rollout, rollout=rollout)
 
         return inference
 
@@ -497,14 +474,12 @@ def add_inference_routes(app: web.Application, replica: InferenceReplica) -> Non
         path = checked(request.match_info["route"])
         rollout = request.headers.get(ROLLOUT_HEADER, "").strip().lower() in ("1", "true")
         return await replica.answer(
-            request, path, scenario=request.match_info["scenario"], record=not rollout, keep_training=rollout
+            request, path, scenario=request.match_info["scenario"], record=not rollout, rollout=rollout
         )
 
     async def evaluation(request: web.Request) -> web.StreamResponse:
         path = checked(request.match_info["route"])
-        return await replica.answer(
-            request, path, scenario=request.match_info["scenario"], record=False, keep_training=True
-        )
+        return await replica.answer(request, path, scenario=request.match_info["scenario"], record=False, rollout=True)
 
     async def artifact(request: web.Request) -> web.StreamResponse:
         path = checked(request.match_info["route"])
@@ -514,7 +489,6 @@ def add_inference_routes(app: web.Application, replica: InferenceReplica) -> Non
             scenario=request.match_info["scenario"],
             name=request.match_info["artifact_id"],
             record=True,
-            keep_training=False,
         )
 
     async def artifact_evaluation(request: web.Request) -> web.StreamResponse:
@@ -525,7 +499,7 @@ def add_inference_routes(app: web.Application, replica: InferenceReplica) -> Non
             scenario=request.match_info["scenario"],
             name=request.match_info["artifact_id"],
             record=False,
-            keep_training=True,
+            rollout=True,
         )
 
     for path in INFERENCE_PATHS:
@@ -575,6 +549,5 @@ __all__ = [
     "StaleServedModels",
     "add_inference_routes",
     "build_inference_app",
-    "client_response",
-    "recorded_response",
+    "provider_response",
 ]

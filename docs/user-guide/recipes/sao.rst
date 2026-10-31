@@ -18,7 +18,7 @@ step produced.
 +-------------+------------------------------------------------------------+
 | Pipeline    | reported feedback, singleton                               |
 +-------------+------------------------------------------------------------+
-| Needs       | GPUs, and a backend that captures tokens and log-probs     |
+| Needs       | GPUs and the Slime training backend                        |
 +-------------+------------------------------------------------------------+
 | Example     | ``recipes/sao/examples/imo_answerbench/``                  |
 +-------------+------------------------------------------------------------+
@@ -57,9 +57,14 @@ SAO's per-token primitive and a critic that shares the actor's GPUs. The
 critic supplies the values, and skip-observation GAE builds the advantages
 inside the training backend.
 
-The DIS ratio compares the current policy against the log-probabilities
-recorded when the rollout was generated. SAO therefore requires an inference
-backend that attaches engine-native tensors.
+The DIS ratio compares the current policy against the old-policy
+log-probabilities. Serving records no log-probabilities, so the training
+component renders each rollout with the model's chat template and the actor
+computes them with the weights of the job's start. The ratio is exact for
+``max_staleness: 0``. Above 0 it measures the drift within the job, not the
+gap to the weights that sampled the rollout. Give the component the serving
+engine's chat template arguments (`Chat template arguments
+<../../reference/configuration.rst#chat-template-arguments>`__).
 
 The value model carries the paper's cold-start mitigations: it trains at its
 own, higher learning rate (``--critic-lr``) and the first
@@ -73,17 +78,18 @@ frozen (paper Section 4). A dense value model trains every parameter unless
 Configuration
 -------------
 
-SAO's pipeline has three stages: ``ExclusiveReportRecord2Record``,
-``SAOSamples``, and ``SAOJobData``. The deployment's ``pipeline`` section configures them. The
-record stage takes no config. Set the job size in the sample-to-job stage and
-the optimizer batch in the training config:
+SAO's pipeline has two stages: ``SAOSamples`` and ``SAOJobData``. The
+deployment's ``pipeline`` section configures them. ``SAOSamples`` trains each
+report by itself. Set the staleness limit in the record-to-sample stage, the
+job size in the sample-to-job stage, and the optimizer batch in the training
+config:
 
 .. code:: yaml
 
    recipe:
      implementation: recipes.sao.recipe:SAORecipe
    pipeline:
-     record2record:
+     record2sample:
        config:
          max_staleness: 18
      sample2job:
@@ -97,8 +103,8 @@ the optimizer batch in the training config:
 
    pipeline.sample2job.config.job_samples | required | rollouts (one per prompt) per job. Set it to ``training.config.global_batch_size`` so that one job is one optimizer step.
    training.config.global_batch_size | rollouts (one per prompt) per optimizer step; the paper uses 128. Reef passes it to Slime as ``--global-batch-size``. Each sample is its own data-parallel unit. 1 trains on every rollout as it lands and is a smoke setting only.
-   pipeline.record2sample.config | {} | the sample-assembly keys: ``accept_multi_turn_policy_samples`` (default false) trains a report that references several model calls as one multi-turn sample; ``realign_threshold`` (1024) and ``scaffold_tolerance`` (0) bound the tokens that assembly may realign.
-   pipeline.record2record.config.max_staleness | 0 | accepted lag, in artifacts that the scenario served, between the producing and served artifact.
+   pipeline.record2sample.config.accept_multi_turn_policy_samples | false | true trains every call of a report's trajectory, every reply; false trains only the reply of the trajectory's last call, with the earlier turns as context.
+   pipeline.record2sample.config.max_staleness | 0 | accepted lag, in artifacts that the scenario served, between the producing and served artifact.
 
 A ``batch-size`` key in ``recipe.config`` or in
 ``pipeline.sample2job.config`` is an unknown key: the recipe or the scenario's

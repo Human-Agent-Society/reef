@@ -31,6 +31,8 @@ class SlimeNativeAlgorithm(SlimeAlgorithm):
     advantages = "forbidden"
     forbidden_advantages_message = "the slime family trains dataset jobs, whose advantages Slime computes"
     allows_slime_advantage_computation = True
+    # Slime's own engines roll a dataset job out and record the log-probabilities of each sampled token.
+    accepts_rollout_logprobs = True
 
     def configure_backend_args(self, args: Namespace) -> None:
         # The serving session's rollout manager outlives the drivers, so the data source is the deployment's.

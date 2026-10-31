@@ -68,7 +68,6 @@ from reef.inference.model_config import ModelConfig
 from reef.observability import ExperimentLogger
 from reef.recipe.base import Recipe, ServedEndpoint, check_job_components
 from reef.recipe.errors import RecipeConfigError
-from reef.record2record import ReportRecord2Record
 from reef.record2sample.traces import TraceSamples
 from reef.runtime.executor.config import ExecutorSettings, role_executor_settings
 from reef.runtime.jobs import SavedCheckpoint, TrainingComponent
@@ -446,7 +445,7 @@ class HarnessEvolutionRecipe(Recipe):
 
     @classmethod
     def pipeline_spec(cls) -> PipelineSpec:
-        return PipelineSpec(record2record=ReportRecord2Record, record2sample=TraceSamples, sample2job=TraceJobData)
+        return PipelineSpec(record2sample=TraceSamples, sample2job=TraceJobData)
 
     @property
     def harness_adapter(self) -> str | None:

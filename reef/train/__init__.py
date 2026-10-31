@@ -2,7 +2,7 @@
 
 One package, mirroring how a well-scoped training subsystem is usually
 organized: a :class:`Trainer` that turns raw records into reserved, typed
-job data (:class:`TrainingPipeline` and its three stages) and trains it. A
+job data (:class:`TrainingPipeline` and its two stages) and trains it. A
 trainer submits each job's data to a training component through
 ``reef.train.jobs.JobLoop``; a harness evolution step is a job of the harness
 training component (``reef.train.harness_backend.component``).

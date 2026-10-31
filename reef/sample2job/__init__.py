@@ -1,8 +1,8 @@
 """Sample to job: the stage that sizes the buffer and shapes the samples of the buffer into one job's data.
 
-Reef reuses records in a pipeline of three stages::
+Reef reuses records in a pipeline of two stages::
 
-    record ─► record2record ─► record set ─► record2sample ─► sample ─► sample2job ─► job data
+    record ─► record2sample ─► sample ─► sample2job ─► job data
 
 The training pipeline (``reef.train.pipeline.TrainingPipeline``) stores the
 samples of each ready record set unit in the scenario's sample store. The

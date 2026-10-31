@@ -203,4 +203,4 @@ def test_chat_client_refuses_a_response_whose_stamps_include_unknown() -> None:
         "kv_transfer_params": {TOKEN_RUNTIME_LOAD_IDS_KEY: [UNKNOWN_RUNTIME_LOAD_ID, "engine:1"]},
     }
     with pytest.raises(ValueError, match="incomplete token runtime load IDs"):
-        VLLMGenerateClient().parse(artifact, response, capture_topk=0)
+        VLLMGenerateClient().parse(artifact, response)

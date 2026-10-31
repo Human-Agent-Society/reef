@@ -25,10 +25,10 @@ inference:
   handler-factory: reef.inference.sglang.chat.SGLangInferenceHandler
 recipe:
   implementation: recipes.tttd.recipe:TTTDRecipe
-# TTTD's stages. The record stage owns the step grid; the later stages read it from there.
+# TTTD's stages. The record-to-sample stage owns the step grid; the job stage reads it from there.
 # harness/harbor_agent.py reads this grid, so the harness and the stack cannot disagree about the step.
 pipeline:
-  record2record:
+  record2sample:
     config:
       groups_per_step: 8
       rollouts_per_group: 64
@@ -65,8 +65,8 @@ training:
     reef-checkpoint-policy: "${training.config.checkpoint_retention.policy}"
     megatron-to-hf-mode: "bridge"
     num-rollout: "${training.config.steps}"
-    rollout-batch-size: "${pipeline.record2record.config.groups_per_step}"
-    n-samples-per-prompt: "${pipeline.record2record.config.rollouts_per_group}"
+    rollout-batch-size: "${pipeline.record2sample.config.groups_per_step}"
+    n-samples-per-prompt: "${pipeline.record2sample.config.rollouts_per_group}"
     global-batch-size: "512"
     actor-num-nodes: "1"
     actor-num-gpus-per-node: "${training.config.num_gpus}"
@@ -108,7 +108,6 @@ training:
     adam-eps: "1e-8"
     clip-grad: "0"
     loss-type: "custom_loss"
-    use-rollout-logprobs: true
     kl-coef: "0.1"
     entropy-coef: "0"
     rollout-temperature: "1"

@@ -5,7 +5,7 @@ import pytest
 from reef.core import AgentRecord, RequestType
 from reef.core.trajectories import source_record_id, trajectory_reward
 from reef.record2sample.samples import make_multi_turn_policy_trajectory, make_policy_trajectory
-from reef.service.inference_service import client_response
+from reef.service.inference_service import provider_response
 
 
 def _inference(payload) -> AgentRecord:
@@ -106,7 +106,7 @@ def test_policy_sample_accepts_exact_harness_tensors() -> None:
 
 
 @pytest.mark.unit
-def test_client_response_hides_private_training_tensors() -> None:
+def test_provider_response_drops_the_training_block() -> None:
     response = {
         "choices": [{"message": {"content": "answer"}}],
         "training": {
@@ -116,7 +116,7 @@ def test_client_response_hides_private_training_tensors() -> None:
         },
     }
 
-    answered = client_response(response)
+    answered = provider_response(response)
 
     assert "training" not in answered
     assert response["training"]["rollout_log_probs"] == [-0.25]

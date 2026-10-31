@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -20,7 +20,6 @@ from reef.artifact.artifact import Artifact, ArtifactConflict, ArtifactError, Ar
 from reef.core.errors import ReefError
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.requirements import required_by
-from reef.core.training_request import normalize_training_request_payload
 from reef.dispatcher import Dispatcher
 from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.sync import HarnessFiles, import_files, layer_install, merge_trees
@@ -30,7 +29,14 @@ from reef.scenario.release_files import component_files
 from reef.scenario.scenario import Scenario
 from reef.service.release_page import before_release_id, build_release_page, build_running_step_page, result_of
 from reef.service.request_page import STATE_WORDS, build_request_page, request_state, settled_step
-from reef.service.wire import SCENARIO_HEADER, ReportPayload, RequestHeaders, parse_request_headers, with_request_tags
+from reef.service.wire import (
+    SCENARIO_HEADER,
+    ReportPayload,
+    RequestHeaders,
+    parse_request_headers,
+    scenario_headers,
+    with_request_tags,
+)
 from reef.train.harness_backend.backend import StepProgress
 from reef.train.harness_backend.component import PROGRESS_FILE, STEPS_DIR, read_step_progress
 from reef.train.harness_backend.records import read_step_records
@@ -58,12 +64,33 @@ def normalize_request_payload(
     payload: Mapping[str, Any],
 ) -> tuple[Mapping[str, Any], tuple[str, ...]]:
     """Normalize a typed Reef payload; a native provider body passes through."""
-    if request_type is RequestType.TRAIN:
-        return normalize_training_request_payload(payload), ()
     if request_type is not RequestType.REPORT:
         return dict(payload), ()
     report = ReportPayload.from_dict(payload)
     return report.to_dict(), report.references
+
+
+def instruction_view(scenario: Scenario, request_id: str, rows: Sequence[Mapping[str, Any]]) -> Mapping[str, Any]:
+    """The training instruction ``request_id`` of ``scenario`` as the request page reads it: ``agent_record_id``,
+    ``payload`` and ``created_at``.
+
+    A queued or recent instruction comes from its queue item. One whose item control deleted after the work retention
+    comes from the catalog row that settled it, which records the request (``metrics["training_request"]``), without
+    ``created_at``. Raise ``ArtifactNotFound`` when neither holds it.
+    """
+    item = None if scenario.instructions is None else scenario.instructions.get(request_id)
+    if item is not None:
+        return {"agent_record_id": item.id, "payload": dict(item.payload), "created_at": item.created_at}
+    step = settled_step(rows, request_id)
+    metrics = rows[step].get("metrics") if step is not None else None
+    request = metrics.get("training_request") if isinstance(metrics, Mapping) else None
+    if not isinstance(request, Mapping):
+        raise ArtifactNotFound(f"scenario {scenario.name!r} has no harness request {request_id!r}")
+    return {
+        "agent_record_id": request_id,
+        "payload": {key: value for key, value in request.items() if key != "id"},
+        "created_at": None,
+    }
 
 
 class RequestService:
@@ -84,6 +111,14 @@ class RequestService:
     @property
     def dispatcher(self) -> Dispatcher:
         return self._dispatcher
+
+    def accept_instruction(
+        self, headers: Mapping[str, str], payload: Mapping[str, Any], *, request_id: str | None = None
+    ) -> tuple[str, str]:
+        """Queue a training instruction (``Dispatcher.accept_instruction``); return its scenario and ID."""
+        scenario, release_id = scenario_headers(headers)
+        item = self._dispatcher.accept_instruction(scenario, payload, request_id=request_id, release_id=release_id)
+        return item.scenario, item.id
 
     def accept(
         self,
@@ -130,7 +165,7 @@ class RequestService:
             raise ValueError("agent_record_id must be a non-empty string")
         request_type = body.get("request_type")
         if not isinstance(request_type, str) or request_type not in ("inference", "report"):
-            raise ValueError("import request_type must be 'inference' or 'report'; use /reef/train for instructions")
+            raise ValueError("import request_type must be 'inference' or 'report'")
         payload = body.get("payload")
         if not isinstance(payload, Mapping):
             raise ValueError("record payload must be an object")
@@ -540,11 +575,9 @@ class RequestService:
         ArtifactNotFound naming it.
         """
         scenario = self._file_scenario(headers)
-        record = self._dispatcher.read_record(scenario.name, record_id)
-        if record is None or record.get("request_type") != RequestType.TRAIN.value:
-            raise ArtifactNotFound(f"scenario {scenario.name!r} has no harness request {record_id!r}")
         # The step a request settled as counts the catalog rows, the ones the release page opens.
         rows = list(reversed(self.harness_rows(scenario)))
+        record = instruction_view(scenario, record_id, rows)
         progress = self.step_progress(scenario)
         reserved = self.files_trainer(scenario).pending_job_data
         consumed = reserved is not None and reserved.request is not None and reserved.request.id == record_id
@@ -564,10 +597,8 @@ class RequestService:
         ArtifactNotFound naming it.
         """
         scenario = self._file_scenario(headers)
-        record = self._dispatcher.read_record(scenario.name, record_id)
-        if record is None or record.get("request_type") != RequestType.TRAIN.value:
-            raise ArtifactNotFound(f"scenario {scenario.name!r} has no harness request {record_id!r}")
         rows = list(reversed(self.harness_rows(scenario)))
+        record = instruction_view(scenario, record_id, rows)
         step = settled_step(rows, record_id)
         if step is not None:
             return {

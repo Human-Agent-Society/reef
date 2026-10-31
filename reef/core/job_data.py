@@ -26,10 +26,11 @@ class TrajectorySample:
     the agent records the trajectory came from. Purpose: the record-to-sample
     stage makes the value, and the training component reads it.
 
-    The document is the single source of trajectory data. Reef-specific feedback,
-    captured provider records, and exact training tensors live in ``extra.reef``.
-    ``training`` reads its ``training`` object without reconstructing tokens.
-    Full ATIF validation and algorithm-required fields belong to the consumer.
+    The document is the single source of trajectory data. Reef-specific feedback, captured provider records and
+    the training fields live in ``extra.reef``. A sample that a record-to-sample stage makes carries no tokens: the
+    training component renders it (``reef.core.chat_rendering``) and writes the tokens into ``training``. A task
+    rollout of a training component carries the exact tokens that its engine sampled. Full ATIF validation and
+    algorithm-required fields belong to the consumer.
     """
 
     trajectory: Mapping[str, Any]
@@ -64,11 +65,26 @@ class TrajectorySample:
 
     @property
     def training(self) -> Mapping[str, Any]:
-        """Captured training fields; absence does not authorize re-tokenization."""
+        """The training fields: the tokens and the loss mask once the sample is rendered or rolled out, and the
+        fields that a recipe adds."""
         training = self.metadata.get("training", {})
         if not isinstance(training, Mapping):
             raise ValueError("ATIF extra.reef.training must be an object")
         return training
+
+    @property
+    def artifact_id(self) -> str | None:
+        """The artifact that produced the trajectory: ``training.artifact_id``, which a rollout of a training component
+        names, else the ``artifact_id`` of the last call that the trajectory recorded (``extra.reef.records``), or
+        None when it names none, as an upload does."""
+        named = self.training.get("artifact_id")
+        if isinstance(named, str) and named:
+            return named
+        records = self.metadata.get("records")
+        last = records[-1] if isinstance(records, list) and records else None
+        payload = last.get("payload") if isinstance(last, Mapping) else None
+        recorded = payload.get("artifact_id") if isinstance(payload, Mapping) else None
+        return recorded if isinstance(recorded, str) and recorded else None
 
     def with_metadata(self, **fields: Any) -> TrajectorySample:
         """Return a new document with updated Reef metadata, preserving other extensions."""

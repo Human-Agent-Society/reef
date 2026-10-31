@@ -68,7 +68,8 @@ class RecordRetention:
     """Deployment-wide budget for all record bodies, regardless of consumption.
 
     Retry metadata, indexes and database overhead are outside the body budget.
-    Capacity alone triggers automatic eviction; records do not expire by age.
+    Capacity alone triggers automatic eviction; records do not expire by age. Eviction keeps the records that a
+    stored sample holds (``reef.storage.sql_records.sample_record_table``).
     """
 
     max_bytes: int = 20 * 1024**3
@@ -163,6 +164,11 @@ class RecordStore(ABC):
         request_type: RequestType | None = None,
     ) -> tuple[StoredRecord, ...]:
         """Read retained records with the same sequence bounds as ``replay_page``, optionally of one type."""
+
+    def trajectory(self, scenario: str, agent_record_id: str) -> tuple[str, ...]:
+        """The record IDs of the trajectory that the record ends, oldest first (RFC #1054); ``()`` when the record is
+        not stored. A store that keeps no trajectories treats each record as a trajectory of one call."""
+        return () if self.get_for_audit(scenario, agent_record_id) is None else (agent_record_id,)
 
     @abstractmethod
     def consumption_receipts(self, scenario: str) -> tuple[ConsumptionReceipt, ...]:
