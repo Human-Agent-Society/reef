@@ -790,12 +790,13 @@ class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
     def _push_base(self, source: BaseArtifactSource) -> str:
         """Commit the content of ``source`` with no parent, push it to the base ref, and return the base.
 
-        The import also fills the base's cache entry. Thus the first materialize links the files and pulls nothing.
+        Only this import makes the model files (``BaseModelFiles.directory``). The import also fills the base's cache
+        entry. Thus the first materialize links the files and pulls nothing.
         """
         with self._workspace.lock:
             self._workspace.orphan_checkout()
-            if source.model_directory is not None:
-                self._workspace.replace_tree(source.model_directory, subdirectory=source.model_component)
+            if source.model_files is not None:
+                self._workspace.replace_tree(source.model_files.directory(), subdirectory=source.model_component)
             for relative, text in source.files.items():
                 target = self._workspace.clone_dir / relative
                 target.parent.mkdir(parents=True, exist_ok=True)

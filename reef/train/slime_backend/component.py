@@ -51,7 +51,7 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from reef.artifact.repository import BaseArtifactSource
+from reef.artifact.repository import BaseArtifactSource, ModelDirectory
 from reef.core.evaluation import RolloutScores
 from reef.core.job_data import JobData, TaskSample, trajectories
 from reef.core.weight_layout import ADAPTER_DIR
@@ -314,7 +314,7 @@ class SlimeJobs(LocalJobComponent):
         """
         model = Path(self.args.hf_checkpoint).expanduser().resolve()
         if not self.lora:
-            return BaseArtifactSource(model_directory=model, inputs={"model": str(model)})
+            return BaseArtifactSource(model_files=ModelDirectory(model), inputs={"model": str(model)})
         from reef.train.slime_backend.reef_adapters.megatron.lora import sglang_lora_target_modules
         from reef.train.slime_backend.reef_adapters.megatron.lora_checkpoint import save_untrained_lora_adapter
 
@@ -322,7 +322,7 @@ class SlimeJobs(LocalJobComponent):
         if not (release / ADAPTER_DIR).is_dir():
             save_untrained_lora_adapter(self.args, release / ADAPTER_DIR)
         return BaseArtifactSource(
-            model_directory=release,
+            model_files=ModelDirectory(release),
             inputs={
                 "model": str(model),
                 "lora_rank": str(self.args.megatron_lora_rank),

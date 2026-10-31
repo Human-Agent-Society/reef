@@ -342,11 +342,11 @@ class CompositeRecipe(Recipe):
     def base_artifact_source(self) -> BaseArtifactSource:
         """Each component's base under that component's directory.
 
-        The files and the model directory of a component go under its name; each input is named ``<component>.<input>``. Raise
-        ``RecipeConfigError`` when two components hold a model directory.
+        The files and the model files of a component go under its name; each input is named ``<component>.<input>``.
+        Raise ``RecipeConfigError`` when two components hold model files.
         """
         sources = {component: recipe.base_artifact_source() for component, recipe in self.components.items()}
-        models = [component for component, source in sources.items() if source.model_directory is not None]
+        models = [component for component, source in sources.items() if source.model_files is not None]
         if len(models) > 1:
             raise RecipeConfigError(f"components {models} each hold a base model; a composite trains one model")
         return BaseArtifactSource(
@@ -355,7 +355,7 @@ class CompositeRecipe(Recipe):
                 for component, source in sources.items()
                 for path, text in source.files.items()
             },
-            model_directory=sources[models[0]].model_directory if models else None,
+            model_files=sources[models[0]].model_files if models else None,
             model_component=models[0] if models else None,
             inputs={
                 f"{component}.{name}": value

@@ -21,6 +21,7 @@ import fcntl
 import hashlib
 import json
 import math
+import threading
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
@@ -28,7 +29,7 @@ from pathlib import Path
 from typing import Any, TextIO
 
 from reef.artifact.files import ArtifactFiles
-from reef.artifact.repository import BaseArtifactSource
+from reef.artifact.repository import BaseArtifactSource, BaseModelFiles
 from reef.core.evaluation import RolloutScores
 from reef.core.job_data import JobData, TaskSample, trajectories
 from reef.runtime.durable_files import read_json, write_json
@@ -119,9 +120,12 @@ class TinkerJobComponent(LocalJobComponent, ABC):
 
     Every process that uses the component reads and writes ``config.state_dir``; only the process that runs the
     jobs holds its lock (``start_jobs``). A split deployment gives control and the training service one directory.
-    ``config.state_dir`` holds ``base/`` (the base start, which
-    ``prepare_base`` writes), ``imported/<digest>/`` (starts taken from
-    releases) and ``jobs/`` (see ``LocalJobComponent``); a saved checkpoint is
+    ``config.state_dir`` holds ``base/`` (the base start), ``imported/<digest>/`` (starts taken from
+    releases) and ``jobs/`` (see ``LocalJobComponent``). The constructor makes no base start. ``prepared_base``
+    makes ``base/`` on its first call in a process: before the process runs jobs (``start_jobs``), when it reads
+    ``base_start`` or checks a job from it, or when a repository imports the base artifact (``TinkerBaseFiles``).
+    A process that does none of these, such as a service that opens only repositories that have a base, makes
+    nothing. A saved checkpoint is
     ``jobs/<job_id>/<step>/``, which holds its manifest alone. A checkpoint
     directory is both the start of a later job and the release Reef publishes.
     The weights stay on the service. A subclass decides the parameterization:
@@ -150,12 +154,14 @@ class TinkerJobComponent(LocalJobComponent, ABC):
         self._state_lock: TextIO | None = None
         super().__init__(self._root / "jobs")
         self._base = self._root / "base"
-        self.prepare_base()
-        self.start_at(self._base)
+        #: Whether this process prepared ``base/`` (``prepared_base``); ``_base_lock`` guards it.
+        self._base_prepared = False
+        self._base_lock = threading.Lock()
 
     def start_jobs(self) -> None:
-        """Take ``state_dir`` for this process, then run the jobs: one process at a time runs a state directory's
-        jobs. Raise ``ValueError`` when another process holds it; a second call changes nothing."""
+        """Take ``state_dir`` for this process, prepare the base start, then run the jobs: one process at a time runs a
+        state directory's jobs. Raise ``ValueError`` when another process holds it; a second call changes nothing.
+        When the base start fails, the process releases ``state_dir`` and raises the failure."""
         if self._state_lock is not None:
             return
         lock = (self._root / ".lock").open("a")
@@ -164,13 +170,31 @@ class TinkerJobComponent(LocalJobComponent, ABC):
         except OSError:
             lock.close()
             raise ValueError("Tinker state_dir is already owned by another runtime") from None
+        try:
+            self.prepared_base()
+        except BaseException:
+            lock.close()
+            raise
         self._state_lock = lock
         super().start_jobs()
+
+    def prepared_base(self) -> Path:
+        """``base/``, after this process prepared it.
+
+        The first call in a process writes the base start (``prepare_base``) and checks it (``start_at``). A later
+        call returns at once. A failed call prepares nothing, so the next call tries again.
+        """
+        with self._base_lock:
+            if not self._base_prepared:
+                self.prepare_base()
+                self.start_at(self._base)
+                self._base_prepared = True
+        return self._base
 
     @abstractmethod
     def prepare_base(self) -> None:
         """Write the base start into ``base/`` when it is not there, or when it is a function of the configuration and
-        ``base/`` holds the start of another configuration; the constructor then checks it with ``start_at``."""
+        ``base/`` holds the start of another configuration; ``prepared_base`` then checks it with ``start_at``."""
 
     @abstractmethod
     def validated(self, checkpoint: TinkerCheckpoint) -> TinkerCheckpoint:
@@ -228,7 +252,8 @@ class TinkerJobComponent(LocalJobComponent, ABC):
 
     @property
     def base_start(self) -> str:
-        return str(self._base)
+        """``base/``, which this property prepares on its first use in a process (``prepared_base``)."""
+        return str(self.prepared_base())
 
     def job_parameters(self, parameters: Mapping[str, Any]) -> TinkerJobParameters:
         """``parameters`` over the component's defaults; ``ValueError`` for an unknown or a malformed parameter."""
@@ -249,7 +274,9 @@ class TinkerJobComponent(LocalJobComponent, ABC):
     def check_job(self, job: TrainingJob) -> None:
         parameters = self.job_parameters(job.parameters)
         if job.start is not None:
-            self.start_at(Path(job.start))
+            start = Path(job.start)
+            # A job from the base start reads ``base/`` as this process prepares it.
+            self.start_at(self.prepared_base() if start == self._base else start)
         tasks = [item for item in job.data.samples if isinstance(item, TaskSample)]
         if tasks and len(tasks) != len(job.data.samples):
             raise ValueError("a Tinker job trains either trajectories or tasks, not both")
@@ -398,11 +425,28 @@ class TinkerJobComponent(LocalJobComponent, ABC):
         return {**prepared.metrics, **rollout_metrics}
 
 
+@dataclass(frozen=True)
+class TinkerBaseFiles(BaseModelFiles):
+    """The base start of a Tinker component as the model files of its base artifact.
+
+    Values: ``component`` is the ``TinkerJobComponent`` whose ``base/`` the files are. ``directory`` returns
+    ``component.prepared_base()``, so a repository import makes the base start on its first call in a process.
+    Purpose: ``TinkerJobComponent`` subclasses give it in their ``base_artifact_source``, which itself makes nothing.
+    """
+
+    component: TinkerJobComponent
+
+    def directory(self) -> Path:
+        return self.component.prepared_base()
+
+
 class TinkerTrainingComponent(TinkerJobComponent):
     """Train a LoRA of rank ``config.lora_rank`` on the base model, on Tinker or a Tinker-compatible service.
 
     The base start, ``base/``, is the untrained adapter's checkpoint, which the
-    client saves the first time (``TinkerClient.initialize``). Serving reads
+    client saves on first use (``TinkerClient.initialize``): before the training
+    process runs jobs, or when a repository imports the base artifact
+    (``prepared_base``). Serving reads
     each saved checkpoint from its artifact: Tinker's sampler
     (``reef.inference.tinker``) reads the manifest, and a serving runtime that
     loads the weights into its own engines downloads the adapter from the
@@ -439,7 +483,7 @@ class TinkerTrainingComponent(TinkerJobComponent):
         inputs = {"model": self._model, "lora_rank": str(self._lora_rank)}
         if self._config.base_url is not None:
             inputs["service"] = self._config.base_url
-        return BaseArtifactSource(model_directory=self._base, inputs=inputs)
+        return BaseArtifactSource(model_files=TinkerBaseFiles(self), inputs=inputs)
 
     def check_release(self, files: ArtifactFiles) -> None:
         """A manifest of a checkpoint of this component's model, rank and service, whose state path resolves there."""

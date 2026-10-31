@@ -189,7 +189,7 @@ def test_composite_recipe_merges_surfaces_seeds_and_trainers(tmp_path: Path) -> 
         f"config/{CONFIG_FILE}": json.dumps({"request_defaults": {"temperature": 0.2}}),
     }
     # No weight-training component: the base holds no model.
-    assert base.model_directory is None and base.model_component is None
+    assert base.model_files is None and base.model_component is None
     assert recipe.report_type is None
     trainers = recipe.build_trainers(
         "agent", SQLiteScenarioStorage().open("agent").records, surface=surface, algorithm_states={}

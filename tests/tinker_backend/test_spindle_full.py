@@ -176,7 +176,7 @@ def test_the_base_is_a_reference_to_the_base_revision_and_a_job_from_it_starts_f
 ):
     assert component.release_format == ReleaseFormat("full")
     base = component.base_artifact_source()
-    assert read_reference(base.model_directory) == HuggingFaceRevision(MODEL, COMMIT)
+    assert read_reference(base.model_files.directory()) == HuggingFaceRevision(MODEL, COMMIT)
     assert base.inputs == {"model": BASE, "service": SPINDLE}
     assert component.start_at(Path(component.base_start)) == FreshStart(MODEL)
 
@@ -197,11 +197,14 @@ def test_the_base_is_a_reference_to_the_base_revision_and_a_job_from_it_starts_f
 @pytest.mark.unit
 def test_a_new_base_commit_replaces_the_base_reference_in_the_state_dir(tmp_path, client, exporter):
     # The deployment restarts with a later commit of the same repo in its config.
-    SpindleFullTrainingComponent(MODEL, settings(tmp_path), client, exporter).close_resources()
+    first = SpindleFullTrainingComponent(MODEL, settings(tmp_path), client, exporter)
+    first.prepared_base()
+    first.close_resources()
     later = "f" * 40
     component = SpindleFullTrainingComponent(MODEL, settings(tmp_path, base=f"hf://{MODEL}@{later}"), client, exporter)
     component.start_jobs()
-    assert read_reference(component.base_artifact_source().model_directory) == HuggingFaceRevision(MODEL, later)
+    files = component.base_artifact_source().model_files
+    assert read_reference(files.directory()) == HuggingFaceRevision(MODEL, later)
     assert component.start_at(Path(component.base_start)) == FreshStart(MODEL)
 
 

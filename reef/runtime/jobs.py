@@ -246,7 +246,9 @@ class TrainingComponent(ABC):
         component trains. It has the layout of every other release
         (``release_format``), so serving and training read it as they read
         any release. Its ``inputs`` name the model and the settings that
-        decide its content.
+        decide its content. Every service process calls this method, so a
+        component whose model files cost a remote call gives them as
+        ``BaseModelFiles`` that make them on the first ``directory`` call.
         """
 
     @property

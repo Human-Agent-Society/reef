@@ -149,6 +149,37 @@ class EnumerableRepositoryBackendFactory(RepositoryBackendFactory):
     def list_registrations(self) -> tuple[str, ...]: ...
 
 
+class BaseModelFiles(ABC):
+    """The model files of a base artifact, which a process makes only when a repository imports them.
+
+    Purpose: a recipe gives a value in ``BaseArtifactSource.model_files``. A repository backend calls ``directory``
+    only when it imports the base into a repository that has none. Thus a process that opens only repositories that
+    have a base makes no model files.
+    """
+
+    @abstractmethod
+    def directory(self) -> Path:
+        """A directory of the model files. The first call makes them; a later call gives the same directory."""
+
+
+@dataclass(frozen=True)
+class ModelDirectory(BaseModelFiles):
+    """Model files that exist already.
+
+    Values: ``path`` is an existing directory; the constructor raises ``ValueError`` for another path.
+    ``directory`` returns ``path``.
+    """
+
+    path: Path
+
+    def __post_init__(self) -> None:
+        if not self.path.is_dir():
+            raise ValueError(f"model directory {self.path} does not exist")
+
+    def directory(self) -> Path:
+        return self.path
+
+
 @dataclass(frozen=True)
 class BaseArtifactSource:
     """The content of a repository's base artifact, and the configuration that the content comes from.
@@ -156,19 +187,20 @@ class BaseArtifactSource:
     Values:
 
     - ``files`` maps relative POSIX paths inside the release to the text of each file.
-    - ``model_directory`` is a directory of model files, or ``None``.
+    - ``model_files`` gives the directory of model files, or is ``None`` for no model files.
     - ``model_component`` is the component directory that the model files go into. ``None`` is the release root.
-      It is ``None`` when ``model_directory`` is ``None``.
+      It is ``None`` when ``model_files`` is ``None``.
     - ``inputs`` maps non-empty names to non-empty strings. They identify the configuration, for example the
       configured model and the checksum of the configured seed.
 
     Purpose: a recipe makes the value (``Recipe.base_artifact_source``). A repository backend imports it as the
-    base artifact of a repository that has none. A repository that has a base opens only when its base came from
-    equal ``inputs``. Thus Reef reads the configuration once, to make the base.
+    base artifact of a repository that has none; only that import reads the model files. A repository that has a
+    base opens only when its base came from equal ``inputs``. Thus Reef reads the configuration once, to make the
+    base, and a process that opens only repositories that have a base makes no model files.
     """
 
     files: Mapping[str, str] = field(default_factory=dict)
-    model_directory: Path | None = None
+    model_files: BaseModelFiles | None = None
     model_component: str | None = None
     inputs: Mapping[str, str] = field(default_factory=dict)
 
@@ -177,10 +209,8 @@ class BaseArtifactSource:
             path = PurePosixPath(relative)
             if not relative or path.is_absolute() or ".." in path.parts:
                 raise ValueError(f"base artifact file {relative!r} must be a relative path inside the release")
-        if self.model_directory is None and self.model_component is not None:
-            raise ValueError("model_component names where model files go, so it requires model_directory")
-        if self.model_directory is not None and not self.model_directory.is_dir():
-            raise ValueError(f"model directory {self.model_directory} does not exist")
+        if self.model_files is None and self.model_component is not None:
+            raise ValueError("model_component names where model files go, so it requires model_files")
         if self.model_component is not None:
             validate_component_name(self.model_component)
         for name, value in self.inputs.items():

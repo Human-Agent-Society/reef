@@ -23,6 +23,7 @@ pytest.importorskip("ray", reason="requires the optional Ray runtime")
 from tests.support._trajectories import policy_trajectory
 from tests.support.slime_component import FakeTrainGroup, RecordingBatchProcessor, checkpoint_storage, finished
 
+from reef.artifact import ModelDirectory
 from reef.core.job_data import TaskSample
 from reef.core.trajectories import trajectory_reward
 from reef.core.weight_layout import ADAPTER_DIR
@@ -467,7 +468,7 @@ def test_the_base_artifact_is_the_startup_model_and_the_base_start_names_the_sta
     model.mkdir()
     stack = stacks(tmp_path, hf_checkpoint=str(model))
     base = stack.component.base_artifact_source()
-    assert (base.model_directory, base.inputs) == (model.resolve(), {"model": str(model.resolve())})
+    assert (base.model_files, base.inputs) == (ModelDirectory(model.resolve()), {"model": str(model.resolve())})
     assert SlimeStart.read(Path(stack.component.base_start)) == SlimeStart(None, None, {}, None)
     # The first job of a trainer starts from the startup weights, which the workers hold.
     stack.component.submit(

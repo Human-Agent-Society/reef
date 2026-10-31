@@ -779,14 +779,18 @@ plugin implements one class method:
 - ``context`` is a ``RepositoryBackendContext``. ``work_dir`` and ``cache_dir``
   are ``storage.artifact_work_dir`` and ``storage.artifact_cache_dir``.
   ``base`` is a ``BaseArtifactSource``: the content of the recipe's base
-  artifact (``files``, and ``model_directory`` under ``model_component``) and
-  the configuration it comes from (``inputs``).
+  artifact (``files``, and ``model_files`` under ``model_component``) and
+  the configuration it comes from (``inputs``). ``model_files`` is a
+  ``BaseModelFiles``: its ``directory()`` makes the model files on its first
+  call and returns their directory.
 
 Every repository starts from its base artifact. A backend must:
 
 - Import ``context.base`` as the repository's base release when the
   repository has none. The release has no parent, and its content ID is
-  ``base.content_id``.
+  ``base.content_id``. Call ``base.model_files.directory()`` only for this
+  import, so that a process that opens only repositories that have a base
+  makes no model files.
 - Refuse to open a repository whose base was imported from other
   ``base.inputs``. Name both in the error. Refuse a repository whose base was
   not imported.
@@ -1919,7 +1923,9 @@ loop:
        out as one of its releases, with the ``inputs`` that decide its
        content. Reef imports it as the base artifact. Slime gives the
        ``hf_checkpoint`` directory, or with LoRA an adapter whose weights are
-       zero. Tinker gives the checkpoint of its untrained adapter.
+       zero. Tinker gives the checkpoint of its untrained adapter, which it
+       makes only when a repository imports the base artifact or the
+       training process runs jobs.
    * - ``base_start``
      - The start of a job from the untrained checkpoint, a non-empty string.
        The first job of every trainer starts from it.

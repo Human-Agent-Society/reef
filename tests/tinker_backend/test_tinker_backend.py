@@ -380,10 +380,16 @@ def test_a_restarted_component_resumes_a_job_after_its_last_checkpoint(config, c
 
 
 def test_a_component_refuses_checkpoints_that_another_tinker_service_holds(config, client, tmp_path):
-    TinkerTrainingComponent(MODEL, config, client).close()
+    hosted = TinkerTrainingComponent(MODEL, config, client)
+    hosted.prepared_base()
+    hosted.close()
     spindle = replace(config, base_url="https://spindle.example")
     with pytest.raises(ValueError, match="held by hosted Tinker, not by the configured service https://spindle"):
-        TinkerTrainingComponent(MODEL, spindle, client)
+        TinkerTrainingComponent(MODEL, spindle, client).start_jobs()
+    # The failed start released state_dir, so another process can run its jobs.
+    restarted = TinkerTrainingComponent(MODEL, config, client)
+    restarted.start_jobs()
+    restarted.close()
 
     held = TinkerCheckpoint(MODEL, 32, "tinker://s/state", "tinker://s/sampler", service="https://spindle.example")
     assert TinkerCheckpoint.from_dict(held.to_dict()) == held
@@ -393,11 +399,38 @@ def test_a_component_refuses_checkpoints_that_another_tinker_service_holds(confi
         held.check_compatible(MODEL, service=None)
 
 
+@pytest.mark.parametrize("first_use", ["model_files", "base_start", "start_jobs"])
+def test_a_component_makes_its_base_start_on_first_use_once_and_not_when_it_is_built(config, client, first_use):
+    component = TinkerTrainingComponent(MODEL, config, client)
+    files = component.base_artifact_source().model_files
+    assert files is not None
+    assert client.initializations == 0 and not (component.state_dir / "base").exists()
+    uses = {
+        "model_files": files.directory,
+        "base_start": lambda: component.base_start,
+        "start_jobs": component.start_jobs,
+    }
+    uses[first_use]()
+    uses[first_use]()
+    assert TinkerCheckpoint.read(files.directory()) == UNTRAINED
+    assert component.base_start == str(files.directory())
+    assert client.initializations == 1
+    component.close()
+    # Another process that shares state_dir finds the base start there and makes none.
+    other_client = RemoteClient()
+    other = TinkerTrainingComponent(MODEL, config, other_client)
+    other.start_jobs()
+    assert other_client.initializations == 0
+    other.close()
+
+
 def test_the_base_artifact_is_the_untrained_adapter_and_imports_as_any_release(component, objective, tmp_path):
     base = component.base_artifact_source()
-    assert base.model_directory is not None and TinkerCheckpoint.read(base.model_directory) == UNTRAINED
-    assert component.base_start == str(base.model_directory)
-    assert TinkerCheckpoint.read(Path(component.import_start(base.model_directory))) == UNTRAINED
+    assert base.model_files is not None
+    directory = base.model_files.directory()
+    assert TinkerCheckpoint.read(directory) == UNTRAINED
+    assert component.base_start == str(directory)
+    assert TinkerCheckpoint.read(Path(component.import_start(directory))) == UNTRAINED
     status = train(component, batch(), objective.name)
     release = tmp_path / "release"
     release.mkdir()
