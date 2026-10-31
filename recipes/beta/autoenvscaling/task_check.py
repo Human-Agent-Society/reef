@@ -65,13 +65,13 @@ def main(arguments: list[str], environ: Mapping[str, str]) -> int:
         if options.wait is None:
             answer = gateway(url, "/check", {})
         else:
-            answer = gateway(url, "/trial", {"task": f"check {options.wait}"})
+            answer = gateway(url, "/check", {"check_id": options.wait})
         while answer.get("state") == "running":
             waited = time.monotonic() - started
             if time.time() >= deadline or waited >= WAIT_SECONDS:
                 break
             time.sleep(min(POLL_SECONDS, WAIT_SECONDS - waited))
-            answer = gateway(url, "/trial", {"task": f"check {answer['check_id']}"})
+            answer = gateway(url, "/check", {"check_id": answer["check_id"]})
     except RuntimeError as error:
         print(f"The check service failed ({error}). This uses up no check: run the check again.")
         return 1

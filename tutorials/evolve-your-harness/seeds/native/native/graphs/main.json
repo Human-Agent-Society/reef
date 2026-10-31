@@ -1,0 +1,34 @@
+{
+  "name": "main",
+  "start": "think",
+  "max_steps": 12,
+  "stages": {
+    "think": {
+      "kind": "model"
+    },
+    "act": {
+      "kind": "tools"
+    },
+    "done": {
+      "kind": "end",
+      "reason": "completed"
+    }
+  },
+  "edges": [
+    {
+      "from": "think",
+      "when": "tool_calls",
+      "to": "act"
+    },
+    {
+      "from": "think",
+      "when": "text",
+      "to": "done"
+    },
+    {
+      "from": "act",
+      "when": "done",
+      "to": "think"
+    }
+  ]
+}

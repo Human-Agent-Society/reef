@@ -10,7 +10,7 @@ from recipes.beta.autoenvscaling.designer import CandidateChecks, DesignerOutage
 
 REDACTED = "[redacted]"
 #: Retain rendered configuration and transcripts, but remove account state.
-KEPT_CONFIG = frozenset({"CLAUDE.md", "settings.json", "projects"})
+KEPT_CONFIG = frozenset({"settings.json", "projects"})
 TOKEN_REFUSAL = (
     "the check refused the task: a file in ./task/ holds this run's credential. Remove it from the task; a task "
     "that holds it is never checked or admitted."

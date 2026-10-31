@@ -1,166 +1,83 @@
-"""Guarantees of the recipes/gepa method package, hermetic: no reflection
-model is ever reached, the proposer's rollouts run through an injected fake
-runner, and the one end-to-end step drives a fake pi binary through the real
-adapter, backend, and commit path."""
+"""Guarantees of the recipes/gepa method, hermetic: GEPA's archive rules, its reflection prompt, and whole steps.
+
+No reflection model is reached: a fake binding answers. A step runs through
+the phases the trainer runs (``backend_step``), decided by the ``compare``
+policy on the mean as a GEPA deployment decides it. Its tasks run a fake
+pi binary through the real adapter path: the binary answers with the rules it
+was given, and a prompt that holds ``CRASH`` leaves a session that cannot be
+read, so that run has no score. The scorer prefers rules with the marker.
+"""
 
 from __future__ import annotations
 
 import dataclasses
 import json
 import random
+import sys
 from pathlib import Path
 from typing import Any
 
 import pytest
-from tests.support._strategies import resolve_rollout_scorer
 from tests.support._trajectories import recorded_trajectory
-from tests.support.samples_service import make_samples
+from tests.support.harness_service import backend_step
+from tests.support.harness_steps import TreeReleases, build_harness_backend, harness_recipe
 
-from recipes.gepa import components, reflection
+from recipes.gepa import GEPA, GEPASettings, ScoreFeedback, components, reflection
 from recipes.gepa.archive import Archive, Candidate
-from recipes.gepa.backend import ARCHIVE_STATE_KEY
-from recipes.gepa.method import Feedback, GEPAPlugin, GEPAProposer, GepaRolloutRunner, ScoreFeedback
-from recipes.gepa.recipe import GEPARecipe, scenario_archive_path
-from reef.artifact import InMemoryRepositoryBackend
-from reef.core import AgentRecord, RequestType
-from reef.core.evaluation import EvaluationResult, UpdateCandidate
-from reef.core.trajectories import recorded_payload
-from reef.dispatcher import Dispatcher
-from reef.execution.sandbox.process import LocalExecutor
+from recipes.gepa.method import ARCHIVE_FILE, archive_for_step
+from reef.core.evaluation import RolloutScore
+from reef.core.job_data import TrajectorySample
+from reef.core.plugins import PluginConfigError
+from reef.evaluation.harness import ComparePolicy, DecisionRecord, FailureObservation, History, RunRecord
 from reef.harness.adapters import get_adapter
-from reef.harness.rollouts.model_binding import ModelBinding, ModelBindings
-from reef.harness.rollouts.run import RolloutError, RolloutResult
-from reef.harness.tree.mutations import Mutation
-from reef.inference.http import InferenceProxyRuntime
-from reef.recipe import RecipeConfigError
-from reef.recipe.registry import build_recipe
-from reef.storage.commit_history import CommitHistoryScenarioStore
-from reef.storage.sql_coordination import memory_coordination
-from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
-from reef.train.trainer import Trainer
-
-# The fake harness scores itself: its trajectory carries the rules text, so
-# the scorer can prefer any composition whose instructions carry the marker.
-PI_FAKE = """\
-#!/usr/bin/env python3
-import json, os, sys
-from pathlib import Path
-
-prompt = sys.argv[sys.argv.index("-p") + 1]
-agent_dir = Path(os.environ["PI_CODING_AGENT_DIR"])
-session_dir = Path(os.environ["PI_CODING_AGENT_SESSION_DIR"])
-session_dir.mkdir(parents=True, exist_ok=True)
-rules_path = agent_dir / "AGENTS.md"
-event = {"type": "agent_end", "rules": rules_path.read_text() if rules_path.exists() else ""}
-(session_dir / "session.jsonl").write_text(json.dumps(event) + "\\n")
-"""
+from reef.harness.tasks.model_binding import ModelBinding, ModelBindings
+from reef.harness.tasks.run import TaskResult
+from reef.harness.tree import HarnessTree
+from reef.train.harness_backend.backend import HarnessBackend
+from reef.train.harness_backend.state import HarnessState
+from reef.train.types import JobData, TrainStepResult
 
 MARKER = "SHOW-YOUR-WORK"
 SEED_TEXT = "Answer briefly."
 REFLECTED = f"Answer briefly. {MARKER}"
 FENCED_REPLY = f"Here you go:\n```\n{REFLECTED}\n```\n"
+NO_MARKER_REPLY = "```\nNo marker here.\n```"
 
-#: The served composition as the backend passes it: (kind, config) pairs with
-#: entry ids stripped. The skill is here to prove ``kinds`` narrows what GEPA
-#: is allowed to rewrite.
-NODES = (
-    ("rules", {"text": SEED_TEXT}),
-    ("skill", {"name": "notes", "text": "# notes"}),
-)
-SEED = ({"id": "rules", "name": "rules", "config": {"text": SEED_TEXT}},)
-
+#: The seed tree. The skill proves that ``components`` narrows what GEPA may rewrite, and the config file that GEPA
+#: never rewrites structure.
+TREE = HarnessTree({"config/primary.json": "{}\n", "rules.md": SEED_TEXT, "skills/notes/SKILL.md": "# notes\n"})
+#: The step's evaluation tasks, GEPA's validation set. The second cannot run on any tree.
+TASKS = ("check one", "CRASH check two")
 TASK = "what is 2+2?"
-SAMPLE = recorded_trajectory(
-    "a1",
-    {
-        "messages": [{"role": "user", "content": TASK}],
-        "response": {"choices": [{"message": {"role": "assistant", "content": "4"}}]},
-    },
-    0.0,
+
+#: A fake pi whose answer is the rules it was given. A prompt with CRASH writes a line that is not JSON before the
+#: answer, so the session cannot be read.
+PI_FAKE = (
+    f"#!{sys.executable}\n"
+    """\
+import json, os, sys
+from pathlib import Path
+
+prompt = sys.argv[sys.argv.index("-p") + 1]
+rules = (Path(sys.argv[sys.argv.index("-e") + 1]) / "rules.md").read_text()
+sessions = Path(os.environ["PI_CODING_AGENT_SESSION_DIR"])
+sessions.mkdir(parents=True, exist_ok=True)
+event = {"type": "message", "role": "assistant", "content": rules}
+(sessions / "session.jsonl").write_text(("not json\\n" if "CRASH" in prompt else "") + json.dumps(event) + "\\n")
+"""
 )
-#: The same exchange as the proxy records a streamed reply: the message it
-#: assembled from the chunks sits beside the raw stream body, no ``choices``.
-STREAMED_SAMPLE = recorded_trajectory(
-    "a2",
-    {
-        "messages": [{"role": "user", "content": TASK}],
-        "response": {"stream": True, "body": "data: ...", "message": {"role": "assistant", "content": "4"}},
-    },
-    0.0,
-)
 
 
-def test_recorded_traffic_reads_buffered_and_streamed_replies() -> None:
-    from recipes.gepa.method import _traffic
-
-    assert [texts for _, texts in _traffic((SAMPLE, STREAMED_SAMPLE))] == [(TASK, "4"), (TASK, "4")]
-
-
-def score_rules(task: str, result: RolloutResult) -> float:
-    """1.0 when the composition that ran carried the marker instruction."""
-    last = result.trajectory[-1] if result.trajectory else {}
-    return 1.0 if MARKER in str(last.get("content", last.get("rules", ""))) else 0.0
+def score_rules(task: str, result: TaskResult) -> float:
+    """1.0 when the tree that ran carried the marker."""
+    return 1.0 if MARKER in result.trajectory[-1]["content"] else 0.0
 
 
-class FakeRollouts(GepaRolloutRunner):
-    """A rollout runner that answers with the rules text it was rendered."""
+class FakeChat(ModelBinding):
+    """A reflection model that answers one reply and keeps the prompts it was asked."""
 
-    def __init__(self, failure: Exception | None = None, *, residue: tuple[str, ...] = ()) -> None:
-        self.prompts: list[str] = []
-        self.rules: list[str] = []
-        self.executors = []
-        self.timeouts: list[float] = []
-        self.failure = failure
-        self.residue = residue
-
-    def run(self, descriptor, files, prompt, *, binary=None, timeout=600.0, executor=None):
-        self.prompts.append(prompt)
-        self.executors.append(executor)
-        self.timeouts.append(timeout)
-        text = next((value for path, value in files.items() if path.endswith("AGENTS.md")), "")
-        self.rules.append(text)
-        if self.failure is not None:
-            raise self.failure
-        return RolloutResult(
-            exit_code=0,
-            stdout="",
-            stderr="",
-            trajectory=({"role": "assistant", "content": text},),
-            residue=self.residue,
-        )
-
-
-class FakeChat:
-    """A model binding stand-in that answers one canned reflection reply; it
-    carries a binding's endpoint fields so the step record's recording seam
-    can wrap it like any declared model."""
-
-    base_url = "http://127.0.0.1:9"
-    model = "reflection"
-    api_key = None
-    api = "openai"
-    timeout_s = 600.0
-    metadata = None
-
-    def __init__(self, reply: str) -> None:
-        self.reply = reply
-        self.prompts: list[str] = []
-
-    def chat(self, messages, **params):
-        self.prompts.append(messages[0]["content"])
-        return self.reply
-
-
-class ServedModel(ModelBinding):
-    """The model under test: a real binding whose ``chat`` is canned.
-
-    Rollouts render this binding into the tree, so it has to be a genuine
-    ``ModelBinding``; the canned ``chat`` is what the reflection fallback
-    reaches when no ``evolution.models.reflection`` is declared.
-    """
-
-    def __init__(self, reply: str = "") -> None:
-        super().__init__(base_url="http://127.0.0.1:9", model="served-model", api_key="dummy")
+    def __init__(self, reply: str = FENCED_REPLY) -> None:
+        super().__init__(base_url="http://127.0.0.1:9", model="reflection", api_key="dummy")
         object.__setattr__(self, "reply", reply)
         object.__setattr__(self, "prompts", [])
 
@@ -169,79 +86,75 @@ class ServedModel(ModelBinding):
         return self.reply
 
 
-def bindings(reply: str = FENCED_REPLY, *, declared: bool = True) -> tuple[ModelBindings, Any]:
-    """The models a proposer receives, and the object its reflection lands on."""
-    if declared:
-        reflector = FakeChat(reply)
-        return ModelBindings(served=ServedModel(), named={"reflection": reflector}), reflector
-    served = ServedModel(reply)
-    return ModelBindings(served=served), served
-
-
-def runtime() -> InferenceProxyRuntime:
-    return InferenceProxyRuntime(model_path="served-model", base_url="http://127.0.0.1:9", api_key="dummy")
-
-
-def make_binary(tmp_path: Path) -> Path:
-    binary = tmp_path / "fake-pi"
+def gepa_backend(
+    tmp_path: Path, settings: GEPASettings, *, reflector: ModelBinding | None = None
+) -> tuple[HarnessBackend, TreeReleases]:
+    """The backend of a pi scenario that GEPA evolves from ``TREE``, its reflection model ``reflector``."""
+    binary = tmp_path / "gepa-pi"
     binary.write_text(PI_FAKE)
     binary.chmod(0o755)
-    return binary
+    recipe = harness_recipe(tmp_path, GEPA(settings), seed=TREE, score=score_rules, tasks=TASKS, binary=str(binary))
+    recipe = dataclasses.replace(recipe, models={"reflection": FakeChat() if reflector is None else reflector})
+    releases = TreeReleases(recipe.seed)
+    return build_harness_backend(recipe, "demo", releases), releases
 
 
-def proposer(
-    archive: Archive,
-    rollouts: FakeRollouts,
-    **overrides: Any,
-) -> GEPAProposer:
-    settings: dict[str, Any] = {
-        "minibatch_size": 3,
-        "rng_seed": 0,
-        "skip_perfect_score": True,
-        "perfect_score": 1.0,
-        "max_metric_calls": None,
-        "kinds": ("rules",),
-        "valset_size": 2,
+def step(backend: HarnessBackend, number: int, state: dict[str, Any], *samples: TrajectorySample) -> TrainStepResult:
+    """Step ``number`` on ``samples``, decided by the compare policy on the mean."""
+    policy = ComparePolicy(backend, statistic="mean")
+    return backend_step(backend, JobData(f"demo:{number}", samples), state, policy, scenario_step=number - 1)
+
+
+def sample(name: str, score: float, prompt: str = TASK) -> TrajectorySample:
+    """One served exchange: ``prompt``, the answer ``4``, and the reported ``score``."""
+    payload = {
+        "messages": [{"role": "user", "content": prompt}],
+        "response": {"choices": [{"message": {"role": "assistant", "content": "4"}}]},
     }
-    settings.update(overrides)
-    return GEPAProposer(
-        archive=archive,
-        descriptor=get_adapter("pi"),
-        binary=None,
-        score_rollout=resolve_rollout_scorer(score_rules),
-        feedback=ScoreFeedback(),
-        rollout_runner=rollouts,
-        **settings,
+    return recorded_trajectory(name, payload, score)
+
+
+def committed(archive: Archive) -> dict[str, Any]:
+    """The backend state of a step whose method committed ``archive``."""
+    return HarnessState(method_files={ARCHIVE_FILE: json.dumps(archive.to_state())}).to_json()
+
+
+def archive_of(result: TrainStepResult) -> Archive:
+    """The archive a step committed."""
+    return Archive.from_state(json.loads(HarnessState.from_json(result.state).method_files[ARCHIVE_FILE]))
+
+
+RULES_ONLY = GEPASettings(components=("rules",))
+PI_LAYOUT = get_adapter("pi").layout
+
+
+# -- components: the tree as a GEPA candidate ----------------------------------
+
+
+def test_texts_of_keys_the_evolvable_files_by_path_and_refuses_a_part_that_is_not_text() -> None:
+    assert components.texts_of(TREE, PI_LAYOUT, ("rules", "skill")) == {
+        "rules.md": SEED_TEXT,
+        "skills/notes/SKILL.md": "# notes\n",
+    }
+    assert components.texts_of(TREE, PI_LAYOUT, ("rules",)) == {"rules.md": SEED_TEXT}
+    with pytest.raises(ValueError, match="GEPA components must name text parts of the tree: rules, skill, command"):
+        components.texts_of(TREE, PI_LAYOUT, ("extension",))
+
+
+def test_a_candidate_tree_is_the_served_tree_with_the_candidates_texts() -> None:
+    texts = {"rules.md": REFLECTED, "skills/notes/SKILL.md": "# better\n", "skills/absent/SKILL.md": "unreachable"}
+    # Every other file stays, and a component the served tree does not hold is never invented.
+    assert components.candidate_tree(TREE, texts) == HarnessTree(
+        {**TREE.files, "rules.md": REFLECTED, "skills/notes/SKILL.md": "# better\n"}
     )
+    assert components.candidate_tree(TREE, components.texts_of(TREE, PI_LAYOUT, ("rules",))) == TREE
 
 
-# -- components: the composition as a GEPA candidate ------------------------
-
-
-def test_texts_of_keys_nodes_by_kind_and_name() -> None:
-    assert components.texts_of(NODES, ("rules", "skill")) == {"rules": SEED_TEXT, "skill:notes": "# notes"}
-    assert components.texts_of(NODES, ("rules",)) == {"rules": SEED_TEXT}
-    assert components.component_key("config", {"target": "primary"}) is None
-
-
-def test_mutations_address_the_entry_the_component_composes_under() -> None:
-    served = {"rules": SEED_TEXT, "skill:notes": "# notes"}
-    child = {"rules": REFLECTED, "skill:notes": "# better", "skill:absent": "unreachable"}
-    assert components.mutations(served, child) == (
-        Mutation("update", "rules", {"name": "rules", "config": {"text": REFLECTED}}),
-        Mutation("update", "notes", {"name": "skill", "config": {"name": "notes", "text": "# better"}}),
-    )
-    assert components.mutations(served, served) == ()
-
-
-# -- reflection: the copied prompt and extractor ----------------------------
+# -- reflection: the copied prompt and extractor --------------------------------
 
 
 def test_the_prompt_carries_the_current_text_and_the_records() -> None:
-    prompt = reflection.render_prompt(
-        SEED_TEXT,
-        [{"Inputs": TASK, "Generated Outputs": "4", "Feedback": "correct"}],
-    )
+    prompt = reflection.render_prompt(SEED_TEXT, [{"Inputs": TASK, "Generated Outputs": "4", "Feedback": "correct"}])
     assert "<curr_param>" not in prompt and "<side_info>" not in prompt
     assert SEED_TEXT in prompt
     assert "# Example 1\n## Inputs\nwhat is 2+2?\n\n## Generated Outputs\n4\n\n## Feedback\ncorrect\n\n" in prompt
@@ -253,11 +166,6 @@ def test_the_prompt_nests_structured_feedback_as_markdown_headers() -> None:
     assert "## Feedback\n### why\n#### detail\noff by one" in prompt
 
 
-def test_a_template_missing_a_placeholder_is_refused() -> None:
-    with pytest.raises(ValueError, match="<side_info>"):
-        reflection.render_prompt("x", [], template="only <curr_param>")
-
-
 def test_the_extractor_reads_fenced_and_unfenced_replies() -> None:
     assert reflection.extract_new_text(FENCED_REPLY) == REFLECTED
     assert reflection.extract_new_text(f"```text\n{REFLECTED}\n```") == REFLECTED
@@ -266,31 +174,30 @@ def test_the_extractor_reads_fenced_and_unfenced_replies() -> None:
     assert reflection.extract_new_text(f"{REFLECTED}\n```") == REFLECTED  # never opened
 
 
-# -- archive: fronts, parent sampling, resume -------------------------------
+# -- archive: fronts, parent sampling, the committed state ----------------------
 
 
-def archive_with(tmp_path: Path, *scores: list[float] | None) -> Archive:
-    archive = Archive(tmp_path / "archive.json")
+def archive_with(*scores: list[float] | None) -> Archive:
+    archive = Archive()
     for index, score in enumerate(scores):
         if index == 0:
-            archive.seed({"rules": f"text {index}"})
+            archive.seed({"rules.md": f"text {index}"})
         else:
-            archive.add({"rules": f"text {index}"}, 0, [0.0])
+            archive.add({"rules.md": f"text {index}"}, 0, [0.0], step=index)
         if score is not None:
             archive.record_validation(index, score)
     archive.clear_pending()
     return archive
 
 
-def test_a_strict_win_replaces_a_front_and_an_equal_score_joins_it(tmp_path: Path) -> None:
-    archive = archive_with(tmp_path, [0.0, 1.0], [1.0, 1.0], [0.0, 0.0])
+def test_a_strict_win_replaces_a_front_and_an_equal_score_joins_it() -> None:
+    archive = archive_with([0.0, 1.0], [1.0, 1.0], [0.0, 0.0])
     assert archive.fronts() == {0: {1}, 1: {0, 1}}
-    assert archive.best() == 1
     assert archive.mean_val(2) == 0.0
 
 
-def test_an_unvalidated_candidate_is_on_no_front(tmp_path: Path) -> None:
-    archive = archive_with(tmp_path, [1.0, 1.0], None)
+def test_an_unvalidated_candidate_is_on_no_front() -> None:
+    archive = archive_with([1.0, 1.0], None)
     assert archive.fronts() == {0: {0}, 1: {0}}
 
 
@@ -304,586 +211,330 @@ class RecordingRandom(random.Random):
         return seq[0]
 
 
-def test_parent_sampling_weights_survivors_by_how_many_fronts_they_hold(tmp_path: Path) -> None:
+def test_parent_sampling_weights_survivors_by_how_many_fronts_they_hold() -> None:
     """Two specialists, neither dominated: the one holding two of the three
     instance fronts is drawn twice as often as the one holding one."""
-    archive = archive_with(tmp_path, [1.0, 1.0, 0.0], [0.0, 0.0, 1.0])
+    archive = archive_with([1.0, 1.0, 0.0], [0.0, 0.0, 1.0])
     rng = RecordingRandom()
     assert archive.select_parent(rng) == 0
     assert rng.seen == [0, 0, 1]
 
 
-def test_parent_sampling_drops_candidates_another_candidate_covers(tmp_path: Path) -> None:
+def test_parent_sampling_drops_candidates_another_candidate_covers() -> None:
     """Candidate 2 is on every front that 0 and 1 are on, so only it survives."""
-    archive = archive_with(tmp_path, [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [1.0, 1.0, 0.0])
+    archive = archive_with([1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [1.0, 1.0, 0.0])
     rng = RecordingRandom()
     assert archive.select_parent(rng) == 2
     assert rng.seen == [2, 2, 2]
 
 
-def test_parent_sampling_falls_back_to_the_served_candidate(tmp_path: Path) -> None:
-    archive = Archive(tmp_path / "archive.json")
-    archive.seed({"rules": SEED_TEXT})
+def test_parent_sampling_falls_back_to_the_served_candidate() -> None:
+    archive = Archive()
+    archive.seed({"rules.md": SEED_TEXT})
     assert archive.select_parent(random.Random(0)) == 0
 
 
-def test_the_round_robin_cursor_walks_the_components_and_children_inherit_it(tmp_path: Path) -> None:
-    archive = Archive(tmp_path / "archive.json")
-    archive.seed({"rules": "r", "skill:notes": "n"})
-    keys = ["rules", "skill:notes"]
-    assert [archive.next_component(0, keys) for _ in range(3)] == ["rules", "skill:notes", "rules"]
-    child = archive.add({"rules": "r2", "skill:notes": "n"}, 0, [1.0])
-    assert archive.next_component(child, keys) == "skill:notes"
+def test_the_round_robin_cursor_walks_the_components_and_children_inherit_it() -> None:
+    archive = Archive()
+    archive.seed({"rules.md": "r", "skills/notes/SKILL.md": "n"})
+    keys = ["rules.md", "skills/notes/SKILL.md"]
+    assert [archive.next_component(0, keys) for _ in range(3)] == ["rules.md", "skills/notes/SKILL.md", "rules.md"]
+    child = archive.add({"rules.md": "r2", "skills/notes/SKILL.md": "n"}, 0, [1.0], step=1)
+    assert archive.next_component(child, keys) == "skills/notes/SKILL.md"
 
 
-def test_the_archive_resumes_from_disk(tmp_path: Path) -> None:
-    path = tmp_path / "nested" / "demo.json"
-    archive = Archive(path)
-    archive.seed({"rules": SEED_TEXT})
+def test_the_archive_state_round_trips() -> None:
+    archive = Archive(rng_seed=3)
+    archive.seed({"rules.md": SEED_TEXT})
     archive.charge(4)
-    archive.add({"rules": REFLECTED}, 0, [1.0])
+    archive.add({"rules.md": REFLECTED}, 0, [1.0], step=2)
     archive.record_validation(1, [1.0, 0.0])
     archive.reject()
 
-    resumed = Archive(path)
-    assert resumed.to_dict() == archive.to_dict()
-    assert (resumed.metric_calls, resumed.steps, resumed.rejections) == (4, 2, 1)
+    resumed = Archive.from_state(json.loads(json.dumps(archive.to_state())))
+    assert resumed == archive
+    assert (resumed.metric_calls, resumed.steps, resumed.rejections, resumed.pending_step) == (4, 2, 1, 2)
     assert resumed.candidates[1] == Candidate(
-        texts={"rules": REFLECTED},
+        texts={"rules.md": REFLECTED},
         parent=0,
         val_scores=[1.0, 0.0],
         minibatch_scores=[1.0],
         cursor=0,
         discovered_at=4,
     )
+    with pytest.raises(ValueError, match="must be a mapping"):
+        Archive.from_state(["not", "a", "state"])
+    # A state that breaks the archive's invariants is refused when it is read.
+    with pytest.raises(ValueError, match="must index one of the 2 candidates"):
+        Archive.from_state({**archive.to_state(), "served": 2})
+    with pytest.raises(ValueError, match="set exactly when"):
+        Archive.from_state({**archive.to_state(), "pending_step": None})
 
 
-def test_a_reef_bound_archive_imports_only_a_matching_external_plan(tmp_path: Path) -> None:
-    path = tmp_path / "archive.json"
-    committed = Archive(path)
-    committed.seed({"rules": SEED_TEXT})
-    committed.record_validation(0, [0.0, 0.0])
-
-    bound = Archive(path, autosave=False)
-    driver = Archive(path)
-    plan = driver.plan(trainset_size=4, valset_size=2, minibatch_size=2)
-    bound.refresh()
-    assert bound.plans["0"] == plan
-    assert bound.candidates == committed.candidates
-
-    driver.add({"rules": REFLECTED}, 0, [1.0])
-    mismatched = Archive(path, autosave=False)
-    mismatched.restore(committed.to_dict())
-    with pytest.raises(ValueError, match="does not match Reef's committed state"):
-        mismatched.refresh()
+def test_the_plan_is_a_function_of_the_committed_state_and_walks_epochs() -> None:
+    """A driver that reads the committed state draws the plan the method draws, and an epoch shows every
+    training problem once before the order is shuffled again."""
+    archive = Archive()
+    archive.seed({"rules.md": SEED_TEXT})
+    state = archive.to_state()
+    first = Archive.from_state(state).plan(trainset_size=4, valset_size=2, minibatch_size=2)
+    assert first == archive.plan(trainset_size=4, valset_size=2, minibatch_size=2)
+    assert first["iteration"] == 0 and first["parent"] == 0
+    second = archive.plan(trainset_size=4, valset_size=2, minibatch_size=2)
+    assert second["iteration"] == 1 and sorted(first["minibatch"] + second["minibatch"]) == [0, 1, 2, 3]
+    assert archive.iteration == 2
 
 
-# -- proposer: minibatch, reflection, acceptance ----------------------------
-
-
-def test_a_served_parent_uses_recorded_traffic_and_runs_no_parent_rollouts(tmp_path: Path) -> None:
-    """The served composition's minibatch is free: the mechanism already
-    batched its real traffic, so only the child costs rollouts."""
-    archive = Archive(tmp_path / "archive.json")
-    rollouts = FakeRollouts()
-    models, reflector = bindings()
-
-    proposal = proposer(archive, rollouts).propose(NODES, (SAMPLE,), models)
-
-    assert proposal == (Mutation("update", "rules", {"name": "rules", "config": {"text": REFLECTED}}),)
-    assert rollouts.prompts == [TASK]  # the child only
-    # GEPA's count: the seed's validation (2 tasks), the served parent's
-    # minibatch (1, from traffic), and the child's minibatch (1).
-    assert archive.metric_calls == 4
-    assert archive.pending == 1
-    assert archive.candidates[1].parent == 0
-    assert archive.candidates[1].minibatch_scores == [1.0]
-    assert archive.candidates[0].texts == {"rules": SEED_TEXT}  # the skill stayed out of ``kinds``
-    # The reflective record is the recorded exchange, graded by the hook.
-    (prompt,) = reflector.prompts
-    assert f"## Inputs\n{TASK}" in prompt
-    assert "## Generated Outputs\n4" in prompt
-    assert "## Feedback\nThis response scored 0.000." in prompt
-
-
-def test_a_parent_that_never_served_is_re_run_on_the_minibatch(tmp_path: Path) -> None:
-    """No traffic was ever served from an archive candidate, so its minibatch
-    scores and its outputs have to be produced by rollouts."""
-    archive = Archive(tmp_path / "archive.json")
-    archive.seed({"rules": SEED_TEXT})
-    archive.add({"rules": "Parent rules."}, 0, [1.0])
-    archive.record_validation(0, [0.0, 0.0])
-    archive.record_validation(1, [1.0, 1.0])  # dominates, so it is always the parent
-    archive.clear_pending()
-    rollouts = FakeRollouts()
-    models, reflector = bindings()
-
-    proposal = proposer(archive, rollouts).propose(NODES, (SAMPLE,), models)
-
-    assert proposal == (Mutation("update", "rules", {"name": "rules", "config": {"text": REFLECTED}}),)
-    assert rollouts.prompts == [TASK, TASK]  # parent then child
-    assert archive.metric_calls == 2
-    assert archive.candidates[2].parent == 1
-    (prompt,) = reflector.prompts
-    assert "Parent rules." in prompt  # reflection reads the parent's own text and output
-
-
-def test_a_child_that_does_not_beat_its_parent_is_rejected(tmp_path: Path) -> None:
-    archive = Archive(tmp_path / "archive.json")
-    rollouts = FakeRollouts()
-    models, _ = bindings("```\nNo marker here.\n```")
-
-    assert proposer(archive, rollouts).propose(NODES, (SAMPLE,), models) is None
-    assert (archive.rejections, archive.steps, archive.pending) == (1, 1, None)
-    assert len(archive.candidates) == 1
-
-
-def test_a_rollout_that_cannot_run_scores_zero_and_reports_its_error(tmp_path: Path) -> None:
-    archive = Archive(tmp_path / "archive.json")
-    archive.seed({"rules": SEED_TEXT})
-    archive.add({"rules": "Parent rules."}, 0, [1.0])
-    archive.record_validation(0, [0.0])
-    archive.record_validation(1, [1.0])
-    archive.clear_pending()
-    rollouts = FakeRollouts(failure=RolloutError("harness binary 'pi' not found"))
-    models, reflector = bindings()
-
-    assert proposer(archive, rollouts).propose(NODES, (SAMPLE,), models) is None  # child ties the parent at 0.0
-    (prompt,) = reflector.prompts
-    assert "## Feedback\nharness binary 'pi' not found" in prompt
-
-
-def test_proposer_rollouts_use_the_configured_execution_policy(tmp_path: Path) -> None:
-    archive = Archive(tmp_path / "archive.json")
-    rollouts = FakeRollouts()
-    models, _ = bindings()
-    executor = LocalExecutor()
-
-    proposal = proposer(
-        archive,
-        rollouts,
-        executor=executor,
-        rollout_timeout_s=12.5,
-    ).propose(NODES, (SAMPLE,), models)
-
-    assert proposal is not None
-    assert rollouts.executors == [executor]
-    assert rollouts.timeouts == [12.5]
-
-
-def test_proposer_enforces_residue_and_finite_score_policy(tmp_path: Path) -> None:
-    models, _ = bindings()
-    dirty = proposer(
-        Archive(tmp_path / "dirty.json"),
-        FakeRollouts(residue=("unexpected.txt",)),
-        forbid_residue=True,
-    )
-    score, output, error = dirty._score(NODES, {"rules": REFLECTED}, TASK, models)
-    assert (score, output) == (0.0, "")
-    assert error == "1 file(s) outside the cleanup whitelist: unexpected.txt"
-
-    nonfinite = GEPAProposer(
-        archive=Archive(tmp_path / "nonfinite.json"),
-        descriptor=get_adapter("pi"),
-        binary=None,
-        score_rollout=resolve_rollout_scorer(lambda task, result: float("nan")),
-        feedback=ScoreFeedback(),
-        minibatch_size=1,
-        rng_seed=0,
-        skip_perfect_score=False,
-        perfect_score=1.0,
-        max_metric_calls=None,
-        kinds=("rules",),
-        valset_size=1,
-        rollout_runner=FakeRollouts(),
-    )
-    with pytest.raises(ValueError, match="non-finite score nan"):
-        nonfinite._score(NODES, {"rules": REFLECTED}, TASK, models)
-
-
-def test_the_budget_short_circuits_before_any_model_call(tmp_path: Path) -> None:
-    archive = Archive(tmp_path / "archive.json")
-    archive.charge(150)
-    rollouts = FakeRollouts()
-    models, reflector = bindings()
-
-    assert proposer(archive, rollouts, max_metric_calls=150).propose(NODES, (SAMPLE,), models) is None
-    assert (rollouts.prompts, reflector.prompts) == ([], [])
-
-
-def test_a_perfect_minibatch_short_circuits_before_any_model_call(tmp_path: Path) -> None:
-    archive = Archive(tmp_path / "archive.json")
-    rollouts = FakeRollouts()
-    models, reflector = bindings()
-    solved = recorded_trajectory("a1", dict(recorded_payload(SAMPLE)), 1.0)
-
-    assert proposer(archive, rollouts).propose(NODES, (solved,), models) is None
-    assert (rollouts.prompts, reflector.prompts) == ([], [])
-    # The same minibatch is worth reflecting on once the bar is above it.
-    proposer(archive, rollouts, perfect_score=2.0).propose(NODES, (solved,), models)
-    assert len(reflector.prompts) == 1
-
-
-def test_reflection_falls_back_to_the_model_under_test(tmp_path: Path) -> None:
-    archive = Archive(tmp_path / "archive.json")
-    rollouts = FakeRollouts()
-    models, served = bindings(declared=False)
-
-    assert proposer(archive, rollouts).propose(NODES, (SAMPLE,), models) is not None
-    assert len(served.prompts) == 1
-
-
-def test_a_tree_the_archive_does_not_recognise_is_reseeded(tmp_path: Path) -> None:
-    """An operator edit or a rollback is a new root, never a descendant."""
-    archive = Archive(tmp_path / "archive.json")
-    archive.seed({"rules": "something else"})
-    rollouts = FakeRollouts()
-    models, _ = bindings()
-
-    proposer(archive, rollouts).propose(NODES, (SAMPLE,), models)
-
-    assert archive.served == 1
-    assert archive.candidates[1].texts == {"rules": SEED_TEXT}
-    assert archive.candidates[1].parent is None
-
-
-# -- selector: the validation pass and the Pareto update --------------------
-
-
-def rollout_scores(values: tuple) -> list[dict[str, object]]:
-    """``RolloutScores.to_json`` of one task per value, with None as a failed rollout."""
-    return [
-        {"task": f"t{index}", "scores": ["failed" if value is None else value]} for index, value in enumerate(values)
-    ]
-
-
-def evaluation(candidate: tuple, current: tuple) -> EvaluationResult:
-    return EvaluationResult(
-        evaluator="harness_rollout_pairs",
-        evaluator_version="1",
-        metrics={"candidate_scores": rollout_scores(candidate), "current_scores": rollout_scores(current)},
+def test_settling_a_step_records_both_sides_and_serves_a_selected_candidate() -> None:
+    archive = Archive()
+    archive.seed({"rules.md": SEED_TEXT})
+    archive.add({"rules.md": REFLECTED}, 0, [1.0], step=1)
+    archive.settle([1.0, 0.0], [0.0, 0.0], selected=True, repeats=1)
+    assert archive.candidates[1].val_scores == [1.0, 0.0]
+    # The seed's first validation arrives with the first evaluated step; it was charged when it was seeded.
+    assert archive.candidates[0].val_scores == [0.0, 0.0]
+    assert (archive.served, archive.pending, archive.pending_step, archive.metric_calls) == (1, None, None, 2)
+    # A rejected candidate keeps its scores, and with them its fronts: it can still parent proposals.
+    archive.add({"rules.md": "third"}, 1, [1.0], step=2)
+    archive.settle([0.0, 1.0], [1.0, 0.0], selected=False, repeats=1)
+    assert (archive.served, archive.candidates[2].val_scores, archive.candidates[1].val_scores) == (
+        1,
+        [0.0, 1.0],
+        [1.0, 0.0],
     )
 
 
-class DecideOnlyBackend:
-    """Stands in for the training backend: these cases exercise ``decide`` only."""
+def test_with_repeats_a_tasks_validation_is_the_mean_of_its_runs_and_each_run_is_charged(
+    tmp_path: Path,
+) -> None:
+    """Two runs per task and tree: a task's validation score is their mean, with a run that could not run
+    as a zero, and the seed's and the candidate's validation passes each cost one metric call per run."""
+    seed, child = HarnessTree({"rules.md": SEED_TEXT}), HarnessTree({"rules.md": REFLECTED})
+    history = History.open(tmp_path / "history")
+    # The scores task by task and repeat by repeat; one run of the child could not run.
+    for tree, parent, values in ((seed, None, (0.0, 0.0, 1.0, 1.0)), (child, seed, (1.0, 0.0, None, 1.0))):
+        if parent is None:
+            history.add_candidate(tree, step=1, origin="seed")
+        else:
+            history.add_candidate(tree, step=1, origin="method", parent=parent.checksum())
+        runs = [(task, repeat) for task in TASKS for repeat in range(2)]
+        for (task, repeat), score in zip(runs, values, strict=True):
+            failure = None if score is not None else FailureObservation(task, "launch", "the binary is missing")
+            task_run, _ = history.new_run()
+            record = RunRecord(task_run, tree.checksum(), task, task, repeat, "ctx", 1, RolloutScore(score), failure)
+            history.add_run(record)
+    history.add_decision(DecisionRecord(1, child.checksum(), seed.checksum(), True, "compare", "a higher mean"))
 
-    def evaluate(self, candidate: UpdateCandidate) -> EvaluationResult:
-        raise AssertionError("this case exercises decide(), not evaluate()")
-
-
-def pending_archive(tmp_path: Path) -> Archive:
-    archive = Archive(tmp_path / "archive.json")
-    archive.seed({"rules": SEED_TEXT})
-    archive.add({"rules": REFLECTED}, 0, [1.0])
-    return archive
-
-
-def test_the_first_decision_records_both_sides_and_charges_the_candidate(tmp_path: Path) -> None:
-    archive = pending_archive(tmp_path)
-    decision = GEPAPlugin(DecideOnlyBackend(), archive).decide(
-        UpdateCandidate("c1"), evaluation((1.0, None), (0.0, 0.0))
-    )
-
-    assert decision.selected
-    assert decision.policy == "gepa"
-    assert archive.candidates[1].val_scores == [1.0, 0.0]  # a failed rollout is a zero, not a gap
-    assert archive.candidates[0].val_scores == [0.0, 0.0]  # the seed's own first validation
-    # The candidate's validation (2); the seed's was charged when it was seeded.
-    assert (archive.served, archive.pending, archive.metric_calls) == (1, None, 2)
-    assert decision.metrics == {
-        "candidate_val_mean": 0.5,
-        "served_val_mean": 0.0,
-        "parent": 0,
-        "archive_size": 2,
-        "front_size": 2,  # the seed still holds the task both compositions failed
-        "metric_calls": 2,
-    }
+    seeded = archive_for_step(None, history, TASKS, seed.files, repeats=2)
+    seeded.add(child.files, 0, [1.0], step=1)
+    settled = archive_for_step(json.dumps(seeded.to_state()), history, TASKS, child.files, repeats=2)
+    assert (settled.candidates[1].val_scores, settled.candidates[0].val_scores) == ([0.5, 0.5], [0.0, 1.0])
+    # Each validation pass ran 2 tasks with 2 runs each: the seed's, then the candidate's.
+    assert (seeded.metric_calls, settled.metric_calls, settled.served) == (4, 8, 1)
 
 
-def test_a_candidate_that_does_not_beat_the_served_mean_is_rejected(tmp_path: Path) -> None:
-    archive = pending_archive(tmp_path)
-    decision = GEPAPlugin(DecideOnlyBackend(), archive).decide(
-        UpdateCandidate("c1"), evaluation((1.0, 0.0), (0.0, 1.0))
-    )
-
-    assert not decision.selected  # equal means are not an improvement
-    assert (archive.served, archive.pending) == (0, None)
-    assert archive.candidates[1].val_scores == [1.0, 0.0]  # still on a front, still a parent
-    assert archive.fronts() == {0: {1}, 1: {0}}
+# -- settings ---------------------------------------------------------------------
 
 
-def test_the_seed_is_validated_once(tmp_path: Path) -> None:
-    archive = pending_archive(tmp_path)
-    selector = GEPAPlugin(DecideOnlyBackend(), archive)
-    selector.decide(UpdateCandidate("c1"), evaluation((0.0, 0.0), (1.0, 1.0)))
-    archive.add({"rules": "third"}, 0, [1.0])
-    selector.decide(UpdateCandidate("c2"), evaluation((0.0, 0.0), (1.0, 1.0)))
-
-    assert archive.metric_calls == 4  # 2 per validated candidate; the seed's own pass was charged at seeding
-    assert archive.candidates[0].val_scores == [1.0, 1.0]
-
-
-# -- recipe: config boot and the per-scenario binding -----------------------
-
-
-class FeedbackHook(Feedback):
-    def feedback(self, task: str, output: str, score: float) -> str:
-        return f"{task} answered {output} at {score}"
-
-
-feedback_hook = FeedbackHook()
-
-
-def sections(tmp_path: Path, **gepa: Any) -> dict[str, Any]:
-    block = {
-        "archive": str(tmp_path / "gepa"),
+def test_the_config_parses_into_settings_and_builds_the_feedback() -> None:
+    config = {
         "minibatch_size": 2,
         "seed": 7,
         "skip_perfect_score": False,
         "perfect_score": 0.5,
         "max_metric_calls": 150,
         "components": ["rules"],
+        "trainset_size": 45,
+        "feedback": "recipes.gepa:ScoreFeedback",
     }
-    block.update(gepa)
-    return {
-        "implementation": "recipes.gepa.recipe:GEPARecipe",
-        "model": {"path": "served-model"},
-        "evolution": {
-            "adapter": "pi",
-            "binary": str(tmp_path / "fake-pi"),
-            "evaluate": resolve_rollout_scorer(score_rules),
-            "feedback": feedback_hook,
-            "tasks": ["check one", "check two"],
-            "seed": list(SEED),
-            "gepa": block,
-            "batch_size": 1,
-        },
+    method = GEPA.from_config(config)
+    assert method.settings == GEPASettings(**{**config, "components": ("rules",)})
+    assert isinstance(method.feedback, ScoreFeedback)
+    # Without a feedback setting the reflection reads the score restated.
+    assert isinstance(GEPA.from_config({}).feedback, ScoreFeedback)
+
+
+@pytest.mark.parametrize(
+    ("config", "message"),
+    [
+        ({"components": ["rules", "rules"]}, "components must name one or more distinct parts"),
+        ({"components": []}, "components must name one or more distinct parts"),
+        ({"archive": "gepa"}, "unknown config fields: archive"),
+        ({"minibatch_size": 0}, "minibatch_size must be positive"),
+        ({"seed": "zero"}, "GEPA.seed must be a valid int"),
+        ({"feedback": "reef.evaluation.harness:VerifierRewardScorer"}, "inherits Feedback"),
+    ],
+)
+def test_an_invalid_config_is_refused(config: dict[str, Any], message: str) -> None:
+    with pytest.raises(PluginConfigError, match=message):
+        GEPA.from_config(config)
+
+
+# -- whole steps through the real backend ------------------------------------------
+
+
+def committed_parent(text: str = "Parent rules.") -> Archive:
+    """An archive whose validated candidate 1 dominates the served seed, so it is always the parent."""
+    archive = Archive()
+    archive.seed({"rules.md": SEED_TEXT})
+    archive.add({"rules.md": text}, 0, [1.0], step=1)
+    archive.record_validation(0, [0.0, 0.0])
+    archive.record_validation(1, [1.0, 1.0])
+    archive.clear_pending()
+    return archive
+
+
+def test_a_step_reflects_on_the_served_trees_traces_and_the_next_step_settles_its_validation(
+    tmp_path: Path,
+) -> None:
+    reflector = FakeChat()
+    backend, releases = gepa_backend(tmp_path, RULES_ONLY, reflector=reflector)
+    first = step(backend, 1, HarnessState().to_json(), sample("a1", 0.0))
+
+    # The served tree's traces are the parent's minibatch, graded by the feedback hook: only the child ran.
+    assert first.metrics["method_runs"] == 1
+    (prompt,) = reflector.prompts
+    assert f"## Inputs\n{TASK}" in prompt and "## Generated Outputs\n4" in prompt
+    assert "## Feedback\nThis response scored 0.000." in prompt
+    notes = first.metrics["method_notes"]
+    assert (notes["parent"], notes["component"], notes["parent_scores"], notes["child_scores"]) == (
+        0,
+        "rules.md",
+        [0.0],
+        [1.0],
+    )
+    assert notes["accepted"] is True and notes["candidate"] == 1
+    # GEPA's count: the seed's validation (2 tasks), the served minibatch (1, from the traces) and the child's (1).
+    assert notes["metric_calls"] == 4
+    # The child is the step's candidate, and its validation mean beats the seed's.
+    assert first.metrics["selected"] is True and first.metrics["patch"] == {"rules.md": REFLECTED}
+    archive = archive_of(first)
+    assert (archive.pending, archive.pending_step) == (1, 1)
+    assert archive.candidates[0].texts == {"rules.md": SEED_TEXT}  # the skill stayed out of ``components``
+    # The archive and the notes keep the same record of the reflection. The step's calls.json keeps the prompt and
+    # the reply, so the archive, which every step commits whole, leaves them out.
+    (logged,) = archive.proposals
+    assert logged == {"step": 1, **{key: value for key, value in notes.items() if key != "metric_calls"}}
+    (call,) = json.loads((Path(first.metrics["step_record"]) / "calls.json").read_text())
+    assert (call["messages"][0]["content"], call["reply"]) == (prompt, FENCED_REPLY)
+
+    releases.publish("r1", HarnessTree.read(first.artifact.local_path))
+    second = step(backend, 2, first.state, sample("a2", 1.0))
+    # The next step folds the validation in from the history; the task that could not run is a zero, not a gap.
+    settled = archive_of(second)
+    assert (settled.served, settled.pending) == (1, None)
+    assert (settled.candidates[1].val_scores, settled.candidates[0].val_scores) == ([1.0, 0.0], [0.0, 0.0])
+    # The candidate's validation (2), then the new parent's minibatch (1), which scored perfectly.
+    assert second.metrics["method_notes"] == {
+        "skipped": "the parent scored perfectly on the minibatch",
+        "metric_calls": 7,
     }
 
 
-def test_the_config_boots_the_recipe_and_binds_both_seams(tmp_path: Path) -> None:
-    config = sections(tmp_path)
-    built = build_recipe(str(config["implementation"]), {}, config=config, runtime=runtime())
+def test_a_parent_that_never_served_runs_on_the_minibatch(tmp_path: Path) -> None:
+    reflector = FakeChat()
+    backend, _ = gepa_backend(tmp_path, RULES_ONLY, reflector=reflector)
+    result = step(backend, 1, committed(committed_parent()), sample("a1", 0.0))
 
-    assert isinstance(built, GEPARecipe)
-    assert built.name == "gepa"
-    assert built.archive_dir == tmp_path / "gepa"
-    assert (built.minibatch_size, built.rng_seed, built.max_metric_calls) == (2, 7, 150)
-    assert (built.skip_perfect_score, built.perfect_score, built.kinds) == (False, 0.5, ("rules",))
-    assert built.feedback is feedback_hook
-    # Unbound until build: the archive is per scenario, so the seams cannot
-    # be filled at config time.
-    assert isinstance(built.build("demo", SQLiteRecordStore()), Trainer)
-
-
-def test_scenario_archive_path_cannot_escape_its_directory(tmp_path: Path) -> None:
-    directory = tmp_path / "gepa"
-    traversal = scenario_archive_path(directory, "../outside")
-    absolute = scenario_archive_path(directory, "/tmp/outside")
-
-    assert traversal.parent == directory
-    assert absolute.parent == directory
-    assert traversal != absolute
-    assert traversal.name.endswith(".json")
-    assert "/" not in traversal.name and ".." not in traversal.name
+    # No traffic was served from candidate 1, so its run is a run, and the child's another.
+    assert result.metrics["method_runs"] == 2
+    (prompt,) = reflector.prompts
+    assert "```\nParent rules.\n```" in prompt and "## Generated Outputs\nParent rules." in prompt
+    notes = result.metrics["method_notes"]
+    assert (notes["parent"], notes["candidate"], notes["metric_calls"]) == (1, 2, 2)
+    assert archive_of(result).candidates[2].parent == 1
 
 
-def test_a_seed_that_breaks_the_id_convention_is_refused(tmp_path: Path) -> None:
-    config = sections(tmp_path)
-    config["evolution"]["seed"] = [{"id": "wrong", "name": "skill", "config": {"name": "notes", "text": "# n"}}]
-    with pytest.raises(RecipeConfigError, match="must have id equal to its config name"):
-        build_recipe(str(config["implementation"]), {}, config=config, runtime=runtime())
+def test_a_child_that_does_not_beat_its_parent_is_rejected(tmp_path: Path) -> None:
+    backend, _ = gepa_backend(tmp_path, RULES_ONLY, reflector=FakeChat(NO_MARKER_REPLY))
+    result = step(backend, 1, HarnessState().to_json(), sample("a1", 0.0))
 
-    config["evolution"]["seed"] = [{"id": "house-rules", "name": "rules", "config": {"text": SEED_TEXT}}]
-    with pytest.raises(RecipeConfigError, match="entry id 'rules'"):
-        build_recipe(str(config["implementation"]), {}, config=config, runtime=runtime())
-
-
-def test_an_unknown_evolvable_kind_is_refused(tmp_path: Path) -> None:
-    config = sections(tmp_path, components=["config"])
-    with pytest.raises(RecipeConfigError, match="components must name kinds"):
-        build_recipe(str(config["implementation"]), {}, config=config, runtime=runtime())
+    assert result.metrics["skipped"] == "the method left the head tree unchanged"
+    assert result.metrics["method_summary"] == "the child scored 0 on the minibatch and its parent 0"
+    notes = result.metrics["method_notes"]
+    assert (notes["accepted"], notes["child_scores"]) == (False, [0.0])
+    archive = archive_of(result)
+    assert (archive.rejections, archive.steps, archive.pending, len(archive.candidates)) == (1, 1, None, 1)
 
 
-def test_a_missing_gepa_block_is_refused(tmp_path: Path) -> None:
-    config = sections(tmp_path)
-    config["evolution"].pop("gepa")
-    with pytest.raises(RecipeConfigError, match=r"evolution\.gepa"):
-        build_recipe(str(config["implementation"]), {}, config=config, runtime=runtime())
+def test_a_child_that_fails_validation_ends_the_iteration_without_an_run(tmp_path: Path) -> None:
+    # A reflection that writes a credential-shaped literal makes a tree that Reef never evaluates or publishes.
+    reply = "```\nAnswer briefly with the key sk-" + "a" * 24 + "\n```"
+    backend, _ = gepa_backend(tmp_path, RULES_ONLY, reflector=FakeChat(reply))
+    result = step(backend, 1, HarnessState().to_json(), sample("a1", 0.0))
+
+    assert result.metrics["skipped"] == "the method left the head tree unchanged"
+    assert result.metrics["method_runs"] == 0 and "inline credential" in result.metrics["method_summary"]
+    notes = result.metrics["method_notes"]
+    assert (notes["accepted"], notes["child_scores"], len(notes["problems"])) == (False, None, 1)
+    # No child ran, so GEPA spent no iteration on it.
+    assert (archive_of(result).steps, archive_of(result).rejections) == (0, 0)
 
 
-def test_a_configured_selection_is_left_alone(tmp_path: Path) -> None:
-    """Only the empty seams are filled: an operator who names a policy keeps it."""
-    from reef.evaluation.evaluators import BackendAlwaysSelectPlugin
+def test_an_run_that_cannot_run_scores_zero_and_its_error_is_the_feedback(tmp_path: Path) -> None:
+    reflector = FakeChat()
+    backend, _ = gepa_backend(tmp_path, RULES_ONLY, reflector=reflector)
+    result = step(backend, 1, committed(committed_parent()), sample("a1", 0.0, prompt=f"CRASH {TASK}"))
 
-    config = sections(tmp_path)
-    config["evolution"]["selection"] = "always"
-    built = build_recipe(str(config["implementation"]), {}, config=config, runtime=runtime())
-    assert not built.archive_selection
-    assert built.selection.plugin_class is BackendAlwaysSelectPlugin
-
-
-# -- one full step through the real backend and commit path -----------------
+    (prompt,) = reflector.prompts
+    assert "corrupt event at line 1" in prompt.split("## Feedback\n", 1)[1]
+    # The child cannot run the task either, so it ties its parent at zero.
+    notes = result.metrics["method_notes"]
+    assert (notes["parent_scores"], notes["child_scores"], notes["accepted"]) == ([0.0], [0.0], False)
 
 
-def _report_once(scenario, name: str, suffix: str) -> None:
-    """One scored sample through the record store: enough to wake one step."""
-    scenario.records.append_result(
-        AgentRecord.create(
-            scenario=name,
-            request_type=RequestType.INFERENCE,
-            payload={"messages": [{"role": "user", "content": TASK}]},
-            agent_record_id=f"i{suffix}",
-        )
-    )
-    scenario.records.append_result(
-        AgentRecord.create(
-            scenario=name,
-            request_type=RequestType.REPORT,
-            payload={"score": 0.0, "references": [f"i{suffix}"]},
-            agent_record_id=f"r{suffix}",
-        )
-    )
-    make_samples(scenario)
+def test_a_spent_budget_stops_the_search_before_any_run_or_model_call(tmp_path: Path) -> None:
+    reflector = FakeChat()
+    backend, _ = gepa_backend(tmp_path, GEPASettings(components=("rules",), max_metric_calls=150), reflector=reflector)
+    spent = Archive()
+    spent.seed({"rules.md": SEED_TEXT})
+    spent.charge(150)
+    result = step(backend, 1, committed(spent), sample("a1", 0.0))
+
+    assert result.metrics["method_notes"] == {
+        "stopped": "the budget of 150 metric calls is spent",
+        "metric_calls": 150,
+    }
+    assert (result.metrics["method_runs"], reflector.prompts) == (0, [])
 
 
-def test_one_step_publishes_and_the_gate_carries_the_gepa_metrics(tmp_path: Path) -> None:
-    """The whole loop on the real mechanism: reflection rewrites the rules
-    node, the child wins its minibatch, the mechanism scores both trees over
-    the validation set, and the archive's own numbers ride the release gate."""
-    make_binary(tmp_path)
-    config = sections(tmp_path)
-    booted = build_recipe(str(config["implementation"]), {}, config=config, runtime=runtime())
-    # The declared reflection endpoint is the one thing this run may not
-    # reach; everything else is the production path.
-    built = dataclasses.replace(booted, models={"reflection": FakeChat(FENCED_REPLY)})
-    initial = tmp_path / "initial"
-    initial.mkdir()
-    factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
-    dispatcher = Dispatcher(
-        built,
-        factory,
-        scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
-        hold_local_cycles=True,
-        coordination=memory_coordination(),
-    )
-    scenario_name = "../gepa-demo"
-    try:
-        scenario = dispatcher.get_or_create_scenario(scenario_name)
-        assert scenario is not None
-        _report_once(scenario, scenario_name, "1")
-        result = scenario.prepare_training_step()
-        assert result is not None
-        archive_path = scenario_archive_path(tmp_path / "gepa", scenario_name)
-        assert not archive_path.exists()
-        assert not (tmp_path / "gepa-demo.json").exists()
-        assert result.state is not None
-        assert result.state[ARCHIVE_STATE_KEY]["served"] == 1
-        scenario.commit(result)
-        # The commit discards the rendered tree it published.
-        assert not result.artifact.local_path.exists()
-    finally:
-        dispatcher.close()
-
-    assert result.metrics["published"] is True
-    mutation = result.metrics["mutation"]
-    assert (mutation["op"], mutation["id"], mutation["options"]["name"]) == ("update", "rules", "rules")
-    gate = result.metrics
-    assert (gate["candidate_val_mean"], gate["served_val_mean"], gate["parent"]) == (1.0, 0.0, 0)
-    assert (gate["archive_size"], gate["front_size"]) == (2, 1)
-    # The seed's validation (2), the served minibatch (1), the child's (1),
-    # then the candidate's validation (2): the mechanism's re-run of the
-    # served side is not a metric call.
-    assert gate["metric_calls"] == 6
-    assert gate["selection"]["policy"] == "gepa"
-
-    archive = json.loads(archive_path.read_text())
-    assert not (tmp_path / "gepa-demo.json").exists()
-    assert archive["served"] == 1
-    assert archive["pending"] is None
-    assert archive["candidates"][1]["texts"] == {"rules": REFLECTED}
-    assert archive["candidates"][1]["val_scores"] == [1.0, 1.0]
+@pytest.mark.parametrize(("perfect_score", "reflections"), [(1.0, 0), (2.0, 1)])
+def test_a_perfect_minibatch_ends_the_iteration_before_any_model_call(
+    tmp_path: Path, perfect_score: float, reflections: int
+) -> None:
+    reflector = FakeChat()
+    settings = GEPASettings(components=("rules",), perfect_score=perfect_score)
+    backend, _ = gepa_backend(tmp_path, settings, reflector=reflector)
+    step(backend, 1, HarnessState().to_json(), sample("a1", 1.0))
+    # The same minibatch is worth reflecting on once the bar is above it.
+    assert len(reflector.prompts) == reflections
 
 
-def test_archive_mirror_does_not_advance_when_a_no_artifact_commit_fails(tmp_path: Path, monkeypatch) -> None:
-    make_binary(tmp_path)
-    config = sections(tmp_path)
-    booted = build_recipe(str(config["implementation"]), {}, config=config, runtime=runtime())
-    built = dataclasses.replace(booted, models={"reflection": FakeChat(FENCED_REPLY)})
-    initial = tmp_path / "initial"
-    initial.mkdir()
-    factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
-    data_dir = tmp_path / "agent-record"
-    dispatcher = Dispatcher(
-        built,
-        factory,
-        scenario_storage=SQLiteScenarioStorage(data_dir),
-        hold_local_cycles=True,
-        coordination=memory_coordination(),
-    )
-    try:
-        scenario = dispatcher.get_or_create_scenario("gepa-demo")
-        assert scenario is not None
-        _report_once(scenario, "gepa-demo", "1")
-        first = scenario.prepare_training_step()
-        assert first is not None
-        scenario.commit(first)
-
-        archive_path = scenario_archive_path(tmp_path / "gepa", "gepa-demo")
-        committed = json.loads(archive_path.read_text())
-        assert scenario.trainer.state[ARCHIVE_STATE_KEY] == committed
-
-        _report_once(scenario, "gepa-demo", "2")
-        second = scenario.prepare_training_step()
-        assert second is not None and second.artifact is None and second.state is not None
-        assert second.state[ARCHIVE_STATE_KEY] != committed
-        assert json.loads(archive_path.read_text()) == committed
-
-        assert isinstance(scenario.store, CommitHistoryScenarioStore)
-        history = scenario.store.commit_history
-        assert history is not None
-
-        def fail_append(record):
-            raise RuntimeError("commit history unavailable")
-
-        monkeypatch.setattr(history, "append", fail_append)
-        with pytest.raises(RuntimeError, match="commit history unavailable"):
-            scenario.commit(second)
-        assert json.loads(archive_path.read_text()) == committed
-    finally:
-        dispatcher.close()
-
-    recovered_dispatcher = Dispatcher(
-        built,
-        factory,
-        scenario_storage=SQLiteScenarioStorage(data_dir),
-        hold_local_cycles=True,
-        coordination=memory_coordination(),
-    )
-    try:
-        recovered = recovered_dispatcher.get_or_create_scenario("gepa-demo")
-        assert recovered is not None
-        assert recovered.scenario_step == 1
-        assert recovered.trainer.state[ARCHIVE_STATE_KEY] == committed
-        assert json.loads(archive_path.read_text()) == committed
-    finally:
-        recovered_dispatcher.close()
+def test_reflection_falls_back_to_the_model_under_test(tmp_path: Path) -> None:
+    backend, _ = gepa_backend(tmp_path, RULES_ONLY)
+    served = FakeChat()
+    # A deployment that declares no reflection model gives the method the model under test alone.
+    backend.models = ModelBindings(served=served)
+    result = step(backend, 1, HarnessState().to_json(), sample("a1", 0.0))
+    assert len(served.prompts) == 1 and result.metrics["method_notes"]["accepted"] is True
 
 
-def test_every_reflection_is_logged_with_its_prompt_reply_and_verdict(tmp_path: Path) -> None:
-    """The archive keeps what the reflection model saw and wrote, accepted or
-    not, so a search outcome can be traced to the exact text rather than
-    inferred from the candidates it left behind."""
-    archive = Archive(tmp_path / "archive.json")
-    models, reflector = bindings()
+def test_a_tree_the_archive_does_not_hold_becomes_a_new_root(tmp_path: Path) -> None:
+    """An operator edit or a rollback is a new root, never a descendant."""
+    elsewhere = Archive()
+    elsewhere.seed({"rules.md": "something else"})
+    backend, _ = gepa_backend(tmp_path, RULES_ONLY)
+    archive = archive_of(step(backend, 1, committed(elsewhere), sample("a1", 0.0)))
 
-    proposer(archive, FakeRollouts()).propose(NODES, (SAMPLE,), models)
+    assert (archive.candidates[1].texts, archive.candidates[1].parent) == ({"rules.md": SEED_TEXT}, None)
+    assert archive.candidates[2].parent == 1  # the step's child descends from the new root
 
-    (row,) = archive.proposals
-    assert (row["parent"], row["component"], row["accepted"], row["candidate"]) == (0, "rules", True, 1)
-    assert row["prompt"] == reflector.prompts[0]
-    assert row["reply"] == FENCED_REPLY
-    assert row["minibatch"][0]["Inputs"] == TASK
-    assert (row["parent_scores"], row["child_scores"]) == ([0.0], [1.0])
-    assert Archive(tmp_path / "archive.json").proposals == archive.proposals  # persisted
+
+def test_a_pending_candidate_whose_step_reached_no_decision_is_dropped(tmp_path: Path) -> None:
+    pending = Archive()
+    pending.seed({"rules.md": SEED_TEXT})
+    pending.add({"rules.md": REFLECTED}, 0, [1.0], step=3)
+    backend, _ = gepa_backend(tmp_path, RULES_ONLY, reflector=FakeChat(NO_MARKER_REPLY))
+    # Step 3 left a candidate pending, and the history holds no decision on it: the backend skipped that step.
+    archive = archive_of(step(backend, 4, committed(pending), sample("a1", 0.0)))
+    assert (archive.pending, archive.served, archive.candidates[1].val_scores) == (None, 0, None)

@@ -466,9 +466,9 @@ def test_a_request_with_source_records_is_refused_and_named_in_the_report(tmp_pa
 
 
 def polled(tools: AgentTools) -> dict[str, Any]:
-    """What the agent's task_check does: start a check with /check, then poll /trial "check <id>" until it is done."""
-    check_id = tools.check()["check_id"]
-    while (result := tools.trial(f"check {check_id}"))["state"] == "running":
+    """What the agent's task_check does: start a check with /check, then poll /check with its id until it is done."""
+    check_id = tools.call({})["check_id"]
+    while (result := tools.call({"check_id": check_id}))["state"] == "running":
         time.sleep(0.01)
     return result
 

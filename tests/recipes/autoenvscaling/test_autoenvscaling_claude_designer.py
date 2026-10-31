@@ -61,8 +61,8 @@ from reef.execution.sandbox.e2b import E2BExecutor, E2BSession
 from reef.execution.sandbox.process import (
     ProcessOutcome,
     ProgramExecutor,
-    RolloutLaunchError,
-    RolloutTimeout,
+    ProgramLaunchError,
+    ProgramTimeout,
     SandboxProgram,
 )
 from reef.recipe.generated_tasks.generator import RolledOutTask
@@ -171,9 +171,9 @@ class ScriptedClaudeSession(E2BSession):
         if self.stop is not None:
             self.stop.set()
             self.is_closed.wait(10)
-            raise RolloutLaunchError("the E2B sandbox could not run the process: it is gone")
+            raise ProgramLaunchError("the E2B sandbox could not run the process: it is gone")
         if self.launch_error:
-            raise RolloutLaunchError(self.launch_error)
+            raise ProgramLaunchError(self.launch_error)
         task_dir = write_workspace_task(workspace / "task", 8600)
         if self.task_leak:
             with (task_dir / "instruction.md").open("a") as stream:
@@ -194,7 +194,7 @@ class ScriptedClaudeSession(E2BSession):
         (root / "claude" / "statsig" / "cache").write_text("gates")
         (root / "home" / ".cache").mkdir(parents=True, exist_ok=True)
         if self.is_timeout:
-            raise RolloutTimeout("the agent ran out of time")
+            raise ProgramTimeout("the agent ran out of time")
         return ProcessOutcome(self.exit_code, self.stdout, self.stderr)
 
     def pull(self, root: Path, relative: str = "") -> None:
@@ -203,7 +203,7 @@ class ScriptedClaudeSession(E2BSession):
     def close(self) -> None:
         self.is_closed.set()
         if self.close_error:
-            raise RolloutLaunchError(self.close_error)
+            raise ProgramLaunchError(self.close_error)
 
 
 @dataclass(frozen=True)
@@ -217,7 +217,7 @@ class ClaudeExecutor(E2BExecutor):
 
     def open(self) -> E2BSession:
         if self.session is None:
-            raise RolloutLaunchError("no scripted session")
+            raise ProgramLaunchError("no scripted session")
         return self.session
 
 
@@ -307,9 +307,17 @@ def test_runs_pinned_claude_headless_with_token_in_environment(tmp_path: Path, r
         "http://"
     )
     assert session.writable == [root / "claude", root / "home"]
-    readonly = [root / "claude" / "settings.json", root / "claude" / "CLAUDE.md", root / "tools" / "task_check.py"]
+    assert argv[argv.index("--plugin-dir") + 1] == f"{root}/plugin"
+    plugin = root / "plugin"
+    readonly = [
+        root / "claude" / "settings.json",
+        plugin / "rules.md",
+        plugin / ".claude-plugin" / "plugin.json",
+        plugin / "output-styles" / "reef.md",
+        root / "tools" / "task_check.py",
+    ]
     assert sorted(session.readonly) == sorted(readonly)
-    rules = (root / "claude" / "CLAUDE.md").read_text()
+    rules = (plugin / "rules.md").read_text()
     assert REBUILD_RULES_TEXT in rules and CLAUDE_CHECK_TEXT.strip() in rules
     # No model binding: the settings point Claude Code at no other endpoint.
     assert "env" not in json.loads((root / "claude" / "settings.json").read_text())
@@ -317,7 +325,7 @@ def test_runs_pinned_claude_headless_with_token_in_environment(tmp_path: Path, r
     assert designed.record_ids == () and designed.transcript == transcript and (root / transcript).is_file()
     assert "port.txt" in designed.reply
     # Of Claude Code's own files only the transcripts, the rules and the settings stay.
-    assert sorted(path.name for path in (root / "claude").iterdir()) == ["CLAUDE.md", "projects", "settings.json"]
+    assert sorted(path.name for path in (root / "claude").iterdir()) == ["projects", "settings.json"]
     assert not (root / "home").exists() and not (root / "inputs" / "repo").exists()
     assert session.is_closed.is_set()
 
@@ -339,7 +347,7 @@ def test_task_check_script_waits_and_rechecks(tmp_path: Path) -> None:
         release.set()
         done = checked(["--wait", "1"], {**environ, "REEF_DESIGNER_FINISH_SECONDS": "60"})
         assert '"state": "done"' in done and '"passed": true' in done and held.count == 1
-        assert "no check is named 'check 7'" in checked(
+        assert "check_id must name a check this run started" in checked(
             ["--wait", "7"], {**environ, "REEF_DESIGNER_FINISH_SECONDS": "60"}
         )
         # A check that ends while the command waits gives its result in the same call.
@@ -397,10 +405,9 @@ def test_credential_checks_preserve_delegate_configuration_and_budget(tmp_path: 
     [
         ("/check", b"not json", 400),
         ("/check", b"[]", 400),
-        ("/trial", b"{}", 400),
-        ("/trial", b'{"task": "check 1", "script": {}}', 400),
-        ("/trial", b'{"task": "check 999"}', 200),
-        ("/trial", b'{"task": "not-a-check-id"}', 200),
+        ("/check", b'{"check_id": 999}', 200),
+        ("/check", b'{"check_id": "not-a-check-id"}', 200),
+        ("/trial", b'{"task": "check 1"}', 404),
         ("/wrong-token/check", b"{}", 404),
     ],
 )
@@ -511,7 +518,7 @@ def test_claude_vary_gives_claude_code_the_parent_and_the_variant_rules(tmp_path
     )
     root = tmp_path / "run"
     assert session.argv[:3] == ["claude", "-p", VARIANT_PROMPT.format(direction="simpler")]
-    rules = (root / "claude" / "CLAUDE.md").read_text()
+    rules = (root / "plugin" / "rules.md").read_text()
     assert VARIANT_INPUTS_TEXT.strip() in rules and CLAUDE_CHECK_TEXT.strip() in rules
     assert (root / "inputs" / "parent" / "instruction.md").is_file()
     assert "(t-0) is 0.12 over 8 rollouts" in (root / "inputs" / "variant.md").read_text()

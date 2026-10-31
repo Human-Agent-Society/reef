@@ -45,8 +45,6 @@ CHECKOUT_PYTHON = "/opt/ceobench/.venv/bin/python"
 DEFAULT_BASH_TIMEOUT_S = 1200
 #: A tool call may run as long as the bash limit, plus the exec's own overhead.
 EXEC_MARGIN_S = 120.0
-#: The benchmark ends the run when this command outlives its limit.
-NEXT_WEEK_COMMAND = "./novamind-operation next-week"
 
 TOOL_SCRIPT = r'''
 """The benchmark's tool executor, run in the agent's workspace. Reads one call as JSON on stdin."""

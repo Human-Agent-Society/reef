@@ -17,9 +17,17 @@ dependencies = [
     "pyyaml",
 ]
 
+# The campaign's own harness adapter: Harbor's Terminus 2, which Reef does not bundle.
+[project.entry-points."reef.harness_adapters"]
+terminus = "reef_terminus:descriptor"
+
+[project.scripts]
+reef-terminus = "reef_terminus:main"
+
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["harness*"]
+include = ["harness*", "reef_terminus*"]
 
 [tool.setuptools.package-data]
 harness = ["tasks.json"]
+reef_terminus = ["adapter.yaml"]

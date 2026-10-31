@@ -20,7 +20,7 @@ from reef.artifact.sources import ArtifactSourceReader
 from reef.core.config import ConfigArgument, config_arguments, config_metadata, config_option, parse_config_values
 from reef.scenario.admission import ScenarioAdmission, ScenarioLimits
 from reef.service.cors import console_origins
-from reef.service.deploy.config_utils import config_value, interpolate_config, interpolate_config_values
+from reef.service.deploy.config_utils import interpolate_config, interpolate_config_values
 from reef.storage.data import DataStore
 from reef.storage.postgres import postgres_url, validate_postgres_schema
 from reef.storage.records import RecordRetention
@@ -40,7 +40,7 @@ class ServiceConfig:
 
     recipe: str = config_option(
         public_path=("recipe", "implementation"),
-        help="Recipe implementation or named deployment preset (the launcher owns --recipe).",
+        help="Recipe implementation or named deployment preset (the launcher reserves --recipe).",
     )
     host: str = config_option("0.0.0.0", public_path=("reef", "host"), help="HTTP bind address.")
     port: int = config_option(8900, public_path=("reef", "port"), help="HTTP bind port.")
@@ -56,6 +56,14 @@ class ServiceConfig:
         None,
         public_path=("reef", "served_url"),
         help="URL the recipe's own evaluation calls reach this service at (default: loopback on the bind port).",
+    )
+    harness_inference_url: str | None = config_option(
+        None,
+        public_path=("harness", "inference_url"),
+        help=(
+            "URL clients reach the inference service at: a client's harness layer sends its model calls there "
+            "(default: the address the client gave)."
+        ),
     )
     console_origins: tuple[str, ...] = config_option(
         (), public_path=("reef", "console_origins"), help="Allowed console origins as a JSON/YAML list."
@@ -437,13 +445,6 @@ class ServiceConfig:
                 "record_database_url and record_database_schema require storage.record_backend or "
                 "storage.coordination_backend: postgres"
             )
-
-
-def _config_service_value(config: Mapping[str, Any], *path: str, default: Any = None, expand: bool = True) -> Any:
-    value = config_value(config, *path, default=default, expand=expand)
-    if isinstance(value, str):
-        return interpolate_config(config, value)
-    return value
 
 
 def _reef_section(config: Mapping[str, Any]) -> dict[str, Any]:

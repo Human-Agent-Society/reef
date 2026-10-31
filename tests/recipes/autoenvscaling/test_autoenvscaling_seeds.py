@@ -587,7 +587,7 @@ def test_a_seed_variant_gets_only_the_parent_and_variant_md_and_the_parents_envi
     written = "\n".join(text for name, text in files_under(run, ".").items() if not name.startswith("inputs/"))
     assert rules in written
     if harness == "claude-code":
-        assert CLAUDE_CHECK_TEXT in (run / "claude" / "CLAUDE.md").read_text()
+        assert CLAUDE_CHECK_TEXT in (run / "plugin" / "rules.md").read_text()
     assert session.argv[session.argv.index("-p") + 1] == SEED_VARIANT_PROMPT.format(direction="simpler")
     with pytest.raises(ValueError, match="needs a variant of a seeded parent"):
         designer.vary_seed(

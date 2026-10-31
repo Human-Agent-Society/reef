@@ -60,18 +60,18 @@ def grouped() -> TaskJobRollouts:
 
 @pytest.fixture
 def task_stack(tmp_path, monkeypatch):
-    """A Slime component with a fake rollout group; ``roll_out`` records the chat it answers with, in ``events``."""
+    """A Slime component with a fake rollout group; ``run_train_tasks`` records the chat it answers with, in ``events``."""
     events: list[str] = []
     chats: list[EngineChat] = []
 
     def fake_roll_out(tasks, settings, chat, **options):
-        events.append("roll_out")
+        events.append("run_train_tasks")
         chats.append(chat)
         if "failing" in options["work_dir"].parts:
             raise RuntimeError("the sandbox did not start")
         return grouped()
 
-    monkeypatch.setattr(slime_component, "roll_out", fake_roll_out)
+    monkeypatch.setattr(slime_component, "run_train_tasks", fake_roll_out)
     stack = Stack(tmp_path, rollout_group=FakeRolloutGroup(events), hf_checkpoint=str(tmp_path / "model"))
     yield stack, events, chats
     stack.component.close()
@@ -94,7 +94,7 @@ def test_a_task_job_rolls_out_on_the_synced_engines_releases_them_and_trains_the
 
     assert status.state == "finished" and len(status.checkpoints) == 1
     # The engines serve the workers' weights only from the sync to the release, around the rollouts.
-    assert events == ["sync", "roll_out", "release"]
+    assert events == ["sync", "run_train_tasks", "release"]
     assert chats[0].runtime_load_id == "slime:base"
     assert status.metrics["rollout_rewards"] == {"add": [1.0, 0.0]}
     assert status.metrics["rollout_samples"] == 2
@@ -105,7 +105,7 @@ def test_a_task_job_rolls_out_on_the_synced_engines_releases_them_and_trains_the
     assert json.loads((directory / ROLLOUTS_FILE).read_text())["scores"] == [{"task": "add", "scores": [1.0, 0.0]}]
     settings = slime_component.RolloutSettings.from_parameters(job.parameters)
     assert stack.component.task_rollouts(job, directory, settings) == grouped()
-    assert events == ["sync", "roll_out", "release"]
+    assert events == ["sync", "run_train_tasks", "release"]
 
 
 @pytest.mark.unit
@@ -124,7 +124,7 @@ def test_failed_rollouts_still_release_the_engines(tmp_path, task_stack):
         stack.component.task_rollouts(
             job, tmp_path / "failing" / "job", slime_component.RolloutSettings.from_parameters(job.parameters)
         )
-    assert events == ["sync", "roll_out", "release"]
+    assert events == ["sync", "run_train_tasks", "release"]
 
 
 @pytest.mark.unit

@@ -1,10 +1,9 @@
-"""The native_loop kind end to end: admission, render, host, plugin, backend review, the context API and the serve form."""
+"""The native_loop kind end to end: validation, render, host, backend review, the context API and the serve form."""
 
 from __future__ import annotations
 
 import contextlib
 import json
-import logging
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
@@ -13,12 +12,10 @@ from typing import Any
 import pytest
 from tests.harness.test_native_harness import CHECKER, _FakeModel
 from tests.harness.test_native_harness import _reply as _completion
-from tests.harness.test_native_harness import _seed_nodes
 from tests.harness.test_native_serve import (
     SEED_EDGES,
     SEED_STAGES,
     _call,
-    _entry,
     _events,
     _FakeReef,
     _graph,
@@ -31,41 +28,39 @@ from tests.harness.test_native_serve import (
     _typed,
     _wait,
 )
-from tests.reef_service.test_harness_recipe import MODEL, batch, run_backend_step
-from tests.support._strategies import resolve_proposer, resolve_rollout_scorer
+from tests.support._strategies import resolve_task_scorer
+from tests.support._trajectories import recorded_trajectory
+from tests.support.harness_render import NATIVE_SEED_FILES, NATIVE_SEED_TOOLS, native_loop, native_tool, write_rendered
+from tests.support.harness_service import backend_step
+from tests.support.harness_steps import MODEL, harness_backend, harness_recipe
 
 from reef.core.activation import MadeArtifact
 from reef.core.evaluation import RolloutScore
+from reef.core.plugins import PluginReference
 from reef.evaluation.activation import AlwaysActivate
-from reef.evaluation.harness import RolloutEvaluationWorker
+from reef.evaluation.harness import TaskEvaluationWorker
 from reef.execution.sandbox.process import LocalExecutor
 from reef.harness.adapters import get_adapter
-from reef.harness.compose import Context, FiberState
-from reef.harness.compose.loader import Loader
-from reef.harness.rollouts.model_binding import ModelBinding
-from reef.harness.rollouts.run import RolloutResult
-from reef.harness.rollouts.trajectory import stage_path
-from reef.harness.runners.native import LoadError, LoopModule, load_loop, run_loop, serve
+from reef.harness.runners.native import LoadError, load_loop, run_loop, serve
 from reef.harness.runners.native.enforce import ToolFailed
 from reef.harness.runners.native.graph import LOOP_LOG_CHARS, TRANSITIONS_PER_STEP
 from reef.harness.runners.native.host import NativeHost
-from reef.harness.runners.native.plugins import NATIVE_PLUGINS
-from reef.harness.runners.native.seed import SEED_NODES, SEED_TOOLS
-from reef.harness.runners.native.selftools import SelfTools
-from reef.harness.tree.mutations import admit_mutations
-from reef.harness.tree.nodes import (
-    ALWAYS_REVIEWED_KINDS,
-    FLAT_TREE_REFUSAL,
-    NATIVE_GRAPH_MAX_STEPS,
-    NODE_KINDS,
-    validate_native_loop,
-)
-from reef.harness.tree.render import RenderError, render_composition, render_native_module, tree_files
-from reef.train.cordis_backend import CordisBackend, Mutation
+from reef.harness.runners.native.release_client import ReleaseClient
+from reef.harness.runners.native.selftools import SelfTools, ServeState
+from reef.harness.tasks.model_binding import ModelBinding, ModelBindings
+from reef.harness.tasks.run import TaskResult
+from reef.harness.tasks.trajectory import stage_path
+from reef.harness.tree import HarnessTree, RenderError, TreePatch, render_tree, validate_tree
+from reef.harness.tree.checks import NATIVE_GRAPH_MAX_STEPS, validate_native_loop
+from reef.train.harness_backend.backend import HarnessBackend
+from reef.train.harness_backend.state import HarnessState
+from reef.train.types import JobData
 
+NATIVE = get_adapter("native")
 # The seed graph as code: ask the model, run its tool calls while it asks for them, return on text.
 LOOP_CODE = "def run_turn(ctx):\n    while ctx.model() == 'tool_calls':\n        ctx.run_tools()\n"
-LOOP = ("native_loop", {"name": "main", "code": LOOP_CODE})
+LOOP = {"name": "main", "code": LOOP_CODE}
+LOOP_FILE = native_loop("main", LOOP_CODE)
 
 # A harness shaped like the native loop that records which loop file and skills the root got, so the scorer can
 # prefer a candidate that carries either.
@@ -87,67 +82,49 @@ events = [
 """
 
 
-def _bare_module(name: str = "loop") -> ModuleType:
-    module = ModuleType(name)
-    module.run_turn = lambda ctx: None  # type: ignore[attr-defined]
-    return module
-
-
-def _states(loader: Loader) -> dict[str, FiberState | None]:
-    return {str(e.options["id"]): (None if e.fiber is None else e.fiber.state) for e in loader.entries()}
-
-
-def _error(loader: Loader, id_: str) -> str:
-    fiber = loader.resolve(id_).fiber
-    assert fiber is not None
-    return str(fiber.error)
-
-
-def _write_root(tmp_path: Path, entries: list[dict]) -> Path:
-    """A rendered native root with its entries list, as the rollout engine lays one out."""
-    descriptor = get_adapter("native")
+def _write_root(tmp_path: Path, files: dict[str, str]) -> Path:
+    """A rendered native root of ``files``, as the run engine lays one out; the native directory inside."""
     binding = ModelBinding(base_url="http://127.0.0.1:9", model="fake", api_key="dummy")
-    nodes = [(entry["name"], entry["config"]) for entry in entries]
-    files = render_composition([*nodes, *binding.compose_nodes(descriptor)], descriptor)
-    for relative, text in {**files, **tree_files(descriptor, entries)}.items():
-        (tmp_path / "root" / relative).parent.mkdir(parents=True, exist_ok=True)
-        (tmp_path / "root" / relative).write_text(text, encoding="utf-8")
+    write_rendered(tmp_path / "root", HarnessTree(files), NATIVE, binding)
     return tmp_path / "root" / "native"
 
 
-# -- admission ---------------------------------------------------------------------------------------------------
+# -- validation --------------------------------------------------------------------------------------------------
 
 
-def test_native_loop_admission_reads_the_code_and_never_runs_it() -> None:
-    NODE_KINDS["native_loop"](None, LOOP[1])
-    assert validate_native_loop({**LOOP[1], "max_steps": 3})["max_steps"] == 3
-    # Top level code that would end the process if it ran: admission is a static read of the syntax tree.
-    NODE_KINDS["native_loop"](None, {**LOOP[1], "code": f"raise SystemExit(3)\n{LOOP_CODE}"})
-    assert frozenset({"native_loop"}) == ALWAYS_REVIEWED_KINDS and set(NODE_KINDS) > ALWAYS_REVIEWED_KINDS
+def test_native_loop_validation_reads_the_code_and_never_runs_it() -> None:
+    validate_native_loop(LOOP)
+    assert validate_native_loop({**LOOP, "max_steps": 3})["max_steps"] == 3
+    # Top level code that would end the process if it ran: validation is a static read of the syntax tree.
+    validate_native_loop({**LOOP, "code": f"raise SystemExit(3)\n{LOOP_CODE}"})
+    assert validate_tree(HarnessTree(native_loop("main", f"raise SystemExit(3)\n{LOOP_CODE}")), NATIVE).passed
 
 
-def test_native_loop_admission_refuses_what_could_not_take_a_turn() -> None:
+def test_native_loop_validation_refuses_what_could_not_take_a_turn() -> None:
     with pytest.raises(ValueError, match="'code' must define a top level run_turn"):
-        NODE_KINDS["native_loop"](None, {**LOOP[1], "code": "def run(ctx):\n    return\n"})
+        validate_native_loop({**LOOP, "code": "def run(ctx):\n    return\n"})
     # No parameter cannot take the context; an async def hands back a coroutine; an assignment is not a def.
     for code in ("def run_turn():\n    return\n", "async def run_turn(ctx):\n    return\n", "run_turn = print\n"):
         with pytest.raises(ValueError, match="must define a top level run_turn"):
-            NODE_KINDS["native_loop"](None, {**LOOP[1], "code": code})
+            validate_native_loop({**LOOP, "code": code})
     with pytest.raises(ValueError, match="'code' does not compile"):
-        NODE_KINDS["native_loop"](None, {**LOOP[1], "code": "def run_turn(ctx)\n    return\n"})
+        validate_native_loop({**LOOP, "code": "def run_turn(ctx)\n    return\n"})
     with pytest.raises(ValueError, match="inline credential"):
-        NODE_KINDS["native_loop"](None, {**LOOP[1], "code": f"KEY = 'sk-476-LOOP-KEY-0123456789abcdef'\n{LOOP_CODE}"})
+        validate_native_loop({**LOOP, "code": f"KEY = 'sk-476-LOOP-KEY-0123456789abcdef'\n{LOOP_CODE}"})
     with pytest.raises(ValueError, match="'code'"):
-        NODE_KINDS["native_loop"](None, {"name": "main"})
+        validate_native_loop({"name": "main"})
     with pytest.raises(ValueError, match="'name'"):
-        NODE_KINDS["native_loop"](None, {"code": LOOP_CODE})
+        validate_native_loop({"code": LOOP_CODE})
     for bad in (0, NATIVE_GRAPH_MAX_STEPS + 1, True, "3", 2.0):
         with pytest.raises(ValueError, match=f"'max_steps' must be an integer from 1 to {NATIVE_GRAPH_MAX_STEPS}"):
-            NODE_KINDS["native_loop"](None, {**LOOP[1], "max_steps": bad})
+            validate_native_loop({**LOOP, "max_steps": bad})
     for edge in (1, NATIVE_GRAPH_MAX_STEPS):
-        assert validate_native_loop({**LOOP[1], "max_steps": edge})["max_steps"] == edge
-    with pytest.raises(ValueError, match="native_loop node does not take start"):
-        NODE_KINDS["native_loop"](None, {**LOOP[1], "start": "think"})
+        assert validate_native_loop({**LOOP, "max_steps": edge})["max_steps"] == edge
+    with pytest.raises(ValueError, match="native_loop does not take start"):
+        validate_native_loop({**LOOP, "start": "think"})
+    # The tree's file meets the same check, by its path.
+    (problem,) = validate_tree(HarnessTree(native_loop("main", "def run(ctx):\n    return\n")), NATIVE).problems
+    assert problem.startswith("native/loops/main.py: native_loop 'code' must define a top level run_turn")
 
 
 def test_run_turn_is_the_binding_the_module_body_leaves() -> None:
@@ -155,9 +132,9 @@ def test_run_turn_is_the_binding_the_module_body_leaves() -> None:
     bare = "def run_turn():\n    return\n"
     # The last statement that binds the name at module scope decides: a def that takes the context after one that
     # does not, or after a rebinding inside an if.
-    assert validate_native_loop({**LOOP[1], "code": bare + taking})["code"] == bare + taking
+    assert validate_native_loop({**LOOP, "code": bare + taking})["code"] == bare + taking
     nested = "if True:\n    run_turn = None\n"
-    assert validate_native_loop({**LOOP[1], "code": taking + nested + taking})["code"] == taking + nested + taking
+    assert validate_native_loop({**LOOP, "code": taking + nested + taking})["code"] == taking + nested + taking
     for rebinding in (
         bare,
         "run_turn = None\n",
@@ -184,162 +161,65 @@ def test_run_turn_is_the_binding_the_module_body_leaves() -> None:
         "type run_turn = int\n",
     ):
         with pytest.raises(ValueError, match="must define a top level run_turn"):
-            validate_native_loop({**LOOP[1], "code": taking + rebinding})
+            validate_native_loop({**LOOP, "code": taking + rebinding})
     # A bare annotation, an attribute write and a copy under another name leave the def standing, and so does a
     # binding of another scope: a lambda's parameter, a comprehension's target, a local of another def or a class.
     standing = taking + "run_turn: object\nrun_turn.__doc__ = 'd'\nother = run_turn\n"
     standing += "f = lambda run_turn: run_turn\n[run_turn for run_turn in ()]\n"
     standing += "def g():\n    run_turn = None\n\nclass C:\n    run_turn = None\n"
-    assert validate_native_loop({**LOOP[1], "code": standing})["code"] == standing
+    assert validate_native_loop({**LOOP, "code": standing})["code"] == standing
 
 
-def test_a_coding_cookie_reads_the_same_at_admission_and_at_boot(tmp_path: Path) -> None:
-    # The render writes UTF-8 and the loop compiles the bytes, so a latin-1 cookie reads the two bytes of an e acute
-    # as two characters; admission compiles the same bytes, so it admits the module the loop will run.
+def test_a_coding_cookie_reads_the_same_at_validation_and_at_boot(tmp_path: Path) -> None:
+    # The tree holds UTF-8 text and the loop compiles the bytes, so a latin-1 cookie reads the two bytes of an e
+    # acute as two characters; validation compiles the same bytes, so it passes the module the loop will run.
     code = "# -*- coding: latin-1 -*-\nS = 'caf\u00e9'\n" + LOOP_CODE
-    assert validate_native_loop({**LOOP[1], "code": code})["code"] == code
-    host = NativeHost(mount_dir=tmp_path / "mount")
-    host.mount_module("native_loop", {**LOOP[1], "code": code})
-    mounted = host.loop
-    assert mounted is not None and mounted.module.S == "caf\u00c3\u00a9"
-    root = _write_root(
-        tmp_path, [*SEED_NODES, {"id": "loop", "name": "native_loop", "config": {**LOOP[1], "code": code}}]
-    )
-    (root / "tree.json").unlink()
+    assert validate_native_loop({**LOOP, "code": code})["code"] == code
+    root = _write_root(tmp_path, {**NATIVE_SEED_FILES, **native_loop("main", code)})
     booted = NativeHost.from_root(root).loop
     assert booted is not None and booted.module.S == "caf\u00c3\u00a9"
     with pytest.raises(ValueError, match="'code' does not compile: unknown encoding: no-such-codec"):
-        validate_native_loop({**LOOP[1], "code": "# -*- coding: no-such-codec -*-\n" + LOOP_CODE})
-    # A UTF-8 BOM is read off the same bytes: the compile and the parse at admission accept it as the import does,
-    # for a loop as for a tool, so the module mounts and boots from the file the render writes.
+        validate_native_loop({**LOOP, "code": "# -*- coding: no-such-codec -*-\n" + LOOP_CODE})
+    # A UTF-8 BOM is read off the same bytes: the compile and the parse at validation accept it as the import does,
+    # for a loop as for a tool, so the module boots from the file the render writes.
     bom = "\ufeff" + LOOP_CODE
-    assert validate_native_loop({**LOOP[1], "code": bom})["code"] == bom
-    NODE_KINDS["native_tool"](
-        None, {"name": "t", "description": "d", "code": "\ufeffdef run(args, workdir):\n    return 1\n"}
-    )
-    host.dispose()
-    host.mount_module("native_loop", {**LOOP[1], "code": bom})
-    mounted = host.loop
-    assert mounted is not None and callable(mounted.module.run_turn)
-    root = _write_root(
-        tmp_path / "bom", [*SEED_NODES, {"id": "loop", "name": "native_loop", "config": {**LOOP[1], "code": bom}}]
-    )
-    (root / "tree.json").unlink()
+    assert validate_native_loop({**LOOP, "code": bom})["code"] == bom
+    tool = native_tool("t", "\ufeffdef run(args, workdir):\n    return 1\n", description="d")
+    assert validate_tree(HarnessTree(tool), NATIVE).passed
+    root = _write_root(tmp_path / "bom", {**NATIVE_SEED_FILES, **native_loop("main", bom)})
     assert (root / "loops" / "main.py").read_bytes().startswith(b"\xef\xbb\xbf")
     booted = NativeHost.from_root(root).loop
     assert booted is not None and booted.name == "main" and callable(booted.module.run_turn)
 
 
-# -- render ------------------------------------------------------------------------------------------------------
+# -- render and the host ---------------------------------------------------------------------------------------
 
 
-def test_native_loop_renders_one_module_per_tree_at_the_descriptor_path() -> None:
-    descriptor = get_adapter("native")
-    assert descriptor.node_paths["native_loop"] == "native/loops/{name}.py"
-    module = render_composition([LOOP], descriptor)["native/loops/main.py"]
-    # The code byte for byte, then the node's name and budget bound as constants the file form reads back.
+def test_a_native_loop_renders_at_the_descriptor_path_and_a_tree_holds_one() -> None:
+    assert NATIVE.layout.parts["native_loop"].renders == "native/loops/{name}.py"
+    module = render_tree(HarnessTree(LOOP_FILE), NATIVE)["native/loops/main.py"]
+    # The code byte for byte, then the name and budget as the constants the file form reads back.
     assert module == LOOP_CODE.rstrip() + "\n\nNAME = 'main'\nMAX_STEPS = 12\n"
-    budgeted = render_composition([("native_loop", {**LOOP[1], "max_steps": 3})], descriptor)
+    budgeted = render_tree(HarnessTree(native_loop("main", LOOP_CODE, max_steps=3)), NATIVE)
     assert budgeted["native/loops/main.py"].endswith("MAX_STEPS = 3\n")
-    with pytest.raises(RenderError, match="does not render native_loop nodes"):
-        render_composition([LOOP], get_adapter("pi"))
-    other = ("native_loop", {**LOOP[1], "name": "other"})
-    with pytest.raises(RenderError, match="one loop per tree: native_loop nodes 'main' and 'other'"):
-        render_composition([LOOP, other], descriptor)
-    with pytest.raises(RenderError, match="one loop per tree"):
-        render_composition([LOOP, LOOP], descriptor)
+    with pytest.raises(RenderError, match=r"native/loops/main\.py is not a path of the pi harness tree"):
+        render_tree(HarnessTree(LOOP_FILE), get_adapter("pi"))
+    two = HarnessTree({**LOOP_FILE, **native_loop("other", LOOP_CODE)})
+    assert validate_tree(two, NATIVE).problems == (
+        "one native loop per tree: native/loops/main.py, native/loops/other.py",
+    )
 
 
-# -- host --------------------------------------------------------------------------------------------------------
-
-
-def test_the_host_holds_one_loop_and_every_add_returns_its_inverse(tmp_path: Path) -> None:
-    host = NativeHost(mount_dir=tmp_path / "mount")
-    assert host.loop is None
-    first = LoopModule("main", None, 12, _bare_module())
-    remove = host.add_loop(first)
-    assert host.loop is first
-    with pytest.raises(LoadError, match="one loop per tree: 'main' is already installed, so 'other' cannot be"):
-        host.add_loop(LoopModule("other", None, 12, _bare_module()))
-    remove()
-    assert host.loop is None
-    remove()  # a second call finds nothing of its own to take out
-    host.add_loop(first)
-    host.dispose()
-    assert host.loop is None
-
-
-def test_mount_module_writes_imports_and_registers_the_loop_and_the_remover_leaves_nothing(tmp_path: Path) -> None:
-    host = NativeHost(mount_dir=tmp_path / "mount")
-    uninstall = host.mount_module("native_loop", {**LOOP[1], "max_steps": 5})
-    path = tmp_path / "mount" / "loops" / "main.py"
-    assert path.read_text(encoding="utf-8") == render_native_module("native_loop", {**LOOP[1], "max_steps": 5})
-    loop = host.loop
-    assert loop is not None and (loop.name, loop.path, loop.max_steps) == ("main", path, 5)
-    assert callable(loop.module.run_turn) and (loop.module.NAME, loop.module.MAX_STEPS) == ("main", 5)
-    with pytest.raises(LoadError, match="native_loop 'main' is already installed; one name, one module"):
-        host.mount_module("native_loop", LOOP[1])
-    with pytest.raises(LoadError, match="one loop per tree"):
-        host.mount_module("native_loop", {**LOOP[1], "name": "other"})
-    assert not (tmp_path / "mount" / "loops" / "other.py").exists()  # a failed mount leaves nothing behind
-    uninstall()
-    assert host.loop is None and not (tmp_path / "mount" / "loops").exists()
-    # The loader's own guard, past admission: a module without a callable run_turn is refused at import.
-    with pytest.raises(LoadError, match=r"loop broken\.py defines no run_turn\(ctx\)"):
-        host.mount_module("native_loop", {"name": "broken", "code": "run_turn = None\n"})
-    # Nothing behind: the file went, and the directory made for it went with it, for a tool as for a loop.
-    assert host.loop is None and not (tmp_path / "mount" / "loops").exists()
-    with pytest.raises(LoadError, match=r"no top level statement of t\.py binds run\(args, workdir\)"):
-        host.mount_module("native_tool", {"name": "t", "description": "d", "code": "x = 1\n"})
-    assert not (tmp_path / "mount" / "tools").exists()
-    with pytest.raises(LoadError, match="no mount directory"):
-        NativeHost().mount_module("native_loop", LOOP[1])
-
-
-def test_the_loop_plugin_admits_then_mounts_and_a_second_loop_fails(tmp_path: Path, caplog) -> None:
-    ctx = Context()
-    host = NativeHost(mount_dir=tmp_path / "mount")
-    ctx.provide("native", host)
-    loader = Loader(ctx, NATIVE_PLUGINS.get)
-    with caplog.at_level(logging.ERROR):
-        loader.root.update(
-            [
-                {"id": "loop", "name": "native_loop", "config": {**LOOP[1], "max_steps": 4}},
-                {"id": "twin", "name": "native_loop", "config": {**LOOP[1], "name": "other"}},
-                {"id": "bad", "name": "native_loop", "config": {"name": "bad", "code": "x = 1\n"}},
-            ]
-        )
-    assert _states(loader) == {"loop": FiberState.ACTIVE, "twin": FiberState.FAILED, "bad": FiberState.FAILED}
-    assert "one loop per tree" in _error(loader, "twin")
-    assert "must define a top level run_turn" in _error(loader, "bad")
-    loop = host.loop
-    assert loop is not None and (loop.name, loop.max_steps) == ("main", 4)
-    assert [path.name for path in (tmp_path / "mount" / "loops").glob("*.py")] == ["main.py"]
-    loader.root.update([])
-    assert host.loop is None and not list((tmp_path / "mount").rglob("*"))
-
-
-def test_from_root_boots_the_loop_from_the_entries_list_and_from_the_files(tmp_path: Path) -> None:
-    entries = [*SEED_NODES, {"id": "loop", "name": "native_loop", "config": {**LOOP[1], "max_steps": 4}}]
-    root = _write_root(tmp_path, entries)
-    host = NativeHost.from_root(root, tmp_path / "mounts")
-    loop = host.loop
-    assert loop is not None and (loop.name, loop.max_steps) == ("main", 4)
-    assert loop.path == tmp_path / "mounts" / "loops" / "main.py" and host.graph("main").source == "main"
-    host.dispose()
-    assert host.loop is None and not (tmp_path / "mounts").exists()
-
-    (root / "tree.json").unlink()
-    from_files = NativeHost.from_root(root)
-    loop = from_files.loop
+def test_from_root_boots_the_loop_from_the_files_and_reads_its_header_again(tmp_path: Path) -> None:
+    root = _write_root(tmp_path, {**NATIVE_SEED_FILES, **native_loop("main", LOOP_CODE, max_steps=4)})
+    loop = NativeHost.from_root(root).loop
     assert loop is not None and (loop.name, loop.max_steps, loop.path) == ("main", 4, root / "loops" / "main.py")
     assert callable(loop.module.run_turn)
-
-    (root / "loops" / "other.py").write_text(render_native_module("native_loop", {**LOOP[1], "name": "other"}))
+    (root / "loops" / "other.py").write_text(native_loop("other", LOOP_CODE)["native/loops/other.py"])
     with pytest.raises(LoadError, match=r"one loop per tree: loops/ holds main\.py, other\.py"):
         NativeHost.from_root(root)
     (root / "loops" / "other.py").unlink()
-    # A hand edited file cannot run unchecked: the constants and the code meet admission again.
+    # A hand edited file cannot run unchecked: the constants and the code meet the check again.
     (root / "loops" / "main.py").write_text(f"{LOOP_CODE}\nNAME = 'main'\nMAX_STEPS = 99\n", encoding="utf-8")
     with pytest.raises(LoadError, match=r"loop main\.py cannot run: .*'max_steps' must be an integer"):
         NativeHost.from_root(root)
@@ -381,7 +261,7 @@ def test_the_file_form_admits_the_text_before_the_import_runs_the_module(tmp_pat
     ):
         (loops / "main.py").write_text(f"{ran}{LOOP_CODE}\nNAME = 'main'\n{header}", encoding="utf-8")
         with pytest.raises(
-            LoadError, match=r"loop main\.py cannot run: the header is not the literals the render wrote"
+            LoadError, match=r"loop main\.py cannot run: NAME and MAX_STEPS must be plain literal assignments"
         ):
             load_loop(loops)
         assert not marker.exists()
@@ -396,8 +276,7 @@ def test_the_file_form_admits_the_text_before_the_import_runs_the_module(tmp_pat
 
 
 def test_a_module_that_exits_at_import_is_a_load_error_in_the_file_form(tmp_path: Path) -> None:
-    root = _write_root(tmp_path, [*SEED_NODES, {"id": "loop", "name": "native_loop", "config": LOOP[1]}])
-    (root / "tree.json").unlink()
+    root = _write_root(tmp_path, {**NATIVE_SEED_FILES, **LOOP_FILE})
     (root / "loops" / "main.py").write_text(f"raise SystemExit(3)\n{LOOP_CODE}\nNAME = 'main'\n", encoding="utf-8")
     with pytest.raises(LoadError, match=r"main\.py failed to import: SystemExit: 3"):
         NativeHost.from_root(root)
@@ -406,7 +285,7 @@ def test_a_module_that_exits_at_import_is_a_load_error_in_the_file_form(tmp_path
     work.mkdir()
     exit_code = run_loop("hello", root, sessions, work)
     events = _events(sessions / "session.jsonl")
-    assert exit_code == 1 and events[0]["type"] == "session" and events[0]["data"]["tree"] == "files"
+    assert exit_code == 1 and events[0]["type"] == "session"
     error = events[-1]["data"]["reason"]["error"]
     assert error["code"] == "LOAD_ERROR" and error["message"] == "main.py failed to import: SystemExit: 3"
 
@@ -414,8 +293,7 @@ def test_a_module_that_exits_at_import_is_a_load_error_in_the_file_form(tmp_path
 def test_a_module_that_does_not_parse_is_a_load_error_in_the_file_form(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    root = _write_root(tmp_path, [*SEED_NODES, {"id": "loop", "name": "native_loop", "config": LOOP[1]}])
-    (root / "tree.json").unlink()
+    root = _write_root(tmp_path, {**NATIVE_SEED_FILES, **LOOP_FILE})
     (root / "loops" / "main.py").write_text("def run_turn(ctx)\n    return\n\nNAME = 'main'\n", encoding="utf-8")
     refusal = r"loop main\.py cannot run: code does not compile: .*\(main\.py, line 1\)"
     with pytest.raises(LoadError, match=refusal):
@@ -434,84 +312,53 @@ def test_a_module_that_does_not_parse_is_a_load_error_in_the_file_form(
     assert "[reef-native] loop main.py cannot run: code does not compile: " in err and "Traceback" not in err
 
 
-# -- the flat tree -----------------------------------------------------------------------------------------------
+# -- the self tools refuse a loop ------------------------------------------------------------------------------
 
 
-def _group(**config: Any) -> dict[str, Any]:
-    """A group entry's options: children in place of a config, which the compose loader mounts through the same plugins."""
-    child = {"id": "hidden", "name": "native_loop", "config": {**LOOP[1], **config}}
-    return {"name": "rules", "group": True, "config": [child]}
+class _Trial(ServeState):
+    """The serve state the self tools read: a live tree, and a try_patch that records what reached it."""
 
+    def __init__(self, tree: HarnessTree) -> None:
+        self.tree = tree
+        self.tried: list[TreePatch] = []
 
-class _Trial:
-    """The serve state the self tools read: the live entries, and a try_mount that records what reached it."""
+    @property
+    def client(self) -> ReleaseClient:
+        raise AssertionError("trying a patch reads no release")
 
-    def __init__(self, entries: list[dict[str, Any]]) -> None:
-        self.entries = entries
-        self.tried: list[Any] = []
+    @property
+    def release_id(self) -> str | None:
+        return "r1"
 
-    def live_entries(self) -> list[dict[str, Any]]:
-        return [dict(entry) for entry in self.entries]
+    @property
+    def session_id(self) -> str | None:
+        return "s1"
 
-    def try_mount(self, mutations: Any, try_id: str) -> dict[str, Any]:
-        self.tried.append(mutations)
+    def live_tree(self) -> HarnessTree:
+        return self.tree
+
+    def status(self) -> dict[str, Any]:
+        return {}
+
+    def try_patch(self, patch: TreePatch, try_id: str) -> dict[str, Any]:
+        self.tried.append(patch)
         return {"try_id": try_id, "mounted": True}
 
 
-def test_a_group_wrapped_loop_is_refused_wherever_entries_are_admitted(tmp_path: Path) -> None:
-    descriptor = get_adapter("native")
-    entries = [dict(entry) for entry in SEED_NODES]
-    admitted, refusal = admit_mutations(entries, [Mutation("create", "g", _group())], descriptor)
-    assert refusal == f"mutation create 'g' rejected: {FLAT_TREE_REFUSAL}" and admitted == entries
-    wrapped = Mutation("update", "main", {"group": True, "config": _group()["config"]})
-    assert (
-        admit_mutations(entries, [wrapped], descriptor)[1] == f"mutation update 'main' rejected: {FLAT_TREE_REFUSAL}"
-    )
-    listed = Mutation("create", "g", {"name": "rules", "config": [{"text": "x"}]})
-    assert admit_mutations(entries, [listed], descriptor)[1] == (
-        "mutation create 'g' rejected: entry config must be an object, got list"
-    )
-    unlisted = Mutation("update", "main", {"config": None})
-    assert admit_mutations(entries, [unlisted], descriptor)[1] == (
-        "mutation update 'main' rejected: entry config must be an object, got NoneType"
-    )
-    # An update merges, so one that names the kind and leaves the config alone keeps the entry's config.
-    assert admit_mutations(entries, [Mutation("update", "main", {"name": "native_graph"})], descriptor)[1] is None
-    with pytest.raises(RenderError, match="rules node config must be an object, got list"):
-        render_composition([("rules", _group()["config"])], descriptor)
-    root = _write_root(tmp_path, entries)
-    (root / "tree.json").write_text(json.dumps([*entries, {"id": "g", **_group()}]), encoding="utf-8")
-    with pytest.raises(LoadError, match=rf"tree\.json entry 'g' cannot load: {FLAT_TREE_REFUSAL}"):
-        NativeHost.from_root(root, tmp_path / "mounts")
-    assert not (tmp_path / "mounts").exists()
-    (root / "tree.json").write_text(json.dumps([*entries, {"id": "g", "name": "rules"}]), encoding="utf-8")
-    with pytest.raises(
-        LoadError, match=r"tree\.json entry 'g' cannot load: entry config must be an object, got NoneType"
+def test_harness_try_refuses_any_patch_that_touches_a_loop_file(tmp_path: Path) -> None:
+    trial = _Trial(HarnessTree({**NATIVE_SEED_FILES, **LOOP_FILE}))
+    # A loop is reviewed code: a patch that writes one, rewrites the live one or removes it never reaches the mount.
+    for patch in (
+        native_loop("other", LOOP_CODE),
+        native_loop("main", LOOP_CODE, max_steps=3),
+        {**native_tool("whisper", "def run(args, workdir):\n    return 'quiet'\n"), **LOOP_FILE},
+        {"native/loops/main.py": None},
     ):
-        NativeHost.from_root(root, tmp_path / "mounts")
-    trial = _Trial(entries)
-    with pytest.raises(ToolFailed, match=f"create 'g': {FLAT_TREE_REFUSAL}"):
-        SelfTools(trial).try_({"mutations": [{"op": "create", "id": "g", "options": _group()}]}, str(tmp_path))
+        with pytest.raises(ToolFailed, match=r"native/loops/.*is reviewed code: a person activates it"):
+            SelfTools(trial, "try").try_({"patch": patch}, str(tmp_path))
     assert trial.tried == []
-
-
-def test_harness_try_refuses_an_update_that_renames_a_live_loops_kind(tmp_path: Path) -> None:
-    trial = _Trial([*SEED_NODES, {"id": "main-loop", "name": "native_loop", "config": LOOP[1]}])
-    reason = "native_loop is reviewed code: propose it, a person activates it"
-    skill = {"name": "skill", "config": {"name": "s", "text": "# s"}}
-    # The live entry's kind counts as the options' does: an update that renames the loop's kind is refused before
-    # the admission that would refuse the rename, and a skill updated into a loop is refused by its new kind.
-    for mutation in (
-        {"op": "update", "id": "main-loop", "options": skill},
-        {"op": "update", "id": "main-loop", "options": {"config": {**LOOP[1], "max_steps": 3}}},
-        {"op": "update", "id": "read_file", "options": {"name": "native_loop", "config": LOOP[1]}},
-        {"op": "remove", "id": "main-loop"},
-    ):
-        with pytest.raises(ToolFailed, match=reason):
-            SelfTools(trial).try_({"mutations": [mutation]}, str(tmp_path))
-    assert trial.tried == []
-    result = SelfTools(trial).try_({"mutations": [{"op": "create", "id": "s", "options": skill}]}, str(tmp_path))
-    assert result["mounted"] is True and len(trial.tried) == 1
+    result = SelfTools(trial, "try").try_({"patch": {"skills/s/SKILL.md": "# s"}}, str(tmp_path))
+    assert result["mounted"] is True and trial.tried == [TreePatch({"skills/s/SKILL.md": "# s"})]
 
 
 # -- backend -----------------------------------------------------------------------------------------------------
@@ -522,48 +369,67 @@ def _score(task: str, result) -> float:
     return 1.0 if header.get("loop") or "marker" in header.get("skills", []) else 0.0
 
 
-def _backend(tmp_path: Path, propose, score=_score, **options) -> CordisBackend:
+def loop_backend(
+    tmp_path: Path, scenario: str, method, score=_score, seed: dict[str, str] = NATIVE_SEED_FILES, **evolution
+) -> HarnessBackend:
+    """A native backend over the fake binary; each ``scenario`` has its own history, so no score carries over."""
     binary = tmp_path / "fake-native"
     binary.write_text(NATIVE_FAKE)
     binary.chmod(0o755)
-    return CordisBackend(
-        descriptor=get_adapter("native"),
-        propose=resolve_proposer(propose),
-        score_rollout=resolve_rollout_scorer(score),
-        tasks=("task one",),
-        models=MODEL,
+    backend, _ = harness_backend(
+        tmp_path,
+        method,
+        scenario=scenario,
+        seed=HarnessTree(seed),
+        score=score,
+        adapter="native",
         binary=str(binary),
-        **options,
+        **evolution,
     )
+    return backend
+
+
+def batch() -> JobData:
+    return JobData("demo:trace:1", (recorded_trajectory("a1", {"messages": []}, 0.0),))
 
 
 def test_a_win_that_changes_a_loop_waits_for_a_person_whatever_review_kinds_lists(tmp_path: Path) -> None:
-    """A kept tree names the kinds it changes; the always rule holds a loop change whatever review_kinds lists."""
-    loop = Mutation("create", "loop", {"name": "native_loop", "config": LOOP[1]})
-    skill = Mutation("create", "s1", {"name": "skill", "config": {"name": "marker", "text": "# marker"}})
-    default, skill_reviewed = AlwaysActivate(), AlwaysActivate(frozenset({"skill"}))
-    held = _backend(tmp_path, lambda n, s, m: loop)
-    with_loop = run_backend_step(held, batch(), held.initial_state())
-    assert with_loop.metrics["selected"] is True and with_loop.changed_kinds == {"native_loop"}
-    # A list that names another kind holds the loop just the same.
-    assert not default.activates(MadeArtifact(None, with_loop.changed_kinds))
-    assert not skill_reviewed.activates(MadeArtifact(None, with_loop.changed_kinds))
-    assert with_loop.state is not None and "loop" in [entry["id"] for entry in with_loop.state["entries"]]
-    free = _backend(tmp_path, lambda n, s, m: skill)
-    result = run_backend_step(free, batch(), free.initial_state())
-    assert result.metrics["selected"] is True and result.changed_kinds == {"skill"}
-    assert default.activates(MadeArtifact(None, result.changed_kinds))
-    assert not skill_reviewed.activates(MadeArtifact(None, result.changed_kinds))
-    # The step that takes the loop out changes it too.
-    without = _backend(
-        tmp_path,
-        lambda n, s, m: Mutation("remove", "loop"),
-        score=lambda task, result: 0.0 if result.trajectory[0]["data"].get("loop") else 1.0,
+    """A kept tree names the parts it changes; the recipe's always rule holds a loop change, a ``review: true``
+    part, whatever review_kinds lists."""
+    loop = TreePatch(LOOP_FILE)
+    skill = TreePatch({"skills/marker/SKILL.md": "# marker"})
+    recipe = harness_recipe(
+        tmp_path, lambda workspace, services: skill, adapter="native", seed=HarnessTree(NATIVE_SEED_FILES)
     )
-    removed = run_backend_step(without, batch(), with_loop.state)
-    assert removed.metrics["selected"] is True and removed.changed_kinds == {"native_loop"}
-    assert not default.activates(MadeArtifact(None, removed.changed_kinds))
-    assert removed.state is not None and "loop" not in [entry["id"] for entry in removed.state["entries"]]
+    default = recipe.activation_rule()
+    skill_reviewed = recipe.activation_rule(PluginReference(AlwaysActivate, {"review_kinds": ["skill"]}))
+    held = loop_backend(tmp_path, "held", lambda workspace, services: loop)
+    with_loop = backend_step(held, batch(), HarnessState().to_json())
+    assert with_loop.metrics["selected"] is True and frozenset(with_loop.metrics["patch_parts"].values()) == {
+        "native_loop"
+    }
+    # A list that names another part holds the loop just the same.
+    assert not default.activates(MadeArtifact(None, frozenset(with_loop.metrics["patch_parts"].values())))
+    assert not skill_reviewed.activates(MadeArtifact(None, frozenset(with_loop.metrics["patch_parts"].values())))
+    free = loop_backend(tmp_path, "free", lambda workspace, services: skill)
+    result = backend_step(free, batch(), HarnessState().to_json())
+    assert result.metrics["selected"] is True and frozenset(result.metrics["patch_parts"].values()) == {"skill"}
+    assert default.activates(MadeArtifact(None, frozenset(result.metrics["patch_parts"].values())))
+    assert not skill_reviewed.activates(MadeArtifact(None, frozenset(result.metrics["patch_parts"].values())))
+    # The step that takes the loop out changes it too.
+    without = loop_backend(
+        tmp_path,
+        "without",
+        lambda workspace, services: TreePatch({"native/loops/main.py": None}),
+        score=lambda task, result: 0.0 if result.trajectory[0]["data"].get("loop") else 1.0,
+        seed={**NATIVE_SEED_FILES, **LOOP_FILE},
+    )
+    removed = backend_step(without, batch(), HarnessState().to_json())
+    assert removed.metrics["selected"] is True and frozenset(removed.metrics["patch_parts"].values()) == {
+        "native_loop"
+    }
+    assert not default.activates(MadeArtifact(None, frozenset(removed.metrics["patch_parts"].values())))
+    assert removed.metrics["patch"] == {"native/loops/main.py": None}
 
 
 def test_a_loop_turn_has_no_stages_and_a_loop_error_is_the_path_error() -> None:
@@ -636,25 +502,15 @@ def reef():
         yield server
 
 
-def _root(directory: Path, model: _FakeModel, nodes) -> Path:
-    """The rendered files of ``nodes`` and the model binding under ``directory``; the native root inside."""
-    descriptor = get_adapter("native")
-    binding = ModelBinding(base_url=model.base_url, model="fake", api_key="dummy")
-    for relative, text in render_composition([*nodes, *binding.compose_nodes(descriptor)], descriptor).items():
-        path = directory / relative
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text, encoding="utf-8")
-    return directory / "native"
-
-
-def _run(directory: Path, model: _FakeModel, nodes, loop: _Given | None, prompt: str = PROMPT):
-    """One in process turn on a rendered root; the exit status and the root session's events."""
+def _run(directory: Path, model: _FakeModel, files: dict[str, str], loop: _Given | None, prompt: str = PROMPT):
+    """One in process turn on a rendered root of ``files`` and ``loop``; the exit status and the root session's events."""
     if loop is not None:
-        nodes = [*nodes, ("native_loop", {"name": loop.name, "code": loop.code, "max_steps": loop.max_steps})]
-    root = _root(directory / "root", model, nodes)
+        files = {**files, **native_loop(loop.name, loop.code, max_steps=loop.max_steps)}
+    binding = ModelBinding(base_url=model.base_url, model="fake", api_key="dummy")
+    write_rendered(directory / "root", HarnessTree(files), NATIVE, binding)
     sessions, work = directory / "sessions", directory / "work"
     work.mkdir(parents=True)
-    return run_loop(prompt, root, sessions, work), _events(sessions / "session.jsonl")
+    return run_loop(prompt, directory / "root" / "native", sessions, work), _events(sessions / "session.jsonl")
 
 
 def _comparable(events: list[dict[str, Any]]) -> list[tuple[str, Any]]:
@@ -676,8 +532,8 @@ def _comparable(events: list[dict[str, Any]]) -> list[tuple[str, Any]]:
 
 
 def test_the_seed_loop_as_code_logs_the_same_events_as_the_seed_graph(tmp_path: Path, fake_model) -> None:
-    graph_exit, from_graph = _run(tmp_path / "graph", fake_model, _seed_nodes(), None)
-    loop_exit, from_loop = _run(tmp_path / "loop", fake_model, _seed_nodes(), _loop(SEED_LOOP))
+    graph_exit, from_graph = _run(tmp_path / "graph", fake_model, NATIVE_SEED_FILES, None)
+    loop_exit, from_loop = _run(tmp_path / "loop", fake_model, NATIVE_SEED_FILES, _loop(SEED_LOOP))
     assert graph_exit == loop_exit == 0
     assert _comparable(from_loop) == _comparable(from_graph)
     assert [event["type"] for event in from_loop] == [
@@ -724,7 +580,7 @@ def test_the_context_reads_the_turn_and_say_is_a_loop_message(tmp_path: Path) ->
         "                      'last': ctx.last['role'], 'roles': [m['role'] for m in ctx.messages]})\n"
     )
     with _TextModel() as model:
-        exit_code, events = _run(tmp_path, model, _seed_nodes(SEED_TOOLS), _loop(code, max_steps=3))
+        exit_code, events = _run(tmp_path, model, NATIVE_SEED_TOOLS, _loop(code, max_steps=3))
     assert exit_code == 0 and events[-1]["data"]["reason"] == {"kind": "completed"}
     assert _typed(events, "loop/before") == [
         {
@@ -765,7 +621,7 @@ def test_log_events_are_namespaced_clipped_and_json(tmp_path: Path) -> None:
         "            ctx.log('refused', {'event': event, 'error': str(exc)})\n"
     )
     with _TextModel() as model:
-        exit_code, events = _run(tmp_path, model, _seed_nodes(SEED_TOOLS), _loop(code))
+        exit_code, events = _run(tmp_path, model, NATIVE_SEED_TOOLS, _loop(code))
     assert exit_code == 0
     assert _typed(events, "loop/note") == [{"n": 1, "path": "/x"}]
     big = _typed(events, "loop/big")[0]
@@ -785,7 +641,7 @@ def test_log_events_are_namespaced_clipped_and_json(tmp_path: Path) -> None:
 def test_a_loop_that_raises_ends_the_turn_with_loop_error(tmp_path: Path) -> None:
     code = "def run_turn(ctx):\n    ctx.model()\n    raise RuntimeError('boom')\n"
     with _TextModel() as model:
-        exit_code, events = _run(tmp_path, model, _seed_nodes(SEED_TOOLS), _loop(code))
+        exit_code, events = _run(tmp_path, model, NATIVE_SEED_TOOLS, _loop(code))
     assert exit_code == 1
     assert [event["type"] for event in events][-4:] == ["assistant/message", "step/end", "loop/exit", "turn/end"]
     assert _typed(events, "loop/exit") == [{"reason": "error"}]
@@ -800,7 +656,7 @@ def test_a_loop_that_raises_ends_the_turn_with_loop_error(tmp_path: Path) -> Non
 def test_a_loop_that_never_returns_hits_the_transition_cap(tmp_path: Path) -> None:
     code = "def run_turn(ctx):\n    while True:\n        ctx.run_tools()\n"
     with _TextModel() as model:
-        exit_code, events = _run(tmp_path, model, _seed_nodes(SEED_TOOLS), _loop(code, max_steps=2))
+        exit_code, events = _run(tmp_path, model, NATIVE_SEED_TOOLS, _loop(code, max_steps=2))
     limit = 3 * TRANSITIONS_PER_STEP
     assert exit_code == 1 and not model.requests
     assert events[-1]["data"]["reason"]["error"] == {
@@ -812,7 +668,7 @@ def test_a_loop_that_never_returns_hits_the_transition_cap(tmp_path: Path) -> No
 
 def test_max_steps_ends_the_turn_as_a_graph_does(tmp_path: Path, fake_model) -> None:
     code = "def run_turn(ctx):\n    while True:\n        ctx.model()\n        ctx.run_tools()\n"
-    exit_code, events = _run(tmp_path, fake_model, _seed_nodes(SEED_TOOLS), _loop(code, max_steps=2))
+    exit_code, events = _run(tmp_path, fake_model, NATIVE_SEED_TOOLS, _loop(code, max_steps=2))
     assert exit_code == 0 and len(_typed(events, "step/start")) == 2
     assert _typed(events, "loop/exit") == [{"reason": "max-steps"}]
     assert events[-1]["data"]["reason"] == {"kind": "max-steps", "steps": 2}
@@ -834,7 +690,7 @@ def test_agent_runs_an_agent_in_its_own_session_and_appends_its_text(tmp_path: P
         exit_code, events = _run(
             tmp_path,
             model,
-            [*_seed_nodes(SEED_TOOLS), CHECKER],
+            {**NATIVE_SEED_TOOLS, **CHECKER},
             _loop(code, max_steps=6),
             prompt="how many primes are below 100000?",
         )
@@ -891,7 +747,7 @@ def test_an_agents_abort_is_the_turns_end_for_the_loop(tmp_path: Path) -> None:
         exit_code, events = _run(
             tmp_path,
             model,
-            [*_seed_nodes(SEED_TOOLS), CHECKER],
+            {**NATIVE_SEED_TOOLS, **CHECKER},
             _loop(code, max_steps=6),
             prompt="how many primes are below 100000?",
         )
@@ -916,7 +772,7 @@ def test_end_ends_with_the_reason_and_refuses_an_unknown_one(tmp_path: Path) -> 
         "    ctx.log('unreachable', {})\n"
     )
     with _TextModel() as model:
-        exit_code, events = _run(tmp_path, model, _seed_nodes(SEED_TOOLS), _loop(code))
+        exit_code, events = _run(tmp_path, model, NATIVE_SEED_TOOLS, _loop(code))
     assert exit_code == 0 and not model.requests
     assert [event["type"] for event in events] == [
         "session",
@@ -933,15 +789,13 @@ def test_end_ends_with_the_reason_and_refuses_an_unknown_one(tmp_path: Path) -> 
 
 # -- the serve form ------------------------------------------------------------------------------------------
 
-
-def _loop_entry(code: str = SEED_LOOP, max_steps: int = 4) -> dict[str, Any]:
-    return _entry("main-loop", "native_loop", name="main", code=code, max_steps=max_steps)
+SEED_LOOP_FILE = native_loop("main", SEED_LOOP, max_steps=4)
 
 
 def test_a_release_with_a_loop_runs_the_next_turn_and_one_without_returns_to_the_graph(
     tmp_path: Path, reef: _FakeReef
 ) -> None:
-    graph_only = [_tool("shout", "    return 'LOUD'"), _graph(SEED_STAGES, SEED_EDGES)]
+    graph_only = {**_tool("shout", "    return 'LOUD'"), **_graph(SEED_STAGES, SEED_EDGES)}
     reef.release("r1", graph_only)
     reef.replies = [_reply("one"), _reply(tool_calls=[_call("shout", {}, "c1")]), _reply("two"), _reply("three")]
     with _running(_tree(tmp_path, reef, "r1"), poll_interval_s=0.1) as server:
@@ -949,7 +803,7 @@ def test_a_release_with_a_loop_runs_the_next_turn_and_one_without_returns_to_the
         assert first["text"] == "one" and [e["type"] for e in streamed][:3] == ["session", "turn/start", "stage/enter"]
         assert _typed(streamed, "session")[0]["loop"] is None
         log = server.sessions_dir / serve.SERVE_LOG
-        reef.release("r2", [*graph_only, _loop_entry()], parent="r1")
+        reef.release("r2", {**graph_only, **SEED_LOOP_FILE}, parent="r1")
         _wait(lambda: any(m["release_id"] == "r2" for m in _typed(_events(log), "harness/mount")))
         second, streamed = _turn(server, "second")
         assert second["exit"] == 0 and second["text"] == "two"
@@ -989,37 +843,28 @@ def test_a_release_with_a_loop_runs_the_next_turn_and_one_without_returns_to_the
     ]
 
 
-def test_harness_try_refuses_a_native_loop_mutation(tmp_path: Path, reef: _FakeReef) -> None:
-    reef.release("r1", [_tool("shout", "    return 'LOUD'"), _loop_entry(max_steps=8)])
-    other = {
-        "op": "create",
-        "id": "other",
-        "options": {"name": "native_loop", "config": {**_loop_entry()["config"], "name": "other"}},
-    }
-    update = {"op": "update", "id": "main-loop", "options": {"name": "native_loop", "config": _loop_entry()["config"]}}
-    remove = {"op": "remove", "id": "main-loop"}
-    whisper = {
-        "op": "create",
-        "id": "whisper",
-        "options": {"name": "native_tool", "config": _tool("whisper")["config"]},
-    }
+def test_harness_try_refuses_a_native_loop_patch_on_a_served_loop(tmp_path: Path, reef: _FakeReef) -> None:
+    served = {**_tool("shout", "    return 'LOUD'"), **native_loop("main", SEED_LOOP, max_steps=8)}
+    reef.release("r1", served)
+    other = native_loop("other", SEED_LOOP)
+    update = native_loop("main", SEED_LOOP, max_steps=4)
+    remove = {"native/loops/main.py": None}
     reef.replies = [
-        _reply(tool_calls=[_call("harness_try", {"mutations": [other]}, "c1")]),
-        _reply(tool_calls=[_call("harness_try", {"mutations": [whisper, update]}, "c2")]),
-        _reply(tool_calls=[_call("harness_try", {"mutations": [remove]}, "c3")]),
+        _reply(tool_calls=[_call("harness_try", {"patch": other}, "c1")]),
+        _reply(tool_calls=[_call("harness_try", {"patch": {**_tool("whisper"), **update}}, "c2")]),
+        _reply(tool_calls=[_call("harness_try", {"patch": remove}, "c3")]),
         _reply("done"),
     ]
     with _running(_tree(tmp_path, reef, "r1"), self_tools=True) as server:
         result, streamed = _turn(server, "try a loop")
         assert result["exit"] == 0 and result["text"] == "done"
-        assert [entry["id"] for entry in server.live_entries()] == ["shout", "main-loop"]
-        assert sorted(server.host.tools) == ["harness_inspect", "harness_propose", "harness_try", "shout"]
+        assert server.live_tree() == HarnessTree(served)
+        assert sorted(server.host.tools) == ["harness_inspect", "harness_try", "shout"]
     assert _typed(streamed, "loop/enter") == [{"name": "main"}]
     results = _typed(streamed, "tool/result")
-    reason = "native_loop is reviewed code: propose it, a person activates it"
     assert [r["error"]["code"] for r in results] == ["TOOL_FAILED"] * 3
-    assert all(r["content"] == f"Error: {reason}" for r in results)
-    # The refusal is whole: the tool beside the loop mutation did not mount either, and nothing was tried.
+    assert all("is reviewed code: a person activates it" in r["content"] for r in results)
+    # The refusal is whole: the tool beside the loop file did not mount either, and nothing was tried.
     assert [m["source"] for m in _typed(streamed, "harness/mount")] == []
     assert "harness/unmount" not in {event["type"] for event in streamed}
 
@@ -1030,7 +875,7 @@ def test_harness_try_refuses_a_native_loop_mutation(tmp_path: Path, reef: _FakeR
 def _text_turn(directory: Path, code: str, max_steps: int = 12) -> tuple[int, list[dict[str, Any]]]:
     """One turn of ``code`` against a model that answers in text; the exit status and the root session's events."""
     with _TextModel() as model:
-        return _run(directory, model, _seed_nodes(SEED_TOOLS), _loop(code, max_steps=max_steps))
+        return _run(directory, model, NATIVE_SEED_TOOLS, _loop(code, max_steps=max_steps))
 
 
 def _ends(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1131,9 +976,9 @@ def _loop_error_trajectory(loop: str | None) -> tuple[dict[str, Any], ...]:
 
 
 def test_a_loop_error_failure_is_observed_at_stage_loop() -> None:
-    worker = RolloutEvaluationWorker(
+    worker = TaskEvaluationWorker(
         descriptor=get_adapter("native"),
-        scorer=resolve_rollout_scorer(_score),
+        scorer=resolve_task_scorer(_score),
         binary=None,
         timeout=10,
         executor=LocalExecutor(),
@@ -1141,27 +986,11 @@ def test_a_loop_error_failure_is_observed_at_stage_loop() -> None:
     )
     observed = {}
     for loop in ("main", None):
-        result = RolloutResult(exit_code=1, stdout="", stderr="", trajectory=_loop_error_trajectory(loop), residue=())
-        scored = worker._score_result(result, "task one")
+        result = TaskResult(exit_code=1, stdout="", stderr="", trajectory=_loop_error_trajectory(loop), residue=())
+        scored = worker.score_result(result, "task one", ModelBindings(MODEL))
         assert scored.score == RolloutScore.scored(0.0) and scored.failure is not None
         observed[loop] = (scored.failure.stage, scored.failure.cause)
     assert observed == {
         "main": ("loop", "LOOP_ERROR: RuntimeError: boom"),
         None: ("graph", "LOOP_ERROR: RuntimeError: boom"),
     }
-
-
-def test_a_recovered_state_with_a_group_entry_is_refused_before_the_render(tmp_path: Path) -> None:
-    # The state gate reads the flat tree rule as admission does, so the step raises the refusal and never renders.
-    skill = Mutation("create", "s1", {"name": "skill", "config": {"name": "marker", "text": "# marker"}})
-    seed = list(SEED_NODES)
-    for options, refusal in (
-        (_group(), FLAT_TREE_REFUSAL),
-        ({"name": "rules", "config": [{"text": "x"}]}, "entry config must be an object, got list"),
-    ):
-        backend = _backend(tmp_path, lambda n, s, m: skill)
-        state = {**backend.initial_state(), "entries": [*seed, {"id": "g", **options}]}
-        with pytest.raises(ValueError, match=f"recovered state entry 'g' rejected: {refusal}"):
-            run_backend_step(backend, batch(), state)
-    with pytest.raises(ValueError, match=f"seed entry 'g' rejected: {FLAT_TREE_REFUSAL}"):
-        _backend(tmp_path, lambda n, s, m: skill, seed=[*seed, {"id": "g", **_group()}])

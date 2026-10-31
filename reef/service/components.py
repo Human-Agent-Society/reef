@@ -12,6 +12,8 @@ processes on several hosts, SQLite for processes on one host. The services are:
 - ``evaluation``: runs the evaluation rollouts of the evaluations queue; it serves each candidate itself.
 - ``data``: the data routes and the reads of each scenario, record copies, imports and exports
   (``reef.service.data_service``). It needs no control lease.
+- ``harness``: the routes that a harness client calls (``reef.service.routes.harness``); control commits each
+  import (``reef.service.harness_imports``). It needs no control lease.
 
 A service that only takes work from a queue answers ``/healthz`` alone. ``reef serve`` without ``--component`` runs
 all of them in one process, on the same interfaces.
@@ -28,7 +30,7 @@ from aiohttp import web
 from reef.execution.workers import SERVICE_COMPONENTS
 from reef.observability import build_record_observer
 from reef.runtime.deployment import close_runtimes
-from reef.service.app import create_data_app
+from reef.service.app import create_data_app, create_harness_app
 from reef.service.assembly import (
     build_app,
     build_dispatcher,
@@ -78,7 +80,7 @@ class InferenceApp(ComponentApp):
                 storage = ObservedScenarioStorage(storage, record_observer)
         except BaseException:
             coordination.close()
-            close_runtimes(recipe.training_component, runtime)
+            close_runtimes(recipe.job_components(), runtime)
             raise
         timeout_seconds = settings.inference_timeout_s if runtime is None else runtime.inference_timeout_s
         app = build_inference_app(
@@ -96,7 +98,7 @@ class InferenceApp(ComponentApp):
         async def close_inference(app: web.Application) -> None:
             storage.close()
             coordination.close()
-            close_runtimes(recipe.training_component, runtime)
+            close_runtimes(recipe.job_components(), runtime)
 
         app.on_cleanup.append(close_inference)
         return app
@@ -114,6 +116,23 @@ class DataApp(ComponentApp):
         )
 
 
+class HarnessApp(ComponentApp):
+    """The harness service: a dispatcher that loads each scenario on demand, without activating it, and serves the
+    routes that a harness client calls."""
+
+    def build(self, settings: ServiceConfig, environ: Mapping[str, str]) -> web.Application:
+        dispatcher = build_dispatcher(settings, environ=environ, components=frozenset({"harness"}))
+        if not dispatcher.recipe.harness_adapter:
+            dispatcher.close()
+            raise ValueError(f"recipe {settings.recipe!r} evolves no harness, so it has no harness service")
+        return create_harness_app(
+            dispatcher,
+            tokens=settings.tokens,
+            console_origins=settings.console_origins,
+            inference_url=settings.harness_inference_url,
+        )
+
+
 class QueueServiceApp(ComponentApp):
     """A service that only takes work from a queue (samples, training, evaluation): a dispatcher that runs only the
     service's own workers on the shared store, and answers ``/healthz`` alone. The evaluation service loads each
@@ -127,9 +146,9 @@ class QueueServiceApp(ComponentApp):
 
     def build(self, settings: ServiceConfig, environ: Mapping[str, str]) -> web.Application:
         dispatcher = build_dispatcher(settings, environ=environ, components=frozenset({self.name}))
-        if dispatcher.services.runs_training and dispatcher.recipe.training_component is None:
+        if dispatcher.services.runs_training and not dispatcher.recipe.job_components():
             dispatcher.close()
-            raise ValueError(f"recipe {settings.recipe!r} trains no weights, so it has no training service")
+            raise ValueError(f"recipe {settings.recipe!r} submits no training job, so it has no training service")
         app = service_application(settings.tokens)
 
         async def close_dispatcher(app: web.Application) -> None:
@@ -147,6 +166,7 @@ COMPONENT_APPS: dict[str, ComponentApp] = {
     "training": QueueServiceApp("training"),
     "evaluation": QueueServiceApp("evaluation"),
     "data": DataApp(),
+    "harness": HarnessApp(),
 }
 
 

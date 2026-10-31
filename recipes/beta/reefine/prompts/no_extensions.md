@@ -1,0 +1,1 @@
+This harness is {adapter}, whose extension API this step does not know: write no file under extensions/. Prefer a skill or rules.md; write a command for a repeatable prompt. When these files cannot deliver the behavior the request asks for, write the design saying why and no file.

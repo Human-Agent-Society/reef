@@ -38,8 +38,8 @@ from recipes.beta.autoenvscaling.checks import PassRateBand
 from recipes.beta.autoenvscaling.designer import AgentTools, ModelCalls, RecordingGateway, TaskVariant
 from reef.core.tasks import HarborTask
 from reef.execution.sandbox.e2b import E2BExecutor, E2BSession
-from reef.execution.sandbox.process import ProcessOutcome, ProgramExecutor, RolloutLaunchError, SandboxProgram
-from reef.harness.client.tasks import TaskRollout
+from reef.execution.sandbox.process import ProcessOutcome, ProgramExecutor, ProgramLaunchError, SandboxProgram
+from reef.harness.tasks.rollouts import TaskRollout
 from reef.recipe.generated_tasks.generator import GeneratedTaskResult, RejectedTask, RolledOutTask
 from reef.record2sample.generator import GeneratorError, WrittenTask
 from reef.record2sample.generator.inputs import TaskGenerationRequest
@@ -100,7 +100,7 @@ class ScriptedSession(E2BSession):
         if self.stop is not None:
             self.stop.set()
             self.is_closed.wait(10)
-            raise RolloutLaunchError("the E2B sandbox could not run the process: it is gone")
+            raise ProgramLaunchError("the E2B sandbox could not run the process: it is gone")
         (root / "sessions").mkdir(parents=True, exist_ok=True)
         (root / "sessions" / "session.jsonl").write_text("".join(json.dumps(event) + "\n" for event in self.events))
         return ProcessOutcome(0, "", "")
@@ -123,7 +123,7 @@ class ScriptedExecutor(E2BExecutor):
 
     def open(self) -> E2BSession:
         if self.session is None:
-            raise RolloutLaunchError("no scripted session")
+            raise ProgramLaunchError("no scripted session")
         return self.session
 
 

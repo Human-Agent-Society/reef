@@ -1,6 +1,6 @@
-"""How a rollout's process runs, behind an interface.
+"""How a run's process runs, behind an interface.
 
-``run_rollout`` owns the executor-agnostic work: it prepares the rollout root,
+``run_task`` owns the executor-agnostic work: it prepares the run root,
 writes the rendered composition, builds the environment, reads the trajectory,
 and collects residue. Only the launch of the harness process differs between a
 development run and a hosted one, so that step is the seam:
@@ -9,7 +9,7 @@ development run and a hosted one, so that step is the seam:
   session, exactly as before. It is the default, used for development and the
   hermetic tests.
 * :class:`SandboxExecutor` runs the same binary inside a bubblewrap jail: a
-  fresh non-root namespace, a read-only base filesystem with only the rollout
+  fresh non-root namespace, a read-only base filesystem with only the run
   root exposed (its workspace and declared runtime state writable, rendered
   inputs read-only), only explicitly forwarded deployment environment, resource limits,
   network disabled unless an egress allowlist is configured, and death with
@@ -44,7 +44,7 @@ from reef.execution.processes import (
 
 ISOLATION_ENV = "REEF_SANDBOX_ISOLATION"
 
-ROLLOUT_OWNER_LEASE: ContextVar[bool] = ContextVar("rollout_owner_lease", default=False)
+RUN_OWNER_LEASE: ContextVar[bool] = ContextVar("run_owner_lease", default=False)
 
 
 class ProcessOwner:
@@ -70,19 +70,19 @@ class SandboxUnavailable(ReefError):
 
 @dataclass(frozen=True)
 class ProcessOutcome:
-    """What a launched rollout process produced."""
+    """What a launched run process produced."""
 
     exit_code: int
     stdout: str
     stderr: str
 
 
-class RolloutTimeout(Exception):
-    """The process exceeded its wall-clock budget; raised for run_rollout to map."""
+class ProgramTimeout(Exception):
+    """The process exceeded its wall-clock budget; raised for run_task to map."""
 
 
-class RolloutLaunchError(Exception):
-    """The process could not be launched; raised for run_rollout to map."""
+class ProgramLaunchError(Exception):
+    """The process could not be launched; raised for run_task to map."""
 
 
 class SandboxProgram(ABC):
@@ -117,11 +117,11 @@ class SandboxProgram(ABC):
 class ProgramExecutor(ABC):
     """Synchronous launch interface adapted by ``ExecutorEnvironment``.
 
-    ``run_rollout`` prepares ``root`` (with ``workspace`` inside it) and the
+    ``run_task`` prepares ``root`` (with ``workspace`` inside it) and the
     ``env`` overlay; an executor decides how the process sees them. It must
-    kill the whole process tree on timeout and raise :class:`RolloutTimeout`
-    or :class:`RolloutLaunchError` so ``run_rollout`` maps them to the public
-    ``RolloutError`` uniformly.
+    kill the whole process tree on timeout and raise :class:`ProgramTimeout`
+    or :class:`ProgramLaunchError` so ``run_task`` maps them to the public
+    ``TaskRunError`` uniformly.
 
     Callers do not need to know which executor they hold. :meth:`for_program`
     binds the executor to the program it runs and resolves that program's
@@ -201,13 +201,13 @@ def run_process(
     process group with ``new_session=False``."""
     read_fd = write_fd = None
     command = list(popen_argv)
-    if ROLLOUT_OWNER_LEASE.get() and new_session:
+    if RUN_OWNER_LEASE.get() and new_session:
         # Detect missing executables before the guard changes their exit status.
         executable = command[0]
         if "/" in executable and not os.path.isabs(executable):
             executable = str(cwd / executable)
         if shutil.which(executable, path=env.get("PATH", "")) is None:
-            raise RolloutLaunchError(f"harness binary {command[0]!r} not found or not executable")
+            raise ProgramLaunchError(f"harness binary {command[0]!r} not found or not executable")
         read_fd, write_fd = os.pipe()
         command = [sys.executable, str(Path(__file__).with_name("lease.py")), str(read_fd), *command]
     owner = PROCESS_OWNER.get() if new_session else None
@@ -229,26 +229,26 @@ def run_process(
             )
         )
     except FileNotFoundError as exc:
-        raise RolloutLaunchError(f"harness binary {popen_argv[0]!r} not found") from exc
+        raise ProgramLaunchError(f"harness binary {popen_argv[0]!r} not found") from exc
     except ProcessScopeClosed as exc:
-        raise RolloutLaunchError("the execution environment was stopped") from exc
+        raise ProgramLaunchError("the execution environment was stopped") from exc
     finally:
         if read_fd is not None:
             os.close(read_fd)
         if write_fd is not None:
             os.close(write_fd)
     if result.reason == "timed_out":
-        raise RolloutTimeout(f"rollout timed out after {timeout}s: {list(popen_argv)}")
+        raise ProgramTimeout(f"run timed out after {timeout}s: {list(popen_argv)}")
     if result.reason == "stopped":
-        raise RolloutLaunchError("the execution environment was stopped")
+        raise ProgramLaunchError("the execution environment was stopped")
     return ProcessOutcome(exit_code=result.exit_code, stdout=result.stdout, stderr=result.stderr)
 
 
 def inherited_environment() -> dict[str, str]:
-    """The minimal parent environment a rollout keeps: how to find binaries.
+    """The minimal parent environment a run keeps: how to find binaries.
 
     The running interpreter's scripts directory comes last on PATH, so a
-    runner that ships with reef (reef-terminus, reef-native) is found when
+    runner that ships with reef (reef-native) is found when
     ``reef serve`` runs from a venv that is not on PATH; every name PATH
     already finds resolves as before."""
     env = {
@@ -290,7 +290,7 @@ class LocalExecutor(ProgramExecutor):
         return run_process(argv, cwd=workspace, env={**inherited_environment(), **env}, timeout=timeout)
 
 
-#: What every jail unshares and mounts before its binds; the rollout jail and the nesting probe share it.
+#: What every jail unshares and mounts before its binds; the run jail and the nesting probe share it.
 ISOLATION: tuple[str, ...] = (
     "--unshare-user",
     "--unshare-ipc",
@@ -309,7 +309,7 @@ ISOLATION: tuple[str, ...] = (
 )
 
 
-#: Resource limits every sandboxed rollout gets unless the config overrides one.
+#: Resource limits every sandboxed run gets unless the config overrides one.
 @dataclass(frozen=True)
 class SandboxLimits(ProcessSetup):
     """Nonnegative integer resource limits applied to a child before exec.
@@ -351,9 +351,9 @@ class SandboxExecutor(ProgramExecutor):
 
     bubblewrap (``bwrap``) is an unprivileged, daemonless sandbox: it builds a
     new mount/pid/user namespace, binds a read-only base filesystem, exposes
-    only the rollout root (workspace writable), clears the environment, and
+    only the run root (workspace writable), clears the environment, and
     dies with its parent. Network is unshared (no egress) unless
-    ``egress_hosts`` lists the model endpoint the rollout must reach, in which
+    ``egress_hosts`` lists the model endpoint the run must reach, in which
     case the network namespace is shared so the endpoint is reachable; a
     single-host firewall is the follow-up (issue #18). The jail also carries
     ``REEF_NATIVE_ENFORCE=bwrap``, so the native loop runs each tool call in
@@ -383,7 +383,7 @@ class SandboxExecutor(ProgramExecutor):
             raise SandboxUnavailable(f"unknown sandbox network {self.network!r}; use 'default' or 'isolated'")
         if self.network == "isolated":
             self.preflight_pasta()
-        # The native loop nests one jail per tool call inside the rollout's, so a host that refuses a user namespace
+        # The native loop nests one jail per tool call inside the run's, so a host that refuses a user namespace
         # inside another fails here instead of ending every call in SANDBOX_FAILED and tying every pairing.
         try:
             done = subprocess.run(
@@ -458,12 +458,12 @@ class SandboxExecutor(ProgramExecutor):
             )
 
     def nested_probe_argv(self) -> list[str]:
-        """A rollout jail with a tool jail inside it around ``true``: the shape every sandboxed tool call takes."""
+        """A run jail with a tool jail inside it around ``true``: the shape every sandboxed tool call takes."""
         bwrap = shutil.which("bwrap") or "bwrap"
         binds = [token for base in self.base_paths if Path(base).exists() for token in ("--ro-bind", base, base)]
-        rollout = [bwrap, *ISOLATION, "--unshare-net", *binds]
+        task_run = [bwrap, *ISOLATION, "--unshare-net", *binds]
         tool = [bwrap, *TOOL_ISOLATION, "--unshare-net", *binds]
-        return [*rollout, "--", *tool, "--", "/bin/true"]
+        return [*task_run, "--", *tool, "--", "/bin/true"]
 
     def bwrap_argv(
         self,
@@ -492,16 +492,17 @@ class SandboxExecutor(ProgramExecutor):
             for dns_path in ("/etc/resolv.conf", "/etc/hosts", "/etc/nsswitch.conf"):
                 if Path(dns_path).exists():
                     cmd += ["--ro-bind", dns_path, dns_path]
-        # Mount the root read-only, then open only declared runtime-state
-        # directories. Rendered inputs inside those directories are rebound
-        # read-only so a run cannot mutate the admitted composition.
+        # Mount the root read-only, then open only the workspace and the
+        # declared runtime-state directories. Rendered inputs inside those
+        # directories are rebound read-only so a run cannot mutate the
+        # admitted composition, as a remote sandbox's command does.
         cmd += ["--ro-bind", str(root), str(root)]
-        for path in writable_paths:
+        opened = (workspace, *writable_paths)
+        for path in opened:
             cmd += ["--bind", str(path), str(path)]
         for path in readonly_paths:
-            if any(path == writable or writable in path.parents for writable in writable_paths):
+            if any(path == writable or writable in path.parents for writable in opened):
                 cmd += ["--ro-bind", str(path), str(path)]
-        cmd += ["--bind", str(workspace), str(workspace)]
         cmd += ["--chdir", str(workspace)]
         for key, value in {
             **inherited_environment(),
@@ -543,7 +544,7 @@ class SandboxExecutor(ProgramExecutor):
         )
 
 
-#: Nested tool jails bind the rollout's proc filesystem instead of mounting another one.
+#: Nested tool jails bind the run's proc filesystem instead of mounting another one.
 TOOL_ISOLATION: tuple[str, ...] = (
     "--unshare-user",
     "--unshare-ipc",

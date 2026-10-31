@@ -8,9 +8,12 @@ from typing import Any
 
 from reef.artifact import Artifact, BaseArtifactSource
 from reef.core.evaluation import PolicyModel
+from reef.core.job_data import JobData
 from reef.core.served_models import ServedArtifact
 from reef.inference.http import InferenceProxyRuntime
+from reef.runtime.interfaces import InferenceBackend
 from reef.runtime.jobs import JobStatus, ReleaseFormat, SavedCheckpoint, TrainingComponent, TrainingJob
+from reef.runtime.serving import OpenedEngines, ServingEngines
 from reef.train.pipeline import PipelineConfig, PipelineSpec
 
 #: The release format of a stub component that does not name one.
@@ -110,6 +113,22 @@ class StubTrainingComponent(TrainingComponent):
         self.closed = True
 
 
+class RecordingComponent(StubTrainingComponent):
+    """A training component that keeps the data of every job it ran, in ``batches``, and saves no checkpoint, so each
+    job ends at once in ``submit``.
+
+    Purpose: a test of how a trainer reads, batches and commits records, which trains nothing worth publishing.
+    """
+
+    def __init__(self, batches: list[JobData] | None = None, *, name: str = "recording") -> None:
+        super().__init__(name=name, shares_scenarios=True)
+        self.batches: list[JobData] = [] if batches is None else batches
+
+    def train(self, job: TrainingJob) -> tuple[SavedCheckpoint, ...]:
+        self.batches.append(job.data)
+        return ()
+
+
 class StubInferenceRuntime(InferenceProxyRuntime):
     """An inference proxy that records the releases it serves.
 
@@ -172,3 +191,21 @@ def job_sized_stages(
     sample2job = stages.setdefault("sample2job", {})
     sample2job["config"] = {"job_samples": job_samples, **sample2job.get("config", {})}
     return PipelineConfig.from_setting(stages, spec=spec, environ={})
+
+
+class RunningEngines(ServingEngines):
+    """Engines that a test started behind ``backend`` and stops: opening returns them as new engines, and closing
+    stops nothing.
+
+    Purpose: the serving runtime tests run ``AdapterServingRuntime`` and ``FullWeightServingRuntime`` on fake engines.
+    """
+
+    def __init__(self, backend: InferenceBackend) -> None:
+        self.backend = backend
+
+    @property
+    def base_url(self) -> str:
+        return self.backend.inference_url()
+
+    def open(self) -> OpenedEngines:
+        return OpenedEngines(self.backend, attached=False)

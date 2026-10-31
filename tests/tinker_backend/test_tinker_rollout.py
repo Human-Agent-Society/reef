@@ -12,12 +12,12 @@ import pytest
 from reef.core.evaluation import RolloutScore, RolloutScores
 from reef.core.job_data import JobData, TaskSample, TrajectorySample
 from reef.core.trajectories import trajectory_reward
-from reef.harness.client.tasks import RolloutRow, TaskLab
+from reef.harness.tasks.rollouts import RolloutRow, TaskLab
 from reef.runtime.interfaces import TrainingMethod
 from reef.runtime.jobs import TrainingJob
 from reef.tinker.checkpoint import TinkerCheckpoint
 from reef.tinker.sampling import SampleResult, TinkerSampler
-from reef.train.task_rollouts import ChatEndpoint, RolloutSettings, TaskJobRollouts, roll_out
+from reef.train.task_rollouts import ChatEndpoint, RolloutSettings, TaskJobRollouts, run_train_tasks
 from reef.train.tinker_backend import component as component_module
 from reef.train.tinker_backend.client import TinkerClient
 from reef.train.tinker_backend.component import ROLLOUTS_FILE, TinkerTrainingComponent
@@ -83,7 +83,7 @@ def test_a_rollout_samples_each_task_on_the_start_sampler_and_groups_its_samples
     tasks = (harbor_task(tmp_path, "add"), harbor_task(tmp_path, "sort"), harbor_task(tmp_path, "broken"))
     sampler = Sampler()
 
-    rollouts = roll_out(
+    rollouts = run_train_tasks(
         tasks,
         RolloutSettings.from_parameters({"rollout": ROLLOUT}),
         SamplerChat(sampler, "tinker://start/sampler", model=MODEL, runtime_load_id="tinker:start", topk_logprobs=0),
@@ -232,7 +232,7 @@ def test_a_task_job_trains_its_rollouts_and_a_resumed_job_trains_the_same_ones(t
         calls.append((tuple(task.task_path.name for task in tasks), chat.sampler_path))
         return grouped(tmp_path)
 
-    monkeypatch.setattr(component_module, "roll_out", fake_roll_out)
+    monkeypatch.setattr(component_module, "run_train_tasks", fake_roll_out)
     client = Client()
     component = TinkerTrainingComponent(
         MODEL, TinkerConfig(state_dir=str(tmp_path / "state")), client, sampler=Sampler()
@@ -333,7 +333,7 @@ def test_a_task_job_waits_for_its_start_sampler_before_the_rollouts(tmp_path, mo
         rolled_out_after.append(len(sampler.requests))
         return grouped(tmp_path)
 
-    monkeypatch.setattr(component_module, "roll_out", fake_roll_out)
+    monkeypatch.setattr(component_module, "run_train_tasks", fake_roll_out)
     component = TinkerTrainingComponent(
         MODEL, TinkerConfig(state_dir=str(tmp_path / "state")), Client(), sampler=sampler
     )

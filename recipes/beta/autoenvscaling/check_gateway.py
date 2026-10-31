@@ -8,21 +8,22 @@ import threading
 from collections.abc import Mapping
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from reef.recipe.reefine.agent_gateway import WorkspaceTools
-from reef.recipe.reefine.trial import trial_script
+from reef.harness.gateway import AgentTool
 
 
 class CheckGateway:
-    """Serve WorkspaceTools on a token-prefixed loopback URL for one Designer run.
+    """Serve a Designer's ``check`` tool on a token-prefixed loopback URL for one Designer run.
 
-    Values: ``tools`` implements WorkspaceTools, ``token`` is a random URL token,
-    and ``server`` is either None (stopped) or the running loopback HTTP server.
+    Values: ``tools`` is the ``AgentTool`` named ``check`` (``designer.AgentTools``), ``token`` is a random URL
+    token, and ``server`` is either None (stopped) or the running loopback HTTP server.
     Purpose: ClaudeCodeDesigner starts the server for task_check.py and stops it
-    after the run. Only POST /check and /trial reach tools. All other routes
-    return 404. The gateway has no model binding, provider, or model-call budget.
+    after the run. Only POST /check reaches the tool, with the request body as its arguments: ``{}`` starts a
+    check, and ``{"check_id": n}`` polls one; a ``check_id`` of no check of this run answers ``ran: false``. All
+    other routes return 404. The gateway has no model binding,
+    provider, or model-call budget.
     """
 
-    def __init__(self, tools: WorkspaceTools) -> None:
+    def __init__(self, tools: AgentTool) -> None:
         self.tools = tools
         self.token = secrets.token_urlsafe(24)
         self.server: ThreadingHTTPServer | None = None
@@ -56,7 +57,7 @@ class CheckGateway:
             self.server = None
 
     def handler_class(self) -> type[BaseHTTPRequestHandler]:
-        """Bind HTTP parsing to this gateway's workspace tools and URL token."""
+        """Bind HTTP parsing to this gateway's check tool and URL token."""
         gateway = self
         prefix = f"/t/{self.token}"
 
@@ -64,13 +65,13 @@ class CheckGateway:
             """One HTTP request, using BaseHTTPRequestHandler's stream and response lifecycle.
 
             The server constructs each instance with its request socket, client address,
-            and server. POST dispatches check requests; GET always returns 404.
+            and server. POST /check calls the check tool; GET always returns 404.
             """
 
             def do_POST(self) -> None:
                 path = self.path.split("?", 1)[0]
                 route = path[len(prefix) :]
-                if not secrets.compare_digest(path[: len(prefix)], prefix) or route not in ("/check", "/trial"):
+                if not secrets.compare_digest(path[: len(prefix)], prefix) or route != "/check":
                     self.answer(404, {"error": "not found"})
                     return
                 try:
@@ -84,25 +85,12 @@ class CheckGateway:
                 if not isinstance(payload, dict):
                     self.answer(400, {"error": "the body must be a JSON object"})
                     return
-                if route == "/check":
-                    self.answer(200, gateway.tools.check())
-                    return
-                task = payload.get("task")
-                script = payload.get("script")
-                if script is not None:
-                    if task is not None:
-                        self.answer(400, {"error": "choose task or script, not both"})
-                        return
-                    try:
-                        validated = trial_script(script)
-                    except ValueError as error:
-                        self.answer(400, {"error": str(error)})
-                        return
-                    self.answer(200, gateway.tools.trial("", validated))
-                elif isinstance(task, str) and task.strip():
-                    self.answer(200, gateway.tools.trial(task.strip()))
-                else:
-                    self.answer(400, {"error": "a trial needs a task or script"})
+                try:
+                    answer = gateway.tools.call(payload)
+                except ValueError as error:
+                    # A check_id that names no check of this run starts nothing; the agent reads why.
+                    answer = {"ran": False, "error": str(error)}
+                self.answer(200, answer)
 
             def do_GET(self) -> None:
                 self.answer(404, {"error": "not found"})

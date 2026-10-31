@@ -394,6 +394,10 @@ html[data-theme="dark"] .logo-cell:hover img { filter: invert(1) hue-rotate(180d
 .markdown-body .fig { margin: 28px 0 36px; padding: 24px 18px; border: 1px solid var(--border); border-radius: 4px; background: var(--card); }
 .markdown-body .fig figcaption { max-width: 560px; margin: 16px auto 0; color: var(--muted); font-size: 13px; line-height: 1.5; text-align: center; }
 .fig .fig-arrow { flex: none; align-self: center; color: var(--muted); }
+/* A drawn figure with one file per theme. */
+.fig-diagram img { display: block; width: 100%; height: auto; }
+.fig-diagram .fig-dark, html[data-theme="dark"] .fig-diagram .fig-light { display: none; }
+html[data-theme="dark"] .fig-diagram .fig-dark { display: block; }
 .fig-flow-track { display: flex; align-items: stretch; gap: 6px; }
 .fig-flow-track > .fig-arrow-next { width: 14px; height: 14px; }
 .fig-flow-stage { min-width: 0; padding: 12px 8px; display: flex; flex: 1 1 0; flex-direction: column; justify-content: center; gap: 3px; border: 1px solid var(--border); border-radius: 8px; background: var(--background); text-align: center; overflow-wrap: break-word; }

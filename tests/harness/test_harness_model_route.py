@@ -1,38 +1,39 @@
 """A tree never chooses where a model call goes: Reef's model binding is its only route.
 
-For claude, hermes, dsh, pi and terminus, render refuses every config key the
+For claude, hermes, dsh and pi, render refuses every config key the
 pinned harness reads to choose the endpoint, the provider, the credential or
-the model, in the tree alone (as admission renders it) and with the binding
-appended (as a rollout or an install renders it). A request body a tree
-passes to the bound endpoint may not name a model either. Keys that tune a
-run stay admitted, and the binding itself always renders.
+the model, in the tree alone (as validation renders it) and with the binding's
+overlays (as a run renders it). A request body a tree passes to the
+bound endpoint may not name a model either. Keys that tune a run stay
+admitted, and the binding itself always renders.
 """
 
 from __future__ import annotations
 
 import json
 import re
+from collections.abc import Mapping
 from typing import Any
 
 import pytest
 import yaml
 
 from reef.harness.adapters import get_adapter
-from reef.harness.rollouts.model_binding import ModelBinding
-from reef.harness.tree.mutations import Mutation, admit_mutations
-from reef.harness.tree.render import RenderError, render_composition
+from reef.harness.tasks.model_binding import ModelBinding
+from reef.harness.tree import HarnessTree, RenderError, render_tree, validate_tree
 
 OTHER_URL = "http://127.0.0.1:9/v1"
 
 
-def render(adapter: str, nodes: list[tuple[str, Any]], *, bound: bool, api: str = "openai") -> dict[str, str]:
+def render(adapter: str, files: Mapping[str, str], *, bound: bool, api: str = "openai") -> dict[str, str]:
     descriptor = get_adapter(adapter)
     binding = ModelBinding(base_url="http://127.0.0.1:8900", model="served", api_key="k-bound", api=api)
-    return render_composition([*nodes, *(binding.compose_nodes(descriptor) if bound else ())], descriptor)
+    overlays = binding.config_overlays(descriptor) if bound else ()
+    return render_tree(HarnessTree(dict(files)), descriptor, overlays)
 
 
-def config(data: dict[str, Any], target: str = "primary") -> tuple[str, dict[str, Any]]:
-    return ("config", {"target": target, "data": data})
+def config(data: dict[str, Any], target: str = "primary") -> dict[str, str]:
+    return {f"config/{target}.json": json.dumps(data)}
 
 
 CLAUDE_REFUSED = [
@@ -51,7 +52,7 @@ CLAUDE_REFUSED = [
     pytest.param({"env": {"CLAUDE_CODE_EXTRA_BODY": "{model: m}"}}, id="body-render-cannot-read"),
 ]
 
-#: settings.json keys whose descriptor check is IsAbsent(): fixed names a tree must not set.
+#: settings.json keys that choose the model or the login: a Claude Code plugin carries no setting at all.
 CLAUDE_LOCKED = [
     pytest.param({"model": "m"}, id="settings-model"),
     pytest.param({"fallbackModel": ["m"]}, id="settings-fallback-model"),
@@ -65,21 +66,21 @@ CLAUDE_LOCKED = [
 @pytest.mark.parametrize("bound", [False, True], ids=["tree", "bound"])
 def test_claude_refuses_a_setting_that_chooses_the_route(data: dict[str, Any], bound: bool) -> None:
     with pytest.raises(RenderError, match="Reef's model binding"):
-        render("claude", [config(data)], bound=bound, api="anthropic")
+        render("claude", config(data), bound=bound, api="anthropic")
 
 
 @pytest.mark.parametrize("data", CLAUDE_LOCKED)
 @pytest.mark.parametrize("bound", [False, True], ids=["tree", "bound"])
 def test_claude_refuses_a_key_the_descriptor_locks(data: dict[str, Any], bound: bool) -> None:
-    with pytest.raises(RenderError, match=r"on \w+ in claude/settings\.json: Reef's model binding"):
-        render("claude", [config(data)], bound=bound, api="anthropic")
+    with pytest.raises(RenderError, match=r"in claude/settings\.json: a Claude Code plugin carries no settings"):
+        render("claude", config(data), bound=bound, api="anthropic")
 
 
 def test_claude_writes_the_binding_env_only_beside_the_binding_token() -> None:
     # A tree alone never carries the endpoint; the binding's three names pass because its token is beside them.
     with pytest.raises(RenderError, match=re.escape("must not set env.ANTHROPIC_BASE_URL in claude/settings.json")):
-        render("claude", [config({"env": {"ANTHROPIC_BASE_URL": OTHER_URL}})], bound=False)
-    files = render("claude", [config({"env": {"ANTHROPIC_BASE_URL": OTHER_URL}})], bound=True, api="anthropic")
+        render("claude", config({"env": {"ANTHROPIC_BASE_URL": OTHER_URL}}), bound=False)
+    files = render("claude", config({"env": {"ANTHROPIC_BASE_URL": OTHER_URL}}), bound=True, api="anthropic")
     env = json.loads(files["claude/settings.json"])["env"]
     assert env == {
         "ANTHROPIC_AUTH_TOKEN": "k-bound",
@@ -98,25 +99,15 @@ def test_claude_writes_the_binding_env_only_beside_the_binding_token() -> None:
         pytest.param("---\n\tmodel: [\n---\nBody.\n", id="unreadable-block"),
     ],
 )
-@pytest.mark.parametrize("kind", ["skill", "agent_command"])
-def test_claude_refuses_a_model_in_a_command_or_skill_frontmatter(text: str, kind: str) -> None:
+@pytest.mark.parametrize("path", ["skills/x/SKILL.md", "commands/x.md"])
+def test_claude_refuses_a_model_in_a_command_or_skill_frontmatter(text: str, path: str) -> None:
     with pytest.raises(RenderError, match="must not set model in its frontmatter"):
-        render("claude", [(kind, {"name": "x", "text": text})], bound=True, api="anthropic")
+        render("claude", {path: text}, bound=True, api="anthropic")
 
 
-def test_claude_keeps_the_settings_a_tree_tunes() -> None:
-    tuned = {
-        "permissions": {"allow": ["WebSearch"]},
-        "env": {"BASH_DEFAULT_TIMEOUT_MS": "60000", "CLAUDE_CODE_EXTRA_BODY": '{"metadata": {"user_id": "u"}}'},
-        "effortLevel": "low",
-    }
-    skill = ("skill", {"name": "notes", "text": "---\nname: notes\ndescription: models and notes\n---\nBody.\n"})
-    files = render("claude", [config(tuned), skill], bound=True, api="anthropic")
-    settings = json.loads(files["claude/settings.json"])
-    assert settings["permissions"] == {"allow": ["WebSearch"]}
-    assert settings["env"]["BASH_DEFAULT_TIMEOUT_MS"] == "60000"
-    assert settings["env"]["CLAUDE_CODE_EXTRA_BODY"] == tuned["env"]["CLAUDE_CODE_EXTRA_BODY"]
-    assert render("claude", [config(tuned), skill], bound=False)["claude/skills/notes/SKILL.md"] == skill[1]["text"]
+def test_claude_keeps_a_skill_whose_description_names_models() -> None:
+    skill = "---\nname: notes\ndescription: models and notes\n---\nBody.\n"
+    assert render("claude", {"skills/notes/SKILL.md": skill}, bound=False)["plugin/skills/notes/SKILL.md"] == skill
 
 
 HERMES_REFUSED = [
@@ -179,7 +170,7 @@ HERMES_REFUSED = [
 @pytest.mark.parametrize(("data", "bound"), HERMES_REFUSED)
 def test_hermes_refuses_a_setting_that_chooses_the_route(data: dict[str, Any], bound: bool) -> None:
     with pytest.raises(RenderError, match="Reef's model binding"):
-        render("hermes", [config(data)], bound=bound)
+        render("hermes", config(data), bound=bound)
 
 
 #: Top-level keys whose descriptor check is IsAbsent(): hermes moves them into ``model``, and a tree must not set
@@ -201,7 +192,7 @@ HERMES_LOCKED = [
 @pytest.mark.parametrize("bound", [False, True], ids=["tree", "bound"])
 def test_hermes_refuses_a_key_the_descriptor_locks(data: dict[str, Any], bound: bool) -> None:
     with pytest.raises(RenderError, match=r"on \w+ in hermes/config\.yaml: Reef's model binding"):
-        render("hermes", [config(data)], bound=bound)
+        render("hermes", config(data), bound=bound)
 
 
 #: Each api mode hermes 0.21.0 takes for model.api_mode, and spellings its alias map reads as one. For the binding's
@@ -225,7 +216,7 @@ HERMES_API_MODES = [
 @pytest.mark.parametrize("bound", [False, True], ids=["tree", "bound"])
 def test_hermes_refuses_an_api_mode_the_binding_does_not_set(api_mode: str, bound: bool) -> None:
     with pytest.raises(RenderError, match=r"on model\.api_mode in hermes/config\.yaml: Reef's model binding"):
-        render("hermes", [config({"model": {"api_mode": api_mode}})], bound=bound)
+        render("hermes", config({"model": {"api_mode": api_mode}}), bound=bound)
 
 
 def test_hermes_keeps_the_settings_a_tree_tunes() -> None:
@@ -243,7 +234,7 @@ def test_hermes_keeps_the_settings_a_tree_tunes() -> None:
         "curator": {"enabled": False},
         "compression": {"summary_provider": "auto", "threshold": 0.5},
     }
-    rendered = yaml.safe_load(render("hermes", [config(tuned)], bound=True)["hermes/config.yaml"])
+    rendered = yaml.safe_load(render("hermes", config(tuned), bound=True)["hermes/config.yaml"])
     assert rendered["model"] == {
         "api_key": "k-bound",
         "base_url": "http://127.0.0.1:8900/v1",
@@ -253,8 +244,8 @@ def test_hermes_keeps_the_settings_a_tree_tunes() -> None:
     }
     assert rendered["toolsets"] == ["terminal", "file"] and rendered["delegation"] == tuned["delegation"]
     assert rendered["auxiliary"]["compression"]["extra_body"] == {"provider": {"sort": "price"}}
-    # Alone, as admission renders it, the tree tunes the model without naming a provider, an endpoint or a model.
-    render("hermes", [config(tuned)], bound=False)
+    # Alone, as validation renders it, the tree tunes the model without naming a provider, an endpoint or a model.
+    render("hermes", config(tuned), bound=False)
 
 
 DSH_ROUTE = {"api": "openai-completions", "baseURL": OTHER_URL, "models": [{"id": "m"}]}
@@ -286,7 +277,7 @@ def test_dsh_refuses_a_setting_that_chooses_the_route_in_either_profile(
     data: dict[str, Any], bound: bool, target: str
 ) -> None:
     with pytest.raises(RenderError, match=r"Reef's model binding|keeps its own package"):
-        render("dsh", [config(data, target)], bound=bound)
+        render("dsh", config(data, target), bound=bound)
 
 
 @pytest.mark.parametrize("api", ["openai", "anthropic"])
@@ -296,13 +287,13 @@ def test_dsh_keeps_the_settings_a_tree_tunes(api: str) -> None:
         "tool-subagent": {"config": {"provider": "spawn", "toolName": "subagent"}},
         "compaction-basic": {"config": {"modelPolicies": [{"provider": "reef", "model": "served", "maxTokens": 9}]}},
     }
-    files = render("dsh", [config(tuned)], bound=True, api=api)
+    files = render("dsh", config(tuned), bound=True, api=api)
     rows = {
         row["id"]: row for row in yaml.safe_load(files["dsh/profiles/headless/cordis.patch.yml"].replace("!!js ", ""))
     }
     assert rows["agent-loop"]["config"] == {"maxParallelToolCalls": 4}
     assert set(rows["llm-pi-ai"]["config"]["providers"]) == {"reef"}
-    render("dsh", [config(tuned)], bound=False)
+    render("dsh", config(tuned), bound=False)
 
 
 PI_REFUSED = [
@@ -319,79 +310,36 @@ PI_REFUSED = [
         config({"providers": {"reef": {"baseUrl": OTHER_URL}}}, "models"), False, id="binding-provider-in-tree"
     ),
     pytest.param(config({"providers": {"reef": {"headers": {"x": "!cat k"}}}}, "models"), True, id="binding-extra"),
-    pytest.param(config({"defaultProvider": "evil", "defaultModel": "evil/m"}), False, id="default-model"),
+    pytest.param(config({"defaultProvider": "evil", "defaultModel": "evil/m"}, "agent"), False, id="default-model"),
 ]
 
-#: settings.json keys whose descriptor check is IsAbsent(): fixed names a tree must not set.
+#: Keys of pi's own settings.json, which holds the binding's keys alone.
 PI_LOCKED = [
-    pytest.param(config({"enabledModels": ["evil/m"]}), id="enabled-models"),
-    pytest.param(config({"httpProxy": OTHER_URL}), id="proxy"),
+    pytest.param(config({"enabledModels": ["evil/m"]}, "agent"), id="enabled-models"),
+    pytest.param(config({"httpProxy": OTHER_URL}, "agent"), id="proxy"),
 ]
 
 
-@pytest.mark.parametrize(("node", "bound"), PI_REFUSED)
-def test_pi_refuses_a_setting_that_chooses_the_route(node: tuple[str, dict[str, Any]], bound: bool) -> None:
+@pytest.mark.parametrize(("files", "bound"), PI_REFUSED)
+def test_pi_refuses_a_setting_that_chooses_the_route(files: dict[str, str], bound: bool) -> None:
     with pytest.raises(RenderError, match="Reef's model binding"):
-        render("pi", [node], bound=bound)
+        render("pi", files, bound=bound)
 
 
-@pytest.mark.parametrize("node", PI_LOCKED)
+@pytest.mark.parametrize("files", PI_LOCKED)
 @pytest.mark.parametrize("bound", [False, True], ids=["tree", "bound"])
-def test_pi_refuses_a_key_the_descriptor_locks(node: tuple[str, dict[str, Any]], bound: bool) -> None:
-    with pytest.raises(RenderError, match=r"on \w+ in pi-agent/settings\.json: Reef's model binding"):
-        render("pi", [node], bound=bound)
+def test_pi_refuses_a_key_the_descriptor_locks(files: dict[str, str], bound: bool) -> None:
+    with pytest.raises(RenderError, match=r"in pi-agent/settings\.json: Reef's model binding"):
+        render("pi", files, bound=bound)
 
 
 @pytest.mark.parametrize("api", ["openai", "responses", "anthropic"])
 def test_pi_keeps_the_settings_a_tree_tunes(api: str) -> None:
-    tuned = config({"defaultThinkingLevel": "high", "compaction": {"enabled": False}, "defaultTools": ["bash"]})
-    files = render("pi", [tuned], bound=True, api=api)
+    tuned = config({"defaultTools": []})
+    files = render("pi", tuned, bound=True, api=api)
     assert json.loads(files["pi-agent/settings.json"])["defaultProvider"] == "reef"
     assert set(json.loads(files["pi-agent/models.json"])["providers"]) == {"reef"}
-    render("pi", [tuned, config({"providers": {}}, "models")], bound=False)
-
-
-TERMINUS_REFUSED = [
-    pytest.param({"model_name": "openai/m"}, False, id="model-name-in-tree"),
-    pytest.param({"api_base": OTHER_URL}, False, id="endpoint-in-tree"),
-    pytest.param({"llm_kwargs": {"base_url": OTHER_URL}}, True, id="constructor-endpoint"),
-    pytest.param({"llm_call_kwargs": {"base_url": OTHER_URL}}, True, id="call-base-url"),
-    pytest.param({"llm_call_kwargs": {"api_base": OTHER_URL}}, True, id="call-api-base"),
-    pytest.param({"llm_call_kwargs": {"custom_llm_provider": "openai"}}, True, id="call-provider"),
-    pytest.param({"llm_call_kwargs": {"model": "openai/m"}}, True, id="call-model"),
-    pytest.param(
-        {"llm_call_kwargs": {"fallbacks": [{"model": "m", "api_base": OTHER_URL}]}}, True, id="call-fallback"
-    ),
-    pytest.param({"llm_call_kwargs": {"aws_bedrock_runtime_endpoint": OTHER_URL}}, True, id="call-cloud-endpoint"),
-    pytest.param(
-        {"llm_call_kwargs": {"success_callback": ["langfuse"], "langfuse_host": OTHER_URL}}, True, id="logging"
-    ),
-    pytest.param({"llm_call_kwargs": {"models": ["m"]}}, True, id="call-fallback-models"),
-    pytest.param({"llm_call_kwargs": {"extra_body": {"model": "m"}}}, True, id="body-model"),
-    pytest.param({"llm_call_kwargs": {"extra_body": {"models": ["m"]}}}, True, id="body-fallback-models"),
-]
-
-
-@pytest.mark.parametrize(("data", "bound"), TERMINUS_REFUSED)
-def test_terminus_refuses_a_setting_that_chooses_the_route(data: dict[str, Any], bound: bool) -> None:
-    with pytest.raises(RenderError, match="Reef's model binding"):
-        render("terminus", [config(data)], bound=bound)
-
-
-def test_terminus_refuses_a_request_body_that_is_not_an_object() -> None:
-    with pytest.raises(
-        RenderError, match=r"on llm_call_kwargs\.extra_body in terminus/config\.json: litellm reads it as an object"
-    ):
-        render("terminus", [config({"llm_call_kwargs": {"extra_body": '{"model": "m"}'}})], bound=True)
-
-
-def test_terminus_keeps_the_arguments_a_tree_tunes() -> None:
-    tuned = {"max_turns": 12, "llm_call_kwargs": {"top_k": 20, "extra_body": {"provider": {"sort": "price"}}}}
-    rendered = json.loads(render("terminus", [config(tuned)], bound=True)["terminus/config.json"])
-    assert rendered["llm_call_kwargs"] == tuned["llm_call_kwargs"]
-    assert rendered["llm_kwargs"] == {"api_key": "k-bound", "custom_llm_provider": "litellm_proxy"}
-    assert rendered["model_name"] == "served"
-    render("terminus", [config(tuned)], bound=False)
+    render("pi", {**tuned, **config({"providers": {}}, "models")}, bound=False)
 
 
 @pytest.mark.parametrize(
@@ -403,7 +351,7 @@ def test_terminus_keeps_the_arguments_a_tree_tunes() -> None:
             "Reef's model binding",
         ),
         ("claude", {"env": {"CLAUDE_CODE_EXTRA_BODY": '{"model": "m"}'}}, "Reef's model binding"),
-        ("claude", {"fallbackModel": ["m"]}, "Reef's model binding"),
+        ("claude", {"fallbackModel": ["m"]}, "a Claude Code plugin carries no settings"),
         (
             "hermes",
             {"fallback_model": {"provider": "custom", "model": "m", "base_url": OTHER_URL}},
@@ -417,12 +365,9 @@ def test_terminus_keeps_the_arguments_a_tree_tunes() -> None:
         ("hermes", {"delegation": {"request_overrides": {"model": "m"}}}, "Reef's model binding"),
         ("hermes", {"model": {"api_mode": "bedrock_converse"}}, "Reef's model binding"),
         ("dsh", {"llm-pi-ai": {"config": {"providers": {"evil": DSH_ROUTE}}}}, "Reef's model binding"),
-        ("pi", {"enabledModels": ["evil/m"]}, "Reef's model binding"),
-        ("terminus", {"llm_call_kwargs": {"base_url": OTHER_URL}}, "Reef's model binding"),
-        ("terminus", {"llm_call_kwargs": {"extra_body": {"model": "m"}}}, "Reef's model binding"),
+        ("pi", {"enabledModels": ["evil/m"]}, "a pi package carries no other setting"),
     ],
 )
-def test_admission_refuses_the_proposal_and_says_why(adapter: str, data: dict[str, Any], refusal: str) -> None:
-    proposal = Mutation("create", "route", {"name": "config", "config": {"data": data}})
-    entries, refusal_message = admit_mutations([], [proposal], get_adapter(adapter))
-    assert entries == [] and refusal_message is not None and refusal in refusal_message
+def test_validation_refuses_the_tree_and_says_why(adapter: str, data: dict[str, Any], refusal: str) -> None:
+    (problem,) = validate_tree(HarnessTree(config(data)), get_adapter(adapter)).problems
+    assert refusal in problem
