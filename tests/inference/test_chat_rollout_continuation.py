@@ -221,6 +221,33 @@ def test_a_request_that_does_not_extend_its_rollout_is_refused_before_generation
     assert len(engine.prompts) == 1
 
 
+IMAGE_PART = {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgo="}}
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "new_message",
+    [
+        {"role": "user", "content": [{"type": "text", "text": "And this?"}, IMAGE_PART]},
+        {"role": "tool", "tool_call_id": "c1", "content": [IMAGE_PART]},
+        # A full render refuses a content list even when every part is text.
+        {"role": "user", "content": [{"type": "text", "text": "And this?"}]},
+    ],
+)
+def test_a_new_message_without_text_content_is_refused_before_generation(tmp_path, new_message) -> None:
+    async def scenario():
+        async with ScriptedEngine([([ord("a"), IM_END], "stop")]) as engine:
+            handler = engine.handler()
+            await handler.inference(artifact(tmp_path), "/v1/chat/completions", first_request())
+            later = continued(first_request(), new_message)
+            with pytest.raises(ValueError, match="text-only message content"):
+                await handler.inference(artifact(tmp_path), "/v1/chat/completions", later)
+        return engine
+
+    engine = run(scenario())
+    assert len(engine.prompts) == 1
+
+
 @pytest.mark.unit
 def test_a_new_rollout_and_a_request_without_user_render_from_the_template(tmp_path) -> None:
     async def scenario():
