@@ -1096,12 +1096,75 @@ returns HTTP 404, and you create the scenario first:
 +---------------------------------------------+---------------------------------------------+
 | ``GET /reef/scenarios/{scenario}/jobs``     | → ``{scenario, jobs}``: the scenario's      |
 |                                             | training jobs in the jobs queue, oldest     |
-|                                             | first, each ``{id, state, attempt_count,    |
-|                                             | checkpoints, result, error}``;              |
-|                                             | ``checkpoints`` are the saved checkpoints   |
-|                                             | that the job reported. Read only, from the  |
-|                                             | data service; 404 unknown                   |
+|                                             | first, each a job object (see below). Read  |
+|                                             | only, from the data service; 404 unknown    |
 +---------------------------------------------+---------------------------------------------+
+
+A job object has these keys. A time is an ISO 8601 string in UTC, such as
+``2026-10-31T08:15:00.250000+00:00``.
+
+- ``id``: the job ID.
+- ``state``: ``queued``, ``assigned``, ``running``, ``finished`` or
+  ``failed``. The last two are final.
+- ``attempt_count``: how many times a training worker took the job, an
+  integer from 0.
+- ``checkpoints``: the saved checkpoints that the job reported, in step
+  order, each ``{step, path, release_path, metrics}``.
+- ``result``: ``{"state": "finished", "metrics": {...}}`` once the job
+  finished, else ``null``.
+- ``error``: the error of a failed job, or the last retryable error of a
+  queued job, else ``null``.
+- ``parameters``: the job's parameters, a JSON object: the recipe's
+  parameters for the kind of the job's samples, with the instruction's
+  parameters over them. They hold the training ``method`` and the
+  ``scheduling`` when the recipe or the instruction gives them.
+- ``sample_count``: the number of samples that the job trains, an integer
+  from 0.
+- ``sample_kind``: ``trajectory`` or ``task``, the kind of the job's samples.
+  It is ``null`` for a job with no sample.
+- ``instruction``: ``{id, text, parameters}`` of the training instruction
+  (``POST /reef/train``) that the job trains. ``parameters`` is what the
+  instruction gave, ``{}`` when it gave none. It is ``null`` for a job that
+  the ``auto`` training mode made.
+- ``created_at``: when control added the job.
+- ``started_at``: when a training worker first took the job; ``null`` until
+  then. A job that a store kept from before Reef recorded this time also has
+  ``null``.
+- ``ended_at``: when the job finished or failed; ``null`` until then.
+- ``experiment``: ``{tracker, project, entity, run_id, url}`` of the
+  experiment run that records the job, such as ``{"tracker": "wandb", ...}``.
+  Control writes it when its tracker records the first commit of the job.
+  ``entity`` and ``url`` are ``null`` when the tracker does not know them.
+  It is ``null`` until then, and always ``null`` without an experiment
+  tracker. See `Configuration <configuration.rst>`__, "Commit correlation",
+  for how W&B gives the run's URL.
+
+For example:
+
+.. code-block:: json
+
+   {
+     "id": "4f2a9c1e",
+     "state": "finished",
+     "attempt_count": 1,
+     "checkpoints": [
+       {"step": 1, "path": "/jobs/4f2a9c1e/step-1",
+        "release_path": "/jobs/4f2a9c1e/step-1/release", "metrics": {"loss": 0.41}}
+     ],
+     "result": {"state": "finished", "metrics": {"loss": 0.41}},
+     "error": null,
+     "parameters": {"method": {"objective": "sft"}, "learning_rate": 1e-05},
+     "sample_count": 8,
+     "sample_kind": "trajectory",
+     "instruction": {"id": "train-1", "text": "Prefer tests first",
+                     "parameters": {"learning_rate": 1e-05}},
+     "created_at": "2026-10-31T08:15:00.250000+00:00",
+     "started_at": "2026-10-31T08:15:01.020000+00:00",
+     "ended_at": "2026-10-31T08:21:44.900000+00:00",
+     "experiment": {"tracker": "wandb", "project": "reef", "entity": "acme",
+                    "run_id": "0d4c3b2a19f8e7d6c5b4a39281706f5e",
+                    "url": "https://wandb.ai/acme/reef/runs/0d4c3b2a19f8e7d6c5b4a39281706f5e"}
+   }
 
 ``POST /reef/scenarios/{scenario}/jobs/{job_id}/cancel`` cancels one training
 job of the scenario. It answers ``{scenario, job}``, with the job as ``GET
