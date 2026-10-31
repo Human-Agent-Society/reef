@@ -22,6 +22,7 @@ import hashlib
 import json
 import math
 import threading
+import time
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
@@ -46,6 +47,8 @@ from reef.train.tinker_backend.config import ScoreCentering, TinkerConfig, Tinke
 from reef.train.tinker_backend.preparation import prepare_tinker_job
 from reef.train.tinker_backend.rollout import SamplerChat
 
+#: Seconds that the start's sampler may take to answer its first sample before a task job's rollouts start.
+SAMPLER_WARM_TIMEOUT_S = 3600.0
 #: The rollouts of a task job, in its job directory.
 ROLLOUTS_FILE = "rollouts.json"
 #: The parameters of a Tinker job besides ``method`` and ``scheduling``.
@@ -319,6 +322,7 @@ class TinkerJobComponent(LocalJobComponent, ABC):
         if self._sampler is None:
             raise RuntimeError("this Tinker component has no sampler, so it cannot roll tasks out")
         tasks = tuple(item for item in job.data.samples if isinstance(item, TaskSample))
+        self.warm_sampler(start.sampler_path)
         chat = SamplerChat(
             self._sampler,
             start.sampler_path,
@@ -344,6 +348,25 @@ class TinkerJobComponent(LocalJobComponent, ABC):
             },
         )
         return rollouts
+
+    def warm_sampler(self, sampler_path: str | None) -> None:
+        """Sample one token from ``sampler_path`` (None: the base model) until the sampler answers.
+
+        A service such as Spindle starts a sampler at its first request, which can take minutes. The agents of
+        a task job's rollouts would spend that time against their own timeouts and fail for it, so the job
+        waits here first, retrying each sample that times out, for at most ``SAMPLER_WARM_TIMEOUT_S`` seconds.
+        """
+        if self._sampler is None:
+            raise RuntimeError("this Tinker component has no sampler, so it cannot roll tasks out")
+        prompt = self._sampler.render([{"role": "user", "content": "Hi"}], template_kwargs={})
+        deadline = time.monotonic() + SAMPLER_WARM_TIMEOUT_S
+        while True:
+            try:
+                self._sampler.sample(sampler_path, prompt, {"max_tokens": 1}, topk_logprobs=0)
+                return
+            except TimeoutError:
+                if time.monotonic() >= deadline:
+                    raise
 
     def run(self, job: TrainingJob, directory: Path) -> Mapping[str, Any]:
         parameters = self.job_parameters(job.parameters)
