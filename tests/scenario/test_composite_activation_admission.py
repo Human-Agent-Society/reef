@@ -23,6 +23,7 @@ from reef.artifact.sources import REFERENCE_FILE, DirectorySource, HuggingFaceRe
 from reef.core.errors import CommitPending, ReefError, TrainingStartRefused
 from reef.dispatcher import Dispatcher
 from reef.dispatcher.errors import local_error_source
+from reef.execution.workers import SERVICE_COMPONENTS
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.surface import ArtifactLayout, ComponentSurface, Surface, TextFileTree
@@ -62,6 +63,9 @@ def _dispatcher(tmp_path: Path, recipe: type[_LoadedRecipe] = _LoadedRecipe) -> 
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(records),
         coordination=memory_coordination(),
+        # No samples worker: the test makes the samples and commits each step itself, so no worker that the store
+        # watcher wakes commits the same result.
+        components=frozenset(SERVICE_COMPONENTS) - {"samples"},
     )
 
 

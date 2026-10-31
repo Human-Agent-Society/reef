@@ -16,6 +16,7 @@ from reef.core import AgentRecord, RequestType
 from reef.core.errors import CommitPending
 from reef.dispatcher import Dispatcher
 from reef.evaluation import EvaluationResult, UpdateCandidate
+from reef.execution.workers import SERVICE_COMPONENTS
 from reef.recipe import Recipe
 from reef.scenario import Scenario
 from reef.storage.commit_history import CommitHistoryScenarioStore
@@ -97,6 +98,9 @@ def local_scenario(tmp_path):
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
         coordination=memory_coordination(),
+        # No samples worker: the test makes the samples and commits each step itself, so no worker that the store
+        # watcher wakes commits the same result.
+        components=frozenset(SERVICE_COMPONENTS) - {"samples"},
     )
     scenario = dispatcher.get_or_create_scenario("math")
     assert scenario is not None
