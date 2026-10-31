@@ -53,21 +53,30 @@ The recipe's ``loss_family`` and the Slime flags in ``training.options`` must
 describe the same objective. The Slime component checks them at start and
 refuses a mismatch.
 
-+---------------------+-----------------------------+----------------------------+
-| Loss family         | ``--loss-type``             | Rollout log-probs          |
-+=====================+=============================+============================+
-| ``sao``             | ``policy_loss``             | ``--use-rollout-logprobs`` |
-+---------------------+-----------------------------+----------------------------+
-| ``sft``             | ``sft_loss``                | not required               |
-+---------------------+-----------------------------+----------------------------+
-| ``slime``           | ``policy_loss``             | Slime's own setting        |
-+---------------------+-----------------------------+----------------------------+
-| ``tttd``            | ``custom_loss``             | ``--use-rollout-logprobs`` |
-+---------------------+-----------------------------+----------------------------+
-| ``openclawrl``      | ``custom_loss``             | not required               |
-+---------------------+-----------------------------+----------------------------+
-| ``sdft``            | ``custom_loss``             | ``--use-rollout-logprobs`` |
-+---------------------+-----------------------------+----------------------------+
++---------------------------+-----------------------------+----------------------------+
+| Loss family               | ``--loss-type``             | Rollout log-probs          |
++===========================+=============================+============================+
+| ``sao``                   | ``policy_loss``             | ``--use-rollout-logprobs`` |
++---------------------------+-----------------------------+----------------------------+
+| ``sft``                   | ``sft_loss``                | not required               |
++---------------------------+-----------------------------+----------------------------+
+| ``slime``                 | ``policy_loss``             | Slime's own setting        |
++---------------------------+-----------------------------+----------------------------+
+| ``tttd``                  | ``custom_loss``             | ``--use-rollout-logprobs`` |
++---------------------------+-----------------------------+----------------------------+
+| ``openclawrl``            | ``custom_loss``             | not required               |
++---------------------------+-----------------------------+----------------------------+
+| ``sdft``                  | ``custom_loss``             | ``--use-rollout-logprobs`` |
++---------------------------+-----------------------------+----------------------------+
+| ``importance_sampling``   | ``custom_loss``             | ``--use-rollout-logprobs`` |
++---------------------------+-----------------------------+----------------------------+
+
+The ``importance_sampling`` family is the backend's own
+(``reef/train/slime_backend/importance_sampling/``): Tinker's built-in loss of
+that name. It also needs ``--disable-compute-advantages-and-returns``, and
+refuses a nonzero ``--kl-coef``, ``--use-kl-loss`` and
+``--calculate-per-token-loss``. TTTD's Slime loss is this loss on TTTD's own
+advantages.
 
 The spec
 --------

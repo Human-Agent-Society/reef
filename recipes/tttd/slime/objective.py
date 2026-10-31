@@ -4,29 +4,12 @@ from __future__ import annotations
 
 from argparse import Namespace
 from collections.abc import Callable
-from numbers import Integral
 from typing import Any
 
 import torch
 
 from reef.train.slime_backend.algorithm import objective
-
-
-def importance_sampling_surrogate(
-    log_probs: torch.Tensor,
-    rollout_log_probs: torch.Tensor,
-    advantages: torch.Tensor,
-) -> torch.Tensor:
-    """Return Tinker's un-clipped ``importance_sampling`` token loss."""
-    if log_probs.shape != rollout_log_probs.shape or log_probs.shape != advantages.shape:
-        raise ValueError(
-            "TTTD importance-sampling tensors must have identical shapes: "
-            f"log_probs={tuple(log_probs.shape)}, "
-            f"rollout_log_probs={tuple(rollout_log_probs.shape)}, "
-            f"advantages={tuple(advantages.shape)}"
-        )
-    ratio = torch.exp(log_probs.float() - rollout_log_probs.float())
-    return -ratio * advantages.float()
+from reef.train.slime_backend.importance_sampling.objective import importance_sampling_loss
 
 
 @objective("custom_loss_function_path")
@@ -40,63 +23,17 @@ def tttd_loss(
 
     The reference passes sampled log-probabilities and token advantages to
     Tinker's ``importance_sampling`` loss, which computes
-    ``-(exp(logp-logq) * advantage).sum()`` over every submitted token.
-    Slime's stock ``policy_loss`` both clips the ratio and mean-normalizes the
-    result, so it is deliberately not used here.
+    ``-(exp(logp-logq) * advantage).sum()`` over every submitted token. This
+    is Slime's ``importance_sampling`` loss
+    (``reef.train.slime_backend.importance_sampling``) on TTTD's advantages,
+    with the same step token sum as Tinker.
 
-    Slime's outer Megatron adapter divides custom losses by the dynamic global
-    batch size. Multiplying by the same value here cancels only that adapter
-    normalization; after microbatch/DP accumulation, the resulting gradient is
-    the same full-batch token sum that Tinker applies. The response loss mask is
-    intentionally not used for this policy term. In the reference, that mask
-    gates the frozen-base KL before ``remove_mask`` sends the Datum to Tinker's
-    built-in loss, so forced two-phase prefill tokens retain their trajectory
-    advantage in the policy objective.
+    The response loss mask is intentionally not used for this policy term. In
+    the reference, that mask gates the frozen-base KL before ``remove_mask``
+    sends the Datum to Tinker's built-in loss, so forced two-phase prefill
+    tokens retain their trajectory advantage in the policy objective.
     """
-    from slime.backends.megatron_utils.loss import get_log_probs_and_entropy, get_rollout_top_p_logprob_kwargs
-
-    if not getattr(args, "use_rollout_logprobs", False):
-        raise ValueError("TTTD importance sampling requires --use-rollout-logprobs")
-
-    rollout_log_probs_list = batch.get("rollout_log_probs")
-    advantages_list = batch.get("advantages")
-    if not rollout_log_probs_list or not advantages_list:
-        raise ValueError("TTTD importance sampling requires rollout_log_probs and advantages")
-    step_global_batch_size = batch.get("step_global_batch_size")
-    if (
-        not isinstance(step_global_batch_size, Integral)
-        or isinstance(step_global_batch_size, bool)
-        or step_global_batch_size <= 0
-    ):
-        raise ValueError("TTTD importance sampling requires a positive step_global_batch_size")
-
-    _, outputs = get_log_probs_and_entropy(
-        logits,
-        args=args,
-        unconcat_tokens=batch["unconcat_tokens"],
-        total_lengths=batch["total_lengths"],
-        response_lengths=batch["response_lengths"],
-        with_entropy=False,
-        **get_rollout_top_p_logprob_kwargs(args, batch),
-    )
-    log_probs = torch.cat(outputs["log_probs"], dim=0)
-    rollout_log_probs = torch.cat(rollout_log_probs_list, dim=0)
-    advantages = torch.cat(advantages_list, dim=0)
-    token_loss = importance_sampling_surrogate(log_probs, rollout_log_probs, advantages)
-    tinker_loss_sum = token_loss.sum()
-    loss = tinker_loss_sum * int(step_global_batch_size)
-
-    if log_probs.numel() == 0:
-        loss = loss + 0 * logits.sum()
-
-    ratio = torch.exp(log_probs.detach().float() - rollout_log_probs.float())
-    old_policy_kl = rollout_log_probs.float() - log_probs.detach().float()
-    return loss, {
-        "loss": loss.detach().clone(),
-        "pg_loss": loss.detach().clone(),
-        "importance_ratio": sum_of_sample_mean(ratio).detach().clone(),
-        "ppo_kl": sum_of_sample_mean(old_policy_kl).detach().clone(),
-    }
+    return importance_sampling_loss(args, batch, logits, sum_of_sample_mean)
 
 
 @objective("custom_advantage_function_path")
@@ -163,3 +100,6 @@ def tttd_advantages(args, rollout_data) -> None:
     rollout_data["advantages"] = adjusted
     rollout_data["returns"] = [value.clone() for value in adjusted]
     rollout_data["tttd_base_logp_diff"] = [average_difference.detach().expand_as(value) for value in adjusted]
+
+
+__all__ = ["tttd_advantages", "tttd_loss"]

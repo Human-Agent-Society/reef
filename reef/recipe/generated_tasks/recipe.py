@@ -18,7 +18,7 @@ from reef.train.pipeline import PipelineSpec
 
 @dataclass(frozen=True, kw_only=True)
 class GeneratedTaskRecipe(WeightTrainingRecipe):
-    """Group relative advantages per generated task, on Tinker's importance sampling loss.
+    """Group relative advantages per generated task, on Tinker's ``importance_sampling`` loss.
 
     The recipe binds the objective and the report contract. Its stages are
     ``GeneratedTaskRecord2Record``, ``GeneratedTaskSamples``, and

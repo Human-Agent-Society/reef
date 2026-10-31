@@ -485,7 +485,7 @@ def test_adaptive_entropic_advantages_match_pinned_reference(rewards, expected) 
 @pytest.mark.unit
 def test_importance_sampling_surrogate_is_unclipped() -> None:
     torch = pytest.importorskip("torch")
-    from recipes.tttd.slime.objective import importance_sampling_surrogate
+    from reef.train.slime_backend.importance_sampling.objective import importance_sampling_surrogate
 
     current = torch.tensor([0.0, math.log(4.0)], requires_grad=True)
     rollout = torch.zeros(2)
