@@ -28,6 +28,7 @@ from tests.support.component_trainers import (
     _ComponentBackend,
     _TwoTrainerRecipe,
 )
+from tests.support.samples_service import make_samples
 
 from recipes.tttd import TTTDGridSettings, TTTDGroupedRolloutReport, TTTDJobData, TTTDRecord2Record, TTTDSamples
 from reef.artifact import ArtifactRef, InMemoryRepositoryBackend
@@ -46,6 +47,8 @@ from reef.record2record import (
 from reef.record2sample import JudgedSamples
 from reef.record2sample.assembly import SampleAssemblySettings
 from reef.sample2job import Sample2Job
+from reef.storage.samples import TrainerSamples
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train import ComponentTrainer, Trainer
 from reef.train.pipeline import TrainingPipeline
@@ -89,7 +92,6 @@ class _SessionSamples(JudgedSamples):
             loss_mask=(0, 1),
             rollout_log_probs=(-0.1,),
             reward=1.0,
-            runtime_load_id="v1",
         )
 
 
@@ -163,6 +165,7 @@ class _Recipe(_TwoTrainerRecipe):
         samples=None,
     ):
         pipelines = dict(self.pipelines)
+        # Each trainer reads the stored samples of its component, so a rebuilt trainer finds the samples made live.
         return tuple(
             ComponentTrainer(
                 component,
@@ -175,6 +178,7 @@ class _Recipe(_TwoTrainerRecipe):
                     experiment_logger=experiment_logger,
                     report_type=TTTDGroupedRolloutReport if pipelines[component] is tttd_pipeline else None,
                     default_job_samples=1,
+                    samples=None if samples is None else TrainerSamples(samples, component),
                 ),
             )
             for component, backend in self.backends.items()
@@ -194,6 +198,7 @@ def _dispatcher(tmp_path: Path, pipelines: dict[str, Any]) -> Dispatcher:
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
         # Loading a scenario wakes its workers: held, they leave every step to the test.
         hold_local_cycles=True,
+        coordination=memory_coordination(),
     )
 
 
@@ -228,6 +233,8 @@ def _report(record_id: str, reference: str, metadata: dict[str, Any] | None = No
 
 
 def _step(scenario, component: str) -> list[tuple[str, ...]] | None:
+    # The samples service makes the samples of the rows appended since the last step, as its worker would.
+    make_samples(scenario)
     result = scenario.prepare_training_step(component)
     if result is None:
         return None
@@ -235,6 +242,21 @@ def _step(scenario, component: str) -> list[tuple[str, ...]] | None:
     sources = [tuple(item.source_agent_record_ids) for item in batch.samples]
     scenario.commit(result, component=component)
     return sources
+
+
+def _append(scenario, records) -> None:
+    for record in records:
+        scenario.records.append(record)
+
+
+def _step_nine() -> tuple[AgentRecord, ...]:
+    """The two reported rows of step 9, a complete group that trains."""
+    return (
+        _inference("iA"),
+        _report("rA", "iA", {"step": 9, "slot": 0}),
+        _inference("iB"),
+        _report("rB", "iB", {"step": 9, "slot": 1}),
+    )
 
 
 def _stored(scenario) -> list[str]:
@@ -273,18 +295,18 @@ def _discarded_step(tmp_path: Path, reload: bool) -> tuple[Any, ...]:
     dispatcher = _dispatcher(tmp_path, {WEIGHTS: threshold_pipeline, HARNESS: step_pipeline})
     try:
         scenario = dispatcher.get_or_create_scenario("agent")
-        for record in (
-            _inference("iA"),
-            _report("rA", "iA", {"step": 9, "slot": 0}),
-            _inference("iB"),
-            _report("rB", "iB", {"step": 9, "slot": 1}),
-            _inference("i1"),
-            _report("r1", "i1", {"step": 0, "slot": 0}),
-            _inference("i2"),
-            _report("r2", "i2", {"step": 0, "slot": 1}, feedback="mixed"),
-        ):
-            scenario.records.append(record)
+        _append(scenario, _step_nine())
         assert _step(scenario, HARNESS) == [("iA", "rA"), ("iB", "rB")]
+        # The rows of step 0 arrive after the first commit, so no commit records their discard.
+        _append(
+            scenario,
+            (
+                _inference("i1"),
+                _report("r1", "i1", {"step": 0, "slot": 0}),
+                _inference("i2"),
+                _report("r2", "i2", {"step": 0, "slot": 1}, feedback="mixed"),
+            ),
+        )
         assert _step(scenario, HARNESS) is None  # step 0 discarded
         for _ in range(3):
             _step(scenario, WEIGHTS)
@@ -313,18 +335,10 @@ def _another_roles_report(tmp_path: Path, reload: bool) -> tuple[Any, ...]:
     dispatcher = _dispatcher(tmp_path, {WEIGHTS: session_pipeline, HARNESS: step_pipeline})
     try:
         scenario = dispatcher.get_or_create_scenario("agent")
-        for record in (
-            _inference("iA"),
-            _report("rA", "iA", {"step": 9, "slot": 0}),
-            _inference("iB"),
-            _report("rB", "iB", {"step": 9, "slot": 1}),
-            _turn("i3", "s", 1),
-            _report("r3", "i3"),
-            _turn("X", "u", 1),
-            _turn("X2", "u", 2),
-        ):
-            scenario.records.append(record)
+        _append(scenario, _step_nine())
         assert _step(scenario, HARNESS) == [("iA", "rA"), ("iB", "rB")]
+        # These rows arrive after the first commit, so no commit records the release of r3 and i3.
+        _append(scenario, (_turn("i3", "s", 1), _report("r3", "i3"), _turn("X", "u", 1), _turn("X2", "u", 2)))
         assert _step(scenario, HARNESS) is None  # r3 is another role's: released with i3
         assert _step(scenario, WEIGHTS) == [("X",)]
         if reload:

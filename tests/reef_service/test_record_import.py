@@ -13,6 +13,7 @@ from tests.train.test_reef_trainer_contracts import ExampleBackend
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core.reports import ScoredRolloutReport
 from reef.dispatcher import Dispatcher
+from reef.inference.http import InferenceProxyRuntime
 from reef.recipe import Recipe
 from reef.record2record import ReportGrouping, ReportRecord2Record
 from reef.record2sample import ReportSamples
@@ -20,6 +21,7 @@ from reef.runtime.interfaces import InferenceHandler
 from reef.sample2job import Sample2Job
 from reef.service.app import create_app
 from reef.service.routes.records import MAX_RECORD_IMPORT_BYTES
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train import JobData, PreparedStep, Trainer
 from reef.train.pipeline import TrainingPipeline
@@ -106,6 +108,12 @@ class LearningRecipe(Recipe):
         )
 
 
+def served_recipe() -> LearningRecipe:
+    """A learning recipe whose runtime names an HTTP engine and a model, so its scenarios have a served model; the
+    app's ``inference_handler`` answers for that engine."""
+    return LearningRecipe(runtime=InferenceProxyRuntime(base_url="http://engine.test", model_path="example-model"))
+
+
 class EchoHandler(InferenceHandler):
     def __init__(self):
         self.calls = 0
@@ -122,6 +130,7 @@ def dispatcher_for(tmp_path, recipe):
         recipe,
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
+        coordination=memory_coordination(),
     )
 
 
@@ -134,7 +143,8 @@ async def wait_for_training(scenario, count):
 
 @pytest.mark.parametrize("endpoint", ("/v1/chat/completions", "/v1/messages"))
 def test_large_inference_context_reaches_the_handler(tmp_path, endpoint):
-    dispatcher = dispatcher_for(tmp_path, LearningRecipe())
+    dispatcher = dispatcher_for(tmp_path, served_recipe())
+    dispatcher.get_or_create_scenario("s")
     handler = EchoHandler()
     text = "x" * (3 * 1024 * 1024)
 
@@ -177,7 +187,7 @@ def test_record_import_takes_a_long_trajectory_and_keeps_its_body_limit(tmp_path
 
 @pytest.mark.parametrize("bulk", (False, True))
 def test_import_then_chat_continue_with_the_same_reported_processor(tmp_path, bulk):
-    recipe = LearningRecipe()
+    recipe = served_recipe()
     dispatcher = dispatcher_for(tmp_path, recipe)
     handler = EchoHandler()
 

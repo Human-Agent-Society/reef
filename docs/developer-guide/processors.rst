@@ -285,14 +285,16 @@ for cancellation and resource ownership.
 Uploaded trajectories
 ---------------------
 
-A client can upload complete ATIF trajectories to ``POST /reef/trajectories``
-(see the `HTTP API <../reference/http-api.rst#upload-trajectories>`__). An
-uploaded trajectory is not a record. Reef keeps it in the scenario's sample
-store, and the pipeline reads it from there.
+A client can give a scenario complete ATIF trajectories as data items (see the
+`HTTP API <../reference/http-api.rst#data-items>`__). A trajectory item is not a
+record. Reef copies each item that a scenario uses into the scenario's sample
+store, as an upload: a sample of no component. The pipeline reads it from there.
+When the item leaves the scenario, Reef removes the upload, and each trainer
+forgets it.
 
 A recipe takes uploads when its ``Sample2Job`` sets ``accepts_trajectories``
-to True. The default is False. Admission refuses an upload with 400 when no
-trainer of the scenario accepts uploaded trajectories.
+to True. The default is False. Reef refuses with 400 an item that names a
+scenario with no trainer that accepts uploaded trajectories.
 
 The record-to-sample stage turns each upload into its training sample with
 ``Record2Sample.uploaded_sample(trajectory)``. The default returns the trajectory
@@ -349,8 +351,8 @@ records to generate samples without captured policy tensors.
 Staleness
 ~~~~~~~~~
 
-Every record stage runs the staleness check. No other part of Reef checks the
-version of training data. The limit is the record stage's setting
+Every record stage runs the staleness check. No other part of Reef checks
+which artifact produced training data. The limit is the record stage's setting
 ``max_staleness`` (``Record2RecordSettings``), set in
 ``pipeline.record2record.config``:
 
@@ -362,28 +364,36 @@ version of training data. The limit is the record stage's setting
          max_staleness: 2
 
 ``max_staleness`` is a non-negative int, and its default is 0. With 0, only
-data of the version that the scenario serves trains. A negative value fails
+data of the artifact that the scenario serves trains. A negative value fails
 the pipeline build. A stage settings class with more keys extends
 ``Record2RecordSettings``, so each stage takes the key next to its own keys.
 The check has these steps:
 
-1. When the scenario reserves job data, it gives the pipeline the runtime load
-   ID that serves its committed release (``observe_serving_runtime_load_id``).
-   The stage keeps these versions, oldest first.
-2. Each time the pipeline computes the buffer, it asks the record stage
+1. The inference service writes the ``artifact_id`` of the artifact that
+   answered into each inference record. The record-to-sample stage copies it
+   into the sample's ``training`` data.
+2. When the scenario reserves job data, it gives the pipeline the
+   ``artifact_id`` of the artifact that serves it now
+   (``observe_serving_artifact_id``). The stage keeps these artifacts, oldest
+   first.
+3. Each time the pipeline computes the buffer, it asks the record stage
    whether each sample that the trainer made from records has data more than
-   ``max_staleness`` versions behind the current version
+   ``max_staleness`` artifacts behind the current artifact
    (``Record2Record.is_stale``). The buffer leaves out a stale sample and
    every other sample of its group. The sample stays in the store untrained.
 
-The lag counts only the versions of this scenario. A publication of another
-scenario on a shared engine does not age the data. These rules also apply:
+The lag counts only the artifacts that this scenario served. A publication of
+another scenario on a shared engine does not age the data. An ``artifact_id``
+names the same weights in every process and after an engine restart. These
+rules also apply:
 
-* A sample without a recorded version is stale.
-* A sample from a version that the stage did not see is stale. A rebuilt
-  trainer knows only the versions that it sees after the rebuild.
-* While the serving version is unknown, for example before the first
-  publication, no data is stale.
+* A sample whose record names no artifact is stale.
+* A sample from an artifact that the stage did not see is stale. A rebuilt
+  trainer knows only the artifacts that it sees after the rebuild.
+* A scenario that has no runtime, or whose surface has no component that a
+  runtime loads (no ``loader``), has no staleness check: no data is stale.
+* Until the scenario first gives the stage a served artifact, no data is
+  stale.
 
 Reef's check is the only staleness filter that Reef runs. A training
 framework can have its own off-policy limit. Such a limit goes in that

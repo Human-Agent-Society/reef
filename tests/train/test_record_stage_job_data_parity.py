@@ -1,7 +1,8 @@
 """Batch goldens for the record-to-record migration (RFC #765).
 
-Each stream appends records to a record store and drives a ``Trainer`` through
-reserve, execute, prepare-commit, and commit, as the dispatcher does. For each
+Each stream appends records to a record store, makes their samples as the
+samples service does, and drives a ``Trainer`` through reserve, execute,
+prepare-commit, and commit, as the dispatcher does. For each
 committed batch, the test saves the batch ID, a stable digest of each item, and
 the record IDs that the commit consumed and released.
 
@@ -25,6 +26,7 @@ import pytest
 from tests.recipes.sdpo.test_sdpo_pipeline import SDPOTokenizer
 from tests.support._threshold_processor import ThresholdJobData, ThresholdSamples
 from tests.support._trajectories import policy_trajectory
+from tests.support.samples_service import make_samples
 
 from recipes.beta.coral.recipe import CoralRecipe
 from recipes.sdpo import SDPOReport
@@ -67,9 +69,9 @@ RELOAD = "reload"
 
 @dataclass(frozen=True)
 class Serve:
-    """The scenario serves ``runtime_load_id`` from this step on; the pipeline's staleness check measures against it."""
+    """The scenario serves ``artifact_id`` from this step on; the pipeline's staleness check measures against it."""
 
-    runtime_load_id: str
+    artifact_id: str
 
 
 @dataclass(frozen=True)
@@ -119,7 +121,7 @@ def describe_item(item: Sample) -> dict[str, object]:
         "tokens",
         "loss_mask",
         "rollout_log_probs",
-        "runtime_load_id",
+        "artifact_id",
         "teacher_tokens",
         "distill_sample_weight",
     )
@@ -151,7 +153,7 @@ class StreamRun:
     report_type: type[ReportBase] | None = None
     training_mode: str = "auto"
     batch_size: int = 1
-    serving_runtime_load_id: str | None = None
+    serving_artifact_id: str | None = None
     records: SQLiteRecordStore = field(default_factory=SQLiteRecordStore)
     consumed: set[str] = field(default_factory=set)
     high_water: tuple[int, int] | None = None
@@ -181,10 +183,13 @@ class StreamRun:
         return rebuilt
 
     def drain(self, trainer: Trainer) -> None:
-        """Commit every batch the trainer can reserve now."""
-        while (
-            result := trainer.run_once(len(self.commits), serving_runtime_load_id=self.serving_runtime_load_id)
-        ) is not None:
+        """Make the samples of the new records, as the samples service does, then commit every batch the trainer can
+        reserve now."""
+        while True:
+            make_samples(trainer)
+            result = trainer.run_once(len(self.commits), serving_artifact_id=self.serving_artifact_id)
+            if result is None:
+                return
             batch = trainer.pending_job_data
             if batch is None:
                 raise AssertionError("a commit was prepared without a reserved batch")
@@ -209,8 +214,8 @@ class StreamRun:
                 if isinstance(step, AgentRecord):
                     self.records.append(step)
                 elif isinstance(step, Serve):
-                    self.serving_runtime_load_id = step.runtime_load_id
-                    trainer.pipeline.observe_serving_runtime_load_id(step.runtime_load_id)
+                    self.serving_artifact_id = step.artifact_id
+                    trainer.pipeline.observe_serving_artifact_id(step.artifact_id)
                 elif isinstance(step, Insert):
                     trainer.change_buffer(step.sample_ids, insert=True)
                 elif step == CYCLE:
@@ -231,7 +236,7 @@ class StreamRun:
 def inference(record_id: str, *, version: str | None = None, artifact_ref: ArtifactRef | None = None) -> AgentRecord:
     training: dict[str, object] = {"tokens": [1, 2, 3], "loss_mask": [0, 1, 1], "rollout_log_probs": [-0.1, -0.2]}
     if version is not None:
-        training["runtime_load_id"] = version
+        training["artifact_id"] = version
     return AgentRecord.create(
         scenario="s",
         request_type=RequestType.INFERENCE,
@@ -448,7 +453,7 @@ class ToySamples(JudgedSamples):
             loss_mask=(1,),
             rollout_log_probs=(-0.1,),
             reward=1.0,
-            runtime_load_id=record.payload.get("version"),
+            artifact_id=record.payload.get("version"),
         )
 
 

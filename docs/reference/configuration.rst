@@ -113,7 +113,10 @@ services:
 - ``distill-teacher``: a frozen SGLang teacher engine, only when a ``teacher``
   section is set.
 - ``reef``: the HTTP service. It hosts the Slime training component, which
-  reserves the training GPUs on Ray and starts Slime's workers.
+  starts a Slime driver on Ray for each job. The driver starts Slime's workers
+  on the GPUs of Slime's serving session when one runs (see `Task jobs on
+  Slime`_), and otherwise reserves the job's GPUs and releases them when the
+  job ends.
 
 The inference component and the HTTP service join the same Ray cluster
 (``RAY_ADDRESS`` or ``training.ray-address``), so the engines and the training
@@ -229,8 +232,8 @@ CLI overrides use the same parser, for example
 ``--inference.num-gpus 4 --inference.tensor-parallel-size 2`` or
 ``--inference.options.mem-fraction-static 0.7``. Native engine options use
 SGLang's names without a ``sglang-`` prefix. Reef builds the engines' input
-from the ``inference`` section and the release format; Slime starts no engine
-(``--rollout-num-gpus 0``). ``router-port`` binds the first router's HTTP
+from the ``inference`` section and the release format; Slime starts no serving
+engine. ``router-port`` binds the first router's HTTP
 port, and other supported router flags keep their native ``router-*`` names.
 ``router-ip`` is refused, because the serving engines use no external
 router. The standalone engine launcher does not include a router.
@@ -259,11 +262,14 @@ Encoder engines keep the weights they started with. Published weights load
 only into the other engines of the model. When a model with an encoder group
 trains, keep its vision encoder frozen.
 
-Managed launches reject inference flags in ``training.options``, such as
-``rollout-num-gpus``, ``rollout-num-gpus-per-engine`` and ``sglang-*``, even
-if their values agree with the ``inference`` fields. Training and serving use
-separate GPUs, so Slime refuses ``training.colocate`` and the native
-``colocate`` and ``offload-rollout`` options. Native options cannot override
+Slime's own engine and placement options in ``training.options``
+(``rollout-num-gpus``, ``colocate``, ``sglang-*``, ``router-*`` and the rest)
+reach each job's Slime driver unread. They configure the rollout engines of
+Slime's serving session, which the first task job starts (see `Task jobs on
+Slime`_), never the serving engines; before that session runs, a driver of any
+other job starts no rollout engines. Reef's serving
+never shares GPUs with training, so ``training.colocate`` is refused. Native
+options cannot override
 managed model, placement or parallelism settings. Pipeline/data parallel and
 prefill/decode-disaggregated inference topologies are not supported by this
 managed path yet. Reef binds ``training.options.hf-checkpoint`` to
@@ -280,12 +286,17 @@ inference component starts the engines from that data. See
 <../developer-guide/executors.rst#independent-sglang-backend>`__ for the
 boundary.
 
-Training GPU capacity is set in ``training.options.actor-num-*``; the physical
-node size is ``training.options.num-gpus-per-node``. The inference component
-reserves ``inference.num-gpus`` GPUs on the same Ray cluster, and the
-inference control process takes one Ray CPU and no GPU. When a training worker
-fails, the running job fails and later jobs fail too; restart the service, and
-the Slime component loads its latest checkpoint again. Engine failures are
+Training GPU capacity is set in ``training.options.actor-num-*`` (and, for
+rollout engines on GPUs of their own, ``rollout-num-gpus``); the physical node
+size is ``training.options.num-gpus-per-node``. Until the first task job, each
+job's driver reserves those GPUs while it runs, so between jobs they are free,
+and a job waits while another reservation holds them. From the first task job
+on, Slime's serving session holds them until the component closes. The
+inference component reserves
+``inference.num-gpus`` GPUs on the same Ray cluster, and the inference control
+process takes one Ray CPU and no GPU. When a training worker fails, the running
+job fails, and the next job's driver starts again from the latest checkpoint.
+A configuration error that only Slime's workers detect fails the first job. Engine failures are
 handled by the inference component (see `Engine supervision
 <../developer-guide/executors.rst#engine-supervision>`__).
 
@@ -363,7 +374,7 @@ Train without an inference engine
 
 ``inference.backend: none`` runs no inference engine. Use it for supervised
 fine-tuning on data that does not come from the served model, such as uploaded
-trajectories (``POST /reef/trajectories``) or imported records
+trajectory items (``POST /reef/namespaces/{owner}/data``) or imported records
 (``POST /reef/records``). Only the Slime backend supports it. The trainer
 takes every GPU that ``training.options.actor-*`` names:
 
@@ -391,7 +402,8 @@ Training in this mode works as follows:
 - A restart continues from the last saved checkpoint, as with an engine.
 
 The deployment serves no inference. ``/v1/chat/completions``,
-``/v1/responses`` and ``/v1/messages`` answer 503 for every scenario. To use a
+``/v1/responses`` and ``/v1/messages`` answer 404 for every scenario,
+because no scenario serves a model. To use a
 trained version, serve its published checkpoint from a separate deployment.
 
 ``reef serve`` refuses the settings that configure an engine or call the
@@ -440,8 +452,9 @@ For Slime, a training stack can contain:
 
 Override an individual native flag with
 ``reef serve -c training.yaml --training.options.lr 0.000002``. The normalized
-options reach the Slime training component in the HTTP service through the
-effective config. The component takes out Reef's own options, such as
+options reach each job's Slime driver through the effective config. The
+training component parses them once at startup, which refuses a malformed
+option before the first job. The driver takes out Reef's own options, such as
 ``--reef-checkpoint-policy``, and the loss family's options, then passes the
 rest to Slime's native parser.
 
@@ -757,10 +770,10 @@ The HTTP service reads these fields from the ``recipe``, ``reef``,
    reef.console-origins | [] | exact browser console origins allowed to access the HTTP service; disabled by default
    reef.token | the bearer token the service accepts. Use ``tokens: [...]`` to accept several while rotating.
    reef.allow-unauthenticated | false | when true, serve without a token on a ``reef.host`` that other machines can reach. When false, Reef does not start on such an address without a token. A loopback address, such as ``127.0.0.1``, ``::1`` or ``localhost``, needs no token
-   reef.allow-implicit-scenario-creation | true | when false, an unknown scenario is HTTP 404
+   reef.allow-implicit-scenario-creation | true | when false, a report, a record import or a harness install for an unknown scenario is HTTP 404. An inference request never creates a scenario, whatever this setting says
    inference.model-path | a local HF model directory or a repo id, downloaded on start
    inference.upstream-url | the OpenAI-compatible provider, with no ``/v1`` suffix
-   inference.upstream-api-key | its credential. Reef is the only party that sees it.
+   inference.upstream-api-key | its credential. Reef is the only party that sees it. It is the only credential that Reef sends to an engine, also to the endpoint of a scenario's own model
    inference.upstream-model | the model to request upstream
    inference.upstream-api | openai | the provider dialect: ``openai`` for Chat Completions, ``responses`` for OpenAI Responses, or ``anthropic`` for an Anthropic-style endpoint
    inference.url | reserved: every built-in deployment refuses it, because Reef starts or names its engines itself (``inference.model-path``, ``inference.upstream-url`` or ``inference.remote``)
@@ -778,7 +791,11 @@ persistent.
    storage.artifact-sources | [] | ``ArtifactSourceReader`` plugin references that read artifact import URIs, beside the built-in ``hf``, ``file`` and ``s3`` readers
    storage.agent-record-dir | .reef/agent-record | the SQLite scenario storage: records, commits and settings
    storage.record-backend | sqlite | where scenario records, commits and settings live: ``sqlite``, ``postgres``, or a ``ScenarioStorage`` plugin reference
+   storage.coordination-backend | follows ``record-backend`` | where the services share their work queues, served models and control lease: ``sqlite`` (processes on one host) or ``postgres`` (``record-database-url``); required when ``record-backend`` is a plugin
+   storage.work-max-attempts | 3 | how many times a worker takes one work item (a training job, a record selection, an evaluation rollout, a data task) before the item fails
+   storage.work-retention-s | 604800 | seconds that control keeps an ended work item, so that its producer reads the result; then control deletes it
    storage.task-file-backend | local | where the files of generated tasks live: ``local``, or a ``TaskFileStore`` plugin reference
+   storage.data-store | follows ``record-backend`` | where the deployment's data items live: ``sqlite``, ``postgres`` (``record-database-url``, schema ``reef_data``), or a ``DataStore`` plugin reference
    storage.task-file-dir | .reef/task-files | the files of generated tasks for ``local``, or the local cache of a plugin store
    storage.agent-record-retention-max-bytes | 21474836480 | 20 GiB shared across all record bodies, including unconsumed records
 
@@ -1185,15 +1202,11 @@ The ``inference`` section
 -------------------------
 
 Read by every serving mode. ``inference.timeout-s`` limits one inference
-request. Buffered inference attempts share ``inference.retry-timeout-s``;
-when it is omitted, it follows ``inference.timeout-s``.
+request; an engine that does not answer within it gets a 504.
 
 .. config::
 
    inference.timeout-s | 300.0 | maximum time for one inference request
-   inference.retry-timeout-s | ``inference.timeout-s`` (300.0 by default) | total deadline shared by inference attempts and retry delays
-   inference.retry-initial-s | 0.05 | delay before the first retry
-   inference.retry-max-s | 1.0 | maximum delay between retries
 
 An ``inference.remote`` section runs the engines that ``inference.backend``
 names on a remote inference component instead of this host. The component's
@@ -1222,7 +1235,7 @@ Read by the weight-training stack. See `Evolve your model
 .. config::
 
    training.backend | slime | built-in (slime or tinker), installed entry-point name, or dotted TrainingDeployment class
-   training.colocate | false | must stay false: training and serving use separate GPUs, and Slime and Tinker refuse ``true``
+   training.colocate | false | must stay false: Reef's serving never shares GPUs with training, and Slime and Tinker refuse ``true``; Slime's own rollout engines share the training GPUs with ``training.options.colocate``
    training.ready-timeout | 3600 | startup deadline of the services the training backend adds, such as the inference component and the teacher engine; Slime, and every deployment that Reef's engines serve, also raise ``reef.ready-timeout`` to at least this value
    training.config.num_gpus | example-specific GPU count passed to Slime's model topology flags; does not set the Ray cluster's capacity
    training.config.global_batch_size | samples in one optimizer step, passed to Slime as ``--global-batch-size``. The examples also pass it to ``pipeline.sample2job.config.job_samples``, so one job is one optimizer step. Reef reads ``training.options.global-batch-size`` itself and refuses a Slime deployment without it, even when ``num-steps-per-rollout`` could derive it.
@@ -1330,13 +1343,13 @@ hyphen spelling is also accepted.
 
 Every built-in record-to-record stage that holds units reads
 ``max_staleness``, Reef's staleness filter. Reef drops held training data
-whose producing version lags the served version by more than this many
-versions. The limit is a record-to-record setting, not a recipe setting:
+whose producing artifact is more than this many served artifacts behind the
+artifact that the scenario serves. The limit is a record-to-record setting, not a recipe setting:
 ``recipe.config.max_staleness`` is an error.
 
 .. config::
 
-   pipeline.record2record.config.max_staleness | 0 | the versions that training data may lag behind the served version and still train, a non-negative int; 0 trains only data of the served version
+   pipeline.record2record.config.max_staleness | 0 | the artifacts that training data may lag behind the served artifact and still train, a non-negative int; 0 trains only data of the served artifact
 
 .. code:: yaml
 
@@ -1492,7 +1505,8 @@ whatever Tinker's batch size (``training.options.batch-size``) is:
    pipeline.sample2job.config.buffer_size | 4 | the most saved tasks of one task job; at least ``job_samples``, and ``job_samples`` when it is more than 4
 
 The Tinker component runs a task job's rollouts on Tinker's sampler at the
-job's start weights. The ``rollout`` job parameter configures them:
+job's start weights, and the Slime component on its own rollout engines (see
+`Task jobs on Slime`_). The ``rollout`` job parameter configures them:
 
 .. config::
 
@@ -1503,6 +1517,95 @@ job's start weights. The ``rollout`` job parameter configures them:
    rollout.concurrency | 2 | rollouts in flight
    rollout.verifier_timeout_reward | 0.0 | the reward of a rollout whose verifier timed out; ``null`` leaves it unscored
    rollout.scaffold_tolerance | 8 | masked tokens the sample assembly may realign before a response, for a thinking template's scaffold
+
+Task jobs on Slime
+~~~~~~~~~~~~~~~~~~
+
+The Slime component runs task jobs on Slime's own rollout engines: the SGLang
+engines of Slime's serving session (Slime's ``ServingCluster``), which a task
+job's driver drives through Slime's ``RolloutManager`` as Slime's own training
+loop does. Reef's serving never calls them. The first task job starts the
+session; it holds the engines, their router and the training GPUs until the
+component closes, so the next jobs attach to the started engines, and every job
+trains on the session's GPUs. A failed or cancelled job leaves the session
+running for the next job. The save root's ``reef-serving.json`` records the
+session, which the component disposes when it closes. ``training.options.rollout-num-gpus`` gives the engines GPUs of
+their own; ``training.options.colocate`` puts them on the training GPUs (all
+of them, unless ``rollout-num-gpus`` names fewer), and Slime moves the GPU
+memory between the engines and the workers. Slime's ``sglang-*``,
+``router-*`` and ``rollout-num-gpus-per-engine`` options configure the
+engines.
+
+.. code:: yaml
+
+   training:
+     backend: slime
+     options:
+       colocate: true
+       rollout-num-gpus-per-engine: 1
+       sglang-mem-fraction-static: 0.5
+
+A task job loads the workers' weights into the engines, runs the rollouts the
+``rollout`` parameter describes, frees the colocated engines' memory, and
+trains the samples of each task's group with the job's objective. The
+engines answer OpenAI text chat: system, user and assistant text messages, no
+tools. A task job whose options give the engines no GPUs fails. A LoRA actor
+cannot have rollout engines, since Reef's adapters do not reach Slime's weight
+transfer.
+
+Dataset jobs on Slime
+~~~~~~~~~~~~~~~~~~~~~
+
+A dataset job trains a prompt dataset the way Slime trains on its own (RFC
+#1041). Slime rolls the prompts out on its serving session's engines, scores
+them with its reward model, computes the advantages and trains its loss; Reef
+records each saved rollout as a candidate. The deployment selects the built-in
+recipe ``reef.recipe.dataset:DatasetRecipe`` with ``data.training_mode:
+manual``. Its loss family, ``slime``, leaves the training signal to Slime and
+refuses every other job. Each training instruction (``POST /reef/train``)
+whose ``parameters`` hold ``dataset`` is one job:
+
+.. code:: json
+
+   {"text": "GRPO on the prompts", "session": "s", "release_id": "r",
+    "parameters": {"dataset": {"path": "/data/prompts.jsonl", "epochs": 1}, "save_interval": 10}}
+
+``dataset.path`` is an absolute path, on the Ray cluster, to a JSONL file in
+Slime's prompt-data format. ``dataset.epochs`` (default 1) is the passes over
+it. The job trains ``len(dataset) // rollout-batch-size`` rollouts per epoch,
+and ``save_interval`` counts rollouts between checkpoints (default: one
+checkpoint at the end). A checkpoint's step is the job's rollouts up to it,
+and its reward is the rollout's mean raw reward. A resumed job continues after
+its last checkpoint and skips the prompts of the rollouts it saved. The
+recipe's ``job_parameters`` can set a default ``dataset``.
+
+Slime's own options in ``training.options`` configure the rest:
+
+.. code:: yaml
+
+   training:
+     backend: slime
+     options:
+       colocate: true
+       input-key: messages
+       label-key: label
+       apply-chat-template: true
+       rollout-batch-size: 32
+       n-samples-per-prompt: 8
+       global-batch-size: 256
+       rollout-max-response-len: 1024
+       rollout-temperature: 1.0
+       advantage-estimator: grpo
+       custom-rm-path: my_package.reward.reward
+       loss-type: policy_loss
+
+A rollout function (``rollout-function-path``, ``custom-generate-function-path``),
+a reward model (``custom-rm-path`` or ``rm-type``) and a hook on the rollout data
+after the advantages (``rollout-data-postprocess-path``) are Slime's plugins and
+run in Slime's processes. Reef sets ``data-source-path`` itself: its data source
+serves each job's dataset to the serving session's rollout manager, which
+outlives the jobs, so the option is refused. ``disable-compute-advantages-and-returns``
+is refused too.
 
 Reef calls the generator class's ``from_config(config, *, scenario, environ)``
 once for each scenario. A generator that calls a remote service reads its
@@ -1669,32 +1772,6 @@ The following names are relative to ``operations/``:
 
    * - Metric
      - Meaning
-   * - ``serve/request/*``
-     - Inference requests after scenario resolution, including admission,
-       backend calls, retries, and record acceptance. Streaming requests remain
-       active until their completion record is accepted; an incomplete or
-       engine-aborted stream, or a cancelled request, counts as failed.
-   * - ``serve/admission/*``
-     - Time acquiring runtime admission. ``active`` is the number waiting for
-       admission; immediate admissions also contribute to count and duration.
-   * - ``evaluate/request/*``, ``evaluate/admission/*``
-     - The same measurements for calls on the evaluation route, a step's
-       rollouts and the method's calls to the served model, which keep no
-       record; counted apart so a step does not read as served traffic.
-   * - ``rollout/request/*``, ``rollout/admission/*``
-     - The same measurements for the calls of rollouts that Reef runs
-       itself (``x-reef-rollout``), which keep no record. Their retries,
-       timeouts and version mismatches count under ``rollout/``.
-   * - ``serve/retries_total``, ``serve/timeouts_total``
-     - Additional buffered inference attempts and requests that exhaust the
-       inference retry deadline. Retries do not create extra request counts.
-       Calls on the evaluation route count under ``evaluate/retries_total``
-       and ``evaluate/timeouts_total``.
-   * - ``serve/version_mismatch_total``
-     - Responses rejected by runtime-load-ID verification, including missing
-       engine version information and buffered or deferred streaming responses.
-       This is a counter of observed rejections, not a background drift probe.
-       Calls on the evaluation route count under ``evaluate/version_mismatch_total``.
    * - ``ingest/accepted_total``, ``ingest/duplicates_total``
      - New records appended and identical retries acknowledged by the dispatcher.
        Accepted records include incomplete-stream diagnostics; acceptance does
@@ -1780,6 +1857,14 @@ Commit correlation
 Durable commit metrics carry ``experiment/provider``, ``experiment/project``,
 ``experiment/group``, and ``experiment/run_id``. Use them to open the run from
 a Reef version, and use the run's ``reef/training_job_id`` to go the other way.
+
+The job listing, ``GET /reef/scenarios/{scenario}/jobs``, gives the run of
+each training job as ``experiment``. Control writes it into the job's work
+item when its tracker records the job, so every service that lists jobs reads
+it. Its ``url`` is the URL that the open W&B run gives. An offline run gives
+none: the URL is then ``https://wandb.ai/<entity>/<project>/runs/<run_id>``,
+where the run is once it is synced, with the configured ``entity``. Without a
+configured ``entity``, the URL of an offline run is ``null``.
 Checkpoint paths are metadata only unless ``upload_checkpoints: true``.
 
 Import, initialization, logging, summary, and upload failures are reported in
@@ -1827,8 +1912,8 @@ id, so a restart or a second Reef host produces the same ids. The span carries:
   ``gen_ai.usage.input_tokens``, ``gen_ai.usage.output_tokens`` and
   ``gen_ai.response.finish_reasons`` from the provider request and response,
   following the OpenTelemetry GenAI semantic conventions.
-* ``reef.release_id``, ``reef.content_id`` and ``reef.runtime_load_id``: the
-  version that served the request, when the record names one.
+* ``reef.release_id``, ``reef.content_id`` and ``reef.artifact_id``: the
+  release and the artifact that answered the request, when the record names them.
 * ``reef.tags``: the ``x-reef-tag-*`` request tags.
 
 A feedback record becomes a ``feedback`` span inside the trace of the first

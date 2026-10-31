@@ -29,6 +29,7 @@ from reef.recipe.registry import build_recipe
 from reef.scenario.release_files import component_files
 from reef.scenario.scenario import Scenario
 from reef.service.deploy.config_utils import load_config
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.harness_backend.backend import HarnessBackend
 
@@ -99,6 +100,7 @@ def open_campaign(recipe: HarnessEvolutionRecipe, directory: Path) -> Dispatcher
         ),
         scenario_storage=SQLiteScenarioStorage(directory / "reef-data"),
         hold_local_cycles=True,
+        coordination=memory_coordination(),
     )
 
 
@@ -220,9 +222,11 @@ def search(scenario: Scenario, recipe: HarnessEvolutionRecipe, directory: Path) 
             break
         # A previous process may have recorded the report but not committed its
         # step. Let Reef replay it before spending on another run.
+        scenario.produce_samples()
         result = scenario.prepare_training_step()
         if result is None:
             record_run(scenario, recipe)
+            scenario.produce_samples()
             result = scenario.prepare_training_step()
         if result is None:
             raise RuntimeError("the recorded run did not produce a training step")

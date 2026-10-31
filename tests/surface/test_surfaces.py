@@ -2,47 +2,17 @@ from __future__ import annotations
 
 import pytest
 
-from reef.core.errors import ReefError
 from reef.harness.adapters import get_adapter
 from reef.harness.sync import create_harness_surface
 from reef.recipe.base import Recipe
-from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.surface import (
-    AdapterWeightRuntime,
-    ArtifactLoader,
-    ComponentSurface,
-    InferenceHooks,
-    LeasingInferenceHooks,
-    Surface,
-    TextFileTree,
-    WeightInferenceHooks,
-    WeightLoader,
-    WeightRuntime,
-    create_config_surface,
-    create_weight_surface,
-)
+from reef.surface import ComponentSurface, Surface, TextFileTree, WeightLoader, create_weight_surface
 from reef.surface.base import AcceptAnyArtifact
-from reef.surface.weights import reported_runtime_load_id, reported_runtime_load_spans
-
-
-class InjectingHooks(InferenceHooks):
-    """Test stand-in for a recipe's request hooks: prepend the release's rule file as a system message."""
-
-    def prepare_request(self, artifact, path, payload):
-        text = (TextFileTree().read_files(artifact) or {}).get("rules.md", "").strip()
-        if not text:
-            return payload
-        return {**payload, "messages": [{"role": "system", "content": text}, *payload["messages"]]}
-
-    def verify_response(self, artifact, path, response):
-        return None
 
 
 def test_recipe_default_surface_is_noop() -> None:
     surface = Recipe().build_surface("s")
     assert type(surface) is Surface
     assert surface.loader is None
-    assert surface.inference is None
     assert surface.files is None
 
 
@@ -58,20 +28,11 @@ def test_each_built_in_surface_declares_the_kind_of_its_component() -> None:
     assert kinds(create_weight_surface(kind="model")) == {"weights": "model"}
     assert kinds(create_weight_surface(kind="model_adapter")) == {"weights": "model_adapter"}
     assert kinds(create_harness_surface(get_adapter("pi"))) == {"harness": "harness_plugin"}
-    assert kinds(create_config_surface()) == {"config": "harness_plugin"}
     assert kinds(Surface(loader=WeightLoader())) == {"release": None}, "a surface may declare no kind"
     with pytest.raises(ValueError, match="model or a model_adapter"):
         create_weight_surface(kind="harness_plugin")  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="component kind"):
         ComponentSurface(kind="weights")  # type: ignore[arg-type]
-
-
-def test_optional_surface_capabilities_are_not_claimed_by_basic_implementations() -> None:
-    loader = WeightLoader()
-    hooks = WeightInferenceHooks()
-    assert isinstance(loader, ArtifactLoader)
-    assert isinstance(hooks, InferenceHooks)
-    assert not isinstance(hooks, LeasingInferenceHooks)
 
 
 def test_default_component_validator_accepts_anything() -> None:
@@ -91,225 +52,6 @@ def test_text_file_tree_ignores_repository_bookkeeping(tmp_path) -> None:
     (root / "reef-artifact.json").write_text("{}", encoding="utf-8")
     (root / ".gitattributes").write_text("* text", encoding="utf-8")
     assert TextFileTree().read_files(Artifact.local(root)) == {"rules.md": "rule"}
-
-
-def test_default_prepare_request_is_identity(tmp_path) -> None:
-    payload = {"model": "m"}
-    assert _weight_hooks().prepare_request(_checkpoint_artifact(tmp_path), "/v1/chat/completions", payload) is payload
-
-
-def _checkpoint_artifact(tmp_path):
-    from reef.artifact import Artifact
-
-    d = tmp_path / "checkpoint-artifact"
-    d.mkdir(exist_ok=True)
-    return Artifact.local(d)
-
-
-def _weight_hooks(surface: Surface | None = None):
-    hooks = (surface or create_weight_surface(kind="model")).inference
-    assert hooks is not None
-    return hooks
-
-
-def test_weight_surface_without_an_adapter_leaves_requests_alone(tmp_path) -> None:
-    payload = {"model": "m", "lora_path": "whatever"}
-    assert _weight_hooks().prepare_request(_checkpoint_artifact(tmp_path), "/v1/chat/completions", payload) is payload
-
-
-def test_the_reported_version_is_read_from_every_response_shape() -> None:
-    assert reported_runtime_load_id({"metadata": {"runtime_load_id": "wv-7"}}) == "wv-7"
-    # Native /generate shape: top-level meta_info.
-    assert reported_runtime_load_id({"meta_info": {"runtime_load_id": "wv-7"}}) == "wv-7"
-    # OpenAI chat shape: per-choice meta_info.
-    assert reported_runtime_load_id({"choices": [{"meta_info": {"runtime_load_id": "wv-7"}}]}) == "wv-7"
-    assert reported_runtime_load_id({"choices": [{"message": {"content": "hi"}}]}) is None
-
-
-def test_mixed_token_versions_from_an_in_place_update_are_valid_spans() -> None:
-    response = {
-        "choices": [{"meta_info": {"runtime_load_id": "engine:7"}}],
-        "training": {
-            "response_length": 3,
-            "runtime_load_id": None,
-            "runtime_load_spans": [
-                {"start": 0, "end": 1, "runtime_load_id": "engine:6"},
-                {"start": 1, "end": 3, "runtime_load_id": "engine:7"},
-            ],
-        },
-    }
-
-    assert [span.runtime_load_id for span in reported_runtime_load_spans(response)] == ["engine:6", "engine:7"]
-
-
-def test_the_reported_version_of_an_anthropic_response_is_its_final_training_span() -> None:
-    response = {
-        "type": "message",
-        "content": [{"type": "text", "text": "done"}],
-        "training": {
-            "response_length": 2,
-            "runtime_load_id": None,
-            "runtime_load_spans": [
-                {"start": 0, "end": 1, "runtime_load_id": "engine:6"},
-                {"start": 1, "end": 2, "runtime_load_id": "engine:7"},
-            ],
-        },
-    }
-
-    assert reported_runtime_load_id(response) == "engine:7"
-
-
-@pytest.mark.parametrize(
-    "runtime_load_ids",
-    [
-        ("engine:6", "engine:7", "engine:6"),
-        ("engine:7", "engine:6"),
-        ("engine:6", "replacement:7"),
-    ],
-)
-def test_impossible_runtime_load_histories_are_rejected(runtime_load_ids) -> None:
-    response = {
-        "choices": [{"meta_info": {"runtime_load_id": runtime_load_ids[-1]}}],
-        "training": {
-            "response_length": len(runtime_load_ids),
-            "runtime_load_spans": [
-                {"start": index, "end": index + 1, "runtime_load_id": runtime_load_id}
-                for index, runtime_load_id in enumerate(runtime_load_ids)
-            ],
-        },
-    }
-
-    with pytest.raises(ValueError, match=r"advance monotonically|return to an earlier"):
-        reported_runtime_load_spans(response)
-
-
-def test_record_only_surface_has_no_inference_hooks() -> None:
-    assert Surface().inference is None
-
-
-def test_inference_injects_and_records_the_post_transform_request(tmp_path) -> None:
-    import asyncio
-
-    from reef.artifact import InMemoryRepositoryBackend
-    from reef.dispatcher import Dispatcher
-    from reef.runtime.interfaces import InferenceHandler
-    from reef.service.app import RequestService
-
-    class InjectingRecipe(Recipe):
-        def build_surface(self, scenario):
-            return Surface(inference=InjectingHooks())
-
-    class RecordingBackend(InferenceHandler):
-        def __init__(self) -> None:
-            self.seen = None
-
-        async def inference(self, artifact, path, payload):
-            del artifact, path
-            self.seen = payload
-            return {"ok": True}
-
-    bootstrap = tmp_path / "bootstrap"
-    bootstrap.mkdir()
-    (bootstrap / "rules.md").write_text("Always check units.", encoding="utf-8")
-
-    recipe = InjectingRecipe(name="request_injection")
-    dispatcher = Dispatcher(
-        recipe,
-        InMemoryRepositoryBackend.factory(bootstrap, root=tmp_path / "repository"),
-        local_artifact_dir=tmp_path / "local",
-        scenario_storage=SQLiteScenarioStorage(None),
-    )
-    service = RequestService(dispatcher)
-    backend = RecordingBackend()
-
-    async def run() -> None:
-        response, item = await service.infer_with_data(
-            {"x-reef-scenario": "smoke"},
-            {"model": "m", "messages": [{"role": "user", "content": "hi"}]},
-            "/v1/chat/completions",
-            backend,
-        )
-        assert response == {"ok": True}
-        assert backend.seen["messages"][0] == {"role": "system", "content": "Always check units."}
-        recorded = item.payload["messages"]
-        assert recorded[0] == {"role": "system", "content": "Always check units."}
-        assert recorded[1] == {"role": "user", "content": "hi"}
-
-    asyncio.run(run())
-    scenario = dispatcher.get_or_create_scenario("smoke")
-    assert scenario.surface is scenario.surface
-
-
-class _StubTrainingRuntime(WeightRuntime):
-    """Satisfies WeightRuntime; only the version probe does anything."""
-
-    def __init__(self, served: str | None, published: str | None = None):
-        self._served = served
-        self._published = published
-
-    @property
-    def base_url(self) -> str:
-        return "http://engine.invalid"
-
-    def current_runtime_load_id(self) -> str | None:
-        return self._published
-
-    def activate_checkpoint(self, artifact, *, scenario=None) -> str:
-        return artifact.ref.release_id
-
-
-class _StubAdapterRuntime(_StubTrainingRuntime, AdapterWeightRuntime):
-    """Serves one adapter version per scenario, from ``adapters``."""
-
-    def __init__(self, served: str | None, adapters: dict[str, str]):
-        super().__init__(served)
-        self._adapters = adapters
-
-    def serving_adapter_runtime_load_id(self, scenario):
-        return self._adapters.get(scenario)
-
-
-def test_a_durable_release_serves_under_the_version_that_reef_acknowledged(tmp_path) -> None:
-    from reef.artifact import Artifact
-
-    # A commit, an activation or a restart loaded the release under a version that the runtime names.
-    release = Artifact.local(tmp_path)
-    runtime = _StubTrainingRuntime("e:6", published="e:5")
-    assert create_weight_surface(kind="model").served_runtime_load_id(release, runtime) == "e:5"
-    # A runtime that serves no weights leaves the served version unknown.
-    assert create_weight_surface(kind="model").served_runtime_load_id(release, None) is None
-    # A per-scenario adapter serves a durable release under the version the engine holds for the scenario.
-    adapters = _StubAdapterRuntime("e:6", {"math": "e:4"})
-    surface = create_weight_surface(scenario="math", runtime=adapters, kind="model_adapter")
-    assert surface.served_runtime_load_id(release, adapters) == "e:4"
-    # An engine that holds no adapter for the scenario leaves the served version unknown.
-    assert surface.served_runtime_load_id(release, _StubAdapterRuntime("e:6", {})) is None
-
-
-def test_weight_hooks_route_each_scenario_to_its_own_adapter_revision(tmp_path) -> None:
-    from reef.artifact import Artifact
-    from reef.surface import adapter_name
-
-    hooks = WeightInferenceHooks(scenario="math", runtime=_StubAdapterRuntime("engine:9", {"math": "engine:7"}))
-    published = Artifact.local(tmp_path, metadata={"runtime_load_id": "engine:3"})
-    served = hooks.prepare_request(published, "/v1/chat/completions", {"messages": []})
-    # The release serves under the revision the runtime holds for the scenario.
-    assert served == {"messages": [], "lora_path": adapter_name("math", "engine:7")}
-    with pytest.raises(ReefError, match="asked for lora_path"):
-        hooks.prepare_request(published, "/v1/chat/completions", {"lora_path": adapter_name("code", "engine:7")})
-
-
-def test_weight_hooks_sample_the_base_before_a_scenario_publishes(tmp_path) -> None:
-    hooks = WeightInferenceHooks(scenario="math", runtime=_StubAdapterRuntime("engine:9", {}))
-    checkpoint = _checkpoint_artifact(tmp_path)
-    assert "lora_path" not in hooks.prepare_request(checkpoint, "/v1/chat/completions", {"messages": []})
-    with pytest.raises(ReefError, match="published no adapter yet"):
-        hooks.prepare_request(checkpoint, "/v1/chat/completions", {"lora_path": "anything"})
-
-
-def test_weight_hooks_need_the_scenario_and_its_runtime_together() -> None:
-    with pytest.raises(ValueError, match="both the scenario and the runtime"):
-        WeightInferenceHooks(scenario="math")
 
 
 def test_a_harness_artifact_holds_its_entries_and_a_client_pull_leaves_them_out(tmp_path) -> None:

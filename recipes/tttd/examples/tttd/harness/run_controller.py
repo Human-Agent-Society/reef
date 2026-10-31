@@ -18,7 +18,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-STATE_FORMAT_VERSION = 1
+# Version 2 names the served artifact (``served_artifact_id``); version 1 named an engine load ID.
+STATE_FORMAT_VERSION = 2
 
 
 class TTTDRunStateError(RuntimeError):
@@ -60,8 +61,8 @@ class ScenarioTrainingStatus:
 
     ``finished_jobs`` is the number of training jobs that ended, a
     non-negative int; one job trains one search step. ``running_job_id`` is
-    the running job's ID, or ``None`` while no job runs. ``runtime_load_id``
-    is the serving load ID, or ``None``. ``failed_steps`` are the TTTD steps
+    the running job's ID, or ``None`` while no job runs. ``served_artifact_id``
+    is the ID of the artifact that serves the scenario's requests, or ``None``. ``failed_steps`` are the TTTD steps
     the processor discarded. ``failed_job_error`` is the error of the last
     commit's job when that job failed, or ``None``. ``ReefTrainingStatusClient``
     makes the value and ``TTTDRunController`` reads it.
@@ -69,7 +70,7 @@ class ScenarioTrainingStatus:
 
     finished_jobs: int
     running_job_id: str | None
-    runtime_load_id: str | None
+    served_artifact_id: str | None
     job_data_ready: bool
     failed_steps: tuple[ScenarioTrainingFailure, ...] = ()
     failed_job_error: str | None = None
@@ -134,10 +135,10 @@ class ReefTrainingStatusClient(TrainingStatusReader):
         running_job_id = running_job.get("job_id") if isinstance(running_job, Mapping) else None
         if running_job is not None and (not isinstance(running_job_id, str) or not running_job_id):
             raise RuntimeError(f"Reef status for scenario {scenario!r} has invalid training_job {running_job!r}")
-        runtime_load_id = value.get("current_runtime_load_id")
-        if runtime_load_id is not None and (not isinstance(runtime_load_id, str) or not runtime_load_id):
+        served_artifact_id = value.get("served_artifact_id")
+        if served_artifact_id is not None and (not isinstance(served_artifact_id, str) or not served_artifact_id):
             raise RuntimeError(
-                f"Reef status for scenario {scenario!r} has invalid runtime load ID {runtime_load_id!r}"
+                f"Reef status for scenario {scenario!r} has invalid served artifact ID {served_artifact_id!r}"
             )
         processor = value.get("processor")
         failed_values = processor.get("failed_steps", []) if isinstance(processor, Mapping) else []
@@ -179,7 +180,7 @@ class ReefTrainingStatusClient(TrainingStatusReader):
         return ScenarioTrainingStatus(
             finished_jobs=finished_jobs,
             running_job_id=running_job_id,
-            runtime_load_id=runtime_load_id,
+            served_artifact_id=served_artifact_id,
             job_data_ready=value.get("job_data_ready") is True,
             failed_steps=tuple(failed_steps),
             failed_job_error=failed_job_error,
@@ -220,7 +221,7 @@ class TTTDRunStateStore:
         self,
         *,
         next_step: int,
-        previous_runtime_load_id: str | None,
+        previous_served_artifact_id: str | None,
         archive: Mapping[str, Any],
     ) -> None:
         self._write(
@@ -229,7 +230,7 @@ class TTTDRunStateStore:
                 "identity": asdict(self.identity),
                 "phase": "pending",
                 "next_step": next_step,
-                "previous_runtime_load_id": previous_runtime_load_id,
+                "previous_served_artifact_id": previous_served_artifact_id,
                 "archive": dict(archive),
             }
         )
@@ -238,18 +239,18 @@ class TTTDRunStateStore:
         self,
         *,
         next_step: int,
-        runtime_load_id: str,
+        served_artifact_id: str,
         archive: Mapping[str, Any],
     ) -> None:
-        if not runtime_load_id:
-            raise ValueError("committed TTTD state requires a runtime load ID")
+        if not served_artifact_id:
+            raise ValueError("committed TTTD state requires a served artifact ID")
         self._write(
             {
                 "format_version": STATE_FORMAT_VERSION,
                 "identity": asdict(self.identity),
                 "phase": "committed",
                 "next_step": next_step,
-                "runtime_load_id": runtime_load_id,
+                "served_artifact_id": served_artifact_id,
                 "archive": dict(archive),
             }
         )
@@ -278,7 +279,7 @@ class TTTDRunOutcome:
     results: tuple[Any, ...]
     start_step: int
     next_step: int
-    runtime_load_id: str | None
+    served_artifact_id: str | None
 
 
 class TTTDRunController:
@@ -308,7 +309,7 @@ class TTTDRunController:
     def run(self, total_steps: int) -> TTTDRunOutcome:
         if total_steps < 1:
             raise ValueError("total_steps must be positive")
-        next_step, runtime_load_id = self._restore()
+        next_step, served_artifact_id = self._restore()
         start_step = next_step
         if next_step > total_steps:
             raise TTTDRunStateError(
@@ -321,16 +322,16 @@ class TTTDRunController:
             if before is None:
                 if step != 0:
                     raise TTTDRunStateError(f"Reef has no status for resumed TTTD step {step}")
-                previous_runtime_load_id = None
+                previous_served_artifact_id = None
             else:
                 if before.running_job_id is not None or before.finished_jobs != step:
                     raise TTTDRunStateError(
                         f"Reef finished {before.finished_jobs} training jobs (running: {before.running_job_id}), "
                         f"but the PUCT archive expects {step}"
                     )
-                previous_runtime_load_id = before.runtime_load_id
+                previous_served_artifact_id = before.served_artifact_id
 
-            self._emit({"event": "tttd_step_started", "step": step, "runtime_load_id": previous_runtime_load_id})
+            self._emit({"event": "tttd_step_started", "step": step, "served_artifact_id": previous_served_artifact_id})
             results = tuple(self.harness.run_step(step))
             expected_rollouts = (
                 self.state_store.identity.groups_per_step * self.state_store.identity.rollouts_per_group
@@ -340,16 +341,16 @@ class TTTDRunController:
             archive = self.harness.archive.state_dict()
             self.state_store.save_pending(
                 next_step=step + 1,
-                previous_runtime_load_id=previous_runtime_load_id,
+                previous_served_artifact_id=previous_served_artifact_id,
                 archive=archive,
             )
-            committed = self._wait_for_step(step + 1, previous_runtime_load_id)
+            committed = self._wait_for_step(step + 1, previous_served_artifact_id)
             self.state_store.save_committed(
                 next_step=step + 1,
-                runtime_load_id=committed.runtime_load_id,
+                served_artifact_id=committed.served_artifact_id,
                 archive=archive,
             )
-            runtime_load_id = committed.runtime_load_id
+            served_artifact_id = committed.served_artifact_id
             all_results.extend(results)
             candidates = self.harness.archive.candidates
             self._emit(
@@ -357,7 +358,7 @@ class TTTDRunController:
                     "event": "tttd_step_committed",
                     "step": step,
                     "next_step": step + 1,
-                    "runtime_load_id": runtime_load_id,
+                    "served_artifact_id": served_artifact_id,
                     "archive_size": len(candidates),
                     "archive_best_reward": max(candidate.reward for candidate in candidates),
                 }
@@ -367,7 +368,7 @@ class TTTDRunController:
             results=tuple(all_results),
             start_step=start_step,
             next_step=total_steps,
-            runtime_load_id=runtime_load_id,
+            served_artifact_id=served_artifact_id,
         )
 
     def _restore(self) -> tuple[int, str | None]:
@@ -379,52 +380,53 @@ class TTTDRunController:
                     f"Reef already finished {current.finished_jobs} training jobs "
                     f"(running: {current.running_job_id}), but no PUCT state exists"
                 )
-            return 0, None if current is None else current.runtime_load_id
+            return 0, None if current is None else current.served_artifact_id
 
         self.harness.archive.load_state_dict(saved["archive"])
         next_step = int(saved["next_step"])
         if saved["phase"] == "pending":
-            previous = saved.get("previous_runtime_load_id")
+            previous = saved.get("previous_served_artifact_id")
             if previous is not None and not isinstance(previous, str):
-                raise TTTDRunStateError("pending TTTD state has an invalid previous runtime load ID")
+                raise TTTDRunStateError("pending TTTD state has an invalid previous served artifact ID")
             committed = self._wait_for_step(next_step, previous)
             self.state_store.save_committed(
                 next_step=next_step,
-                runtime_load_id=committed.runtime_load_id,
+                served_artifact_id=committed.served_artifact_id,
                 archive=saved["archive"],
             )
-            return next_step, committed.runtime_load_id
+            return next_step, committed.served_artifact_id
 
-        expected_version = saved.get("runtime_load_id")
+        expected_version = saved.get("served_artifact_id")
         if not isinstance(expected_version, str) or not expected_version:
-            raise TTTDRunStateError("committed TTTD state has no runtime load ID")
+            raise TTTDRunStateError("committed TTTD state has no served artifact ID")
         current = self._wait_for_current_step(next_step)
-        if not isinstance(current.runtime_load_id, str) or not current.runtime_load_id:
-            raise TTTDRunStateError(f"Reef restored step {next_step} without a serving runtime load ID")
-        if current.runtime_load_id != expected_version:
-            # Serving versions are engine-session scoped. A restarted runtime
-            # republishes the checkpoint under a new version while preserving
-            # Reef's durable scenario step, which is the cross-session fence.
+        if not isinstance(current.served_artifact_id, str) or not current.served_artifact_id:
+            raise TTTDRunStateError(f"Reef restored step {next_step} without a served artifact ID")
+        if current.served_artifact_id != expected_version:
+            # Reef's durable scenario step is the fence between the archive
+            # and training. The served artifact can change without a step,
+            # for example when an operator activates another artifact, so
+            # record the artifact that serves now.
             self.state_store.save_committed(
                 next_step=next_step,
-                runtime_load_id=current.runtime_load_id,
+                served_artifact_id=current.served_artifact_id,
                 archive=saved["archive"],
             )
             self._emit(
                 {
-                    "event": "tttd_runtime_load_id_rebound",
+                    "event": "tttd_served_artifact_id_rebound",
                     "step": next_step,
-                    "previous_runtime_load_id": expected_version,
-                    "runtime_load_id": current.runtime_load_id,
+                    "previous_served_artifact_id": expected_version,
+                    "served_artifact_id": current.served_artifact_id,
                 }
             )
-        return next_step, current.runtime_load_id
+        return next_step, current.served_artifact_id
 
     def _wait_for_current_step(
         self,
         expected_step: int,
         *,
-        previous_runtime_load_id: str | None = None,
+        previous_served_artifact_id: str | None = None,
     ) -> ScenarioTrainingStatus:
         deadline = time.monotonic() + self.train_timeout_s
         last: ScenarioTrainingStatus | None = None
@@ -446,12 +448,10 @@ class TTTDRunController:
                         raise TTTDRunStateError(
                             f"the training job of TTTD step {expected_step - 1} failed: {last.failed_job_error}"
                         )
-                    if previous_runtime_load_id is None or last.runtime_load_id != previous_runtime_load_id:
-                        # Reef commits the served checkpoint before the runtime
-                        # acknowledges it and refreshes its public serving
-                        # version. Keep polling through that short
-                        # reconciliation window so a successful update is not
-                        # mistaken for stale weights after checkpoint recovery.
+                    if previous_served_artifact_id is None or last.served_artifact_id != previous_served_artifact_id:
+                        # The job's checkpoint serves only once Reef activates
+                        # it. Keep polling until the served artifact changes,
+                        # so the next step samples from the new checkpoint.
                         return last
             self._sleep(self.poll_interval_s)
         raise TTTDTrainingTimeoutError(
@@ -461,14 +461,14 @@ class TTTDRunController:
     def _wait_for_step(
         self,
         expected_step: int,
-        previous_runtime_load_id: str | None,
+        previous_served_artifact_id: str | None,
     ) -> ScenarioTrainingStatus:
         current = self._wait_for_current_step(
             expected_step,
-            previous_runtime_load_id=previous_runtime_load_id,
+            previous_served_artifact_id=previous_served_artifact_id,
         )
-        if not isinstance(current.runtime_load_id, str) or not current.runtime_load_id:
-            raise TTTDRunStateError(f"Reef committed step {expected_step} without a serving runtime load ID")
+        if not isinstance(current.served_artifact_id, str) or not current.served_artifact_id:
+            raise TTTDRunStateError(f"Reef committed step {expected_step} without a served artifact ID")
         return current
 
 

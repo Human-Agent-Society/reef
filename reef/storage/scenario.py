@@ -16,6 +16,7 @@ from typing import Any, Self
 from reef.core.errors import ReefError
 from reef.core.plugins import Plugin
 from reef.storage.commits import CommitRecord
+from reef.storage.data import check_owner
 from reef.storage.evaluations import EvaluationStore
 from reef.storage.records import RecordStore
 from reef.storage.samples import SampleStore
@@ -28,7 +29,7 @@ class ScenarioStoreConflict(ReefError):
 
 @dataclass(frozen=True)
 class ScenarioSettings:
-    """The settings a person selects for one scenario, kept with its records and commits.
+    """The settings of one scenario, kept with its records and commits.
 
     ``model_config`` is the validated model override as JSON (``None`` selects
     the recipe's model). ``training_mode`` is the selected mode (``None``
@@ -37,13 +38,17 @@ class ScenarioSettings:
     artifact with (``None`` evaluates none). ``activation`` is the scenario's
     own activation rule as JSON: ``{"module": <built-in rule>, "config": {...}}``.
     ``None`` follows the deployment's ``activation`` section. The scenario
-    registry checks the rule before it stores it.
+    registry checks the rule before it stores it. ``owner`` is the data store
+    owner whose items the scenario uses (RFC #1028), a name that passes
+    ``check_owner``. It is ``None`` only for a scenario that the data sync has
+    not opened yet; the first open sets it.
     """
 
     model_config: Mapping[str, object] | None = None
     training_mode: str | None = None
     artifact_evaluation: Mapping[str, object] | None = None
     activation: Mapping[str, object] | None = None
+    owner: str | None = None
 
     def __post_init__(self) -> None:
         if self.model_config is not None and not isinstance(self.model_config, Mapping):
@@ -54,6 +59,8 @@ class ScenarioSettings:
             raise ValueError("scenario settings artifact_evaluation must be an object or null")
         if self.activation is not None and not isinstance(self.activation, Mapping):
             raise ValueError("scenario settings activation must be an object or null")
+        if self.owner is not None:
+            check_owner(self.owner)
 
 
 class ScenarioStore(ABC):

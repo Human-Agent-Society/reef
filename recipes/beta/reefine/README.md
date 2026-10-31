@@ -31,7 +31,7 @@ beta/reefine/
                        the agent's instructions, its tools and its trial runner
   pi_extension_api.md  the summary of pi's extension API the agent reads
   harness_facts/       each adapter's facts the prompts and the review use (<adapter>.yaml)
-  multimodal.py        the image, speech, embedding and decision relay
+  multimodal.py        the image, speech, embedding and decision gateway
   scorer.py            the health task's evaluator
   seed/                the first tree of a new scenario: one starter skill
   health/              the health task as a Harbor task directory, for terminus
@@ -422,13 +422,10 @@ models before it settles on one.
 ## Images, speech, embeddings and decisions
 
 `evolution.multimodal` names one gateway that serves these modalities behind
-a single key. Reef relays a scenario's `/v1/images`, `/v1/embeddings`,
-`/v1/audio/speech` and `/v1/decisions` to it with the key, the way the
-upstream serves chat: an extension calls them at `REEF_SERVICE_URL` with the
-scenario and token headers, in the provider's own format, and holds no provider
-key. Nothing is recorded, so these calls are not learning signal. The agent's
-trials reach the same gateway, so an extension it proves in a trial calls
-what the harness will call.
+a single key. The agent and its trials reach it through their loopback
+gateway, in the provider's own format, and hold no provider key. Reef's HTTP
+service does not relay these modalities: a scenario's clients call only the
+chat model routes.
 
 ```yaml
 evolution:
@@ -444,7 +441,7 @@ key; the example configuration sets it to `${REEF_MULTIMODAL_API_KEY}`, and
 Empty, the upstream key serves when the upstream is the same address, so a
 deployment that chats through OpenRouter needs nothing more. Without a key,
 or for a route the preset does not serve (`openai-compatible` has no
-decisions), those routes answer 501. Recipes other than Reefine offer none.
+decisions), the agent's call answers 501. Recipes other than Reefine offer none.
 
 ## The health floor
 

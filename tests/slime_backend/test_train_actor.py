@@ -78,7 +78,7 @@ def _load_train_actor(monkeypatch: pytest.MonkeyPatch):
         monkey_patch_torch_dist=lambda: None,
     )
     _StubTimer.reset()
-    _stub_module(monkeypatch, "slime.utils.timer", timer=_stub_timer_decorator, Timer=_StubTimer)
+    _stub_module(monkeypatch, "slime.observability.timer", timer=_stub_timer_decorator, Timer=_StubTimer)
     _stub_module(
         monkeypatch, "torch_memory_saver", torch_memory_saver=types.SimpleNamespace(disable=lambda: nullcontext())
     )

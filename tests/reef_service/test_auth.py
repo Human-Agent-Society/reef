@@ -35,6 +35,8 @@ def _make_client(tokens, evaluation_tokens=None) -> TestClient:
     app.router.add_get("/reef/harness/requests/{record_id}/progress", _ok)
     app.router.add_post("/reef/scenarios/{scenario}/evaluation/v1/{route:.+}", _ok)
     app.router.add_post("/reef/scenarios/{scenario}/components/{component}/evaluation/v1/{route:.+}", _ok)
+    app.router.add_post("/reef/scenarios/{scenario}/artifacts/{artifact_id}/evaluation/v1/{route:.+}", _ok)
+    app.router.add_post("/reef/scenarios/{scenario}/artifacts/{artifact_id}/v1/{route:.+}", _ok)
     app.router.add_get("/reef/scenarios/{scenario}/evaluation/v1/{route:.+}", _ok)
     app.router.add_post("/v1/chat/completions", _ok)
     app.router.add_post("/reef/scenarios/{scenario}/activate", _ok)
@@ -80,6 +82,8 @@ def test_an_evaluation_token_opens_the_evaluation_routes_alone() -> None:
                 "/reef/scenarios/agent/evaluation/v1/chat/completions",
                 "/reef/scenarios/team%2Fagent/evaluation/v1/messages",
                 "/reef/scenarios/agent/components/harness/evaluation/v1/responses",
+                # An evaluation rollout of a candidate artifact, which the evaluation service runs.
+                "/reef/scenarios/agent/artifacts/r1/evaluation/v1/chat/completions",
             ):
                 resp = await client.post(path, headers={"Authorization": "Bearer rollout"})
                 assert resp.status == 200, path
@@ -92,6 +96,8 @@ def test_an_evaluation_token_opens_the_evaluation_routes_alone() -> None:
                 ("GET", "/reef/scenarios/agent/evaluation/v1/chat/completions"),
                 ("POST", "/v1/chat/completions"),
                 ("POST", "/reef/scenarios/agent/activate"),
+                # The recorded URL of a served artifact stays closed to the evaluation token.
+                ("POST", "/reef/scenarios/agent/artifacts/r1/v1/chat/completions"),
             ):
                 resp = await client.request(method, path, headers={"Authorization": "Bearer rollout"})
                 assert resp.status == 401, (method, path)

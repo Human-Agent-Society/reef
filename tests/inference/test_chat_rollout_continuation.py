@@ -129,8 +129,11 @@ def artifact(tmp_path) -> Artifact:
 
 
 def assemble(responses: list[dict]):
+    """The sample of ``responses``, recorded as the answers of one artifact."""
     records = [
-        AgentRecord.create(scenario="rollout", request_type=RequestType.INFERENCE, payload={"response": response})
+        AgentRecord.create(
+            scenario="rollout", request_type=RequestType.INFERENCE, payload={"artifact_id": "a1", "response": response}
+        )
         for response in responses
     ]
     return make_multi_turn_policy_trajectory(records, 1.0, source_agent_record_id="report", realign_threshold=0)

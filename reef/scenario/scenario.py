@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from contextlib import nullcontext
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -18,17 +19,61 @@ from reef.core.reports import ReportBase
 from reef.inference.model_config import ModelConfig
 from reef.observability.commits import CommitExperimentObserver
 from reef.observability.operations import OperationMetrics
-from reef.runtime.interfaces import InferenceHandler, InferenceRuntime
+from reef.runtime.interfaces import InferenceRuntime
 from reef.runtime.jobs import TrainingComponent
 from reef.scenario.binding import ScenarioBinding
 from reef.scenario.committer import ComponentArtifact, ScenarioCommitter
-from reef.scenario.releases import ServedArtifact
+from reef.scenario.releases import ServedBesideArtifact
 from reef.storage.commits import SCENARIO_METADATA_KEY, CommitRecord
 from reef.storage.records import RecordStore
 from reef.storage.scenario import ScenarioStore
 from reef.surface.base import Surface
 from reef.train.trainer import ComponentTrainer, Trainer
 from reef.train.types import TrainStepResult
+
+
+@dataclass(frozen=True)
+class ScenarioCapabilities:
+    """The artifact operations that one scenario can run, as its store, runtime and trainers allow them.
+
+    Values:
+
+    - ``serve_beside`` is True exactly when ``Scenario.serve`` can serve an artifact beside the active release: the
+      store keeps a durable commit history, and the scenario has no runtime-loaded component, no runtime, or a
+      runtime that serves artifacts on request (``InferenceRuntime.serves_artifacts_on_request``).
+    - ``evaluate`` holds the components whose artifacts an artifact evaluation can run, in surface order: each
+      component with a kind, when no component is a ``harness_plugin`` and the runtime serves artifacts on request;
+      else it is empty.
+    - ``train_from`` holds the components whose trainer can start from an artifact (``Trainer.can_train_from``), in
+      trainer order.
+
+    Each name occurs at most once in its tuple.
+
+    Purpose: ``Scenario.capabilities`` makes it, and the contract route reports it, so that a client offers only the
+    operations that the scenario can run. An operation that it allows can still refuse one artifact, for example a
+    release whose weights the training component cannot import.
+    """
+
+    serve_beside: bool
+    evaluate: tuple[str, ...]
+    train_from: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.serve_beside, bool):
+            raise TypeError("serve_beside must be a bool")
+        for field_name, names in (("evaluate", self.evaluate), ("train_from", self.train_from)):
+            if not isinstance(names, tuple) or not all(isinstance(name, str) and name for name in names):
+                raise TypeError(f"{field_name} must be a tuple of component names")
+            if len(set(names)) != len(names):
+                raise ValueError(f"{field_name} names a component twice")
+
+    def to_json(self) -> dict[str, object]:
+        """``{serve_beside, evaluate, train_from}``, with the tuples as lists."""
+        return {
+            "serve_beside": self.serve_beside,
+            "evaluate": list(self.evaluate),
+            "train_from": list(self.train_from),
+        }
 
 
 class Scenario:
@@ -48,25 +93,8 @@ class Scenario:
         experiment_observer: CommitExperimentObserver | None = None,
     ) -> None:
         self.operations = OperationMetrics(
-            (
-                "serve/request",
-                "serve/admission",
-                "evaluate/request",
-                "evaluate/admission",
-                "rollout/request",
-                "rollout/admission",
-                "ingest/write",
-            ),
+            ("ingest/write",),
             counters=(
-                "serve/retries_total",
-                "serve/version_mismatch_total",
-                "serve/timeouts_total",
-                "evaluate/retries_total",
-                "evaluate/version_mismatch_total",
-                "evaluate/timeouts_total",
-                "rollout/retries_total",
-                "rollout/version_mismatch_total",
-                "rollout/timeouts_total",
                 "ingest/accepted_total",
                 "ingest/duplicates_total",
                 "ingest/rejected_report_total",
@@ -128,11 +156,6 @@ class Scenario:
         return self._binding.report_type
 
     @property
-    def inference_handler(self) -> InferenceHandler | None:
-        runtime = self.model_config.runtime
-        return runtime.inference_handler if runtime is not None else self._binding.inference_handler
-
-    @property
     def repository(self) -> Repository:
         """The release chain's scenario-scoped artifact repository.
 
@@ -187,6 +210,44 @@ class Scenario:
         """The mode the scenario's stepping trainers run in; a trainer that runs no step keeps none."""
         return self.stepping_trainers()[0].trainer.pipeline.training_mode
 
+    def evaluation_refusal(self, component: str) -> str | None:
+        """Why this scenario cannot evaluate an artifact of ``component``, a component that its surface declares
+        with a kind; None when it can.
+
+        Reef evaluates a model artifact (``RFC #959``): the artifacts hold no harness, and the runtime answers each
+        call from the artifact that the call names (``InferenceRuntime.serves_artifacts_on_request``).
+        """
+        kinds = {name: declared.kind for name, declared in self._surface.components.items()}
+        if kinds[component] == "harness_plugin":
+            return "Reef does not evaluate a harness artifact yet (RFC #959, step 2)"
+        if "harness_plugin" in kinds.values():
+            return "Reef evaluates a model artifact only in a scenario whose artifacts hold no harness"
+        runtime = self.runtime
+        if runtime is None or not runtime.serves_artifacts_on_request:
+            return (
+                f"scenario {self.name!r}'s runtime serves only its current artifact, so it cannot evaluate an "
+                "artifact on request"
+            )
+        return None
+
+    def capabilities(self) -> ScenarioCapabilities:
+        """The artifact operations that this scenario can run (``ScenarioCapabilities``)."""
+        surface, runtime = self._surface, self.runtime
+        on_request = runtime is not None and runtime.serves_artifacts_on_request
+        return ScenarioCapabilities(
+            serve_beside=self._store.durable and (surface.loader_component is None or runtime is None or on_request),
+            evaluate=tuple(
+                name
+                for name, component in surface.components.items()
+                if component.kind is not None and self.evaluation_refusal(name) is None
+            ),
+            train_from=tuple(
+                component_trainer.component
+                for component_trainer in self.trainers
+                if component_trainer.trainer.can_train_from
+            ),
+        )
+
     def stepping_trainers(self) -> tuple[ComponentTrainer, ...]:
         """The trainers that train; the first trainer when none does."""
         stepping = tuple(component_trainer for component_trainer in self.trainers if component_trainer.trainer.trains)
@@ -216,6 +277,15 @@ class Scenario:
         for component_trainer in stepping:
             component_trainer.trainer.set_training_mode(training_mode, fill_manual_buffer=fill_manual_buffer)
 
+    def produce_samples(self) -> bool:
+        """Do the samples service's step for every trainer: make the samples of the new records
+        (``Trainer.produce_samples``). Return whether background work of a pipeline still runs. A process that
+        steps the scenario itself, such as a recipe's driver, calls it before ``prepare_training_step``."""
+        running = False
+        for component_trainer in self.trainers:
+            running = component_trainer.trainer.produce_samples().background or running
+        return running
+
     def prepare_training_step(self, component: str | None = None) -> TrainStepResult | None:
         """Prepare ``component``'s next commit: a harness step, a job submission or a job's checkpoint decision.
 
@@ -229,12 +299,28 @@ class Scenario:
         """
         trainer = self.trainer_for(component)
         with self._committer.lock if len(self.trainers) == 1 else nullcontext():
-            return trainer.run_once(self.scenario_step, serving_runtime_load_id=self.serving_runtime_load_id())
+            # The staleness check measures data against the weights that serve; a scenario that loads no weights
+            # serves one fixed model, so its data never goes stale.
+            weights_load = self._binding.surface.loader_component is not None and self.runtime is not None
+            serving = self.serving_artifact_id() if weights_load else None
+            return trainer.run_once(self.scenario_step, serving_artifact_id=serving)
 
-    def serving_runtime_load_id(self) -> str | None:
-        """Return the runtime load ID that serves the active release, or None when it is unknown."""
-        artifact = Artifact(self.current_artifact_ref(), self.repository)
-        return self._binding.surface.served_runtime_load_id(artifact, self._binding.runtime)
+    def served_component(self) -> str | None:
+        """The component whose artifact the runtime serves: the weight trainer's component, or the only component;
+        None when the scenario has several components and no weight trainer."""
+        weights = [item.component for item in self.trainers if item.trainer.job_loop is not None]
+        if weights:
+            return weights[0]
+        names = self._committer.component_names()
+        return names[0] if len(names) == 1 else None
+
+    def serving_artifact_id(self) -> str:
+        """The artifact that answers this scenario's requests now: the active artifact of ``served_component``,
+        or the active release for a scenario whose model is no Reef artifact or whose store keeps no commit
+        history to name the active artifact."""
+        component = self.served_component()
+        active = None if component is None or not self.store.durable else self.artifact_status()[component]["active"]
+        return active or self.current_artifact_ref().release_id
 
     def replay_retained(
         self, *, up_to_sequence: int, consumed_ids: frozenset[str], component: str | None = None
@@ -284,9 +370,15 @@ class Scenario:
         """Serve ``artifact_id`` beside the active release; see :meth:`ScenarioCommitter.serve`."""
         return self._committer.serve(artifact_id, component)
 
-    def stop_serving(self, artifact_id: str) -> ServedArtifact:
+    def stop_serving(self, artifact_id: str) -> ServedBesideArtifact:
         """Stop serving ``artifact_id`` beside the active release; see :meth:`ScenarioCommitter.stop_serving`."""
         return self._committer.stop_serving(artifact_id)
+
+    def served_beside(self) -> Mapping[str, ServedBesideArtifact]:
+        """The artifacts that the scenario serves beside its active release, by ``artifact_id``; see
+        :meth:`ScenarioReleases.served_beside`."""
+        with self.release_queries.publication_lock:
+            return self.release_queries.served_beside(self._committer.step, self._committer.component_names())
 
     def served_release(self, artifact_id: str) -> ArtifactRef:
         """The release that answers a call to the URL of ``artifact_id``.
@@ -325,6 +417,12 @@ class Scenario:
         """Each component's active artifact and training start; see :meth:`ScenarioCommitter.artifact_status`."""
         with self.release_queries.publication_lock:
             return self._committer.artifact_status()
+
+    def artifact_release_ref(self, artifact_id: str, component: str | None = None) -> tuple[str, ArtifactRef]:
+        """The component that ``artifact_id`` names and the ref of the release that minted it, without materializing
+        the release; see :meth:`ScenarioCommitter.artifact_release_ref`."""
+        with self.release_queries.publication_lock:
+            return self._committer.artifact_release_ref(artifact_id, component)
 
     def resolve_artifact(self, artifact_id: str, component: str | None = None) -> tuple[ComponentArtifact, Artifact]:
         """The artifact ``artifact_id`` names and a release that binds it; see :meth:`ScenarioCommitter.resolve_artifact`."""
@@ -390,5 +488,6 @@ __all__ = [
     "SCENARIO_METADATA_KEY",
     "ReleaseNotRestorable",
     "Scenario",
+    "ScenarioCapabilities",
     "validate_component_trainers",
 ]

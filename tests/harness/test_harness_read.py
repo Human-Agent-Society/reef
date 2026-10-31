@@ -12,6 +12,7 @@ from reef.inference.http import InferenceProxyRuntime
 from reef.recipe import Recipe
 from reef.recipe.harness import EvolutionSettings, HarnessEvolutionRecipe
 from reef.service.app import RequestService
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.surface import Surface
 
@@ -40,6 +41,7 @@ def _service(tmp_path, *, recipe, rules: str | None) -> RequestService:
         InMemoryRepositoryBackend.factory(bootstrap, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "local",
         scenario_storage=SQLiteScenarioStorage(None),
+        coordination=memory_coordination(),
     )
     dispatcher.get_or_create_scenario("delivery")
     return RequestService(dispatcher)

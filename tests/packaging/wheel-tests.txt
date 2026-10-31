@@ -61,7 +61,7 @@ tests/recipes/reasoning_bank/test_reasoning_bank.py
 tests/recipes/reefine/test_reefine_agent.py
 tests/recipes/reefine/test_reefine_answer_loop.py
 tests/recipes/reefine/test_reefine_harness_facts.py
-tests/recipes/reefine/test_reefine_multimodal_relay.py
+tests/recipes/reefine/test_reefine_multimodal.py
 tests/recipes/reefine/test_reefine_recipe.py
 tests/recipes/reefine/test_reefine_tutorial.py
 tests/recipes/sao/test_sao_pipeline.py
@@ -101,7 +101,6 @@ tests/reef_service/test_learning_inspection.py
 tests/reef_service/test_local_inference_startup.py
 tests/reef_service/test_manual_training.py
 tests/reef_service/test_multi_scenario_training.py
-tests/reef_service/test_multimodal_relay.py
 tests/reef_service/test_native_runtime_selection.py
 tests/reef_service/test_orchestrator_overrides.py
 tests/reef_service/test_parallel_service_startup.py

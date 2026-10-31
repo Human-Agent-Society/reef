@@ -36,7 +36,7 @@ def created(monkeypatch):
         calls.append((settings, component))
         return component
 
-    monkeypatch.setattr(slime_component, "create_slime_component", create)
+    monkeypatch.setattr(slime_component, "SlimeTrainingComponent", create)
     return calls
 
 
@@ -61,8 +61,12 @@ def test_slime_without_serving_builds_the_component_and_a_null_runtime(created):
         [(settings, built)] = created
         assert component is built
         assert isinstance(runtime, NullInferenceRuntime)
-        assert settings.arguments == ("--global-batch-size=8", "--rollout-num-gpus=0")
-        assert (settings.loss_family, settings.recipe) == ("sao", "recipes.sao.recipe:SAORecipe")
+        assert settings.arguments == ("--global-batch-size=8",)
+        # The recipe registered sao by name; each job's driver, a new process, gets its reference.
+        assert (settings.loss_family, settings.recipe) == (
+            "recipes.sao.slime:SaoAlgorithm",
+            "recipes.sao.recipe:SAORecipe",
+        )
         assert (settings.ray_address, settings.namespace) == ("ray://head:10001", "training-cluster")
         assert settings.train_timeout_s == 14400.0
         # The deployment's execution section selects the workers' executors.

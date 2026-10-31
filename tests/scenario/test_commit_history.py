@@ -22,6 +22,7 @@ from tests.support._threshold_processor import ThresholdJobData, ThresholdSample
 from tests.support.harness_service import harness_repository
 from tests.support.harness_steps import PI_SEED, harness_recipe
 from tests.support.runtime_stubs import StubTrainingComponent, runtime_bindings
+from tests.support.samples_service import make_samples
 
 from reef.artifact import Artifact, ArtifactRef, InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
@@ -35,6 +36,7 @@ from reef.runtime.jobs import SavedCheckpoint, TrainingJob
 from reef.storage.commit_history import CommitHistoryError, CommitHistoryScenarioStore
 from reef.storage.commits import CommitRecord, active_artifact_ref
 from reef.storage.samples import SAMPLE_KINDS, consumed_sample_id
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train import CandidateBackend, PreparedStep, Trainer, TrainStepResult
 from reef.train.harness_backend.state import HarnessState
@@ -45,7 +47,7 @@ from reef.train.pipeline import TrainingPipeline
 def sample_record(
     *,
     step: int = 1,
-    runtime_load_id: str = "w1",
+    release_label: str = "w1",
     checkpoint: bool = False,
     training_job_id: str | None = None,
     metrics: dict | None = None,
@@ -54,7 +56,7 @@ def sample_record(
         scenario="math",
         step=step,
         artifact_ref=ArtifactRef(
-            content_id=f"content:{step}", release_id=f"release:{runtime_load_id}:{step}", parent_release_id="base"
+            content_id=f"content:{step}", release_id=f"release:{release_label}:{step}", parent_release_id="base"
         ),
         checkpoint=checkpoint,
         algorithm_state={"steps": step},
@@ -86,7 +88,7 @@ def test_commit_record_round_trips_through_the_history(open_history) -> None:
     log = open_history()
     log.append(sample_record(step=1))
     metrics = {"changed": "config/format.json", "wins": 3, "losses": 1, "ties": 0, "published": True}
-    log.append(sample_record(step=2, runtime_load_id="w2", metrics=metrics, training_job_id="job-1"))
+    log.append(sample_record(step=2, release_label="w2", metrics=metrics, training_job_id="job-1"))
 
     records = log.records()
     assert [record.step for record in records] == [1, 2]
@@ -124,7 +126,7 @@ def test_commit_record_detaches_nested_metrics() -> None:
 def test_commit_history_tracks_the_current_training_run_position(open_history) -> None:
     log = open_history()
     log.append(sample_record(step=1))
-    log.append(sample_record(step=2, runtime_load_id="w2"))
+    log.append(sample_record(step=2, release_label="w2"))
     assert log.training_run_position() == (0, 2)
 
     start = CommitRecord(
@@ -140,7 +142,7 @@ def test_commit_history_tracks_the_current_training_run_position(open_history) -
     log.append(start)
     assert log.training_run_position() == (3, 0)
 
-    log.append(sample_record(step=4, runtime_load_id="w4"))
+    log.append(sample_record(step=4, release_label="w4"))
     assert log.training_run_position() == (3, 1)
     # An activation changes what serves, not the training run.
     log.append(
@@ -228,7 +230,7 @@ def test_each_operation_names_its_artifact_exactly() -> None:
 def test_the_active_artifact_is_the_last_activation_in_the_log() -> None:
     creation = ArtifactRef("content:base", "base", None)
     made = replace(sample_record(step=1, checkpoint=True), activated=True)
-    held = sample_record(step=2, checkpoint=True, runtime_load_id="w2")
+    held = sample_record(step=2, checkpoint=True, release_label="w2")
     nothing = replace(sample_record(step=3), artifact_ref=made.artifact_ref)
     assert active_artifact_ref((), creation) == creation
     assert active_artifact_ref((made,), creation) == made.artifact_ref
@@ -242,7 +244,7 @@ def test_the_active_artifact_is_the_last_activation_in_the_log() -> None:
     back = operation_record("activate", 6, "base", artifact_ref=creation)
     assert active_artifact_ref((made, held, nothing, start, activation, back), creation) == creation
     # A training step that makes and activates an artifact afterwards is the newest activation.
-    newest = replace(sample_record(step=7, checkpoint=True, runtime_load_id="w7"), activated=True)
+    newest = replace(sample_record(step=7, checkpoint=True, release_label="w7"), activated=True)
     assert active_artifact_ref((made, held, activation, back, newest), creation) == newest.artifact_ref
 
 
@@ -254,13 +256,13 @@ def test_commit_history_retry_is_idempotent_but_conflicting_step_is_rejected(ope
 
     log.append(original)
     log.append(retry)
-    second = sample_record(step=2, runtime_load_id="w2")
+    second = sample_record(step=2, release_label="w2")
     log.append(second)
     log.append(retry)
 
     assert log.records() == (original, second)
     with pytest.raises(CommitHistoryError, match="conflicts"):
-        log.append(sample_record(step=1, runtime_load_id="different"))
+        log.append(sample_record(step=1, release_label="different"))
 
 
 @pytest.mark.unit
@@ -270,11 +272,11 @@ def test_commit_history_reads_the_appends_of_another_writer(open_history) -> Non
     first.append(sample_record(step=1))
     assert len(first.records()) == 1
 
-    second.append(sample_record(step=2, runtime_load_id="w2"))
+    second.append(sample_record(step=2, release_label="w2"))
     # The first writer's cache stops at step 1, but the append still sees step 2.
     with pytest.raises(CommitHistoryError, match="conflicts"):
-        first.append(sample_record(step=2, runtime_load_id="other"))
-    first.append(sample_record(step=3, runtime_load_id="w3"))
+        first.append(sample_record(step=2, release_label="other"))
+    first.append(sample_record(step=3, release_label="w3"))
 
     assert [record.step for record in first.records()] == [1, 2, 3]
     assert second.records() == first.records()
@@ -335,11 +337,11 @@ class RecordingComponent(StubTrainingComponent):
         return super().train(job)
 
 
-def sft_inference(agent_record_id: str, runtime_load_id: str | None = None) -> AgentRecord:
-    """An inference record; ``runtime_load_id`` is the version that served it, when the runtime reports one."""
+def sft_inference(agent_record_id: str, artifact_id: str | None = None) -> AgentRecord:
+    """An inference record; ``artifact_id`` names the artifact that answered it, when one is given."""
     payload: dict[str, object] = {"tokens": [1, 2], "loss_mask": [0, 1], "rollout_log_probs": [-0.2]}
-    if runtime_load_id is not None:
-        payload["runtime_load_id"] = runtime_load_id
+    if artifact_id is not None:
+        payload["artifact_id"] = artifact_id
     return AgentRecord.create(
         scenario="math",
         request_type=RequestType.INFERENCE,
@@ -372,12 +374,14 @@ def build_training_dispatcher(
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(agent_record_dir),
         hold_local_cycles=hold_local_cycles,
+        coordination=memory_coordination(),
     )
 
 
-def served_version(dispatcher: Dispatcher, scenario: str = "math") -> str | None:
-    """The version that serves the scenario now: fresh inference records claim it, so they pass the staleness check."""
-    return dispatcher.get_or_create_scenario(scenario).serving_runtime_load_id()
+def served_artifact_id(dispatcher: Dispatcher, scenario: str = "math") -> str:
+    """The artifact that serves the scenario now: fresh inference records name it, so they pass the staleness
+    check."""
+    return dispatcher.get_or_create_scenario(scenario).serving_artifact_id()
 
 
 def scenario_database(agent_record_dir, scenario: str = "math"):
@@ -426,11 +430,11 @@ def wait_for_jobs(dispatcher: Dispatcher, count: int, *, scenario: str = "math")
     )
 
 
-def train_pair(dispatcher: Dispatcher, index: int, runtime_load_id: str | None = None) -> None:
-    """Send inference ``i<index>`` (served by ``runtime_load_id``, else by the served version) and its report
+def train_pair(dispatcher: Dispatcher, index: int, artifact_id: str | None = None) -> None:
+    """Send inference ``i<index>`` (answered by ``artifact_id``, else by the served artifact) and its report
     ``r<index>``, then wait until ``index`` training jobs ended."""
-    version = served_version(dispatcher) if runtime_load_id is None else runtime_load_id
-    dispatcher.accept_record(sft_inference(f"i{index}", version))
+    answered = served_artifact_id(dispatcher) if artifact_id is None else artifact_id
+    dispatcher.accept_record(sft_inference(f"i{index}", answered))
     dispatcher.accept_record(sft_report(f"r{index}", f"i{index}"))
     wait_for_jobs(dispatcher, index)
 
@@ -501,6 +505,7 @@ def _build_saved_artifact_dispatcher(tmp_path, *, agent_record_dir=None):
         scenario_storage=SQLiteScenarioStorage(agent_record_dir),
         # The tests drive the steps themselves; a local cycle would race them for the batch.
         hold_local_cycles=True,
+        coordination=memory_coordination(),
     )
     return dispatcher, backend
 
@@ -512,8 +517,7 @@ def test_each_committed_step_appends_one_atomic_record_and_a_restart_recovers_fr
     component = RecordingComponent(tmp_path / "exported")
     dispatcher = build_training_dispatcher(component, tmp_path, backend_factory, agent_record_dir=agent_record_dir)
     train_pair(dispatcher, 1)
-    # The staleness check trains only data of the served version, so the second record comes from w1.
-    train_pair(dispatcher, 2, "w1")
+    train_pair(dispatcher, 2)
 
     # Each job commits its submission, its checkpoint decision and its end, one record each.
     records = committed_records(agent_record_dir)
@@ -620,6 +624,7 @@ def test_recovery_resumes_record_progress_without_retraining(tmp_path) -> None:
             backend_factory,
             local_artifact_dir=tmp_path / "staged",
             scenario_storage=SQLiteScenarioStorage(agent_record_dir),
+            coordination=memory_coordination(),
         )
 
     first_component = RecordingComponent(tmp_path / "first")
@@ -656,9 +661,9 @@ def test_recovery_replays_retained_rows_behind_the_watermark(tmp_path) -> None:
     # The components save no checkpoint, so the base release serves both inferences and neither is stale.
     first_component = RecordingComponent()
     first = build_training_dispatcher(first_component, tmp_path, backend_factory, agent_record_dir=agent_record_dir)
-    base_version = served_version(first)
-    first.accept_record(sft_inference("i1", base_version))
-    first.accept_record(sft_inference("i2", base_version))
+    base_artifact_id = served_artifact_id(first)
+    first.accept_record(sft_inference("i1", base_artifact_id))
+    first.accept_record(sft_inference("i2", base_artifact_id))
     first.accept_record(sft_report("r1", "i1"))
     wait_for_jobs(first, 1)
     assert first_component.trained_data == [["i1"]]
@@ -671,7 +676,7 @@ def test_recovery_replays_retained_rows_behind_the_watermark(tmp_path) -> None:
     second = build_training_dispatcher(second_component, tmp_path, backend_factory, agent_record_dir=agent_record_dir)
     recovered = second.get_or_create_scenario("math")
     assert recovered.trainer.data_offset == 3  # resumed at the committed watermark
-    assert served_version(second) == base_version
+    assert served_artifact_id(second) == base_artifact_id
 
     second.accept_record(sft_report("r2", "i2"))
     wait_for_jobs(second, 2)
@@ -713,7 +718,8 @@ def test_recovery_skips_consumption_after_processor_release_failure(tmp_path, mo
 
     train_pair(second, 2)
     assert second_component.trained_data == [["i2"]]
-    assert recovered.scenario_step == 6
+    # The job's three commits land on the scenario that serves now; a failed cycle can replace the instance.
+    wait_until(lambda: second.get_or_create_scenario("math").scenario_step == 6, "the job's commits did not all land")
 
 
 @pytest.mark.unit
@@ -776,9 +782,9 @@ def test_recovery_rejects_a_gapped_log(tmp_path) -> None:
     first = build_training_dispatcher(
         RecordingComponent(), tmp_path, backend_factory, agent_record_dir=agent_record_dir
     )
-    base_version = served_version(first)
+    base_artifact_id = served_artifact_id(first)
     for index in (1, 2, 3):
-        train_pair(first, index, base_version)
+        train_pair(first, index, base_artifact_id)
     assert [record.step for record in committed_records(agent_record_dir)] == [1, 2, 3, 4, 5, 6]
 
     delete_commits(agent_record_dir, 3)
@@ -850,6 +856,7 @@ def build_harness_evolve_dispatcher(
         backend_factory,
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(agent_record_dir),
+        coordination=memory_coordination(),
     )
 
 
@@ -987,6 +994,7 @@ def test_artifact_commit_failure_keeps_the_pending_job_data_retryable(tmp_path, 
     scenario = dispatcher.get_or_create_scenario("math")
     scenario.records.append(sft_inference("i1"))
     scenario.records.append(sft_report("r1", "i1"))
+    make_samples(scenario)
     result = scenario.prepare_training_step()
     assert result is not None
     pending = scenario.trainer.pending_job_data
@@ -1005,7 +1013,7 @@ def test_artifact_commit_failure_keeps_the_pending_job_data_retryable(tmp_path, 
         target = committer._artifacts
         method_name = failure_point
     original = getattr(target, method_name)
-    calls_before_failure = 2 if failure_point == "activation" else 1
+    calls_before_failure = 1
 
     def fail_once(*args, **kwargs):
         nonlocal calls_before_failure
@@ -1015,10 +1023,13 @@ def test_artifact_commit_failure_keeps_the_pending_job_data_retryable(tmp_path, 
         return original(*args, **kwargs)
 
     monkeypatch.setattr(target, method_name, fail_once)
+    active = scenario.current_artifact_ref()
 
     with pytest.raises(RuntimeError, match=f"injected {failure_point} failure"):
         scenario.commit(result)
 
+    # The active release moves only after the runtime serves the new one and its record lands.
+    assert scenario.current_artifact_ref() == active
     assert scenario.scenario_step == 0
     assert scenario.trainer.state == {"steps": 0}
     assert scenario.trainer.pending_job_data is pending
@@ -1049,6 +1060,7 @@ def test_post_commit_failure_resumes_the_recorded_step_without_republication(
     scenario = dispatcher.get_or_create_scenario("math")
     scenario.records.append(sft_inference("i1"))
     scenario.records.append(sft_report("r1", "i1"))
+    make_samples(scenario)
     result = scenario.prepare_training_step()
     assert result is not None
     pending = scenario.trainer.pending_job_data
@@ -1102,8 +1114,9 @@ def test_a_commit_failure_keeps_one_retryable_batch_and_one_record(tmp_path, mon
         hold_local_cycles=True,
     )
     scenario = dispatcher.get_or_create_scenario("math")
-    scenario.records.append(sft_inference("i1", scenario.serving_runtime_load_id()))
+    scenario.records.append(sft_inference("i1", scenario.serving_artifact_id()))
     scenario.records.append(sft_report("r1", "i1"))
+    make_samples(scenario)
     # The job's submission is the step that consumes the batch.
     result = scenario.prepare_training_step()
     assert result is not None
@@ -1137,6 +1150,8 @@ def test_a_commit_failure_keeps_one_retryable_batch_and_one_record(tmp_path, mon
 
     assert scenario.scenario_step == 1
     assert scenario.trainer.state == result.state
+    # The training worker hands the queued job to the component on its own thread.
+    wait_until(lambda: component.trained_data, "the training worker did not run the job")
     assert scenario.trainer.state["job"]["job_id"] == component.submitted[0].job_id
     assert scenario.trainer.pending_job_data is None
     assert scenario.store.training_run_position() == (0, 1)

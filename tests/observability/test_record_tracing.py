@@ -21,6 +21,7 @@ from reef.service.streaming import stream_record
 from reef.storage.commits import CommitRecord
 from reef.storage.observer import ObservedScenarioStorage, RecordObserver
 from reef.storage.samples import consumed_sample_id
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 
 
@@ -159,7 +160,7 @@ def test_inference_record_becomes_a_client_span_with_stable_ids() -> None:
         payload={
             "model": "qwen",
             "messages": [{"role": "user", "content": "2+2?"}],
-            "runtime_load_id": "load-3",
+            "artifact_id": "artifact-3",
             "metadata": {"tags": ["eval", "smoke"]},
             "response": {
                 "id": "chatcmpl-1",
@@ -189,7 +190,7 @@ def test_inference_record_becomes_a_client_span_with_stable_ids() -> None:
         "reef.request_type": "inference",
         "reef.release_id": "v3",
         "reef.content_id": "c1",
-        "reef.runtime_load_id": "load-3",
+        "reef.artifact_id": "artifact-3",
         "reef.tags": ("eval", "smoke"),
         "gen_ai.operation.name": "chat",
         "gen_ai.request.model": "qwen",
@@ -458,10 +459,12 @@ def test_dispatcher_traffic_reaches_the_observer_through_the_storage(tmp_path) -
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=ObservedScenarioStorage(SQLiteScenarioStorage(tmp_path / "records"), observer),
+        coordination=memory_coordination(),
     )
     try:
-        dispatcher.accept_record(_inference("i1", runtime_load_id="w0"))
-        dispatcher.accept_record(_inference("i1", runtime_load_id="w0"))
+        served = dispatcher.get_or_create_scenario("math").serving_artifact_id()
+        dispatcher.accept_record(_inference("i1", artifact_id=served))
+        dispatcher.accept_record(_inference("i1", artifact_id=served))
         dispatcher.accept_record(_report("r1", "i1"))
         for _ in range(5000):
             if finished_jobs(dispatcher):

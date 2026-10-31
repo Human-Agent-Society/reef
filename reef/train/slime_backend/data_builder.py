@@ -14,7 +14,6 @@ from collections.abc import Mapping, Sequence
 from numbers import Integral, Real
 from typing import Any
 
-from reef.core.artifact_ref import parse_runtime_load_spans
 from reef.train.slime_backend.algorithm import SlimeAlgorithm
 from reef.train.types import policy_row_violation
 
@@ -45,7 +44,7 @@ def to_slime_rollout_data(payload: Mapping[str, Any]) -> dict:
         raise ValueError(f"unsupported Reef training loss: {loss!r} ({exc})") from exc
 
     data = spec.build_rollout_data(payload, samples)
-    _attach_runtime_load_ids(data, payload, samples)
+    _attach_producing_artifact_ids(data, payload, samples)
     _enforce_spec_advantages(spec, payload)
     if spec.requires_rollout_logprobs and not data.get("rollout_log_probs"):
         raise ValueError(
@@ -55,39 +54,21 @@ def to_slime_rollout_data(payload: Mapping[str, Any]) -> dict:
     return data
 
 
-def _attach_runtime_load_ids(data: dict, payload: Mapping[str, Any], samples: Sequence) -> None:
-    """Preserve sample and token runtime load IDs beside Slime's policy rows."""
-    versions = payload.get("producing_runtime_load_ids")
-    if versions is not None:
-        if not isinstance(versions, Sequence) or isinstance(versions, str | bytes) or len(versions) != len(samples):
-            raise ValueError("producing_runtime_load_ids must contain one value per sample")
-        recorded_versions = data.get("producing_runtime_load_ids")
-        if recorded_versions is not None and list(recorded_versions) != list(versions):
-            raise ValueError("loss-family row runtime load IDs do not match the shared training payload")
-        data["producing_runtime_load_ids"] = list(versions)
-
-    raw_groups = payload.get("producing_runtime_load_spans")
-    if raw_groups is None:
+def _attach_producing_artifact_ids(data: dict, payload: Mapping[str, Any], samples: Sequence) -> None:
+    """Keep each sample's producing artifact beside Slime's policy rows, as training metadata."""
+    artifact_ids = payload.get("producing_artifact_ids")
+    if artifact_ids is None:
         return
-    if not isinstance(raw_groups, Sequence) or isinstance(raw_groups, str | bytes) or len(raw_groups) != len(samples):
-        raise ValueError("producing_runtime_load_spans must contain one span list per sample")
-    response_lengths = data.get("response_lengths")
-    if not isinstance(response_lengths, Sequence) or len(response_lengths) != len(samples):
-        raise ValueError("token runtime-load-ID spans require one response length per sample")
-    normalized: list[list[dict[str, Any]]] = []
-    for sample_index, (raw_spans, response_length) in enumerate(zip(raw_groups, response_lengths, strict=True)):
-        if not raw_spans:
-            normalized.append([])
-            continue
-        spans = parse_runtime_load_spans(
-            raw_spans,
-            field_name=f"producing_runtime_load_spans[{sample_index}]",
-            response_length=response_length,
-        )
-        normalized.append(
-            [{"start": span.start, "end": span.end, "runtime_load_id": span.runtime_load_id} for span in spans]
-        )
-    data["producing_runtime_load_spans"] = normalized
+    if (
+        not isinstance(artifact_ids, Sequence)
+        or isinstance(artifact_ids, str | bytes)
+        or len(artifact_ids) != len(samples)
+    ):
+        raise ValueError("producing_artifact_ids must contain one value per sample")
+    recorded = data.get("producing_artifact_ids")
+    if recorded is not None and list(recorded) != list(artifact_ids):
+        raise ValueError("loss-family row artifact IDs do not match the shared training payload")
+    data["producing_artifact_ids"] = list(artifact_ids)
 
 
 def _enforce_spec_advantages(spec: SlimeAlgorithm, payload: Mapping[str, Any]) -> None:

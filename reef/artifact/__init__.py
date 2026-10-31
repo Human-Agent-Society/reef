@@ -26,7 +26,9 @@ Every repository starts from a base artifact. A configured backend imports
 ``RepositoryBackendContext.base`` (a ``BaseArtifactSource``) into a
 repository that has none, with ``base.content_id`` as its content ID, and
 refuses to open a repository whose base was imported from other
-``base.inputs``.
+``base.inputs``. Only that import calls ``base.model_files.directory()``
+(a ``BaseModelFiles``, for example a ``ModelDirectory``), so a process that
+opens only repositories that have a base makes no model files.
 
 Backends used with a scenario commit history must subclass
 ``StagedReleaseRepositoryBackend``. ``publish`` must accept
@@ -59,9 +61,11 @@ from reef.artifact.peft import AdapterArtifactError, PEFTValidator, read_peft_co
 from reef.artifact.release_chain import ArtifactReleaseChain, ReleaseNotRestorable
 from reef.artifact.repository import (
     BaseArtifactSource,
+    BaseModelFiles,
     CachedRepositoryBackendFactory,
     ConfigurableRepositoryBackendFactory,
     EnumerableRepositoryBackendFactory,
+    ModelDirectory,
     RegistrationAwareRepositoryBackendFactory,
     Repository,
     RepositoryBackend,
@@ -105,6 +109,7 @@ __all__ = [
     "ArtifactSources",
     "ArtifactValidator",
     "BaseArtifactSource",
+    "BaseModelFiles",
     "CachedRepositoryBackendFactory",
     "ConfigurableRepositoryBackendFactory",
     "DirectoryFiles",
@@ -119,6 +124,7 @@ __all__ = [
     "HuggingFaceRevisionFiles",
     "HuggingFaceSource",
     "InMemoryRepositoryBackend",
+    "ModelDirectory",
     "PEFTValidator",
     "RegistrationAwareRepositoryBackendFactory",
     "ReleaseNotRestorable",

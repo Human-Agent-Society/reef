@@ -185,18 +185,14 @@ def test_adapters_endpoint_lists_bundled_adapters_with_install_pins(tmp_path) ->
 
 
 @pytest.mark.unit
-def test_a_published_step_reaches_the_served_files_the_catalog_and_the_inference_headers(tmp_path) -> None:
+def test_a_published_step_reaches_the_served_files_and_the_catalog(tmp_path) -> None:
     """One evaluated step: the served files are exactly the evaluated tree rendered for the adapter, the source is
-    one query away, the catalog row repeats the manifest's evaluation, and a resident harness learns of the new head
-    on its next model call, streamed or not."""
+    one query away, and the catalog row repeats the manifest's evaluation."""
 
     async def run() -> None:
         async with served(channel_dispatcher(tmp_path, PATCHES[:1])) as client:
             rows = (await (await client.get("/reef/scenarios/delivery/artifacts")).json())["artifacts"]
             current = next(row["release_id"] for row in rows if row["active"])
-            body = {"messages": [{"role": "user", "content": "hi"}]}
-            response = await client.post("/v1/chat/completions", headers=HEADERS, json=body)
-            assert response.status == 200 and response.headers["x-reef-release-id"] == current
             manifest = await evaluated_step(client)
             assert manifest["release_id"] != current
 
@@ -221,13 +217,6 @@ def test_a_published_step_reaches_the_served_files_the_catalog_and_the_inference
             assert head["release_id"] == manifest["release_id"] and head["active"] is True
             assert head["metrics"] == manifest["evaluation"]
             assert head["metrics"]["selected"] is True and head["metrics"]["wins"] == 1
-
-            for stream in (False, True):
-                response = await client.post("/v1/chat/completions", headers=HEADERS, json={**body, "stream": stream})
-                assert response.status == 200
-                await response.read()
-                assert response.headers["x-reef-release-id"] == manifest["release_id"]
-                assert response.headers["x-reef-agent-record-id"]
 
     asyncio.run(run())
 

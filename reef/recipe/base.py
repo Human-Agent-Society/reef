@@ -28,7 +28,7 @@ from reef.pipeline_context import PipelineContext
 from reef.recipe.config_fields import config_field, resolve_config_field_values
 from reef.recipe.errors import RecipeConfigError
 from reef.record2sample import Record2Sample
-from reef.runtime.interfaces import InferenceHandler, InferenceRuntime, MultimodalRelay, TrainingMethod
+from reef.runtime.interfaces import InferenceRuntime, TrainingMethod
 from reef.runtime.jobs import ReleaseLayout, TrainingComponent
 from reef.sample2job import NoJobData
 from reef.storage.records import RecordStore
@@ -147,6 +147,13 @@ class Recipe:
         """
         stage = self.stages().record2sample
         return Record2Sample.referenced_class(stage).scenario_state_dirs(stage.config, scenario)
+
+    def with_training_component(self, component: TrainingComponent) -> Recipe:
+        """This recipe with ``component`` in place of its training component: the same recipe, whose trainers
+        submit their jobs to ``component``. Only a recipe with a training component has one to replace."""
+        if self.training_component is None:
+            raise ValueError(f"{type(self).__name__} has no training component to replace")
+        return replace(self, training_component=component)
 
     def with_model_config(self, config: ModelConfig) -> Recipe:
         """Bind model settings supplied for this scenario."""
@@ -315,20 +322,6 @@ class Recipe:
                 ),
             ),
         )
-
-    @property
-    def inference_handler(self) -> InferenceHandler | None:
-        """The inference backend composed by this recipe's runtime, if any.
-
-        Use ``runtime`` for the runtime itself.
-        """
-        runtime = self.runtime
-        return runtime.inference_handler if runtime is not None else None
-
-    @property
-    def multimodal_relay(self) -> MultimodalRelay | None:
-        """Where this recipe's scenarios send multimodal calls, or ``None`` when it offers none (the default)."""
-        return None
 
     def build_surface(self, scenario: str) -> Surface:
         """Build the serving surface for the named scenario.

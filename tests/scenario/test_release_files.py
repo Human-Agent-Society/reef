@@ -20,6 +20,7 @@ from reef.evaluation.activation import NeverActivate
 from reef.harness.tree import TreePatch
 from reef.scenario.release_files import ScenarioReleaseFiles
 from reef.scenario.scenario import Scenario
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.backend import ReleaseFiles
 
@@ -33,6 +34,7 @@ def harness_scenario(tmp_path: Path, method, *, durable: bool = True, **fields) 
         harness_repository(tmp_path, PI_SEED.files),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record" if durable else None),
+        coordination=memory_coordination(),
     )
     scenario = dispatcher.get_or_create_scenario("demo")
     assert scenario is not None

@@ -243,10 +243,18 @@ class TaskVariant:
 
 @dataclass(frozen=True)
 class AuthoredTask:
-    """The author's task as a Designer's reply, and the receipts of its model calls that Reef recorded, in order."""
+    """The author's task as a Designer's reply, and where the model calls that wrote it are kept.
+
+    Values: ``reply`` is the task in a Designer's reply form. ``record_ids`` are the receipts of the model calls
+    that Reef recorded, in order. ``transcript`` is the path, relative to the run's directory, of the transcript
+    of an author whose model calls Reef does not record (Claude Code's own session file), or ``""``.
+    Purpose: an author's ``author`` returns it; the generator admits ``reply`` and names the task's sources from
+    ``record_ids``, or from ``transcript`` when no call was recorded.
+    """
 
     reply: str
     record_ids: tuple[str, ...]
+    transcript: str = ""
 
 
 class CandidateChecks(ABC):
@@ -430,11 +438,19 @@ class RecordingGateway(AgentGateway):
 class AgentTools(AgentTool):
     """The gateway's ``/check`` for one agent run, answered at once, and the polls that follow it.
 
+    Values: ``root`` is the run directory, ``checks`` implements CandidateChecks, and
+    ``session`` is None or the executor from which to download the workspace.
+    Under ``lock``, ``results`` maps consecutive positive check IDs to None while
+    running or their result dictionaries when done. ``running_id`` is None or
+    the sole unfinished check ID. Construction starts with no session or check results.
+    Purpose: author gateways use this object to serialize checks and retain results.
+
     ``/check`` with no arguments starts a check on a thread of its own (the workspace pulled from the sandbox,
     then the candidate checks) and answers ``state: running`` with its ``check_id``; while one runs, it answers
     that one and starts nothing. ``/check`` with a ``check_id`` polls that check: it answers ``running`` until the
     check ends, then its result with ``state: done``. No HTTP exchange outlasts a check, and every caller waiting
     on one gets its result.
+    A ``check_id`` that names no check of this run is refused.
     """
 
     name = "check"
@@ -558,6 +574,37 @@ def repository_snapshot(source: SessionSource, cache_dir: Path) -> Path:
     return target
 
 
+def write_inputs(reef: ReefClient, source: SessionSource, work_dir: Path, variant: TaskVariant | None) -> None:
+    """An agent's inputs for ``source`` under ``work_dir / "inputs"``, and its empty ``workspace/task``.
+
+    The inputs are the session read from ``reef``, the repository's address and, with ``variant``, the parent's
+    files and its pass rate. The repository's files are copied in later, from the snapshot cache.
+    """
+    inputs = work_dir / "inputs"
+    (work_dir / "workspace" / "task").mkdir(parents=True)
+    inputs.mkdir()
+    (inputs / "session.md").write_text(session_text(reef, source), encoding="utf-8")
+    repository = source.repository
+    (inputs / "task.md").write_text(
+        REPOSITORY_TEXT.format(url=repository.url, commit=repository.commit, path=repository.path)
+        + "\n../inputs/repo holds the same files for you to read.\n",
+        encoding="utf-8",
+    )
+    if variant is not None:
+        shutil.copytree(variant.parent_dir, inputs / "parent", symlinks=False)
+        (inputs / "variant.md").write_text(
+            VARIANT_TEXT.format(
+                parent=variant.parent,
+                pass_rate=variant.pass_rate,
+                rollouts=variant.rollouts,
+                direction=variant.direction,
+                why=VARIANT_REASONS[variant.direction],
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+
 class AgentAuthor(VariantAuthor):
     """pi in a cloud sandbox, its model calls recorded on the Reef at ``reef_url`` under ``scenario``.
 
@@ -627,28 +674,7 @@ class AgentAuthor(VariantAuthor):
     ) -> AuthoredTask:
         inputs = work_dir / "inputs"
         task_dir = work_dir / "workspace" / "task"
-        task_dir.mkdir(parents=True)
-        inputs.mkdir()
-        (inputs / "session.md").write_text(session_text(self.reef, source), encoding="utf-8")
-        repository = source.repository
-        (inputs / "task.md").write_text(
-            REPOSITORY_TEXT.format(url=repository.url, commit=repository.commit, path=repository.path)
-            + "\n../inputs/repo holds the same files for you to read.\n",
-            encoding="utf-8",
-        )
-        if variant is not None:
-            shutil.copytree(variant.parent_dir, inputs / "parent", symlinks=False)
-            (inputs / "variant.md").write_text(
-                VARIANT_TEXT.format(
-                    parent=variant.parent,
-                    pass_rate=variant.pass_rate,
-                    rollouts=variant.rollouts,
-                    direction=variant.direction,
-                    why=VARIANT_REASONS[variant.direction],
-                )
-                + "\n",
-                encoding="utf-8",
-            )
+        write_inputs(self.reef, source, work_dir, variant)
         calls = ModelCalls(self.max_model_calls)
         try:
             shutil.copytree(repository_snapshot(source, self.cache_dir), inputs / "repo", symlinks=True)

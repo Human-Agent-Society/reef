@@ -111,8 +111,8 @@ Train on whole conversations
 ----------------------------
 
 A complete conversation, such as an agent rollout with tool calls, can train
-every agent turn at once. Upload it as an ATIF trajectory
-(`Upload trajectories <../../reference/http-api.rst#upload-trajectories>`__).
+every agent turn at once. Create it as a trajectory item that the scenario uses
+(`Create trajectory items <../../reference/http-api.rst#create-trajectory-items>`__).
 ``SFTSamples`` renders each uploaded trajectory into one sample:
 
 - The steps become chat messages: an ``agent`` step is an assistant turn with
@@ -270,18 +270,20 @@ SFT, then RL on uploaded tasks
 ------------------------------
 
 The recipe gives parameters to trajectory jobs only. An uploaded train task
-(``POST /reef/scenarios/{scenario}/tasks?split=train``) trains in ``manual``
+(a task item in the ``train`` split, ``POST /reef/namespaces/{owner}/data/tasks``) trains in ``manual``
 mode, for an instruction whose ``parameters`` give its job's method and
 rollout. Thus one scenario runs SFT first and then RL:
 
-1. Set the scenario to ``manual`` and upload the trajectories and the tasks.
+1. Set the scenario to ``manual``, and create the trajectories and the tasks as items that it uses.
 2. Put the trajectories in the manual buffer and send an instruction. The job
    trains them with SFT.
 3. Put the tasks in the manual buffer and send an instruction with
    ``{"method": {"objective": "task_group"}, "rollout": {"rollouts_per_task": 4}}``
    in ``parameters``. The job rolls the tasks out and trains on the rollouts.
 
-The training component must run task jobs: Tinker does, Slime does not. See
+The training component must run task jobs: Tinker does, and Slime does with
+its own rollout engines (`Task jobs on Slime
+<../../reference/configuration.rst#task-jobs-on-slime>`__). See
 `Manual training <../../reference/http-api.rst#manual-training>`__ for the
 instruction and `Choose the samples that train
 <../../reference/http-api.rst#choose-the-samples-that-train>`__ for the buffer.

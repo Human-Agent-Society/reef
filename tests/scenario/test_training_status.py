@@ -35,6 +35,7 @@ from reef.record2record import InferenceRecord2Record
 from reef.record2sample import NoSamples
 from reef.storage.records import RecordStore
 from reef.storage.samples import TrainerSamples
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.tasks import TaskStorage
 from reef.train.backend import ComponentReleases
@@ -76,6 +77,7 @@ def scenario_double(
         runtime=runtime,
         commit_status={"scenario_step": 0, "last_committed_step": last_committed_step},
         artifact_status=lambda: {"weights": {"active": "base", "training_start": "base"}},
+        serving_artifact_id=lambda: "base",
     )
 
 
@@ -96,6 +98,7 @@ def bound_dispatcher(scenario: SimpleNamespace) -> Dispatcher:
         Recipe(),
         InMemoryRepositoryBackend.factory(initial, root=root / "repository"),
         scenario_storage=SQLiteScenarioStorage(),
+        coordination=memory_coordination(),
     )
     dispatcher.registry = registry_double(scenario)
     dispatcher.local_workers.registry = dispatcher.registry
@@ -120,30 +123,27 @@ def test_status_exposes_the_last_committed_step_outcome() -> None:
     assert dispatcher.build_training_status()["scenarios"]["s"]["last_committed_step"] == committed
 
 
-def test_status_keeps_the_published_version_until_inference_reopens() -> None:
+def test_status_names_the_served_artifact_and_the_inference_admission() -> None:
     class Runtime:
         open = False
-        current = "engine:old"
         per_scenario_adapters = False
 
         @property
         def inference_admission_status(self):
             return {"open": self.open, "active": 0}
 
-        def current_runtime_load_id(self):
-            return self.current
-
     runtime = Runtime()
-    dispatcher = bound_dispatcher(scenario_double(runtime=runtime))
+    scenario = scenario_double(runtime=runtime)
+    dispatcher = bound_dispatcher(scenario)
 
     status = dispatcher.build_training_status()["scenarios"]["s"]
-    assert status["current_runtime_load_id"] == "engine:old"
+    assert status["served_artifact_id"] == "base"
     assert status["inference_admission"] == {"open": False, "active": 0}
 
-    runtime.current = "engine:new"
+    scenario.serving_artifact_id = lambda: "trained"
     runtime.open = True
     status = dispatcher.build_training_status()["scenarios"]["s"]
-    assert status["current_runtime_load_id"] == "engine:new"
+    assert status["served_artifact_id"] == "trained"
     assert status["inference_admission"] == {"open": True, "active": 0}
 
 
@@ -336,13 +336,15 @@ def background_step_dispatcher(tmp_path: Path) -> tuple[Dispatcher, BackgroundSt
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
+        coordination=memory_coordination(),
     )
     return dispatcher, recipe, component
 
 
 def assert_trains_the_generated_task(component: StubTrainingComponent) -> None:
-    """Wait up to two seconds for the one job, which trains the step's task."""
-    deadline = time.monotonic() + 2
+    """Wait up to ten seconds for the one job, which trains the step's task: it passes the jobs queue, whose
+    workers poll, so a loaded host takes longer than an idle one."""
+    deadline = time.monotonic() + 10
     while not component.submitted and time.monotonic() < deadline:
         time.sleep(0.01)
     [job] = component.submitted

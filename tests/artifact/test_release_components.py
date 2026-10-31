@@ -5,7 +5,6 @@ from __future__ import annotations
 import shutil
 import threading
 from collections.abc import Mapping
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -14,28 +13,16 @@ import pytest
 from reef.artifact import Artifact, ArtifactNotFound, ArtifactPublicationError, InMemoryRepositoryBackend, Repository
 from reef.artifact.artifact import ArtifactRef, ArtifactValidator
 from reef.artifact.composite import compose_release
-from reef.core import RequestType
 from reef.core.activation import ActivationRule
 from reef.core.components import COMPONENTS_METADATA_KEY, ComponentEntry, ReleaseComponents, release_components
 from reef.core.errors import ReefError
 from reef.dispatcher import Dispatcher
 from reef.evaluation.activation import AlwaysActivate
 from reef.recipe.base import Recipe
-from reef.runtime.interfaces import InferenceHandler
 from reef.service.request_service import RequestService
-from reef.service.wire import parse_request_headers
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.surface import (
-    ArtifactLoader,
-    ComponentSurface,
-    InferenceHooks,
-    InferenceLease,
-    LeasingInferenceHooks,
-    ServingRuntime,
-    Surface,
-    TextFileTree,
-    WeightLoader,
-)
+from reef.surface import ArtifactLoader, ComponentSurface, ServingRuntime, Surface, TextFileTree, WeightLoader
 from reef.surface.base import AcceptAnyArtifact
 from reef.train import ComponentTrainer
 from reef.train.types import TrainStepResult
@@ -206,64 +193,6 @@ def test_surface_rejects_ambiguous_component_sets() -> None:
         Surface(components={"a/b": ComponentSurface()})
 
 
-class _TaggingHooks(InferenceHooks):
-    """Append the component's file to the request so order is observable."""
-
-    def prepare_request(self, artifact: Artifact, path: str, request: dict[str, Any]) -> dict[str, Any]:
-        files = TextFileTree().read_files(artifact) or {}
-        return {**request, "seen": [*request.get("seen", []), *sorted(files)]}
-
-    def verify_response(self, artifact: Artifact, path: str, response: Mapping[str, Any]) -> None:
-        return None
-
-
-@dataclass
-class _Lease(InferenceLease):
-    released: list[str]
-    content_id: str
-
-    def release(self) -> None:
-        self.released.append(self.content_id)
-
-
-class _LeasingHooks(LeasingInferenceHooks):
-    def __init__(self) -> None:
-        self.released: list[str] = []
-
-    def prepare_request(self, artifact: Artifact, path: str, request: dict[str, Any]) -> dict[str, Any]:
-        return {**request, "seen": [*request.get("seen", []), "lease"]}
-
-    def verify_response(self, artifact: Artifact, path: str, response: Mapping[str, Any]) -> None:
-        return None
-
-    def begin_request(self, artifact: Artifact, path: str) -> InferenceLease:
-        return _Lease(self.released, artifact.ref.content_id)
-
-
-@pytest.mark.unit
-def test_surface_chains_inference_hooks_and_leases_in_component_order(tmp_path: Path) -> None:
-    leasing = _LeasingHooks()
-    surface = Surface(
-        components={
-            "skills": ComponentSurface(inference=_TaggingHooks()),
-            WEIGHTS: ComponentSurface(inference=leasing),
-        }
-    )
-    hooks = surface.inference
-    assert isinstance(hooks, LeasingInferenceHooks)
-    skills = Artifact.local(_tree(tmp_path / "s", {"SKILL.md": "text"}))
-    weights = Artifact.local(_tree(tmp_path / "w", {"adapter_config.json": "{}"}))
-    composed = compose_release({"skills": skills, WEIGHTS: weights}, directory=tmp_path / "release")
-
-    prepared = hooks.prepare_request(composed, "/v1/chat/completions", {"messages": []})
-    assert prepared["seen"] == ["SKILL.md", "lease"]
-    hooks.begin_request(composed, "/v1/chat/completions").release()
-    assert leasing.released == [weights.ref.content_id]
-
-    # A flat surface hands out its component's hooks unchanged.
-    assert Surface(components={WEIGHTS: ComponentSurface(inference=leasing)}).inference is leasing
-
-
 class _TwoComponentRecipe(Recipe):
     """A record-only recipe whose scenario serves weights and a harness tree through one trainer."""
 
@@ -307,42 +236,6 @@ class _TwoComponentRecipe(Recipe):
 
 
 @pytest.mark.unit
-def test_inference_hands_the_handler_the_loaded_component(tmp_path: Path) -> None:
-    """A handler that reads the tree must see the weights, not a release root of component directories."""
-    initial = tmp_path / "initial"
-    _tree(initial / WEIGHTS, {"adapter_config.json": "{}"})
-    _tree(initial / HARNESS, {"AGENTS.md": "seed"})
-    dispatcher = Dispatcher(
-        _TwoComponentRecipe(),
-        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
-        local_artifact_dir=tmp_path / "staged",
-        scenario_storage=SQLiteScenarioStorage(tmp_path / "store"),
-    )
-    try:
-        scenario = dispatcher.get_or_create_scenario("agent")
-        assert scenario is not None
-        scenario.commit(TrainStepResult(state={}, artifact=Artifact.local(_tree(tmp_path / "h1", {"AGENTS.md": "x"}))))
-        service = RequestService(dispatcher)
-        prepared = service._prepare_inference(
-            parse_request_headers({"x-reef-scenario": "agent"}, RequestType.INFERENCE), _NullHandler(), None
-        )
-        release = prepared.artifact.materialize()
-        assert prepared.served.ref.release_id == release.ref.release_id
-        assert prepared.served.local_path == (release.local_path or Path()) / WEIGHTS
-        assert TextFileTree().read_files(prepared.served) == {"adapter_config.json": "{}"}
-    finally:
-        dispatcher.close()
-
-
-class _NullHandler(InferenceHandler):
-    async def inference(self, artifact, path, payload):
-        raise NotImplementedError
-
-    async def inference_stream(self, artifact, path, payload):
-        raise NotImplementedError
-
-
-@pytest.mark.unit
 def test_multi_component_scenario_commits_one_component_and_carries_the_rest(tmp_path: Path) -> None:
     initial = tmp_path / "initial"
     _tree(initial / WEIGHTS, {"adapter_config.json": "{}"})
@@ -355,6 +248,7 @@ def test_multi_component_scenario_commits_one_component_and_carries_the_rest(tmp
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "store"),
+        coordination=memory_coordination(),
     )
     try:
         scenario = dispatcher.get_or_create_scenario("agent")
@@ -394,7 +288,7 @@ def test_multi_component_scenario_commits_one_component_and_carries_the_rest(tmp
         # The record names the harness trainer, but the tree did not change: no new harness head.
         service = RequestService(dispatcher)
         headers = {"x-reef-scenario": "agent"}
-        assert service.harness_head(headers) == after_harness.ref.release_id
+        assert service.harness_release_id(scenario) == after_harness.ref.release_id
         assert [row["release_id"] for row in service.harness_releases(headers)["releases"]] == [
             base.ref.release_id,
             after_harness.ref.release_id,
@@ -423,7 +317,7 @@ def test_multi_component_scenario_commits_one_component_and_carries_the_rest(tmp
         assert served.components.entries[WEIGHTS].content_id == trained.ref.content_id
         assert surface.files.read_files(served) == {"AGENTS.md": "evolved"}
         assert activator.activated[served_before:] == []
-        assert service.harness_head(headers) == after_harness.ref.release_id
+        assert service.harness_release_id(scenario) == after_harness.ref.release_id
 
         # Activating the base's weights loads them and keeps the served harness; the chain tip stays. The creation
         # carried the base artifact forward, so its artifact_id is the base release's.
@@ -458,7 +352,7 @@ def test_multi_component_scenario_commits_one_component_and_carries_the_rest(tmp
         assert served.components is not None
         assert served.components.entries[WEIGHTS].content_id == base_weights
         assert surface.files.read_files(served) == {"AGENTS.md": "held"}
-        assert service.harness_head(headers) == held_ref.release_id
+        assert service.harness_release_id(scenario) == held_ref.release_id
 
         # Weights held for review are activated as weights, under the tree served by then.
         held_weights = Artifact.local(
@@ -476,7 +370,7 @@ def test_multi_component_scenario_commits_one_component_and_carries_the_rest(tmp
         assert surface.files.read_files(served) == {"AGENTS.md": "newest"}
         assert activator.activated[-1] == held_weights.ref.content_id
         # That activation changed no tree: the harness head and catalog stay at the newest harness step.
-        assert service.harness_head(headers) == newest_release
+        assert service.harness_release_id(scenario) == newest_release
         assert service.harness_manifest(headers)["release_id"] == newest_release
         catalog = service.harness_releases(headers)["releases"]
         assert catalog[-1]["release_id"] == newest_release
@@ -499,6 +393,7 @@ def test_a_held_release_activates_without_the_manifest_of_its_parent(tmp_path: P
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "store"),
+        coordination=memory_coordination(),
     )
     try:
         scenario = dispatcher.get_or_create_scenario("agent")
@@ -536,6 +431,7 @@ def test_an_activation_after_a_rejected_harness_step_adds_no_harness_release(tmp
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "store"),
+        coordination=memory_coordination(),
     )
     try:
         scenario = dispatcher.get_or_create_scenario("agent")
@@ -574,6 +470,7 @@ def test_an_activation_refused_by_validation_changes_nothing(tmp_path: Path, mon
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=staged_root,
         scenario_storage=SQLiteScenarioStorage(tmp_path / "store"),
+        coordination=memory_coordination(),
     )
     try:
         scenario = dispatcher.get_or_create_scenario("agent")

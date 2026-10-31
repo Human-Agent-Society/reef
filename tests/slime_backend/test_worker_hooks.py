@@ -2,9 +2,7 @@ from __future__ import annotations
 
 import importlib
 import sys
-import tomllib
 import types
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -104,51 +102,11 @@ def test_external_batch_and_step_size_hooks_are_idempotent(monkeypatch: pytest.M
 
 
 @pytest.mark.unit
-def test_finalize_grads_hook_empties_the_cache_only_when_memory_is_low(monkeypatch: pytest.MonkeyPatch) -> None:
-    finalized: list[tuple[object, ...]] = []
-    model = _stub_module(
-        monkeypatch,
-        "slime.backends.megatron_utils.model",
-        finalize_model_grads=lambda *args: finalized.append(args) or "finalized",
-    )
-    cleared: list[bool] = []
-    memory_utils = importlib.import_module("slime.utils.memory_utils")
-    monkeypatch.setattr(memory_utils, "clear_memory", lambda: cleared.append(True))
-    free_bytes = {"value": 10 * 1024**3}
-    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
-    monkeypatch.setattr(torch.cuda, "mem_get_info", lambda _device: (free_bytes["value"], 80 * 1024**3))
-    monkeypatch.setattr(worker_hooks, "FINALIZE_GRADS_RELIEF", worker_hooks.FinalizeGradsRelief())
-
-    worker_hooks.install_finalize_grads_memory_relief()
-    wrapped = model.finalize_model_grads
-    worker_hooks.install_finalize_grads_memory_relief()
-    assert model.finalize_model_grads is wrapped
-
-    assert model.finalize_model_grads("model", 4) == "finalized"
-    assert cleared == []
-    free_bytes["value"] = 2 * 1024**3
-    assert model.finalize_model_grads("model", 4) == "finalized"
-    assert cleared == [True]
-    assert finalized == [("model", 4), ("model", 4)]
-
-
-@pytest.mark.unit
-def test_finalize_grads_hook_targets_the_pinned_slime() -> None:
-    pyproject = tomllib.loads((Path(__file__).parents[2] / "pyproject.toml").read_text())
-    pins = [dependency for dependency in pyproject["dependency-groups"]["runtime"] if dependency.startswith("slime @")]
-
-    # A new pin from THUDM/slime@2f4280e3 on has the guard itself: drop the hook.
-    assert pins == [
-        f"slime @ git+https://github.com/THUDM/slime.git@{worker_hooks.SLIME_REVISION_WITHOUT_FINALIZE_GUARD}"
-    ]
-
-
-@pytest.mark.unit
 def test_metric_and_rollout_logging_hooks_keep_reef_fields_local(monkeypatch: pytest.MonkeyPatch) -> None:
     logged: list[object] = []
     logging_utils = _stub_module(
         monkeypatch,
-        "slime.utils.logging_utils",
+        "slime.observability.logging_utils",
         log=lambda args, metrics, step: logged.append((args, metrics, step)) or "logged",
     )
     worker_hooks.drain_worker_metrics()
@@ -171,16 +129,14 @@ def test_metric_and_rollout_logging_hooks_keep_reef_fields_local(monkeypatch: py
     captured: list[dict[str, object]] = []
     data = _stub_module(
         monkeypatch,
-        "slime.backends.megatron_utils.data",
+        "slime.observability.train_metric_utils",
         log_rollout_data=lambda _rollout_id, _args, values: captured.append(values) or "stored",
     )
-    actor = _stub_module(monkeypatch, "slime.backends.megatron_utils.actor")
     worker_hooks._install_rollout_logging()
     values = {
         "tokens": [torch.tensor([1])],
         "topk_log_probs": [torch.tensor([[-0.2]])],
-        "producing_runtime_load_ids": ["inc:4"],
-        "producing_runtime_load_spans": [[{"start": 0, "end": 1, "runtime_load_id": "inc:4"}]],
+        "producing_artifact_ids": ["artifact-4"],
     }
     from reef.train.slime_backend.loss_families import LOSS_FAMILIES
 
@@ -190,10 +146,8 @@ def test_metric_and_rollout_logging_hooks_keep_reef_fields_local(monkeypatch: py
     )
     assert data.log_rollout_data(3, log_args, values) == "stored"
     assert "topk_log_probs" not in captured[0]
-    assert "producing_runtime_load_ids" not in captured[0]
-    assert "producing_runtime_load_spans" not in captured[0]
-    assert values["producing_runtime_load_ids"] == ["inc:4"]
-    assert actor.log_rollout_data is data.log_rollout_data
+    assert "producing_artifact_ids" not in captured[0]
+    assert values["producing_artifact_ids"] == ["artifact-4"]
 
     # A family's declared skip keys resolve from loss_family alone, so the
     # direct-start_bridge path (no driver stamping) hides them too.
@@ -443,7 +397,6 @@ def test_objective_initializers_chain_user_hooks(monkeypatch: pytest.MonkeyPatch
     for name in (
         "_install_external_batch_keys",
         "_install_step_batch_size",
-        "install_finalize_grads_memory_relief",
         "_install_metric_capture",
         "_install_rollout_logging",
         "_install_critic_metrics",
@@ -510,10 +463,12 @@ def test_learning_rate_schedule_sets_each_optimizer_step_and_chains_the_user_hoo
 @pytest.mark.unit
 def test_logged_step_rates_follow_the_recipe_schedule(monkeypatch: pytest.MonkeyPatch) -> None:
     logged: list[dict[str, object]] = []
-    _stub_module(monkeypatch, "slime.utils.logging_utils", log=lambda args, metrics, step: logged.append(metrics))
+    _stub_module(
+        monkeypatch, "slime.observability.logging_utils", log=lambda args, metrics, step: logged.append(metrics)
+    )
     worker_hooks.drain_worker_metrics()
     worker_hooks._install_metric_capture()
-    from slime.utils import logging_utils
+    from slime.observability import logging_utils
 
     step = {"train/lr-pg_0": 3e-6, "train/critic-lr-pg_0": 1e-6, "train/loss": 1.0, "train/step": 4}
     worker_hooks.APPLIED_LEARNING_RATE.value = 2e-5

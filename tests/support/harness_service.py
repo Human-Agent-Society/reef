@@ -15,6 +15,8 @@ from pathlib import Path
 from typing import Any
 from weakref import WeakKeyDictionary
 
+from tests.support.samples_service import make_samples
+
 from reef.artifact import CachedRepositoryBackendFactory, InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
 from reef.core.evaluation import CandidateEvaluationPlugin
@@ -23,6 +25,7 @@ from reef.evaluation.harness import ComparePolicy
 from reef.recipe import Recipe
 from reef.runtime.interfaces import InferenceHandler
 from reef.scenario.scenario import Scenario
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.harness_backend.backend import HarnessBackend
 from reef.train.types import JobData, TrainStepResult
@@ -51,6 +54,7 @@ def harness_dispatcher(tmp_path: Path, recipe: Recipe, *, hold_local_cycles: boo
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
         hold_local_cycles=hold_local_cycles,
+        coordination=memory_coordination(),
     )
 
 
@@ -73,9 +77,11 @@ def report_records(scenario: str, suffix: str, *, prompt: str = "q", score: floa
 
 
 def report_once(scenario: Scenario, suffix: str, *, prompt: str = "q", score: float = 0.0) -> None:
-    """One trace sample through the record store, without waking the trainer: enough for one step."""
+    """One trace sample through the record store and the samples service, without waking the trainer: enough for
+    one step."""
     for record in report_records(scenario.name, suffix, prompt=prompt, score=score):
         scenario.records.append_result(record)
+    make_samples(scenario)
 
 
 def run_step(scenario: Scenario, suffix: str) -> TrainStepResult:

@@ -16,6 +16,7 @@ from tests.support._threshold_processor import threshold_pipeline
 from tests.support.harness_service import harness_dispatcher
 from tests.support.harness_steps import COMPONENT, UNCHANGED, TreeReleases, changed_rules, harness_recipe
 from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent
+from tests.support.samples_service import make_samples
 from tests.train.test_harness_evolve_processor import harness_stages, records_pipeline, reports_pipeline
 from tests.train.test_reef_trainer_contracts import ExampleBackend, ExampleJobData
 
@@ -35,6 +36,7 @@ from reef.sample2job import Sample2Job
 from reef.service.app import create_app
 from reef.storage.samples import CONSUMED_SAMPLE_PREFIX
 from reef.storage.scenario import ScenarioSettings
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train.backend import ComponentReleases, PreparedStep
 from reef.train.harness_backend.state import HarnessState
@@ -187,6 +189,7 @@ def test_manual_waits_for_an_instruction_and_trains_the_inserted_samples_whateve
         )
     )
     # Held samples start no job in manual, however many there are, and none joins the manual buffer by itself.
+    make_samples(trainer)
     assert trainer.run_once() is None
     assert not trainer.job_data_ready()
     assert trainer.pipeline.buffer() == ()
@@ -196,6 +199,7 @@ def test_manual_waits_for_an_instruction_and_trains_the_inserted_samples_whateve
     chosen = held[-2:]
     trainer.change_buffer(sample_ids_of(trainer.pipeline, *chosen), insert=True)
     records.append(instruction("request-1"))
+    make_samples(trainer)
     result = trainer.run_once()
     assert result is not None
     batch = backend.batches[0]
@@ -211,8 +215,10 @@ def test_manual_waits_for_an_instruction_and_trains_the_inserted_samples_whateve
     assert trainer.pipeline.buffer() == ()
     assert len(trainer.pipeline.held) == len(held) - len(chosen)
     assert records.get("s", "turn-1") is not None
+    make_samples(trainer)
     assert trainer.run_once() is None
     assert not records.append_result(instruction("request-1")).inserted
+    make_samples(trainer)
     assert trainer.run_once() is None
 
 
@@ -220,8 +226,10 @@ def test_auto_keeps_recipe_batching(records, build):
     backend = CaptureBackend()
     trainer = build(backend, mode="auto", job_samples=2)
     records.append(inference("a"))
+    make_samples(trainer)
     assert trainer.run_once() is None
     records.append(inference("b"))
+    make_samples(trainer)
     assert trainer.run_once() is not None
     assert [source_record_id(sample) for sample in backend.batches[0].samples] == ["a", "b"]
     assert backend.batches[0].request is None
@@ -233,6 +241,7 @@ def test_manual_recovery_replays_pending_requests_but_not_committed_ones(tmp_pat
     first = build(backend, store=records)
     records.append(inference("a"))
     records.append(instruction("committed"))
+    make_samples(first)
     result = first.run_once()
     prepared = first.prepare_commit(result)
     first.commit(prepared)
@@ -244,6 +253,7 @@ def test_manual_recovery_replays_pending_requests_but_not_committed_ones(tmp_pat
     recovered = build(backend, store=records)
     recovered.restore_record_progress(after_sequence=prepared.high_water_sequence, offset=prepared.high_water_offset)
     recovered.replay_retained(up_to_sequence=prepared.high_water_sequence, consumed_ids=prepared.consumed_ids)
+    make_samples(recovered)
     assert recovered.run_once() is not None
     assert [batch.request.text for batch in backend.batches] == ["committed", "pending"]
     recovered.close()
@@ -323,6 +333,7 @@ def test_manual_is_a_native_contract_for_arbitrary_batch_schemas(records, build)
     backend = CaptureBackend()
     trainer = build(backend, instruction_pipeline)
     records.append(instruction("change"))
+    make_samples(trainer)
     assert trainer.run_once() is not None
     assert isinstance(backend.batches[0], ExampleJobData)
     # The pipeline attaches the instruction to the recipe's own batch type; with nothing held it has no tasks.
@@ -469,14 +480,18 @@ def test_processor_uses_shared_data_and_one_batch_assembly_hook(records, build, 
     backend = CaptureBackend()
     trainer = build(backend, trajectory_pipeline, mode=mode, job_samples=2)
     records.append(inference("first"))
+    make_samples(trainer)
     assert trainer.run_once() is None
     records.append(inference("second"))
     if mode == "manual":
         # The job samples are in the manual buffer, and manual still waits for an instruction.
+        make_samples(trainer)
         assert trainer.run_once() is None
         trainer.change_buffer(sample_ids_of(trainer.pipeline, "first", "second"), insert=True)
+        make_samples(trainer)
         assert trainer.run_once() is None
         records.append(instruction("use-the-trajectory"))
+    make_samples(trainer)
     result = trainer.run_once()
     # The same hook shapes the job data of both modes.
     assert isinstance(backend.batches[0], ExampleJobData)
@@ -491,6 +506,7 @@ def test_processor_uses_shared_data_and_one_batch_assembly_hook(records, build, 
     )
     assert prepared.consumed_ids == frozenset(expected)
     trainer.commit(prepared)
+    make_samples(trainer)
     assert trainer.run_once() is None
 
 
@@ -503,6 +519,7 @@ def test_factory_cannot_silently_change_the_processor_mode(build):
 def test_switch_during_reserved_batch_keeps_original_acknowledgement(records, build, mode):
     trainer = build(CaptureBackend(), mode=mode)
     records.append(inference("first") if mode == "auto" else instruction("first"))
+    make_samples(trainer)
     result = trainer.run_once()
     original = trainer.pending_job_data
     target = "manual" if mode == "auto" else "auto"
@@ -515,6 +532,7 @@ def test_switch_during_reserved_batch_keeps_original_acknowledgement(records, bu
     assert prepared.consumed_ids == ({"first", "sample:first:0"} if mode == "auto" else {"first"})
     trainer.commit(prepared)
     records.append(instruction("next") if target == "manual" else inference("next"))
+    make_samples(trainer)
     assert trainer.run_once(1) is not None
     following = trainer.pending_job_data
     assert (following.request is not None) == (target == "manual")
@@ -524,22 +542,27 @@ def test_switch_preserves_incomplete_auto_batch_and_unread_manual_instructions(r
     backend = CaptureBackend()
     trainer = build(backend, mode="auto", job_samples=2)
     records.append(inference("a"))
+    make_samples(trainer)
     assert trainer.run_once() is None
     trainer.set_training_mode("manual")
     records.append(instruction("change"))
     # Change back before the accepted instruction has been read.
     trainer.set_training_mode("auto")
+    make_samples(trainer)
     assert trainer.run_once() is None
     records.append(inference("b"))
+    make_samples(trainer)
     result = trainer.run_once()
     assert [source_record_id(item) for item in backend.batches[-1].samples] == ["a", "b"]
     trainer.commit(trainer.prepare_commit(result))
     assert records.get("s", "change") is not None
     trainer.set_training_mode("manual")
+    make_samples(trainer)
     result = trainer.run_once(1)
     assert backend.batches[-1].request.id == "change"
     trainer.commit(trainer.prepare_commit(result))
     trainer.set_training_mode("auto")
+    make_samples(trainer)
     assert trainer.run_once(2) is None
 
 
@@ -807,8 +830,11 @@ def test_a_failed_instruction_is_skipped_alone_and_its_units_wait_for_the_next_i
             for record in current.store.history()
             if record.metrics is not None and "training_request" in record.metrics
         )
-        # The skip row consumed the instruction alone.
-        assert skip.consumed_ids == frozenset({"poison"})
+        # The skip row consumed the instruction and no sample. The samples service reads the exchange's records
+        # on its own; when it stored their sample before the skip, the skip consumes those records too.
+        assert "poison" in skip.consumed_ids
+        assert skip.consumed_ids <= {"poison", "a", "report-a"}
+        assert not any(item.startswith(CONSUMED_SAMPLE_PREFIX) for item in skip.consumed_ids)
         assert current.records.get("s", "report-a") is not None
         assert current.trainer.pending_instructions() == 0
         assert current.trainer.instruction_failures() == {}
@@ -855,6 +881,7 @@ def test_a_logless_scenario_keeps_the_failed_batch_and_skips_it_on_its_next_wake
         recipe_in("manual", tmp_path, method),
         factory,
         scenario_storage=SQLiteScenarioStorage(),
+        coordination=memory_coordination(),
     )
     try:
         scenario = dispatcher.get_or_create_scenario("s")
@@ -954,14 +981,12 @@ def test_a_job_trainer_runs_each_instruction_as_a_job_and_a_failed_job_does_not_
 ):
     component, runtime = _FirstJobFails(tmp_path / "checkpoints"), StubInferenceRuntime()
     dispatcher = open_dispatcher(_InstructionJobRecipe(component, runtime=runtime, training_mode="manual"))
-    served = dispatcher.get_or_create_scenario("s").serving_runtime_load_id()
     for receipt in ("a", "b"):
-        # The exchange names the served version, so the staleness check keeps it for the job.
         dispatcher.accept_record(
             AgentRecord.create(
                 scenario="s",
                 request_type=RequestType.INFERENCE,
-                payload={"response": {"training": {"runtime_load_id": served}}},
+                payload={"response": {"training": {}}},
                 agent_record_id=receipt,
             )
         )
@@ -998,6 +1023,49 @@ def test_a_job_trainer_runs_each_instruction_as_a_job_and_a_failed_job_does_not_
     assert scenario.trainer.pending_instructions() == 0
 
 
+def test_the_job_of_an_instruction_lists_the_instructions_parameters_and_its_times(tmp_path, open_dispatcher):
+    component = StubTrainingComponent(tmp_path / "checkpoints")
+    dispatcher = open_dispatcher(
+        _InstructionJobRecipe(component, runtime=StubInferenceRuntime(), training_mode="manual")
+    )
+    dispatcher.accept_record(
+        AgentRecord.create(
+            scenario="s",
+            request_type=RequestType.INFERENCE,
+            payload={"response": {"training": {}}},
+            agent_record_id="a",
+        )
+    )
+    dispatcher.accept_record(report("a"))
+    insert_samples_of(dispatcher, "a")
+    body = {
+        "agent_record_id": "train-1",
+        "text": "Prefer tests first",
+        "session": "session-1",
+        "release_id": "release-1",
+        "parameters": {"learning_rate": 0.5},
+    }
+
+    async def run():
+        async with TestClient(TestServer(create_app(dispatcher))) as client:
+            response = await client.post("/reef/train", headers={"x-reef-scenario": "s"}, json=body)
+            assert response.status == 200, await response.text()
+            async with asyncio.timeout(10):
+                while True:
+                    listing = await (await client.get("/reef/scenarios/s/jobs")).json()
+                    if listing["jobs"] and listing["jobs"][0]["state"] == "finished":
+                        return listing["jobs"][0]
+                    await asyncio.sleep(0.05)
+
+    job = asyncio.run(run())
+    # The recipe gives no job parameters, so the job's are the instruction's.
+    assert job["parameters"] == {"learning_rate": 0.5}
+    assert job["instruction"] == {"id": "train-1", "text": "Prefer tests first", "parameters": {"learning_rate": 0.5}}
+    assert (job["sample_count"], job["sample_kind"]) == (1, "trajectory")
+    assert job["created_at"] <= job["started_at"] <= job["ended_at"]
+    assert job["experiment"] is None
+
+
 def test_a_job_trainer_skips_a_failed_instruction_instead_of_submitting_it_again(tmp_path, records):
     component = SubmitRaisesForInstructionOne(tmp_path / "checkpoints")
     trainer = Trainer.build(
@@ -1009,13 +1077,16 @@ def test_a_job_trainer_skips_a_failed_instruction_instead_of_submitting_it_again
         default_job_samples=1,
     )
     failure(records, "a")
+    make_samples(trainer)
     assert trainer.run_once() is None
     trainer.change_buffer(sample_ids_of(trainer.pipeline, "a"), insert=True)
     records.append(instruction("one"))
     with pytest.raises(RuntimeError, match="submit failed"):
+        make_samples(trainer)
         trainer.run_once()
     # What the dispatcher does when an instruction's step raises.
     assert trainer.fail_pending_instruction("RuntimeError: submit failed")
+    make_samples(trainer)
     result = trainer.run_once()
     assert result.metrics["skipped"] == "instruction failed"
     assert result.metrics["error"] == "RuntimeError: submit failed"
@@ -1025,6 +1096,7 @@ def test_a_job_trainer_skips_a_failed_instruction_instead_of_submitting_it_again
     trainer.commit(prepared)
     # The next instruction's job takes the sample that the skipped instruction left in the manual buffer.
     records.append(instruction("two"))
+    make_samples(trainer)
     assert trainer.run_once() is not None
     assert component.submit_texts == ["one", "two"]
     assert [source_record_id(sample) for sample in component.submitted[-1].data.samples] == ["a"]
@@ -1042,6 +1114,7 @@ def test_an_instruction_runs_past_the_step_budget_and_the_failure_streak(tmp_pat
     records.append(instruction("two"))
     rows = []
     for step in range(2):
+        make_samples(trainer)
         result = trainer.run_once(step)
         assert result is not None
         prepared = trainer.prepare_commit(result)
@@ -1050,6 +1123,7 @@ def test_an_instruction_runs_past_the_step_budget_and_the_failure_streak(tmp_pat
     assert seen == ["one", "two"]
     assert [row["training_request"]["text"] for row in rows] == ["one", "two"]
     assert [row["skipped"] for row in rows] == [UNCHANGED, UNCHANGED]
+    make_samples(trainer)
     assert trainer.run_once(2) is None
 
     # An automatic step past the budget skips; the two instructions above ran past it.
@@ -1085,10 +1159,12 @@ def test_manual_traffic_is_available_to_auto_without_a_replay(records, build, pr
                     payload={"score": 0, "references": [receipt]},
                 )
             )
+    make_samples(trainer)
     assert trainer.run_once() is None
     original = trainer.pipeline
     offset = trainer.data_offset
     trainer.set_training_mode("auto")
+    make_samples(trainer)
     assert trainer.run_once() is not None
     assert trainer.pipeline is original
     assert trainer.data_offset == offset
@@ -1112,8 +1188,10 @@ def test_hybrid_and_other_unknown_modes_are_refused(tmp_path):
 def test_manual_runs_a_harness_instruction_alone_when_no_units_are_held(records, build, processor):
     backend = CaptureBackend()
     trainer = build(backend, processor, job_samples=2)
+    make_samples(trainer)
     assert trainer.run_once() is None
     records.append(instruction("alone"))
+    make_samples(trainer)
     result = trainer.run_once()
     assert result is not None
     batch = backend.batches[0]
@@ -1125,6 +1203,7 @@ def test_manual_runs_a_harness_instruction_alone_when_no_units_are_held(records,
     assert prepared.metrics["training_request"]["id"] == "alone"
     trainer.commit(prepared)
     assert records.get("s", "alone") is not None
+    make_samples(trainer)
     assert trainer.run_once() is None
     assert trainer.pipeline.training_mode == "manual"
 
@@ -1151,6 +1230,7 @@ def test_manual_gives_each_instruction_the_failures_that_the_client_inserted(rec
     trainer = build(backend, reports_pipeline, job_samples=2)
 
     def step():
+        make_samples(trainer)
         result = trainer.run_once()
         if result is None:
             return None

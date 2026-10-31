@@ -5,8 +5,9 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_reef_never_wires_the_internal_rollout_stack() -> None:
-    # Reef supplies batches externally and never calls the runtime's rollout
-    # generation package.
+    # Reef supplies the batches of trajectory and task jobs externally and never
+    # calls the runtime's rollout generation package. A dataset job's rollouts
+    # are Slime's own, through its rollout manager (RFC #1041).
     offenders = [
         str(path.relative_to(ROOT))
         for path in (ROOT / "reef").rglob("*.py")
@@ -31,7 +32,7 @@ def test_batch_processor_only_accepts_external_training_batches() -> None:
 
 def test_slime_pin_replaces_the_submodule() -> None:
     project_metadata = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    pin = "41014d1f29e201137fdffce737bb8bac65bc5219"
+    pin = "540ea919e45b8b929198abce008a103be9cfc779"
 
     assert f"github.com/THUDM/slime.git@{pin}" in project_metadata
     assert "third_party/slime" not in (ROOT / ".gitmodules").read_text(encoding="utf-8")

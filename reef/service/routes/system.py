@@ -11,11 +11,8 @@ from reef.service.request_service import RequestService, page_headers
 from reef.service.routes.payload import read_object
 
 
-def register_health_route(app: web.Application) -> None:
-    async def health(request: web.Request) -> web.Response:
-        return web.json_response({"ok": True})
-
-    app.router.add_get("/healthz", health)
+#: How long the install route renders before it sends the script's first lines with a spinner.
+INSTALL_PREAMBLE_DELAY_SECONDS = 0.5
 
 
 def register_system_routes(app: web.Application, *, request_service: RequestService) -> None:

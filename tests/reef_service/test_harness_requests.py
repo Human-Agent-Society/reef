@@ -13,6 +13,7 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from tests.support.harness_service import backend_step, harness_dispatcher
 from tests.support.harness_steps import COMPONENT, TreeReleases, changed_rules, harness_backend, harness_recipe
+from tests.support.samples_service import make_samples
 
 from reef.core import AgentRecord, RequestType
 from reef.core.plugins import PluginReference
@@ -463,6 +464,7 @@ def test_prepare_commit_keeps_the_backends_training_request_and_fills_a_step_tha
                     scenario="agents", request_type=RequestType.TRAIN, payload=payload, agent_record_id="ask-1"
                 )
             )
+            make_samples(trainer)
             result = trainer.run_once()
             assert result is not None
             prepared = trainer.prepare_commit(result)

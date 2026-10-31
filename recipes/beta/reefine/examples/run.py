@@ -163,17 +163,8 @@ def _manifest(client):
 
 
 def _ensure_scenario(client):
-    """A scenario exists once traffic has named it: one minimal inference creates it on its base release."""
-    try:
-        return _manifest(client)
-    except ReefClientError as exc:
-        if exc.status != 404:
-            raise
-    client.inference_with_record(
-        SCENARIO,
-        "/v1/chat/completions",
-        {"model": MODEL, "messages": [{"role": "user", "content": "Reply with one word."}], "max_tokens": 1},
-    )
+    """Create the scenario on its base release if it does not exist yet; its harness manifest."""
+    client.post("/reef/scenarios", SCENARIO, {"name": SCENARIO})
     return _manifest(client)
 
 

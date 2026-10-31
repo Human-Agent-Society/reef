@@ -6,6 +6,47 @@ from threading import Event
 import pytest
 from tests.support.artifact_versions import RecordingExperimentTracker, dispatcher, train
 from tests.support.component_trainers import HARNESS, _dispatcher, _RecordingTracker, _scenario
+from tests.support.samples_service import make_samples
+
+from reef.observability import ExperimentRun
+from reef.train.job_queue import scenario_jobs
+
+
+class RunRecordingTracker(RecordingExperimentTracker):
+    """Has one open run per scenario and training segment, as the W&B tracker does."""
+
+    def experiment_run(self, context):
+        run_id = f"{context.scenario}-segment-{context.run_segment}"
+        return ExperimentRun("wandb", "reef", run_id, "team", f"https://wandb.ai/team/reef/runs/{run_id}")
+
+
+def test_the_job_listing_names_the_run_that_records_each_job(tmp_path):
+    tracker = RunRecordingTracker()
+    value, _, _ = dispatcher(tmp_path, experiment_tracker=tracker)
+    try:
+        train(value, 1)
+        value.registry.experiment_reports.flush()
+        (job,) = scenario_jobs(value.queue, "math")
+        assert any(event.training_job_id == job["id"] for event in tracker.events)
+        assert job["experiment"] == {
+            "tracker": "wandb",
+            "project": "reef",
+            "entity": "team",
+            "run_id": "math-segment-0",
+            "url": "https://wandb.ai/team/reef/runs/math-segment-0",
+        }
+    finally:
+        value.close()
+
+
+def test_a_job_has_no_experiment_without_a_tracker(tmp_path):
+    value, _, _ = dispatcher(tmp_path)
+    try:
+        train(value, 1)
+        (job,) = scenario_jobs(value.queue, "math")
+        assert job["state"] == "finished" and job["experiment"] is None
+    finally:
+        value.close()
 
 
 def test_training_starts_and_reads_finish_while_the_tracker_blocks(tmp_path, monkeypatch):
@@ -50,6 +91,8 @@ def test_local_tracker_read_locks(tmp_path, monkeypatch, callback, failing):
     # Loading a scenario wakes its workers: hold them, so that this test runs the one cycle.
     value, _ = _dispatcher(tmp_path, experiment_tracker=tracker, hold_local_cycles=True)
     scenario = _scenario(value, 1)
+    # The rows went to the store directly: make their samples, as the samples service does.
+    make_samples(scenario)
     value.local_workers.open()
     entered, release = Event(), Event()
 

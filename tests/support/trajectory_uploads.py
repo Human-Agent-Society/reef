@@ -2,18 +2,30 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from aiohttp import ClientResponse
+from aiohttp.test_utils import TestClient
+
 from reef.artifact import InMemoryRepositoryBackend
+from reef.artifact.repository import RepositoryBackendFactory
+from reef.artifact.sources import ArtifactSources
 from reef.core.evaluation import EvaluationResult, SelectionDecision, UpdateCandidate
 from reef.dispatcher import Dispatcher
 from reef.recipe import Recipe
 from reef.record2sample import NoSamples
 from reef.sample2job import Sample2Job
+from reef.service.data_service import DataWorker, data_jobs
+from reef.service.data_transfer import ArchiveWriters
+from reef.service.task_import import DataScenarioStorage
+from reef.storage.sql_coordination import memory_coordination
+from reef.storage.sql_data import SQLiteDataStore
 from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.tasks import LocalTaskFileStore
 from reef.train import CandidateBackend, JobData, PreparedStep, Trainer, TrainStepResult
 from reef.train.pipeline import TrainingPipeline
 
@@ -30,12 +42,35 @@ def atif(text: str) -> dict[str, Any]:
     }
 
 
-def uploaded(*trajectory_ids: str) -> dict[str, Any]:
-    return {
-        "trajectories": [
-            {"trajectory_id": trajectory_id, "trajectory": atif(trajectory_id)} for trajectory_id in trajectory_ids
-        ]
-    }
+#: The data route of the owner of scenario ``s``, which is ``s`` itself.
+DATA = "/reef/namespaces/s/data"
+
+
+def trajectory_lines(*item_ids: str) -> bytes:
+    """A JSON Lines upload body: the ATIF document of each ID, whose ``session_id`` is the ID."""
+    return "".join(json.dumps(atif(item_id)) + "\n" for item_id in item_ids).encode()
+
+
+def trajectory_metadata(scenario: str | None = "s") -> dict[str, Any]:
+    """The metadata of a trajectory upload, used by ``scenario`` when it is given."""
+    return {"kind": "trajectory", "scenarios": {} if scenario is None else {scenario: "train"}}
+
+
+async def upload_trajectories(
+    client: TestClient,
+    headers: Mapping[str, str],
+    *item_ids: str,
+    scenario: str | None = "s",
+    base: str = DATA,
+    lines: bytes | None = None,
+) -> ClientResponse:
+    """Upload a trajectory item for each ID (or the JSON Lines ``lines``) to the data route ``base``."""
+    return await client.post(
+        f"{base}/trajectories",
+        headers={**headers, "Content-Type": "application/x-ndjson"},
+        params={"metadata": json.dumps(trajectory_metadata(scenario))},
+        data=trajectory_lines(*item_ids) if lines is None else lines,
+    )
 
 
 class CountingBackend(CandidateBackend):
@@ -115,11 +150,30 @@ class UploadRecipe(Recipe):
         )
 
 
-def dispatcher_for(tmp_path: Path, recipe: Recipe) -> Dispatcher:
+def dispatcher_for(tmp_path: Path, recipe: Recipe, factory: RepositoryBackendFactory | None = None) -> Dispatcher:
+    """A dispatcher with a data store, as deployment assembly builds it; the scenario storage owns the task files.
+
+    ``factory`` defaults to an in-memory repository under ``tmp_path``; a test that restarts passes its own.
+    """
     initial = tmp_path / "initial"
-    initial.mkdir(exist_ok=True)
-    return Dispatcher(
+    initial.mkdir(parents=True, exist_ok=True)
+    task_files = LocalTaskFileStore(tmp_path / "task-files")
+    data = SQLiteDataStore(tmp_path / "data", task_files)
+    storage = SQLiteScenarioStorage(tmp_path / "records", task_files=task_files)
+    dispatcher = Dispatcher(
         recipe,
-        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
-        scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
+        factory or InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
+        scenario_storage=DataScenarioStorage(storage, data),
+        record_storage=storage,
+        data_store=data,
+        coordination=memory_coordination(),
     )
+    # The data service copies the records to record items, as assembly runs it.
+    dispatcher.workers.add(
+        DataWorker(
+            dispatcher.queue,
+            data_jobs(dispatcher, ArtifactSources.from_setting(()), ArchiveWriters()),
+            worker_id="data-test",
+        )
+    )
+    return dispatcher

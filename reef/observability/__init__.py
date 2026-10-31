@@ -1,5 +1,6 @@
 from reef.observability.base import (
     ExperimentLogger,
+    ExperimentRun,
     ExperimentTracker,
     NullExperimentLogger,
     NullExperimentTracker,
@@ -12,6 +13,7 @@ from reef.observability.tracing import TracingConfig
 
 __all__ = [
     "ExperimentLogger",
+    "ExperimentRun",
     "ExperimentTracker",
     "NullExperimentLogger",
     "NullExperimentTracker",

@@ -36,7 +36,8 @@ Training components
 -------------------
 
 A ``TrainingJob`` is one bounded job. It has a job ID, the backend name, the
-start, the job data it trains and the backend's parameters. The start is the
+start, the job data it trains, the backend's parameters and the scenario whose
+trainer submits it. The start is the
 directory of the weights that the job starts from, or ``None`` for the base
 model. Reef reads none of the parameters. The component contract is:
 
@@ -53,6 +54,17 @@ model. Reef reads none of the parameters. The component contract is:
    Copy a published release into the component's own storage and return it
    as a start. Reef calls this for a ``train-from``. Raise ``ValueError``
    when the component cannot start from those weights.
+``start_jobs()``
+   Start running jobs in this process and resume the jobs that have not
+   ended. Only the training service's job worker calls it, also in a
+   one-process deployment. Control and the other services use the component
+   to describe jobs and import starts, and never run a job. A component that
+   keeps its job state on disk, such as Tinker's ``state_dir``, locks it
+   here, so one process at a time runs its jobs.
+``starts_from_releases``
+   False when ``import_start`` refuses every release; the default is true.
+   A client reads it in the scenario contract before it offers a
+   ``train-from``.
 ``name``
    The backend name that jobs carry.
 ``shares_scenarios``
@@ -220,12 +232,28 @@ Slime integration
 -----------------
 
 ``reef.train.slime_backend.component.SlimeTrainingComponent`` runs in the
-HTTP service's process. It owns one Ray session, the training GPUs it
-reserves there, and Slime's actor (and critic) workers. It starts no serving
-engine, and training and serving never share GPUs. The component therefore
-refuses ``--colocate``, ``--offload-rollout`` and
-``--keep-lora-base-resident``. Its workers keep running between jobs, so it
-also refuses ``--release-train``.
+HTTP service's process and holds no GPU. It parses Slime's arguments once at
+startup and, for each job, starts a driver process
+(``reef.train.slime_backend.driver``) with the job's directory. The driver owns
+one Ray session and runs ``SlimeJobRunner``: Slime's actor (and critic) workers
+and, for a task job, Slime's own rollout engines
+(``reef.train.slime_backend.rollout_group``). The engines belong to Slime's
+serving session, a detached ``ServingCluster`` named after the save root, which
+the first task job's driver creates and the next drivers attach to through
+Slime's ``create_rollout_manager``. The session holds the engines, their router
+and the placement group of the training GPUs; while it runs, every driver
+trains on its placements, and a driver detaches from it when it exits, also
+after a failure. Without a session, a driver places its job with Slime's own
+placement and starts no engines. A driver records each saved checkpoint in the
+job's directory, where the component reports it, and releases its workers (and
+the GPUs it placed) when it exits. The session's actors run under a process
+lease of their own, recorded with the session's name in the save root's
+``reef-serving.json``, so a driver's process cleanup leaves them running; the
+component disposes the session and retires that lease when it closes
+(``driver --dispose``). Serving never shares GPUs with training; with
+``--colocate`` the rollout engines share the training GPUs, and Slime moves the
+memory between them. A cancel or a close stops the driver; a restarted
+component starts the job's driver again.
 
 A job trains its data as Slime rollouts (a ``rollout_id`` is Slime's unit of
 training). Without the job parameter ``save_interval``, the job is one
@@ -243,20 +271,19 @@ the objective computes its state for the whole data. When the objective
 skips the job's data, the job saves no checkpoint, so the next job continues
 the start's weights and objective state. The Tinker component does the same.
 
-Slime continues from its workers' own weights. A job therefore starts from
-the component's latest checkpoint. A ``None`` start names the weights that
-the workers loaded at startup, which they hold only until they save their
-first rollout. The component checks the start when Reef submits the job and
-again when the job runs: a queued job whose start an earlier job moved past
-fails. ``import_start`` refuses every release, so a Slime scenario refuses
-``train-from``. Because the workers hold one set of
-weights, a Slime deployment trains one scenario. After a restart, the workers
-load the latest checkpoint again. A restarted job continues after its last
-recorded checkpoint. A restart can also stop a job after Megatron saved a
+Every driver loads Slime's latest checkpoint. A job therefore starts from
+the component's latest checkpoint; the base start names the untrained
+weights, until the first rollout is saved. The component checks the start
+when Reef submits the job, and the driver again when the job runs: a queued
+job whose start an earlier job moved past fails. ``import_start`` refuses
+every release, so a Slime scenario refuses ``train-from``. Because the jobs
+continue one save root, a Slime deployment trains one scenario. A restarted
+job continues after its last recorded checkpoint. A restart can also stop a job after Megatron saved a
 rollout but before the component recorded it. The job then records that
 checkpoint and does not train the rollout's data twice.
 
-The optimizer state stays in the workers from one job to the next.
+The optimizer state carries from one job to the next in the Megatron
+checkpoint, which every driver loads.
 
 `Slime worker executors <#slime-worker-executors>`__ describes how the
 component launches its workers.

@@ -9,11 +9,12 @@ from tests.support._grouped_pg import GROUPED_PG_OBJECTIVE as _GROUPED_PG_OBJECT
 from tests.support._grouped_pg import grouped_policy_pipeline
 from tests.support._threshold_processor import ThresholdJobData, threshold_pipeline
 from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, runtime_bindings
+from tests.support.samples_service import make_samples
 
 import reef.record2sample.assembly as reported_module
 from recipes.sao import SAOJobData, SAOSamples
 from recipes.tttd import TTTDGridSettings, TTTDGroupedRolloutReport, TTTDJobData, TTTDRecord2Record, TTTDSamples
-from reef.artifact import InMemoryRepositoryBackend
+from reef.artifact import ArtifactRef, InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
 from reef.core.plugins import PluginConfigError
 from reef.core.reports import ReportValidationError
@@ -29,7 +30,12 @@ from reef.evaluation import (
 from reef.recipe import WeightTrainingRecipe, WeightTrainingSpec
 from reef.record2record import ExclusiveReportRecord2Record
 from reef.record2sample.assembly import SampleAssemblySettings
+from reef.record2sample.service import ProducedSamples
 from reef.runtime.interfaces import TrainingMethod
+from reef.storage.commit_history import CommitHistoryScenarioStore
+from reef.storage.commits import CommitRecord
+from reef.storage.samples import TrainerSamples
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train import PipelineContext, Trainer, TrainingPipeline
 from reef.train.algos.schedule import StepScheduling
@@ -123,6 +129,24 @@ def preparing_trainer(records: SQLiteRecordStore, **options) -> Trainer:
     return Trainer.build("math", records, **{**values, **options})
 
 
+def record_commit(session: CommitHistoryScenarioStore, step: int, prepared) -> None:
+    """Append ``prepared`` to the commit history as training step ``step``, as the scenario committer does, so the
+    sample store counts the samples that the step trained."""
+    session.commit_step(
+        expected_step=step - 1,
+        commit=CommitRecord(
+            scenario="math",
+            step=step,
+            artifact_ref=ArtifactRef(f"content:{step}", f"release:{step}", "base"),
+            checkpoint=True,
+            algorithm_state=prepared.algorithm_state,
+            high_water_sequence=prepared.high_water_sequence,
+            high_water_offset=prepared.high_water_offset,
+            consumed_ids=prepared.consumed_ids,
+        ),
+    )
+
+
 def inference(agent_record_id: str, *, candidate: str | None = None) -> AgentRecord:
     payload = {"tokens": [1, 2], "loss_mask": [0, 1], "rollout_log_probs": [-0.2]}
     if candidate is not None:
@@ -148,7 +172,7 @@ def training_inference(
                     "tokens": tokens,
                     "loss_mask": loss_mask,
                     "rollout_log_probs": rollout_log_probs,
-                    "runtime_load_id": "wv-1",
+                    "artifact_id": "artifact-1",
                 }
             }
         },
@@ -230,7 +254,7 @@ def test_pairing_processor_emits_policy_samples_for_spo() -> None:
     assert item.training["tokens"] == [1, 2]
     assert item.training["loss_mask"] == [0, 1]
     assert item.training["rollout_log_probs"] == [-0.2]
-    assert item.training["runtime_load_id"] is None
+    assert item.training["artifact_id"] is None
     assert item.metadata["report_agent_record_id"] == "r1"
 
 
@@ -263,7 +287,7 @@ def test_pairing_processor_assembles_ordered_multi_reference_report() -> None:
     assert item.training["tokens"] == [10, 20, 11, 21]
     assert item.training["loss_mask"] == [1, 0, 1]
     assert item.training["rollout_log_probs"] == [-0.1, 0.0, -0.2]
-    assert item.training["runtime_load_id"] == "wv-1"
+    assert item.training["artifact_id"] == "artifact-1"
     assert item.training["turn_count"] == 2
     assert [record["payload"] for record in item.metadata["records"]] == [first.payload, second.payload]
     processor.acknowledge(batch.data_id)
@@ -444,6 +468,7 @@ def test_algorithms_consume_formatted_batches_and_keep_algorithm_state() -> None
 @pytest.mark.unit
 def test_trainer_reserves_batch_and_commits_backend_preparation() -> None:
     trainer = preparing_trainer(one_pair_records())
+    make_samples(trainer)
 
     result = trainer.run_once(0)
 
@@ -465,6 +490,20 @@ def test_trainer_reserves_batch_and_commits_backend_preparation() -> None:
 
 
 @pytest.mark.unit
+def test_the_trainer_builds_jobs_only_from_samples_that_the_samples_service_made() -> None:
+    trainer = preparing_trainer(one_pair_records())
+
+    # The trainer's own cycle reads the sample store only: no record became a sample yet.
+    assert trainer.run_once(0) is None
+    assert trainer.pipeline_status()["ready_samples"] == 0
+
+    # The samples service makes the samples; the next cycle builds the job from them.
+    assert trainer.produce_samples() == ProducedSamples(changed=True, background=False)
+    result = trainer.run_once(0)
+    assert result is not None and result.metrics["samples"] == 1
+
+
+@pytest.mark.unit
 def test_trainer_takes_job_samples_and_buffers_one_job_only_with_a_backend() -> None:
     records = SQLiteRecordStore()
     for sequence in range(3):
@@ -472,12 +511,13 @@ def test_trainer_takes_job_samples_and_buffers_one_job_only_with_a_backend() -> 
         records.append(report(f"r{sequence}", f"i{sequence}", 1.0))
     trainer = preparing_trainer(records, default_job_samples=2)
     assert (trainer.job_samples, trainer.pipeline.buffer_size) == (2, 2)
+    make_samples(trainer)
     assert trainer.run_once() is not None
     data = trainer.pending_job_data
     assert data is not None and len(data.samples) == 2
-    # The trainer stops reading records once it holds one job's data.
+    # The samples service read every record; the third sample waits in the buffer for the next job.
     assert trainer.pipeline_status() == {
-        "ready_samples": 0,
+        "ready_samples": 1,
         "buffer_size": 2,
         "buffered_requests": 0,
         "job_samples": 2,
@@ -544,6 +584,7 @@ def test_trainer_executes_candidate_policy_between_evaluation_and_settlement() -
         candidate_evaluator=policy_plugin(backend, Policy),
         default_job_samples=1,
     )
+    make_samples(trainer)
 
     result = trainer.run_once()
 
@@ -577,6 +618,7 @@ def test_trainer_uses_explicit_candidate_evaluator_instead_of_backend_fallback()
 
     candidate_evaluator = ExternalEvaluator()
     trainer = preparing_trainer(one_pair_records(), candidate_backend=backend, candidate_evaluator=candidate_evaluator)
+    make_samples(trainer)
 
     result = trainer.run_once()
 
@@ -597,6 +639,7 @@ def test_trainer_aborts_candidate_when_policy_execution_fails() -> None:
     trainer = preparing_trainer(
         one_pair_records(), candidate_backend=backend, candidate_evaluator=policy_plugin(backend, BrokenPolicy)
     )
+    make_samples(trainer)
 
     with pytest.raises(RuntimeError, match="policy failed"):
         trainer.run_once()
@@ -618,6 +661,7 @@ def test_trainer_rejects_an_evaluator_that_replaces_its_evaluation_result() -> N
     trainer = preparing_trainer(
         one_pair_records(), candidate_backend=backend, candidate_evaluator=ReplacingEvaluator()
     )
+    make_samples(trainer)
 
     with pytest.raises(ValueError, match="retain the evaluation result"):
         trainer.run_once()
@@ -626,7 +670,9 @@ def test_trainer_rejects_an_evaluator_that_replaces_its_evaluation_result() -> N
 
 @pytest.mark.unit
 def test_trainer_restores_algorithm_state_from_metadata() -> None:
-    records = SQLiteRecordStore()
+    session = SQLiteScenarioStorage(None).open("math")
+    records = session.records
+    samples = TrainerSamples(session.samples)
     for item in (
         inference("i1"),
         report("r1", "i1", 1.0),
@@ -636,49 +682,59 @@ def test_trainer_restores_algorithm_state_from_metadata() -> None:
         records.append(item)
 
     def pipeline(context: PipelineContext) -> TrainingPipeline:
-        return threshold_pipeline(PipelineContext(context.scenario, default_job_samples=context.default_job_samples))
+        return threshold_pipeline(
+            PipelineContext(context.scenario, default_job_samples=context.default_job_samples, samples=context.samples)
+        )
 
-    first = preparing_trainer(records, pipeline_factory=pipeline)
+    first = preparing_trainer(records, pipeline_factory=pipeline, samples=samples)
+    make_samples(first)
 
     first_result = first.run_once(0)
     assert first_result is not None
     assert source_record_id(first.pending_job_data.samples[0]) == "i1"
     prepared = first.prepare_commit(first_result)
     first.commit(prepared)
+    record_commit(session, 1, prepared)
     assert first.state == {"steps": 1}
-    assert first.data_offset == prepared.high_water_offset == 2
+    # The samples service read every record: both pairs are stored samples, and only i1's trained.
+    assert first.data_offset == prepared.high_water_offset == 4
 
-    # Recovery restores consumption independently of the retained record bodies.
+    # Recovery restores consumption independently of the retained record bodies; i2's stored sample trains next.
     recovered_state = first.algorithm_state_dict()
-    second = preparing_trainer(records, pipeline_factory=pipeline, algorithm_state=recovered_state)
+    second = preparing_trainer(records, pipeline_factory=pipeline, algorithm_state=recovered_state, samples=samples)
 
     second.replay_retained(up_to_sequence=prepared.high_water_sequence, consumed_ids=prepared.consumed_ids)
     second.restore_record_progress(after_sequence=prepared.high_water_sequence, offset=prepared.high_water_offset)
     assert second.state == {"steps": 1}
+    make_samples(second)
     second_result = second.run_once(1)
     assert second_result is not None
     assert source_record_id(second.pending_job_data.samples[0]) == "i2"
     prepared = second.prepare_commit(second_result)
     second.commit(prepared)
     assert second.run_once(2) is None
+    session.close()
 
 
 @pytest.mark.unit
 def test_commit_retains_readable_records_and_recovery_skips_committed_consumption(tmp_path) -> None:
-    database = tmp_path / "records.sqlite3"
+    storage = SQLiteScenarioStorage(tmp_path)
     first_inference = positioned_inference(1)
     first_report = positioned_report(2, first_inference.agent_record_id, 1.0)
     second_inference = positioned_inference(3)
     second_report = positioned_report(4, second_inference.agent_record_id, 0.5)
 
-    with SQLiteRecordStore(database) as first_store:
+    with closing(storage.open("math")) as first_session:
+        first_store = first_session.records
         for item in (first_inference, first_report, second_inference, second_report):
             first_store.append(item)
-        first = preparing_trainer(first_store)
+        first = preparing_trainer(first_store, samples=TrainerSamples(first_session.samples))
+        make_samples(first)
         first_result = first.run_once(0)
         assert first_result is not None
         prepared = first.prepare_commit(first_result)
         first.commit(prepared)
+        record_commit(first_session, 1, prepared)
 
         assert first_store.get("math", first_inference.agent_record_id) == first_inference
         assert first_store.get("math", first_report.agent_record_id) == first_report
@@ -691,11 +747,15 @@ def test_commit_retains_readable_records_and_recovery_skips_committed_consumptio
             second_report.agent_record_id,
         ]
 
-    with SQLiteRecordStore(database) as second_store:
-        second = preparing_trainer(second_store, algorithm_state={"steps": 1})
+    with closing(storage.open("math")) as second_session:
+        second_store = second_session.records
+        second = preparing_trainer(
+            second_store, algorithm_state={"steps": 1}, samples=TrainerSamples(second_session.samples)
+        )
         second.replay_retained(up_to_sequence=prepared.high_water_sequence, consumed_ids=prepared.consumed_ids)
         second.restore_record_progress(after_sequence=prepared.high_water_sequence, offset=prepared.high_water_offset)
         assert second.state == {"steps": 1}
+        make_samples(second)
         second_result = second.run_once(1)
         assert second_result is not None
         assert source_record_id(second.pending_job_data.samples[0]) == second_inference.agent_record_id
@@ -705,6 +765,7 @@ def test_commit_retains_readable_records_and_recovery_skips_committed_consumptio
         archived = second_store.audit_page("math")
         assert [entry.item for entry in archived] == [first_inference, first_report, second_inference, second_report]
         assert second.run_once(2) is None
+    storage.close()
 
 
 @pytest.mark.integration
@@ -748,12 +809,13 @@ def test_a_grouped_recipe_trains_one_comparison_set_as_one_job(tmp_path) -> None
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(),
+        coordination=memory_coordination(),
     )
     scenario = dispatcher.get_or_create_scenario("math")
-    serving = scenario.serving_runtime_load_id()
+    serving = scenario.serving_artifact_id()
     for rid, score in (("i1", 0.2), ("i2", 0.8)):
         record = inference(rid)
-        dispatcher.accept_record(replace(record, payload={**record.payload, "runtime_load_id": serving}))
+        dispatcher.accept_record(replace(record, payload={**record.payload, "artifact_id": serving}))
         dispatcher.accept_record(report("r" + rid, rid, score, comparison_set="set-a"))
 
     deadline = time.monotonic() + 10
@@ -834,6 +896,7 @@ def test_capacity_loss_skips_orphan_report_and_remains_visible_after_restart(tmp
         records.append(positioned_report(4, "i3", 1.0))
         trainer = preparing_trainer(records)
         assert trainer.pipeline_status()["record_data_incomplete"] is True
+        make_samples(trainer)
         result = trainer.run_once(0)
         assert result is not None
         assert source_record_id(trainer.pending_job_data.samples[0]) == "i3"
@@ -847,6 +910,7 @@ def test_capacity_loss_skips_orphan_report_and_remains_visible_after_restart(tmp
         resumed = preparing_trainer(records, algorithm_state=prepared.algorithm_state)
         resumed.replay_retained(up_to_sequence=prepared.high_water_sequence, consumed_ids=prepared.consumed_ids)
         resumed.restore_record_progress(after_sequence=prepared.high_water_sequence, offset=prepared.high_water_offset)
+        make_samples(resumed)
         assert resumed.run_once(1) is None
         assert resumed.pipeline_status()["evicted_record_count"] == 1
         assert records.get("math", "i3") is not None

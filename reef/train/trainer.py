@@ -32,6 +32,7 @@ from reef.evaluation.evaluators import BackendAlwaysSelectPlugin
 from reef.observability import ExperimentLogger, NullExperimentLogger
 from reef.observability.operations import OperationMetrics
 from reef.pipeline_context import PipelineContext
+from reef.record2sample.service import ProducedSamples
 from reef.storage.records import RecordStore
 from reef.storage.samples import SAMPLE_KINDS, SampleKind, TrainerSamples
 from reef.storage.tasks import TaskStorage
@@ -337,6 +338,15 @@ class Trainer:
         return self._job_loop is not None or self._candidate_backend is not None
 
     @property
+    def can_train_from(self) -> bool:
+        """Whether ``start_from`` can take an artifact: a harness trainer always can, a weight trainer when its
+        training component takes releases (``TrainingComponent.starts_from_releases``), and a trainer that trains
+        nothing never can."""
+        if self._candidate_backend is not None:
+            return True
+        return self._job_loop is not None and self._job_loop.component.starts_from_releases
+
+    @property
     def job_running(self) -> bool:
         """Whether this trainer's committed state names a running job, which its worker polls."""
         with self._lock:
@@ -443,6 +453,11 @@ class Trainer:
                 self._pipeline.remove_from_buffer(sample_ids)
         return self.buffer_listing()
 
+    def forget_samples(self, sample_ids: tuple[str, ...]) -> None:
+        """Stop holding the uploads that the data sync removed (``TrainingPipeline.forget_samples``)."""
+        with self._lock:
+            self._pipeline.forget_samples(sample_ids)
+
     def pipeline_status(self) -> Mapping[str, Any]:
         """Return caller-visible pipeline state under the pipeline's lock."""
         with self._lock:
@@ -507,7 +522,24 @@ class Trainer:
         if item.request_type in self.pipeline.required_request_types:
             self._pipeline.push(item)
 
-    def _consume_data(self) -> None:
+    def produce_samples(self) -> ProducedSamples:
+        """Push every record that arrived since the last call into the pipeline and make samples of the formed record
+        sets; return whether the trainer received new input (samples or instructions), and whether background work
+        of the pipeline still runs, so the samples service comes back."""
+        with self._lock:
+            if not self.trains:
+                return ProducedSamples(changed=False, background=False)
+            # Another samples process can have stored the samples of later records since this trainer loaded;
+            # the records that stored samples consumed never form a record set again.
+            self.consumed_record_ids.update(self._pipeline.store.consumed_record_ids())
+            self.read_records()
+            stored = self._pipeline.produce()
+            return ProducedSamples(changed=stored, background=self._pipeline.background_jobs_running())
+
+    def read_records(self) -> None:
+        """Push every record after the record cursor into the pipeline and move the cursor. The samples service
+        calls it for a trainer that trains (``produce_samples``); a trainer that trains nothing calls it in its own
+        cycle, only to move the cursor. The caller holds the lock."""
         while True:
             items = self._records.replay_page(
                 self.scenario,
@@ -520,33 +552,31 @@ class Trainer:
                 self.push_retained(item)
                 self._data_offset += 1
                 self._data_sequence = sequence
-                if self.pipeline_ready():
-                    return
 
     def run_once(
         self,
         scenario_step: int = 0,
         *,
-        serving_runtime_load_id: str | None = None,
+        serving_artifact_id: str | None = None,
     ) -> TrainStepResult | None:
         """Consume available data and prepare the next commit, if any.
 
         Returns ``None`` when this trainer trains nothing (it only advances
         record consumption, because a non-training scenario still has to
         advance its record cursor), when no job data is ready, or while a job runs
-        with nothing new to commit. ``serving_runtime_load_id`` is the version
+        with nothing new to commit. ``serving_artifact_id`` is the artifact
         that serves the scenario now, for the staleness check of the pipeline.
         """
         with self._lock:
             if not self.trains:
-                self._consume_data()
+                self.read_records()
                 return None
             if self._pending is not None and self._pending.result is not None:
                 return self._pending.result
             observed_state = self._state
             loop_state = None if self._job_loop is None else JobLoopState.from_dict(observed_state)
             job = None if loop_state is None else loop_state.job
-            data = None if job is not None else self.reserve_job_data(serving_runtime_load_id)
+            data = None if job is not None else self.reserve_job_data(serving_artifact_id)
             if job is None and data is None:
                 return None
         # Submitting a job, evaluating a checkpoint or preparing a harness candidate can take minutes.
@@ -621,17 +651,17 @@ class Trainer:
             raise RuntimeError("candidate preparation has no candidate evaluator")
         return evaluator.evaluate_and_decide(candidate)
 
-    def reserve_job_data(self, serving_runtime_load_id: str | None) -> JobData | None:
+    def reserve_job_data(self, serving_artifact_id: str | None) -> JobData | None:
         """Return the reserved job data, or reserve the next data when the pipeline is ready. The caller holds the lock.
 
-        ``serving_runtime_load_id`` is the version that serves the scenario now.
+        ``serving_artifact_id`` is the artifact that serves the scenario now.
         The staleness check of the pipeline measures the lag of each buffered record sample against it.
         """
         if self._pending is not None:
             return self._pending.data
-        if serving_runtime_load_id is not None:
-            self._pipeline.observe_serving_runtime_load_id(serving_runtime_load_id)
-        self._consume_data()
+        if serving_artifact_id is not None:
+            self._pipeline.observe_serving_artifact_id(serving_artifact_id)
+        # The samples service makes the samples (``produce_samples``); the cycle only reads the sample store.
         if not self.pipeline_ready():
             return None
         data = self._build_validated_job_data()

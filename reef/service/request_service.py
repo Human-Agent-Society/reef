@@ -9,16 +9,15 @@ scenario surface's request/response checks. No aiohttp types appear here;
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import tempfile
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
 from reef.artifact.artifact import Artifact, ArtifactConflict, ArtifactError, ArtifactNotFound, ArtifactRef
-from reef.core.errors import ReefError, UnknownScenario
+from reef.core.errors import ReefError
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.requirements import required_by
 from reef.core.training_request import normalize_training_request_payload
@@ -26,27 +25,15 @@ from reef.dispatcher import Dispatcher
 from reef.harness.sync import import_files, layer_install, merge_trees
 from reef.harness.tree import HarnessTree, validate_tree
 from reef.harness.tree.checks import clip_record_value
-from reef.observability.operations import OperationMeasurement, OperationMetrics
-from reef.recipe.errors import RecipeConfigError
-from reef.runtime.interfaces import InferenceAdmissionHandle, InferenceHandler, InferenceStream, inference_aborted
 from reef.scenario.release_files import component_files
 from reef.scenario.scenario import Scenario
 from reef.service.release_page import before_release_id, build_release_page, build_running_step_page, result_of
 from reef.service.request_page import STATE_WORDS, build_request_page, request_state, settled_step
-from reef.service.wire import SCENARIO_HEADER, ReportPayload, RequestHeaders, parse_request_headers
-from reef.surface.base import InferenceHooks, InferenceLease, LeasingInferenceHooks, Surface
-from reef.surface.weights import RuntimeLoadMismatch, reported_runtime_load_id, reported_runtime_load_spans
+from reef.service.wire import SCENARIO_HEADER, ReportPayload, RequestHeaders, parse_request_headers, with_request_tags
 from reef.train.harness_backend.backend import HarnessBackend
 from reef.train.trainer import Trainer
 
 logger = logging.getLogger(__name__)
-
-
-def request_family(record: bool, *, rollout: bool = False) -> str:
-    """The operation metrics family of a call: served traffic keeps a record; an evaluation or rollout call does not."""
-    if rollout:
-        return "rollout"
-    return "serve" if record else "evaluate"
 
 
 def page_headers(headers: Mapping[str, str], query: Mapping[str, str]) -> dict[str, str]:
@@ -76,71 +63,9 @@ def normalize_request_payload(
     return report.to_dict(), report.references
 
 
-@dataclass(frozen=True)
-class PendingInference:
-    item: AgentRecord
-    release_id: str | None
-    admission: InferenceAdmissionHandle | None = None
-    lease: InferenceLease | None = None
-    deferred_prepared: PreparedInference | None = None
-    path: str | None = None
-    measurement: OperationMeasurement | None = None
-    #: False for an evaluation call: served like any other, kept by nobody.
-    record: bool = True
-
-
-@dataclass(frozen=True)
-class PreparedInference:
-    """Everything one inference attempt froze before calling the provider."""
-
-    parsed: RequestHeaders
-    artifact: Artifact
-    #: What the handler serves: the runtime-loaded component's view of the
-    #: release, or the release itself when nothing is loaded or it is flat.
-    served: Artifact
-    #: The release the attempt's record names: the served one, or the one the client runs (see recorded_ref).
-    record_ref: ArtifactRef
-    handler: InferenceHandler
-    surface: Surface
-    #: True when the scenario trains weights on a training component: the
-    #: recorded payload must then carry the engine-confirmed runtime load ID.
-    durable: bool
-    admission: InferenceAdmissionHandle | None = None
-    #: Releases serving state the surface held for this attempt (an adapter
-    #: lease); called exactly once when the attempt ends.
-    lease: InferenceLease | None = None
-    #: The request hooks this attempt runs: the surface's, or on an evaluation
-    #: call every component's but the one the rollout evaluates.
-    hooks: InferenceHooks | None = None
-
-    def release(self) -> None:
-        try:
-            if self.lease is not None:
-                self.lease.release()
-        finally:
-            if self.admission is not None:
-                self.admission.release()
-
-
-@dataclass(frozen=True)
-class InferenceRetryPolicy:
-    initial_s: float = 0.05
-    max_s: float = 1.0
-    timeout_s: float = 300.0
-
-    def __post_init__(self) -> None:
-        if not 0 < self.initial_s <= self.max_s or self.timeout_s <= 0:
-            raise ValueError("inference retry policy requires 0 < initial_s <= max_s and timeout_s > 0")
-
-
-class InferenceRetryTimeout(ReefError):
-    """Inference attempts ending with a handler ``abort`` exhausted their retry deadline."""
-
-
 class RequestService:
-    def __init__(self, dispatcher: Dispatcher, *, retry_policy: InferenceRetryPolicy | None = None) -> None:
+    def __init__(self, dispatcher: Dispatcher) -> None:
         self._dispatcher = dispatcher
-        self._retry_policy = retry_policy or InferenceRetryPolicy()
         # The harness head of a scenario with several components, by scenario step and active release: it is
         # read on every inference answer and changes only when a commit lands.
         self.harness_heads: dict[str, tuple[int, str, str]] = {}
@@ -203,432 +128,11 @@ class RequestService:
         item = AgentRecord.create(
             scenario=parsed.scenario,
             request_type=parsed.request_type,
-            payload=_with_tags(normalized, parsed),
+            payload=with_request_tags(normalized, parsed),
             agent_record_id=record_id,
             references=references,
         )
         return parsed, item
-
-    async def infer_with_data(
-        self,
-        headers: Mapping[str, str],
-        payload: dict[str, Any],
-        path: str,
-        handler: InferenceHandler | None = None,
-        *,
-        record: bool = True,
-        evaluated: str | None = None,
-        rollout: bool = False,
-        artifact_id: str | None = None,
-    ) -> tuple[dict[str, Any], AgentRecord | None]:
-        """Serve one inference; ``record`` False serves it without keeping a record, as an evaluation call of the
-        ``evaluated`` component (see ``Surface.inference_for_evaluation``).
-
-        ``artifact_id`` names the served artifact that answers, at its own URL (``Scenario.served_release``);
-        ``None`` is the active release.
-
-        ``rollout`` True serves a call of a rollout that Reef runs itself: the served release with its
-        hooks, as for a recorded call, but no record is kept, and the response keeps its ``training`` block
-        with the runtime load ID that answered, so the caller assembles the rollout's samples.
-        """
-        if rollout and record:
-            raise ValueError("a rollout call keeps no record")
-        family = request_family(record, rollout=rollout)
-        operations = await self.inference_operations(headers, record=record, artifact_id=artifact_id)
-        # Evaluation and rollout traffic is measured apart, so Reef's own rollouts do not read as served requests.
-        measurement = operations.start(f"{family}/request")
-        succeeded = False
-        try:
-            original_payload = dict(payload)
-            retry_delay = self._retry_policy.initial_s
-            loop = asyncio.get_running_loop()
-            remaining_budget = self._retry_policy.timeout_s
-            timeout_error = f"inference retry deadline exceeded ({self._retry_policy.timeout_s:g}s)"
-            attempt = 0
-            while True:
-                attempt += 1
-                if attempt > 1:
-                    operations.increment(f"{family}/retries_total")
-                prepared, payload = await self._prepare_request(
-                    headers,
-                    original_payload,
-                    path,
-                    handler,
-                    record=record,
-                    evaluated=evaluated,
-                    rollout=rollout,
-                    artifact_id=artifact_id,
-                )
-                try:
-                    if prepared.durable:
-                        payload = {**payload, "return_meta_info": True}
-                    if remaining_budget <= 0:
-                        raise InferenceRetryTimeout(timeout_error)
-                    started = loop.time()
-                    try:
-                        response = await asyncio.wait_for(
-                            prepared.handler.inference(prepared.served, path, payload),
-                            timeout=remaining_budget,
-                        )
-                    except TimeoutError as exc:
-                        logger.warning(
-                            "inference for scenario %r timed out after %d attempt(s) at artifact %r",
-                            prepared.parsed.scenario,
-                            attempt,
-                            prepared.artifact.ref.release_id,
-                        )
-                        raise InferenceRetryTimeout(timeout_error) from exc
-                    finally:
-                        remaining_budget -= loop.time() - started
-                    interrupted = inference_aborted(response)
-                    if not interrupted:
-                        # A completed response with invalid runtime-load-ID information is a
-                        # handler contract error, not a retryable inference abort.
-                        if prepared.hooks is not None:
-                            prepared.hooks.verify_response(prepared.artifact, path, response)
-                        self._stamp_durable_runtime_load_id(prepared, payload, response)
-                        item = None
-                        if record:
-                            item = await asyncio.to_thread(
-                                self._accept,
-                                prepared.parsed,
-                                {**payload, "response": response},
-                                artifact_ref=prepared.record_ref,
-                            )
-                        succeeded = True
-                        if rollout:
-                            return rollout_inference_response(response, payload), None
-                        return client_inference_response(response), item
-                    # A handler ``abort`` finish reason makes the attempt unusable.
-                    # Restart the request against the latest artifact and never record it.
-                    logger.info(
-                        "retrying handler-aborted inference for scenario %r (attempt %d): frozen artifact %r, "
-                        "engine reported runtime load ID %r",
-                        prepared.parsed.scenario,
-                        attempt,
-                        prepared.artifact.ref.release_id,
-                        reported_runtime_load_id(response),
-                    )
-                finally:
-                    prepared.release()
-                if remaining_budget <= 0:
-                    raise InferenceRetryTimeout(timeout_error)
-                sleep_for = min(retry_delay, remaining_budget)
-                await asyncio.sleep(sleep_for)
-                remaining_budget -= sleep_for
-                retry_delay = min(retry_delay * 2, self._retry_policy.max_s)
-        except RuntimeLoadMismatch:
-            operations.increment(f"{family}/version_mismatch_total")
-            raise
-        except InferenceRetryTimeout:
-            operations.increment(f"{family}/timeouts_total")
-            raise
-        finally:
-            measurement.finish(succeeded=succeeded)
-
-    async def start_stream(
-        self,
-        headers: Mapping[str, str],
-        payload: dict[str, Any],
-        path: str,
-        handler: InferenceHandler | None = None,
-        *,
-        record: bool = True,
-        evaluated: str | None = None,
-        artifact_id: str | None = None,
-    ) -> tuple[InferenceStream, PendingInference]:
-        operations = await self.inference_operations(headers, record=record, artifact_id=artifact_id)
-        measurement = operations.start(f"{request_family(record)}/request")
-        try:
-            prepared, payload = await self._prepare_request(
-                headers, payload, path, handler, record=record, evaluated=evaluated, artifact_id=artifact_id
-            )
-            admission = prepared.admission
-            lease = prepared.lease
-            try:
-                stream = await prepared.handler.inference_stream(prepared.served, path, payload)
-                record_response = stream.record_response
-                record_response_pending = stream.record_response_pending
-                if record_response is not None:
-                    # An engine-aborted generation may carry no runtime-load ID; the route
-                    # records it as incomplete, and the record stage excludes it from training.
-                    if not inference_aborted(record_response):
-                        if prepared.hooks is not None:
-                            prepared.hooks.verify_response(prepared.artifact, path, record_response)
-                        self._stamp_durable_runtime_load_id(prepared, payload, record_response)
-                    # Buffered streaming backends have already finished model
-                    # execution. Release the admission handle and the lease now,
-                    # so that a slow client does not hold them.
-                    if admission is not None:
-                        admission.release()
-                        admission = None
-                    if lease is not None:
-                        lease.release()
-                        lease = None
-                elif prepared.durable and not record_response_pending:
-                    raise RuntimeLoadMismatch(
-                        "durable streaming inference requires an atomic record_response with serving runtime load IDs"
-                    )
-            except BaseException:
-                try:
-                    if "stream" in locals():
-                        await stream.close()
-                finally:
-                    try:
-                        if lease is not None:
-                            lease.release()
-                    finally:
-                        if admission is not None:
-                            admission.release()
-                raise
-            pending = PendingInference(
-                item=AgentRecord.create(
-                    scenario=prepared.parsed.scenario,
-                    request_type=RequestType.INFERENCE,
-                    payload=_with_tags(payload, prepared.parsed),
-                    artifact_ref=prepared.record_ref,
-                ),
-                release_id=prepared.parsed.release_id,
-                measurement=measurement,
-                admission=admission,
-                lease=lease,
-                deferred_prepared=prepared if record_response_pending else None,
-                path=path if record_response_pending else None,
-                record=record,
-            )
-            return stream, pending
-        except BaseException as exc:
-            measurement.finish(succeeded=False)
-            if isinstance(exc, RuntimeLoadMismatch):
-                operations.increment(f"{request_family(record)}/version_mismatch_total")
-            raise
-
-    async def relay_multimodal(
-        self, headers: Mapping[str, str], payload: dict[str, Any], path: str
-    ) -> InferenceStream:
-        """A multimodal call for a scenario, relayed by the deployment's recipe to the provider it configured;
-        nothing is recorded. The relay is the deployment's: its key and gateway, whatever model a scenario chats
-        with."""
-        parsed = parse_request_headers(headers, RequestType.INFERENCE)
-        scenario = await asyncio.to_thread(
-            self._dispatcher.get_or_create_scenario,
-            parsed.scenario,
-            release_id=parsed.release_id,
-        )
-        if scenario is None:
-            raise UnknownScenario(f"unknown scenario {parsed.scenario!r}")
-        relay = self._dispatcher.recipe.multimodal_relay
-        if relay is None:
-            raise NotImplementedError(f"the served recipe relays no multimodal calls, so it serves no {path}")
-        return await relay.relay(path, payload)
-
-    def record_stream(self, pending: PendingInference, response: Mapping[str, Any]) -> AgentRecord:
-        succeeded = False
-        try:
-            payload = dict(pending.item.payload)
-            # An abort may have no runtime-load ID. Preserve its captured response;
-            # the record stage decides whether it can enter task creation.
-            if (
-                pending.deferred_prepared is not None
-                and isinstance(response.get("training"), Mapping)
-                and not inference_aborted(response)
-            ):
-                if pending.path is None:
-                    raise ReefError("deferred inference response has no request path")
-                hooks = pending.deferred_prepared.hooks
-                if hooks is not None:
-                    hooks.verify_response(
-                        pending.deferred_prepared.artifact,
-                        pending.path,
-                        response,
-                    )
-                self._stamp_durable_runtime_load_id(pending.deferred_prepared, payload, response)
-            item = replace(
-                pending.item,
-                payload={**payload, "response": dict(response)},
-            )
-            # An evaluation call is served like any other and kept by nobody.
-            stored = (
-                item if not pending.record else self._dispatcher.accept_record(item, release_id=pending.release_id)
-            )
-            delivery = response.get("stream_delivery", response)
-            succeeded = (
-                isinstance(delivery, Mapping) and delivery.get("complete") is True and not delivery.get("error")
-            )
-            return stored
-        except Exception as exc:
-            if isinstance(exc, RuntimeLoadMismatch) and pending.measurement is not None:
-                pending.measurement.metrics.increment(f"{request_family(pending.record)}/version_mismatch_total")
-            logger.exception(
-                "dispatcher rejected the stream record for scenario %r (record %s)",
-                pending.item.scenario,
-                pending.item.agent_record_id,
-            )
-            raise
-        finally:
-            if pending.measurement is not None:
-                pending.measurement.finish(succeeded=succeeded)
-            try:
-                if pending.lease is not None:
-                    pending.lease.release()
-            finally:
-                if pending.admission is not None:
-                    pending.admission.release()
-
-    async def inference_operations(
-        self, headers: Mapping[str, str], *, record: bool = True, artifact_id: str | None = None
-    ) -> OperationMetrics:
-        """Resolve the scenario before measuring its inference request lifetime."""
-        parsed = parse_request_headers(headers, RequestType.INFERENCE)
-        scenario = await asyncio.to_thread(self.inference_scenario, parsed, record=record, artifact_id=artifact_id)
-        return scenario.operations
-
-    def inference_scenario(self, parsed: RequestHeaders, *, record: bool, artifact_id: str | None = None) -> Scenario:
-        """The scenario an inference serves. A recorded call may create it, unless it names an artifact
-        (``artifact_id``): only a scenario that exists has one. An evaluation call (``record`` False) reads the
-        loaded instance only, never waiting for the scenario's lock and never creating it (see
-        ``ScenarioRegistry.get_loaded``)."""
-        if record:
-            scenario = self._dispatcher.get_or_create_scenario(
-                parsed.scenario,
-                release_id=parsed.release_id,
-                allow_implicit_creation=None if artifact_id is None else False,
-            )
-        else:
-            scenario = self._dispatcher.loaded_scenario(parsed.scenario, release_id=parsed.release_id)
-        if scenario is None:
-            raise UnknownScenario(f"unknown scenario {parsed.scenario!r}")
-        return scenario
-
-    async def _prepare_request(
-        self,
-        headers: Mapping[str, str],
-        payload: Mapping[str, Any],
-        path: str,
-        handler: InferenceHandler | None,
-        *,
-        record: bool = True,
-        evaluated: str | None = None,
-        rollout: bool = False,
-        artifact_id: str | None = None,
-    ) -> tuple[PreparedInference, dict[str, Any]]:
-        """The shared first half of every inference: freeze the serving state
-        (headers, scenario, artifact, handler, surface) and let the surface
-        transform the request payload. ``record`` names the measurement family;
-        an evaluation call (``record`` False) runs every component's hooks but
-        the ``evaluated`` one's, whose candidate the rollout runs."""
-        parsed = parse_request_headers(headers, RequestType.INFERENCE)
-        initial = await asyncio.to_thread(self.inference_scenario, parsed, record=record, artifact_id=artifact_id)
-        if evaluated is not None and evaluated not in initial.surface.names:
-            raise UnknownScenario(f"scenario {parsed.scenario!r} serves no component {evaluated!r}")
-        if initial.runtime is not None:
-            with initial.operations.measure(f"{request_family(record, rollout=rollout)}/admission"):
-                admission = await initial.runtime.acquire_inference()
-        else:
-            admission = None
-        try:
-            # Re-resolve after admission: a queued request must freeze the head
-            # committed by the weight update that released it, never the head it
-            # observed before waiting.
-            prepared = await asyncio.to_thread(
-                self._prepare_inference,
-                parsed,
-                handler,
-                admission,
-                record=record,
-                evaluated=evaluated,
-                rollout=rollout,
-                artifact_id=artifact_id,
-            )
-            hooks = prepared.hooks
-            transformed = (
-                dict(payload)
-                if hooks is None
-                else await asyncio.to_thread(
-                    hooks.prepare_request,
-                    prepared.artifact,
-                    path,
-                    dict(payload),
-                )
-            )
-            if isinstance(hooks, LeasingInferenceHooks):
-                # Freeze the served adapter for the attempt: the surface has
-                # named it, so it must stay resident until the attempt ends.
-                lease = await asyncio.to_thread(hooks.begin_request, prepared.artifact, path)
-                prepared = replace(prepared, lease=lease)
-            return prepared, transformed
-        except BaseException:
-            if admission is not None:
-                admission.release()
-            raise
-
-    @staticmethod
-    def _stamp_durable_runtime_load_id(
-        prepared: PreparedInference,
-        payload: dict[str, Any],
-        response: Mapping[str, Any],
-    ) -> None:
-        """Record which engine weights answered a training-scenario request."""
-        if not prepared.durable:
-            return
-        spans = reported_runtime_load_spans(response)
-        if spans:
-            payload["runtime_load_spans"] = [
-                {"start": span.start, "end": span.end, "runtime_load_id": span.runtime_load_id} for span in spans
-            ]
-            versions = {span.runtime_load_id for span in spans}
-            if len(versions) == 1:
-                payload["runtime_load_id"] = versions.pop()
-            else:
-                payload.pop("runtime_load_id", None)
-            return
-        if (version := reported_runtime_load_id(response)) is None:
-            raise RuntimeLoadMismatch("durable training response reports no runtime_load_id")
-        payload["runtime_load_id"] = version
-
-    def _prepare_inference(
-        self,
-        parsed: RequestHeaders,
-        handler: InferenceHandler | None,
-        admission: InferenceAdmissionHandle | None,
-        *,
-        record: bool = True,
-        evaluated: str | None = None,
-        rollout: bool = False,
-        artifact_id: str | None = None,
-    ) -> PreparedInference:
-        scenario = self.inference_scenario(parsed, record=record, artifact_id=artifact_id)
-        selected_handler = handler if handler is not None else scenario.inference_handler
-        if selected_handler is None:
-            raise RecipeConfigError("the served recipe has no inference handler")
-        ref = scenario.current_artifact_ref() if artifact_id is None else scenario.served_release(artifact_id)
-        artifact = Artifact(ref, scenario.repository)
-        surface = scenario.surface
-        # A rollout call samples the served policy, so it runs the served hooks as a recorded call does.
-        hooks = surface.inference if record or rollout else surface.inference_for_evaluation(evaluated)
-        # A handler that reads the tree (a checkpoint manifest, an adapter path) reads the
-        # loaded component, never a composed release whose root holds only component directories.
-        loaded_component = surface.loader_component
-        if hooks is not None or (not surface.single and loaded_component is not None):
-            # The release is frozen for the attempt: the loaded component's view and every
-            # component hook read this one materialized copy instead of materializing it again.
-            # A flat release's hooks need it too: after a checkpointed commit the head is a
-            # durable release whose runtime load ID lives only in its metadata, and a weight
-            # hook that cannot read it names no adapter, so the frozen base answers instead.
-            # The materialized copy comes from the release cache.
-            artifact = artifact.materialize()
-        served = artifact if loaded_component is None else surface.component_artifact(artifact, loaded_component)
-        return PreparedInference(
-            parsed=parsed,
-            artifact=artifact,
-            served=served,
-            record_ref=recorded_ref(scenario, parsed, ref),
-            handler=selected_handler,
-            surface=surface,
-            durable=scenario.training_component is not None,
-            admission=admission,
-            hooks=hooks,
-        )
 
     def harness_manifest(
         self,
@@ -1097,7 +601,7 @@ class RequestService:
         artifact_ref: ArtifactRef | None = None,
     ) -> AgentRecord:
         normalized_payload, references = normalize_request_payload(parsed.request_type, payload)
-        normalized_payload = _with_tags(normalized_payload, parsed)
+        normalized_payload = with_request_tags(normalized_payload, parsed)
         item = AgentRecord.create(
             scenario=parsed.scenario,
             request_type=parsed.request_type,
@@ -1123,77 +627,8 @@ class RequestService:
             raise
 
 
-def recorded_ref(scenario: Scenario, parsed: RequestHeaders, served: ArtifactRef) -> ArtifactRef:
-    """The release an inference record names: the served one, or the release the client says it runs.
-
-    A client sends the release it runs as ``x-reef-tag-release`` and keeps
-    running it after a newer one is published. Where the client pulls everything a release changes (a file
-    tree, with no request hooks and no served weights), a call answers the
-    same on every release, so the record names the client's release when the
-    scenario's catalog has it. A value the catalog does not have names the
-    served release, as does every call on a scenario that serves its release
-    itself."""
-    claimed = parsed.tags.get("release")
-    surface = scenario.surface
-    if (
-        claimed is None
-        or claimed == served.release_id
-        or surface.files is None
-        or surface.inference is not None
-        or scenario.training_component is not None
-    ):
-        return served
-    return scenario.release_queries.ref_for_version(claimed) or served
-
-
-def _with_tags(payload: Mapping[str, Any], parsed: RequestHeaders) -> Mapping[str, Any]:
-    """Carry ``x-reef-tag-*`` through to the INFERENCE record's metadata.
-
-    Only inference: a tag is context about a served exchange, and the
-    processors that read one correlate on the inference side. This stores
-    every pair as sent; only :func:`recorded_ref` reads a value.
-    """
-    if parsed.request_type is not RequestType.INFERENCE or not parsed.tags:
-        return payload
-    metadata = dict(payload.get("metadata") or {})
-    metadata["tags"] = {**(metadata.get("tags") or {}), **parsed.tags}
-    return {**payload, "metadata": metadata}
-
-
-def rollout_inference_response(response: Mapping[str, Any], payload: Mapping[str, Any]) -> dict[str, Any]:
-    """The response of a rollout call: the training block stays, with the runtime load ID that answered.
-
-    ``payload`` is the request after ``_stamp_durable_runtime_load_id``; its stamp goes into the training block
-    when the block names no version of its own.
-    """
-    training = response.get("training")
-    if not isinstance(training, Mapping):
-        return dict(response)
-    stamped = {key: payload[key] for key in ("runtime_load_id", "runtime_load_spans") if key in payload}
-    return {**response, "training": {**stamped, **training}}
-
-
-def client_inference_response(response: Mapping[str, Any]) -> dict[str, Any]:
-    """Remove Reef-private training tensors from a buffered client response.
-
-    The record keeps the block; no client ever sees it. (The
-    ``x-reef-return-training`` opt-in existed for the external OpenClaw-RL
-    grader, whose judging now runs in-processor off the records.)
-    """
-
-    client_response = dict(response)
-    client_response.pop("training", None)
-    return client_response
-
-
 __all__ = [
-    "InferenceRetryPolicy",
-    "InferenceRetryTimeout",
-    "PendingInference",
-    "PreparedInference",
     "RequestService",
-    "client_inference_response",
     "normalize_request_payload",
     "page_headers",
-    "rollout_inference_response",
 ]

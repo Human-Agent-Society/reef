@@ -1,7 +1,7 @@
 """A loopback endpoint that answers model calls from one artifact, for the rollouts that evaluate it.
 
 An artifact evaluation runs its rollouts against an artifact that the scenario may not serve. A runtime that
-answers each call from the artifact that the call names (``InferenceRuntime.artifact_model`` is not None) can
+answers each call from the artifact that the call names (``InferenceRuntime.serves_artifacts_on_request``) can
 answer them without loading the artifact: ``ArtifactEndpoint`` hands each call to the runtime's handler with that
 artifact, under the runtime's inference admission. Reef's serving takes no part, and no call is a record.
 """
@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
@@ -26,7 +27,7 @@ MODEL_CALL_PATHS = ("/v1/chat/completions", "/v1/responses", "/v1/messages")
 class ArtifactEndpoint:
     """An OpenAI endpoint on loopback that answers every call from ``artifact`` with ``runtime``'s handler.
 
-    Values: ``runtime`` is an ``InferenceRuntime`` whose ``artifact_model(artifact)`` is not None, and ``artifact``
+    Values: ``runtime`` is an ``InferenceRuntime`` that serves artifacts on request, and ``artifact``
     the materialized artifact that every call samples. A call to a path outside ``MODEL_CALL_PATHS`` gets 404, a
     body that is not a JSON object 400, a runtime that admits no call 503, a handler refusal its own status, and
     any other handler failure 502 with the reason. Purpose: the artifact evaluation service points its rollouts
@@ -36,7 +37,7 @@ class ArtifactEndpoint:
     """
 
     def __init__(self, runtime: InferenceRuntime, artifact: Artifact) -> None:
-        if runtime.artifact_model(artifact) is None:
+        if not runtime.serves_artifacts_on_request:
             raise ValueError(f"the runtime serves only its current artifact, not {artifact.ref.release_id!r}")
         self.runtime = runtime
         self.artifact = artifact
@@ -100,4 +101,20 @@ class ArtifactEndpoint:
             self.server = None
 
 
-__all__ = ["ArtifactEndpoint"]
+class CandidateArtifacts(ABC):
+    """Finds the candidate of an evaluation rollout.
+
+    ``candidate(scenario, artifact_id, component)`` returns the runtime of ``scenario`` and the materialized
+    artifact that ``artifact_id`` names for ``component``. It raises ``ReefError`` for a scenario without a
+    runtime, and as ``Scenario.resolve_artifact`` does for an unknown artifact or component.
+
+    Purpose: the dispatcher implements it; ``LocalCandidateEndpoints`` calls it for each rollout.
+    """
+
+    @abstractmethod
+    def candidate(
+        self, scenario: str, artifact_id: str, component: str | None
+    ) -> tuple[InferenceRuntime, Artifact]: ...
+
+
+__all__ = ["ArtifactEndpoint", "CandidateArtifacts"]

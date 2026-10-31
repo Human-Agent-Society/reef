@@ -132,14 +132,14 @@ class ModelBinding:
     def from_runtime(cls, runtime: InferenceRuntime, *, model: str | None = None) -> ModelBinding:
         """Bind to ``runtime``'s endpoint; ``model`` overrides its model path."""
 
-        name = model or getattr(runtime, "model_path", "") or ""
+        name = model or runtime.model_path
         if not name:
             raise ValueError("model binding requires a model name: set reef.upstream_model or the recipe's model.path")
         return cls(
             base_url=runtime.base_url,
             model=name,
-            api_key=getattr(runtime, "api_key", None),
-            api=getattr(runtime, "api", "openai") or "openai",
+            api_key=runtime.provider_key,
+            api=runtime.api,
             timeout_s=float(runtime.inference_timeout_s),
         )
 

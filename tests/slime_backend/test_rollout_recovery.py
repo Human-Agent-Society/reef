@@ -8,13 +8,15 @@ from pathlib import Path
 import pytest
 
 from reef.inference.sglang.config import SGLangConfig
+from reef.inference.sglang.launch import SGLangModel
 from reef.runtime.executor.delegating import DelegatingExecutor
 from reef.runtime.executor.uniproc import UniProcExecutor
 
 torch = pytest.importorskip("torch")
 
 
-def _load_rollout_module(monkeypatch: pytest.MonkeyPatch):
+def _install_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stand in for Ray, SGLang and the Slime modules the batch processor imports."""
     ray = types.ModuleType("ray")
     ray.get = lambda handles, **_kwargs: handles  # type: ignore[attr-defined]
     ray.kill = lambda *_args, **_kwargs: None  # type: ignore[attr-defined]
@@ -38,10 +40,6 @@ def _load_rollout_module(monkeypatch: pytest.MonkeyPatch):
     constants.GPU_MEMORY_TYPE_CUDA_GRAPH = "cuda_graph"  # type: ignore[attr-defined]
     constants.GPU_MEMORY_TYPE_KV_CACHE = "kv_cache"  # type: ignore[attr-defined]
     constants.GPU_MEMORY_TYPE_WEIGHTS = "weights"  # type: ignore[attr-defined]
-    sglang_engine = types.ModuleType("slime.backends.sglang_utils.sglang_engine")
-    sglang_engine.SGLangEngine = type("SGLangEngine", (), {})  # type: ignore[attr-defined]
-    sglang_engine.resolve_sglang_engine_class = lambda _args: sglang_engine.SGLangEngine  # type: ignore[attr-defined]
-
     monkeypatch.setitem(sys.modules, "sglang", sglang)
     monkeypatch.setitem(sys.modules, "sglang.srt", srt)
     monkeypatch.setitem(sys.modules, "sglang.srt.constants", constants)
@@ -52,86 +50,14 @@ def _load_rollout_module(monkeypatch: pytest.MonkeyPatch):
             setattr(module, attribute, value)
         monkeypatch.setitem(sys.modules, name, module)
 
-    stub(
-        "slime.backends.sglang_utils.external",
-        start_external_rollout_servers=lambda *_args, **_kwargs: None,
-    )
-    stub(
-        "slime.backends.sglang_utils.sglang_config",
-        ModelConfig=type("ModelConfig", (), {}),
-        ServerGroupConfig=type("ServerGroupConfig", (), {}),
-        SglangConfig=type("SglangConfig", (), {}),
-    )
-    monkeypatch.setitem(
-        sys.modules,
-        "slime.backends.sglang_utils.sglang_engine",
-        sglang_engine,
-    )
-    stub(
-        "slime.utils.dp_schedule",
-        build_dp_schedule=lambda *_args, **_kwargs: None,
-    )
-    stub(
-        "slime.utils.health_monitor",
-        RolloutHealthMonitor=type("RolloutHealthMonitor", (), {}),
-    )
-    stub(
-        "slime.utils.http_utils",
-        _wrap_ipv6=lambda host: host,
-        find_available_port=lambda *_args, **_kwargs: 0,
-        get_host_info=lambda: ("localhost", "127.0.0.1"),
-        init_http_client=lambda *_args, **_kwargs: None,
-    )
-    stub(
-        "slime.utils.logging_utils",
-        configure_logger=lambda *_args, **_kwargs: None,
-        init_tracking=lambda *_args, **_kwargs: None,
-    )
-    stub("slime.rollout.base_types", call_rollout_fn=lambda *_args, **_kwargs: None)
-    stub("slime.rollout.sample_hooks", set_current_rollout_id=lambda _value: None)
-    stub("slime.utils.data", get_source=lambda _sample: "test")
-    stub(
-        "slime.utils.metric_utils",
-        compute_pass_rate=lambda *_args, **_kwargs: {},
-        compute_rollout_step=lambda *_args, **_kwargs: 0,
-        compute_statistics=lambda *_args, **_kwargs: {},
-        dict_add_prefix=lambda values, _prefix: values,
-        has_repetition=lambda _value: False,
-    )
-    stub(
-        "slime.utils.misc",
-        Box=type("Box", (), {}),
-        decode_int32_meta_array=lambda _value: [],
-        group_by=lambda values, _key: {"test": values},
-        load_function=lambda _path: None,
-    )
+    # The batch processor's Slime imports.
+    stub("slime.utils.dp_schedule", build_dp_schedule=lambda *_args, **_kwargs: None)
+    stub("slime.utils.misc", Box=type("Box", (), {}))
     stub("slime.utils.types", Sample=type("Sample", (), {}))
-    stub(
-        "slime.ray.rollout_validation",
-        validate_server_group_gpu_indices=lambda **_kwargs: None,
-    )
-    stub("slime.ray.ray_actor", RayActor=type("RayActor", (), {}))
-    stub(
-        "slime.ray.utils",
-        NOSET_VISIBLE_DEVICES_ENV_VARS_LIST=[],
-        Lock=type("Lock", (), {}),
-        add_default_ray_env_vars=lambda env_vars=None: env_vars or {},
-    )
-
-    module_name = "slime.ray._rollout_recovery_test"
-    installed = importlib.util.find_spec("slime.ray.rollout")
-    assert installed is not None and installed.origin is not None
-    path = Path(installed.origin)
-    spec = importlib.util.spec_from_file_location(module_name, path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    monkeypatch.setitem(sys.modules, module_name, module)
-    spec.loader.exec_module(module)
-    return module
 
 
 def _load_manager_module(monkeypatch: pytest.MonkeyPatch, *, serving: bool = False):
-    raw_rollout = _load_rollout_module(monkeypatch)
+    _install_stubs(monkeypatch)
     path = Path(__file__).parents[2] / "reef" / "train" / "slime_backend" / "reef_adapters" / "batches.py"
     if serving:
         path = Path(__file__).parents[2] / "reef" / "inference" / "sglang" / "worker.py"
@@ -141,7 +67,7 @@ def _load_manager_module(monkeypatch: pytest.MonkeyPatch, *, serving: bool = Fal
     module = importlib.util.module_from_spec(spec)
     monkeypatch.setitem(sys.modules, name, module)
     spec.loader.exec_module(module)
-    return raw_rollout, module
+    return module
 
 
 class _RecordingRolloutExecutor(DelegatingExecutor):
@@ -193,7 +119,7 @@ def test_rollout_manager_routes_entire_serving_lifecycle_through_custom_executor
 
 
 def test_rollout_init_failure_releases_already_launched_engines(monkeypatch):
-    _, module = _load_manager_module(monkeypatch, serving=True)
+    module = _load_manager_module(monkeypatch, serving=True)
     engine = types.SimpleNamespace(shutdown=_RemoteMethod("shutdown"))
     server = types.SimpleNamespace(server_groups=[types.SimpleNamespace(all_engines=[engine])])
 
@@ -218,7 +144,7 @@ def test_rollout_init_failure_releases_already_launched_engines(monkeypatch):
 
 
 def test_rollout_shutdown_of_external_engines_is_idempotent(monkeypatch):
-    _, module = _load_manager_module(monkeypatch, serving=True)
+    module = _load_manager_module(monkeypatch, serving=True)
     worker = object.__new__(module.SGLangWorker)
     worker.config = SGLangConfig("model", 1, 1, 1, external_engines=({},))
     worker._closed = False
@@ -245,6 +171,7 @@ class _ServerGroup:
         self.all_engines = engines
         self.num_new_engines = num_new_engines
         self.worker_type = "regular"
+        self.external = False
         self.needs_offload = False
         self.num_gpus_per_engine = 1
         self.gpu_offset = 0
@@ -263,7 +190,8 @@ class _ServerGroup:
         for index in dead_indices:
             self.all_engines[index] = object()
         self.num_new_engines = len(dead_indices)
-        return [], port_cursors
+        # Engines that are ready at once: nothing for the startup to wait on.
+        return {}
 
 
 class _RemoteMethod:
@@ -276,11 +204,11 @@ class _RemoteMethod:
 
 @pytest.mark.unit
 def test_healthy_recovery_preserves_pending_initial_engine_count(monkeypatch: pytest.MonkeyPatch) -> None:
-    module = _load_rollout_module(monkeypatch)
+    _install_stubs(monkeypatch)
     from reef.inference.sglang.worker import recover_server
 
     group = _ServerGroup([object(), object()], num_new_engines=2)
-    server = module.RolloutServer(server_groups=[group])
+    server = SGLangModel(server_groups=[group])
 
     recover_server(server)
 
@@ -290,11 +218,14 @@ def test_healthy_recovery_preserves_pending_initial_engine_count(monkeypatch: py
 
 @pytest.mark.unit
 def test_recovery_still_starts_dead_engines(monkeypatch: pytest.MonkeyPatch) -> None:
-    module = _load_rollout_module(monkeypatch)
+    _install_stubs(monkeypatch)
     from reef.inference.sglang.worker import recover_server
 
+    # The relaunched engines are ready at once; nothing reaches Ray.
+    monkeypatch.setattr("reef.inference.sglang.launch.ray", types.SimpleNamespace(get=lambda refs: refs))
+
     group = _ServerGroup([object(), None], num_new_engines=0)
-    server = module.RolloutServer(server_groups=[group])
+    server = SGLangModel(server_groups=[group])
 
     recover_server(server)
 
@@ -305,7 +236,7 @@ def test_recovery_still_starts_dead_engines(monkeypatch: pytest.MonkeyPatch) -> 
 
 @pytest.mark.unit
 def test_reef_external_fields_are_tensorized_without_patching_slime(monkeypatch: pytest.MonkeyPatch) -> None:
-    _load_rollout_module(monkeypatch)
+    _install_stubs(monkeypatch)
     from reef.train.slime_backend.reef_adapters.batches import tensorize_external_fields
 
     data = {
@@ -337,7 +268,7 @@ def test_uncertain_weight_update_synchronously_retires_managed_engine_handles(
 ) -> None:
     from reef.inference.sglang.launch import SGLangModel
 
-    _, module = _load_manager_module(monkeypatch, serving=True)
+    module = _load_manager_module(monkeypatch, serving=True)
     engines = [
         types.SimpleNamespace(shutdown=_RemoteMethod("shutdown-0")),
         types.SimpleNamespace(shutdown=_RemoteMethod("shutdown-1")),
@@ -364,7 +295,7 @@ def test_uncertain_weight_update_synchronously_retires_managed_engine_handles(
 def test_uncertain_weight_update_keeps_deployment_owned_external_engines(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _, module = _load_manager_module(monkeypatch, serving=True)
+    module = _load_manager_module(monkeypatch, serving=True)
     engine = types.SimpleNamespace(shutdown=_RemoteMethod("shutdown"))
     server = types.SimpleNamespace(
         update_weights=True, server_groups=[types.SimpleNamespace(all_engines=[engine])], engines=[engine]
@@ -386,7 +317,7 @@ def test_uncertain_weight_update_keeps_deployment_owned_external_engines(
 def test_recovered_engine_is_paused_before_an_in_place_update_continues(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    raw_rollout, module = _load_manager_module(monkeypatch, serving=True)
+    module = _load_manager_module(monkeypatch, serving=True)
     lifecycle: list[str] = []
 
     class RecordingRemote:
@@ -399,7 +330,7 @@ def test_recovered_engine_is_paused_before_an_in_place_update_continues(
 
     engine = types.SimpleNamespace(pause_generation=RecordingRemote("pause"))
     group = _ServerGroup([engine], num_new_engines=1)
-    server = raw_rollout.RolloutServer(server_groups=[group])
+    server = SGLangModel(server_groups=[group])
     monitor = types.SimpleNamespace(
         pause=lambda: lifecycle.append("monitor_pause"),
         resume=lambda: lifecycle.append("monitor_resume"),
@@ -422,7 +353,7 @@ def test_retracting_pause_clears_the_shared_cache_before_a_publication(
     monkeypatch: pytest.MonkeyPatch, pause_mode: str
 ) -> None:
     """Nothing the previous weights built may survive into the next ones."""
-    raw_rollout, module = _load_manager_module(monkeypatch, serving=True)
+    module = _load_manager_module(monkeypatch, serving=True)
     calls: list[str] = []
 
     class RecordingRemote:
@@ -441,7 +372,7 @@ def test_retracting_pause_clears_the_shared_cache_before_a_publication(
     manager = object.__new__(module.SGLangWorker)
     _attach_control(module, manager)
     manager.config = SGLangConfig("model", 1, 1, 1, pause_mode=pause_mode)
-    manager.servers = {"actor": raw_rollout.RolloutServer(server_groups=[group])}
+    manager.servers = {"actor": SGLangModel(server_groups=[group])}
     manager._health_monitors = []
 
     manager.pause_generation_for_update()
@@ -453,10 +384,10 @@ def test_retracting_pause_clears_the_shared_cache_before_a_publication(
 
 
 @pytest.mark.unit
-def test_dp_packaging_preserves_runtime_load_ids_per_partition(
+def test_dp_packaging_preserves_producing_artifact_ids_per_partition(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _, module = _load_manager_module(monkeypatch)
+    module = _load_manager_module(monkeypatch)
     monkeypatch.setattr(
         sys.modules["slime.utils.dp_schedule"],
         "build_dp_schedule",
@@ -473,29 +404,20 @@ def test_dp_packaging_preserves_runtime_load_ids_per_partition(
     args = types.SimpleNamespace(
         global_batch_size=2,
         rollout_data_transport="object-store",
-        custom_rollout_data_keys=(
-            "producing_runtime_load_spans",
-            "producing_runtime_load_ids",
-        ),
+        custom_rollout_data_keys=("producing_artifact_ids",),
         reef_rollout_tensor_dtypes={},
     )
     manager = module.TrainingBatchProcessor(args, {"dp_size": 2})
-    spans = [
-        [{"start": 0, "end": 1, "runtime_load_id": "engine:1"}],
-        [{"start": 0, "end": 1, "runtime_load_id": "engine:2"}],
-    ]
     packed = manager._split_train_data_by_dp(
         {
             "tokens": [[10], [20]],
             "rollout_ids": [0, 1],
             "external_step_sizes": [2],
-            "producing_runtime_load_ids": ["engine:1", "engine:2"],
-            "producing_runtime_load_spans": spans,
+            "producing_artifact_ids": ["artifact-1", "artifact-2"],
         }
     )
 
-    assert [rank["producing_runtime_load_ids"] for rank in packed] == [["engine:1"], ["engine:2"]]
-    assert [rank["producing_runtime_load_spans"] for rank in packed] == [[spans[0]], [spans[1]]]
+    assert [rank["producing_artifact_ids"] for rank in packed] == [["artifact-1"], ["artifact-2"]]
 
 
 def _round_robin_dp_schedule(_args, config, total_lengths, *, global_batch_size, rollout_indices):
@@ -507,7 +429,7 @@ def _round_robin_dp_schedule(_args, config, total_lengths, *, global_batch_size,
 
 
 def _manager_for_schedule(monkeypatch: pytest.MonkeyPatch, *, global_batch_size: int):
-    _, module = _load_manager_module(monkeypatch)
+    module = _load_manager_module(monkeypatch)
     monkeypatch.setattr(sys.modules["slime.utils.dp_schedule"], "build_dp_schedule", _round_robin_dp_schedule)
     monkeypatch.setattr(module.ray, "put", lambda value, **_kwargs: value, raising=False)
     monkeypatch.setattr(sys.modules["slime.utils.misc"], "Box", lambda value: value)
@@ -558,7 +480,7 @@ def test_dp_packaging_trains_a_partial_last_step(monkeypatch: pytest.MonkeyPatch
 
 
 def test_batch_processor_has_no_actor_or_inference_lifecycle(monkeypatch):
-    _, module = _load_manager_module(monkeypatch)
+    module = _load_manager_module(monkeypatch)
     processor = module.TrainingBatchProcessor(
         types.SimpleNamespace(custom_rollout_data_keys=(), reef_rollout_tensor_dtypes={}), {"dp_size": 1}
     )
@@ -568,7 +490,7 @@ def test_batch_processor_has_no_actor_or_inference_lifecycle(monkeypatch):
 
 
 def test_legacy_monitor_resume_cannot_bypass_pending_generation_pause(monkeypatch):
-    _, module = _load_manager_module(monkeypatch, serving=True)
+    module = _load_manager_module(monkeypatch, serving=True)
     worker = object.__new__(module.SGLangWorker)
     _attach_control(module, worker)
     worker._control.paused = True
@@ -581,7 +503,7 @@ def test_legacy_monitor_resume_cannot_bypass_pending_generation_pause(monkeypatc
 
 
 def test_shutdown_drain_failure_preserves_engines_and_allows_retry(monkeypatch):
-    _, module = _load_manager_module(monkeypatch, serving=True)
+    module = _load_manager_module(monkeypatch, serving=True)
     worker = object.__new__(module.SGLangWorker)
     worker.config = SGLangConfig("model", 1, 1, 1, pause_mode="retract")
     worker._closed = False
@@ -622,7 +544,7 @@ def test_shutdown_drain_failure_preserves_engines_and_allows_retry(monkeypatch):
 def test_serving_worker_installs_reef_monitor_with_native_timings(monkeypatch):
     from reef.runtime.recovery import EngineHealthMonitor, HealthMonitorConfig
 
-    _, module = _load_manager_module(monkeypatch, serving=True)
+    module = _load_manager_module(monkeypatch, serving=True)
     group = types.SimpleNamespace(all_engines=[], nodes_per_engine=1)
     server = types.SimpleNamespace(server_groups=[group])
     monkeypatch.setattr(
@@ -653,7 +575,7 @@ def test_serving_worker_installs_reef_monitor_with_native_timings(monkeypatch):
 
 
 def test_publication_pause_fences_surviving_engines_before_dead_slots_recover(monkeypatch):
-    _, module = _load_manager_module(monkeypatch, serving=True)
+    module = _load_manager_module(monkeypatch, serving=True)
     paused = []
     engine = types.SimpleNamespace(
         pause_generation=types.SimpleNamespace(remote=lambda mode: paused.append(mode)),

@@ -1,13 +1,12 @@
-"""Reefine's multimodal gateway and the relay that sends a scenario's multimodal calls to it.
+"""Reefine's multimodal gateway, which its agent proposer calls.
 
 One gateway that serves images, embeddings, speech and decisions behind a
 single key: OpenRouter by default, or an OpenAI-compatible one (OrcaRouter,
 LiteLLM, ...). Reefine reads it from ``evolution.multimodal``, hands Reef a
-:class:`ProviderRelay` for its scenarios, and gives the same gateway to its
-agent. The relay keeps the key the way the upstream runtime keeps the
-chat key: request bodies pass through unchanged, in the gateway's own format,
-and the preset only decides where each of Reef's routes lands and how an agent
-lists the models.
+the gateway to its agent proposer: request bodies pass through unchanged, in the
+gateway's own format, and the preset only decides where each route lands and
+how an agent lists the models. Reef's inference service relays no multimodal
+call; only served models answer there.
 """
 
 from __future__ import annotations
@@ -16,8 +15,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from reef.inference.http import HOP_BY_HOP_HEADERS
-from reef.runtime.interfaces import InferenceStream, MultimodalRelay, UpstreamStatusError
+
+#: The multimodal routes that the proposer's gateway relays to the provider.
+MULTIMODAL_ROUTES: tuple[str, ...] = ("/v1/images", "/v1/embeddings", "/v1/audio/speech", "/v1/decisions")
 
 
 @dataclass(frozen=True)
@@ -122,63 +122,11 @@ class MultimodalSettings:
         return MultimodalProvider(preset=self.preset, base_url=self.base_url, api_key=key) if key else None
 
 
-class ProviderRelay(MultimodalRelay):
-    """Relay multimodal calls to one provider at its own path for each route, with its key and nothing of Reef's.
-
-    Values: ``provider`` is the gateway the calls go to; ``timeout_s`` > 0 bounds one call.
-    Purpose: ``ReefineRecipe.multimodal_relay`` makes one; the service relays a scenario's multimodal calls
-    through it.
-    """
-
-    def __init__(self, provider: MultimodalProvider, *, timeout_s: float = 300.0) -> None:
-        if timeout_s <= 0:
-            raise ValueError("ProviderRelay.timeout_s must be positive")
-        self.provider = provider
-        self.timeout_s = timeout_s
-
-    async def relay(self, path: str, payload: dict[str, Any]) -> InferenceStream:
-        from aiohttp import ClientSession, ClientTimeout
-
-        upstream_path = self.provider.upstream_path(path)
-        if upstream_path is None:
-            raise NotImplementedError(f"the {self.provider.preset.name} provider serves no {path}")
-        headers = {"Authorization": f"Bearer {self.provider.api_key}", "Accept-Encoding": "identity"}
-        # The session outlives this call: the stream owns it until closed.
-        session = ClientSession(timeout=ClientTimeout(total=self.timeout_s), auto_decompress=False)
-        try:
-            response = await session.post(f"{self.provider.base_url}{upstream_path}", json=payload, headers=headers)
-        except Exception:
-            await session.close()
-            raise
-
-        async def close() -> None:
-            response.close()
-            await session.close()
-
-        if response.status >= 400:
-            try:
-                body = (await response.read()).decode(errors="replace")
-            finally:
-                await close()
-            raise UpstreamStatusError(
-                f"the {self.provider.preset.name} provider returned {response.status}: {body[:400]}",
-                status=response.status,
-            )
-        return InferenceStream(
-            status=response.status,
-            headers={
-                name: value for name, value in response.headers.items() if name.lower() not in HOP_BY_HOP_HEADERS
-            },
-            chunks=response.content.iter_any(),
-            close=close,
-        )
-
-
 __all__ = [
     "DEFAULT_PRESET",
+    "MULTIMODAL_ROUTES",
     "PRESETS",
     "MultimodalProvider",
     "MultimodalSettings",
     "ProviderPreset",
-    "ProviderRelay",
 ]

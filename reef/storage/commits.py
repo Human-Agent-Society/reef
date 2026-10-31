@@ -126,7 +126,8 @@ class CommitRecord:
       ``components`` are as for an ``"activate"`` record: ``None`` in a
       scenario of one component, else the imported component and the
       release's manifest. ``metrics`` is ``{"source": {"uri", "version"}}``,
-      where the content was read from; it is no part of the artifact's
+      where the content was read from, and ``source.item`` names the
+      artifact item of an import of one; it is no part of the artifact's
       identity.
     - ``"sync"``: ``artifact_ref`` is a release that the sync published
       beside the chain from a person's merged tree. ``checkpoint`` is true.
@@ -248,11 +249,14 @@ class CommitRecord:
                 self.metrics is None
                 or set(self.metrics) != {"source"}
                 or not isinstance(source, Mapping)
-                or set(source) != {"uri", "version"}
+                or set(source) not in ({"uri", "version"}, {"uri", "version", "item"})
                 or not all(isinstance(value, str) for value in source.values())
                 or not source["uri"]
+                or source.get("item") == ""
             ):
-                raise CommitHistoryError('an import commit\'s metrics are {"source": {"uri", "version"}}')
+                raise CommitHistoryError(
+                    'an import commit\'s metrics are {"source": {"uri", "version"}}, with "item" for an artifact item'
+                )
         if self.operation == "train_from" and self.components is not None:
             raise CommitHistoryError("a train_from commit publishes no release and carries no components")
         if self.operation in ("activate", "import", "sync", "serve", "stop_serving") and (

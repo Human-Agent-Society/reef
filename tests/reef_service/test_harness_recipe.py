@@ -72,6 +72,7 @@ from reef.runtime.executor.config import ExecutorSettings
 from reef.sample2job.traces import TrainTaskJobData
 from reef.service.app import create_app
 from reef.storage.samples import TrainerSamples
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train.backend import ComponentReleases
 from reef.train.harness_backend.backend import HarnessBackend
@@ -606,7 +607,7 @@ def test_runs_and_scorers_use_the_models_each_step_resolved(tmp_path: Path, monk
         return marker_score(task, result)
 
     def endpoint(model: str) -> dict:
-        return {"url": MODEL.base_url, "model": model, "api_key": "scoped"}
+        return {"url": MODEL.base_url, "model": model}
 
     monkeypatch.setattr(RUN_RUN, spy)
     config_value = ModelConfig.from_value(endpoint("first-model"))
@@ -664,7 +665,7 @@ def test_the_served_binding_targets_the_scenario_evaluation_route() -> None:
     )
     assert ScenarioModels(ModelConfig(), configured, "agent").resolve().served.base_url.endswith("/agent/evaluation")
     overridden = configured.with_model_config(
-        ModelConfig.from_value({"url": "http://other.test", "model": "other-model", "api_key": "k"})
+        ModelConfig.from_value({"url": "http://other.test", "model": "other-model"})
     )
     resolved = overridden.model_bindings("agent").served
     assert resolved.base_url == "http://127.0.0.1:8900/reef/scenarios/agent/evaluation"
@@ -1039,6 +1040,7 @@ def test_a_restart_without_a_durable_log_keeps_a_held_tree_inactive(tmp_path: Pa
             local_artifact_dir=tmp_path / "staged",
             scenario_storage=SQLiteScenarioStorage(),
             hold_local_cycles=True,
+            coordination=memory_coordination(),
         )
 
     dispatcher = open_dispatcher()
@@ -1146,6 +1148,7 @@ def test_a_harness_trainer_evolves_the_tree_it_was_told_to_train_from(tmp_path: 
             local_artifact_dir=tmp_path / "staged",
             scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
             hold_local_cycles=True,
+            coordination=memory_coordination(),
         )
 
     def rules_of(scenario, release_id: str) -> str:
@@ -1219,6 +1222,7 @@ def test_a_sync_serves_at_once_and_is_the_training_start_after_a_restart(tmp_pat
             local_artifact_dir=tmp_path / "staged",
             scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
             hold_local_cycles=True,
+            coordination=memory_coordination(),
         )
 
     first_recipe = recipe("r1")
@@ -1327,6 +1331,7 @@ def test_a_keyed_candidate_leaves_no_key_material_in_the_commit_history(tmp_path
             local_artifact_dir=tmp_path / "staged",
             scenario_storage=SQLiteScenarioStorage(agent_record_dir),
             hold_local_cycles=True,
+            coordination=memory_coordination(),
         )
 
     first = dispatcher()

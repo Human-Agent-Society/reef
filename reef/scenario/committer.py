@@ -27,7 +27,7 @@ from reef.core.errors import CommitPending, ReefError
 from reef.observability.base import TrainingExperimentContext
 from reef.observability.commits import CommitExperimentObserver
 from reef.scenario.binding import ScenarioBinding
-from reef.scenario.releases import ScenarioReleases, ServedArtifact
+from reef.scenario.releases import ScenarioReleases, ServedBesideArtifact
 from reef.storage.commits import (
     SCENARIO_METADATA_KEY,
     CommitOperation,
@@ -327,18 +327,12 @@ class ScenarioCommitter:
         if any(component_trainer.trainer.has_pending_commit for component_trainer in self.trainers):
             raise CommitPending(f"cannot {action} while a training result waits for its commit")
 
-    def resolve_artifact(self, artifact_id: str, component: str | None) -> tuple[ComponentArtifact, Artifact]:
-        """The artifact ``artifact_id`` names as ``component``'s content, and the resolved release that minted it.
+    def artifact_release_ref(self, artifact_id: str, component: str | None) -> tuple[str, ArtifactRef]:
+        """The component that ``artifact_id`` names, and the ref of the durable release that minted it.
 
-        With one component, ``component`` may be ``None`` and
-        ``artifact_id`` is the ``release_id`` of the release that made the
-        artifact. With several, ``component`` is required and ``artifact_id``
-        is ``<release_id>:<component>`` for a release that minted that
-        component's content (``ScenarioReleases.artifacts``). Raise
-        ``ValueError`` for a missing or unknown component,
-        ``ArtifactNotFound`` for an ``artifact_id`` the scenario does not
-        list, and ``ReleaseNotRestorable`` for a release without durable
-        bytes or without every component the scenario serves.
+        It reads the commit history alone and does not materialize the release. ``component`` and ``artifact_id``
+        are as for :meth:`resolve_artifact`, which raises the same errors, except for the check of the release's
+        components.
         """
         names = self.component_names()
         if component is None:
@@ -356,7 +350,23 @@ class ScenarioCommitter:
         found = self.release_queries.find_release(row["release_id"])
         if found is None or not found[1]:
             raise ReleaseNotRestorable(f"scenario {self._name!r} artifact {artifact_id!r} has no durable bytes")
-        release = self._artifacts.resolve(found[0])
+        return component, found[0]
+
+    def resolve_artifact(self, artifact_id: str, component: str | None) -> tuple[ComponentArtifact, Artifact]:
+        """The artifact ``artifact_id`` names as ``component``'s content, and the resolved release that minted it.
+
+        With one component, ``component`` may be ``None`` and
+        ``artifact_id`` is the ``release_id`` of the release that made the
+        artifact. With several, ``component`` is required and ``artifact_id``
+        is ``<release_id>:<component>`` for a release that minted that
+        component's content (``ScenarioReleases.artifacts``). Raise
+        ``ValueError`` for a missing or unknown component,
+        ``ArtifactNotFound`` for an ``artifact_id`` the scenario does not
+        list, and ``ReleaseNotRestorable`` for a release without durable
+        bytes or without every component the scenario serves.
+        """
+        component, ref = self.artifact_release_ref(artifact_id, component)
+        release = self._artifacts.resolve(ref)
         try:
             self.require_components(release)
         except ReefError as exc:
@@ -437,7 +447,7 @@ class ScenarioCommitter:
         training result waits for its commit. Raise ``ReefError`` when the
         scenario keeps no durable commit history. Raise it also when the
         runtime answers only from the release that it has loaded
-        (``InferenceRuntime.artifact_model`` is ``None``).
+        (``InferenceRuntime.serves_artifacts_on_request`` is False).
         """
         with self._lock, self._publication_lock:
             if not self._store.durable:
@@ -453,15 +463,13 @@ class ScenarioCommitter:
             current = Artifact(self._artifacts.current, self._artifacts.repository)
             loader = surface.loader_component
             runtime = self._binding.runtime
-            if loader is not None and runtime is not None:
-                # The calls use the artifact's own weights, or the active release's weights for an artifact of
-                # another component. The runtime must answer each call from the release that the call names.
-                source = release if surface.single or selected.component == loader else current
-                if runtime.artifact_model(surface.component_artifact(source, loader)) is None:
-                    raise ReefError(
-                        f"scenario {self._name!r}'s runtime answers only from the release it has loaded, so it "
-                        f"cannot serve artifact {selected.artifact_id!r} beside the active release"
-                    )
+            # The calls use the artifact's own weights, or the active release's weights for an artifact of another
+            # component. The runtime must answer each call from the release that the call names.
+            if loader is not None and runtime is not None and not runtime.serves_artifacts_on_request:
+                raise ReefError(
+                    f"scenario {self._name!r}'s runtime answers only from the release it has loaded, so it "
+                    f"cannot serve artifact {selected.artifact_id!r} beside the active release"
+                )
             target = self.release_with(current, selected, release)
             record = self.append_operation_record(
                 "serve",
@@ -472,7 +480,7 @@ class ScenarioCommitter:
             self.advance_to(record.step)
             return replace(selected, release_id=target.ref.release_id)
 
-    def stop_serving(self, artifact_id: str) -> ServedArtifact:
+    def stop_serving(self, artifact_id: str) -> ServedBesideArtifact:
         """Stop serving ``artifact_id`` beside the active release; return it with the release that served it.
 
         The ``"stop_serving"`` record names the release, the component and the
@@ -546,7 +554,7 @@ class ScenarioCommitter:
         component as the active release binds it; its parent is the chain tip,
         and it is published beside the chain. An ``"import"`` record lands at
         the next step with ``source``, the ``{"uri", "version"}`` that the
-        files were read from, as its metrics. The active release, the chain
+        files were read from (and the ``item`` of an artifact item's import), as its metrics. The active release, the chain
         tip, every training start and the activation rule are left alone.
         Raise ``ValueError`` for an unknown component, a component that takes
         no import, or files that the layout or the admission check refuses;
@@ -817,11 +825,8 @@ class ScenarioCommitter:
             publication = SavedArtifactPublication(publication.artifact, component)
         local_artifact = self.stage_publication(next_step, publication, checkpoint)
         try:
-            # The engine must confirm the new revision before anything moves
-            # the active release: the staged bytes load first, and the version
-            # minted by publication then aliases them.
-            if activated:
-                self._activate(local_artifact)
+            # As at an activation, the runtime serves the published release once, before the record lands and
+            # before the active release moves.
             published_ref = artifacts.publish(
                 local_artifact,
                 expected_parent=checkpoint,
@@ -833,7 +838,7 @@ class ScenarioCommitter:
                     active_artifact=None if activated else head,
                 ),
                 advance_heads=not durable,
-                activate=activated,
+                activate=False,
             )
             if activated:
                 self._activate(artifacts.resolve(published_ref), source=local_artifact)
@@ -993,6 +998,9 @@ class ScenarioCommitter:
             if self._artifacts.checkpoint == record.artifact_ref:
                 if self._store.durable:
                     self._refresh_committed_checkpoint()
+                elif record.activated:
+                    # Publication moved the chain tip alone; the release serves now that its record landed.
+                    self._artifacts.activate(record.artifact_ref, expected=expected)
             else:
                 self._install_committed_checkpoint(
                     record.artifact_ref,

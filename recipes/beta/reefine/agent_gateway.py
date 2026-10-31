@@ -24,10 +24,9 @@ from collections.abc import Sequence
 from http.server import BaseHTTPRequestHandler
 from typing import Any
 
-from recipes.beta.reefine.multimodal import MultimodalProvider
+from recipes.beta.reefine.multimodal import MULTIMODAL_ROUTES, MultimodalProvider
 from reef.harness.gateway import AgentGateway, AgentTool, ModelCalls, refuse, relay
 from reef.harness.tasks.model_binding import ModelBinding
-from reef.runtime.interfaces import MULTIMODAL_ROUTES
 
 #: How much of a provider's refusal a trial reports back to the agent.
 MAX_ERROR_CHARS = 600

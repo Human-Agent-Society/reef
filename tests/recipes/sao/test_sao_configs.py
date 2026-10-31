@@ -7,7 +7,7 @@ re-parsed a cookbook YAML's flags. These tests close that hole: for each Slime
 deployment they build the Slime arguments exactly as ``reef serve`` and the
 HTTP service do (``SlimeDeployment.runtime_config`` and ``slime_arguments``),
 strip the retention and loss-family options exactly as
-``create_slime_component`` does, and then feed the remaining flags to the
+``start_slime_runner`` does, and then feed the remaining flags to the
 actual Slime argparse surface plus the recipe's ``validate_backend_args`` and
 ``validate_slime_args``.
 
@@ -512,7 +512,7 @@ def test_cookbook_training_config_parses_and_validates(config_path: Path) -> Non
     args, spec, options, recipe = _parse_config(config_path)
     _apply_validation_derivations(args)
     spec.apply_driver_options(args, options)
-    # Match create_slime_component: family projection can intentionally re-enable
+    # Match start_slime_runner: family projection can intentionally re-enable
     # the Slime pre-train pass after the YAML's initial --disable flag.
     configure_reef_loss_args(args)
 

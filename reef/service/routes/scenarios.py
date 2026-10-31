@@ -4,92 +4,25 @@ import asyncio
 
 from aiohttp import web
 
+from reef.core.errors import UnknownScenario
 from reef.core.records_types import RequestType
 from reef.scenario.scenario import Scenario
 from reef.service.artifact_evaluations import ArtifactEvaluations
 from reef.service.request_service import RequestService
 from reef.service.routes.payload import read_object
+from reef.storage.data import check_owner
+from reef.train.job_queue import cancel_scenario_job
 
 
-def register_scenario_routes(
-    app: web.Application, *, request_service: RequestService, evaluations: ArtifactEvaluations
-) -> None:
+def register_scenario_reads(app: web.Application, *, request_service: RequestService) -> None:
+    """The reads of what each scenario stores, which every service with the scenarios' stores answers."""
+
     async def list_scenarios(request: web.Request) -> web.Response:
         return web.json_response({"scenarios": list(request_service.dispatcher.list_scenarios())})
-
-    async def create_scenario(request: web.Request) -> web.Response:
-        payload = await read_object(request)
-        name = payload.get("name")
-        release_id = payload.get("release_id")
-        if not isinstance(name, str) or not name.strip():
-            raise web.HTTPBadRequest(text="name must be a non-empty string")
-        if release_id is not None and not isinstance(release_id, str):
-            raise web.HTTPBadRequest(text="release_id must be a string")
-        if isinstance(release_id, str) and not release_id.strip():
-            raise web.HTTPBadRequest(text="release_id must be a non-empty string")
-        name = name.strip()
-        if release_id is not None:
-            release_id = release_id.strip()
-        created = not request_service.dispatcher.has_scenario(name)
-        scenario: Scenario | None
-        if "model" in payload:
-            scenario = await asyncio.to_thread(
-                request_service.dispatcher.configure_scenario_model,
-                name,
-                payload["model"],
-                create=True,
-                release_id=release_id,
-            )
-        else:
-            scenario = request_service.dispatcher.get_or_create_scenario(
-                name,
-                release_id=release_id,
-                allow_implicit_creation=True,
-            )
-        if scenario is None:
-            raise RuntimeError("scenario creation returned no scenario")
-        current = scenario.repository.require_current_artifact()
-        return web.json_response(
-            {
-                "scenario": scenario.name,
-                "release_id": current.release_id,
-                "content_id": current.content_id,
-                "model": scenario.model_config.view(),
-            },
-            status=201 if created else 200,
-        )
-
-    async def update_scenario(request: web.Request) -> web.Response:
-        payload = await read_object(request)
-        if not payload or set(payload) - {"training_mode", "model", "artifact_evaluation", "activation"}:
-            raise ValueError("expected training_mode, model, artifact_evaluation or activation settings")
-        if "training_mode" in payload and payload["training_mode"] not in ("auto", "manual"):
-            raise ValueError("expected training_mode 'auto' or 'manual'")
-        name = request.match_info["scenario"]
-        result: dict[str, object] = {"scenario": name}
-        if "model" in payload:
-            scenario = await asyncio.to_thread(
-                request_service.dispatcher.configure_scenario_model, name, payload["model"]
-            )
-            result["model"] = scenario.model_config.view()
-        if "training_mode" in payload:
-            result.update(
-                await asyncio.to_thread(request_service.dispatcher.set_training_mode, name, payload["training_mode"])
-            )
-        changes: dict[str, object] = {
-            key: payload[key] for key in ("artifact_evaluation", "activation") if key in payload
-        }
-        if changes:
-            result.update(await asyncio.to_thread(evaluations.configure, name, changes))
-        return web.json_response(result)
 
     async def scenario_settings(request: web.Request) -> web.Response:
         result = await asyncio.to_thread(request_service.dispatcher.scenario_settings, request.match_info["scenario"])
         return web.json_response(result, headers={"Cache-Control": "no-store"})
-
-    async def delete_scenario(request: web.Request) -> web.Response:
-        result = await asyncio.to_thread(request_service.dispatcher.delete_scenario, request.match_info["scenario"])
-        return web.json_response(result)
 
     async def list_artifacts(request: web.Request) -> web.Response:
         scenario = request.match_info["scenario"]
@@ -137,6 +70,98 @@ def register_scenario_routes(
         return web.json_response(
             request_service.dispatcher.scenario_contract(scenario), headers={"Cache-Control": "no-store"}
         )
+
+    app.router.add_get("/reef/scenarios", list_scenarios)
+    app.router.add_get("/reef/scenarios/{scenario}/settings", scenario_settings)
+    app.router.add_get("/reef/scenarios/{scenario}/contract", scenario_contract)
+    app.router.add_get("/reef/scenarios/{scenario}/records", record_list)
+    app.router.add_get("/reef/scenarios/{scenario}/commits", commit_list)
+    app.router.add_get("/reef/scenarios/{scenario}/records/{record_id}", record_detail)
+    app.router.add_get("/reef/scenarios/{scenario}/artifacts", list_artifacts)
+
+
+def register_scenario_writes(
+    app: web.Application, *, request_service: RequestService, evaluations: ArtifactEvaluations
+) -> None:
+    """The changes of scenarios, which only control makes: create, update, delete, activate, serve, train from an
+    artifact, and cancel a job."""
+
+    async def create_scenario(request: web.Request) -> web.Response:
+        payload = await read_object(request)
+        name = payload.get("name")
+        release_id = payload.get("release_id")
+        if not isinstance(name, str) or not name.strip():
+            raise web.HTTPBadRequest(text="name must be a non-empty string")
+        if release_id is not None and not isinstance(release_id, str):
+            raise web.HTTPBadRequest(text="release_id must be a string")
+        if isinstance(release_id, str) and not release_id.strip():
+            raise web.HTTPBadRequest(text="release_id must be a non-empty string")
+        owner = payload.get("owner")
+        if owner is not None:
+            check_owner(owner)
+        name = name.strip()
+        if release_id is not None:
+            release_id = release_id.strip()
+        created = not request_service.dispatcher.has_scenario(name)
+        scenario: Scenario | None
+        if "model" in payload:
+            scenario = await asyncio.to_thread(
+                request_service.dispatcher.configure_scenario_model,
+                name,
+                payload["model"],
+                create=True,
+                release_id=release_id,
+            )
+        else:
+            scenario = request_service.dispatcher.get_or_create_scenario(
+                name,
+                release_id=release_id,
+                allow_implicit_creation=True,
+            )
+        if scenario is None:
+            raise RuntimeError("scenario creation returned no scenario")
+        if owner is not None:
+            # The owner whose data items the scenario uses (RFC #1028); the default is the scenario's own name.
+            await asyncio.to_thread(request_service.dispatcher.set_scenario_owner, name, owner)
+        current = scenario.repository.require_current_artifact()
+        return web.json_response(
+            {
+                "scenario": scenario.name,
+                "owner": request_service.dispatcher.scenario_owner(name),
+                "release_id": current.release_id,
+                "content_id": current.content_id,
+                "model": scenario.model_config.view(),
+            },
+            status=201 if created else 200,
+        )
+
+    async def update_scenario(request: web.Request) -> web.Response:
+        payload = await read_object(request)
+        if not payload or set(payload) - {"training_mode", "model", "artifact_evaluation", "activation"}:
+            raise ValueError("expected training_mode, model, artifact_evaluation or activation settings")
+        if "training_mode" in payload and payload["training_mode"] not in ("auto", "manual"):
+            raise ValueError("expected training_mode 'auto' or 'manual'")
+        name = request.match_info["scenario"]
+        result: dict[str, object] = {"scenario": name}
+        if "model" in payload:
+            scenario = await asyncio.to_thread(
+                request_service.dispatcher.configure_scenario_model, name, payload["model"]
+            )
+            result["model"] = scenario.model_config.view()
+        if "training_mode" in payload:
+            result.update(
+                await asyncio.to_thread(request_service.dispatcher.set_training_mode, name, payload["training_mode"])
+            )
+        changes: dict[str, object] = {
+            key: payload[key] for key in ("artifact_evaluation", "activation") if key in payload
+        }
+        if changes:
+            result.update(await asyncio.to_thread(evaluations.configure, name, changes))
+        return web.json_response(result)
+
+    async def delete_scenario(request: web.Request) -> web.Response:
+        result = await asyncio.to_thread(request_service.dispatcher.delete_scenario, request.match_info["scenario"])
+        return web.json_response(result)
 
     async def read_artifact_selection(request: web.Request) -> tuple[str, str | None]:
         """The ``artifact_id`` and the optional ``component`` that an activation, a train-from or a serve names."""
@@ -192,6 +217,16 @@ def register_scenario_routes(
             }
         )
 
+    async def cancel_job(request: web.Request) -> web.Response:
+        scenario, job_id = request.match_info["scenario"], request.match_info["job_id"]
+        dispatcher = request_service.dispatcher
+        if not await asyncio.to_thread(dispatcher.has_scenario, scenario):
+            raise UnknownScenario(f"unknown scenario {scenario!r}")
+        job = await asyncio.to_thread(cancel_scenario_job, dispatcher.queue, scenario, job_id)
+        if job is None:
+            raise web.HTTPNotFound(text=f"scenario {scenario!r} has no training job {job_id!r}")
+        return web.json_response({"scenario": scenario, "job": job})
+
     async def train_from_artifact(request: web.Request) -> web.Response:
         scenario = request.match_info["scenario"]
         artifact_id, component = await read_artifact_selection(request)
@@ -200,20 +235,14 @@ def register_scenario_routes(
             {"scenario": scenario, "component": start.component, "artifact_id": start.artifact_id}
         )
 
-    app.router.add_get("/reef/scenarios", list_scenarios)
     app.router.add_post("/reef/scenarios", create_scenario)
     app.router.add_post("/reef/scenarios/{scenario}/update", update_scenario)
-    app.router.add_get("/reef/scenarios/{scenario}/settings", scenario_settings)
     app.router.add_delete("/reef/scenarios/{scenario}", delete_scenario)
-    app.router.add_get("/reef/scenarios/{scenario}/contract", scenario_contract)
-    app.router.add_get("/reef/scenarios/{scenario}/records", record_list)
-    app.router.add_get("/reef/scenarios/{scenario}/commits", commit_list)
-    app.router.add_get("/reef/scenarios/{scenario}/records/{record_id}", record_detail)
-    app.router.add_get("/reef/scenarios/{scenario}/artifacts", list_artifacts)
     app.router.add_post("/reef/scenarios/{scenario}/activate", activate_artifact)
     app.router.add_post("/reef/scenarios/{scenario}/train-from", train_from_artifact)
     app.router.add_post("/reef/scenarios/{scenario}/serve", serve_artifact)
     app.router.add_post("/reef/scenarios/{scenario}/stop-serving", stop_serving_artifact)
+    app.router.add_post("/reef/scenarios/{scenario}/jobs/{job_id}/cancel", cancel_job)
 
 
-__all__ = ["register_scenario_routes"]
+__all__ = ["register_scenario_reads", "register_scenario_writes"]

@@ -1,4 +1,8 @@
-"""A real HTTP provider, method, judge and subprocess rollout share a scenario model setting."""
+"""A real HTTP provider, method, judge and subprocess rollout share a scenario model setting.
+
+A scenario's model names the engine only (``url``, ``model``, ``api``); every call to it carries the deployment's
+provider key, which never reaches stored state or an API view.
+"""
 
 from __future__ import annotations
 
@@ -25,6 +29,7 @@ from reef.inference.model_config import ModelConfig
 from reef.recipe.harness import EvolutionSettings, HarnessEvolutionRecipe
 from reef.runtime.executor.config import ExecutorSettings
 from reef.storage.scenario import ScenarioSettings
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train.types import JobData
 
@@ -71,13 +76,20 @@ def platform():
         thread.join()
 
 
+#: The deployment's provider key: the key of the recipe's provider runtime.
+PLATFORM_KEY = "platform-key"
+
+
 def configure(platform, name, api, version="1"):
     return {
         "url": f"{platform['url']}/{name}/{version}",
-        "api_key": f"scoped-{name}-{version}",
         "model": f"custom-{name}",
         "api": api,
     }
+
+
+def engine_url(platform, name, version="1"):
+    return f"{platform['url']}/{name}/{version}"
 
 
 FAKE_AGENT = """#!/usr/bin/env python3
@@ -116,7 +128,7 @@ def make_recipe(platform, tmp_path):
         assert services.models["teacher"].chat([{"role": "user", "content": "method"}]) == "OK"
         return TreePatch({"rules.md": "marker\n"})
 
-    managed = ModelBinding(base_url=f"{platform['url']}/managed", api_key="platform-key", model="platform-model")
+    managed = ModelBinding(base_url=f"{platform['url']}/managed", api_key=PLATFORM_KEY, model="platform-model")
     return HarnessEvolutionRecipe(
         method=resolve_method(method),
         evolution=EvolutionSettings(binary=str(binary), state_dir=str(tmp_path / "harness")),
@@ -138,15 +150,18 @@ def test_full_evolution_uses_only_custom_binding(platform, tmp_path, monkeypatch
         recipe,
         harness_repository(tmp_path, recipe.base_artifact_source().files),
         scenario_storage=SQLiteScenarioStorage(),
+        coordination=memory_coordination(),
     )
     try:
         scenario = dispatcher.configure_scenario_model("alpha", configure(platform, "alpha", api), create=True)
         artifact = Artifact(scenario.repository.require_current_artifact(), scenario.repository)
         path = "/v1/messages" if api == "anthropic" else "/v1/chat/completions"
-        asyncio.run(scenario.inference_handler.inference(artifact, path, {"model": "custom-alpha", "messages": []}))
+        asyncio.run(
+            scenario.runtime.inference_handler.inference(artifact, path, {"model": "custom-alpha", "messages": []})
+        )
         if api == "anthropic":
             asyncio.run(
-                scenario.inference_handler.inference(
+                scenario.runtime.inference_handler.inference(
                     artifact, "/v1/messages/count_tokens", {"model": "custom-alpha", "messages": []}
                 )
             )
@@ -170,16 +185,15 @@ def test_full_evolution_uses_only_custom_binding(platform, tmp_path, monkeypatch
             assert path.startswith("/alpha/1/")
             assert body["model"] == "custom-alpha"
             if api == "anthropic":
-                assert headers["x-api-key"] == "scoped-alpha-1"
+                assert headers["x-api-key"] == PLATFORM_KEY
                 assert "authorization" not in headers
             else:
-                assert headers["authorization"] == "Bearer scoped-alpha-1"
-            assert "platform-key" not in json.dumps(raw_headers)
-        assert "scoped-alpha" not in json.dumps(dict(prepared.candidate.candidate_tree.files))
-        assert "scoped-alpha" not in json.dumps(result.state)
+                assert headers["authorization"] == f"Bearer {PLATFORM_KEY}"
+        assert PLATFORM_KEY not in json.dumps(dict(prepared.candidate.candidate_tree.files))
+        assert PLATFORM_KEY not in json.dumps(result.state)
         result.publication.artifact.discard()
         asyncio.run(
-            scenario.inference_handler.inference(
+            scenario.runtime.inference_handler.inference(
                 artifact,
                 "/v1/messages" if api == "anthropic" else "/v1/chat/completions",
                 {"model": "custom-alpha", "messages": []},
@@ -191,8 +205,8 @@ def test_full_evolution_uses_only_custom_binding(platform, tmp_path, monkeypatch
 
 
 def test_concurrent_scenarios_rotation_and_fail_closed(platform, tmp_path):
-    alpha_config = ModelConfig.from_value(configure(platform, "alpha", "openai"))
-    beta_config = ModelConfig.from_value(configure(platform, "beta", "anthropic"))
+    alpha_config = ModelConfig.from_value(configure(platform, "alpha", "openai"), api_key=PLATFORM_KEY)
+    beta_config = ModelConfig.from_value(configure(platform, "beta", "anthropic"), api_key=PLATFORM_KEY)
     recipe = make_recipe(platform, tmp_path)
     alpha = recipe.with_model_config(alpha_config)
     beta = recipe.with_model_config(beta_config)
@@ -204,29 +218,35 @@ def test_concurrent_scenarios_rotation_and_fail_closed(platform, tmp_path):
         )
     assert {path.split("/")[1] for path, _, _ in platform["calls"]} == {"alpha", "beta"}
     first = alpha.model_bindings()
-    alpha_config.runtime = ModelConfig.from_value(configure(platform, "alpha", "anthropic", "2")).runtime
+    alpha_config.runtime = ModelConfig.from_value(
+        configure(platform, "alpha", "anthropic", "2"), api_key=PLATFORM_KEY
+    ).runtime
     second = alpha.model_bindings()
-    assert first.served.api_key == "scoped-alpha-1"
-    assert second.served.api_key == "scoped-alpha-2"
+    assert first.served.base_url == engine_url(platform, "alpha", "1")
+    assert second.served.base_url == engine_url(platform, "alpha", "2")
     assert all(binding.api == "anthropic" for binding in second.values())
-    assert beta.model_bindings().served.api_key == "scoped-beta-1"
+    assert beta.model_bindings().served.base_url == engine_url(platform, "beta", "1")
     with pytest.raises(ValueError):
         alpha_config.runtime = ModelConfig.from_value({"url": "bad", "model": "bad"}).runtime
-    assert alpha.model_bindings().served.api_key == "scoped-alpha-2"
+    assert alpha.model_bindings().served.base_url == engine_url(platform, "alpha", "2")
     assert not any("/managed/" in path for path, _, _ in platform["calls"])
 
 
 def test_recipe_uses_model_config_without_a_persistence_interface(platform, tmp_path):
-    config = ModelConfig.from_value(configure(platform, "alpha", "openai"))
+    config = ModelConfig.from_value(configure(platform, "alpha", "openai"), api_key=PLATFORM_KEY)
     recipe = make_recipe(platform, tmp_path).with_model_config(config)
     first = recipe.model_bindings()
-    config.runtime = InferenceProxyRuntime.from_model_config(configure(platform, "alpha", "anthropic", "2"))
+    config.runtime = InferenceProxyRuntime.from_model_config(
+        configure(platform, "alpha", "anthropic", "2"), api_key=PLATFORM_KEY
+    )
     second = recipe.model_bindings()
-    assert first.served.api_key == "scoped-alpha-1"
+    assert first.served.base_url == engine_url(platform, "alpha", "1")
     assert all(binding.api == "anthropic" for binding in second.values())
-    assert all(binding.api_key == "scoped-alpha-2" for binding in second.values())
+    assert all(binding.base_url == engine_url(platform, "alpha", "2") for binding in second.values())
+    assert all(binding.api_key == PLATFORM_KEY for binding in second.values())
     config.runtime = None
-    assert recipe.model_bindings().served.api_key == "platform-key"
+    served = recipe.model_bindings().served
+    assert (served.base_url, served.api_key) == (f"{platform['url']}/managed", PLATFORM_KEY)
 
 
 def test_model_settings_persist_privately_and_invalid_values_fail_recovery(platform, tmp_path):
@@ -236,10 +256,14 @@ def test_model_settings_persist_privately_and_invalid_values_fail_recovery(platf
     database = next(tmp_path.glob("*.sqlite3"))
     assert database.stat().st_mode & 0o777 == 0o600
     assert SQLiteScenarioStorage(tmp_path).read_settings("alpha").model_config == value
-    recovered = ModelConfig.from_value(storage.read_settings("alpha").model_config)
-    assert recovered.runtime.api_key == "scoped-alpha-1"
-    assert "scoped-alpha-1" not in json.dumps(recovered.view())
-    assert "scoped-alpha-1" not in repr(recovered)
+    recovered = ModelConfig.from_value(storage.read_settings("alpha").model_config, api_key=PLATFORM_KEY)
+    assert recovered.runtime.base_url == engine_url(platform, "alpha", "1")
+    assert recovered.runtime.provider_key == PLATFORM_KEY
+    assert recovered.view() == {"url": engine_url(platform, "alpha", "1"), "model": "custom-alpha", "api": "openai"}
+    assert PLATFORM_KEY not in repr(recovered)
+    # A scenario names its engine only: a key of its own is refused.
+    with pytest.raises(ValueError, match="url, model and api"):
+        ModelConfig.from_value({**value, "api_key": "scoped-alpha"})
     storage.write_settings("alpha", ScenarioSettings())
     assert ModelConfig.from_value(storage.read_settings("alpha").model_config).runtime is None
     storage.write_settings("alpha", ScenarioSettings(model_config={"url": "http://user:secret@host", "model": "bad"}))
@@ -268,6 +292,7 @@ def test_http_contract_updates_the_model_and_serves_no_provider(platform, tmp_pa
         recipe,
         harness_repository(tmp_path, recipe.base_artifact_source().files),
         scenario_storage=SQLiteScenarioStorage(),
+        coordination=memory_coordination(),
     )
 
     async def run():
@@ -284,9 +309,12 @@ def test_http_contract_updates_the_model_and_serves_no_provider(platform, tmp_pa
             created = await client.post("/reef/scenarios", headers=headers, json=payload)
             assert created.status == 201, await created.text()
             view = await created.json()
-            assert view["model"]["model"] == "custom-alpha"
-            assert view["model"]["has_api_key"] is True
-            assert "scoped-alpha" not in json.dumps(view)
+            assert view["model"] == {
+                "url": engine_url(platform, "alpha", "1"),
+                "model": "custom-alpha",
+                "api": "openai",
+            }
+            assert PLATFORM_KEY not in json.dumps(view)
             # Repeated creation must never overwrite a configuration changed elsewhere.
             existing = await client.post("/reef/scenarios", headers=headers, json={"name": "alpha", "model": None})
             assert existing.status == 200
@@ -314,16 +342,16 @@ def test_http_contract_updates_the_model_and_serves_no_provider(platform, tmp_pa
             fresh = await client.post("/v1/messages", headers=headers, json={"model": "custom-alpha", "messages": []})
             assert fresh.status == 200, await fresh.text()
             scenario = dispatcher.get_or_create_scenario("alpha")
-            # The served tree carries no provider: neither the scenario's key nor the deployment's reaches a client.
+            # The served tree carries no provider: the deployment's key never reaches a client.
             for form in ("rendered", "source"):
                 served = await client.get("/reef/harness", headers=headers, params={"form": form})
                 assert served.status == 200, await served.text()
                 files = json.dumps((await served.json())["files"])
-                assert "scoped-alpha" not in files and "platform-key" not in files
+                assert PLATFORM_KEY not in files
             reset = await client.post("/reef/scenarios/alpha/update", headers=headers, json={"model": None})
             assert reset.status == 200
             assert (await reset.json())["model"] is None
-            assert scenario.runtime.api_key == "platform-key"
+            assert scenario.runtime.provider_key == PLATFORM_KEY
         finally:
             await client.close()
 
@@ -339,30 +367,40 @@ def test_scenario_recovery_and_deletion_keep_model_lifecycle(platform, tmp_path)
     records = tmp_path / "records"
     factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
     recipe = make_recipe(platform, tmp_path)
-    first = Dispatcher(recipe, factory, scenario_storage=SQLiteScenarioStorage(records))
+    first = Dispatcher(
+        recipe, factory, scenario_storage=SQLiteScenarioStorage(records), coordination=memory_coordination()
+    )
     first.configure_scenario_model("alpha", configure(platform, "alpha", "anthropic"), create=True)
     first.close()
-    recovered = Dispatcher(recipe, factory, scenario_storage=SQLiteScenarioStorage(records))
+    recovered = Dispatcher(
+        recipe, factory, scenario_storage=SQLiteScenarioStorage(records), coordination=memory_coordination()
+    )
     try:
         scenario = recovered.get_or_create_scenario("alpha")
-        assert scenario.runtime.api_key == "scoped-alpha-1"
-        assert scenario.trainer.candidate_backend.models["judge"].api_key == "scoped-alpha-1"
+        assert (scenario.runtime.base_url, scenario.runtime.provider_key) == (
+            engine_url(platform, "alpha", "1"),
+            PLATFORM_KEY,
+        )
+        assert scenario.trainer.candidate_backend.models["judge"].base_url == engine_url(platform, "alpha", "1")
         config = scenario.model_config
         previous_runtime = config.runtime
         reloaded = recovered.registry.reload("alpha")
         assert reloaded is not scenario
         assert reloaded.model_config is config
         recovered.configure_scenario_model("alpha", configure(platform, "alpha", "openai", "2"))
-        assert reloaded.runtime.api_key == "scoped-alpha-2"
-        assert previous_runtime.api_key == "scoped-alpha-1"
+        assert reloaded.runtime.base_url == engine_url(platform, "alpha", "2")
+        assert previous_runtime.base_url == engine_url(platform, "alpha", "1")
         assert not list(records.glob("*-model.json"))
         recovered.delete_scenario("alpha")
         assert recovered.storage.read_settings("alpha") == ScenarioSettings()
         with closing(SQLiteRecordStore(next((records / "archived").glob("*/*.sqlite3")))) as archived:
-            assert archived.read_settings().model_config["api_key"] == "scoped-alpha-2"
+            assert archived.read_settings().model_config == configure(platform, "alpha", "openai", "2")
         recreated = recovered.get_or_create_scenario("alpha")
         assert recreated.model_config is not config
-        assert recreated.runtime.api_key == "platform-key"
+        assert (recreated.runtime.base_url, recreated.runtime.provider_key) == (
+            f"{platform['url']}/managed",
+            PLATFORM_KEY,
+        )
     finally:
         recovered.close()
 
@@ -376,6 +414,7 @@ def test_model_update_write_failure_keeps_active_config_and_saved_value(platform
         make_recipe(platform, tmp_path),
         factory,
         scenario_storage=SQLiteScenarioStorage(records),
+        coordination=memory_coordination(),
     )
     try:
         original = configure(platform, "alpha", "openai")

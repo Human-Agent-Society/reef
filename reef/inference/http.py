@@ -38,7 +38,7 @@ HOP_BY_HOP_HEADERS = frozenset(
 PROVIDER_APIS = ("openai", "responses", "anthropic")
 
 #: Keys a per-scenario model override may carry.
-MODEL_CONFIG_KEYS = frozenset({"url", "model", "api", "api_key"})
+MODEL_CONFIG_KEYS = frozenset({"url", "model", "api"})
 
 # -- Request headers ----------------------------------------------------------
 
@@ -218,12 +218,13 @@ class InferenceProxyRuntime(InferenceRuntime):
         )
 
     @classmethod
-    def from_model_config(cls, value: object) -> InferenceProxyRuntime | None:
-        """Validate a per-scenario model override and build its proxy runtime."""
+    def from_model_config(cls, value: object, *, api_key: str | None = None) -> InferenceProxyRuntime | None:
+        """Validate a per-scenario model override and build its proxy runtime. A scenario names the engine only;
+        ``api_key`` is the deployment's provider key, the one credential that reaches an engine."""
         if value is None:
             return None
         if not isinstance(value, Mapping) or set(value) - MODEL_CONFIG_KEYS:
-            raise ValueError("model must be null or an object with url, model, api and api_key")
+            raise ValueError("model must be null or an object with url, model and api")
         for name in ("url", "model"):
             if not _clean_text(value.get(name)) or not value[name].strip():
                 raise ValueError(f"model.{name} must be a non-empty string without control characters")
@@ -233,17 +234,14 @@ class InferenceProxyRuntime(InferenceRuntime):
         api = value.get("api", "openai")
         if api not in PROVIDER_APIS:
             raise ValueError("model.api must be openai, responses or anthropic")
-        key = value.get("api_key")
-        if key is not None and not _clean_text(key):
-            raise ValueError("model.api_key must be a string without control characters")
-        return cls(base_url=url, model_path=value["model"].strip(), api=api, api_key=key)
+        return cls(base_url=url, model_path=value["model"].strip(), api=api, api_key=api_key)
 
     @property
     def model_path(self) -> str:
         return self._model_path
 
     @property
-    def api_key(self) -> str | None:
+    def provider_key(self) -> str | None:
         return self._api_key
 
     @property
@@ -257,9 +255,6 @@ class InferenceProxyRuntime(InferenceRuntime):
     @property
     def inference_handler(self) -> InferenceHandler:
         return self._inference_handler
-
-    def current_runtime_load_id(self) -> str | None:
-        return None
 
     def activate_checkpoint(self, artifact: Artifact, *, scenario: str | None = None) -> str:
         return artifact.ref.release_id

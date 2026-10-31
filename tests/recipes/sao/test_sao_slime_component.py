@@ -1,7 +1,7 @@
 """Container-only tests for SAO on Slime: its wire rows and its jobs on the Slime training component.
 
 These exercise the SAO payload builder (``build_sao_rollout_data`` in
-``recipes.sao.slime``), SAO jobs on ``SlimeTrainingComponent`` over fake
+``recipes.sao.slime``), SAO jobs on ``SlimeJobRunner`` over fake
 actor and critic groups, the critic's arguments and its checkpoint storage.
 They transitively import ``ray`` and ``torch`` and touch no GPU.
 """
@@ -16,7 +16,7 @@ from tests.support.slime_component import FakeTrainGroup, RecordingBatchProcesso
 
 from reef.runtime.interfaces import TrainingMethod
 from reef.runtime.jobs import JobStatus, TrainingJob
-from reef.train.slime_backend.component import SlimeTrainingComponent
+from reef.train.slime_backend.component import SlimeJobRunner
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
 from reef.train.slime_backend.loss_families import resolve_loss_family
 from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
@@ -31,7 +31,7 @@ def _sao_row(
     action_mask: list[int] | None = None,
     log_probs: list[float] | None = None,
     reward: float = 0.5,
-    producing_runtime_load_id: str | None = "slime-v3",
+    producing_artifact_id: str | None = "artifact-3",
     rollout_created_at: float | None = 1234.5,
 ) -> list[object]:
     """One 8-element SAO row as emitted by Reef's remote handle."""
@@ -46,7 +46,7 @@ def _sao_row(
         log_probs,
         reward,
         action_mask,
-        producing_runtime_load_id,
+        producing_artifact_id,
         rollout_created_at,
     ]
 
@@ -65,7 +65,7 @@ def _payload(rows: list[list[object]], rollout_ids: list[int] | None = None) -> 
 @pytest.mark.unit
 def test_sao_parser_converts_rows_and_preserves_source_fields() -> None:
     converted = to_slime_rollout_data(
-        _payload([_sao_row("a"), _sao_row("b", reward=1.0, producing_runtime_load_id="slime-v4")])
+        _payload([_sao_row("a"), _sao_row("b", reward=1.0, producing_artifact_id="artifact-4")])
     )
 
     assert converted["loss"] == "sao"
@@ -75,8 +75,8 @@ def test_sao_parser_converts_rows_and_preserves_source_fields() -> None:
     assert converted["rewards"] == [0.5, 1.0]
     assert converted["response_lengths"] == [3, 3]
     assert converted["rollout_log_probs"] == [[-0.1, -0.2, -0.3], [-0.1, -0.2, -0.3]]
-    # The producing version and timestamp support policy lag / queue age.
-    assert converted["producing_runtime_load_ids"] == ["slime-v3", "slime-v4"]
+    # The producing artifact and timestamp support the producing-artifact and queue-age metrics.
+    assert converted["producing_artifact_ids"] == ["artifact-3", "artifact-4"]
     assert converted["rollout_created_ats"] == [1234.5, 1234.5]
     # No comparison-group barrier: one rollout per id, and no advantages.
     assert converted["rollout_ids"] == [0, 1]
@@ -141,51 +141,51 @@ def test_sao_parser_requires_rollout_ids_for_every_sample() -> None:
 
 @pytest.mark.unit
 def test_sao_parser_tolerates_missing_source_fields() -> None:
-    converted = to_slime_rollout_data(_payload([_sao_row(producing_runtime_load_id=None, rollout_created_at=None)]))
+    converted = to_slime_rollout_data(_payload([_sao_row(producing_artifact_id=None, rollout_created_at=None)]))
 
-    assert converted["producing_runtime_load_ids"] == [None]
+    assert converted["producing_artifact_ids"] == [None]
     assert converted["rollout_created_ats"] == [None]
 
 
 @pytest.mark.unit
-def test_sao_row_versions_must_match_the_shared_producing_versions() -> None:
+def test_sao_row_artifacts_must_match_the_shared_producing_artifacts() -> None:
     payload = {
-        **_payload([_sao_row(producing_runtime_load_id="engine:1")]),
-        "producing_runtime_load_ids": ["engine:2"],
+        **_payload([_sao_row(producing_artifact_id="artifact-1")]),
+        "producing_artifact_ids": ["artifact-2"],
     }
-    with pytest.raises(ValueError, match="row runtime load IDs do not match"):
+    with pytest.raises(ValueError, match="row artifact IDs do not match"):
         to_slime_rollout_data(payload)
 
 
 @pytest.mark.unit
-def test_sao_rollout_metrics_reports_version_spread_queue_age_and_effective_tokens() -> None:
+def test_sao_rollout_metrics_reports_producing_artifacts_queue_age_and_effective_tokens() -> None:
     sao = resolve_loss_family("sao")
     rollout_data = to_slime_rollout_data(
         _payload(
             [
-                _sao_row("a", loss_mask=[1, 1, 1], action_mask=[1, 1, 1], producing_runtime_load_id="inc:2"),
-                _sao_row("b", loss_mask=[1, 0, 1], action_mask=[1, 1, 1], producing_runtime_load_id="inc:4"),
+                _sao_row("a", loss_mask=[1, 1, 1], action_mask=[1, 1, 1], producing_artifact_id="artifact-2"),
+                _sao_row("b", loss_mask=[1, 0, 1], action_mask=[1, 1, 1], producing_artifact_id="artifact-4"),
+                _sao_row("c", loss_mask=[1, 1, 1], action_mask=[1, 1, 1], producing_artifact_id="artifact-4"),
             ]
         )
     )
 
     metrics = sao.rollout_metrics(rollout_data)
 
-    # The spread counts versions behind the newest producing version in the rollout's data.
-    assert metrics["sao/producing_version_spread_max"] == 2
-    assert metrics["sao/producing_version_spread_mean"] == 1.0
-    assert metrics["sao/effective_token_rate"] == 5 / 6
+    # Two distinct artifacts produced the rollout's three samples.
+    assert metrics["sao/producing_artifacts"] == 2
+    assert metrics["sao/effective_token_rate"] == 8 / 9
     assert metrics["sao/queue_age_s_max"] >= 0.0
 
 
 @pytest.mark.unit
-def test_sao_rollout_metrics_skip_the_spread_of_versions_without_a_sequence() -> None:
+def test_sao_rollout_metrics_skip_samples_without_a_producing_artifact() -> None:
     sao = resolve_loss_family("sao")
-    rollout_data = to_slime_rollout_data(_payload([_sao_row("a", producing_runtime_load_id="no-sequence")]))
+    rollout_data = to_slime_rollout_data(_payload([_sao_row("a", producing_artifact_id=None)]))
 
     metrics = sao.rollout_metrics(rollout_data)
 
-    assert "sao/producing_version_spread_max" not in metrics
+    assert "sao/producing_artifacts" not in metrics
     assert metrics["sao/effective_token_rate"] == 1.0
 
 
@@ -224,7 +224,7 @@ class SaoStack:
         if self.critic is not None:
             self.critic.train_result = [{"values": [0.25]}]
         self.critic_external_data: list[object] = []
-        self.component = SlimeTrainingComponent(
+        self.component = SlimeJobRunner(
             args,
             self.actor,
             self.critic,
@@ -233,6 +233,7 @@ class SaoStack:
             lora=False,
             loss_family="sao",
         )
+        self.component.start_jobs()
         self.start = self.component.base_start
 
     def run(self, step: int = 0) -> JobStatus:
@@ -245,16 +246,15 @@ class SaoStack:
                     (1, 1, 1),
                     (-0.1, -0.2, -0.3),
                     reward,
-                    producing,
                     action_mask=(1, 1, 1),
                     rollout_created_at=1234.5,
-                )
-                for index, (reward, producing) in enumerate(((0.5, "inc:4"), (1.0, "inc:3")))
+                ).with_training(artifact_id=producing)
+                for index, (reward, producing) in enumerate(((0.5, "artifact-4"), (1.0, "artifact-3")))
             ),
         )
         method = {"method": TrainingMethod("sao").to_dict()}
         job_id = f"job-{step}"
-        self.component.submit(TrainingJob(job_id, "slime", self.start, batch, method))
+        self.component.submit(TrainingJob(job_id, "slime", self.start, batch, method, scenario="s"))
         status = finished(self.component, job_id)
         if status.checkpoints:
             self.start = status.checkpoints[-1].path
@@ -337,8 +337,7 @@ def test_a_sao_checkpoint_carries_the_backend_and_worker_metrics(tmp_path, sao_s
         "values",
         "sao/critic_updates",
         "sao/actor_trained",
-        "sao/producing_version_spread_max",
-        "sao/producing_version_spread_mean",
+        "sao/producing_artifacts",
         "sao/queue_age_s_max",
         "sao/queue_age_s_mean",
         "sao/effective_token_rate",

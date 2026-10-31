@@ -76,6 +76,16 @@ with no GPU.
 
          curl -f http://127.0.0.1:8900/healthz     # {"ok": true}
 
+   #. **Create a scenario.** Reef answers inference only for a scenario that
+      exists, and a request for an unknown scenario gets HTTP 404.
+
+      .. code:: bash
+
+         curl -sS -X POST http://127.0.0.1:8900/reef/scenarios \
+           -H "Authorization: Bearer reef-local" \
+           -H "Content-Type: application/json" \
+           -d '{"name": "hello-reef"}'
+
    #. **Send a request and report on it.** The body is the provider's;
       ``x-reef-scenario`` is the only thing Reef adds. The response header
       ``x-reef-agent-record-id`` carries the **receipt**, which names the

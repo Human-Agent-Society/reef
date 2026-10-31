@@ -13,7 +13,6 @@ import math
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from reef.core.artifact_ref import RuntimeLoadSpan, parse_runtime_load_spans
 from reef.core.job_data import TrajectorySample
 from reef.core.records_types import AgentRecord
 from reef.core.trajectories import make_trajectory
@@ -154,9 +153,9 @@ def make_policy_trajectory(
     """Convert inference data and its evaluated reward into a sample.
 
     ``response.training`` attached by an inference backend is authoritative
-    for policy tensors. A top-level ``runtime_load_id`` stamped after response
-    validation identifies the producing model version; if both locations
-    provide a version, they must agree. Top-level tensors remain supported
+    for policy tensors. The record's ``artifact_id``, which the inference
+    service writes, names the artifact that produced the tokens; a rollout of
+    Reef's own names it in its ``training`` block. Top-level tensors remain supported
     for harnesses that already ship exact policy data. Missing tensors stay empty and are
     rejected at the training boundary; Reef never reconstructs sampled ids from
     decoded text.
@@ -170,54 +169,17 @@ def make_policy_trajectory(
     tokens = field("tokens")
     loss_mask = field("loss_mask")
     rollout_log_probs = field("rollout_log_probs")
-    training_runtime_load_id = training.get("runtime_load_id")
-    recorded_runtime_load_id = payload.get("runtime_load_id")
-    if recorded_runtime_load_id and training_runtime_load_id and recorded_runtime_load_id != training_runtime_load_id:
-        raise ValueError(
-            "response training runtime_load_id disagrees with the validated record: "
-            f"{training_runtime_load_id!r} != {recorded_runtime_load_id!r}"
-        )
-    training_spans = training.get("runtime_load_spans")
-    recorded_spans = payload.get("runtime_load_spans")
-    runtime_load_spans = policy_version_spans(
-        training_spans if training_spans is not None else recorded_spans,
-        len(loss_mask),
-    )
-    if (
-        training_spans is not None
-        and recorded_spans is not None
-        and runtime_load_spans != policy_version_spans(recorded_spans, len(loss_mask))
-    ):
-        raise ValueError("response token runtime-load-ID spans disagree with the validated record")
-    span_versions = {span.runtime_load_id for span in runtime_load_spans}
-    if runtime_load_spans:
-        if recorded_runtime_load_id and span_versions != {recorded_runtime_load_id}:
-            raise ValueError("validated record runtime_load_id disagrees with its token runtime-load-ID spans")
-        if training_runtime_load_id and span_versions != {training_runtime_load_id}:
-            raise ValueError("response training runtime_load_id disagrees with its token runtime-load-ID spans")
-        runtime_load_id = next(iter(span_versions)) if len(span_versions) == 1 else None
-    else:
-        runtime_load_id = recorded_runtime_load_id or training_runtime_load_id
+    artifact_id = payload.get("artifact_id") or training.get("artifact_id")
     topk_indices = field("topk_indices") or ()
     topk_log_probs = field("topk_log_probs") or ()
     return make_trajectory((item,), reward).with_training(
         tokens=[int(token) for token in tokens],
         loss_mask=[int(value) for value in loss_mask],
         rollout_log_probs=[float(value) for value in rollout_log_probs],
-        runtime_load_id=runtime_load_id,
-        runtime_load_spans=[
-            {"start": span.start, "end": span.end, "runtime_load_id": span.runtime_load_id}
-            for span in runtime_load_spans
-        ],
+        artifact_id=artifact_id if isinstance(artifact_id, str) and artifact_id else None,
         topk_indices=[[int(v) for v in row] for row in topk_indices],
         topk_log_probs=[[float(v) for v in row] for row in topk_log_probs],
     )
-
-
-def policy_version_spans(value: Any, response_length: int) -> tuple[RuntimeLoadSpan, ...]:
-    if value is None:
-        return ()
-    return parse_runtime_load_spans(value, response_length=response_length)
 
 
 def make_multi_turn_policy_trajectory(
@@ -249,7 +211,8 @@ def make_multi_turn_policy_trajectory(
         return None
 
     turns = [make_policy_trajectory(item, reward) for item in items]
-    versions = {turn.training.get("runtime_load_id", None) for turn in turns}
+    # One rollout is one policy: every turn must come from the same artifact.
+    versions = {turn.training.get("artifact_id", None) for turn in turns}
     if len(versions) != 1 or None in versions or "" in versions:
         return None
 
@@ -343,7 +306,7 @@ def make_multi_turn_policy_trajectory(
             tokens=tokens,
             loss_mask=loss_mask,
             rollout_log_probs=token_log_probs[leading_prompt_length:] if retain_log_probs else [],
-            runtime_load_id=versions.pop(),
+            artifact_id=versions.pop(),
             turn_count=len(turns),
             topk_indices=[list(indices) for indices, _ in response_topk],
             topk_log_probs=[list(log_probs) for _, log_probs in response_topk],

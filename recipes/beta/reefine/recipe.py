@@ -28,14 +28,13 @@ from typing import Any
 from recipes.beta.reefine.agent import ReefineAgent
 from recipes.beta.reefine.answer import EXTENSION_ADAPTER
 from recipes.beta.reefine.method import ReefineMethod
-from recipes.beta.reefine.multimodal import MultimodalProvider, MultimodalSettings, ProviderRelay
+from recipes.beta.reefine.multimodal import MultimodalProvider, MultimodalSettings
 from recipes.beta.reefine.scorer import HEALTH_TASK_DIRECTORY, AnswerScorer
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import DescriptorError
 from reef.recipe.config_fields import config_field
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.harness import HarnessEvolutionRecipe
-from reef.runtime.interfaces import MultimodalRelay
 from reef.storage.samples import TrainerSamples
 from reef.train.backend import ComponentReleases
 from reef.train.harness_backend.backend import HarnessBackend
@@ -91,11 +90,6 @@ class ReefineRecipe(HarnessEvolutionRecipe):
         return self.multimodal.provider(
             None if binding is None else binding.base_url, None if binding is None else binding.api_key
         )
-
-    @property
-    def multimodal_relay(self) -> MultimodalRelay | None:
-        provider = self.multimodal_provider
-        return None if provider is None else ProviderRelay(provider)
 
     @classmethod
     def _recipe_kwargs(cls, settings: Mapping[str, Any], values: Mapping[str, str]) -> dict[str, Any]:

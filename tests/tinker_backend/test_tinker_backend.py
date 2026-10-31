@@ -33,6 +33,7 @@ from reef.runtime.jobs import TrainingJob, job_id_for
 from reef.service.deploy import orchestrator
 from reef.service.deploy.orchestrator import resolve_deployment_config
 from reef.service.deploy.training import local_model_required
+from reef.storage.sql_coordination import memory_coordination
 from reef.tinker.checkpoint import MANIFEST, TinkerCheckpoint
 from reef.tinker.sampling import SampleResult, TinkerSampler
 from reef.train.algos import TrainingSignal
@@ -87,7 +88,7 @@ class RemoteClient(TinkerClient, TinkerSampler):
     def decode(self, tokens):
         return "hello"
 
-    def sample(self, sampler_path, prompt, params):
+    def sample(self, sampler_path, prompt, params, *, topk_logprobs):
         self.sampled.append((sampler_path, prompt, params))
         return SampleResult((201, 202), (-0.2, -0.3), "stop")
 
@@ -158,6 +159,8 @@ def config(tmp_path):
 @pytest.fixture
 def component(config, client):
     value = TinkerTrainingComponent(MODEL, config, client)
+    value.start_jobs()
+    value.start_jobs()
     yield value
     value.close()
 
@@ -181,7 +184,7 @@ def item(version="v", group="g", token=20):
                         "tokens": [10, 11, token, 21],
                         "loss_mask": [1, 0],
                         "rollout_log_probs": [-0.2, -0.4],
-                        "runtime_load_id": version,
+                        "artifact_id": version,
                     }
                 }
             },
@@ -211,7 +214,7 @@ def submit(component, data, objective_name, *, start=None, schedule=None, **para
     }
     start = component.base_start if start is None else start
     job_id = job_id_for(component.name, start, data.to_dict()["samples"], parameters)
-    component.submit(TrainingJob(job_id, component.name, start, data, parameters))
+    component.submit(TrainingJob(job_id, component.name, start, data, parameters, scenario="s"))
     return job_id
 
 
@@ -340,7 +343,9 @@ def test_a_job_with_parameters_tinker_does_not_take_is_refused_and_records_nothi
 ):
     parameters = {"method": TrainingMethod(objective.name).to_dict(), **overrides}
     with pytest.raises(ValueError, match=message):
-        component.submit(TrainingJob("refused", component.name, component.base_start, batch(), parameters))
+        component.submit(
+            TrainingJob("refused", component.name, component.base_start, batch(), parameters, scenario="s")
+        )
     with pytest.raises(KeyError):
         component.status("refused")
     assert client.calls == []
@@ -348,6 +353,7 @@ def test_a_job_with_parameters_tinker_does_not_take_is_refused_and_records_nothi
 
 def test_a_restarted_component_resumes_a_job_after_its_last_checkpoint(config, client, objective):
     component = TinkerTrainingComponent(MODEL, config, client)
+    component.start_jobs()
     job_id = submit(component, batch(3), objective.name, save_interval=1)
     first = wait(component, job_id).checkpoints[0]
     component.close()
@@ -359,6 +365,7 @@ def test_a_restarted_component_resumes_a_job_after_its_last_checkpoint(config, c
     trained = len(client.calls)
 
     restarted = TinkerTrainingComponent(MODEL, config, client)
+    restarted.start_jobs()
     try:
         status = wait(restarted, job_id)
         assert status.state == "finished"
@@ -373,10 +380,16 @@ def test_a_restarted_component_resumes_a_job_after_its_last_checkpoint(config, c
 
 
 def test_a_component_refuses_checkpoints_that_another_tinker_service_holds(config, client, tmp_path):
-    TinkerTrainingComponent(MODEL, config, client).close()
+    hosted = TinkerTrainingComponent(MODEL, config, client)
+    hosted.prepared_base()
+    hosted.close()
     spindle = replace(config, base_url="https://spindle.example")
     with pytest.raises(ValueError, match="held by hosted Tinker, not by the configured service https://spindle"):
-        TinkerTrainingComponent(MODEL, spindle, client)
+        TinkerTrainingComponent(MODEL, spindle, client).start_jobs()
+    # The failed start released state_dir, so another process can run its jobs.
+    restarted = TinkerTrainingComponent(MODEL, config, client)
+    restarted.start_jobs()
+    restarted.close()
 
     held = TinkerCheckpoint(MODEL, 32, "tinker://s/state", "tinker://s/sampler", service="https://spindle.example")
     assert TinkerCheckpoint.from_dict(held.to_dict()) == held
@@ -386,11 +399,38 @@ def test_a_component_refuses_checkpoints_that_another_tinker_service_holds(confi
         held.check_compatible(MODEL, service=None)
 
 
+@pytest.mark.parametrize("first_use", ["model_files", "base_start", "start_jobs"])
+def test_a_component_makes_its_base_start_on_first_use_once_and_not_when_it_is_built(config, client, first_use):
+    component = TinkerTrainingComponent(MODEL, config, client)
+    files = component.base_artifact_source().model_files
+    assert files is not None
+    assert client.initializations == 0 and not (component.state_dir / "base").exists()
+    uses = {
+        "model_files": files.directory,
+        "base_start": lambda: component.base_start,
+        "start_jobs": component.start_jobs,
+    }
+    uses[first_use]()
+    uses[first_use]()
+    assert TinkerCheckpoint.read(files.directory()) == UNTRAINED
+    assert component.base_start == str(files.directory())
+    assert client.initializations == 1
+    component.close()
+    # Another process that shares state_dir finds the base start there and makes none.
+    other_client = RemoteClient()
+    other = TinkerTrainingComponent(MODEL, config, other_client)
+    other.start_jobs()
+    assert other_client.initializations == 0
+    other.close()
+
+
 def test_the_base_artifact_is_the_untrained_adapter_and_imports_as_any_release(component, objective, tmp_path):
     base = component.base_artifact_source()
-    assert base.model_directory is not None and TinkerCheckpoint.read(base.model_directory) == UNTRAINED
-    assert component.base_start == str(base.model_directory)
-    assert TinkerCheckpoint.read(Path(component.import_start(base.model_directory))) == UNTRAINED
+    assert base.model_files is not None
+    directory = base.model_files.directory()
+    assert TinkerCheckpoint.read(directory) == UNTRAINED
+    assert component.base_start == str(directory)
+    assert TinkerCheckpoint.read(Path(component.import_start(directory))) == UNTRAINED
     status = train(component, batch(), objective.name)
     release = tmp_path / "release"
     release.mkdir()
@@ -420,8 +460,11 @@ def test_an_imported_release_is_a_manifest_whose_paths_resolve_on_the_service(co
 
 def test_exclusive_state_dir_and_model_validation(component, config, inference, tmp_path):
     assert inference.served_weight_kind == "model_adapter", "a Tinker sampler serves a LoRA adapter"
+    # Another process may use the state directory, as control does, but only one runs its jobs.
+    other_process = TinkerTrainingComponent(MODEL, config, RemoteClient())
     with pytest.raises(ValueError, match="already owned"):
-        TinkerTrainingComponent(MODEL, config, RemoteClient())
+        other_process.start_jobs()
+    other_process.close()
     other = TinkerCheckpoint("other/model", 32, "tinker://other/state", "tinker://other/sampler")
     other.write(tmp_path / "other")
     with pytest.raises(ValueError, match="base model"):
@@ -431,7 +474,7 @@ def test_exclusive_state_dir_and_model_validation(component, config, inference, 
     (tmp_path / "other" / MANIFEST).unlink()
     (tmp_path / "other" / "weights.bin").write_bytes(b"not a manifest")
     with pytest.raises(ValueError, match="missing"):
-        inference.snapshot(Artifact.local(tmp_path / "other"))
+        inference.sampler_path(Artifact.local(tmp_path / "other"))
     with pytest.raises(ValueError, match="missing"):
         component.import_start(tmp_path / "other")
 
@@ -467,6 +510,7 @@ def test_a_method_whose_loss_has_no_kl_penalty_is_refused_before_training(
 
 def test_a_schedule_counts_optimizer_steps_across_jobs_and_restarts(config, client, objective):
     component = TinkerTrainingComponent(MODEL, config, client)
+    component.start_jobs()
     first = train(component, batch(3), objective.name, schedule=WARMUP).checkpoints[-1]
     assert client.learning_rates[-1] == pytest.approx((0.0, 2.5e-5, 5e-5))
     assert first.metrics["learning_rate"] == pytest.approx(5e-5)
@@ -476,6 +520,7 @@ def test_a_schedule_counts_optimizer_steps_across_jobs_and_restarts(config, clie
 
     # A restart continues from the last checkpoint: the warmup continues instead of starting over.
     restarted = TinkerTrainingComponent(MODEL, config, client)
+    restarted.start_jobs()
     try:
         continued = train(restarted, batch(3, "b1"), objective.name, start=first.path, schedule=WARMUP)
         assert client.learning_rates[-1] == pytest.approx((7.5e-5, 1e-4, 1e-4))
@@ -532,7 +577,9 @@ def test_schedule_keeps_comparison_sets_and_handles_epochs(objective):
     objective.rollout_unit = "comparison_set"
     scheduling = StepScheduling(epochs=2, remainder="partial")
     data = JobData("schedule", tuple(item("v", group) for group in ("a", "a", "b", "c")))
-    step = prepare_tinker_job(data, TrainingMethod(objective.name), {}, scheduling, batch_size=2, kl_coef=0.0)
+    step = prepare_tinker_job(
+        data, TrainingMethod(objective.name), {}, scheduling, batch_size=2, kl_coef=0.0, score_centering=None
+    )
     assert [len(rows) for rows in step.steps] == [3, 1, 3, 1]
     assert step.metrics["optimizer_steps"] == 4
     assert step.next_algorithm_state == {"steps": 1}
@@ -541,7 +588,9 @@ def test_schedule_keeps_comparison_sets_and_handles_epochs(objective):
 def test_a_packed_tinker_step_trains_batch_size_packs(objective):
     # Each sample has 4 tokens, so packs of 8 tokens hold two samples, and one step trains one pack.
     scheduling = StepScheduling(packing_length=8)
-    step = prepare_tinker_job(batch(3), TrainingMethod(objective.name), {}, scheduling, batch_size=1, kl_coef=0.0)
+    step = prepare_tinker_job(
+        batch(3), TrainingMethod(objective.name), {}, scheduling, batch_size=1, kl_coef=0.0, score_centering=None
+    )
     assert [len(rows) for rows in step.steps] == [2, 1]
 
 
@@ -554,6 +603,7 @@ def test_step_size_respects_error_remainder(objective):
             StepScheduling(remainder="error"),
             batch_size=2,
             kl_coef=0.0,
+            score_centering=None,
         )
 
 
@@ -594,10 +644,12 @@ def test_exact_chat_tokens_and_buffered_sse(inference, client, tmp_path):
         "chat_template_kwargs": {"enable_thinking": False},
     }
     handler = inference.inference_handler
+    # The inference service addresses each request to the row's model name: the active sampler.
+    request = handler.address_model(request, inference.served_model_name("s"))
     response = asyncio.run(handler.inference(artifact, "/v1/chat/completions", request))
     assert response["training"]["tokens"] == [101, 102, 201, 202]
     assert response["training"]["rollout_log_probs"] == [-0.2, -0.3]
-    assert response["training"]["runtime_load_id"] == inference.current_runtime_load_id()
+    assert response["training"]["runtime_load_id"] == inference.sampler_load(inference.served_model_name("s"))[1]
     assert response["usage"]["total_tokens"] == 4
     assert client.rendered[1] == {"enable_thinking": False}
 
@@ -643,23 +695,20 @@ def test_activation_serves_the_new_sampler_and_freezes_older_releases(component,
     (checkpoint,) = train(component, batch(), objective.name).checkpoints
     published = Artifact.local(Path(checkpoint.release_path))
     selected = inference.activate_checkpoint(published)
-    assert inference.current_runtime_load_id() == selected != first
-    # An in-flight request on the older release keeps its sampler and load.
-    assert inference.snapshot(base) == ("tinker://base/sampler", first)
-    assert inference.snapshot(published) == ("tinker://update-1/sampler", selected)
+    assert selected != first
+    # The served row names the active sampler; a request under an older sampler's name keeps that sampler's load.
+    assert inference.served_model_name("s") == "tinker://update-1/sampler"
+    assert inference.sampler_load("tinker://base/sampler") == ("tinker://base/sampler", first)
+    assert inference.sampler_load("tinker://update-1/sampler") == ("tinker://update-1/sampler", selected)
     # Each release's model is the base with that release's sampler, whichever release is served.
     assert inference.artifact_model(published) == PolicyModel(MODEL, "tinker://update-1/sampler")
     assert inference.artifact_model(base) == PolicyModel(MODEL, "tinker://base/sampler")
     rollback = Artifact.local(base.local_path)
     latest = inference.activate_checkpoint(rollback)
     assert int(first.split(":")[-1]) < int(selected.split(":")[-1]) < int(latest.split(":")[-1])
-    assert inference.snapshot(base)[1] == first
-    assert inference.snapshot(published)[1] == selected
-    assert inference.snapshot(rollback)[1] == latest
+    assert inference.sampler_load("tinker://base/sampler")[1] == latest
+    assert inference.sampler_load("tinker://update-1/sampler")[1] == selected
     assert inference.activate_checkpoint(rollback) == latest
-    # A release another component minted with the same weights is never activated; it serves the active load.
-    carried = Artifact.local(base.local_path)
-    assert inference.snapshot(carried)[1] == latest == inference.current_runtime_load_id()
 
 
 # -- Deployment
@@ -804,12 +853,14 @@ def test_scenario_commits_recovers_activates_and_trains_from_remote_checkpoint(t
 
     def build(client):
         component = TinkerTrainingComponent(MODEL, settings, client)
+        component.start_jobs()
         inference = TinkerInferenceRuntime(client, base_model=MODEL)
         dispatcher = Dispatcher(
             PolicyRecipe(component, runtime=inference, pipeline_stages=job_sized_stages(PolicyRecipe.pipeline_spec())),
             factory,
             local_artifact_dir=tmp_path / "staged",
             scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
+            coordination=memory_coordination(),
         )
         return dispatcher, component, inference
 
@@ -820,18 +871,23 @@ def test_scenario_commits_recovers_activates_and_trains_from_remote_checkpoint(t
     try:
         scenario = first.get_or_create_scenario("math")
         base = scenario.current_artifact_ref().release_id
+        handler = inference.inference_handler
+        # As the inference service does: the request names the row's model, the sampler that serves now.
         response = asyncio.run(
-            inference.inference_handler.inference(
+            handler.inference(
                 scenario.release_queries.artifact_for_version(base),
                 "/v1/chat/completions",
-                {"messages": [{"role": "user", "content": "hello"}]},
+                handler.address_model(
+                    {"messages": [{"role": "user", "content": "hello"}]}, inference.served_model_name("math")
+                ),
             )
         )
         first.accept_record(
             AgentRecord.create(
                 scenario="math",
                 request_type=RequestType.INFERENCE,
-                payload={"response": response},
+                # As the inference service records it: the payload names the artifact that answered.
+                payload={"artifact_id": scenario.serving_artifact_id(), "response": response},
                 agent_record_id="i1",
             )
         )
@@ -844,7 +900,8 @@ def test_scenario_commits_recovers_activates_and_trains_from_remote_checkpoint(t
                 agent_record_id="r1",
             )
         )
-        deadline = time.monotonic() + 10
+        # The samples service, the jobs queue and the training worker each take a turn: wait longer.
+        deadline = time.monotonic() + 30
         # Submission, the checkpoint's publication and the job's end each commit a step.
         while (loop_state(scenario).finished_jobs < 1) and time.monotonic() < deadline:
             time.sleep(0.01)
@@ -852,9 +909,7 @@ def test_scenario_commits_recovers_activates_and_trains_from_remote_checkpoint(t
         assert state.finished_jobs == 1 and state.job is None, first.build_training_status()
         published = scenario.current_artifact_ref()
         assert published.release_id != base
-        artifact = scenario.release_queries.artifact_for_version(published.release_id)
-        assert inference.snapshot(artifact)[0] == "tinker://update-1/sampler"
-        assert inference.current_runtime_load_id() == inference.snapshot(artifact)[1]
+        assert inference.served_model_name("math") == "tinker://update-1/sampler"
         assert TinkerCheckpoint.read(Path(state.start)).state_path == "tinker://update-1/state"
         step = scenario.scenario_step
     finally:
@@ -867,17 +922,14 @@ def test_scenario_commits_recovers_activates_and_trains_from_remote_checkpoint(t
         scenario = second.get_or_create_scenario("math")
         assert scenario.scenario_step == step
         assert loop_state(scenario) == state
-        artifact = scenario.release_queries.artifact_for_version(published.release_id)
-        assert inference.snapshot(artifact)[1] == inference.current_runtime_load_id()
         # The creation carried the base artifact forward: its artifact_id is the repository base's release ID.
         base_artifact = scenario.release_queries.artifact_for_version(base).artifact_id
         assert base_artifact == scenario.repository.backend.resolve_release("base").release_id != base
         scenario.activate(base_artifact)
         scenario.train_from(base_artifact)
         assert scenario.scenario_step == step + 2
-        current = scenario.release_queries.artifact_for_version(scenario.current_artifact_ref().release_id)
-        assert current.ref.release_id == base
-        assert inference.snapshot(current)[0] == UNTRAINED.sampler_path
+        assert scenario.current_artifact_ref().release_id == base
+        assert inference.served_model_name("math") == UNTRAINED.sampler_path
         # The base artifact imports as any release: the next job starts from the untrained adapter.
         assert TinkerCheckpoint.read(Path(loop_state(scenario).start)) == UNTRAINED
     finally:
@@ -904,6 +956,7 @@ def test_documented_smoke_runs_through_http_and_ttdd_recipe(tmp_path, monkeypatc
     remote = RemoteClient()
     # A job and a batch size of the whole grid train it as one optimizer step.
     component = TinkerTrainingComponent(MODEL, TinkerConfig(state_dir=str(tmp_path / "runtime"), batch_size=4), remote)
+    component.start_jobs()
     inference = TinkerInferenceRuntime(remote, base_model=MODEL)
     step_grid = PipelineConfig.from_setting(
         {
@@ -918,6 +971,7 @@ def test_documented_smoke_runs_through_http_and_ttdd_recipe(tmp_path, monkeypatc
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(),
+        coordination=memory_coordination(),
     )
     script = Path(__file__).resolve().parents[2] / "tutorials" / "tinker" / "smoke.py"
     monkeypatch.setenv("REEF_TOKEN", "test-token")
@@ -956,7 +1010,9 @@ def sft_item(name: str) -> TrajectorySample:
 
 def test_sft_trains_tinker_cross_entropy_on_the_target_tokens_without_rollout_log_probs():
     data = JobData("sft", (sft_item("a"), sft_item("b")))
-    step = prepare_tinker_job(data, TrainingMethod(SftObjective.name), {}, StepScheduling(), batch_size=2, kl_coef=0.0)
+    step = prepare_tinker_job(
+        data, TrainingMethod(SftObjective.name), {}, StepScheduling(), batch_size=2, kl_coef=0.0, score_centering=None
+    )
 
     loss = resolve_tinker_loss("sft")
     (rows,) = step.steps
@@ -967,7 +1023,15 @@ def test_sft_trains_tinker_cross_entropy_on_the_target_tokens_without_rollout_lo
         "weights": [0.0, 0.0, 1.0, 1.0],
     }
     with pytest.raises(ValueError, match="sft trains no KL penalty"):
-        prepare_tinker_job(data, TrainingMethod(SftObjective.name), {}, StepScheduling(), batch_size=2, kl_coef=0.1)
+        prepare_tinker_job(
+            data,
+            TrainingMethod(SftObjective.name),
+            {},
+            StepScheduling(),
+            batch_size=2,
+            kl_coef=0.1,
+            score_centering=None,
+        )
 
 
 def test_an_sft_job_trains_cross_entropy_on_the_component_and_saves_its_checkpoint(component, client):

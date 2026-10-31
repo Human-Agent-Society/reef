@@ -7,15 +7,17 @@ import asyncio
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from tests.support._policy_recipe import TestPolicyRecipe
-from tests.support.artifact_versions import ImportingComponent, dispatcher, train
+from tests.support.artifact_versions import ImportingComponent, ImportingInference, dispatcher, train
 from tests.support.runtime_stubs import runtime_bindings
 
+from reef.artifact import InMemoryRepositoryBackend, RepositoryBackendFactory
 from reef.artifact.artifact import ArtifactNotFound
 from reef.core.errors import ReefError
-from reef.core.evaluation import PolicyModel
+from reef.core.served_models import ServedArtifact
 from reef.dispatcher import Dispatcher
 from reef.runtime.interfaces import InferenceHandler
 from reef.service.app import create_app
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.trainer import Trainer
 
@@ -31,17 +33,50 @@ class ReleaseEcho(InferenceHandler):
     async def inference(self, artifact, path, payload):
         del path, payload
         self.release_ids.append(artifact.ref.release_id)
-        return {"choices": [{"message": {"content": "ok"}}], "metadata": {"runtime_load_id": "w1"}}
+        return {"choices": [{"message": {"content": "ok"}}]}
+
+
+class NamedInference(ImportingInference):
+    """An ``ImportingInference`` whose engine serves every scenario under one model name, so control writes the
+    scenario's ``served_models`` rows and the inference routes answer."""
+
+    def served_model_name(self, scenario: str) -> str:
+        return "stub-model"
+
+
+class NamedComponent(ImportingComponent):
+    """An ``ImportingComponent`` whose checkpoints a ``NamedInference`` serves."""
+
+    def __init__(self, checkpoint_dir) -> None:
+        super().__init__(checkpoint_dir)
+        self.inference = NamedInference(self.restore_order)
+
+
+def serving_dispatcher(tmp_path) -> tuple[Dispatcher, NamedComponent, RepositoryBackendFactory]:
+    """The dispatcher of ``tests.support.artifact_versions.dispatcher`` whose runtime serves under a model name."""
+    initial = tmp_path / "initial"
+    initial.mkdir(exist_ok=True)
+    (initial / "model.txt").write_text("w0")
+    component = NamedComponent(tmp_path / "exported")
+    backend_factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
+    value = Dispatcher(
+        TestPolicyRecipe(**runtime_bindings(component, component.inference)),
+        backend_factory,
+        local_artifact_dir=tmp_path / "staged",
+        scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
+        coordination=memory_coordination(),
+    )
+    return value, component, backend_factory
 
 
 def answering_each_release(runtime) -> None:
     """Make the stub runtime answer each call from the release that the call names, as Tinker does."""
-    runtime.inference.artifact_model = lambda artifact: PolicyModel("base", artifact.ref.release_id)
+    runtime.inference.answers_each_release = True
 
 
 def two_artifacts(tmp_path):
     """A scenario that trained twice: the newest artifact is active, and ``older`` is the one before it."""
-    value, runtime, backend_factory = dispatcher(tmp_path)
+    value, runtime, backend_factory = serving_dispatcher(tmp_path)
     answering_each_release(runtime)
     train(value, 1)
     train(value, 2)
@@ -57,6 +92,12 @@ def test_a_served_artifact_answers_at_its_url_while_the_default_url_answers_from
         value, _, _, newest, older = two_artifacts(tmp_path)
         served = value.serve("math", older["artifact_id"])
         assert (served.artifact_id, served.release_id) == (older["artifact_id"], older["release_id"])
+        # The artifact served beside the active one has its own row, under the runtime's model name for it.
+        rows = value.coordination.served_models.read_scenario("math")
+        assert rows[older["artifact_id"]] == ServedArtifact(
+            older["artifact_id"], "http://trainer", f"sampler:{older['artifact_id']}"
+        )
+        assert rows["active"].model_name == "stub-model"
         handler = ReleaseEcho()
         client = TestClient(TestServer(create_app(value, inference_handler=handler)))
         await client.start_server()
@@ -136,6 +177,7 @@ def test_the_served_artifacts_survive_a_restart(tmp_path) -> None:
         backend_factory,
         local_artifact_dir=tmp_path / "restarted-staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
+        coordination=memory_coordination(),
     )
     scenario = restarted.get_or_create_scenario("math")
     assert scenario.served_release(older["artifact_id"]).release_id == older["release_id"]

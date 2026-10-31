@@ -21,14 +21,16 @@ import fcntl
 import hashlib
 import json
 import math
+import threading
+import time
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 from reef.artifact.files import ArtifactFiles
-from reef.artifact.repository import BaseArtifactSource
+from reef.artifact.repository import BaseArtifactSource, BaseModelFiles
 from reef.core.evaluation import RolloutScores
 from reef.core.job_data import JobData, TaskSample, trajectories
 from reef.runtime.durable_files import read_json, write_json
@@ -39,11 +41,14 @@ from reef.tinker.sampling import TinkerSampler
 from reef.train.algos.registry import job_training
 from reef.train.algos.schedule import StepScheduling
 from reef.train.local_jobs import LocalJobComponent
+from reef.train.task_rollouts import RolloutSettings, TaskJobRollouts, run_train_tasks, task_name
 from reef.train.tinker_backend.client import TinkerClient
-from reef.train.tinker_backend.config import TinkerConfig, TinkerServiceConfig
+from reef.train.tinker_backend.config import ScoreCentering, TinkerConfig, TinkerServiceConfig
 from reef.train.tinker_backend.preparation import prepare_tinker_job
-from reef.train.tinker_backend.rollout import RolloutSettings, TaskJobRollouts, run_train_tasks, task_name
+from reef.train.tinker_backend.rollout import SamplerChat
 
+#: Seconds that the start's sampler may take to answer its first sample before a task job's rollouts start.
+SAMPLER_WARM_TIMEOUT_S = 3600.0
 #: The rollouts of a task job, in its job directory.
 ROLLOUTS_FILE = "rollouts.json"
 #: The parameters of a Tinker job besides ``method`` and ``scheduling``.
@@ -100,20 +105,30 @@ class TinkerJobComponent(LocalJobComponent, ABC):
     tasks (``TaskSample``), a task job. A task job needs the ``rollout``
     parameter (``RolloutSettings``) and a ``sampler``: before it trains, the
     component runs the tasks' rollouts on the sampler of the job's start
-    (``reef.train.tinker_backend.rollout``) and trains the samples of their
+    (``reef.train.task_rollouts``) and trains the samples of their
     groups. The tasks of a job have distinct names (``task_name``), each of
     which names its group. The component keeps the rollouts in
     ``rollouts.json`` in the job's directory, so a resumed job trains the same
     samples, and reports in the job's metrics each task's rewards of the
     rollouts that ran (``rollout_rewards``, by task name).
 
+    With a ``score_centering``, a policy-gradient job trains as score-centered
+    ``cispo`` (``prepare_tinker_job``), and a task job's rollouts record the
+    sampler's top-k at each sampled token, so they sample at temperature 1
+    without truncation (``sample_chat``).
+
     A job's last checkpoint carries the objective's state after the job's
     data; an intermediate checkpoint (``save_interval``) carries the state of
     the job's start, since the objective computes its state for the whole data.
 
-    ``config.state_dir`` holds ``base/`` (the base start, which
-    ``prepare_base`` writes), ``imported/<digest>/`` (starts taken from
-    releases) and ``jobs/`` (see ``LocalJobComponent``); a saved checkpoint is
+    Every process that uses the component reads and writes ``config.state_dir``; only the process that runs the
+    jobs holds its lock (``start_jobs``). A split deployment gives control and the training service one directory.
+    ``config.state_dir`` holds ``base/`` (the base start), ``imported/<digest>/`` (starts taken from
+    releases) and ``jobs/`` (see ``LocalJobComponent``). The constructor makes no base start. ``prepared_base``
+    makes ``base/`` on its first call in a process: before the process runs jobs (``start_jobs``), when it reads
+    ``base_start`` or checks a job from it, or when a repository imports the base artifact (``TinkerBaseFiles``).
+    A process that does none of these, such as a service that opens only repositories that have a base, makes
+    nothing. A saved checkpoint is
     ``jobs/<job_id>/<step>/``, which holds its manifest alone. A checkpoint
     directory is both the start of a later job and the release Reef publishes.
     The weights stay on the service. A subclass decides the parameterization:
@@ -128,32 +143,61 @@ class TinkerJobComponent(LocalJobComponent, ABC):
         client: TinkerClient,
         *,
         sampler: TinkerSampler | None = None,
+        score_centering: ScoreCentering | None = None,
     ) -> None:
         self._model = base_model
+        #: The score centering of this component's policy-gradient jobs, or None for none.
+        self.score_centering = score_centering
         self._config = config
         self._client = client
         self._sampler = sampler
         self._root = Path(config.state_dir).expanduser().resolve()
         self._root.mkdir(parents=True, exist_ok=True)
-        self._state_lock = (self._root / ".lock").open("a")
+        #: The lock of ``state_dir``, which the process that runs the jobs holds (``start_jobs``); None until then.
+        self._state_lock: TextIO | None = None
+        super().__init__(self._root / "jobs")
+        self._base = self._root / "base"
+        #: Whether this process prepared ``base/`` (``prepared_base``); ``_base_lock`` guards it.
+        self._base_prepared = False
+        self._base_lock = threading.Lock()
+
+    def start_jobs(self) -> None:
+        """Take ``state_dir`` for this process, prepare the base start, then run the jobs: one process at a time runs a
+        state directory's jobs. Raise ``ValueError`` when another process holds it; a second call changes nothing.
+        When the base start fails, the process releases ``state_dir`` and raises the failure."""
+        if self._state_lock is not None:
+            return
+        lock = (self._root / ".lock").open("a")
         try:
-            fcntl.flock(self._state_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
-            self._state_lock.close()
+            lock.close()
             raise ValueError("Tinker state_dir is already owned by another runtime") from None
         try:
-            super().__init__(self._root / "jobs")
-            self._base = self._root / "base"
-            self.prepare_base()
-            self.start_at(self._base)
+            self.prepared_base()
         except BaseException:
-            self._state_lock.close()
+            lock.close()
             raise
-        self.start_jobs()
+        self._state_lock = lock
+        super().start_jobs()
+
+    def prepared_base(self) -> Path:
+        """``base/``, after this process prepared it.
+
+        The first call in a process writes the base start (``prepare_base``) and checks it (``start_at``). A later
+        call returns at once. A failed call prepares nothing, so the next call tries again.
+        """
+        with self._base_lock:
+            if not self._base_prepared:
+                self.prepare_base()
+                self.start_at(self._base)
+                self._base_prepared = True
+        return self._base
 
     @abstractmethod
     def prepare_base(self) -> None:
-        """Write the base start into ``base/`` when it is not there; the constructor then checks it with ``start_at``."""
+        """Write the base start into ``base/`` when it is not there, or when it is a function of the configuration and
+        ``base/`` holds the start of another configuration; ``prepared_base`` then checks it with ``start_at``."""
 
     @abstractmethod
     def validated(self, checkpoint: TinkerCheckpoint) -> TinkerCheckpoint:
@@ -211,7 +255,8 @@ class TinkerJobComponent(LocalJobComponent, ABC):
 
     @property
     def base_start(self) -> str:
-        return str(self._base)
+        """``base/``, which this property prepares on its first use in a process (``prepared_base``)."""
+        return str(self.prepared_base())
 
     def job_parameters(self, parameters: Mapping[str, Any]) -> TinkerJobParameters:
         """``parameters`` over the component's defaults; ``ValueError`` for an unknown or a malformed parameter."""
@@ -232,7 +277,9 @@ class TinkerJobComponent(LocalJobComponent, ABC):
     def check_job(self, job: TrainingJob) -> None:
         parameters = self.job_parameters(job.parameters)
         if job.start is not None:
-            self.start_at(Path(job.start))
+            start = Path(job.start)
+            # A job from the base start reads ``base/`` as this process prepares it.
+            self.start_at(self.prepared_base() if start == self._base else start)
         tasks = [item for item in job.data.samples if isinstance(item, TaskSample)]
         if tasks and len(tasks) != len(job.data.samples):
             raise ValueError("a Tinker job trains either trajectories or tasks, not both")
@@ -258,7 +305,8 @@ class TinkerJobComponent(LocalJobComponent, ABC):
             if self._sampler is not None:
                 self._sampler.close()
         finally:
-            self._state_lock.close()
+            if self._state_lock is not None:
+                self._state_lock.close()
 
     def task_rollouts(
         self, job: TrainingJob, directory: Path, start: TinkerCheckpoint | FreshStart, settings: RolloutSettings
@@ -274,15 +322,23 @@ class TinkerJobComponent(LocalJobComponent, ABC):
         if self._sampler is None:
             raise RuntimeError("this Tinker component has no sampler, so it cannot roll tasks out")
         tasks = tuple(item for item in job.data.samples if isinstance(item, TaskSample))
-        rollouts = run_train_tasks(
-            tasks,
-            settings,
+        self.warm_sampler(start.sampler_path)
+        chat = SamplerChat(
             self._sampler,
             start.sampler_path,
             model=self._model,
             # A fresh start names no sampler: its rollouts sample the base model.
             runtime_load_id=f"tinker:{start.sampler_path or f'base:{self._model}'}",
+            topk_logprobs=0 if self.score_centering is None else self.score_centering.top_k,
+        )
+        rollouts = run_train_tasks(
+            tasks,
+            settings,
+            chat,
+            model=self._model,
             work_dir=directory / "rollouts",
+            start=job.start,
+            model_adapter=start.sampler_path,
         )
         write_json(
             record,
@@ -292,6 +348,25 @@ class TinkerJobComponent(LocalJobComponent, ABC):
             },
         )
         return rollouts
+
+    def warm_sampler(self, sampler_path: str | None) -> None:
+        """Sample one token from ``sampler_path`` (None: the base model) until the sampler answers.
+
+        A service such as Spindle starts a sampler at its first request, which can take minutes. The agents of
+        a task job's rollouts would spend that time against their own timeouts and fail for it, so the job
+        waits here first, retrying each sample that times out, for at most ``SAMPLER_WARM_TIMEOUT_S`` seconds.
+        """
+        if self._sampler is None:
+            raise RuntimeError("this Tinker component has no sampler, so it cannot roll tasks out")
+        prompt = self._sampler.render([{"role": "user", "content": "Hi"}], template_kwargs={})
+        deadline = time.monotonic() + SAMPLER_WARM_TIMEOUT_S
+        while True:
+            try:
+                self._sampler.sample(sampler_path, prompt, {"max_tokens": 1}, topk_logprobs=0)
+                return
+            except TimeoutError:
+                if time.monotonic() >= deadline:
+                    raise
 
     def run(self, job: TrainingJob, directory: Path) -> Mapping[str, Any]:
         parameters = self.job_parameters(job.parameters)
@@ -316,6 +391,7 @@ class TinkerJobComponent(LocalJobComponent, ABC):
             parameters.scheduling,
             batch_size=parameters.batch_size,
             kl_coef=parameters.kl_coef,
+            score_centering=self.score_centering,
         )
         if prepared.loss is None:
             # The objective skipped the job's data: the job trains nothing and saves no checkpoint.
@@ -372,11 +448,28 @@ class TinkerJobComponent(LocalJobComponent, ABC):
         return {**prepared.metrics, **rollout_metrics}
 
 
+@dataclass(frozen=True)
+class TinkerBaseFiles(BaseModelFiles):
+    """The base start of a Tinker component as the model files of its base artifact.
+
+    Values: ``component`` is the ``TinkerJobComponent`` whose ``base/`` the files are. ``directory`` returns
+    ``component.prepared_base()``, so a repository import makes the base start on its first call in a process.
+    Purpose: ``TinkerJobComponent`` subclasses give it in their ``base_artifact_source``, which itself makes nothing.
+    """
+
+    component: TinkerJobComponent
+
+    def directory(self) -> Path:
+        return self.component.prepared_base()
+
+
 class TinkerTrainingComponent(TinkerJobComponent):
     """Train a LoRA of rank ``config.lora_rank`` on the base model, on Tinker or a Tinker-compatible service.
 
     The base start, ``base/``, is the untrained adapter's checkpoint, which the
-    client saves the first time (``TinkerClient.initialize``). Serving reads
+    client saves on first use (``TinkerClient.initialize``): before the training
+    process runs jobs, or when a repository imports the base artifact
+    (``prepared_base``). Serving reads
     each saved checkpoint from its artifact: Tinker's sampler
     (``reef.inference.tinker``) reads the manifest, and a serving runtime that
     loads the weights into its own engines downloads the adapter from the
@@ -413,7 +506,7 @@ class TinkerTrainingComponent(TinkerJobComponent):
         inputs = {"model": self._model, "lora_rank": str(self._lora_rank)}
         if self._config.base_url is not None:
             inputs["service"] = self._config.base_url
-        return BaseArtifactSource(model_directory=self._base, inputs=inputs)
+        return BaseArtifactSource(model_files=TinkerBaseFiles(self), inputs=inputs)
 
     def check_release(self, files: ArtifactFiles) -> None:
         """A manifest of a checkpoint of this component's model, rank and service, whose state path resolves there."""

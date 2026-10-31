@@ -13,17 +13,14 @@ from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
 from reef.train.slime_backend.reef_adapters.training_job.storage import CheckpointStorage, RetentionConfig
 
 CRITIC_ARGS_HOOK_PATH = "reef.train.slime_backend.reef_adapters.worker_hooks.configure_critic_objective"
-REEF_ROLLOUT_DATA_KEYS = (
-    "producing_runtime_load_spans",
-    "producing_runtime_load_ids",
-)
+REEF_ROLLOUT_DATA_KEYS = ("producing_artifact_ids",)
 
 
 def validate_slime_args(args: SlimeArguments, spec: SlimeAlgorithm | None) -> None:
     """Reject Slime arguments the training component cannot run with.
 
-    The component trains only: Slime starts no engines, and training and
-    serving never share GPUs.
+    Slime places each job and starts its rollout engines itself; Reef's
+    serving engines are separate.
     """
     num_rollout = args.num_rollout
     if not isinstance(num_rollout, int) or isinstance(num_rollout, bool) or num_rollout <= 0:
@@ -36,14 +33,13 @@ def validate_slime_args(args: SlimeArguments, spec: SlimeAlgorithm | None) -> No
         raise ValueError("Reef runs Slime's training for every job; remove --debug-train-only")
     if args.debug_rollout_only:
         raise ValueError("Slime has no rollout loop in Reef; remove --debug-rollout-only")
-    for name, value in (
-        ("--colocate", args.colocate),
-        ("--offload-rollout", args.offload_rollout),
-    ):
-        if value:
-            raise ValueError(f"training and serving use separate GPUs; remove {name}")
+    if args.rollout_num_gpus and args.megatron_lora_rank:
+        # Reef's LoRA adapters are not wired into Slime's weight transfer to its engines.
+        raise ValueError(
+            "rollout engines need a full-weight actor; remove --megatron-lora-rank or the rollout engines"
+        )
     if args.release_train:
-        raise ValueError("the training workers keep running between jobs; remove --release-train")
+        raise ValueError("the training workers keep running through a job; remove --release-train")
 
 
 def configure_critic_args_hook(args: SlimeArguments) -> None:
@@ -83,8 +79,7 @@ def validate_advantage_computation(args: SlimeArguments, spec: SlimeAlgorithm | 
         if any(LOSS_FAMILIES.resolve(name).allows_slime_advantage_computation for name in LOSS_FAMILIES.names):
             return
     raise ValueError(
-        "Reef supplies training signals externally; pass "
-        "--disable-compute-advantages-and-returns in training.options"
+        "Reef supplies training signals externally; pass --disable-compute-advantages-and-returns in training.options"
     )
 
 

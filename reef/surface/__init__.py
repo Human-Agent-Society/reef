@@ -19,37 +19,25 @@ from reef.surface.base import (
     ArtifactLoader,
     ComponentSurface,
     FileTree,
-    InferenceHooks,
-    InferenceLease,
-    LeasingInferenceHooks,
     ServingRuntime,
     Surface,
     WeightRuntime,
 )
-from reef.surface.config import ConfigInferenceHooks, ConfigValidator, create_config_surface
 from reef.surface.files import TextFileTree
-from reef.surface.weights import RuntimeLoadMismatch, WeightInferenceHooks, WeightLoader, create_weight_surface
+from reef.surface.weights import WeightLoader, create_weight_surface
 
 __all__ = [
     "AdapterWeightRuntime",
     "ArtifactLayout",
     "ArtifactLoader",
     "ComponentSurface",
-    "ConfigInferenceHooks",
-    "ConfigValidator",
     "FileTree",
-    "InferenceHooks",
-    "InferenceLease",
-    "LeasingInferenceHooks",
-    "RuntimeLoadMismatch",
     "ServingRuntime",
     "Surface",
     "TextFileTree",
-    "WeightInferenceHooks",
     "WeightLoader",
     "WeightRuntime",
     "adapter_name",
-    "create_config_surface",
     "create_weight_surface",
     "parse_adapter_name",
 ]

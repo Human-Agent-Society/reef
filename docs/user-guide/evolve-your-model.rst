@@ -1,18 +1,28 @@
 Train model weights from agent feedback
 =======================================
 
-With Slime, weight training runs in two processes on one Ray cluster. Reef submits each
-job's ready data to its training component as one training job. Each checkpoint
-that a job saves is a candidate. Reef publishes a selected candidate, and the
-serving engines load its weights from files.
+With Slime, weight training runs on one Ray cluster. Reef submits each job's
+ready data to its training component as one training job, and the component
+runs the job in a Slime driver process of its own. Each checkpoint that a job
+saves is a candidate. Reef publishes a selected candidate, and the serving
+engines load its weights from files.
 
 +--------------------------+-----------------------------------------------+
 | Process                  | Owns                                          |
 +==========================+===============================================+
 | Reef HTTP service        | requests, records, the release chain, and the |
-|                          | Slime training component: the training        |
-|                          | workers, their GPUs, the optimizer and the    |
-|                          | checkpoints                                   |
+|                          | Slime training component, which queues the    |
+|                          | jobs and starts their drivers                 |
++--------------------------+-----------------------------------------------+
+| Slime driver (one per    | Slime's training workers; it continues the    |
+| job, while it trains)    | latest checkpoint, with its optimizer state,  |
+|                          | and saves the job's own. Without a serving    |
+|                          | session, it also reserves the job's GPUs      |
++--------------------------+-----------------------------------------------+
+| Slime serving session    | the rollout engines of task jobs, their       |
+| (from the first task job | router and the training GPUs, across jobs     |
+| until the component      |                                               |
+| closes)                  |                                               |
 +--------------------------+-----------------------------------------------+
 | Inference component      | SGLang or vLLM engines on their own GPUs,     |
 | (service ``inference``)  | serving the published weights                 |

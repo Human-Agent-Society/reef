@@ -14,9 +14,37 @@ from typing import Any
 from reef.tinker.checkpoint import FreshStart, TinkerCheckpoint
 from reef.tinker.service import close_service, tinker_sdk
 from reef.train.tinker_backend.config import TinkerServiceConfig
-from reef.train.tinker_backend.losses import TinkerCustomLoss, TinkerLoss, TokenRow
+from reef.train.tinker_backend.losses import MatrixInput, TinkerCustomLoss, TinkerLoss, TokenRow
 
 logger = logging.getLogger(__name__)
+
+
+def combined_step_metrics(steps: Sequence[Mapping[str, float]]) -> dict[str, float]:
+    """The metrics of several optimizer steps, combined by Tinker's metric suffixes.
+
+    A ``:sum`` metric is the sum over the steps that report it, ``:max`` the maximum and ``:min`` the minimum.
+    A ``:mean`` metric is the mean over those steps, weighted by each step's ``tokens:sum`` when every one of
+    them reports a positive count, else unweighted. Any other metric is the last reporting step's value.
+    """
+    combined: dict[str, float] = {}
+    for name in dict.fromkeys(name for step in steps for name in step):
+        reporting = [step for step in steps if name in step]
+        values = [float(step[name]) for step in reporting]
+        if name.endswith(":sum"):
+            combined[name] = sum(values)
+        elif name.endswith(":max"):
+            combined[name] = max(values)
+        elif name.endswith(":min"):
+            combined[name] = min(values)
+        elif name.endswith(":mean"):
+            weights = [float(step.get("tokens:sum", 0.0)) for step in reporting]
+            if all(weight > 0 for weight in weights):
+                combined[name] = sum(v * w for v, w in zip(values, weights, strict=True)) / sum(weights)
+            else:
+                combined[name] = sum(values) / len(values)
+        else:
+            combined[name] = values[-1]
+    return combined
 
 
 class TinkerClient(ABC):
@@ -218,7 +246,7 @@ class TinkerSDKClient(TinkerClient):
                 )
                 self._check_info(info, start.state_path)
                 trainer = service.create_training_client_from_state_with_optimizer(start.state_path)
-            metrics: dict[str, Any] = {}
+            step_metrics: list[Mapping[str, float]] = []
             for rows, learning_rate in zip(steps, learning_rates, strict=True):
                 base = self._base_logprobs(rows) if loss.needs_base_logprobs and kl_coef else []
                 inputs = loss.inputs(rows, base, kl_coef=kl_coef)
@@ -226,7 +254,19 @@ class TinkerSDKClient(TinkerClient):
                     raise ValueError("Tinker loss adapter must return one input per training row")
                 data = [
                     self._sdk.Datum(
-                        model_input=self._sdk.ModelInput.from_ints(list(row.tokens[:-1])), loss_fn_inputs=value
+                        model_input=self._sdk.ModelInput.from_ints(list(row.tokens[:-1])),
+                        loss_fn_inputs={
+                            key: (
+                                self._sdk.TensorData(
+                                    data=[number for row_values in item.rows for number in row_values],
+                                    dtype=item.dtype,
+                                    shape=[len(item.rows), len(item.rows[0])],
+                                )
+                                if isinstance(item, MatrixInput)
+                                else item
+                            )
+                            for key, item in value.items()
+                        },
                     )
                     for row, value in zip(rows, inputs, strict=True)
                 ]
@@ -234,15 +274,17 @@ class TinkerSDKClient(TinkerClient):
                     # Tinker returns logprobs; the family computes the loss here and Tinker runs backward.
                     future = trainer.forward_backward_custom(data, loss.loss)
                 else:
-                    future = trainer.forward_backward(data, loss_fn=loss.loss_fn)
+                    future = trainer.forward_backward(
+                        data, loss_fn=loss.loss_fn, loss_fn_config=dict(loss.loss_fn_config) or None
+                    )
                 result = future.result(timeout=self._config.train_timeout_s)
-                metrics.update(result.metrics)
+                step_metrics.append(result.metrics)
                 trainer.optim_step(self._sdk.AdamParams(learning_rate=learning_rate)).result(
                     timeout=self._config.train_timeout_s
                 )
             result_checkpoint = self._save(trainer)
             status = "success"
-            return result_checkpoint, metrics
+            return result_checkpoint, combined_step_metrics(step_metrics)
         finally:
             if trainer is not None and self._lora_rank is None:
                 try:
