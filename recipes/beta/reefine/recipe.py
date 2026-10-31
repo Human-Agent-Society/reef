@@ -36,8 +36,6 @@ from reef.inference.model_config import ModelConfig
 from reef.recipe.config_fields import config_field
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.harness import HarnessEvolutionRecipe
-from reef.storage.samples import TrainerSamples
-from reef.train.backend import ComponentReleases
 from reef.train.harness_backend.backend import HarnessBackend
 
 #: The first tree of a new Reefine scenario: the starter skill.
@@ -153,26 +151,20 @@ class ReefineRecipe(HarnessEvolutionRecipe):
     def build_backend(
         self,
         scenario: str,
-        releases: ComponentReleases | None,
-        samples: TrainerSamples | None,
+        component: str,
         *,
-        component: str | None = None,
         scenario_model: ModelConfig | None = None,
     ) -> HarnessBackend:
         """The scenario's backend. With an agent configured, its Reefine method runs the agent, bound here to pi
         once per scenario as the evaluator is: the binary is resolved, and installed when missing, on the Reef
         host, or named in a cloud sandbox's image."""
         if self.agent is None or not isinstance(self.method, ReefineMethod):
-            return super().build_backend(
-                scenario, releases, samples, component=component, scenario_model=scenario_model
-            )
+            return super().build_backend(scenario, component, scenario_model=scenario_model)
         method = ReefineMethod(ReefineAgent(self.agent.bind(), self.trial_timeout_s, self.multimodal_provider))
         return HarnessEvolutionRecipe.build_backend(
             replace(self, method=method),
             scenario,
-            releases,
-            samples,
-            component=component,
+            component,
             scenario_model=scenario_model,
         )
 

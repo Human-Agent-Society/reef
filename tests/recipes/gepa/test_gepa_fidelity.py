@@ -24,7 +24,7 @@ from typing import Any
 import pytest
 from tests.support._trajectories import recorded_trajectory
 from tests.support.harness_service import backend_step
-from tests.support.harness_steps import COMPONENT, TreeReleases, harness_recipe
+from tests.support.harness_steps import COMPONENT, TreeReleases, build_harness_backend, harness_recipe
 
 gepa = pytest.importorskip("gepa")
 
@@ -36,7 +36,6 @@ from recipes.gepa.method import ARCHIVE_FILE, archive_for_step
 from reef.evaluation.harness import ComparePolicy
 from reef.harness.tasks.model_binding import ModelBinding
 from reef.harness.tree import HarnessTree
-from reef.train.backend import ComponentReleases
 from reef.train.harness_backend.state import HarnessState
 from reef.train.types import JobData
 
@@ -167,7 +166,7 @@ def run_reef(tmp_path: Path, iterations: int) -> tuple[Archive, dict[int, dict[s
     )
     recipe = dataclasses.replace(recipe, models={"reflection": Reflector("http://model.test", "reflection")})
     releases = TreeReleases(recipe.seed)
-    backend = recipe.build_backend("fidelity", ComponentReleases(releases, COMPONENT), None)
+    backend = build_harness_backend(recipe, "fidelity", releases)
     policy = ComparePolicy(backend, statistic="mean")
 
     def committed_archive(state: dict[str, Any], text: str) -> Archive:
@@ -176,7 +175,7 @@ def run_reef(tmp_path: Path, iterations: int) -> tuple[Archive, dict[int, dict[s
             archive, backend.history, validation, {"rules.md": text}, repeats=recipe.evaluation.repeats
         )
 
-    state = dict(backend.initial_state())
+    state = dict(HarnessState().to_json())
     plans: dict[int, dict[str, Any]] = {}
     try:
         for step in range(1, iterations + 1):

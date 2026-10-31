@@ -60,7 +60,7 @@ from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import AdapterDescriptor, DescriptorError
 from reef.harness.sync import create_harness_surface
 from reef.harness.tasks.harbor_task import can_run_in_task_container
-from reef.harness.tasks.model_binding import ModelBinding, ModelBindings, ModelBindingsResolver
+from reef.harness.tasks.model_binding import ModelBinding, ModelBindings
 from reef.harness.tasks.vendor_install import AdapterProgram
 from reef.harness.tree import HarnessTree, validate_tree
 from reef.inference.model_config import ModelConfig
@@ -179,32 +179,6 @@ class HarnessLayout(ArtifactLayout):
 
 
 @dataclass(frozen=True)
-class ScenarioModels(ModelBindingsResolver):
-    """The model bindings of a scenario that overrides the deployment's model.
-
-    Values: ``config`` is the scenario's model configuration; ``recipe`` is
-    the recipe whose bindings it overrides; ``scenario`` is the scenario a
-    call that names none resolves for.
-    Purpose: the backend resolves its bindings through it at each step, so a
-    model change of the scenario reaches the next step.
-    """
-
-    config: ModelConfig
-    recipe: HarnessEvolutionRecipe
-    scenario: str | None = None
-
-    def resolve(self, scenario: str | None = None) -> ModelBindings:
-        scenario = self.scenario if scenario is None else scenario
-        runtime = self.config.runtime
-        if runtime is None:
-            return self.recipe.default_model_bindings(scenario)
-        # The scenario's own model is served by this Reef too, so a run reaches it through the same route.
-        binding = self.recipe.bind_model_metadata(ModelBinding.from_runtime(runtime))
-        served = self.recipe.served_through_service(binding, scenario)
-        return ModelBindings(served=served, named=dict.fromkeys(self.recipe.models, served))
-
-
-@dataclass(frozen=True)
 class HarnessJobParameters(SubmitParameters):
     """The parameters of a scenario component's harness job that only the scenario knows when the job is submitted.
 
@@ -270,7 +244,7 @@ class RecipeSteps(HarnessSteps):
             if scenario_model is None
             else ModelConfig.from_value(scenario_model, api_key=None if runtime is None else runtime.provider_key)
         )
-        return self.recipe.build_backend(scenario, None, None, component=component, scenario_model=model)
+        return self.recipe.build_backend(scenario, component, scenario_model=model)
 
     def policy(self, backend: HarnessBackend) -> CandidateEvaluationPlugin:
         return self.recipe.build_policy(backend)
@@ -553,14 +527,20 @@ class HarnessEvolutionRecipe(Recipe):
             route += f"/components/{quote(component, safe='')}"
         return replace(binding, base_url=f"{route}/evaluation", api_key=self.served_endpoint.token)
 
-    def default_model_bindings(self, scenario: str | None = None) -> ModelBindings:
-        return ModelBindings(served=self.model_binding(scenario), named=dict(self.models))
+    def model_bindings(self, scenario: str | None = None, model: ModelConfig | None = None) -> ModelBindings:
+        """The model bindings of ``scenario``'s runs on ``model``, the scenario's model selection, else on the
+        recipe's ``scenario_model``.
 
-    def model_bindings(self, scenario: str | None = None) -> ModelBindings:
-        """The scenario's model override, or the recipe's served and named models."""
-        if self.scenario_model is not None:
-            return ScenarioModels(self.scenario_model, self).resolve(scenario)
-        return self.default_model_bindings(scenario)
+        A model with a runtime is served by this Reef too, so a run reaches it through the same route, and every
+        named model is that model. Without a model, or for a model with no runtime, the bindings are the recipe's
+        served and named models.
+        """
+        model = self.scenario_model if model is None else model
+        if model is None or model.runtime is None:
+            return ModelBindings(served=self.model_binding(scenario), named=dict(self.models))
+        binding = self.bind_model_metadata(ModelBinding.from_runtime(model.runtime))
+        served = self.served_through_service(binding, scenario)
+        return ModelBindings(served=served, named=dict.fromkeys(self.models, served))
 
     def activation_rule(self, reference: PluginReference | None = None) -> ActivationRule:
         """The rule ``Recipe.activation_rule`` names, with the adapter's parts checked.
@@ -599,9 +579,7 @@ class HarnessEvolutionRecipe(Recipe):
         return (self.state_root(scenario),)
 
     def harness_served_model(self, scenario: str, component: str, model: ModelConfig) -> ModelBinding | None:
-        if model.runtime is None:
-            return self.default_model_bindings(scenario).served
-        return ScenarioModels(model, self).resolve(scenario).served
+        return self.model_bindings(scenario, model).served
 
     def harness_state_dir(self, scenario: str, component: str) -> Path | None:
         return self.state_root(scenario) / component
@@ -658,46 +636,32 @@ class HarnessEvolutionRecipe(Recipe):
     def build_backend(
         self,
         scenario: str,
-        releases: ComponentReleases | None,
-        samples: TrainerSamples | None,
+        component: str,
         *,
-        component: str | None = None,
         scenario_model: ModelConfig | None = None,
     ) -> HarnessBackend:
-        """The backend of a scenario component: the binary installed, the history, the evaluator, the tasks, the
-        records and the coding agent bound.
-
-        The component is ``component``, else the one that ``releases`` reads. ``scenario_model`` is the
-        scenario's model selection, else the recipe's own (``scenario_model``) applies. ``ValueError`` when
-        neither ``component`` nor ``releases`` names the component.
+        """The backend of ``component`` in ``scenario``: the binary installed, the history, the evaluator, the
+        tasks, the records and the coding agent bound. ``scenario_model`` is the scenario's model selection, else
+        the recipe's own (``scenario_model``) applies.
         """
         descriptor = get_adapter(self.evolution.adapter)
-        if component is None:
-            if releases is None:
-                raise ValueError("a harness backend names its component, or reads it from releases")
-            component = releases.component
-        model = self.scenario_model if scenario_model is None else scenario_model
         # Each component of a composed scenario keeps its own history and records.
         root = self.state_root(scenario) / component
         try:
             history = History.open(root / HISTORY_DIR)
         except OSError as exc:
             raise RecipeConfigError(f"evolution.state_dir cannot hold {root}: {exc}") from exc
-        models = (
-            self.default_model_bindings(scenario) if model is None else ScenarioModels(model, self).resolve(scenario)
-        )
+        models = self.model_bindings(scenario, scenario_model)
         evaluator = None if self.scorer is None else self.build_evaluator(descriptor, models, history, self.scorer)
         records = StepRecord(root / STEPS_DIR)
         return HarnessBackend(
             descriptor=descriptor,
-            releases=releases,
             method=self.method,
             # Only a method that runs the agent through its services gets it bound here.
             agent=self.agent.bind() if self.agent is not None and self.method.runs_agent else None,
             evaluator=evaluator,
             tasks=EvaluationTasks(
                 seed_tasks=self.configured_tasks(),
-                eval_samples=samples if self.evaluation.imported_tasks else None,
                 collect_failures=self.evaluation.collect_failures,
                 collector=self.collector,
                 max_collected=self.evaluation.max_collected_tasks,
@@ -705,7 +669,6 @@ class HarnessEvolutionRecipe(Recipe):
             ),
             history=history,
             models=models,
-            model_resolver=None if model is None else ScenarioModels(model, self, scenario),
             limits=StepLimits(
                 max_steps=self.evolution.max_steps,
                 max_failure_streak=self.evolution.max_failure_streak,
@@ -757,4 +720,4 @@ class HarnessEvolutionRecipe(Recipe):
         )
 
 
-__all__ = ["EvolutionSettings", "HarnessEvolutionRecipe", "ScenarioModels", "plugin_name"]
+__all__ = ["EvolutionSettings", "HarnessEvolutionRecipe", "plugin_name"]

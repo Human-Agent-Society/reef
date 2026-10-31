@@ -15,11 +15,10 @@ from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
-from reef.core.job_data import TaskSample, TrajectorySample
+from reef.core.job_data import TrajectorySample
 from reef.core.plugins import ConfiguredPlugin
 from reef.core.trajectories import recorded_payload
 from reef.harness.tree.checks import directive_shaped, secret_shaped
-from reef.storage.samples import TrainerSamples
 
 
 class TaskCollector(ConfiguredPlugin, ABC):
@@ -90,9 +89,8 @@ class StepTasks:
 class EvaluationTasks:
     """The source of every step's evaluation tasks.
 
-    ``seed_tasks`` are the configured tasks; with ``eval_samples`` set, each
-    step reads the eval split of the imported tasks in that sample store
-    instead. With ``collect_failures``, a step collects up to
+    ``seed_tasks`` are the configured tasks, which a step evaluates when its
+    job names no seed tasks of its own. With ``collect_failures``, a step collects up to
     ``max_collected`` prompts in total and ``max_collected_per_client`` per
     tagged client, chosen by ``collector`` (every trace's prompt without one).
     """
@@ -101,7 +99,6 @@ class EvaluationTasks:
         self,
         *,
         seed_tasks: tuple[str, ...],
-        eval_samples: TrainerSamples | None = None,
         collect_failures: bool = False,
         collector: TaskCollector | None = None,
         max_collected: int = 50,
@@ -110,21 +107,10 @@ class EvaluationTasks:
         if max_collected < 0 or max_collected_per_client < 0:
             raise ValueError("max_collected_tasks and max_collected_per_client must be at least 0")
         self.seed_tasks = seed_tasks
-        self.eval_samples = eval_samples
         self.collect_failures = collect_failures
         self.collector = collector
         self.max_collected = max_collected
         self.max_collected_per_client = max_collected_per_client
-
-    def seed(self) -> tuple[str, ...]:
-        """The seed tasks as of now: with ``eval_samples``, the eval split of its imported tasks, in arrival order."""
-        if self.eval_samples is None:
-            return self.seed_tasks
-        return tuple(
-            str(stored.sample.task_path)
-            for stored in self.eval_samples.imported_tasks(split="eval")
-            if isinstance(stored.sample, TaskSample)
-        )
 
     def for_step(
         self,
@@ -137,9 +123,9 @@ class EvaluationTasks:
         """The tasks this step evaluates, after collecting this step's prompts when collection is on.
 
         ``collected_tasks`` and ``collected_clients`` are the collection state the previous step committed.
-        ``seed`` is the step's seed tasks, such as the eval split that its job names; ``None`` reads ``seed()``.
+        ``seed`` is the step's seed tasks, such as the eval split that its job names; ``None`` is ``seed_tasks``.
         """
-        seed = self.seed() if seed is None else seed
+        seed = self.seed_tasks if seed is None else seed
         collected = list(collected_tasks)
         counts = dict(collected_clients)
         screened = 0

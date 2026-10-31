@@ -712,7 +712,10 @@ def test_a_recipe_serving_fewer_components_than_registered_is_refused(
 @pytest.mark.unit
 def test_a_weights_job_commits_while_the_harness_backend_is_away(tmp_path: Path, dispatchers: _Dispatchers) -> None:
     """The harness cycle fails and the failure shows; the weights job still lands. Then the harness's rows are
-    stale, since the job's checkpoint serves, so the harness stops trying them."""
+    stale, since the job's checkpoint serves, so the harness stops trying them.
+
+    Each wake before then costs one attempt, and the job's commits and queue changes each wake the scenario, so
+    the count of attempts depends on how the wakes group."""
     away = _AwayBackend(HARNESS, tmp_path / "candidates")
     dispatcher, _ = dispatchers.open(backends={HARNESS: away}, training=WeightsJobComponent(tmp_path / "checkpoints"))
     scenario = _scenario(dispatcher)
@@ -724,7 +727,10 @@ def test_a_weights_job_commits_while_the_harness_backend_is_away(tmp_path: Path,
         timeout_seconds=15,
     )
     time.sleep(0.2)
-    assert 1 <= away.attempts <= 3
+    attempts = away.attempts
+    assert attempts >= 1
+    time.sleep(0.5)
+    assert away.attempts == attempts
 
 
 @pytest.mark.unit
@@ -1260,7 +1266,11 @@ def test_the_harness_catalog_is_one_lineage_of_trees(dispatchers: _Dispatchers) 
     assert component_files(scenario, scenario.current_artifact_ref())[WEIGHTS] == "weights step 3"
     catalog = service.harness_releases(headers)["releases"]
     assert [row["release_id"] for row in catalog] == [creation, h1, h1, h2, h3]
-    assert service.harness_head(headers) == h3 not in (w1, w2, held, combined, activated.release_id)
+    assert (
+        service.harness_manifest(headers, form="source")["release_id"]
+        == h3
+        not in (w1, w2, held, combined, activated.release_id)
+    )
     assert required_by(catalog, h3) == [{"name": "TOKEN", "kind": "env"}]
 
 

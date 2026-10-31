@@ -59,10 +59,10 @@ from reef.evaluation.harness import (
     RunRecord,
 )
 from reef.harness.adapters.descriptor import AdapterDescriptor
-from reef.harness.tasks.model_binding import ModelBindings, ModelBindingsResolver
+from reef.harness.tasks.model_binding import ModelBindings
 from reef.harness.tree import HarnessTree, validate_tree
 from reef.harness.tree.checks import clip_record_text, clip_record_value, directive_shaped, secret_shaped
-from reef.train.backend import ComponentReleases, PreparedStep, ReleaseFiles
+from reef.train.backend import PreparedStep, ReleaseFiles
 from reef.train.harness_backend.agent.run import AgentExecution
 from reef.train.harness_backend.calls import StepCalls, call_tokens
 from reef.train.harness_backend.contract import Method, StepContext
@@ -171,9 +171,8 @@ class StepLimits:
 class HarnessBackend(HarnessCandidateEvaluator):
     """Evolve one harness component: one candidate per step, evaluated against the head tree.
 
-    Values: ``releases`` reads the head tree of each step from the scenario's commits, or is ``None`` when each
-    step names its head (``prepare_step``'s ``head``). ``method`` is the deployment's ``Method``, the one part of a
-    step that is not Reef's; methods never subclass the backend. ``agent`` is the
+    Values: ``method`` is the deployment's ``Method``, the one part of a step that is not Reef's; methods never
+    subclass the backend. ``models`` are the scenario's model bindings for every step. ``agent`` is the
     deployment's coding agent, ``None`` when it configured none or the method
     does not run it. ``evaluator`` is ``None`` when the deployment configured
     no scorer; then no task runs. ``task_directories`` says
@@ -186,27 +185,23 @@ class HarnessBackend(HarnessCandidateEvaluator):
         self,
         *,
         descriptor: AdapterDescriptor,
-        releases: ComponentReleases | None,
         method: Method,
         agent: AgentExecution | None,
         evaluator: HarnessTaskEvaluator | None,
         tasks: EvaluationTasks,
         history: History,
         models: ModelBindings,
-        model_resolver: ModelBindingsResolver | None = None,
         limits: StepLimits,
         records: StepRecord,
         task_directories: bool,
     ) -> None:
         self.descriptor = descriptor
-        self.releases = releases
         self.method = method
         self.agent = agent
         self.evaluator = evaluator
         self.tasks = tasks
         self.history = history
         self.models = models
-        self.model_resolver = model_resolver
         self.limits = limits
         self.records = records
         self.task_directories = task_directories
@@ -220,10 +215,6 @@ class HarnessBackend(HarnessCandidateEvaluator):
 
     # -- the candidate lifecycle ------------------------------------------------------------------------------------
 
-    def initial_state(self) -> Mapping[str, Any]:
-        """The state before the first step: ``HarnessState()`` in its JSON form."""
-        return HarnessState().to_json()
-
     def close(self) -> None:
         if self.evaluator is not None:
             self.evaluator.close()
@@ -234,16 +225,11 @@ class HarnessBackend(HarnessCandidateEvaluator):
         state: Mapping[str, Any],
         scenario_step: int,
         *,
-        head: ReleaseFiles | None = None,
+        head: ReleaseFiles,
         seed_tasks: tuple[str, ...] | None = None,
     ) -> PreparedStep:
-        """Step ``scenario_step + 1``'s candidate, or its skip, on ``head``: the head that ``releases`` reads when
-        ``head`` is ``None``. ``seed_tasks`` replaces the evaluation's seed tasks for this step when it is set.
-        ``ValueError`` without ``head`` on a backend that has no ``releases``."""
-        if head is None:
-            if self.releases is None:
-                raise ValueError("this harness backend reads no releases: each step names its head")
-            head = self.releases.head()
+        """Step ``scenario_step + 1``'s candidate, or its skip, on ``head``. ``seed_tasks`` replaces the
+        evaluation's seed tasks for this step when it is set."""
         self.progress = None
         self.failed_step = {}
         try:
@@ -268,10 +254,6 @@ class HarnessBackend(HarnessCandidateEvaluator):
         # The step's material: the traces of traffic, and on an offline step the train tasks it rolls out.
         samples = tuple(sample for sample in data.samples if isinstance(sample, TrajectorySample))
         train_tasks = tuple(str(sample.task_path) for sample in data.samples if isinstance(sample, TaskSample))
-        if self.model_resolver is not None:
-            self.models = self.model_resolver.resolve()
-            if self.evaluator is not None:
-                self.evaluator.use_models(self.models)
         metrics: dict[str, Any] = {"traces": len(samples)}
         if train_tasks:
             metrics["runs"] = len(train_tasks)

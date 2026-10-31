@@ -20,7 +20,7 @@ from typing import Any
 import pytest
 from tests.support._trajectories import recorded_trajectory
 from tests.support.harness_service import backend_step
-from tests.support.harness_steps import COMPONENT, TreeReleases, harness_recipe
+from tests.support.harness_steps import TreeReleases, build_harness_backend, harness_recipe
 
 from recipes.gepa import GEPA, GEPASettings, ScoreFeedback, components, reflection
 from recipes.gepa.archive import Archive, Candidate
@@ -33,7 +33,6 @@ from reef.harness.adapters import get_adapter
 from reef.harness.tasks.model_binding import ModelBinding, ModelBindings
 from reef.harness.tasks.run import TaskResult
 from reef.harness.tree import HarnessTree
-from reef.train.backend import ComponentReleases
 from reef.train.harness_backend.backend import HarnessBackend
 from reef.train.harness_backend.state import HarnessState
 from reef.train.types import JobData, TrainStepResult
@@ -97,7 +96,7 @@ def gepa_backend(
     recipe = harness_recipe(tmp_path, GEPA(settings), seed=TREE, score=score_rules, tasks=TASKS, binary=str(binary))
     recipe = dataclasses.replace(recipe, models={"reflection": FakeChat() if reflector is None else reflector})
     releases = TreeReleases(recipe.seed)
-    return recipe.build_backend("demo", ComponentReleases(releases, COMPONENT), None), releases
+    return build_harness_backend(recipe, "demo", releases), releases
 
 
 def step(backend: HarnessBackend, number: int, state: dict[str, Any], *samples: TrajectorySample) -> TrainStepResult:
@@ -390,7 +389,7 @@ def test_a_step_reflects_on_the_served_trees_traces_and_the_next_step_settles_it
 ) -> None:
     reflector = FakeChat()
     backend, releases = gepa_backend(tmp_path, RULES_ONLY, reflector=reflector)
-    first = step(backend, 1, backend.initial_state(), sample("a1", 0.0))
+    first = step(backend, 1, HarnessState().to_json(), sample("a1", 0.0))
 
     # The served tree's traces are the parent's minibatch, graded by the feedback hook: only the child ran.
     assert first.metrics["method_runs"] == 1
@@ -448,7 +447,7 @@ def test_a_parent_that_never_served_runs_on_the_minibatch(tmp_path: Path) -> Non
 
 def test_a_child_that_does_not_beat_its_parent_is_rejected(tmp_path: Path) -> None:
     backend, _ = gepa_backend(tmp_path, RULES_ONLY, reflector=FakeChat(NO_MARKER_REPLY))
-    result = step(backend, 1, backend.initial_state(), sample("a1", 0.0))
+    result = step(backend, 1, HarnessState().to_json(), sample("a1", 0.0))
 
     assert result.metrics["skipped"] == "the method left the head tree unchanged"
     assert result.metrics["method_summary"] == "the child scored 0 on the minibatch and its parent 0"
@@ -462,7 +461,7 @@ def test_a_child_that_fails_validation_ends_the_iteration_without_an_run(tmp_pat
     # A reflection that writes a credential-shaped literal makes a tree that Reef never evaluates or publishes.
     reply = "```\nAnswer briefly with the key sk-" + "a" * 24 + "\n```"
     backend, _ = gepa_backend(tmp_path, RULES_ONLY, reflector=FakeChat(reply))
-    result = step(backend, 1, backend.initial_state(), sample("a1", 0.0))
+    result = step(backend, 1, HarnessState().to_json(), sample("a1", 0.0))
 
     assert result.metrics["skipped"] == "the method left the head tree unchanged"
     assert result.metrics["method_runs"] == 0 and "inline credential" in result.metrics["method_summary"]
@@ -506,7 +505,7 @@ def test_a_perfect_minibatch_ends_the_iteration_before_any_model_call(
     reflector = FakeChat()
     settings = GEPASettings(components=("rules",), perfect_score=perfect_score)
     backend, _ = gepa_backend(tmp_path, settings, reflector=reflector)
-    step(backend, 1, backend.initial_state(), sample("a1", 1.0))
+    step(backend, 1, HarnessState().to_json(), sample("a1", 1.0))
     # The same minibatch is worth reflecting on once the bar is above it.
     assert len(reflector.prompts) == reflections
 
@@ -516,7 +515,7 @@ def test_reflection_falls_back_to_the_model_under_test(tmp_path: Path) -> None:
     served = FakeChat()
     # A deployment that declares no reflection model gives the method the model under test alone.
     backend.models = ModelBindings(served=served)
-    result = step(backend, 1, backend.initial_state(), sample("a1", 0.0))
+    result = step(backend, 1, HarnessState().to_json(), sample("a1", 0.0))
     assert len(served.prompts) == 1 and result.metrics["method_notes"]["accepted"] is True
 
 

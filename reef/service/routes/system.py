@@ -7,10 +7,6 @@ from aiohttp import web
 from reef.service.request_service import RequestService, page_headers
 
 
-#: How long the install route renders before it sends the script's first lines with a spinner.
-INSTALL_PREAMBLE_DELAY_SECONDS = 0.5
-
-
 def register_system_routes(app: web.Application, *, request_service: RequestService) -> None:
     """Control's own harness routes, the pages and the step records, and ``/reef/status``."""
 

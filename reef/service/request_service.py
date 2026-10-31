@@ -445,14 +445,6 @@ class RequestService:
         self.harness_heads[scenario.name] = (step, current, head)
         return head
 
-    def harness_head(self, headers: Mapping[str, str]) -> str | None:
-        """The release ``GET /reef/harness`` serves the request's scenario, or None when it serves no files."""
-        try:
-            scenario = self._file_scenario(headers)
-        except ArtifactNotFound:
-            return None
-        return self.harness_release_id(scenario)
-
     def harness_releases(self, headers: Mapping[str, str]) -> dict[str, Any]:
         """The scenario's release catalog with per-release evaluation metrics, newest last.
 

@@ -53,6 +53,7 @@ from reef.harness.tasks.trajectory import stage_path
 from reef.harness.tree import HarnessTree, RenderError, TreePatch, render_tree, validate_tree
 from reef.harness.tree.checks import NATIVE_GRAPH_MAX_STEPS, validate_native_loop
 from reef.train.harness_backend.backend import HarnessBackend
+from reef.train.harness_backend.state import HarnessState
 from reef.train.types import JobData
 
 NATIVE = get_adapter("native")
@@ -403,13 +404,13 @@ def test_a_win_that_changes_a_loop_waits_for_a_person_whatever_review_kinds_list
     default = recipe.activation_rule()
     skill_reviewed = recipe.activation_rule(PluginReference(AlwaysActivate, {"review_kinds": ["skill"]}))
     held = loop_backend(tmp_path, "held", lambda workspace, services: loop)
-    with_loop = backend_step(held, batch(), held.initial_state())
+    with_loop = backend_step(held, batch(), HarnessState().to_json())
     assert with_loop.metrics["selected"] is True and with_loop.changed_kinds == {"native_loop"}
     # A list that names another part holds the loop just the same.
     assert not default.activates(MadeArtifact(None, with_loop.changed_kinds))
     assert not skill_reviewed.activates(MadeArtifact(None, with_loop.changed_kinds))
     free = loop_backend(tmp_path, "free", lambda workspace, services: skill)
-    result = backend_step(free, batch(), free.initial_state())
+    result = backend_step(free, batch(), HarnessState().to_json())
     assert result.metrics["selected"] is True and result.changed_kinds == {"skill"}
     assert default.activates(MadeArtifact(None, result.changed_kinds))
     assert not skill_reviewed.activates(MadeArtifact(None, result.changed_kinds))
@@ -421,7 +422,7 @@ def test_a_win_that_changes_a_loop_waits_for_a_person_whatever_review_kinds_list
         score=lambda task, result: 0.0 if result.trajectory[0]["data"].get("loop") else 1.0,
         seed={**NATIVE_SEED_FILES, **LOOP_FILE},
     )
-    removed = backend_step(without, batch(), without.initial_state())
+    removed = backend_step(without, batch(), HarnessState().to_json())
     assert removed.metrics["selected"] is True and removed.changed_kinds == {"native_loop"}
     assert not default.activates(MadeArtifact(None, removed.changed_kinds))
     assert removed.metrics["patch"] == {"native/loops/main.py": None}

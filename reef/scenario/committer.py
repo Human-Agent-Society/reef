@@ -965,7 +965,7 @@ class ScenarioCommitter:
 
     def _activate(self, artifact: Artifact, *, source: Artifact | None = None) -> None:
         # A component the engine already serves is not activated again, so a
-        # harness step never reloads weights; the active release is compared by
+        # harness release never reloads weights; the active release is compared by
         # identity and materialized only when a composed manifest is needed.
         previous = Artifact(self._artifacts.current, self._artifacts.repository)
         self._binding.surface.activate(artifact, self._binding.runtime, source=source, previous=previous)

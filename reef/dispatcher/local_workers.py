@@ -1,8 +1,8 @@
 """Training workers: one thread per scenario component that trains.
 
 A cycle prepares the trainer's next commit outside the scenario's registry
-lock, because the preparation can take minutes (a harness step's evaluation,
-a training job's checkpoint evaluation). Then it commits under that lock. A
+lock, because the preparation can take a while (a job's submission, or the
+read of a job's checkpoints). Then it commits under that lock. A
 worker whose trainer has a training job or a pipeline background job (such
 as a judge call) running looks again every ``POLL_SECONDS``, since a job's
 checkpoints and a judgment arrive without a new record.
@@ -179,14 +179,14 @@ class LocalTrainingWorkers:
         """Run one local cycle of ``scenario``'s ``component``; return whether the worker should look again."""
         current = self.registry.get_optional(scenario)
         if current is None:
-            # Deleted while a harness step was in flight: the step ends without
+            # Deleted while a cycle was in flight: the cycle ends without
             # a commit and without an error, as documented in http-api.rst.
             return False
         if not current.trainer_for(component).trains:
             raise RuntimeContractError(f"scenario {scenario!r} component {component!r} does not train")
         self.errors.clear(scenario, local_error_source(component))
         # A scenario runs one cycle at a time. A cycle holds the cycle lock
-        # from preparation to commit. Thus the head does not move under a step.
+        # from preparation to commit. Thus the head does not move under a job's submission.
         with self.cycle(scenario):
             if not self.cycles_run():
                 return False

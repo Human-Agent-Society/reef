@@ -22,9 +22,11 @@ from tests.support.harness_steps import (
     PI_SEED,
     UNCHANGED,
     TreeReleases,
+    build_harness_backend,
     changed_rules,
     harness_backend,
     harness_recipe,
+    head_of,
     make_pi_binary,
 )
 
@@ -37,9 +39,9 @@ from reef.harness.tasks.run import TaskRunError, TrajectoryKeepError, run_task
 from reef.harness.tree import HarnessTree, TreePatch, render_tree
 from reef.harness.tree.checks import RECORD_TEXT_CAP
 from reef.runtime.executor.config import ExecutorSettings
-from reef.train.backend import ComponentReleases
 from reef.train.harness_backend.backend import HarnessBackend
 from reef.train.harness_backend.records import StepRecord
+from reef.train.harness_backend.state import HarnessState
 from reef.train.types import JobData, TrainStepResult
 
 # A harness shaped like the native loop: the root session, one delegated checker
@@ -117,7 +119,7 @@ def native_backend(
     )
     recipe = replace(recipe, worker_executor=ExecutorSettings(workers=workers))
     releases = TreeReleases(recipe.seed)
-    return recipe.build_backend("demo", ComponentReleases(releases, COMPONENT), None), releases
+    return build_harness_backend(recipe, "demo", releases), releases
 
 
 def steps_dir(tmp_path: Path) -> Path:
@@ -126,7 +128,7 @@ def steps_dir(tmp_path: Path) -> Path:
 
 
 def step(backend: HarnessBackend, state=None, scenario_step: int | None = None) -> TrainStepResult:
-    state = backend.initial_state() if state is None else state
+    state = HarnessState().to_json() if state is None else state
     return backend_step(backend, JobData("demo:1"), state, scenario_step=scenario_step)
 
 
@@ -326,7 +328,7 @@ def test_a_retried_step_claims_a_new_directory_and_a_record_file_is_never_replac
 
 def test_an_run_record_that_cannot_be_kept_aborts_the_step_instead_of_scoring_it(tmp_path: Path) -> None:
     backend, _ = native_backend(tmp_path)
-    prepared = backend.prepare_step(JobData("demo:1"), backend.initial_state(), 0)
+    prepared = backend.prepare_step(JobData("demo:1"), HarnessState().to_json(), 0, head=head_of(backend))
     assert prepared.candidate is not None
     # A file where the run records go stands in for a full or unwritable history volume.
     (backend.history.root / "runs").write_text("in the way")

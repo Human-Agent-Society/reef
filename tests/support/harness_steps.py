@@ -16,6 +16,7 @@ import json
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Self
+from weakref import WeakKeyDictionary
 
 from tests.support._strategies import resolve_method, resolve_task_scorer
 from tests.support._trajectories import recorded_trajectory
@@ -31,7 +32,7 @@ from reef.harness.tree import HarnessTree
 from reef.inference.http import InferenceProxyRuntime
 from reef.recipe.harness import EvolutionSettings, HarnessEvolutionRecipe
 from reef.runtime.executor.config import ExecutorSettings
-from reef.train.backend import CommittedReleases, ComponentReleases, ReleaseFiles
+from reef.train.backend import CommittedReleases, ReleaseFiles
 from reef.train.harness_backend import Method, StepContext, Workspace
 from reef.train.harness_backend.agent.settings import AgentSettings
 from reef.train.harness_backend.backend import HarnessBackend
@@ -148,13 +149,32 @@ def harness_recipe(
     )
 
 
+#: The releases whose head each test backend steps on, as a job names its start.
+BACKEND_RELEASES: WeakKeyDictionary[HarnessBackend, TreeReleases] = WeakKeyDictionary()
+
+
+def build_harness_backend(
+    recipe: HarnessEvolutionRecipe, scenario: str = "demo", releases: TreeReleases | None = None
+) -> HarnessBackend:
+    """``recipe``'s backend of ``COMPONENT`` in ``scenario``, whose steps run on the head of ``releases`` (an
+    in-memory history whose base is the seed by default)."""
+    backend = recipe.build_backend(scenario, COMPONENT)
+    BACKEND_RELEASES[backend] = TreeReleases(recipe.seed) if releases is None else releases
+    return backend
+
+
+def head_of(backend: HarnessBackend) -> ReleaseFiles:
+    """The head that ``backend``'s next step runs on: the latest release of its ``build_harness_backend`` history."""
+    return BACKEND_RELEASES[backend].head(COMPONENT)
+
+
 def harness_backend(
     tmp_path: Path, method: Any, *, scenario: str = "demo", **recipe_fields: Any
 ) -> tuple[HarnessBackend, TreeReleases]:
     """The backend ``harness_recipe`` builds for ``scenario``, over an in-memory history whose base is the seed."""
     recipe = harness_recipe(tmp_path, method, **recipe_fields)
     releases = TreeReleases(recipe.seed)
-    return recipe.build_backend(scenario, ComponentReleases(releases, COMPONENT), None), releases
+    return build_harness_backend(recipe, scenario, releases), releases
 
 
 def changed_rules(text: str) -> Mapping[str, str]:

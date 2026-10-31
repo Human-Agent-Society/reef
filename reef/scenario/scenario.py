@@ -287,7 +287,7 @@ class Scenario:
         return running
 
     def prepare_training_step(self, component: str | None = None) -> TrainStepResult | None:
-        """Prepare ``component``'s next commit: a harness step, a job submission or a job's checkpoint decision.
+        """Prepare ``component``'s next commit: a job's submission, or a running job's checkpoint or end.
 
         The caller runs one step of the scenario at a time, as the
         dispatcher's cycle lock does. Thus no training commit of another

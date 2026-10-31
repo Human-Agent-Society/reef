@@ -14,7 +14,7 @@ import pytest
 from tests.support._trajectories import recorded_trajectory
 from tests.support.harness_methods import QueueChat
 from tests.support.harness_service import backend_step
-from tests.support.harness_steps import COMPONENT, PI_SEED, TreeReleases, runtime, step_services
+from tests.support.harness_steps import PI_SEED, TreeReleases, build_harness_backend, runtime, step_services
 
 from recipes.ace import ACE, ACESettings
 from reef.core.job_data import TrajectorySample
@@ -24,7 +24,6 @@ from reef.harness.tasks.model_binding import ModelBindings
 from reef.harness.tree import HarnessTree, validate_tree
 from reef.recipe import load_recipe_config
 from reef.recipe.harness import EvolutionSettings, HarnessEvolutionRecipe
-from reef.train.backend import ComponentReleases
 from reef.train.harness_backend import StepContext, Workspace
 from reef.train.harness_backend.state import HarnessState
 from reef.train.harness_backend.workspace import StepOutput
@@ -110,12 +109,12 @@ def test_two_steps_grow_the_playbook_that_pi_serves_with_no_run(tmp_path: Path) 
         runtime=runtime(),
     )
     releases = TreeReleases(recipe.seed)
-    backend = recipe.build_backend("demo", ComponentReleases(releases, COMPONENT), None)
+    backend = build_harness_backend(recipe, "demo", releases)
     # The first trace has no score and no feedback: ACE needs no correct answer.
     first = backend_step(
         backend,
         JobData("demo:1", (session("i1", "Fix the failing test."),)),
-        backend.initial_state(),
+        HarnessState().to_json(),
         NoEvaluationPolicy(),
     )
     assert first.metrics["selected"] is True and first.metrics["method_runs"] == 0

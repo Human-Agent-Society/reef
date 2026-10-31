@@ -25,7 +25,6 @@ import json
 import logging
 import urllib.error
 import urllib.request
-from abc import ABC, abstractmethod
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from functools import lru_cache
@@ -405,13 +404,6 @@ class ModelBindings(Mapping[str, ModelBinding]):
 
     def __len__(self) -> int:
         return 1 + len(self.named)
-
-
-class ModelBindingsResolver(ABC):
-    """Freeze the model configuration once for an entire evolution step, for the scenario named."""
-
-    @abstractmethod
-    def resolve(self, scenario: str | None = None) -> ModelBindings: ...
 
 
 def _mentions_model(value: Any) -> bool:

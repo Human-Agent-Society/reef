@@ -221,7 +221,10 @@ class HarnessTaskEvaluator(HarnessCandidateEvaluator, RolloutRunner[ScoredRun]):
         self.forbid_residue = forbid_residue
         self.history = history
         self.task_keys: dict[str, str] = {}
-        self.use_models(models)
+        # Resolving the binding here refuses an adapter without a matching model_binding before any task runs.
+        models.served.config_overlays(descriptor)
+        #: The served binding renders into each tree, and scorers receive all of them.
+        self.models = models
         self.worker_pool = EvaluationWorkerPool(
             worker_selection,
             worker_requirements,
@@ -243,12 +246,6 @@ class HarnessTaskEvaluator(HarnessCandidateEvaluator, RolloutRunner[ScoredRun]):
 
     def close(self) -> None:
         self.worker_pool.close()
-
-    def use_models(self, models: ModelBindings) -> None:
-        """Run later runs with ``models``: the served binding renders into each tree, and scorers receive all."""
-        # Resolving the binding here refuses an adapter without a matching model_binding before any task runs.
-        models.served.config_overlays(self.descriptor)
-        self.models = models
 
     def context(self) -> EvaluationContext:
         """The evaluation context of the current models."""

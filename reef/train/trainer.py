@@ -3,9 +3,9 @@
 A trainer pages records into its pipeline. A trainer that trains hands each
 ready job's data to its ``JobLoop``, which submits training jobs and turns their
 saved checkpoints into commits (``reef.train.jobs``): weight jobs, and the
-harness steps of the harness training component. Consumption progress is committed before pipeline memory is released. Storage
-owns disk eviction independently; new training commits never retire record
-bodies.
+harness steps of the harness training component. Consumption progress is
+committed before pipeline memory is released. Storage owns disk eviction
+independently; new training commits never retire record bodies.
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ from reef.storage.records import RecordStore
 from reef.storage.samples import SAMPLE_KINDS, SampleKind, TrainerSamples
 from reef.storage.tasks import TaskStorage
 from reef.train.jobs import JobLoop, JobLoopState
-from reef.train.pipeline import InstructionFailure, TrainingPipeline
+from reef.train.pipeline import TrainingPipeline
 from reef.train.types import JobData, PreparedCommit, TrainStepResult
 
 
@@ -266,15 +266,15 @@ class Trainer:
             pending = self._pending
             if pending is None or pending.result is not None or pending.data is None or pending.data.request is None:
                 return False
-            self._pipeline.mark_request_failed(pending.data.request.id, error, {})
+            self._pipeline.mark_request_failed(pending.data.request.id, error)
             return True
 
-    def instruction_failures(self) -> Mapping[str, InstructionFailure]:
-        """The failed instructions this trainer still holds, for the trainer that replaces it."""
+    def instruction_failures(self) -> Mapping[str, str]:
+        """The errors of the failed instructions this trainer still holds, by ID, for the trainer that replaces it."""
         with self._lock:
             return self._pipeline.request_failures()
 
-    def set_instruction_failures(self, failures: Mapping[str, InstructionFailure]) -> None:
+    def set_instruction_failures(self, failures: Mapping[str, str]) -> None:
         """Carry failed instructions into this trainer's pipeline; a rebuilt scenario starts without them."""
         with self._lock:
             self._pipeline.set_request_failures(failures)
@@ -569,11 +569,9 @@ class Trainer:
             pending = self._pending
             if pending is None or pending.data_id != data.data_id:
                 raise RuntimeError("trainer reservation changed while its instruction was being skipped")
-            metadata = dict(self._pipeline.request_failure_metrics(request.id))
             self._pipeline.release_job_data(data.data_id)
             pending.consumed_ids = self._pipeline.discard_request(request.id)
-        metrics = {**metadata, "skipped": "instruction failed", "error": error}
-        return TrainStepResult(dict(self._state), metrics)
+        return TrainStepResult(dict(self._state), {"skipped": "instruction failed", "error": error})
 
     def reserve_job_data(self, serving_artifact_id: str | None) -> JobData | None:
         """Return the reserved job data, or reserve the next data when the pipeline is ready. The caller holds the lock.

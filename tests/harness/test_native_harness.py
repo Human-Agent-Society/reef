@@ -29,7 +29,7 @@ from tests.support.harness_render import (
     native_tool,
     write_rendered,
 )
-from tests.support.harness_steps import COMPONENT, TreeReleases
+from tests.support.harness_steps import build_harness_backend, head_of
 
 from reef.evaluation.harness import ComparePolicy, EvaluationSettings, NoEvaluationPolicy
 from reef.execution.sandbox.process import SandboxExecutor
@@ -60,8 +60,8 @@ from reef.harness.tree import HarnessTree, RenderError, TreePatch, render_tree, 
 from reef.harness.tree.checks import validate_native_agent, validate_native_graph
 from reef.inference.http import InferenceProxyRuntime
 from reef.recipe.harness import EvolutionSettings, HarnessEvolutionRecipe
-from reef.train.backend import ComponentReleases
 from reef.train.harness_backend.backend import HarnessBackend
+from reef.train.harness_backend.state import HarnessState
 from reef.train.types import JobData
 
 NATIVE = get_adapter("native")
@@ -255,7 +255,7 @@ def native_backend(tmp_path: Path, model, method, score, tasks: tuple[str, ...])
         seed=HarnessTree(NATIVE_SEED_FILES),
         runtime=InferenceProxyRuntime(model_path="fake", base_url=model.base_url, api_key="dummy"),
     )
-    return recipe.build_backend("demo", ComponentReleases(TreeReleases(recipe.seed), COMPONENT), None)
+    return build_harness_backend(recipe, "demo")
 
 
 def _events(trajectory, type_):
@@ -694,7 +694,7 @@ def test_native_harness_runs_through_the_evaluation(tmp_path: Path, fake_model) 
         ("put hello in notes.txt and read it back",),
     )
     batch = JobData("demo:trace:native", (recorded_trajectory("a1", {"messages": []}, 0.0),))
-    prepared = backend.prepare_step(batch, backend.initial_state(), 0)
+    prepared = backend.prepare_step(batch, HarnessState().to_json(), 0, head=head_of(backend))
     assert prepared.candidate is not None
     assert "native/tools/shout.py" in prepared.candidate.candidate_tree.files
     assert "native/hooks/loop_guard.py" in prepared.candidate.candidate_tree.files
@@ -1024,7 +1024,7 @@ def test_a_verify_stage_asks_once_more_and_the_graph_wins_the_comparison(tmp_pat
             ),
         )
         batch = JobData("demo:trace:graph", (recorded_trajectory("a1", {"messages": []}, 0.0),))
-        prepared = backend.prepare_step(batch, backend.initial_state(), 0)
+        prepared = backend.prepare_step(batch, HarnessState().to_json(), 0, head=head_of(backend))
         assert prepared.candidate is not None
         assert json.loads(prepared.candidate.current_tree.files["native/graphs/main.json"]) == SEED_GRAPH
         assert "check" in json.loads(prepared.candidate.candidate_tree.files["native/graphs/main.json"])["stages"]
@@ -1889,7 +1889,7 @@ def test_the_binding_rides_in_the_run_render_and_the_published_tree_is_the_sourc
     task_run = backend.evaluator.render(HarnessTree(NATIVE_SEED_FILES))
     assert json.loads(task_run["native/models.json"])["base_url"] == fake_model.base_url
     batch = JobData("demo:trace:tree", (recorded_trajectory("a1", {"messages": []}, 0.0),))
-    prepared = backend.prepare_step(batch, backend.initial_state(), 0)
+    prepared = backend.prepare_step(batch, HarnessState().to_json(), 0, head=head_of(backend))
     assert prepared.candidate is not None
     policy = NoEvaluationPolicy()
     settled = backend.settle_step(prepared, policy.decide(prepared.candidate, policy.evaluate(prepared.candidate)))

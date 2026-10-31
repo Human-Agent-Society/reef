@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 from reef_terminus.runner import trial_record
-from tests.support.harness_steps import COMPONENT, TreeReleases
+from tests.support.harness_steps import build_harness_backend
 
 from recipes.beta.reefine import ReefineMethod, ReefineRecipe
 from recipes.beta.reefine.recipe import SEED_DIRECTORY
@@ -20,7 +20,6 @@ from reef.harness.tree import HarnessTree
 from reef.inference.http import InferenceProxyRuntime
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.registry import build_recipe, recipe_class_for
-from reef.train.backend import ComponentReleases
 
 HEALTH = "[health] Run `echo reef-ok` and reply with its output."
 
@@ -173,7 +172,7 @@ def test_each_scenarios_backend_runs_the_agent_on_the_bound_binary_with_the_gate
     )
     assert isinstance(built, ReefineRecipe) and isinstance(built.method, ReefineMethod)
     assert built.method.agent is None
-    backend = built.build_backend("demo", ComponentReleases(TreeReleases(built.seed), COMPONENT), None)
+    backend = build_harness_backend(built, "demo")
     method = backend.method
     assert isinstance(method, ReefineMethod) and method.agent is not None
     execution = method.agent.execution

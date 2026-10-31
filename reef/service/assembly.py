@@ -538,7 +538,7 @@ def build_app(
     """
     record_retention = RecordRetention(max_bytes=settings.agent_record_retention_max_bytes)
     # A composite's model calls come back to this service, which answers only once the app listens: its local
-    # cycles wait for that, so a harness step started by the preload never fails its calls into a skip.
+    # cycles wait for that, so a harness job started by the preload never fails its calls into a skip.
     # Evaluation calls run candidate code, so they get a token of their own that opens the evaluation routes alone,
     # never a service token. Every process derives the same one from the service tokens.
     evaluation_token = evaluation_token_for(settings.tokens)

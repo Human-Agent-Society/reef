@@ -150,14 +150,6 @@ def stage_reference(default: type[Plugin], value: object, stage: str) -> PluginR
     return PluginReference(default, dict(config))
 
 
-@dataclass(frozen=True)
-class InstructionFailure:
-    """A failed instruction and the attempt metadata carried through an in-process trainer reload."""
-
-    error: str
-    metrics: Mapping[str, Any] = field(default_factory=dict)
-
-
 def grouped(stored: StoredSample, sample: Sample) -> Sample:
     """``sample`` as job data trains it: a trajectory of a stored group without its own ``group_id`` gets the group."""
     if isinstance(sample, TrajectorySample) and sample.group_id is None and stored.group is not None:
@@ -208,7 +200,8 @@ class TrainingPipeline:
         self.training_requests: dict[str, TrainingRequest] = {}
         self.consumed_requests: set[str] = set()
         # The error of each buffered instruction whose step failed; its next job data is a skip row, not a run.
-        self.failed_requests: dict[str, InstructionFailure] = {}
+        #: What the failed step of each failed instruction said, by instruction ID.
+        self.failed_requests: dict[str, str] = {}
         #: The job data handed out and not yet acknowledged. While it exists the
         #: pipeline is ready, hands out the same object, and must not
         #: reshuffle what it references.
@@ -303,23 +296,17 @@ class TrainingPipeline:
 
     def request_failure(self, request_id: str) -> str | None:
         """What the instruction's failed step said, when it failed at all."""
-        failure = self.failed_requests.get(request_id)
-        return None if failure is None else failure.error
+        return self.failed_requests.get(request_id)
 
-    def request_failure_metrics(self, request_id: str) -> Mapping[str, Any]:
-        """The exact failed attempt's metadata, if the backend had produced any."""
-        failure = self.failed_requests.get(request_id)
-        return {} if failure is None else failure.metrics
-
-    def request_failures(self) -> Mapping[str, InstructionFailure]:
+    def request_failures(self) -> Mapping[str, str]:
         """The failed instructions still buffered, by id, with what their step said."""
         return dict(self.failed_requests)
 
-    def mark_request_failed(self, request_id: str, error: str, metrics: Mapping[str, Any] | None = None) -> None:
-        """Record that the instruction's step failed; its next job data is consumed with a skip row."""
-        self.failed_requests[request_id] = InstructionFailure(error, dict(metrics or {}))
+    def mark_request_failed(self, request_id: str, error: str) -> None:
+        """Record that the instruction's step failed with ``error``; its next job data is consumed with a skip row."""
+        self.failed_requests[request_id] = error
 
-    def set_request_failures(self, failures: Mapping[str, InstructionFailure]) -> None:
+    def set_request_failures(self, failures: Mapping[str, str]) -> None:
         """Carry the failed instructions of a replaced pipeline into this one."""
         self.failed_requests = dict(failures)
 

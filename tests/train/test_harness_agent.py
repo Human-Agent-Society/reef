@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 from tests.support.harness_service import backend_step
-from tests.support.harness_steps import COMPONENT, TreeReleases, harness_recipe
+from tests.support.harness_steps import TreeReleases, build_harness_backend, harness_recipe
 
 from reef.core.plugins import PluginConfigError
 from reef.execution.sandbox.e2b import E2BExecutor
@@ -27,7 +27,6 @@ from reef.execution.sandbox.process import LocalExecutor, SandboxExecutor, Sandb
 from reef.execution.sandbox.remote import deployment_owner
 from reef.harness.tasks.model_binding import ModelBinding
 from reef.recipe.errors import RecipeConfigError
-from reef.train.backend import ComponentReleases
 from reef.train.harness_backend import AgentMethod
 from reef.train.harness_backend.agent.settings import AgentSettings, agent_settings
 from reef.train.harness_backend.state import HarnessState
@@ -135,14 +134,14 @@ def agent_backend(tmp_path: Path, upstream: Upstream, mode: str = ""):
         models={"proposer": ModelBinding(base_url=upstream.base_url, model="proposer-model", api_key="k")},
     )
     releases = TreeReleases(recipe.seed)
-    return recipe.build_backend("demo", ComponentReleases(releases, COMPONENT), None)
+    return build_harness_backend(recipe, "demo", releases)
 
 
 def test_the_agent_edits_the_workspace_through_its_tools_and_its_notes_become_the_steps(
     tmp_path: Path, upstream: Upstream
 ) -> None:
     backend = agent_backend(tmp_path, upstream)
-    first = backend_step(backend, JobData("demo:1", ()), backend.initial_state())
+    first = backend_step(backend, JobData("demo:1", ()), HarnessState().to_json())
     notes = first.metrics["method_notes"]
     seen = notes["seen"]
     assert first.artifact is not None and first.metrics["method_summary"] == "Added the marker to the rules."
@@ -171,7 +170,7 @@ def test_the_agent_edits_the_workspace_through_its_tools_and_its_notes_become_th
 
 def test_an_agent_that_fails_leaves_the_head_tree_so_the_step_skips(tmp_path: Path, upstream: Upstream) -> None:
     backend = agent_backend(tmp_path, upstream, mode="fail")
-    result = backend_step(backend, JobData("demo:1", ()), backend.initial_state())
+    result = backend_step(backend, JobData("demo:1", ()), HarnessState().to_json())
     assert result.artifact is None and result.metrics["method_notes"]["agent"]["exit_code"] == 3
     assert result.metrics["method_summary"].startswith("the agent exited 3")
 

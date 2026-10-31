@@ -623,7 +623,6 @@ def test_a_flat_scenario_without_a_durable_log_still_serves_its_head(tmp_path: P
         (evolved / "rules.md").write_text("evolved")
         scenario.commit(TrainStepResult(state={}, artifact=Artifact.local(evolved)))
         head = scenario.current_artifact_ref().release_id
-        assert service.harness_head(headers) == head
         source = service.harness_manifest(headers, form="source")
         assert source["release_id"] == head and source["files"] == {"rules.md": "evolved"}
         # The default form renders the source tree for the adapter.

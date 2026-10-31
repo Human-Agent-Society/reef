@@ -40,6 +40,7 @@ from reef.service.assembly import _serving_recipe, _upstream_runtime
 from reef.service.deploy.service_config import service_config_from_mapping
 from reef.storage.sqlite import SQLiteRecordStore
 from reef.train.backend import ComponentReleases
+from reef.train.harness_backend.state import HarnessState
 from reef.train.trainer import Trainer
 from reef.train.types import JobData
 
@@ -149,7 +150,7 @@ def test_the_rules_method_rewrites_rules_md_from_the_failing_traces(tmp_path, pl
     stays out. Its fenced answer becomes rules.md, which wins the evaluation (the scorer prefers the marker)."""
     served = Served("The new rules:\n```markdown\nEnd every reply with the answer alone. marker\n```\n")
     backend = method_backend(tmp_path, plugins.RulesMethod(), served, seed=PI_SEED)
-    result = backend_step(backend, JobData("demo:1", (FAILING, PASSING)), backend.initial_state())
+    result = backend_step(backend, JobData("demo:1", (FAILING, PASSING)), HarnessState().to_json())
     [prompt] = served.prompts
     assert "[fib] compute fib(90)" in prompt and "about 2.88e18" in prompt and "not exact" in prompt
     assert "[csv] compute the median" not in prompt and PI_SEED.files["rules.md"] in prompt
@@ -162,7 +163,7 @@ def test_the_rules_method_skips_when_it_has_nothing_to_learn(tmp_path, plugins) 
     served = Served("```\nAnswer in English.\n```")
     backend = method_backend(tmp_path, plugins.RulesMethod(), served, seed=PI_SEED)
     # A passing trace alone teaches nothing: no model call, and the step skips with the method's reason.
-    passing = backend_step(backend, JobData("demo:2", (PASSING,)), backend.initial_state())
+    passing = backend_step(backend, JobData("demo:2", (PASSING,)), HarnessState().to_json())
     assert served.prompts == [] and passing.metrics["skipped"] == "the method left the head tree unchanged"
     assert passing.metrics["method_summary"] == "no failing trace to learn from"
     backend.models = ModelBindings(served=Served(ModelBindingError("model endpoint unreachable: refused")))
@@ -414,7 +415,7 @@ def test_the_native_method_writes_one_change_of_the_loop(tmp_path, plugins) -> N
         tmp_path, plugins.NativeMethod(), served, seed=NATIVE_SEED, adapter="native", evaluation={"policy": "none"}
     )
     result = backend_step(
-        backend, JobData("demo:1", (FAILING, PASSING)), backend.initial_state(), NoEvaluationPolicy()
+        backend, JobData("demo:1", (FAILING, PASSING)), HarnessState().to_json(), NoEvaluationPolicy()
     )
     [prompt] = served.prompts
     assert "about 2.88e18" in prompt and "[csv] compute the median" not in prompt

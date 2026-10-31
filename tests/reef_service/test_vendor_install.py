@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 from tests.support.harness_service import backend_step
-from tests.support.harness_steps import COMPONENT, PI_FAKE, TreeReleases, changed_rules, harness_recipe, make_pi_binary
+from tests.support.harness_steps import PI_FAKE, build_harness_backend, changed_rules, harness_recipe, make_pi_binary
 
 from reef.execution.sandbox.process import LocalExecutor, ProgramExecutor, SandboxExecutor, SandboxUnavailable
 from reef.harness.adapters import get_adapter
@@ -32,8 +32,8 @@ from reef.harness.tasks.vendor_install import (
 )
 from reef.harness.tree import TreePatch
 from reef.runtime.executor.config import ExecutorSettings
-from reef.train.backend import ComponentReleases
 from reef.train.harness_backend.backend import HarnessBackend
+from reef.train.harness_backend.state import HarnessState
 from reef.train.types import JobData, TrainStepResult
 
 PI_PIN = "@earendil-works/pi-coding-agent@0.84.2"
@@ -227,11 +227,11 @@ def _backend(
         return TreePatch(changed_rules("marker rules\n"))
 
     recipe = replace(harness_recipe(tmp_path, method, binary=binary), **fields)
-    return recipe.build_backend("demo", ComponentReleases(TreeReleases(recipe.seed), COMPONENT), None)
+    return build_harness_backend(recipe, "demo")
 
 
 def _step(backend: HarnessBackend) -> TrainStepResult:
-    return backend_step(backend, JobData("demo:1"), backend.initial_state())
+    return backend_step(backend, JobData("demo:1"), HarnessState().to_json())
 
 
 @pytest.mark.unit

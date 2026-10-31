@@ -6,13 +6,12 @@ import time
 from pathlib import Path
 
 import pytest
-from tests.support.harness_steps import COMPONENT, TreeReleases, harness_recipe
+from tests.support.harness_steps import build_harness_backend, harness_recipe
 
 from reef.core.evaluation import PolicyHarness, PolicyModel, RolloutRequest
 from reef.evaluation.harness import EvaluationWorkerPool, TaskScorer, evaluation_selection
 from reef.runtime.executor import ExecutorFailedError, WorkerSpec
 from reef.runtime.executor.config import ExecutorSettings
-from reef.train.backend import ComponentReleases
 
 
 def run_requests(evaluator, *pairings):
@@ -129,7 +128,7 @@ def test_backend_reuses_scorers_but_isolates_real_run_files(tmp_path, executor_b
         worker_executor=ExecutorSettings(executor_backend, workers=workers),
         binary=str(binary),
     )
-    backend = recipe.build_backend("test", ComponentReleases(TreeReleases(recipe.seed), COMPONENT), None)
+    backend = build_harness_backend(recipe, "test")
     pool = backend.evaluator.worker_pool
     try:
         for cycle in range(2):

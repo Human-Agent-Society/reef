@@ -25,6 +25,7 @@ from reef.service.app import create_app
 from reef.storage.sqlite import SQLiteRecordStore
 from reef.train.backend import ComponentReleases
 from reef.train.harness_backend import Workspace
+from reef.train.harness_backend.state import HarnessState
 from reef.train.types import JobData
 
 TEXT = "add a skill that texts me when the run is blocked"
@@ -393,7 +394,7 @@ def test_backend_rejects_requires_over_the_cap(tmp_path: Path, added_count: int)
 
     request = TrainingRequest("ask", "s", "rel-0", "ask-1", requires=tuple(person))
     backend, _ = harness_backend(tmp_path, extending)
-    initial = backend.initial_state()
+    initial = HarnessState().to_json()
     result = backend_step(backend, JobData("demo:instruction:ask-1", (), request=request), initial)
     if added_count > 2:
         assert result.metrics["skipped"] == "the step requires 9 items; at most 8"

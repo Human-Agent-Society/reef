@@ -17,14 +17,15 @@ import pytest
 from tests.support._trajectories import recorded_trajectory
 from tests.support.harness_service import backend_step
 from tests.support.harness_steps import (
-    COMPONENT,
     MODEL,
     PI_SEED,
     UNCHANGED,
     TreeReleases,
+    build_harness_backend,
     changed_rules,
     harness_backend,
     harness_recipe,
+    head_of,
     marker_score,
 )
 
@@ -38,7 +39,6 @@ from reef.harness.adapters import get_adapter
 from reef.harness.tasks.model_binding import ModelBinding
 from reef.harness.tree import HarnessTree, TreePatch
 from reef.harness.tree.checks import RECORD_TEXT_CAP
-from reef.train.backend import ComponentReleases
 from reef.train.harness_backend import Workspace
 from reef.train.harness_backend.state import HarnessState
 from reef.train.harness_backend.workspace import StepOutput
@@ -72,7 +72,7 @@ def test_a_winning_candidate_publishes_and_the_history_keeps_it(tmp_path: Path) 
         workspace.write_output("added the marker", {"why": "it scores"})
 
     backend, _ = harness_backend(tmp_path, step)
-    result = backend_step(backend, data(1), backend.initial_state())
+    result = backend_step(backend, data(1), HarnessState().to_json())
     # The step names the tree kinds its patch changes; the scenario's activation rule decides from them.
     assert result.metrics["selected"] is True and result.changed_kinds == {"rules"}
     assert result.metrics["patch"] == MARKER.to_json() and result.metrics["head_release_id"] == "base"
@@ -103,7 +103,7 @@ def test_a_winning_candidate_publishes_and_the_history_keeps_it(tmp_path: Path) 
 def test_the_cache_reuses_the_head_scores_in_the_next_step(tmp_path: Path) -> None:
     patches = iter((MARKER, PLAIN))
     backend, releases = harness_backend(tmp_path, lambda workspace, services: next(patches))
-    first = backend_step(backend, data(1), backend.initial_state())
+    first = backend_step(backend, data(1), HarnessState().to_json())
     assert (first.metrics["runs_run"], first.metrics["runs_cached"]) == (2, 0)
     published(releases, "r1", first)
     second = backend_step(backend, data(2), first.state)
@@ -121,7 +121,7 @@ def test_an_unchanged_tree_skips_the_step_and_commits_the_method_state(tmp_path:
         workspace.write_output("waiting")
 
     backend, _ = harness_backend(tmp_path, step)
-    first = backend_step(backend, data(1), backend.initial_state())
+    first = backend_step(backend, data(1), HarnessState().to_json())
     assert first.metrics["skipped"] == UNCHANGED and first.artifact is None
     assert state_of(first).method_files == {"round.txt": "1"}
     backend_step(backend, data(2), first.state)
@@ -134,7 +134,7 @@ def test_an_invalid_candidate_skips_with_its_problems(tmp_path: Path) -> None:
         return
 
     backend, _ = harness_backend(tmp_path, step)
-    result = backend_step(backend, data(1), backend.initial_state())
+    result = backend_step(backend, data(1), HarnessState().to_json())
     assert result.metrics["skipped"].startswith("notes.txt: not a path of the pi harness tree, which takes rules.md")
 
 
@@ -156,7 +156,7 @@ def test_a_harness_file_that_cannot_be_read_skips_the_step_and_the_state_still_c
         return
 
     backend, _ = harness_backend(tmp_path, step)
-    result = backend_step(backend, data(1), backend.initial_state())
+    result = backend_step(backend, data(1), HarnessState().to_json())
     assert f"harness {problem} 'rules.md'" in result.metrics["skipped"] and result.artifact is None
     assert state_of(result).method_files == {"round.txt": "1"}
 
@@ -213,7 +213,7 @@ def test_the_workspace_holds_the_head_the_material_and_the_step_record(tmp_path:
         feedback="close",
     )
     backend, _ = harness_backend(tmp_path, step)
-    result = backend_step(backend, data(1, sample, request=REQUEST), backend.initial_state())
+    result = backend_step(backend, data(1, sample, request=REQUEST), HarnessState().to_json())
     trace = seen["traces"][0]
     assert seen["tree"] == PI_SEED and seen["tasks"] == ("task one",) and seen["request"] == REQUEST
     assert (trace.source, trace.task, trace.reply, trace.score, trace.feedback, trace.record) == (
@@ -251,7 +251,7 @@ def test_a_trace_that_ends_on_a_tool_call_has_no_reply(tmp_path: Path) -> None:
         "response": {"choices": [{"message": {"role": "assistant", "content": "", "tool_calls": [call]}}]},
     }
     backend, _ = harness_backend(tmp_path, lambda workspace, services: seen.update(traces=workspace.traces()))
-    backend_step(backend, data(1, recorded_trajectory("i1", payload, None)), backend.initial_state())
+    backend_step(backend, data(1, recorded_trajectory("i1", payload, None)), HarnessState().to_json())
     (trace,) = seen["traces"]
     assert trace.task == "q" and trace.reply is None and trace.score is None
 
@@ -268,7 +268,7 @@ def test_a_method_scores_trees_through_the_cache_within_its_run_budget(tmp_path:
         return
 
     backend, _ = harness_backend(tmp_path, step, max_runs_per_step=3)
-    result = backend_step(backend, data(1), backend.initial_state())
+    result = backend_step(backend, data(1), HarnessState().to_json())
     assert runs == [[1.0, 1.0], [1.0, 1.0]] and result.metrics["method_runs"] == 2
 
 
@@ -297,8 +297,8 @@ def test_a_refused_evaluate_call_adds_no_candidate(
 
     recipe = harness_recipe(tmp_path, step, max_runs_per_step=1, evaluation={} if scored else {"policy": "none"})
     recipe = recipe if scored else replace(recipe, scorer=None)
-    backend = recipe.build_backend("demo", ComponentReleases(TreeReleases(recipe.seed), COMPONENT), None)
-    result = backend_step(backend, data(1), backend.initial_state())
+    backend = build_harness_backend(recipe, "demo")
+    result = backend_step(backend, data(1), HarnessState().to_json())
     assert len(refusals) == 1 and refusals[0].startswith(refusal)
     # The history holds the head alone, and no run completed.
     assert list(backend.history.candidates) == [PI_SEED.checksum()] and result.metrics["method_runs"] == 0
@@ -321,7 +321,7 @@ def test_a_method_that_retries_after_a_scorer_error_stays_within_its_run_budget(
         return
 
     backend, _ = harness_backend(tmp_path, step, score=score, max_runs_per_step=1)
-    result = backend_step(backend, data(1), backend.initial_state())
+    result = backend_step(backend, data(1), HarnessState().to_json())
     # The run whose scorer raised spent the budget, so the retries run nothing.
     assert scored == ["one"] and result.metrics["method_runs"] == 1
     assert errors == ["the scorer broke"] + ["1 runs must run, and the step's run budget has 0 left"] * 2
@@ -329,7 +329,7 @@ def test_a_method_that_retries_after_a_scorer_error_stays_within_its_run_budget(
 
 def test_an_aborted_step_keeps_what_changed_for_the_failed_row(tmp_path: Path) -> None:
     backend, _ = harness_backend(tmp_path, lambda workspace, services: MARKER)
-    prepared = backend.prepare_step(data(1), backend.initial_state(), 0)
+    prepared = backend.prepare_step(data(1), HarnessState().to_json(), 0, head=head_of(backend))
     backend.abort_step(prepared)
     failed = backend.failed_step_metrics()
     assert failed["failed_stage"] == "evaluating" and failed["patch"] == MARKER.to_json()
@@ -338,7 +338,7 @@ def test_an_aborted_step_keeps_what_changed_for_the_failed_row(tmp_path: Path) -
 def test_a_win_names_the_parts_its_patch_changes_for_the_activation_rule(tmp_path: Path) -> None:
     patch = TreePatch({**MARKER.changes, "extensions/notify.ts": "export default function (pi) {}\n"})
     backend, _ = harness_backend(tmp_path, lambda workspace, services: patch)
-    result = backend_step(backend, data(1), backend.initial_state())
+    result = backend_step(backend, data(1), HarnessState().to_json())
     assert result.metrics["selected"] is True and result.artifact is not None
     assert result.changed_kinds == {"rules", "extension"}
 
@@ -359,7 +359,7 @@ def test_the_progress_follows_the_step_through_its_phases(tmp_path: Path) -> Non
 
     backend, _ = harness_backend(tmp_path, step, score=score)
     holder["backend"] = backend
-    backend_step(backend, data(1, request=REQUEST), backend.initial_state())
+    backend_step(backend, data(1, request=REQUEST), HarnessState().to_json())
     assert seen == [("proposing", "ask-1", None), ("evaluating", "ask-1", 2), ("evaluating", "ask-1", 2)]
     assert backend.step_progress is None
 
@@ -382,7 +382,7 @@ def test_an_offline_step_rolls_its_train_tasks_out_on_the_head_before_the_method
 
     backend, _ = harness_backend(tmp_path, step, score=score)
     tasks = (TaskSample(Path("train one")), TaskSample(Path("train two")))
-    result = backend_step(backend, data(2, *tasks), backend.initial_state())
+    result = backend_step(backend, data(2, *tasks), HarnessState().to_json())
     assert result.metrics["runs"] == 2 and result.metrics["selected"] is True
     assert seen["phases"] == [
         ("running tasks", 2),
@@ -431,7 +431,7 @@ def test_a_run_of_a_task_directory_gives_the_method_the_task_instruction(tmp_pat
 
 def test_the_step_and_failure_streak_limits_skip_automatic_steps_only(tmp_path: Path) -> None:
     backend, _ = harness_backend(tmp_path, lambda workspace, services: MARKER, max_steps=1)
-    first = backend_step(backend, data(1), backend.initial_state())
+    first = backend_step(backend, data(1), HarnessState().to_json())
     second = backend_step(backend, data(2), first.state)
     assert second.metrics["skipped"] == "step budget of 1 exhausted"
     answered = backend_step(backend, data(3, request=REQUEST), second.state)
@@ -439,7 +439,7 @@ def test_the_step_and_failure_streak_limits_skip_automatic_steps_only(tmp_path: 
 
     (tmp_path / "streak").mkdir()
     streak, _ = harness_backend(tmp_path / "streak", lambda workspace, services: PLAIN, max_failure_streak=1)
-    first = backend_step(streak, data(1), streak.initial_state())
+    first = backend_step(streak, data(1), HarnessState().to_json())
     second = backend_step(streak, data(2), first.state)
     assert second.metrics["skipped"] == "failure streak of 1 rejections"
 
@@ -462,7 +462,7 @@ def test_the_method_summary_and_notes_are_recorded_bounded(tmp_path: Path) -> No
     clipped = "x" * RECORD_TEXT_CAP + "... [clipped 10 chars]"
     notes = {"hypothesis": long_text, "scores": {"before": 0.5, "after": [1.0]}}
     backend, _ = harness_backend(tmp_path, marking(summary=long_text, notes=notes))
-    result = backend_step(backend, data(1), backend.initial_state())
+    result = backend_step(backend, data(1), HarnessState().to_json())
     assert result.metrics["selected"] is True and result.metrics["patch"] == {"rules.md": "marker rules\n"}
     assert result.metrics["method_summary"] == clipped
     assert result.metrics["method_notes"] == {"hypothesis": clipped, "scores": {"before": 0.5, "after": [1.0]}}
@@ -481,7 +481,7 @@ def test_a_skip_keeps_the_method_summary_and_notes(tmp_path: Path) -> None:
     backend, _ = harness_backend(
         tmp_path, lambda workspace, services: workspace.write_output("nothing to change", notes)
     )
-    result = backend_step(backend, data(1), backend.initial_state())
+    result = backend_step(backend, data(1), HarnessState().to_json())
     # The summary and notes ride the skip, so the pages can show why the method changed nothing.
     assert result.metrics["skipped"] == UNCHANGED and result.artifact is None
     assert result.metrics["method_summary"] == "nothing to change" and result.metrics["method_notes"] == notes
@@ -496,7 +496,7 @@ def test_the_requires_a_method_adds_join_the_persons_in_the_commit(tmp_path: Pat
         {"name": "REEF_AWAY_PHONE", "kind": "env", "prompt": "The phone number to text, with the country code"},
     )
     backend, _ = harness_backend(tmp_path, marking(requires=added))
-    result = backend_step(backend, data(1, request=replace(REQUEST, requires=person)), backend.initial_state())
+    result = backend_step(backend, data(1, request=replace(REQUEST, requires=person)), HarnessState().to_json())
     recorded = result.metrics["training_request"]
     assert recorded["id"] == REQUEST.id and result.metrics["selected"] is True
     assert recorded["requires"] == [person[0], added[0], added[2]]
@@ -521,7 +521,7 @@ def test_the_requires_a_method_adds_join_the_persons_in_the_commit(tmp_path: Pat
 )
 def test_a_methods_requires_item_meets_the_screens_a_persons_item_meets(tmp_path: Path, item: dict) -> None:
     backend, _ = harness_backend(tmp_path, marking(requires=(item,)))
-    request = backend_step(backend, data(1, request=REQUEST), backend.initial_state()).metrics["training_request"]
+    request = backend_step(backend, data(1, request=REQUEST), HarnessState().to_json()).metrics["training_request"]
     assert item["name"] not in [entry["name"] for entry in request["requires"]]
     assert [refusal["item"]["name"] for refusal in request["refused_requires"]] == [item["name"]]
 
@@ -539,7 +539,7 @@ def test_a_candidate_only_evaluation_runs_no_current_run_and_still_settles(tmp_p
 
     monkeypatch.setattr(harness_runner, "run_task", spy)
     backend, _ = harness_backend(tmp_path, lambda workspace, services: MARKER)
-    prepared = backend.prepare_step(data(1), backend.initial_state(), 0)
+    prepared = backend.prepare_step(data(1), HarnessState().to_json(), 0, head=head_of(backend))
     candidate = prepared.candidate
     assert candidate is not None
     for bad in ((), ("served",), ("candidate", "served")):
@@ -593,7 +593,7 @@ def test_a_candidate_only_evaluation_runs_no_current_run_and_still_settles(tmp_p
 def test_a_candidate_that_misses_the_floor_is_rejected_and_joins_the_history(tmp_path: Path) -> None:
     """A rejection counts toward the failure streak, publishes nothing, and still joins the history."""
     backend, _ = harness_backend(tmp_path, lambda workspace, services: PLAIN)
-    prepared = backend.prepare_step(data(2), backend.initial_state(), 1)
+    prepared = backend.prepare_step(data(2), HarnessState().to_json(), 1, head=head_of(backend))
     candidate = prepared.candidate
     assert candidate is not None
     policy = FloorPolicy(backend)
@@ -629,7 +629,7 @@ def test_step_progress_carries_the_methods_model_calls_as_they_happen(tmp_path: 
 
     backend, _ = harness_backend(tmp_path, method)
     held["backend"] = backend
-    prepared = backend.prepare_step(data(1, request=REQUEST), backend.initial_state(), 0)
+    prepared = backend.prepare_step(data(1, request=REQUEST), HarnessState().to_json(), 0, head=head_of(backend))
     waiting, answered = seen
     assert [line["text"] for line in waiting] == [f"asking {MODEL.model}"]
     assert [line["kind"] for line in answered] == ["model", "model"]
@@ -642,7 +642,7 @@ def test_step_progress_carries_the_methods_model_calls_as_they_happen(tmp_path: 
 
 def test_step_progress_is_cleared_by_a_skip_or_a_failed_method(tmp_path: Path) -> None:
     skipping, _ = harness_backend(tmp_path, lambda workspace, services: None, scenario="skipping")
-    prepared = skipping.prepare_step(data(1, request=REQUEST), skipping.initial_state(), 0)
+    prepared = skipping.prepare_step(data(1, request=REQUEST), HarnessState().to_json(), 0, head=head_of(skipping))
     assert prepared.outcome == "skip" and skipping.step_progress is None
 
     def raising(workspace, services):
@@ -650,7 +650,7 @@ def test_step_progress_is_cleared_by_a_skip_or_a_failed_method(tmp_path: Path) -
 
     failing, _ = harness_backend(tmp_path, raising, scenario="failing")
     with pytest.raises(RuntimeError, match="poison method"):
-        failing.prepare_step(data(1, request=REQUEST), failing.initial_state(), 0)
+        failing.prepare_step(data(1, request=REQUEST), HarnessState().to_json(), 0, head=head_of(failing))
     assert failing.step_progress is None
     # The failed request's row names the phase the step reached and its record, which keeps the calls made.
     failed = failing.failed_step_metrics()

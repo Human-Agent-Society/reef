@@ -28,7 +28,7 @@ from tests.support.harness_methods import (
     served_runtime,
 )
 from tests.support.harness_service import backend_step, drive_job, harness_dispatcher, report_once
-from tests.support.harness_steps import COMPONENT, TreeReleases, harness_recipe
+from tests.support.harness_steps import COMPONENT, TreeReleases, build_harness_backend, harness_recipe, head_of
 
 import recipes.meta_harness
 from recipes.meta_harness import MetaHarness, MetaHarnessSettings
@@ -43,6 +43,7 @@ from reef.storage.sqlite import SQLiteRecordStore
 from reef.train.backend import ComponentReleases
 from reef.train.harness_backend import AgentMethod
 from reef.train.harness_backend.backend import HarnessBackend
+from reef.train.harness_backend.state import HarnessState
 from reef.train.trainer import Trainer
 from reef.train.types import JobData, TrainStepResult
 
@@ -68,7 +69,7 @@ def meta_harness_backend(
     recipe = harness_recipe(tmp_path, method, seed=seed, score=MarkerScorer(), tasks=(TASK,))
     recipe = dataclasses.replace(recipe, models={"proposer": chat})
     releases = TreeReleases(recipe.seed)
-    return recipe.build_backend("demo", ComponentReleases(releases, COMPONENT), None), releases
+    return build_harness_backend(recipe, "demo", releases), releases
 
 
 def run(
@@ -99,7 +100,7 @@ def test_a_step_proposes_a_complete_tree_and_the_history_keeps_what_the_proposer
     backend, releases = meta_harness_backend(tmp_path, chat)
     request = TrainingRequest("Prefer short answers.", "s", "base", "ask-1")
 
-    result = run(backend, releases, backend.initial_state(), 1, request=request)
+    result = run(backend, releases, HarnessState().to_json(), 1, request=request)
 
     assert result.metrics["selected"] is True and result.metrics["selection"]["policy"] == "compare"
     assert (result.metrics["candidate_mean"], result.metrics["current_mean"]) == (1.0, 0.0)
@@ -126,7 +127,7 @@ def test_full_history_branches_from_a_rejected_candidate_and_reads_its_run_recor
     chat = QueueChat(proposal_reply(SEED, LOSER), proposal_reply(LOSER, IMPROVED))
     backend, releases = meta_harness_backend(tmp_path, chat, max_traces=3, trace_chars=300)
 
-    first = run(backend, releases, backend.initial_state(), 1)
+    first = run(backend, releases, HarnessState().to_json(), 1)
     second = run(backend, releases, first.state, 2)
 
     assert first.metrics["selected"] is False and second.metrics["selected"] is True
@@ -159,7 +160,7 @@ def test_incumbent_only_branches_from_the_served_tree_and_shows_the_refused_repl
     chat = QueueChat(proposal_reply(SEED, LOSER), proposal_reply(LOSER, ALTERNATE), proposal_reply(SEED, IMPROVED))
     backend, releases = meta_harness_backend(tmp_path, chat, mode="incumbent_only")
 
-    first = run(backend, releases, backend.initial_state(), 1)
+    first = run(backend, releases, HarnessState().to_json(), 1)
     second = run(backend, releases, first.state, 2)
     third = run(backend, releases, second.state, 3)
 
@@ -178,7 +179,7 @@ def test_a_proposal_keeps_the_parent_files_of_the_parts_it_may_not_change(tmp_pa
     chat = QueueChat(proposal_reply(seed, changed))
     backend, releases = meta_harness_backend(tmp_path, chat, seed=seed, components=("rules",))
 
-    result = run(backend, releases, backend.initial_state(), 1)
+    result = run(backend, releases, HarnessState().to_json(), 1)
 
     assert result.metrics["method_notes"] == {
         "status": "invalid",
@@ -191,7 +192,7 @@ def test_an_invalid_or_repeated_tree_leaves_the_head_unchanged_and_joins_the_att
     chat = QueueChat("not json at all", proposal_reply(SEED, empty_skill), proposal_reply(SEED, SEED))
     backend, releases = meta_harness_backend(tmp_path, chat)
 
-    state = backend.initial_state()
+    state = HarnessState().to_json()
     results = []
     for number in (1, 2, 3):
         result = run(backend, releases, state, number)
@@ -220,7 +221,7 @@ def test_a_spent_budget_stops_the_search_before_a_model_call(tmp_path: Path, set
     chat = QueueChat(proposal_reply(SEED, IMPROVED))
     backend, releases = meta_harness_backend(tmp_path, chat, **settings)
 
-    first = run(backend, releases, backend.initial_state(), 1)
+    first = run(backend, releases, HarnessState().to_json(), 1)
     second = run(backend, releases, first.state, 2)
 
     assert first.metrics["selected"] is True and len(chat.prompts) == 1
@@ -237,9 +238,9 @@ def test_a_retried_step_proposes_again_the_tree_its_failed_attempt_proposed(tmp_
     chat = QueueChat(proposal_reply(SEED, IMPROVED), proposal_reply(SEED, IMPROVED))
     backend, releases = meta_harness_backend(tmp_path, chat, max_candidates=1, max_target_runs=2)
     with pytest.raises(RuntimeError, match="unavailable"):
-        run(backend, releases, backend.initial_state(), 1, policy=FailingDecision(backend, statistic="mean"))
+        run(backend, releases, HarnessState().to_json(), 1, policy=FailingDecision(backend, statistic="mean"))
 
-    retried = run(backend, releases, backend.initial_state(), 1)
+    retried = run(backend, releases, HarnessState().to_json(), 1)
 
     assert retried.metrics["selected"] is True and len(chat.prompts) == 2
     # Both trees' scores come from the failed attempt's runs.
@@ -275,7 +276,7 @@ def test_a_proposer_model_that_the_deployment_does_not_declare_is_refused(tmp_pa
     # let a typo in evolution.models turn the harness under test into its own author.
     backend, _ = meta_harness_backend(tmp_path, QueueChat(), model="typo")
     with pytest.raises(ValueError, match=r"is not declared under evolution\.models"):
-        backend.prepare_step(JobData("demo:1", (SAMPLE,)), backend.initial_state(), 0)
+        backend.prepare_step(JobData("demo:1", (SAMPLE,)), HarnessState().to_json(), 0, head=head_of(backend))
 
 
 @pytest.mark.parametrize("adapter", ["pi", "opencode"])
@@ -301,8 +302,8 @@ def test_terminus_extension_uses_shared_recipe_run_runner_and_publication(tmp_pa
     from harbor.agents.terminus_2 import Terminus2
     from harbor.models.trial.config import TrialConfig
     from harbor.utils.import_path import import_class
-
     from reef_terminus import runner
+
     from reef.execution.sandbox.process import ISOLATION_ENV, ProcessOutcome, SandboxExecutor
 
     code = (Path(__file__).parents[3] / "recipes/meta_harness/results/reef_harness.py").read_text()

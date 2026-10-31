@@ -32,6 +32,7 @@ from reef.storage.scenario import ScenarioSettings
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train.backend import ReleaseFiles
+from reef.train.harness_backend.state import HarnessState
 from reef.train.jobs import JobLoopState
 from reef.train.types import JobData
 
@@ -175,7 +176,7 @@ def test_full_evolution_uses_only_custom_binding(platform, tmp_path, monkeypatch
         backend = job_backend(scenario.trainer, "harness", selected)
         prepared = backend.prepare_step(
             JobData("batch", (recorded_trajectory("record", {"messages": []}, 0.0),)),
-            backend.initial_state(),
+            HarnessState().to_json(),
             0,
             head=ReleaseFiles("base", dict(recipe.seed.files)),
         )

@@ -27,6 +27,7 @@ from tests.support.harness_service import (
     run_step,
 )
 from tests.support.harness_steps import (
+    BACKEND_RELEASES,
     COMPONENT,
     MODEL,
     PI_FAKE,
@@ -36,10 +37,12 @@ from tests.support.harness_steps import (
     IdleMethod,
     NoCollection,
     TreeReleases,
+    build_harness_backend,
     changed_rules,
     evolution_config,
     harness_backend,
     harness_recipe,
+    head_of,
     make_pi_binary,
     marker_score,
     runtime,
@@ -74,7 +77,7 @@ from reef.inference.http import InferenceProxyRuntime
 from reef.inference.model_config import ModelConfig
 from reef.recipe import RecipeConfigError
 from reef.recipe.base import ServedEndpoint
-from reef.recipe.harness import EvolutionSettings, HarnessEvolutionRecipe, HarnessJobParameters, ScenarioModels
+from reef.recipe.harness import EvolutionSettings, HarnessEvolutionRecipe, HarnessJobParameters
 from reef.recipe.registry import recipe_class_for
 from reef.runtime.executor.config import ExecutorSettings
 from reef.sample2job.traces import TrainTaskJobData
@@ -85,6 +88,7 @@ from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train.backend import ComponentReleases
 from reef.train.harness_backend.backend import HarnessBackend
 from reef.train.harness_backend.component import HarnessTrainingComponent
+from reef.train.harness_backend.state import HarnessState
 from reef.train.jobs import JobLoopState
 from reef.train.trainer import Trainer
 from reef.train.types import JobData, TrainStepResult
@@ -112,12 +116,12 @@ def releases_for(recipe: HarnessEvolutionRecipe) -> ComponentReleases:
 
 
 def backend_of(recipe: HarnessEvolutionRecipe) -> HarnessBackend:
-    return recipe.build_backend("demo", releases_for(recipe), None)
+    return build_harness_backend(recipe)
 
 
 def step(backend: HarnessBackend, state=None, *samples) -> TrainStepResult:
     batch = JobData("demo:1", samples or (recorded_trajectory("a1", {"messages": []}, 0.0),))
-    return backend_step(backend, batch, backend.initial_state() if state is None else state)
+    return backend_step(backend, batch, HarnessState().to_json() if state is None else state)
 
 
 def write_task(root: Path, name: str) -> Path:
@@ -288,7 +292,7 @@ def test_a_compare_margin_blocks_a_single_lucky_win(tmp_path: Path) -> None:
     """One win and no losses clears the plain comparison but not a margin of 1."""
     recipe = harness_recipe(tmp_path, lambda workspace, services: MARKER, evaluation={"min_margin": 1})
     backend = backend_of(recipe)
-    result = backend_step(backend, JobData("demo:1"), backend.initial_state(), recipe.build_policy(backend))
+    result = backend_step(backend, JobData("demo:1"), HarnessState().to_json(), recipe.build_policy(backend))
     assert (result.metrics["wins"], result.metrics["losses"], result.metrics["selected"]) == (1, 0, False)
     assert result.metrics["min_margin"] == 1.0
 
@@ -414,23 +418,26 @@ def test_each_step_evaluates_on_the_eval_split_of_the_imported_tasks_as_the_step
     root = tmp_path / "tasks"
     with closing(SQLiteScenarioStorage(None)) as storage, closing(storage.open("s")) as session:
         samples = session.samples
-        backend = built.build_backend("s", releases_for(built), TrainerSamples(samples))
+        backend = build_harness_backend(built, "s")
         batch = JobData("s:1", (recorded_trajectory("a1", {"messages": []}, 0.0),))
+        # A job names the eval split as its trainer reads it at submit time, and its step evaluates on it.
+        submitted = HarnessJobParameters(releases_for(built), None, TrainerSamples(samples))
 
-        def task_count() -> int:
-            return backend.prepare_step(batch, backend.initial_state(), 0).metrics["evaluation_task_count"]
+        def evaluation_tasks() -> list[str]:
+            tasks = submitted.parameters(batch, JobLoopState("base:x"))["evaluation_tasks"]
+            prepared = backend.prepare_step(
+                batch, HarnessState().to_json(), 0, head=head_of(backend), seed_tasks=tuple(tasks)
+            )
+            assert prepared.metrics["evaluation_task_count"] == len(tasks)
+            return tasks
 
-        # The sample store opens empty; a task it gets after the build is in the next step's list, and a train task is not.
-        assert task_count() == 0
+        # The sample store opens empty; a task it gets later is in the next job's list, and a train task is not.
+        assert evaluation_tasks() == []
         (first,) = samples.add_tasks((write_task(root, "held-1"),), "eval")
         samples.add_tasks((write_task(root, "train-1"),), "train")
-        assert task_count() == 1
+        assert evaluation_tasks() == [str(first.sample.task_path)]
         (second,) = samples.add_tasks((write_task(root, "held-2"),), "eval")
-        assert task_count() == 2
-        assert backend.tasks.seed() == tuple(str(task.sample.task_path) for task in (first, second))
-        # A job names the eval split as its trainer reads it at submit time.
-        submitted = HarnessJobParameters(releases_for(built), None, TrainerSamples(samples))
-        assert submitted.parameters(batch, JobLoopState("base:x"))["evaluation_tasks"] == list(backend.tasks.seed())
+        assert evaluation_tasks() == [str(task.sample.task_path) for task in (first, second)]
         with pytest.raises(RecipeConfigError, match="needs the sample store"):
             built.build("s", SQLiteRecordStore(), releases=releases_for(built))
     retired = {"tasks": [], "task_store": "imported-tasks"}
@@ -611,8 +618,9 @@ def test_a_winning_step_binds_only_its_runs_records_its_context_and_names_its_ki
     assert not NeverActivate().activates(made)
 
 
-def test_runs_and_scorers_use_the_models_each_step_resolved(tmp_path: Path, monkeypatch) -> None:
-    """A scenario's model setting is read once per step; that step's runs render and score with it."""
+def test_runs_and_scorers_use_the_model_that_each_job_names(tmp_path: Path, monkeypatch) -> None:
+    """A job names the scenario's model; the harness component's backend of a new model renders and scores the
+    job's runs with it."""
     rendered: list[str] = []
     scored: list[str] = []
 
@@ -627,14 +635,25 @@ def test_runs_and_scorers_use_the_models_each_step_resolved(tmp_path: Path, monk
     def endpoint(model: str) -> dict:
         return {"url": MODEL.base_url, "model": model}
 
+    def job_model(model: str) -> dict:
+        runtime = ModelConfig.from_value(endpoint(model)).runtime
+        assert runtime is not None
+        return runtime.model_config()
+
     monkeypatch.setattr(RUN_RUN, spy)
-    config_value = ModelConfig.from_value(endpoint("first-model"))
-    recipe = harness_recipe(tmp_path, lambda workspace, services: MARKER, score=score).with_model_config(config_value)
-    backend = backend_of(recipe)
+    recipe = harness_recipe(tmp_path, lambda workspace, services: MARKER, score=score)
+    component = recipe.harness_component
+    assert isinstance(component, HarnessTrainingComponent)
+    backend = component.backend_for("demo", COMPONENT, job_model("first-model"))
+    assert component.backend_for("demo", COMPONENT, job_model("first-model")) is backend
+    BACKEND_RELEASES[backend] = TreeReleases(recipe.seed)
     first = step(backend)
-    config_value.runtime = ModelConfig.from_value(endpoint("second-model")).runtime
+    changed = component.backend_for("demo", COMPONENT, job_model("second-model"))
+    assert changed is not backend
+    BACKEND_RELEASES[changed] = TreeReleases(recipe.seed)
     # The head did not move, so the second step evaluates the same trees in a new context: none of them is cached.
-    step(backend, first.state)
+    step(changed, first.state)
+    component.close()
     assert rendered == ["reef/first-model"] * 2 + ["reef/second-model"] * 2
     assert scored == ["first-model"] * 2 + ["second-model"] * 2
 
@@ -681,7 +700,7 @@ def test_the_served_binding_targets_the_scenario_evaluation_route() -> None:
     assert (
         configured.model_bindings("agent").served.base_url == "http://127.0.0.1:8900/reef/scenarios/agent/evaluation"
     )
-    assert ScenarioModels(ModelConfig(), configured, "agent").resolve().served.base_url.endswith("/agent/evaluation")
+    assert configured.model_bindings("agent", ModelConfig()).served.base_url.endswith("/agent/evaluation")
     overridden = configured.with_model_config(
         ModelConfig.from_value({"url": "http://other.test", "model": "other-model"})
     )
@@ -855,7 +874,7 @@ def test_evaluation_workers_run_both_sides_in_one_wave(tmp_path: Path) -> None:
         tasks=("task one", "task two"),
     )
     backend = backend_of(dataclasses.replace(recipe, worker_executor=ExecutorSettings(workers=4)))
-    prepared = backend.prepare_step(JobData("demo:1"), backend.initial_state(), 0)
+    prepared = backend.prepare_step(JobData("demo:1"), HarnessState().to_json(), 0, head=head_of(backend))
     try:
         evaluation = backend.evaluate(prepared.candidate)
         assert len(list(barrier.iterdir())) == 4
@@ -871,7 +890,7 @@ def test_real_runs_run_on_the_selected_worker_backend(tmp_path, workers, expecte
     backend = backend_of(dataclasses.replace(recipe, worker_executor=ExecutorSettings(workers=workers)))
     assert backend.evaluator.worker_pool.selection.settings.backend == expected
     assert backend.evaluator.worker_pool.requirements.gpus_per_worker == 0
-    prepared = backend.prepare_step(JobData("demo:1"), backend.initial_state(), 0)
+    prepared = backend.prepare_step(JobData("demo:1"), HarnessState().to_json(), 0, head=head_of(backend))
     with caplog.at_level("INFO"):
         result = backend.evaluate(prepared.candidate)
     assert flat(result.metrics["candidate_scores"]) == [1.0, 1.0]

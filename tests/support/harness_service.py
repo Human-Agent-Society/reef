@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 from weakref import WeakKeyDictionary
 
+from tests.support.harness_steps import head_of
 from tests.support.samples_service import make_samples
 
 from reef.artifact import CachedRepositoryBackendFactory, InMemoryRepositoryBackend
@@ -199,14 +200,15 @@ def backend_step(
     *,
     scenario_step: int | None = None,
 ) -> TrainStepResult:
-    """One step of ``backend`` as the trainer runs it, decided by ``policy`` (a win-count comparison by default).
+    """One step of ``backend`` on its ``head_of`` head as a job runs it, decided by ``policy`` (a win-count
+    comparison by default).
 
     The steps of one backend number 1, 2, ... as a scenario numbers its commits: a step that raised keeps its
     number for its retry. ``scenario_step`` sets the scenario step the step follows instead, as a retry after a
     lost commit or a resumed scenario sees it. A failure aborts the step.
     """
     scenario_step = SCENARIO_STEPS.get(backend, 0) if scenario_step is None else scenario_step
-    prepared = backend.prepare_step(data, state, scenario_step)
+    prepared = backend.prepare_step(data, state, scenario_step, head=head_of(backend))
     if prepared.candidate is None:
         result = TrainStepResult(prepared.state, prepared.metrics)
     else:

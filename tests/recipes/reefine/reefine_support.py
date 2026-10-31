@@ -19,7 +19,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from tests.support.harness_steps import harness_backend
+from tests.support.harness_steps import harness_backend, head_of
 
 from recipes.beta.reefine.answer import EXTENSION_ADAPTER, Answer, answer_request
 from reef.core.job_data import TrajectorySample
@@ -30,6 +30,7 @@ from reef.harness.tasks.model_binding import ModelBinding, ModelBindings
 from reef.harness.tree import HarnessTree, ValidationResult, validate_tree
 from reef.train.harness_backend import AgentOutcome, Method, Services, Trace, Workspace
 from reef.train.harness_backend.calls import StepCalls
+from reef.train.harness_backend.state import HarnessState
 from reef.train.types import JobData, TrainStepResult
 
 #: What marks the plan call's prompt, the first of a request's calls.
@@ -216,7 +217,7 @@ def reefine_step(
     skipped step."""
     backend, _ = harness_backend(root, method, evaluation={"policy": "none"})
     backend.models = models
-    prepared = backend.prepare_step(data, backend.initial_state(), 0)
+    prepared = backend.prepare_step(data, HarnessState().to_json(), 0, head=head_of(backend))
     if prepared.candidate is None:
         return TrainStepResult(prepared.state, prepared.metrics), ()
     # A step with a candidate keeps its progress, the request page's view of it, until it settles.
