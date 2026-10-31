@@ -1015,7 +1015,7 @@ def test_a_run_report_on_an_inference_both_trainers_trained_is_skipped_by_both(
 ) -> None:
     """run references i1 and i2 and is stored before the weights job's submission commits i1, which the harness
     trained already. Each trainer then skips run, since one of its sources trained, instead of raising on it."""
-    dispatcher, _ = dispatchers.open(training=WeightsJobComponent(tmp_path / "checkpoints"))
+    dispatcher, _ = dispatchers.open(training=WeightsJobComponent(tmp_path / "checkpoints"), hold_local_cycles=True)
     scenario = _loaded(dispatcher, 1)
     scenario.records.append(_records(2, scenario.serving_artifact_id())[0])
     submitted = scenario.prepare_training_step(WEIGHTS)
@@ -1034,7 +1034,7 @@ def test_a_run_report_on_an_inference_both_trainers_trained_is_skipped_by_both(
 @pytest.mark.unit
 def test_an_activation_of_the_creation_after_a_rejected_first_step(dispatchers: _Dispatchers) -> None:
     """A rejected step records the creation without a checkpoint; the creation still has its own bytes."""
-    dispatcher, backends = dispatchers.open()
+    dispatcher, backends = dispatchers.open(hold_local_cycles=True)
     scenario = _loaded(dispatcher)
     creation = scenario.current_artifact_ref().release_id
     backends[HARNESS].reject_next = True
@@ -1106,7 +1106,7 @@ def test_composite_registration_refuses_files_outside_its_components(
 def test_composite_registration_starts_an_unseeded_component_empty(tmp_path: Path, dispatchers: _Dispatchers) -> None:
     """A fresh repository seeds only the harness; the weights component starts empty and fills at its first step."""
     _seeded_repository(tmp_path, (HARNESS,))
-    dispatcher, _ = dispatchers.open()
+    dispatcher, _ = dispatchers.open(hold_local_cycles=True)
     scenario = _loaded(dispatcher)
     base = scenario.repository.materialize(scenario.current_artifact_ref())
     assert base.components is not None and base.components.names == (WEIGHTS, HARNESS)
@@ -1156,7 +1156,7 @@ def test_rows_one_trainer_consumed_before_a_restart_still_train_the_other(dispat
 @pytest.mark.unit
 def test_a_weights_step_is_no_new_harness_head(dispatchers: _Dispatchers) -> None:
     """Clients pull the tree: a step that carried it forward unchanged is not announced or listed as a release."""
-    dispatcher, _ = dispatchers.open()
+    dispatcher, _ = dispatchers.open(hold_local_cycles=True)
     scenario = _loaded(dispatcher, 1)
     service = RequestService(dispatcher)
     headers = {"x-reef-scenario": "agent"}
@@ -1180,7 +1180,7 @@ def test_a_weights_step_is_no_new_harness_head(dispatchers: _Dispatchers) -> Non
 def test_each_components_step_reaches_the_tracker_under_its_name(dispatchers: _Dispatchers) -> None:
     """The event the dispatcher records for a step names the trainer that made it."""
     tracker = _RecordingTracker()
-    dispatcher, _ = dispatchers.open(experiment_tracker=tracker)
+    dispatcher, _ = dispatchers.open(experiment_tracker=tracker, hold_local_cycles=True)
     scenario = _loaded(dispatcher, 1)
     assert _commit_step(scenario, HARNESS) is not None
     assert _commit_step(scenario, WEIGHTS) is not None
@@ -1195,7 +1195,7 @@ def test_each_components_step_reaches_the_tracker_under_its_name(dispatchers: _D
 @pytest.mark.unit
 def test_the_harness_catalog_is_one_lineage_of_trees(dispatchers: _Dispatchers) -> None:
     """A rejected step, an unlisted weights step and an activation never break the chain or list a new row."""
-    dispatcher, backends = dispatchers.open()
+    dispatcher, backends = dispatchers.open(hold_local_cycles=True)
     scenario = _loaded(dispatcher)
     service = RequestService(dispatcher)
     headers = {"x-reef-scenario": "agent"}
@@ -1279,7 +1279,7 @@ def test_a_training_step_carries_the_active_release_and_keeps_an_activated_compo
     dispatchers: _Dispatchers,
 ) -> None:
     """After an older weights artifact is activated, a harness step carries the active weights, not the chain tip's."""
-    dispatcher, _ = dispatchers.open()
+    dispatcher, _ = dispatchers.open(hold_local_cycles=True)
     scenario = _loaded(dispatcher, 1)
     assert _commit_step(scenario, WEIGHTS) is not None
     assert component_files(scenario, scenario.current_artifact_ref())[WEIGHTS] == "weights step 1"
@@ -1304,7 +1304,7 @@ def test_the_composite_harness_catalog_marks_one_active_row_and_a_client_activat
     component to the activate route makes that row the active one."""
     from aiohttp.test_utils import TestClient
 
-    dispatcher, _ = dispatchers.open()
+    dispatcher, _ = dispatchers.open(hold_local_cycles=True)
     scenario = _loaded(dispatcher, 1)
     assert _commit_step(scenario, HARNESS) is not None
     assert _commit_step(scenario, WEIGHTS) is not None
@@ -1361,7 +1361,7 @@ def test_a_creation_manifest_read_that_failed_is_asked_again(monkeypatch: Any, d
 @pytest.mark.unit
 def test_an_activation_of_weights_held_at_step_one_is_no_harness_release(dispatchers: _Dispatchers) -> None:
     """The creation artifact has no record; its manifest still says the activated tree did not change."""
-    dispatcher, backends = dispatchers.open()
+    dispatcher, backends = dispatchers.open(hold_local_cycles=True)
     backends[WEIGHTS].hold_next = True
     scenario = _loaded(dispatcher)
     service = RequestService(dispatcher)
@@ -1382,7 +1382,7 @@ def test_an_activation_of_weights_held_at_step_one_is_no_harness_release(dispatc
 @pytest.mark.unit
 def test_an_activation_under_the_same_tree_is_no_new_harness_head(dispatchers: _Dispatchers) -> None:
     """An activation that changes only the weights names the same harness release; none adds a row."""
-    dispatcher, _ = dispatchers.open()
+    dispatcher, _ = dispatchers.open(hold_local_cycles=True)
     scenario = _loaded(dispatcher)
     service = RequestService(dispatcher)
     headers = {"x-reef-scenario": "agent"}
@@ -1415,7 +1415,9 @@ def test_adopted_checkpoint_is_attributed_to_the_trainer_that_made_it(
 ) -> None:
     """A checkpoint read back from the artifact head names its component, so a lost commit history resets no trainer."""
     backend_factory = _seeded_repository(tmp_path)
-    dispatcher, _ = dispatchers.open(records_dir=tmp_path / "records-1", backend_factory=backend_factory)
+    dispatcher, _ = dispatchers.open(
+        records_dir=tmp_path / "records-1", backend_factory=backend_factory, hold_local_cycles=True
+    )
     scenario = _loaded(dispatcher, 1)
     assert _commit_step(scenario, HARNESS) is not None
     head = scenario.repository.materialize(scenario.current_artifact_ref())
@@ -1452,7 +1454,9 @@ def test_a_lone_trainer_names_no_component_on_record(tmp_path: Path, dispatchers
     """A scenario of one trainer writes what it wrote before components: its commit record and the checkpoint's
     scenario metadata name no component."""
     recipe = _OneTrainerRecipe(backends={HARNESS: ComponentJobs(HARNESS, tmp_path / "candidates")})
-    dispatcher, _ = dispatchers.open(recipe=recipe, backend_factory=_seeded_repository(tmp_path, (HARNESS,)))
+    dispatcher, _ = dispatchers.open(
+        recipe=recipe, backend_factory=_seeded_repository(tmp_path, (HARNESS,)), hold_local_cycles=True
+    )
     scenario = _loaded(dispatcher, 1, 2)
     assert _commit_step(scenario, HARNESS) is not None
     record = scenario.store.history()[-1]
