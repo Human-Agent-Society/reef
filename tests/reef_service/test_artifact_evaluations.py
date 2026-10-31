@@ -425,7 +425,7 @@ def test_a_scenario_activation_overrides_the_deployment_rule_and_applies_again_a
             assert await response.json() == {"scenario": "s", "activation": rule}
             settings = await settings_of(client)
             assert settings["activation"] == rule and settings["effective_activation"] == rule
-            assert isinstance(dispatcher.loaded_scenario("s").activation_rule, AlwaysActivate)
+            assert isinstance(dispatcher.registry.get_loaded("s").activation_rule, AlwaysActivate)
 
     asyncio.run(run())
     dispatcher.close()
@@ -435,13 +435,13 @@ def test_a_scenario_activation_overrides_the_deployment_rule_and_applies_again_a
     async def after_restart() -> None:
         async with TestClient(TestServer(create_app(restarted, tokens=TOKEN))) as client:
             assert (await settings_of(client))["effective_activation"]["module"] == "always"
-            assert isinstance(restarted.loaded_scenario("s").activation_rule, AlwaysActivate)
+            assert isinstance(restarted.registry.get_loaded("s").activation_rule, AlwaysActivate)
             # null follows the deployment's rule again.
             response = await client.post("/reef/scenarios/s/update", headers=AUTH, json={"activation": None})
             assert (await response.json())["activation"] is None
             settings = await settings_of(client)
             assert settings["activation"] is None and settings["effective_activation"]["module"] == "never"
-            assert isinstance(restarted.loaded_scenario("s").activation_rule, NeverActivate)
+            assert isinstance(restarted.registry.get_loaded("s").activation_rule, NeverActivate)
             missing = await client.get("/reef/scenarios/other/settings", headers=AUTH)
             assert missing.status == 404
 
@@ -476,7 +476,7 @@ def test_the_evaluated_activation_needs_artifact_evaluation_in_either_order_and_
             assert (await update(client, {"activation": None, "artifact_evaluation": None}))[0] == 200
             assert (await update(client, {"artifact_evaluation": evaluation}))[0] == 200
             assert (await update(client, {"activation": evaluated}))[0] == 200
-            assert isinstance(dispatcher.loaded_scenario("s").activation_rule, EvaluatedActivation)
+            assert isinstance(dispatcher.registry.get_loaded("s").activation_rule, EvaluatedActivation)
 
             status, text = await update(client, {"artifact_evaluation": None})
             assert status == 400 and "set artifact_evaluation" in text

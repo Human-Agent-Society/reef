@@ -64,7 +64,6 @@ STEP_TIMEOUT_S = 1800.0
 POLL_S = 5.0
 
 HERE = Path(__file__).resolve().parent
-REPO = HERE.parents[3]
 WORK = HERE / "work"
 # The install writes the rendered tree and the release metadata file here.
 INSTALL_ROOT = WORK / "harness"

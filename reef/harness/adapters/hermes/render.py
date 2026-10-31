@@ -30,7 +30,6 @@ from reef.harness.adapters.descriptor import AdapterRenderer
 from reef.harness.tree.render import RenderError
 
 _CONFIG = "hermes/config.yaml"
-ENV_PATH = "hermes/.env"
 _MARKER = "hermes/.no-bundled-skills"
 _PLUGINS = "hermes/plugins/"
 # The commands root beside the home, HERMES_HOME/.. in a run and in a person's session on the rendered tree. A

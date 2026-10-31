@@ -399,9 +399,8 @@ implements only ``_submit`` and ``_submit_all``. The bundled ``uni``, ``mp``
 and ``ray`` executors and ``DelegatingExecutor`` are built that way.
 Backend-specific launch configuration belongs in ``ExecutorConfig.options``.
 GPU tensors, optimizer state, NCCL collectives and KV transfers remain the
-model backend's responsibility. ``reinitialize_distributed`` is an optional
-capability and raises ``NotImplementedError`` by default. Changing executors
-does not resize a live topology or reshard checkpoints.
+model backend's responsibility. Changing executors does not resize a live
+topology or reshard checkpoints.
 
 Custom service and inference executors
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

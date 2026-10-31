@@ -337,12 +337,6 @@ class ScenarioReleases:
             listed["metrics"] = dict(row["metrics"])
         return listed
 
-    def ref_for_version(self, release_id: str) -> ArtifactRef | None:
-        """The ref of a scenario release without materializing it; ``None`` when the catalog has no such release."""
-        with self.publication_lock:
-            found = self.find_release(release_id)
-        return None if found is None else found[0]
-
     def find_release(self, release_id: str) -> tuple[ArtifactRef, bool] | None:
         """The artifact ``release_id`` names and whether it has durable bytes; ``None`` when no record names it.
 

@@ -288,10 +288,6 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
             allow_implicit_creation=allow_implicit_creation,
         )
 
-    def loaded_scenario(self, scenario: str, *, release_id: str | None = None) -> Scenario | None:
-        """The loaded instance of ``scenario``, or None; see :meth:`ScenarioRegistry.get_loaded`."""
-        return self.registry.get_loaded(scenario, release_id)
-
     def configure_scenario_model(
         self, scenario: str, model: object, *, create: bool = False, release_id: str | None = None
     ) -> Scenario:

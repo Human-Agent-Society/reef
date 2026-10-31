@@ -572,7 +572,7 @@ def test_a_failing_local_cycle_runs_once_per_wake_and_keeps_its_error_in_the_sta
     assert away.attempts == 1
     assert dispatcher.build_training_status()["error"] == "agent: RuntimeError: proposer away"
     # Another wake: the worker looks again, once.
-    dispatcher.local_workers.wake_all()
+    dispatcher.local_workers.start("agent", HARNESS)
     _wait_for(lambda: away.attempts > 1)
     time.sleep(0.2)
     assert away.attempts == 2

@@ -121,12 +121,6 @@ class LocalTrainingWorkers:
             worker = self.workers.get((scenario, component))
             return self.phase != "closed" and worker is not None and worker.ready is ready
 
-    def wake_all(self) -> None:
-        with self.lock:
-            workers = tuple(self.workers.values())
-        for worker in workers:
-            worker.ready.set()
-
     def open(self) -> None:
         with self.lock:
             if self.phase == "held":

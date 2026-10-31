@@ -238,10 +238,6 @@ class TaskRollout:
     turns: tuple[RolloutTurn, ...] = ()
 
     @property
-    def is_reported(self) -> bool:
-        return bool(self.report_agent_record_ids)
-
-    @property
     def is_infrastructure_failure(self) -> bool:
         """Whether the rollout could not run: the sandbox, the agent or the verifier failed before it scored.
 

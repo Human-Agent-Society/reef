@@ -45,36 +45,6 @@ def rank_priors(nodes: list[LibraryNode]) -> dict[str, float]:
     return {node.id: weights_by_index[index] / total for index, node in enumerate(nodes)}
 
 
-def archive_puct_score(
-    *,
-    node: LibraryNode,
-    visit_count: int,
-    best_reachable_value: float | None,
-    prior: float,
-    scale: float,
-    total_visits: int,
-    puct_c: float,
-    q_mode: str = PUCT_Q_BLEND,
-) -> float:
-    """Guidance-TTT archive PUCT score.
-
-    score(i) = Q(i) + c * scale * P(i) * sqrt(1 + T) / (1 + n[i])
-    Q(i) = R(i) if n[i] == 0
-    Q(i) = m[i] if q_mode == "best_child" and n[i] > 0 and m[i] exists
-    Q(i) = 0.8 * R(i) + 0.2 * m[i] otherwise
-    """
-    q_value = _q_value(
-        node=node,
-        visit_count=visit_count,
-        best_reachable_value=best_reachable_value,
-        q_mode=q_mode,
-    )
-    bonus = (
-        float(puct_c) * float(scale) * float(prior) * math.sqrt(1.0 + float(total_visits)) / (1.0 + float(visit_count))
-    )
-    return q_value + bonus
-
-
 def _q_value(
     *,
     node: LibraryNode,
@@ -101,6 +71,11 @@ def rank_archive_nodes(
     q_mode: str = PUCT_Q_BLEND,
 ) -> list[tuple[float, float, LibraryNode, int, float, float, float]]:
     """Return nodes sorted by Guidance-TTT archive PUCT score.
+
+    score(i) = Q(i) + c * scale * P(i) * sqrt(1 + T) / (1 + n[i])
+    Q(i) = R(i) if n[i] == 0
+    Q(i) = m[i] if q_mode == "best_child" and n[i] > 0 and m[i] exists
+    Q(i) = 0.8 * R(i) + 0.2 * m[i] otherwise
 
     Tuple layout mirrors discover's logging order:
     (score, value, node, n, Q, P, bonus).

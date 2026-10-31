@@ -46,7 +46,6 @@ PROFILE_PATCHES = {
     "dsh/profiles/headless/cordis.patch.yml": "./extensions/",
     "dsh/profiles/web/cordis.patch.yml": "../headless/extensions/",
 }
-_ENV = "dsh/.env"
 _EXTENSIONS = "dsh/profiles/headless/extensions/"
 _JS = "!!js "
 #: dsh lists a skill only under a name of lowercase letters and digits, in words joined by single hyphens.

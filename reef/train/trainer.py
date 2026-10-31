@@ -351,9 +351,9 @@ class Trainer:
         return self._data_offset
 
     def job_loop_required(self) -> JobLoop:
-        """The job loop of a weight trainer; raise ``RuntimeError`` for a harness trainer."""
+        """The job loop of a trainer that trains; raise ``RuntimeError`` for one that does not."""
         if self._job_loop is None:
-            raise RuntimeError("only a weight trainer has a job loop")
+            raise RuntimeError("only a trainer that trains has a job loop")
         return self._job_loop
 
     @property
@@ -589,12 +589,6 @@ class Trainer:
         data = self._build_validated_job_data()
         self._pending = _PendingStep(data=data, result=None)
         return data
-
-    @property
-    def pending_prepared_commit(self) -> PreparedCommit | None:
-        """The prepared commit of the pending step, once an attempt prepared it."""
-        with self._lock:
-            return None if self._pending is None else self._pending.prepared_commit
 
     def prepare_commit(self, result: TrainStepResult | None) -> PreparedCommit:
         """Prepare the pending result without exposing its state as committed.

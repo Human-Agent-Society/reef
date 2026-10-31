@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from reef.artifact.artifact import Artifact, ArtifactNotFound, ArtifactRef
+from reef.artifact.artifact import Artifact, ArtifactRef
 from reef.artifact.release_chain import ArtifactReleaseChain, ReleaseNotRestorable
 from reef.artifact.repository import Repository
 from reef.artifact.sources import SourceFiles
@@ -379,25 +379,6 @@ class Scenario:
         :meth:`ScenarioReleases.served_beside`."""
         with self.release_queries.publication_lock:
             return self.release_queries.served_beside(self._committer.step, self._committer.component_names())
-
-    def served_release(self, artifact_id: str) -> ArtifactRef:
-        """The release that answers a call to the URL of ``artifact_id``.
-
-        When the scenario serves the artifact beside its active release, it is
-        the release that serves it there. Else it is the active release, when
-        that release binds the artifact. Raise ``ArtifactNotFound`` when
-        neither serves it.
-        """
-        with self.release_queries.publication_lock:
-            step = self._committer.step
-            names = self._committer.component_names()
-            served = self.release_queries.served_beside(step, names).get(artifact_id)
-            if served is not None:
-                return served.release
-            current = self._artifact_chain.current
-            if artifact_id in self.release_queries.bound_artifact_ids(current.release_id, names, step).values():
-                return current
-        raise ArtifactNotFound(f"scenario {self._name!r} serves no artifact {artifact_id!r}")
 
     def train_from(self, artifact_id: str, component: str | None = None) -> ComponentArtifact:
         """Start ``component``'s trainer from ``artifact_id``; see :meth:`ScenarioCommitter.train_from`."""

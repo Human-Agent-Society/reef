@@ -17,7 +17,6 @@ from tests.support.runtime_stubs import StubInferenceRuntime
 from tests.support.samples_service import make_samples
 
 from reef.artifact import InMemoryRepositoryBackend
-from reef.artifact.artifact import ArtifactNotFound
 from reef.artifact.files import ArtifactFiles
 from reef.artifact.sources import REFERENCE_FILE, DirectorySource, HuggingFaceRevision
 from reef.core.errors import CommitPending, ReefError, TrainingStartRefused
@@ -416,7 +415,7 @@ def test_a_served_harness_binds_the_weights_served_now_and_leaves_the_active_rel
         runtime.answers_each_release = True
         served = scenario.serve(artifact_id, HARNESS)
         assert served.artifact_id == artifact_id and served.release_id != first
-        release = scenario.served_release(artifact_id)
+        release = scenario.served_beside()[artifact_id].release
         assert release.release_id == served.release_id
         assert component_files(scenario, release) == {WEIGHTS: "weights seed", HARNESS: "harness step 1"}
         assert scenario.current_artifact_ref() == active
@@ -427,7 +426,6 @@ def test_a_served_harness_binds_the_weights_served_now_and_leaves_the_active_rel
         stopped = scenario.stop_serving(artifact_id)
         assert stopped.release == release
         assert scenario.store.history()[-1].components == record.components
-        with pytest.raises(ArtifactNotFound):
-            scenario.served_release(artifact_id)
+        assert artifact_id not in scenario.served_beside()
     finally:
         dispatcher.close()

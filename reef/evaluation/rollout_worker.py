@@ -31,8 +31,6 @@ from reef.storage.work_queue import JsonValue, WorkItem, WorkQueue
 
 #: The queue of evaluations and their rollouts.
 EVALUATIONS_QUEUE = "evaluations"
-#: The kind of the item that holds an evaluation's request; no worker takes it.
-EVALUATION_KIND = "evaluation"
 #: The kind of the item of one rollout.
 EVALUATION_ROLLOUT_KIND = "evaluation_rollout"
 
@@ -150,11 +148,6 @@ def rollout_item_id(evaluation_id: str, task_index: int, repeat: int) -> str:
     return f"{EVALUATION_ROLLOUT_KIND}:{evaluation_id}:{task_index:05d}:{repeat:05d}"
 
 
-def evaluation_item_id(evaluation_id: str) -> str:
-    """The ID of the item that holds an evaluation's request."""
-    return f"{EVALUATION_KIND}:{evaluation_id}"
-
-
 @dataclass(frozen=True)
 class CandidateEndpoint:
     """Where one rollout reaches the candidate's model.
@@ -255,7 +248,6 @@ class EvaluationRolloutWorker(QueueWorker):
 
 __all__ = [
     "EVALUATIONS_QUEUE",
-    "EVALUATION_KIND",
     "EVALUATION_ROLLOUT_KIND",
     "CandidateEndpoint",
     "CandidateEndpoints",
@@ -263,7 +255,6 @@ __all__ = [
     "EvaluationRolloutWorker",
     "LocalCandidateEndpoints",
     "agent_harness",
-    "evaluation_item_id",
     "harbor_agent",
     "rollout_item_id",
 ]
