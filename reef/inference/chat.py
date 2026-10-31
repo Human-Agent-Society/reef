@@ -1223,6 +1223,7 @@ class TokenNativeChatHandler(HttpInferenceHandler):
             not isinstance(message, Mapping) or message.get("role") not in ("user", "tool") for message in new_messages
         ):
             raise ValueError("rollout continuation accepts only user and tool messages after the sampled turn")
+        require_text_content(new_messages)
         for key in ("model", "tools", "chat_template_kwargs"):
             if request.get(key) != prefix.request.get(key):
                 raise ValueError(f"rollout continuation cannot change {key}")
@@ -1270,13 +1271,7 @@ class TokenNativeChatHandler(HttpInferenceHandler):
         messages = payload.get("messages")
         if not isinstance(messages, list) or not messages:
             raise ValueError("chat training requests require a non-empty messages list")
-        if any(
-            not isinstance(message, Mapping)
-            or not isinstance(message.get("role"), str)
-            or (message.get("content") is not None and not isinstance(message.get("content"), str))
-            for message in messages
-        ):
-            raise ValueError("exact chat capture currently requires text-only message content")
+        require_text_content(messages)
         template_kwargs = template_kwargs_of(payload.get("chat_template_kwargs"), "chat_template_kwargs")
         template_messages = self._template_messages(messages)
         tools = self._request_tools(payload)
@@ -1444,6 +1439,17 @@ class TokenNativeChatHandler(HttpInferenceHandler):
                 }
             )
         return values
+
+
+def require_text_content(messages: list[Any]) -> None:
+    """Refuse messages that are not mappings with a string role and string or absent content."""
+    if any(
+        not isinstance(message, Mapping)
+        or not isinstance(message.get("role"), str)
+        or (message.get("content") is not None and not isinstance(message.get("content"), str))
+        for message in messages
+    ):
+        raise ValueError("exact chat capture currently requires text-only message content")
 
 
 def integer_tokens(value: Any, label: str) -> list[int]:

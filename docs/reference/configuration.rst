@@ -483,7 +483,8 @@ and appends them to the previous call's tokens, so a template that rewrites
 earlier turns, as Qwen3's drops their reasoning, cannot change the trained
 tokens, and the multi-turn sample assembles with ``realign_threshold: 0``. A
 request without ``user`` renders as usual. A request that names a rollout
-but does not extend it is refused.
+but does not extend it is refused. As in a full render, the new messages must
+have text-only content.
 ``chat_template_kwargs`` renders a request that omits them, for example
 ``{enable_thinking: false}`` for a hybrid-thinking model served without
 reasoning; a request's own ``chat_template_kwargs`` win key by key. A recipe
