@@ -17,13 +17,6 @@ from reef.service.routes.payload import read_object
 INSTALL_PREAMBLE_DELAY_SECONDS = 0.5
 
 
-def register_health_route(app: web.Application) -> None:
-    async def health(request: web.Request) -> web.Response:
-        return web.json_response({"ok": True})
-
-    app.router.add_get("/healthz", health)
-
-
 def register_system_routes(app: web.Application, *, request_service: RequestService) -> None:
     async def harness(request: web.Request) -> web.Response:
         release_id = request.query.get("release_id") or None

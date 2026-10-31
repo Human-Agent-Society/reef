@@ -19,6 +19,7 @@ import threading
 import time
 from abc import ABC, abstractmethod
 
+from reef.artifact.artifact import Artifact
 from reef.core.served_models import ACTIVE, ScenarioModel, ScheduledStop, ServedArtifact
 from reef.execution.workers import ServiceWorker
 from reef.runtime.interfaces import EngineClients, InferenceHandler, InferenceRuntime
@@ -70,7 +71,9 @@ class ServedModelsPublisher(ServiceWorker):
 
     Values: ``registry`` holds the loaded scenarios; ``coordination`` holds ``served_models`` and the control lease;
     ``instance_id`` names this control instance in the lease, and ``lease`` is the lease that it took
-    (``wait_for_control_lease``); ``instance`` is told when the lease is lost;
+    (``wait_for_control_lease``); ``instance`` is told when the lease is lost; ``runtime`` is the deployment's
+    serving runtime, or ``None`` when it has none: a stop that a former control instance left in ``served_models``
+    is due on it before any scenario loads;
     ``stop_delay_seconds`` is how long a replaced value keeps serving, at least ``CACHE_SECONDS`` plus the longest
     request; ``interval_seconds`` is the time between rounds, less than the lease. ``held`` is whether this
     instance still holds the lease, under ``lease_number``; it starts true.
@@ -86,6 +89,7 @@ class ServedModelsPublisher(ServiceWorker):
         instance: ControlInstance,
         lease: ControlLeaseState,
         *,
+        runtime: InferenceRuntime | None,
         instance_id: str,
         stop_delay_seconds: float,
         interval_seconds: float = 1.0,
@@ -109,7 +113,7 @@ class ServedModelsPublisher(ServiceWorker):
         #: The handler of the runtime that serves each row's engine, by URL, for the inference routes of this process.
         self.engines: dict[str, InferenceHandler] = {}
         #: The runtime that serves each row's engine, by URL: it stops serving a value when its stop is due.
-        self.runtimes: dict[str, InferenceRuntime] = {}
+        self.runtimes: dict[str, InferenceRuntime] = {} if runtime is None else {runtime.base_url: runtime}
         self.stopped = threading.Event()
         self.thread: threading.Thread | None = None
 
@@ -143,8 +147,9 @@ class ServedModelsPublisher(ServiceWorker):
         ``active`` is the artifact that the runtime serves: the active artifact of the weights component (the
         weight trainer's component, or the only component), or, for a scenario whose model is no Reef artifact,
         such as a provider's, the active release. Each artifact served beside it (#997) gets a row under its own
-        ``artifact_id``: a weights artifact with the runtime's value for it, any other artifact with the active
-        model, which answers the calls of that artifact's candidate. Each component's active artifact also has a
+        ``artifact_id``: a weights artifact with the runtime's value for that artifact on request
+        (``InferenceRuntime.served_artifact_on_request``), any other artifact with the active model, which answers
+        the calls of that artifact's candidate. Each component's active artifact also has a
         row under its ``artifact_id`` with the active model, so it answers at its own URL.
         """
         current = self.registry.get_loaded(scenario)
@@ -162,7 +167,11 @@ class ServedModelsPublisher(ServiceWorker):
             if component_status["active"] is not None:
                 rows[component_status["active"]] = active
         for artifact_id, beside in current.served_beside().items():
-            served = runtime.served_artifact(artifact_id, scenario) if beside.component == component else active
+            if beside.component == component:
+                release = Artifact(beside.release, current.repository).materialize()
+                served = runtime.served_artifact_on_request(current.surface.component_artifact(release, component))
+            else:
+                served = active
             if served is not None:
                 rows[artifact_id] = served
         return rows

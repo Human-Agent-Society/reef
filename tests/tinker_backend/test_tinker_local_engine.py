@@ -16,7 +16,7 @@ from reef.inference.remote.runtime import RemoteServingRuntimeFactory
 from reef.runtime.deployment import RuntimeConfigError
 from reef.runtime.interfaces import InferenceBackend, InferenceHandler, TrainingMethod
 from reef.runtime.jobs import ReleaseFormat, TrainingJob, job_id_for
-from reef.runtime.serving import AdapterServingRuntime, ReleaseWeights
+from reef.runtime.serving import AdapterServingRuntime, ReleaseWeights, RunningEngines
 from reef.service.assembly import connect_training_component
 from reef.service.deploy.config_utils import DeployConfigError
 from reef.service.deploy.orchestrator import resolve_deployment_config
@@ -214,7 +214,12 @@ def build(config, monkeypatch, engines):
     def serve(factory, config, model_path, recipe_config, environ):
         seen.update(config)
         weights = ReleaseWeights.from_setting(config["weights"], setting="runtime.weights")
-        return AdapterServingRuntime(engines, Handler(), adapter_capacity=config["adapter_capacity"], weights=weights)
+        runtime = AdapterServingRuntime(
+            RunningEngines(engines), Handler(), adapter_capacity=config["adapter_capacity"], weights=weights
+        )
+        # The test drives the runtime as control does, which opens it.
+        runtime.open()
+        return runtime
 
     monkeypatch.setattr(RemoteServingRuntimeFactory, "__call__", serve)
     component, inference = connect_training_component(

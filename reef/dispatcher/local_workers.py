@@ -222,13 +222,13 @@ class LocalTrainingWorkers:
                     return state is InstanceState.REPLACED
                 try:
                     current.commit(result, component=component)
-                    self.registry.lifecycle.scenario_committed(current)
                 except Exception:
                     # A record may already have crossed the fsync commit point.
                     # Reload before an activation or acceptance can observe the stale
                     # in-memory step and append the same step number again.
                     self.reload_after_local_failure(current)
                     raise
+                self.registry.lifecycle.scenario_committed(current)
         return True
 
     def fail_instruction(self, current: Scenario, cause: Exception, component: str | None = None) -> None:

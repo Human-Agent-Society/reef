@@ -13,7 +13,7 @@ from tests.support.runtime_stubs import runtime_bindings
 from reef.artifact import InMemoryRepositoryBackend, RepositoryBackendFactory
 from reef.artifact.artifact import ArtifactNotFound
 from reef.core.errors import ReefError
-from reef.core.evaluation import PolicyModel
+from reef.core.served_models import ServedArtifact
 from reef.dispatcher import Dispatcher
 from reef.runtime.interfaces import InferenceHandler
 from reef.service.app import create_app
@@ -69,7 +69,7 @@ def serving_dispatcher(tmp_path) -> tuple[Dispatcher, NamedComponent, Repository
 
 def answering_each_release(runtime) -> None:
     """Make the stub runtime answer each call from the release that the call names, as Tinker does."""
-    runtime.inference.artifact_model = lambda artifact: PolicyModel("base", artifact.ref.release_id)
+    runtime.inference.answers_each_release = True
 
 
 def two_artifacts(tmp_path):
@@ -90,6 +90,12 @@ def test_a_served_artifact_answers_at_its_url_while_the_default_url_answers_from
         value, _, _, newest, older = two_artifacts(tmp_path)
         served = value.serve("math", older["artifact_id"])
         assert (served.artifact_id, served.release_id) == (older["artifact_id"], older["release_id"])
+        # The artifact served beside the active one has its own row, under the runtime's model name for it.
+        rows = value.coordination.served_models.read_scenario("math")
+        assert rows[older["artifact_id"]] == ServedArtifact(
+            older["artifact_id"], "http://trainer", f"sampler:{older['artifact_id']}"
+        )
+        assert rows["active"].model_name == "stub-model"
         handler = ReleaseEcho()
         client = TestClient(TestServer(create_app(value, inference_handler=handler)))
         await client.start_server()

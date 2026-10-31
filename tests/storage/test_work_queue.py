@@ -38,10 +38,11 @@ def open_coordination(request, tmp_path):
         else:
             database = SQLiteCoordinationDatabase(None if request.param == "sqlite-memory" else tmp_path / "c")
         databases.append(database)
+        lease = SQLControlLease(database, lease_seconds=lease_seconds)
         return Coordination(
             SQLWorkQueue(database, lease_seconds=lease_seconds, max_attempts=max_attempts),
-            SQLServedModels(database),
-            SQLControlLease(database, lease_seconds=lease_seconds),
+            SQLServedModels(database, lease),
+            lease,
             SQLMarks(database),
         )
 

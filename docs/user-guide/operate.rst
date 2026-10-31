@@ -549,10 +549,13 @@ Give its name as ``package.module:ClassName``, or give the name and a configurat
        module: my_package.storage:ObjectStoreScenarioStorage
        config:
          bucket: reef-state
+     coordination-backend: sqlite
      agent-record-dir: .reef/agent-record
 
 Reef calls ``from_config(config, directory=...)`` with the ``config`` mapping and
-``agent_record_dir``. The `Python storage contract
+``agent_record_dir``. A plugin holds no tables of the services, so name where
+they share them: ``coordination-backend: sqlite`` for processes on one host, or
+``postgres`` with ``record-database-url`` for several hosts. The `Python storage contract
 <../reference/python-api.rst#scenario-stores>`__ gives the necessary behavior.
 An embedded deployment gives a ``ScenarioStorage`` instance to
 ``Dispatcher(..., scenario_storage=...)`` instead.

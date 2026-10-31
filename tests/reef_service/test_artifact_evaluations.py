@@ -84,8 +84,8 @@ class ReleaseRuntime(InferenceRuntime):
     def serves_artifacts_on_request(self) -> bool:
         return self.serves_any_release
 
-    def artifact_model(self, artifact: Artifact) -> PolicyModel | None:
-        return PolicyModel("base", f"sampler:{artifact.artifact_id}") if self.serves_any_release else None
+    def artifact_model(self, artifact: Artifact) -> PolicyModel:
+        return PolicyModel("base", f"sampler:{artifact.artifact_id}")
 
     def activate_checkpoint(self, artifact, *, scenario=None):
         return "load-0"
@@ -303,7 +303,7 @@ def test_a_runtime_that_serves_only_its_current_release_or_a_scenario_with_a_har
 
 
 @pytest.mark.integration
-def test_an_evaluation_whose_rollouts_are_not_in_the_queue_reads_as_failed(tmp_path: Path) -> None:
+def test_a_started_evaluation_service_fails_the_evaluations_whose_rollouts_the_queue_lost(tmp_path: Path) -> None:
     dispatcher = dispatcher_for(tmp_path, WeightRecipe(runtime=ReleaseRuntime()))
 
     async def run() -> None:
@@ -315,7 +315,19 @@ def test_an_evaluation_whose_rollouts_are_not_in_the_queue_reads_as_failed(tmp_p
                 current.store.evaluations.create(
                     evaluation_id="stale", owner="a-stopped-service", request=request, created_at=time.time()
                 )
+            # A read changes nothing.
             answer = await (await client.get("/reef/scenarios/s/evaluations/stale", headers=AUTH)).json()
+            assert answer["state"] == "running"
+            restarted = ArtifactEvaluations(dispatcher)
+            restarted.open()
+            try:
+                for _ in range(100):
+                    answer = await (await client.get("/reef/scenarios/s/evaluations/stale", headers=AUTH)).json()
+                    if answer["state"] == "failed":
+                        break
+                    await asyncio.sleep(0.05)
+            finally:
+                restarted.close()
             assert (answer["state"], answer["error"]) == ("failed", STOPPED_ERROR)
 
     asyncio.run(run())

@@ -106,6 +106,23 @@ def signed_download_url(request: web.Request, expires_in_seconds: int) -> tuple[
     return (f"{raw_path}?{urlencode(query)}" if query else raw_path), expires_at
 
 
+#: What an evaluation token's HMAC covers, so the token is good for the evaluation routes alone.
+EVALUATION_TOKEN_CONTEXT = b"reef-evaluation\n"
+
+
+def evaluation_token_for(tokens: str | Iterable[str] | None) -> str | None:
+    """The deployment's evaluation token: an HMAC of a fixed context keyed by the digest of the first of the sorted
+    service ``tokens``, as hex; None without tokens.
+
+    Every process of a deployment reads the same tokens, so each one derives the same evaluation token: a recipe's
+    evaluation calls work on whichever service answers them, and the service token cannot be read back from it.
+    """
+    accepted = sorted(normalize_tokens(tokens))
+    if not accepted:
+        return None
+    return hmac.new(_digest(accepted[0]), EVALUATION_TOKEN_CONTEXT, hashlib.sha256).hexdigest()
+
+
 #: The harness pages a person opens by a link: the only routes that read a credential from the query string.
 PAGE_ROUTES = re.compile(r"^/reef/harness/(requests/[^/]+|releases/\d{1,9})/page$")
 
@@ -247,6 +264,7 @@ __all__ = [
     "PAGE_ROUTES",
     "create_authentication_middleware",
     "download_signature",
+    "evaluation_token_for",
     "normalize_tokens",
     "page_key_for_digest",
     "page_query",

@@ -23,8 +23,7 @@ Rules:
 - No row: 404. A replica that cannot read ``served_models`` and has no read from the last ``max_cache_age_seconds``:
   503.
 - An engine that fails or cannot be reached: 502; one that does not answer within the timeout: 504.
-- An answer that the engine reports under another model name (``InferenceHandler.answered_model``), or that the
-  engine aborted, is retried once after the replica reads the row again; then 409.
+- An answer that the engine aborted is retried once after the replica reads the row again; then 409.
 - A record that cannot be appended: 503. A replica never answers a recorded request without its record. A stream goes
   out as the engine sends it, so its record is appended when it ends, and its receipt is the stream's last frame.
 """
@@ -49,7 +48,6 @@ from reef.core.errors import ReefError
 from reef.core.records_types import ROLLOUT_HEADER, AgentRecord, RequestType
 from reef.core.served_models import ACTIVE, ServedArtifact
 from reef.dispatcher.served import CACHE_SECONDS
-from reef.inference.http import HttpInferenceHandler, ProviderRequestHeaders
 from reef.runtime.interfaces import (
     INFERENCE_ABORT_ERROR,
     EngineClients,
@@ -57,7 +55,6 @@ from reef.runtime.interfaces import (
     UpstreamStatusError,
     inference_aborted,
 )
-from reef.service.auth import create_authentication_middleware
 from reef.service.request_service import with_request_tags
 from reef.service.streaming import (
     SSEFrameDecoder,
@@ -67,6 +64,7 @@ from reef.service.streaming import (
     receipt_sse_events,
     stream_record,
 )
+from reef.service.web import service_application
 from reef.service.wire import HeaderError, RequestHeaders, parse_request_headers
 from reef.storage.scenario import ScenarioStorage
 from reef.storage.served_models import ServedModels
@@ -375,13 +373,10 @@ class InferenceReplica:
             return await self.relay_stream(request, path, parsed, payload, served, ref, record=record)
         for attempt in range(2):
             response = await self.forward(served, ref, path, payload)
-            answered = self.handler(served).answered_model(response)
-            if not inference_aborted(response) and answered in (None, served.model_name):
+            if not inference_aborted(response):
                 break
             if attempt == 1:
-                if inference_aborted(response):
-                    raise web.HTTPConflict(text=INFERENCE_ABORT_ERROR)
-                raise web.HTTPConflict(text=f"the engine answered as {answered!r}, not {served.model_name!r}")
+                raise web.HTTPConflict(text=INFERENCE_ABORT_ERROR)
             served, ref = await self.resolve(parsed.scenario, payload.get("model"), name=name, refresh=True)
         stamped = {**payload, "artifact_id": served.artifact_id}
         reply_headers = {RELEASE_HEADER: served.artifact_id}
@@ -533,56 +528,13 @@ def add_inference_routes(app: web.Application, replica: InferenceReplica) -> Non
     )
 
 
-class ConfiguredEngineClients(EngineClients):
-    """The engines of a separate inference service, reached with the deployment's handler type.
-
-    Values: ``factory`` is the handler type (``inference.handler-factory``), or None for a plain HTTP handler that
-    sends ``api_key``, the deployment's provider key, when there is one; ``config`` holds the factory's options;
-    ``model_path`` and ``timeout_seconds`` configure each handler; ``handlers`` holds one handler per engine URL.
-    The credentials of an engine come from this deployment configuration only.
-
-    Purpose: ``build_inference_app`` gives it to the replica of a separate inference service.
-    """
-
-    def __init__(
-        self,
-        factory: type[InferenceHandler] | None,
-        config: Mapping[str, Any],
-        *,
-        model_path: str,
-        timeout_seconds: float,
-        api_key: str | None = None,
-    ) -> None:
-        self.factory = factory
-        self.api_key = api_key
-        self.config = dict(config)
-        self.model_path = model_path
-        self.timeout_seconds = timeout_seconds
-        self.handlers: dict[str, InferenceHandler] = {}
-
-    def handler(self, served: ServedArtifact) -> InferenceHandler:
-        found = self.handlers.get(served.url)
-        if found is None:
-            if self.factory is None:
-                found = HttpInferenceHandler(
-                    served.url,
-                    timeout_s=self.timeout_seconds,
-                    request_headers=ProviderRequestHeaders(self.api_key) if self.api_key else None,
-                )
-            else:
-                found = self.factory.from_config(
-                    served.url, model_path=self.model_path, timeout_s=self.timeout_seconds, **self.config
-                )
-            self.handlers[served.url] = found
-        return found
-
-
 def build_inference_app(
     served_models: ServedModels,
     storage: ScenarioStorage,
     engines: EngineClients,
     *,
     tokens: str | tuple[str, ...] | None,
+    evaluation_tokens: str | tuple[str, ...] | None = None,
     max_cache_age_seconds: float = 300.0,
     timeout_seconds: float = 300.0,
     for_codex: bool = False,
@@ -596,12 +548,7 @@ def build_inference_app(
         timeout_seconds,
         for_codex,
     )
-    app = web.Application(middlewares=[create_authentication_middleware(tokens)])
-
-    async def healthz(request: web.Request) -> web.Response:
-        return web.json_response({"status": "ok"})
-
-    app.router.add_get("/healthz", healthz)
+    app = service_application(tokens, evaluation_tokens=evaluation_tokens)
     add_inference_routes(app, replica)
     return app
 
@@ -611,7 +558,6 @@ __all__ = [
     "RECORD_HEADER",
     "RELEASE_HEADER",
     "ArtifactRefs",
-    "ConfiguredEngineClients",
     "InferenceReplica",
     "NotServed",
     "ServedModelsCache",

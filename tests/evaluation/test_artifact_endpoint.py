@@ -35,8 +35,12 @@ class Runtime(InferenceRuntime):
     def inference_handler(self):
         return self.handler
 
+    @property
+    def serves_artifacts_on_request(self) -> bool:
+        return self.serves_any_release
+
     def artifact_model(self, artifact):
-        return PolicyModel("base", artifact.ref.release_id) if self.serves_any_release else None
+        return PolicyModel("base", artifact.ref.release_id)
 
     def activate_checkpoint(self, artifact, *, scenario=None):
         return "load-0"

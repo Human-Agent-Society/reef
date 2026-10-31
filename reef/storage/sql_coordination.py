@@ -6,10 +6,13 @@ The services of a deployment hand work to each other through these tables:
 - ``control_lease`` holds the control lease (``reef.storage.control_lease``);
 - ``work_item`` holds the work queues (``reef.storage.work_queue``);
 - ``coordination_mark`` holds the marks (``reef.storage.marks``);
-- ``coordination_sequence`` holds the one counter that numbers every change.
+- ``coordination_sequence`` holds two counters: ``WORK_SEQUENCE`` numbers the changes of the work queues, and
+  ``SERVED_SEQUENCE`` the changes of ``served_models`` and its stops.
 
-Every write takes the counter row first. So writes are serialized, and the sequence order of the changes is the
-order in which they commit: a reader that reads the changes after a sequence never misses a later commit.
+A write that numbers its change takes its counter's row first. So the writes of one counter are serialized, and
+the sequence order of their changes is the order in which they commit: a reader that reads the changes after a
+sequence never misses a later commit. A write that numbers nothing (a lease extension, a mark) takes no counter, so
+it never waits behind the writes of a counter.
 """
 
 from __future__ import annotations
@@ -47,6 +50,7 @@ from sqlalchemy import (
     update,
 )
 from sqlalchemy.engine import Connection, Engine, RowMapping
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.pool import NullPool
 from sqlalchemy.schema import CreateSchema
 
@@ -154,6 +158,12 @@ def coordination_tables(metadata: MetaData) -> CoordinationTables:
     return CoordinationTables(sequence, served_model, scheduled_stop, control_lease, work_item, mark)
 
 
+#: The counter row that numbers the changes of the work queues.
+WORK_SEQUENCE = 1
+#: The counter row that numbers the changes of ``served_models`` and its scheduled stops.
+SERVED_SEQUENCE = 2
+
+
 def canonical_json(value: object) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
@@ -184,10 +194,11 @@ class CoordinationDatabase(CoordinationResource):
         """Whether ``SELECT ... FOR UPDATE`` is needed to serialize transactions (it is for PostgreSQL)."""
 
     @contextmanager
-    def write(self) -> Iterator[tuple[Connection, SequenceCounter]]:
-        """A write transaction that holds the change counter until it ends."""
+    def write(self, sequence: int) -> Iterator[tuple[Connection, SequenceCounter]]:
+        """A write transaction that holds the counter ``sequence`` (``WORK_SEQUENCE`` or ``SERVED_SEQUENCE``) until
+        it ends."""
         with self.connection(write=True) as connection:
-            query = select(self.tables.sequence.c.value).where(self.tables.sequence.c.id == 1)
+            query = select(self.tables.sequence.c.value).where(self.tables.sequence.c.id == sequence)
             if self.locks_rows:
                 query = query.with_for_update()
             value = connection.execute(query).scalar_one()
@@ -195,7 +206,9 @@ class CoordinationDatabase(CoordinationResource):
             yield connection, counter
             if counter.value != value:
                 connection.execute(
-                    update(self.tables.sequence).where(self.tables.sequence.c.id == 1).values(value=counter.value)
+                    update(self.tables.sequence)
+                    .where(self.tables.sequence.c.id == sequence)
+                    .values(value=counter.value)
                 )
 
     @contextmanager
@@ -205,8 +218,10 @@ class CoordinationDatabase(CoordinationResource):
 
     def create(self, connection: Connection, metadata: MetaData) -> None:
         metadata.create_all(connection)
-        if connection.execute(select(self.tables.sequence.c.id)).first() is None:
-            connection.execute(insert(self.tables.sequence).values(id=1, value=0))
+        present = set(connection.execute(select(self.tables.sequence.c.id)).scalars())
+        for sequence in (WORK_SEQUENCE, SERVED_SEQUENCE):
+            if sequence not in present:
+                connection.execute(insert(self.tables.sequence).values(id=sequence, value=0))
 
     @abstractmethod
     def close(self) -> None:
@@ -338,24 +353,19 @@ def served_from_row(row: RowMapping) -> ServedArtifact:
 
 
 class SQLServedModels(ServedModelsWriter):
-    """``served_models`` in a coordination database. Writes check the control lease row in their transaction."""
+    """``served_models`` in a coordination database. Writes check the number of ``lease`` in their transaction."""
 
-    def __init__(self, database: CoordinationDatabase) -> None:
+    def __init__(self, database: CoordinationDatabase, lease: SQLControlLease) -> None:
         self.database = database
         self.tables = database.tables
+        self.lease = lease
 
     def checked(self, connection: Connection, control_lease_number: int) -> None:
-        current = self.lease_number(connection)
+        current = self.lease.number_in(connection)
         if current != control_lease_number:
             raise ControlLeaseConflict(
                 f"control lease number {control_lease_number} is not the current number {current}"
             )
-
-    def lease_number(self, connection: Connection) -> int:
-        number = connection.execute(
-            select(self.tables.control_lease.c.number).where(self.tables.control_lease.c.id == 1)
-        ).scalar()
-        return 0 if number is None else int(number)
 
     def read(self, key: ScenarioModel) -> ServedArtifact | None:
         table = self.tables.served_model
@@ -377,17 +387,13 @@ class SQLServedModels(ServedModelsWriter):
         with self.database.read() as connection:
             return int(
                 connection.execute(
-                    select(self.tables.sequence.c.value).where(self.tables.sequence.c.id == 1)
+                    select(self.tables.sequence.c.value).where(self.tables.sequence.c.id == SERVED_SEQUENCE)
                 ).scalar_one()
             )
 
-    def current_lease_number(self) -> int:
-        with self.database.read() as connection:
-            return self.lease_number(connection)
-
     def write(self, key: ScenarioModel, served: ServedArtifact, *, control_lease_number: int) -> None:
         table = self.tables.served_model
-        with self.database.write() as (connection, counter):
+        with self.database.write(SERVED_SEQUENCE) as (connection, counter):
             self.checked(connection, control_lease_number)
             connection.execute(delete(table).where(table.c.scenario == key.scenario, table.c.name == key.name))
             connection.execute(insert(table).values(scenario=key.scenario, name=key.name, **served.to_json()))
@@ -396,7 +402,7 @@ class SQLServedModels(ServedModelsWriter):
     def remove(self, key: ScenarioModel, *, control_lease_number: int) -> ServedArtifact | None:
         table = self.tables.served_model
         condition = and_(table.c.scenario == key.scenario, table.c.name == key.name)
-        with self.database.write() as (connection, counter):
+        with self.database.write(SERVED_SEQUENCE) as (connection, counter):
             self.checked(connection, control_lease_number)
             row = connection.execute(select(table).where(condition)).mappings().first()
             if row is None:
@@ -408,7 +414,7 @@ class SQLServedModels(ServedModelsWriter):
     def schedule_stop(self, stop: ScheduledStop, *, control_lease_number: int) -> None:
         table = self.tables.scheduled_stop
         served = stop.served
-        with self.database.write() as (connection, counter):
+        with self.database.write(SERVED_SEQUENCE) as (connection, counter):
             self.checked(connection, control_lease_number)
             connection.execute(delete(table).where(*self.stop_condition(served)))
             connection.execute(insert(table).values(stop_after=stop.stop_after, **served.to_json()))
@@ -433,7 +439,7 @@ class SQLServedModels(ServedModelsWriter):
         return tuple(ScheduledStop(served_from_row(row), float(row["stop_after"])) for row in rows)
 
     def delete_stop(self, served: ServedArtifact, *, control_lease_number: int) -> None:
-        with self.database.write() as (connection, counter):
+        with self.database.write(SERVED_SEQUENCE) as (connection, counter):
             self.checked(connection, control_lease_number)
             if connection.execute(delete(self.tables.scheduled_stop).where(*self.stop_condition(served))).rowcount:
                 counter.next()
@@ -472,23 +478,24 @@ class SQLControlLease(ControlLease):
     def acquire(self, instance_id: str, *, now: float | None = None) -> ControlLeaseState | None:
         require_text(instance_id, "instance_id")
         moment = clock(now)
-        with self.database.write() as (connection, counter):
-            held = self.held(connection)
-            if held is not None and held.instance_id == instance_id and held.expires_at >= moment:
-                number = held.number
-            elif held is None or held.expires_at < moment:
-                number = 1 if held is None else held.number + 1
-                counter.next()
-            else:
-                return None
-            state = ControlLeaseState(instance_id, number, moment + self.lease_seconds)
-            return self.store(connection, state, existed=held is not None)
+        try:
+            with self.database.connection(write=True) as connection:
+                held = self.held(connection)
+                if held is not None and held.instance_id == instance_id and held.expires_at >= moment:
+                    number = held.number
+                elif held is None or held.expires_at < moment:
+                    number = 1 if held is None else held.number + 1
+                else:
+                    return None
+                state = ControlLeaseState(instance_id, number, moment + self.lease_seconds)
+                return self.store(connection, state, existed=held is not None)
+        except IntegrityError:
+            # Another instance took the first lease in the same moment: its row is there now, so this take lost.
+            return None
 
     def extend(self, instance_id: str, *, now: float | None = None) -> ControlLeaseState | None:
         moment = clock(now)
-        with self.database.write() as transaction:
-            # Extending changes no number, so it takes no sequence value.
-            connection = transaction[0]
+        with self.database.connection(write=True) as connection:
             held = self.held(connection)
             if held is None or held.instance_id != instance_id or held.expires_at < moment:
                 return None
@@ -498,13 +505,17 @@ class SQLControlLease(ControlLease):
 
     def release(self, instance_id: str, *, now: float | None = None) -> bool:
         moment = clock(now)
-        with self.database.write() as transaction:
-            connection = transaction[0]
+        with self.database.connection(write=True) as connection:
             held = self.held(connection)
             if held is None or held.instance_id != instance_id or held.expires_at < moment:
                 return False
             self.store(connection, ControlLeaseState(instance_id, held.number, moment), existed=True)
             return True
+
+    def number_in(self, connection: Connection) -> int:
+        """The number of the lease that holds now, read in ``connection``'s transaction; 0 before the first take."""
+        number = connection.execute(select(self.table.c.number).where(self.table.c.id == 1)).scalar()
+        return 0 if number is None else int(number)
 
     def current(self) -> ControlLeaseState | None:
         with self.database.read() as connection:
@@ -532,8 +543,7 @@ class SQLMarks(Marks):
         check_mark_name(name)
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             raise ValueError("a mark is a non-negative int")
-        with self.database.write() as transaction:
-            connection = transaction[0]
+        with self.database.connection(write=True) as connection:
             query = select(self.table.c.value).where(self.table.c.name == name)
             if self.database.locks_rows:
                 query = query.with_for_update()
@@ -569,8 +579,8 @@ def item_from_row(row: RowMapping) -> WorkItem:
 class SQLWorkQueue(WorkQueue):
     """Work queues in a coordination database.
 
-    ``take`` selects the oldest item that the worker can take. In PostgreSQL it locks the row with
-    ``FOR UPDATE SKIP LOCKED``, so workers that take at once get different items.
+    Every change holds the ``WORK_SEQUENCE`` counter row, so the changes of all queues are serialized: two workers
+    that take at once never get the same item. ``take`` selects the oldest item that the worker can take.
     """
 
     def __init__(
@@ -623,7 +633,7 @@ class SQLWorkQueue(WorkQueue):
     def add(self, work: NewWork, *, now: float | None = None) -> WorkItem:
         moment = clock(now)
         payload = canonical_json(dict(work.payload))
-        with self.database.write() as (connection, counter):
+        with self.database.write(WORK_SEQUENCE) as (connection, counter):
             existing = self.row(connection, work.queue, work.id)
             if existing is not None:
                 if canonical_json(dict(existing.payload)) != payload:
@@ -681,7 +691,7 @@ class SQLWorkQueue(WorkQueue):
         )
         if self.database.locks_rows:
             query = query.with_for_update(skip_locked=True, of=item)
-        with self.database.write() as (connection, counter):
+        with self.database.write(WORK_SEQUENCE) as (connection, counter):
             found = connection.execute(query).mappings().first()
             if found is None:
                 return None
@@ -699,12 +709,12 @@ class SQLWorkQueue(WorkQueue):
 
     def extend_lease(self, queue: str, item_id: str, worker_id: str, *, now: float | None = None) -> WorkItem:
         moment = clock(now)
-        with self.database.write() as (connection, counter):
+        with self.database.write(WORK_SEQUENCE) as (connection, counter):
             item = self.held(connection, queue, item_id, worker_id, moment)
             return self.save(connection, counter, item, lease_expires_at=moment + self.lease_seconds)
 
     def start(self, queue: str, item_id: str, worker_id: str, *, now: float | None = None) -> WorkItem:
-        with self.database.write() as (connection, counter):
+        with self.database.write(WORK_SEQUENCE) as (connection, counter):
             item = self.held(connection, queue, item_id, worker_id, clock(now))
             return item if item.state == "running" else self.save(connection, counter, item, state="running")
 
@@ -718,7 +728,7 @@ class SQLWorkQueue(WorkQueue):
         number: int,
         now: float | None = None,
     ) -> WorkItem:
-        with self.database.write() as (connection, counter):
+        with self.database.write(WORK_SEQUENCE) as (connection, counter):
             item = self.held(connection, queue, item_id, worker_id, clock(now))
             if number < len(item.progress):
                 return item
@@ -729,7 +739,7 @@ class SQLWorkQueue(WorkQueue):
     def finish(
         self, queue: str, item_id: str, worker_id: str, result: Mapping[str, JsonValue], *, now: float | None = None
     ) -> WorkItem:
-        with self.database.write() as (connection, counter):
+        with self.database.write(WORK_SEQUENCE) as (connection, counter):
             item = self.held(connection, queue, item_id, worker_id, clock(now))
             return self.save(
                 connection, counter, item, state="finished", result=dict(result), worker_id=None, lease_expires_at=None
@@ -746,7 +756,7 @@ class SQLWorkQueue(WorkQueue):
         now: float | None = None,
     ) -> WorkItem:
         require_text(error, "error")
-        with self.database.write() as (connection, counter):
+        with self.database.write(WORK_SEQUENCE) as (connection, counter):
             item = self.held(connection, queue, item_id, worker_id, clock(now))
             again = retryable and item.attempt_count < self.attempts_allowed(queue)
             return self.save(
@@ -761,7 +771,7 @@ class SQLWorkQueue(WorkQueue):
 
     def cancel(self, queue: str, item_id: str, error: str) -> WorkItem | None:
         require_text(error, "error")
-        with self.database.write() as (connection, counter):
+        with self.database.write(WORK_SEQUENCE) as (connection, counter):
             item = self.row(connection, queue, item_id, lock=True)
             if item is None or item.final:
                 return item
@@ -776,7 +786,7 @@ class SQLWorkQueue(WorkQueue):
         )
         if self.database.locks_rows:
             query = query.with_for_update(skip_locked=True)
-        with self.database.write() as (connection, counter):
+        with self.database.write(WORK_SEQUENCE) as (connection, counter):
             expired = [item_from_row(row) for row in connection.execute(query).mappings().all()]
             return tuple(
                 self.save(
@@ -831,18 +841,20 @@ def open_coordination_database(
 
 
 def open_coordination(
-    record_backend: object,
+    backend: str,
     *,
     agent_record_dir: str,
     record_database_url: str | None,
     record_database_schema: str = "reef_records",
     lease_seconds: float = 60.0,
 ) -> Coordination:
-    """The coordination store of a deployment. It follows ``record_backend``: ``postgres`` uses
-    ``record_database_url`` with the schema ``<record_database_schema>_coordination``, so that deployments with
-    their own record schemas keep their own coordination tables; anything else uses a SQLite file in
-    ``<agent_record_dir>/coordination``."""
-    if record_backend == "postgres":
+    """The coordination store of a deployment on ``backend``: ``postgres`` uses ``record_database_url`` with the
+    schema ``<record_database_schema>_coordination``, so that deployments with their own record schemas keep their
+    own coordination tables; ``sqlite`` uses a SQLite file in ``<agent_record_dir>/coordination``. Raise
+    ``ValueError`` for another backend."""
+    if backend not in ("sqlite", "postgres"):
+        raise ValueError(f"the coordination backend is sqlite or postgres, not {backend!r}")
+    if backend == "postgres":
         database = open_coordination_database(
             "postgres",
             directory=None,
@@ -856,11 +868,12 @@ def open_coordination(
 
 def coordination_on(database: CoordinationDatabase, *, lease_seconds: float = 60.0) -> Coordination:
     """The coordination store whose tables ``database`` holds; ``lease_seconds`` is the lease of a work item."""
+    lease = SQLControlLease(database)
     return Coordination(
         database,
         SQLWorkQueue(database, lease_seconds=lease_seconds),
-        SQLServedModels(database),
-        SQLControlLease(database),
+        SQLServedModels(database, lease),
+        lease,
         SQLMarks(database),
     )
 

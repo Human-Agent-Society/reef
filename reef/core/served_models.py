@@ -92,8 +92,7 @@ class ScheduledStop:
 
     Purpose: control adds one when it replaces or removes a ``served_models`` value that no row names any more, so
     that requests that already read the old value end before it stops (``stop_delay_seconds``). Control reads the
-    due ones and deletes them. The runtimes of this version replace their weights in place when they load new
-    ones, so a due stop has no engine to stop.
+    due ones, asks the runtime at ``served.url`` to stop serving the value when no row names it, and deletes them.
     """
 
     served: ServedArtifact

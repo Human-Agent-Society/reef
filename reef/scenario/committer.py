@@ -440,7 +440,7 @@ class ScenarioCommitter:
         training result waits for its commit. Raise ``ReefError`` when the
         scenario keeps no durable commit history. Raise it also when the
         runtime answers only from the release that it has loaded
-        (``InferenceRuntime.artifact_model`` is ``None``).
+        (``InferenceRuntime.serves_artifacts_on_request`` is False).
         """
         with self._lock, self._publication_lock:
             if not self._store.durable:
@@ -456,15 +456,13 @@ class ScenarioCommitter:
             current = Artifact(self._artifacts.current, self._artifacts.repository)
             loader = surface.loader_component
             runtime = self._binding.runtime
-            if loader is not None and runtime is not None:
-                # The calls use the artifact's own weights, or the active release's weights for an artifact of
-                # another component. The runtime must answer each call from the release that the call names.
-                source = release if surface.single or selected.component == loader else current
-                if runtime.artifact_model(surface.component_artifact(source, loader)) is None:
-                    raise ReefError(
-                        f"scenario {self._name!r}'s runtime answers only from the release it has loaded, so it "
-                        f"cannot serve artifact {selected.artifact_id!r} beside the active release"
-                    )
+            # The calls use the artifact's own weights, or the active release's weights for an artifact of another
+            # component. The runtime must answer each call from the release that the call names.
+            if loader is not None and runtime is not None and not runtime.serves_artifacts_on_request:
+                raise ReefError(
+                    f"scenario {self._name!r}'s runtime answers only from the release it has loaded, so it "
+                    f"cannot serve artifact {selected.artifact_id!r} beside the active release"
+                )
             target = self.release_with(current, selected, release)
             record = self.append_operation_record(
                 "serve",

@@ -7,6 +7,8 @@ from pathlib import Path
 from typing import Any
 
 from reef.artifact import Artifact, BaseArtifactSource
+from reef.core.evaluation import PolicyModel
+from reef.core.served_models import ServedArtifact
 from reef.inference.http import InferenceProxyRuntime
 from reef.runtime.jobs import JobStatus, ReleaseFormat, SavedCheckpoint, TrainingComponent, TrainingJob
 from reef.train.pipeline import PipelineConfig, PipelineSpec
@@ -115,12 +117,26 @@ class StubInferenceRuntime(InferenceProxyRuntime):
     release ID when it holds no such file. ``activated`` lists the versions
     of the releases it served, at commits, activations and starts, in order;
     ``served`` is the last one, ``None`` before the first one.
+
+    With ``answers_each_release``, the runtime answers each call from the artifact it names, as Tinker does: each
+    artifact has its own model name, ``sampler:<artifact_id>``.
     """
 
     def __init__(self, base_url: str = "http://inference-runtime", **kwargs) -> None:
         super().__init__(base_url=base_url, **kwargs)
         self.activated: list[str] = []
         self.served: str | None = None
+        self.answers_each_release = False
+
+    @property
+    def serves_artifacts_on_request(self) -> bool:
+        return self.answers_each_release
+
+    def artifact_model(self, artifact: Artifact) -> PolicyModel:
+        return PolicyModel("base", artifact.ref.release_id)
+
+    def served_artifact_on_request(self, artifact: Artifact) -> ServedArtifact:
+        return ServedArtifact(artifact.artifact_id, self.base_url, f"sampler:{artifact.artifact_id}")
 
     def activate_checkpoint(self, artifact: Artifact, *, scenario: str | None = None) -> str:
         version = self.serve(artifact)

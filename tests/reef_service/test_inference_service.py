@@ -24,31 +24,25 @@ TOKEN = "service-token"
 HEADERS = {"Authorization": f"Bearer {TOKEN}", "x-reef-scenario": "math", "x-reef-tag-session": "s1"}
 
 
-def engine_app(answers: list[str]) -> web.Application:
-    """An engine that answers as the model name of the request, unless ``answers`` names another."""
+def engine_app() -> web.Application:
+    """An engine that answers as the model name of the request."""
     app = web.Application()
 
     async def complete(request: web.Request) -> web.Response:
         body = await request.json()
-        model = answers.pop(0) if answers else body["model"]
-        return web.json_response({"model": model, "choices": [{"message": {"role": "assistant", "content": "4"}}]})
+        return web.json_response(
+            {"model": body["model"], "choices": [{"message": {"role": "assistant", "content": "4"}}]}
+        )
 
     app.router.add_post("/v1/chat/completions", complete)
     return app
 
 
-class ReportingHandler(HttpInferenceHandler):
-    """An HTTP handler whose engine reports the model name that answered."""
-
-    def answered_model(self, response: Any) -> str | None:
-        return response.get("model")
-
-
-class ReportingEngines(EngineClients):
-    """A ``ReportingHandler`` for each engine URL."""
+class Engines(EngineClients):
+    """An HTTP handler for each engine URL."""
 
     def handler(self, served: ServedArtifact) -> InferenceHandler:
-        return ReportingHandler(served.url)
+        return HttpInferenceHandler(served.url)
 
 
 def commit(release_id: str) -> CommitRecord:
@@ -69,18 +63,18 @@ def inference_records(records: Any) -> tuple[Any, ...]:
     return tuple(item for item in records.replay("math") if item.request_type is RequestType.INFERENCE)
 
 
-async def ask(tmp_path: Path, answers: list[str], *, write: bool = True) -> tuple[int, dict[str, Any], Any]:
+async def ask(tmp_path: Path, *, write: bool = True) -> tuple[int, dict[str, Any], Any]:
     storage = SQLiteScenarioStorage(tmp_path / "records")
     store = storage.open("math")
     store.commit_step(expected_step=0, commit=commit("release-1"))
     coordination = memory_coordination()
     table = coordination.served_models
     number = coordination.control_lease.acquire("control-1").number
-    async with TestServer(engine_app(answers)) as engine:
+    async with TestServer(engine_app()) as engine:
         if write:
             served = ServedArtifact("release-1", str(engine.make_url("/")), "math-v1")
             table.write(ScenarioModel("math", ACTIVE), served, control_lease_number=number)
-        app = build_inference_app(table, storage, ReportingEngines(), tokens=TOKEN)
+        app = build_inference_app(table, storage, Engines(), tokens=TOKEN)
         async with TestClient(TestServer(app)) as client:
             response = await client.post(
                 "/v1/chat/completions", headers=HEADERS, json={"model": "any", "messages": [{"role": "user"}]}
@@ -90,7 +84,7 @@ async def ask(tmp_path: Path, answers: list[str], *, write: bool = True) -> tupl
 
 @pytest.mark.unit
 def test_a_request_goes_to_the_served_artifact_and_its_record_joins_the_record_store(tmp_path: Path) -> None:
-    status, headers, records = asyncio.run(ask(tmp_path, []))
+    status, headers, records = asyncio.run(ask(tmp_path))
     assert status == 200
     assert headers[RELEASE_HEADER] == "release-1"
     (item,) = inference_records(records)
@@ -102,18 +96,9 @@ def test_a_request_goes_to_the_served_artifact_and_its_record_joins_the_record_s
 
 @pytest.mark.unit
 def test_a_scenario_without_a_served_model_is_not_found(tmp_path: Path) -> None:
-    status, _, records = asyncio.run(ask(tmp_path, [], write=False))
+    status, _, records = asyncio.run(ask(tmp_path, write=False))
     assert status == 404
     assert inference_records(records) == ()
-
-
-@pytest.mark.unit
-def test_an_engine_that_answers_as_another_model_twice_is_a_conflict_and_nothing_is_recorded(tmp_path: Path) -> None:
-    status, _, records = asyncio.run(ask(tmp_path, ["math-v0", "math-v0"]))
-    assert status == 409
-    assert inference_records(records) == ()
-    # One wrong answer is read again and retried.
-    assert asyncio.run(ask(tmp_path / "again", ["math-v0"]))[0] == 200
 
 
 class BrokenStorage(SQLiteScenarioStorage):
@@ -138,14 +123,12 @@ async def ask_failing(tmp_path: Path, *, engine_url: str | None, refuse_records:
     coordination = memory_coordination()
     table = coordination.served_models
     number = coordination.control_lease.acquire("control-1").number
-    async with TestServer(engine_app([])) as engine:
+    async with TestServer(engine_app()) as engine:
         url = engine_url or str(engine.make_url("/"))
         table.write(
             ScenarioModel("math", ACTIVE), ServedArtifact("release-1", url, "math-v1"), control_lease_number=number
         )
-        async with TestClient(
-            TestServer(build_inference_app(table, storage, ReportingEngines(), tokens=TOKEN))
-        ) as client:
+        async with TestClient(TestServer(build_inference_app(table, storage, Engines(), tokens=TOKEN))) as client:
             response = await client.post(
                 "/v1/chat/completions", headers=HEADERS, json={"model": "any", "messages": [{"role": "user"}]}
             )

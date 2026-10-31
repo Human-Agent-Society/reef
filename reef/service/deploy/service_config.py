@@ -227,6 +227,14 @@ class ServiceConfig:
         public_path=("storage", "data_store"),
         help="Data store of the deployment's items (RFC #1028): sqlite, postgres, or a DataStore plugin reference.",
     )
+    #: ``sqlite`` or ``postgres``: where the coordination tables (served models, work queues, the control lease) live.
+    #: Unset follows a built-in ``record_backend``; a plugin record backend must name it, because every process of
+    #: the deployment must share these tables. ``postgres`` uses ``record_database_url``.
+    coordination_backend: str | None = config_option(
+        None,
+        public_path=("storage", "coordination_backend"),
+        help="Coordination tables of the services: sqlite (one host) or postgres (record_database_url).",
+    )
     #: ``local``, or a ``TaskFileStore`` plugin: ``package.module:ClassName`` or module and config.
     task_file_backend: str | Mapping[str, Any] = config_option(
         "local",
@@ -375,6 +383,13 @@ class ServiceConfig:
             if isinstance(self.record_backend, str) and ":" not in self.record_backend:
                 raise ValueError("storage.record_backend must be sqlite, postgres, or 'package.module:ClassName'")
             ScenarioStorage.reference(self.record_backend, setting="storage.record_backend")
+        if self.coordination_backend not in (None, "sqlite", "postgres"):
+            raise ValueError("storage.coordination_backend must be sqlite or postgres")
+        if self.coordination_backend is None and self.record_backend not in ("sqlite", "postgres"):
+            raise ValueError(
+                "storage.record_backend is a plugin, so name where the services share their coordination tables: "
+                "set storage.coordination_backend to sqlite (processes on one host) or postgres"
+            )
         if self.data_store not in (None, "sqlite", "postgres"):
             if isinstance(self.data_store, str) and ":" not in self.data_store:
                 raise ValueError("storage.data_store must be sqlite, postgres, or 'package.module:ClassName'")
@@ -391,13 +406,18 @@ class ServiceConfig:
             raise ValueError("task-import needs both manifest and tasks-root")
         if self.task_import_manifest == "" or self.task_import_tasks_root == "":
             raise ValueError("task-import.manifest and task-import.tasks-root must be non-empty paths")
-        if self.record_backend == "postgres":
+        if "postgres" in (self.record_backend, self.coordination_backend):
             if not isinstance(self.record_database_url, str) or not self.record_database_url:
-                raise ValueError("reef.record_database_url is required for the postgres backend")
+                raise ValueError(
+                    "storage.record_database_url is required for a postgres record or coordination backend"
+                )
             postgres_url(self.record_database_url)
             validate_postgres_schema(self.record_database_schema)
         elif self.record_database_url is not None or self.record_database_schema != "reef_records":
-            raise ValueError("record_database_url and record_database_schema require reef.record_backend: postgres")
+            raise ValueError(
+                "record_database_url and record_database_schema require storage.record_backend or "
+                "storage.coordination_backend: postgres"
+            )
 
 
 def _config_service_value(config: Mapping[str, Any], *path: str, default: Any = None, expand: bool = True) -> Any:

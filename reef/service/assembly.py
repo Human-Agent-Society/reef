@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import ipaddress
 import os
-import secrets
 from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import asdict
@@ -37,6 +36,7 @@ from reef.scenario.admission import ScenarioAdmission, ScenarioLimits
 from reef.service.app import create_app
 from reef.service.artifact_evaluations import ArtifactEvaluations, LocalCandidateEndpoints, NewArtifacts
 from reef.service.artifact_imports import ArtifactImports
+from reef.service.auth import evaluation_token_for
 from reef.service.data_service import DataWorker
 from reef.service.data_transfer import ArchiveWriters
 from reef.service.deploy.service_config import ServiceConfig, service_owned_keys
@@ -208,6 +208,12 @@ def composed_training_recipe(
         raise
 
 
+def serving_recipe(settings: ServiceConfig, env: Mapping[str, str]) -> Recipe:
+    """The deployment's recipe, as every process of the deployment builds it: its runtime is the same in each, and
+    only control opens it (``InferenceRuntime.open``)."""
+    return _serving_recipe(_require_non_empty(settings.recipe, "reef.recipe"), settings, env)
+
+
 def _serving_recipe(selected: str, settings: ServiceConfig, env: Mapping[str, str]) -> Recipe:
     """Build the one recipe ``reef.recipe`` names.
 
@@ -303,9 +309,15 @@ def build_data_store(settings: ServiceConfig, task_files: TaskFileStore) -> Data
 
 
 def open_service_coordination(settings: ServiceConfig) -> Coordination:
-    """The deployment's coordination store, on the record backend, database and schema of ``settings``."""
+    """The deployment's coordination store: on ``storage.coordination_backend``, which defaults to the built-in
+    record backend, with the record database and schema of ``settings``."""
+    backend = settings.coordination_backend
+    if backend is None:
+        if not isinstance(settings.record_backend, str) or settings.record_backend not in ("sqlite", "postgres"):
+            raise ValueError("a plugin storage.record_backend needs storage.coordination_backend")
+        backend = settings.record_backend
     return open_coordination(
-        settings.record_backend,
+        backend,
         agent_record_dir=settings.agent_record_dir,
         record_database_url=settings.record_database_url,
         record_database_schema=settings.record_database_schema,
@@ -500,8 +512,8 @@ def build_app(
     # A composite's model calls come back to this service, which answers only once the app listens: its local
     # cycles wait for that, so a harness step started by the preload never fails its calls into a skip.
     # Evaluation calls run candidate code, so they get a token of their own that opens the evaluation routes alone,
-    # never a service token; a restart issues a new one with the recipe it rebuilds.
-    evaluation_token = secrets.token_urlsafe(32) if settings.tokens else None
+    # never a service token. Every process derives the same one from the service tokens.
+    evaluation_token = evaluation_token_for(settings.tokens)
     new_artifacts = NewArtifacts()
     dispatcher = build_dispatcher(
         settings,

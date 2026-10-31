@@ -189,14 +189,17 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync):
                 coordination,
                 self,
                 lease,
+                runtime=runtime,
                 instance_id=control_id,
                 stop_delay_seconds=CACHE_SECONDS + request_timeout_seconds,
             )
             self.workers.add(publisher)
             self.publisher = publisher
             if runtime is not None:
-                # Control does not activate again at start-up what the engines still serve: the runtime takes over
-                # each value that served_models names for its engine, before any scenario loads.
+                # Only control changes the engines. It takes them over, and does not activate again at start-up what
+                # they still serve: the runtime adopts each value that served_models names for its engine, before
+                # any scenario loads.
+                runtime.open()
                 for served in coordination.served_models.all_served():
                     if served.url == runtime.base_url:
                         runtime.adopt(served)
@@ -334,10 +337,19 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync):
 
     def scenario_committed(self, instance: Scenario) -> None:
         """Write what ``instance`` serves now to ``served_models``, in the step of the commit that changed it, and
-        ask the data service to copy the scenario's artifacts to artifact items."""
-        if self.publisher is not None:
-            self.publisher.publish(instance)
-        self.request_artifact_copy(instance.name)
+        ask the data service to copy the scenario's artifacts to artifact items.
+
+        The commit is durable already, so a failed write does not undo it: the publisher's next round writes the rows
+        again, and the next commit asks for the copy again.
+        """
+        try:
+            if self.publisher is not None:
+                self.publisher.publish(instance)
+            self.request_artifact_copy(instance.name)
+        except Exception:
+            logger.exception(
+                "scenario %r: the commit is durable, but its served models were not written", instance.name
+            )
 
     def scenario_reloaded(self, instance: Scenario) -> None:
         """A failure rebuilt ``instance``: ask the samples service again for the records after its progress. Its
@@ -838,7 +850,6 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync):
         """Stop all scenario workers, then close this dispatcher's runtime."""
         if self.local_workers.closed.is_set():
             return
-        self.workers.stop()
         local_workers = self.local_workers.begin_close()
         if self.background_threads.preload_thread is not None:
             self.background_threads.preload_thread.join()
@@ -846,6 +857,9 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync):
             self.background_threads.idle_unload_thread.join()
         for worker in local_workers:
             worker.thread.join()
+        # The service workers stop after the local cycles, so that the publisher releases the control lease only
+        # when no cycle of this instance can commit any more.
+        self.workers.stop()
         if self.background_threads.metrics_thread is not None:
             self.background_threads.metrics_thread.join()
             self.record_operational_metrics()

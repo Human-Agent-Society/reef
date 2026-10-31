@@ -69,7 +69,8 @@ class ScenarioLifecycle(ABC):
     @abstractmethod
     def scenario_committed(self, instance: Scenario) -> None:
         """React to a commit of ``instance`` that can change what it serves: a training step, an activation, a
-        served or stopped artifact. The caller holds the scenario's lock."""
+        served or stopped artifact. The commit is durable already, so this does not raise. The caller holds the
+        scenario's lock."""
 
     @abstractmethod
     def close_replaced(self, instance: Scenario) -> None:

@@ -445,12 +445,6 @@ class InferenceHandler(ABC):
         (``ServedArtifact.model_name``). The default names it as the request's ``model``."""
         return {**payload, "model": model_name}
 
-    def answered_model(self, response: Mapping[str, Any]) -> str | None:
-        """The model name under which the engine says it answered, or None when the engine does not say it.
-        An inference replica compares it with the name it asked for. The default reports none, because a
-        provider can answer under another spelling of the same model."""
-        return None
-
     async def inference_stream(self, artifact: Artifact, path: str, payload: dict[str, Any]) -> InferenceStream:
         """Return a stream for one native request payload.
 
@@ -553,6 +547,14 @@ class InferenceRuntime(AdapterWeightRuntime):
             # The base URL is no HTTP(S) URL that another process can call.
             return None
 
+    def open(self) -> None:
+        """Take control of the engines, before control adopts or activates anything; a second call does nothing.
+
+        Only the process that runs control calls it. Every other process builds the same runtime and never opens
+        it, so it changes no engine and only sends requests through ``inference_handler``. The default does
+        nothing: a runtime that controls no engine has nothing to open.
+        """
+
     def adopt(self, served: ServedArtifact) -> None:
         """Take over ``served``, which a ``served_models`` row names for this runtime's engine, from before this
         runtime existed (a control restart): when the engine still serves it, the next activation of the same
@@ -602,20 +604,27 @@ class InferenceRuntime(AdapterWeightRuntime):
     def serves_artifacts_on_request(self) -> bool:
         """Whether this runtime answers each call from the artifact that the call names, without loading it.
 
-        False, the default, for a runtime that serves only the artifact it has loaded; its ``artifact_model`` is
-        None for every artifact. A runtime that returns True overrides ``artifact_model`` to return a model.
+        It is the one statement of that capability. False, the default, for a runtime that serves only the artifact
+        it has loaded. A runtime that returns True overrides ``artifact_model`` and ``served_artifact_on_request``;
+        the defaults of both refuse.
         """
         return False
 
-    def artifact_model(self, artifact: Artifact) -> PolicyModel | None:
-        """The model that this runtime serves for ``artifact`` on request, without loading it.
+    def artifact_model(self, artifact: Artifact) -> PolicyModel:
+        """The model that an evaluation rollout names to sample ``artifact`` on request, without a load.
 
-        ``None``, the default, means the runtime serves only the artifact it has loaded, so it cannot answer a call
-        for another artifact (``serves_artifacts_on_request`` is False). A runtime whose handler answers each call from the artifact that the call names, such
-        as a sampler for each checkpoint, returns that artifact's model. Raise ``ValueError`` when ``artifact`` is
+        Raise ``ReefError`` when ``serves_artifacts_on_request`` is False, and ``ValueError`` when ``artifact`` is
         not one that this runtime can serve.
         """
-        return None
+        raise ReefError("this runtime serves only the artifact it has loaded, so it serves no artifact on request")
+
+    def served_artifact_on_request(self, artifact: Artifact) -> ServedArtifact | None:
+        """The ``served_models`` value that reaches ``artifact`` on request: the engine's ``base_url`` and the model
+        name that samples that artifact. None when the engine has no address that another process can call.
+
+        Raise as ``artifact_model`` does.
+        """
+        raise ReefError("this runtime serves only the artifact it has loaded, so it serves no artifact on request")
 
     @property
     def per_scenario_adapters(self) -> bool:

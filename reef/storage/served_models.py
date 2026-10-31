@@ -44,17 +44,14 @@ class ServedModels(ABC):
 class ServedModelsWriter(ServedModels):
     """Write access to ``served_models``, for the control instance that holds the control lease.
 
-    Every operation takes ``control_lease_number`` and raises ``ControlLeaseConflict`` when it is not the number
-    that ``current_lease_number`` reports, without a change.
+    Every operation that changes the table (``write``, ``remove``, ``schedule_stop``, ``delete_stop``) takes
+    ``control_lease_number`` and raises ``ControlLeaseConflict``, without a change, when it is not the number of the
+    control lease that holds now (``ControlLease.current``). The reads take none.
 
     Purpose: control writes the served artifact of each key at activation and at ``serve`` of an artifact beside
     the active one (``write``, ``remove``); it schedules the stop of a replaced artifact (``schedule_stop``) and
     stops the due ones (``due_stops``, ``delete_stop``).
     """
-
-    @abstractmethod
-    def current_lease_number(self) -> int:
-        """The ``control_lease_number`` that writes must carry now."""
 
     @abstractmethod
     def write(self, key: ScenarioModel, served: ServedArtifact, *, control_lease_number: int) -> None:

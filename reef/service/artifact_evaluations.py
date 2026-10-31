@@ -11,7 +11,7 @@ here.
 ``reef.service.routes.evaluations`` adapts it to HTTP.
 
 This version evaluates a model artifact (a ``model`` or ``model_adapter`` component) on a runtime that serves an
-artifact on request (``InferenceRuntime.artifact_model``), with a Harbor agent, on the Harbor tasks of the eval
+artifact on request (``InferenceRuntime.serves_artifacts_on_request``), with a Harbor agent, on the Harbor tasks of the eval
 split of the scenario's imported tasks (its sample store). It refuses a harness artifact, and a model artifact on any
 other runtime.
 """
@@ -57,7 +57,7 @@ from reef.harness.client.tasks import TaskLab
 from reef.scenario.scenario import Scenario
 from reef.storage.commits import CommitRecord
 from reef.storage.coordination import instance_id
-from reef.storage.evaluations import EvaluationStateConflict, EvaluationStore, StoredEvaluation
+from reef.storage.evaluations import StoredEvaluation
 from reef.storage.observer import RecordObserver
 from reef.storage.work_queue import NewWork, WorkItem
 
@@ -69,6 +69,8 @@ LOCAL_ROLLOUT_WORKERS = 4
 STOPPED_ERROR = "the service that held this evaluation stopped before it ended"
 #: The owner that every evaluation of the work queue stores: any service instance reads its rollouts.
 QUEUE_OWNER = "evaluations-queue"
+#: How many of a scenario's newest evaluations ``fail_stopped`` reads.
+MAX_STOPPED_EVALUATIONS = 1000
 #: The seconds between two reads of the queue's changes when nothing changed.
 RESULT_POLL_SECONDS = 0.2
 #: How often Reef tries to activate an artifact that passed its evaluation while training results wait to commit,
@@ -171,7 +173,7 @@ class ArtifactEvaluations:
 
     Purpose: the evaluation routes call ``start``, ``get`` and ``newest``, and the scenario update route calls
     ``configure``. ``open`` starts the threads that evaluate new artifacts, that run this object's workers, and
-    that end each evaluation when its rollouts end; ``close`` stops them.
+    that end each evaluation when its rollouts end; ``close`` stops them. ``get`` and ``newest`` only read.
     """
 
     def __init__(
@@ -318,13 +320,12 @@ class ArtifactEvaluations:
         _, release = current.resolve_artifact(artifact_id, component)
         artifact = release.materialize()
         runtime = current.runtime
-        model = None if runtime is None else runtime.artifact_model(artifact)
-        if model is None:
+        if runtime is None or not runtime.serves_artifacts_on_request:
             raise ReefError(
                 f"scenario {current.name!r}'s runtime serves only its current artifact, so it cannot evaluate an "
                 "artifact on request"
             )
-        return request, artifact, model
+        return request, artifact, runtime.artifact_model(artifact)
 
     def accept(
         self,
@@ -346,17 +347,17 @@ class ArtifactEvaluations:
                 for stored in current.store.samples.imported_tasks(split="eval")
                 if isinstance(stored.sample, TaskSample)
             }
-            unknown = sorted(set(request.task_names) - set(held))
-            if unknown:
-                raise ValueError(f"the eval split of the imported tasks holds no tasks {unknown}")
-            names = request.task_names or tuple(held)
-            if not names:
-                raise ValueError("the eval split of the imported tasks holds no task to evaluate on")
-            evaluation_id = uuid.uuid4().hex
-            stored = current.store.evaluations.create(
-                evaluation_id=evaluation_id, owner=QUEUE_OWNER, request=request, created_at=time.time(), state=state
-            )
+        unknown = sorted(set(request.task_names) - set(held))
+        if unknown:
+            raise ValueError(f"the eval split of the imported tasks holds no tasks {unknown}")
+        names = request.task_names or tuple(held)
+        if not names:
+            raise ValueError("the eval split of the imported tasks holds no task to evaluate on")
+        evaluation_id = uuid.uuid4().hex
         agent = harbor_agent(request.harness)
+        # The rollouts go to the queue before the evaluation exists, so that no reader sees an evaluation whose
+        # rollouts are missing. An evaluation runs on all of its tasks or on none: when a step fails, the added
+        # rollouts are cancelled and no evaluation is stored.
         added: list[str] = []
         try:
             for index, name in enumerate(names):
@@ -384,13 +385,22 @@ class ArtifactEvaluations:
                         )
                     )
                     added.append(rollout.item_id())
+            with self.dispatcher.locked_scenario(scenario) as current:
+                stored = current.store.evaluations.create(
+                    evaluation_id=evaluation_id,
+                    owner=QUEUE_OWNER,
+                    request=request,
+                    created_at=time.time(),
+                    state=state,
+                )
         except BaseException as exc:
-            # An evaluation runs on all of its tasks or on none: the added rollouts are cancelled and it fails.
-            error = f"could not queue the rollouts: {type(exc).__name__}: {exc}"
+            error = f"the evaluation was not stored: {type(exc).__name__}: {exc}"
             for item_id in added:
                 self.queue.cancel(EVALUATIONS_QUEUE, item_id, error)
-            self.end(scenario, evaluation_id, request, result=None, error=error)
             raise
+        # The workers can end every rollout before the evaluation exists; the results thread then found nothing to
+        # end, so end it here.
+        self.settle(scenario, evaluation_id)
         return stored
 
     def rollouts(self, evaluation_id: str, scenario: str) -> tuple[WorkItem, ...]:
@@ -434,7 +444,9 @@ class ArtifactEvaluations:
         return views
 
     def read_results(self) -> None:
-        """End each evaluation whose rollouts are all final, until ``close``."""
+        """Fail the evaluations whose rollouts the queue lost (``fail_stopped``), then end each evaluation whose
+        rollouts are all final, until ``close``."""
+        self.fail_stopped()
         sequence = 0
         while not self.stopped.is_set():
             try:
@@ -532,29 +544,32 @@ class ArtifactEvaluations:
             scenario,
         )
 
+    def fail_stopped(self) -> None:
+        """Fail each queued or running evaluation whose rollouts are not in the queue, with ``STOPPED_ERROR``.
+
+        ``accept`` queues the rollouts before it stores the evaluation, so this happens only when the queue lost
+        them: an in-memory queue, and a service that stopped. It loads each known scenario once.
+        """
+        for row in self.dispatcher.list_scenarios():
+            scenario = row["scenario"]
+            try:
+                with self.dispatcher.locked_scenario(scenario) as current:
+                    evaluations = current.store.evaluations
+                    for stored in evaluations.newest(limit=MAX_STOPPED_EVALUATIONS):
+                        if stored.state in ("queued", "running") and not self.rollouts(stored.evaluation_id, scenario):
+                            evaluations.fail(stored.evaluation_id, error=STOPPED_ERROR, finished_at=time.time())
+            except Exception:
+                logger.exception("could not fail the stopped evaluations of %s", scenario)
+
     def get(self, scenario: str, evaluation_id: str) -> StoredEvaluation | None:
-        """The evaluation ``evaluation_id`` of ``scenario``, or None; one whose rollouts left the queue is failed."""
+        """The evaluation ``evaluation_id`` of ``scenario``, or None."""
         with self.dispatcher.locked_scenario(scenario) as current:
-            stored = current.store.evaluations.get(evaluation_id)
-            return None if stored is None else self.settled(scenario, current.store.evaluations, stored)
+            return current.store.evaluations.get(evaluation_id)
 
     def newest(self, scenario: str, *, limit: int = 50) -> tuple[StoredEvaluation, ...]:
-        """At most ``limit`` evaluations of ``scenario``, newest first, as ``get`` reads each."""
+        """At most ``limit`` evaluations of ``scenario``, newest first."""
         with self.dispatcher.locked_scenario(scenario) as current:
-            evaluations = current.store.evaluations
-            return tuple(self.settled(scenario, evaluations, stored) for stored in evaluations.newest(limit=limit))
-
-    def settled(self, scenario: str, evaluations: EvaluationStore, stored: StoredEvaluation) -> StoredEvaluation:
-        """``stored``, failed first when it is queued or running but its rollouts are not in the queue."""
-        if stored.state not in ("queued", "running"):
-            return stored
-        if stored.owner == QUEUE_OWNER and self.rollouts(stored.evaluation_id, scenario):
-            return stored
-        try:
-            return evaluations.fail(stored.evaluation_id, error=STOPPED_ERROR, finished_at=time.time())
-        except EvaluationStateConflict:
-            # Another reader failed it first.
-            return evaluations.get(stored.evaluation_id) or stored
+            return current.store.evaluations.newest(limit=limit)
 
 
 __all__ = [

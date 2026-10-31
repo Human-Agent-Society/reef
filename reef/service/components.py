@@ -27,26 +27,23 @@ from aiohttp import web
 from reef.evaluation.rollout_worker import EvaluationRolloutWorker
 from reef.execution.workers import SERVICE_COMPONENTS, ServiceWorkers
 from reef.observability import build_record_observer
+from reef.runtime.deployment import close_runtimes
 from reef.service.app import create_data_app
 from reef.service.artifact_evaluations import LOCAL_ROLLOUT_WORKERS, LocalCandidateEndpoints
-from reef.service.assembly import build_app, build_dispatcher, open_scenario_storage, open_service_coordination
-from reef.service.auth import create_authentication_middleware
+from reef.service.assembly import (
+    build_app,
+    build_dispatcher,
+    open_scenario_storage,
+    open_service_coordination,
+    serving_recipe,
+)
+from reef.service.auth import evaluation_token_for
 from reef.service.deploy.service_config import ServiceConfig
-from reef.service.deploy.serving import inference_handler_factory_for
-from reef.service.inference_service import ConfiguredEngineClients, build_inference_app
+from reef.service.engine_clients import DeploymentEngineClients
+from reef.service.inference_service import build_inference_app
+from reef.service.web import service_application
 from reef.storage.coordination import instance_id
 from reef.storage.observer import ObservedScenarioStorage
-
-
-def health_app(settings: ServiceConfig) -> web.Application:
-    """An app that answers ``/healthz`` alone, behind the service tokens."""
-    app = web.Application(middlewares=[create_authentication_middleware(settings.tokens)])
-
-    async def healthz(request: web.Request) -> web.Response:
-        return web.json_response({"status": "ok"})
-
-    app.router.add_get("/healthz", healthz)
-    return app
 
 
 def build_component_app(
@@ -65,6 +62,10 @@ def build_component_app(
     if component == "control":
         return build_app(settings, environ=env, components=frozenset({"control"}))
     if component == "inference":
+        # The same recipe as control's, whose runtime this process never opens: it reaches each engine with the
+        # runtime's own request handler, as control does, and changes no engine.
+        recipe = serving_recipe(settings, env)
+        runtime = recipe.runtime
         coordination = open_service_coordination(settings)
         try:
             storage, _ = open_scenario_storage(settings)
@@ -74,30 +75,25 @@ def build_component_app(
                 storage = ObservedScenarioStorage(storage, record_observer)
         except BaseException:
             coordination.close()
+            close_runtimes(recipe.training_component, runtime)
             raise
-        try:
-            # The engines are reached with the deployment's handler type, as the runtimes of control reach them.
-            app = build_inference_app(
-                coordination.served_models,
-                storage,
-                ConfiguredEngineClients(
-                    inference_handler_factory_for(settings.inference_handler_factory),
-                    settings.inference_handler_config,
-                    model_path=settings.model_path or "",
-                    timeout_seconds=settings.inference_timeout_s,
-                    api_key=settings.upstream_api_key or None,
-                ),
-                tokens=settings.tokens,
-                timeout_seconds=settings.inference_timeout_s,
-            )
-        except BaseException:
-            storage.close()
-            coordination.close()
-            raise
+        timeout_seconds = settings.inference_timeout_s if runtime is None else runtime.inference_timeout_s
+        app = build_inference_app(
+            coordination.served_models,
+            storage,
+            DeploymentEngineClients(
+                runtime, provider_key=settings.upstream_api_key or None, timeout_seconds=timeout_seconds
+            ),
+            tokens=settings.tokens,
+            evaluation_tokens=evaluation_token_for(settings.tokens),
+            timeout_seconds=timeout_seconds,
+            for_codex=recipe.harness_adapter == "codex",
+        )
 
         async def close_inference(app: web.Application) -> None:
             storage.close()
             coordination.close()
+            close_runtimes(recipe.training_component, runtime)
 
         app.on_cleanup.append(close_inference)
         return app
@@ -115,7 +111,7 @@ def build_component_app(
         if component == "training" and dispatcher.recipe.training_component is None:
             dispatcher.close()
             raise ValueError(f"recipe {settings.recipe!r} trains no weights, so it has no training service")
-        app = health_app(settings)
+        app = service_application(settings.tokens)
 
         async def close_dispatcher(app: web.Application) -> None:
             dispatcher.close()
@@ -133,7 +129,7 @@ def build_component_app(
             )
         )
     workers.start()
-    app = health_app(settings)
+    app = service_application(settings.tokens)
 
     async def close_evaluation(app: web.Application) -> None:
         workers.stop()
@@ -143,4 +139,4 @@ def build_component_app(
     return app
 
 
-__all__ = ["build_component_app", "health_app"]
+__all__ = ["build_component_app"]

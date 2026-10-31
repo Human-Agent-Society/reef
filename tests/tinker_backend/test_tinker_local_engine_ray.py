@@ -217,6 +217,7 @@ def control_plane(tmp_path, monkeypatch, url, repository):
     """
     from recipes.tttd.recipe import TTTDRecipe
     from reef.dispatcher import Dispatcher
+    from reef.storage.sql_coordination import open_coordination
     from reef.storage.sqlite import SQLiteScenarioStorage
     from reef.train.pipeline import PipelineConfig
 
@@ -268,6 +269,10 @@ def control_plane(tmp_path, monkeypatch, url, repository):
             repository,
             local_artifact_dir=tmp_path / "staged",
             scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
+            # A file, as a deployment keeps it: a restarted control plane reads what the engines serve.
+            coordination=open_coordination(
+                "sqlite", agent_record_dir=str(tmp_path / "records"), record_database_url=None
+            ),
         )
         yield dispatcher, component, inference
     finally:
@@ -364,16 +369,14 @@ def test_tinker_trains_in_the_control_plane_and_serves_on_an_inference_component
                 ]
                 # Serving downloads the adapter after training, in a session of its own.
                 assert [event["rows"] for event in events if event["event"] == "forward_backward"][-1] == 4
-        # Closing the control plane stops the engines; the component keeps serving.
-        with pytest.raises(RuntimeError, match="409"):
-            control.call("GET", "runtime-load-ids")
-        assert served_adapters(tmp_path) == []
-        # A restarted control plane starts the engines again and loads the committed adapter before it serves.
+        # Closing the control plane leaves the engines serving what they served, for the next control instance.
+        assert control.call("GET", "runtime-load-ids")["runtime_load_ids"] == [published] * 2
+        # A restarted control plane attaches to the engines and serves the committed adapter that they still hold,
+        # with no second load.
         with control_plane(tmp_path, monkeypatch, url, repository) as (dispatcher, _, inference):
             scenario = dispatcher.get_or_create_scenario(SCENARIO)
-            served = inference.serving_adapter_runtime_load_id(SCENARIO)
-            assert served is not None and served != published
-            assert control.call("GET", "runtime-load-ids")["runtime_load_ids"] == [served] * 2
+            assert inference.serving_adapter_runtime_load_id(SCENARIO) == published
+            assert control.call("GET", "runtime-load-ids")["runtime_load_ids"] == [published] * 2
             (adapter,) = served_adapters(tmp_path)
             assert (adapter / "adapter_config.json").is_file()
             assert loop_state(scenario).start == str(start)

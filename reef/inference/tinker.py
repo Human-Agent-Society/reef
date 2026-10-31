@@ -24,6 +24,7 @@ from reef.artifact.artifact import Artifact
 from reef.artifact.sources import read_reference
 from reef.core.config import config_option
 from reef.core.evaluation import ArtifactKind, PolicyModel
+from reef.core.served_models import ServedArtifact
 from reef.runtime.deployment import RuntimeFactory, config_secret
 from reef.runtime.interfaces import (
     InferenceHandler,
@@ -126,6 +127,14 @@ class TinkerInferenceRuntime(InferenceRuntime):
     @property
     def serves_artifacts_on_request(self) -> bool:
         return True
+
+    def served_artifact_on_request(self, artifact: Artifact) -> ServedArtifact | None:
+        """``artifact``'s own sampler on the service: a call that names it samples that artifact's weights."""
+        try:
+            return ServedArtifact(artifact.artifact_id, self.base_url, self.sampler_path(artifact) or self._model)
+        except ValueError:
+            # The base URL is no HTTP(S) URL that another process can call.
+            return None
 
     def artifact_model(self, artifact: Artifact) -> PolicyModel:
         """The model that serves ``artifact``: each call samples its own artifact.

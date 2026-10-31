@@ -16,20 +16,15 @@ from reef.dispatcher.served import PublishedEngines
 from reef.runtime.interfaces import FixedEngineClients, InferenceHandler
 from reef.service.artifact_evaluations import ArtifactEvaluations
 from reef.service.artifact_imports import ArtifactImports
-from reef.service.auth import create_authentication_middleware
 from reef.service.cors import configure_browser_access
-from reef.service.errors import translate_errors
 from reef.service.inference_service import InferenceReplica, ServedModelsCache
 from reef.service.request_service import RequestService
 from reef.service.routes import register_data_service_routes, register_routes
+from reef.service.web import service_application
 from reef.storage.records import RecordRetention
 
 logger = logging.getLogger(__name__)
 _RECORD_RETENTION_INTERVAL_SECONDS = 60.0
-#: The largest request body the service reads. aiohttp's default is 1 MiB, and a coding agent's first call carries
-#: its whole context: Claude Code with a dozen MCP servers and a few hundred skills sends several MiB, which the
-#: default answered with 413 and the agent reported as a request too large.
-MAX_REQUEST_BYTES = 64 * 1024 * 1024
 REQUEST_SERVICE_KEY = web.AppKey("reef_request_service", RequestService)
 
 
@@ -69,9 +64,7 @@ def create_data_app(
     if "data" not in dispatcher.components:
         raise ValueError("the data app runs the data service: build its dispatcher with the data service")
     request_service = RequestService(dispatcher)
-    app = web.Application(
-        middlewares=[create_authentication_middleware(tokens), translate_errors], client_max_size=MAX_REQUEST_BYTES
-    )
+    app = service_application(tokens)
     configure_browser_access(app, console_origins)
     app[REQUEST_SERVICE_KEY] = request_service
     register_data_service_routes(app, request_service=request_service, evaluations=ArtifactEvaluations(dispatcher))
@@ -124,10 +117,7 @@ def create_app(
         for_codex=dispatcher.recipe.harness_adapter == "codex",
     )
     request_service = RequestService(dispatcher)
-    app = web.Application(
-        middlewares=[create_authentication_middleware(tokens, evaluation_tokens=evaluation_tokens), translate_errors],
-        client_max_size=MAX_REQUEST_BYTES,
-    )
+    app = service_application(tokens, evaluation_tokens=evaluation_tokens)
     configure_browser_access(app, console_origins)
     app[REQUEST_SERVICE_KEY] = request_service
     artifact_evaluations = ArtifactEvaluations(dispatcher) if evaluations is None else evaluations

@@ -21,7 +21,6 @@ from reef.artifact.artifact import ArtifactNotFound
 from reef.artifact.files import ArtifactFiles
 from reef.artifact.sources import REFERENCE_FILE, DirectorySource, HuggingFaceRevision
 from reef.core.errors import CommitPending, ReefError, TrainingStartRefused
-from reef.core.evaluation import PolicyModel
 from reef.dispatcher import Dispatcher
 from reef.dispatcher.errors import local_error_source
 from reef.storage.sqlite import SQLiteScenarioStorage
@@ -407,7 +406,7 @@ def test_a_served_harness_binds_the_weights_served_now_and_leaves_the_active_rel
         with pytest.raises(ReefError, match="answers only from the release it has loaded"):
             scenario.serve(artifact_id, HARNESS)
 
-        runtime.artifact_model = lambda artifact: PolicyModel("base", artifact.ref.release_id)
+        runtime.answers_each_release = True
         served = scenario.serve(artifact_id, HARNESS)
         assert served.artifact_id == artifact_id and served.release_id != first
         release = scenario.served_release(artifact_id)

@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from reef.core.served_models import ACTIVE, ScenarioModel, ServedArtifact
+from reef.core.served_models import ACTIVE, ScenarioModel, ScheduledStop, ServedArtifact
 from reef.dispatcher.served import CACHE_SECONDS, ControlInstance, ServedModelsPublisher, wait_for_control_lease
 from reef.storage.coordination import Coordination
 from reef.storage.sql_coordination import (
@@ -23,6 +23,7 @@ class Runtime:
 
     def __init__(self) -> None:
         self.release = "release-1"
+        self.base_url = "http://engine:8000"
         self.inference_handler = object()
         self.stopped: list[ServedArtifact] = []
 
@@ -51,6 +52,13 @@ class Registry:
         return self.scenario if scenario == "math" else None
 
 
+class EmptyRegistry(Registry):
+    """A registry that has loaded no scenario yet."""
+
+    def loaded_scenarios(self) -> tuple[SimpleNamespace, ...]:
+        return ()
+
+
 class Instance(ControlInstance):
     def __init__(self) -> None:
         self.lost = 0
@@ -61,9 +69,8 @@ class Instance(ControlInstance):
 
 def coordination() -> Coordination:
     database = SQLiteCoordinationDatabase(None)
-    return Coordination(
-        database, SQLWorkQueue(database), SQLServedModels(database), SQLControlLease(database), SQLMarks(database)
-    )
+    lease = SQLControlLease(database)
+    return Coordination(database, SQLWorkQueue(database), SQLServedModels(database, lease), lease, SQLMarks(database))
 
 
 @pytest.mark.unit
@@ -72,7 +79,13 @@ def test_the_active_artifact_is_published_and_a_replaced_value_is_stopped_after_
     store = coordination()
     lease = store.control_lease.acquire("control-1", now=99.0)
     publisher = ServedModelsPublisher(
-        Registry(runtime), store, Instance(), lease, instance_id="control-1", stop_delay_seconds=CACHE_SECONDS + 10
+        Registry(runtime),
+        store,
+        Instance(),
+        lease,
+        runtime=None,
+        instance_id="control-1",
+        stop_delay_seconds=CACHE_SECONDS + 10,
     )
     key = ScenarioModel("math", ACTIVE)
     first = ServedArtifact("release-1", "http://engine:8000", "math-release-1")
@@ -102,13 +115,16 @@ def test_a_standby_takes_over_when_the_lease_expires_and_the_old_instance_stops_
         store,
         first,
         store.control_lease.acquire("control-1", now=100.0),
+        runtime=None,
         instance_id="control-1",
         stop_delay_seconds=60,
     )
     assert active.run_once(now=100.0)
     assert store.control_lease.acquire("control-2", now=110.0) is None
     taken = store.control_lease.acquire("control-2", now=131.0)
-    standby = ServedModelsPublisher(registry, store, second, taken, instance_id="control-2", stop_delay_seconds=60)
+    standby = ServedModelsPublisher(
+        registry, store, second, taken, runtime=None, instance_id="control-2", stop_delay_seconds=60
+    )
     assert standby.run_once(now=131.0)
     assert store.control_lease.current().instance_id == "control-2"
     assert not active.run_once(now=132.0)
@@ -120,7 +136,7 @@ def test_a_stopped_instance_releases_the_lease_so_the_next_one_starts_at_once() 
     store = coordination()
     lease = wait_for_control_lease(store.control_lease, "control-1", poll_seconds=0.01)
     active = ServedModelsPublisher(
-        Registry(Runtime()), store, Instance(), lease, instance_id="control-1", stop_delay_seconds=60
+        Registry(Runtime()), store, Instance(), lease, runtime=None, instance_id="control-1", stop_delay_seconds=60
     )
     assert active.run_once()
     active.stop()
@@ -136,7 +152,29 @@ def test_an_instance_whose_lease_expired_while_it_started_stops_at_its_first_rou
     # A slow start-up: a standby takes the expired lease before the first round.
     assert store.control_lease.acquire("control-2", now=131.0) is not None
     publisher = ServedModelsPublisher(
-        Registry(Runtime()), store, instance, lease, instance_id="control-1", stop_delay_seconds=60
+        Registry(Runtime()), store, instance, lease, runtime=None, instance_id="control-1", stop_delay_seconds=60
     )
     assert not publisher.run_once(now=132.0)
     assert instance.lost == 1
+
+
+@pytest.mark.unit
+def test_a_stop_that_the_former_control_instance_left_is_applied_before_any_scenario_loads() -> None:
+    runtime = Runtime()
+    store = coordination()
+    old = ServedArtifact("release-0", runtime.base_url, "math-release-0")
+    former = store.control_lease.acquire("control-1", now=100.0)
+    store.served_models.schedule_stop(ScheduledStop(old, 110.0), control_lease_number=former.number)
+    lease = store.control_lease.acquire("control-2", now=131.0)
+    publisher = ServedModelsPublisher(
+        EmptyRegistry(runtime),
+        store,
+        Instance(),
+        lease,
+        runtime=runtime,
+        instance_id="control-2",
+        stop_delay_seconds=60,
+    )
+    assert publisher.run_once(now=131.0)
+    assert runtime.stopped == [old]
+    assert store.served_models.due_stops(131.0) == ()
