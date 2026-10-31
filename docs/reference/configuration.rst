@@ -458,6 +458,14 @@ option before the first job. The driver takes out Reef's own options, such as
 ``--reef-checkpoint-policy``, and the loss family's options, then passes the
 rest to Slime's native parser.
 
+Every Slime actor and critic builds through Reef's Megatron model provider; a
+``custom-model-provider-path`` names a provider it chains behind its own. When
+the checkpoint's ``config.json`` declares ``rope_scaling`` of type ``yarn``, the
+provider installs the same YaRN rotary embedding in Megatron, with the
+attention factor the Hugging Face model applies, and turns the fused RoPE
+kernel off. ``rotary-base`` must equal the config's ``rope_theta``. Serve and
+train one checkpoint directory, so both sides read the same scaling.
+
 ``inference.handler-config`` has a different owner: it configures Reef's
 selected ``inference.handler-factory`` adapter, for example its tool parser.
 The factory path must name an ``InferenceHandler`` subclass with a
