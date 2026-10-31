@@ -11,6 +11,111 @@ Its official agent loop owns environment resets, tools, budgets, termination, an
 The harness connects the model transport to Reef and reports the official scalar reward.
 Hidden rules, ground-truth actions, and verifier details never enter SAO feedback.
 
+## Latest experiment: warmup 20, five epochs per window
+
+The completed Qwen3-8B run scored **189/384 (49.22%)**, versus **144/384 (37.50%)** for the bare model: **+11.72 percentage points**.
+Every window improved over the recorded baseline.
+
+![Retail L1 window and category scores for the bare model and five-epoch SAO run](assets/retail_l1_warmup20_epoch5_results.png)
+
+### Training and evaluation protocol
+
+Each window receives five passes over its serving tasks before its held-out tests run once.
+Each pass collects fresh tool-use trajectories from the current actor, with one trajectory per task.
+It does not replay the same sampled trajectories five times.
+Actor, critic, and optimizer state continue from W0 through W5.
+Tests use frozen weights and submit no training feedback.
+
+| Configuration | Completed experiment |
+| --- | --- |
+| Model / GPUs | Qwen3-8B / 2×B200, local colocate port |
+| Actor / critic | Full-parameter actor / self-attention frozen in the critic |
+| Mode / rollout seed | Blind / 42 |
+| Global / micro batch | 64 / 8; each epoch trains its smaller window tail |
+| Context / output per call | 40,960 / 16,384 tokens |
+| Task budgets | 100 model calls, 50 budgeted tool calls, 256,000 output tokens |
+| Sampling | Temperature 1, top-p 1; one rollout per task per epoch |
+| Learning rates | Actor `1e-6`, critic `5e-6` |
+| Warmup | 20 extra passes on the first 64 W0 trajectories, with two critic updates per pass |
+| Normal training | Two critic updates and one actor update per batch |
+| Total | 720 unique serving tasks, 3,600 fresh trajectories, 70 actor updates, 180 critic updates |
+
+Warmup performs 40 critic optimizer updates while the actor stays fixed.
+The first normal update reuses those 64 trajectories and computes values and advantages again.
+Warmup occurs once, before W0 training, and does not repeat at window boundaries or restarts.
+The five epochs produce 10, 15, 15, 10, 10, and 10 actor updates across W0–W5.
+
+These results use local colocate commit `fb5b52b0` with experiment overlays for five epochs, checkpoint retention, and optimizer recovery.
+The runtime is separate from this PR's split stack and #1034.
+The checked-in launcher still defaults to one epoch, warmup 1, and global/micro batch 64/16.
+This result update does not add the experiment overlays to that launcher.
+
+### Test results
+
+| Window | Tests | Bare model | Warmup 20, five epochs | Gain (pp) |
+| --- | ---: | ---: | ---: | ---: |
+| W0 | 44 | 18/44 (40.91%) | 24/44 (54.55%) | +13.64 |
+| W1 | 64 | 22/64 (34.38%) | 27/64 (42.19%) | +7.81 |
+| W2 | 64 | 23/64 (35.94%) | 29/64 (45.31%) | +9.38 |
+| W3 | 64 | 30/64 (46.88%) | 40/64 (62.50%) | +15.63 |
+| W4 | 64 | 26/64 (40.63%) | 34/64 (53.13%) | +12.50 |
+| W5 | 84 | 25/84 (29.76%) | 35/84 (41.67%) | +11.90 |
+| **Combined** | **384** | **144/384 (37.50%)** | **189/384 (49.22%)** | **+11.72** |
+
+| Official task category | Bare model | Warmup 20, five epochs | Gain (pp) |
+| --- | ---: | ---: | ---: |
+| Hidden | 47/240 (19.58%) | 58/240 (24.17%) | +4.58 |
+| Fully Specified | 97/144 (67.36%) | 131/144 (90.97%) | +23.61 |
+
+The combined score weights all 384 tests by task count, using each window's own post-training checkpoint.
+It does not measure final-checkpoint retention on earlier windows or benchmark-wide performance across scenarios.
+Percentage-point gains use unrounded fractions.
+
+Historical completed runs provide context:
+
+| Run | Epochs per window | Actor updates | Successes / tests | Combined score |
+| --- | ---: | ---: | ---: | ---: |
+| Bare Qwen3-8B | 0 | 0 | 144/384 | 37.50% |
+| Warmup 5, seed42 | 1 | 14 | 161/384 | 41.93% |
+| Warmup 5, seed43 | 1 | 14 | 155/384 | 40.36% |
+| **Warmup 20, seed42** | **5** | **70** | **189/384** | **49.22%** |
+
+### Training curves
+
+![Eight training metrics across all 70 actor updates, with window boundaries](assets/retail_l1_warmup20_epoch5_training.png)
+
+The curves use the full W&B history, without sampling or smoothing.
+All 70 plotted releases match the metrics in the committed campaign records.
+The horizontal axis counts completed actor updates, not W&B events, epochs, or critic warmup passes.
+Dashed lines mark window boundaries. Batch reward is a training metric, not a held-out test score.
+Trajectory lengths are batch means, not maximum context lengths.
+
+The export contains no critic-loss series or intermediate warmup-fit series.
+The values/returns panel shows rollout means and cannot establish per-token critic calibration.
+The warmup-only checkpoint remains saved. Ordinary training checkpoints were removed after evaluation.
+
+### Interpretation and limits
+
+- The run gains 45 successful tests over the bare model. Fully Specified tasks account for 34 gains, and Hidden tasks account for 11.
+- Hidden success remains 24.17%. The stronger Fully Specified gain is consistent with better execution of supplied constraints, but does not establish robust hidden-rule discovery.
+- The recorded PPO KL estimate stays between 0.00056 and 0.00187. Actor gradient norms and losses remain finite across all 70 updates.
+- Mean response length falls early, then mostly remains around 2,000–3,000 tokens. Shorter responses alone do not explain improved test scores.
+- Training rewards change with the window's task distribution. Their jumps cannot establish learning progress across different windows.
+- This run changes both warmup and training epochs relative to warmup 5. It does not isolate either change's causal effect.
+- The new configuration has one training seed. The baseline also has one sampling seed, so these results do not establish repeatability or statistical significance.
+
+### Data and checks
+
+[Training curve data (CSV)](results/retail_l1_warmup20_epoch5_training.csv) and
+[configuration and result counts (JSON)](results/retail_l1_warmup20_epoch5_summary.json) accompany the figures.
+The JSON records the source checksum, benchmark revision, runtime commit, and W&B run identifier.
+Readers can view the figures without a W&B account.
+
+Record checks found 70 committed actor updates, 3,600 training trajectories, 384 unique test IDs, and 189 successful tests.
+The total of the recorded critic updates is 180, including 40 warmup updates.
+The final Slurm job, `1610937`, completed with exit code 0 on October 31, 2026.
+The baseline and historical counts come from the [previous result report](https://github.com/Human-Agent-Society/reef/pull/911#issuecomment-6478393787).
+
 ## Layout
 
 ```text
