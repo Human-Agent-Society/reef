@@ -14,7 +14,7 @@ from __future__ import annotations
 import importlib
 import os
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -344,18 +344,18 @@ def build_training_component(
 
 
 def close_runtimes(
-    training_component: TrainingComponent | None, runtime: InferenceRuntime | None
+    training_components: Sequence[TrainingComponent], runtime: InferenceRuntime | None
 ) -> list[BaseException]:
-    """Close a recipe's training component and inference runtime, and return their close errors in that order.
+    """Close a recipe's training components and inference runtime, and return their close errors in that order.
 
     Admission closes first, so that no new request starts. Then the training
-    component closes, and then the runtime shuts down. A failed close does not
-    stop the next one. ``None`` stands for an absent component or runtime.
+    components close, and then the runtime shuts down. A failed close does not
+    stop the next one. ``None`` stands for an absent runtime.
     """
     if runtime is not None:
         runtime.close_admission()
     errors: list[BaseException] = []
-    if training_component is not None:
+    for training_component in training_components:
         try:
             training_component.close()
         except BaseException as exc:

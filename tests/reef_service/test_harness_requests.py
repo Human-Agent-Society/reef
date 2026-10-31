@@ -1,97 +1,127 @@
-"""Harness commands use the native training route and its mode switch end to end, and a request's ``requires``
-rides the route, the commit, the manifest, the install script and the activation."""
+"""Harness instructions through ``POST /reef/train`` and its mode switch, and the ``requires`` a request carries
+through the route, the commit, the manifest and the activation."""
 
 from __future__ import annotations
 
 import asyncio
 import dataclasses
 import json
-import logging
-from dataclasses import replace
 from pathlib import Path
 from threading import Event
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
-from tests.reef_service.test_harness_proposals import _dispatcher, _recipe
-from tests.reef_service.test_harness_recipe import (
-    SEED_MODELS,
-    SEED_SETTINGS,
-    backend,
-    make_binary,
-    run_backend_step,
-    runtime,
-)
-from tests.reef_service.test_harness_wrapper import _ask_tree, _write_spool_entry
-from tests.support._strategies import resolve_proposer, resolve_rollout_scorer
+from tests.support.harness_service import backend_step, catalog, drive_trainer_job, harness_dispatcher
+from tests.support.harness_steps import COMPONENT, TreeReleases, changed_rules, harness_backend, harness_recipe
 from tests.support.samples_service import make_samples
-from tests.train.test_harness_evolve_processor import harness_stages
-from tests.train.test_reef_trainer_contracts import ExampleBackend
 
 from reef.core import AgentRecord, RequestType
 from reef.core.plugins import PluginReference
-from reef.core.requirements import REQUIRE_KINDS
+from reef.core.requirements import REQUIRE_KINDS, merge_requires, parse_requires
 from reef.core.training_request import TrainingRequest
 from reef.evaluation.activation import NeverActivate
-from reef.harness.adapters import get_adapter
-from reef.harness.client.wrapper import harness
-from reef.recipe.cordis import CordisRecipe
+from reef.harness.tree import TreePatch
 from reef.service.app import create_app
-from reef.service.request_service import RequestService
 from reef.storage.sqlite import SQLiteRecordStore
-from reef.train.backend import PreparedStep
-from reef.train.cordis_backend import Mutation
-from reef.train.cordis_backend.backend import merged_requires
-from reef.train.trainer import Trainer
+from reef.train.backend import ComponentReleases
+from reef.train.harness_backend import Workspace
+from reef.train.harness_backend.state import HarnessState
 from reef.train.types import JobData
 
+TEXT = "add a skill that texts me when the run is blocked"
 
-@pytest.mark.parametrize("has_receipts", [False, True])
-def test_harness_command_switches_to_manual_and_commits_native_request(tmp_path, monkeypatch, capsys, has_receipts):
-    seen = []
+#: What a person may say the change needs from their machine, in the shape the route admits.
+REQUIRES = [
+    {"name": "TWILIO_SID", "kind": "env", "check": "TWILIO_SID"},
+    {"name": "notify", "kind": "permission", "check": "test -d /"},
+]
+#: A rules patch the scorer prefers (it looks for "marker"), and one it does not.
+MARKER = TreePatch(changed_rules("marker rules\n"))
+PLAIN = TreePatch(changed_rules("plain rules\n"))
 
-    def propose(nodes, samples, models, *, requests=()):
-        seen.append((samples, requests))
-        return Mutation("create", "requested-rules", {"name": "rules", "config": {"text": "marker rules"}})
+
+def train_request(text: str = TEXT, session: str = "3f1c2a9d0b7e", release_id: str = "rel-0") -> dict:
+    return {"text": text, "session": session, "release_id": release_id}
+
+
+async def post_request(client: TestClient, body: object, scenario: str = "agents"):
+    return await client.post("/reef/train", headers={"x-reef-scenario": scenario}, json=body)
+
+
+def manual_recipe(tmp_path: Path, method, **fields):
+    return dataclasses.replace(harness_recipe(tmp_path, method, **fields), training_mode="manual")
+
+
+def growing_recipe(tmp_path: Path, method, **fields):
+    """A manual recipe whose scorer prefers the longer rules text, so every step that lengthens the rules publishes."""
+
+    def longer(task: str, result) -> float:
+        return float(len(result.trajectory[-1]["rules"]))
+
+    return manual_recipe(tmp_path, method, score=longer, **fields)
+
+
+def adding_rules(workspace: Workspace, services) -> TreePatch | None:
+    """A method whose every request step adds one more rule, which the growing recipe publishes."""
+    if workspace.request() is None:
+        return None
+    return TreePatch(changed_rules(workspace.tree().files["rules.md"] + f"rule {workspace.step}\n"))
+
+
+def answered(workspace: Workspace, patch: TreePatch, **output) -> None:
+    """Write ``patch`` over the head tree, so the tree it makes is the candidate, and say what the step did."""
+    workspace.write_tree(workspace.tree().apply(patch))
+    workspace.write_output(**output)
+
+
+def request_rows(scenario) -> list[dict]:
+    """The committed rows that answered a request, oldest first."""
+    rows = [row for row in catalog(scenario) if row.get("metrics", {}).get("training_request")]
+    return sorted(rows, key=lambda row: row["step"])
+
+
+async def committed(scenario, count: int, seconds: float = 30.0) -> list[dict]:
+    """The request rows once ``count`` of them are committed; the worker runs the steps on its own thread."""
+    for _ in range(int(seconds / 0.05)):
+        rows = request_rows(scenario)
+        if len(rows) >= count:
+            return rows
+        await asyncio.sleep(0.05)
+    raise AssertionError(f"{count} request step(s) did not commit in {seconds}s: {request_rows(scenario)}")
+
+
+def test_an_instruction_needs_an_instruction_mode_and_commits_through_the_train_route(tmp_path: Path) -> None:
+    seen: list[tuple] = []
+
+    def method(workspace, services):
+        seen.append((workspace.traces(), workspace.request()))
+        return MARKER
 
     # A large auto batch must not keep an explicit manual request waiting.
-    dispatcher = _dispatcher(tmp_path, replace(_recipe(tmp_path, propose), batch_size=100))
-    scenario = dispatcher.get_or_create_scenario("ask-scenario")
+    recipe = harness_recipe(tmp_path, method, batch_size=100)
+    dispatcher = harness_dispatcher(tmp_path, recipe)
+    scenario = dispatcher.get_or_create_scenario("agents")
 
     async def run():
         client = TestClient(TestServer(create_app(dispatcher)))
         await client.start_server()
         try:
-            compose, captures = _ask_tree(tmp_path, client.server.port)
-            monkeypatch.setenv("REEF_HARNESS_CAPTURES_DIR", str(captures))
-            pending = _write_spool_entry(captures, "ask-scenario", "pending") if has_receipts else None
-            before = pending.read_bytes() if pending is not None else None
-            with pytest.raises(SystemExit, match="training_mode='manual'"):
-                await asyncio.to_thread(harness, "ask-scenario", "pi", compose, "run tests first")
-            assert seen == []
-            response = await client.post("/reef/scenarios/ask-scenario/update", json={"training_mode": "manual"})
+            response = await post_request(client, train_request("run tests first", release_id="rel-3"))
+            assert response.status == 400 and "training_mode='manual'" in await response.text()
+            response = await client.post("/reef/scenarios/agents/update", json={"training_mode": "manual"})
             assert response.status == 200
-            await asyncio.to_thread(harness, "ask-scenario", "pi", compose, "run tests first")
-            for _ in range(100):
-                releases = scenario.releases()
-                committed = [row for row in releases if row.get("metrics", {}).get("training_request")]
-                if committed:
-                    break
-                await asyncio.sleep(0.05)
-            assert len(committed) == 1
-            request = committed[0]["metrics"]["training_request"]
-            assert request["text"] == "run tests first"
-            assert request["release_id"] == "rel-3"
-            assert request["session"]
+            response = await post_request(client, train_request("run tests first", release_id="rel-3"))
+            assert response.status == 200, await response.text()
+            (row,) = await committed(scenario, 1)
+            request = row["metrics"]["training_request"]
+            assert request["text"] == "run tests first" and request["release_id"] == "rel-3"
+            assert request["session"] == "3f1c2a9d0b7e"
             # A request carries its requires list everywhere it goes, empty when the person named nothing.
             assert request["requires"] == []
-            assert seen == [((), ({**request, "untrusted": True},))]
-            assert committed[0]["metrics"]["published"] is True
-            assert f"training request {request['id']} accepted" in capsys.readouterr().out
-            if pending is not None:
-                assert pending.read_bytes() == before
-            assert not (Path(scenario.trainer.candidate_backend.proposals.directory) / "requests").exists()
-            response = await client.post("/reef/scenarios/ask-scenario/update", json={"training_mode": "auto"})
+            [(traces, asked)] = seen
+            assert traces == () and asked.id == request["id"] and asked.text == "run tests first"
+            assert row["metrics"]["selected"] is True
+            response = await client.post("/reef/scenarios/agents/update", json={"training_mode": "auto"})
             assert response.status == 200
             assert scenario.trainer.pipeline.training_mode == "auto"
         finally:
@@ -104,73 +134,6 @@ def test_harness_command_switches_to_manual_and_commits_native_request(tmp_path,
 
 
 # -- requires: what a release needs from the person ---------------------------------------------
-
-TEXT = "add a skill that texts me when the run is blocked"
-
-#: What a person may say the change needs from their machine, in the shape the route admits.
-REQUIRES = [
-    {"name": "TWILIO_SID", "kind": "env", "check": "TWILIO_SID"},
-    {"name": "notify", "kind": "permission", "check": "test -d /"},
-]
-#: A rules entry the recipe's scorer prefers (it looks for "marker"), and one it does not.
-MARKER = Mutation("create", "r1", {"name": "rules", "config": {"text": "marker rules"}})
-PLAIN = Mutation("create", "r2", {"name": "rules", "config": {"text": "plain rules"}})
-
-
-def _request(text: str = TEXT, session: str = "3f1c2a9d0b7e", release_id: str = "rel-0") -> dict:
-    return {"text": text, "session": session, "release_id": release_id}
-
-
-async def _post(client: TestClient, body: object, scenario: str = "agents"):
-    return await client.post("/reef/train", headers={"x-reef-scenario": scenario}, json=body)
-
-
-def _manual(tmp_path: Path, propose, **overrides) -> CordisRecipe:
-    return replace(_recipe(tmp_path, propose), training_mode="manual", **overrides)
-
-
-def _seeded(tmp_path: Path, recipe: CordisRecipe):
-    """The seed's files as the base artifact, what the service assembly does, so the base release serves."""
-    initial = tmp_path / "initial"
-    for relative, text in recipe.base_artifact_source().files.items():
-        (initial / relative).parent.mkdir(parents=True, exist_ok=True)
-        (initial / relative).write_text(text, encoding="utf-8")
-    return _dispatcher(tmp_path, recipe)
-
-
-def _growing_recipe(tmp_path: Path, propose, **options) -> CordisRecipe:
-    """A manual recipe whose scorer prefers the longer rules text, so every step that adds a rules entry publishes."""
-
-    def longer(task: str, result) -> float:
-        return float(len(result.trajectory[-1]["rules"]))
-
-    return CordisRecipe(
-        resolve_proposer(propose),
-        resolve_rollout_scorer(longer),
-        ("task one",),
-        binary=str(make_binary(tmp_path)),
-        seed=(SEED_MODELS, SEED_SETTINGS),
-        runtime=runtime(),
-        proposals_dir=str(tmp_path / "inbox"),
-        training_mode="manual",
-        **options,
-    )
-
-
-def _request_rows(scenario) -> list[dict]:
-    """The committed rows that answered a request, oldest first."""
-    rows = [row for row in scenario.releases() if row.get("metrics", {}).get("training_request")]
-    return sorted(rows, key=lambda row: row["metrics"]["steps"])
-
-
-async def _committed(scenario, count: int, seconds: float = 30.0) -> list[dict]:
-    """The request rows once ``count`` of them are committed; the worker runs the steps on its own thread."""
-    for _ in range(int(seconds / 0.05)):
-        rows = _request_rows(scenario)
-        if len(rows) >= count:
-            return rows
-        await asyncio.sleep(0.05)
-    raise AssertionError(f"{count} request step(s) did not commit in {seconds}s: {_request_rows(scenario)}")
 
 
 def test_training_request_parses_requires_and_names_the_first_bad_item() -> None:
@@ -219,8 +182,8 @@ def test_training_request_parses_requires_and_names_the_first_bad_item() -> None
 
 
 def test_an_env_item_names_a_shell_identifier_in_its_check_else_its_name() -> None:
-    """The wrapper and the extension read the variable an env item names from the environment, so the check
-    when present, else the name, is a shell identifier; the other kinds keep a command as their check."""
+    """A change reads the variable an env item names from the environment, so the check when present, else the
+    name, is a shell identifier; the other kinds keep a command as their check."""
     base = {"text": "text me when you are blocked", "session": "s", "release_id": "r"}
     named = [{"name": "twilio.sid", "kind": "env", "check": "TWILIO_SID"}, {"name": "SMTP2", "kind": "env"}]
     assert TrainingRequest.from_dict({**base, "requires": named}).to_dict()["requires"] == named
@@ -241,12 +204,12 @@ def test_the_route_stores_requires_and_refuses_a_credential_or_directive_shaped_
     never the literal; a malformed list is a caller error; a refusal stores nothing."""
     entered, release = Event(), Event()
 
-    def propose(nodes, samples, models, *, requests=()):
+    def method(workspace, services):
         # Holds its step open so the accepted records stay stored while the route is probed.
         entered.set()
         release.wait(10)
 
-    dispatcher = _dispatcher(tmp_path, _manual(tmp_path, propose))
+    dispatcher = harness_dispatcher(tmp_path, manual_recipe(tmp_path, method))
 
     async def run() -> None:
         scenario = dispatcher.get_or_create_scenario("agents")
@@ -255,7 +218,7 @@ def test_the_route_stores_requires_and_refuses_a_credential_or_directive_shaped_
         await client.start_server()
         try:
             twilio = {"name": "twilio", "kind": "service", "extra": 1, "prompt": " Connect the Twilio account "}
-            response = await _post(client, {**_request(), "requires": [*REQUIRES, twilio]})
+            response = await post_request(client, {**train_request(), "requires": [*REQUIRES, twilio]})
             assert response.status == 200, await response.text()
             answer = await response.json()
             stored = scenario.records.get("agents", answer["agent_record_id"])
@@ -266,7 +229,7 @@ def test_the_route_stores_requires_and_refuses_a_credential_or_directive_shaped_
             ]
             assert await asyncio.to_thread(entered.wait, 5)
             # A request without the field is stored with an empty list, so every record has one shape.
-            plain = await (await _post(client, _request("plain"))).json()
+            plain = await (await post_request(client, train_request("plain"))).json()
             assert scenario.records.get("agents", plain["agent_record_id"]).payload["requires"] == []
             # The two screens run over every name and check; the reason names the rule, never the literal.
             for item, rule in (
@@ -307,7 +270,7 @@ def test_the_route_stores_requires_and_refuses_a_credential_or_directive_shaped_
                     "instruction override",
                 ),
             ):
-                response = await _post(client, {**_request("with a bad item"), "requires": [item]})
+                response = await post_request(client, {**train_request("with a bad item"), "requires": [item]})
                 reason = await response.text()
                 assert response.status == 400 and "a requires item" in reason and rule in reason, reason
                 assert "sk-" not in reason and "ghp_" not in reason and "<|" not in reason and "ignore" not in reason
@@ -319,7 +282,7 @@ def test_the_route_stores_requires_and_refuses_a_credential_or_directive_shaped_
                 ([{"name": "x", "kind": "env", "prompt": "p" * 201}], "prompt must be at most 200 characters"),
                 ("TWILIO_SID", "must be a list"),
             ):
-                response = await _post(client, {**_request(), "requires": requires})
+                response = await post_request(client, {**train_request(), "requires": requires})
                 assert response.status == 400 and message in await response.text()
             assert scenario.records.count("agents", request_type=RequestType.TRAIN) == 2
         finally:
@@ -333,35 +296,32 @@ def test_the_route_stores_requires_and_refuses_a_credential_or_directive_shaped_
         dispatcher.close()
 
 
-def test_the_commit_carries_requires_and_merges_what_the_proposer_added_by_name(tmp_path: Path, caplog) -> None:
-    """The person's items stand first; the proposer adds to the mapping's list and a name already there is not
-    repeated; a malformed or credential shaped item of the proposer's is dropped alone, the rest stand and the
-    mutation stands."""
-    added = iter(
+def test_the_commit_carries_requires_and_merges_what_the_method_added_by_name(tmp_path: Path) -> None:
+    """The person's items stand first; the method's items follow, and a name already there is not repeated;
+    a step whose method changed nothing still commits the request's own list."""
+    answers = iter(
         (
-            [
-                {"name": "notify", "kind": "service", "check": "same name, dropped"},
-                {"name": "SMTP_HOST", "kind": "env"},
-            ],
-            [{"name": "bad", "kind": "secret"}],
-            [
-                {"name": "ok", "kind": "env"},
-                {"name": "leak", "kind": "service", "check": "sk-abcdefghijklmnopqrstuvwxyz"},
-            ],
+            (
+                MARKER,
+                (
+                    {"name": "notify", "kind": "service", "check": "same name, dropped"},
+                    {"name": "SMTP_HOST", "kind": "env"},
+                ),
+            ),
+            (PLAIN, ()),
+            (PLAIN, ({"name": "ok", "kind": "env"},)),
+            (None, ()),
         )
     )
-    answers = iter((MARKER, PLAIN, PLAIN))
-    handed_lists: list[list[dict]] = []
+    handed: list[list[dict]] = []
 
-    def propose(nodes, samples, models, *, requests=()):
-        if not requests:
-            return None
-        handed = requests[0]
-        handed_lists.append(list(handed["requires"]))
-        handed["requires"].extend(next(added))
-        return next(answers)
+    def method(workspace, services):
+        handed.append([dict(item) for item in workspace.request().requires])
+        patch, requires = next(answers)
+        if patch is not None:
+            answered(workspace, patch, requires=requires)
 
-    dispatcher = _dispatcher(tmp_path, _manual(tmp_path, propose))
+    dispatcher = harness_dispatcher(tmp_path, manual_recipe(tmp_path, method))
     scenario = dispatcher.get_or_create_scenario("agents")
     assert scenario is not None
 
@@ -370,24 +330,27 @@ def test_the_commit_carries_requires_and_merges_what_the_proposer_added_by_name(
         await client.start_server()
         try:
             ids = []
-            with caplog.at_level(logging.WARNING, logger="reef.train.cordis_backend.backend"):
-                for step in range(3):
-                    answer = await (await _post(client, {**_request(f"ask {step}"), "requires": REQUIRES})).json()
-                    ids.append(answer["agent_record_id"])
-                    # One at a time, so each step's proposer reply and additions land on the request they mean.
-                    await _committed(scenario, step + 1)
-            rows = [row["metrics"] for row in _request_rows(scenario)]
+            for step in range(4):
+                answer = await (
+                    await post_request(client, {**train_request(f"ask {step}"), "requires": REQUIRES})
+                ).json()
+                ids.append(answer["agent_record_id"])
+                # One at a time, so each step's answer lands on the request it means.
+                await committed(scenario, step + 1)
+            rows = [row["metrics"] for row in request_rows(scenario)]
             expected = [
                 [*REQUIRES, {"name": "SMTP_HOST", "kind": "env"}],
                 list(REQUIRES),
                 [*REQUIRES, {"name": "ok", "kind": "env"}],
+                list(REQUIRES),
             ]
             for metrics, record_id, requires in zip(rows, ids, expected, strict=True):
                 assert metrics["training_request"]["id"] == record_id
                 assert metrics["training_request"]["requires"] == requires
-            # Every step got the person's items and nothing else in a fresh list.
-            assert handed_lists == [REQUIRES, REQUIRES, REQUIRES]
+            # Every step got the person's items and nothing else.
+            assert handed == [REQUIRES] * 4
             assert rows[0]["selected"] is True and rows[2]["selected"] is False
+            assert rows[3]["skipped"] == "the method left the head tree unchanged"
             # The releases the route serves carry the same lists.
             catalog = await (await client.get("/reef/harness/releases", headers={"x-reef-scenario": "agents"})).json()
             served = [
@@ -401,33 +364,16 @@ def test_the_commit_carries_requires_and_merges_what_the_proposer_added_by_name(
         asyncio.run(run())
     finally:
         dispatcher.close()
-    dropped = [record.getMessage() for record in caplog.records if "it added" in record.getMessage()]
-    assert len(dropped) == 2 and "kind must be one of" in dropped[0] and "credential shaped" in dropped[1]
-    assert "sk-" not in dropped[1]
 
 
-def test_the_merge_takes_the_proposers_items_by_name_wherever_it_put_them(caplog) -> None:
-    """A proposer that appends, prepends or replaces the list adds its item alike; the person's item edited in
-    place stays the person's; a bad item of the proposer's is dropped alone and a list that is not one adds
-    nothing."""
+def test_the_merge_keeps_the_persons_items_and_adds_the_methods_new_names() -> None:
     base = ({"name": "A", "kind": "env"},)
     item = {"name": "B", "kind": "env"}
-    for handed in ([*base, item], [item, *base], [item]):
-        assert merged_requires(base, handed) == ([*base, item], [])
-    assert merged_requires(base, [{"name": "A", "kind": "env", "check": "rm -rf /"}]) == ([*base], [])
-    with caplog.at_level(logging.WARNING, logger="reef.train.cordis_backend.backend"):
-        merged, refused = merged_requires(
-            base, [item, {"name": "bad", "kind": "secret"}, {"name": "C", "kind": "service"}]
-        )
-        # What was dropped is returned with its reason, so the step records it beside the kept list.
-        assert merged_requires(base, "nope") == ([*base], [{"item": "nope", "reason": "not a list"}])
-        assert merged_requires(base, None) == ([*base], [])
-    assert merged == [*base, item, {"name": "C", "kind": "service"}]
-    assert refused == [
-        {"item": {"name": "bad", "kind": "secret"}, "reason": f"requires[0].kind must be one of {REQUIRE_KINDS}"}
-    ]
-    dropped = [record.getMessage() for record in caplog.records if "it added" in record.getMessage()]
-    assert len(dropped) == 2 and "kind must be one of" in dropped[0] and "not a list" in dropped[1]
+    assert merge_requires(base, [item]) == [*base, item]
+    assert merge_requires(base, [item, *base, item]) == [*base, item]
+    # The person's item edited by the method stays the person's.
+    assert merge_requires(base, [{"name": "A", "kind": "env", "check": "rm -rf /"}]) == [*base]
+    assert merge_requires(base, []) == [*base]
 
 
 def test_a_training_request_with_requires_hashes_like_one_without() -> None:
@@ -442,32 +388,30 @@ def test_backend_rejects_requires_over_the_cap(tmp_path: Path, added_count: int)
     person = [{"name": f"P{index}", "kind": "env"} for index in range(6)]
     added = [{"name": f"A{index}", "kind": "env"} for index in range(added_count)]
 
-    def extending(nodes, samples, models, *, requests=()):
-        # Repeated names must not consume the remaining capacity.
-        requests[0]["requires"].extend([*person, *added, *added])
-        return MARKER
+    def extending(workspace, services):
+        # A name the person already gave does not take one of the remaining places.
+        return answered(workspace, MARKER, requires=(*person[:2], *added))
 
     request = TrainingRequest("ask", "s", "rel-0", "ask-1", requires=tuple(person))
-    batch = JobData("demo:instruction:ask-1", (), request=request)
-    candidate_backend = backend(tmp_path, extending)
-    initial = candidate_backend.initial_state()
-    result = run_backend_step(candidate_backend, batch, initial)
-    assert result.metrics["training_request"]["requires"] == [*person, *added]
-    assert result.metrics["training_request"]["id"] == "ask-1"
+    backend, _ = harness_backend(tmp_path, extending)
+    initial = HarnessState().to_json()
+    result = backend_step(backend, JobData("demo:instruction:ask-1", (), request=request), initial)
     if added_count > 2:
-        assert result.metrics["skipped"] == "proposal requires 9 items; at most 8 are allowed; split the request"
-        assert not result.metrics.get("published", False)
-        assert result.state["entries"] == initial["entries"]
+        assert result.metrics["skipped"] == "the step requires 9 items; at most 8"
+        assert "selected" not in result.metrics and result.artifact is None
     else:
-        assert result.metrics["published"] is True
+        assert result.metrics["training_request"]["requires"] == [*person, *added]
+        assert result.metrics["training_request"]["id"] == "ask-1"
+        assert result.metrics["selected"] is True
 
 
 def test_requires_overflow_reason_reaches_request_page(tmp_path: Path) -> None:
-    def propose(nodes, samples, models, *, requests=()):
-        requests[0]["requires"].extend({"name": f"ENV_{index}", "kind": "env"} for index in range(9))
-        return MARKER
+    def method(workspace, services):
+        return answered(
+            workspace, MARKER, requires=tuple({"name": f"ENV_{index}", "kind": "env"} for index in range(8))
+        )
 
-    dispatcher = _dispatcher(tmp_path, _manual(tmp_path, propose))
+    dispatcher = harness_dispatcher(tmp_path, manual_recipe(tmp_path, method))
     scenario = dispatcher.get_or_create_scenario("agents")
     assert scenario is not None
 
@@ -475,12 +419,12 @@ def test_requires_overflow_reason_reaches_request_page(tmp_path: Path) -> None:
         client = TestClient(TestServer(create_app(dispatcher)))
         await client.start_server()
         try:
-            answer = await (await _post(client, _request("add a rule"))).json()
-            await _committed(scenario, 1)
-            metrics = _request_rows(scenario)[0]["metrics"]
-            assert not metrics.get("published", False)
-            reason = "proposal requires 9 items; at most 8 are allowed; split the request"
-            assert metrics["skipped"] == reason
+            body = {**train_request("add a rule"), "requires": [{"name": "OWN", "kind": "env"}]}
+            answer = await (await post_request(client, body)).json()
+            await committed(scenario, 1)
+            metrics = request_rows(scenario)[0]["metrics"]
+            reason = "the step requires 9 items; at most 8"
+            assert metrics["skipped"] == reason and "selected" not in metrics
             response = await client.get(
                 f"/reef/harness/requests/{answer['agent_record_id']}/page",
                 headers={"x-reef-scenario": "agents"},
@@ -496,47 +440,25 @@ def test_requires_overflow_reason_reaches_request_page(tmp_path: Path) -> None:
         dispatcher.close()
 
 
-def test_no_proposal_keeps_the_requests_requires(tmp_path: Path) -> None:
-    person = [{"name": "P0", "kind": "env"}]
-    request = TrainingRequest("ask", "s", "rel-0", "ask-2", requires=tuple(person))
-    batch = JobData("demo:instruction:ask-2", (), request=request)
-    candidate_backend = backend(tmp_path, lambda n, s, m, *, requests=(): None)
-    result = run_backend_step(candidate_backend, batch, candidate_backend.initial_state())
-    assert result.metrics["skipped"] == "no proposal"
-    assert result.metrics["training_request"] == {"id": "ask-2", **request.to_dict()}
-
-
-def test_prepare_commit_keeps_the_backends_training_request_and_fills_a_step_that_never_reached_it() -> None:
-    """The backend's dict wins, since it carries what the proposer added; a step the backend skipped before its
-    proposer ran gets the request as accepted, requires included."""
-
-    class _RequiresBackend(ExampleBackend):
-        def __init__(self, written: list[dict] | None) -> None:
-            super().__init__("agents", [])
-            self._written = written
-
-        def prepare_step(self, batch, state, scenario_step):
-            metrics = {}
-            if self._written is not None:
-                metrics["training_request"] = {
-                    "id": batch.request.id,
-                    **batch.request.to_dict(),
-                    "requires": self._written,
-                }
-            return PreparedStep.skipped(state={"steps": state.get("steps", 0) + 1}, metrics=metrics)
-
+def test_the_step_row_keeps_the_backends_training_request_and_fills_a_step_that_never_reached_it(
+    tmp_path: Path,
+) -> None:
+    """The backend's dict wins, since it carries what the method added; a step the backend skipped before it
+    merged the list gets the request as accepted, requires included."""
     payload = {"text": "text me", "session": "session-1", "release_id": "release-1", "requires": REQUIRES}
     merged = [*REQUIRES, {"name": "SMTP_HOST", "kind": "env"}]
-    for written, expected in ((merged, merged), (None, REQUIRES)):
+
+    def adding(workspace, services):
+        return answered(workspace, MARKER, requires=({"name": "SMTP_HOST", "kind": "env"},))
+
+    def keeping(workspace, services):
+        return None
+
+    for index, (method, expected) in enumerate(((adding, merged), (keeping, REQUIRES))):
+        (tmp_path / str(index)).mkdir()
+        recipe = manual_recipe(tmp_path / str(index), method)
         records = SQLiteRecordStore()
-        trainer = Trainer.build(
-            "agents",
-            records,
-            pipeline_factory=harness_stages(inference=True).build,
-            candidate_backend=_RequiresBackend(written),
-            training_mode="manual",
-            default_job_samples=1,
-        )
+        trainer = recipe.build("agents", records, releases=ComponentReleases(TreeReleases(recipe.seed), COMPONENT))
         try:
             records.append(
                 AgentRecord.create(
@@ -544,23 +466,23 @@ def test_prepare_commit_keeps_the_backends_training_request_and_fills_a_step_tha
                 )
             )
             make_samples(trainer)
-            result = trainer.run_once()
+            result = drive_trainer_job(trainer)
             assert result is not None
-            prepared = trainer.prepare_commit(result)
-            assert prepared.metrics["training_request"] == {"id": "ask-1", **payload, "requires": expected}
+            request = result.metrics["training_request"]
+            assert {key: request[key] for key in ("id", *payload)} == {"id": "ask-1", **payload, "requires": expected}
         finally:
             trainer.close()
             records.close()
 
 
-def test_the_manifest_and_the_install_script_carry_the_addressed_releases_requires(tmp_path: Path) -> None:
+def test_the_manifest_carries_the_addressed_releases_requires(tmp_path: Path) -> None:
     """The seed's base release requires nothing; the release a request with two items published carries them;
-    the manifest and the install script of each carry that release's own list."""
+    the manifest of each carries that release's own list."""
 
-    def propose(nodes, samples, models, *, requests=()):
-        return MARKER if requests else None
+    def method(workspace, services):
+        return MARKER if workspace.request() is not None else None
 
-    dispatcher = _seeded(tmp_path, _manual(tmp_path, propose))
+    dispatcher = harness_dispatcher(tmp_path, manual_recipe(tmp_path, method))
     scenario = dispatcher.get_or_create_scenario("agents")
     assert scenario is not None
 
@@ -571,26 +493,15 @@ def test_the_manifest_and_the_install_script_carry_the_addressed_releases_requir
             headers = {"x-reef-scenario": "agents"}
             base = await (await client.get("/reef/harness", headers=headers)).json()
             assert base["requires"] == []
-            response = await _post(client, {**_request(), "requires": REQUIRES})
+            response = await post_request(client, {**train_request(), "requires": REQUIRES})
             assert response.status == 200, await response.text()
-            (row,) = await _committed(scenario, 1)
-            assert row["metrics"]["published"] is True
+            (row,) = await committed(scenario, 1)
+            assert row["metrics"]["selected"] is True
             head = await (await client.get("/reef/harness", headers=headers)).json()
             assert head["release_id"] != base["release_id"]
             assert head["requires"] == REQUIRES and head["evaluation"]["training_request"]["requires"] == REQUIRES
             pinned = await client.get("/reef/harness", params={"release_id": base["release_id"]}, headers=headers)
             assert (await pinned.json())["requires"] == []
-            # The script embeds the list it will refuse on, and the parent's script an empty one.
-            response = await client.get("/reef/harness/install", params={"adapter": "pi"}, headers=headers)
-            assert response.status == 200
-            assert f"REQUIRES='{json.dumps(REQUIRES)}'" in await response.text()
-            response = await client.get(
-                "/reef/harness/install",
-                params={"adapter": "pi", "release_id": base["release_id"]},
-                headers=headers,
-            )
-            assert response.status == 200
-            assert "REQUIRES='[]'" in await response.text()
         finally:
             await client.close()
 
@@ -600,32 +511,15 @@ def test_the_manifest_and_the_install_script_carry_the_addressed_releases_requir
         dispatcher.close()
 
 
-def _rules_proposer():
-    """A proposer whose every request step creates one more rules entry, which the growing recipe publishes."""
-    steps = iter(range(1, 20))
-
-    def propose(nodes, samples, models, *, requests=()):
-        if not requests:
-            return None
-        step = next(steps)
-        return Mutation("create", f"r{step}", {"name": "rules", "config": {"text": f"rules {step}"}})
-
-    return propose
-
-
-def test_the_manifest_and_the_install_script_carry_the_chains_requires(tmp_path: Path) -> None:
+def test_the_manifest_carries_the_chains_requires(tmp_path: Path) -> None:
     """A request's items are per release: a release still needs what an earlier one named, so its manifest lists
-    the union and its install script refuses until every item is checked off, naming the newest release that
-    requires nothing (the seed's successor, not the parent, which requires an item of its own); each releases
-    row keeps its own step's list."""
-    from tests.reef_service.test_harness_channel import _pinned_env, _run_install
-
-    dispatcher = _seeded(tmp_path, _growing_recipe(tmp_path, _rules_proposer()))
+    the union over its chain, while each releases row keeps its own step's list."""
+    dispatcher = harness_dispatcher(tmp_path, growing_recipe(tmp_path, adding_rules))
     scenario = dispatcher.get_or_create_scenario("agents")
     assert scenario is not None
     first, second = REQUIRES
 
-    async def run() -> tuple[str, str]:
+    async def run() -> None:
         client = TestClient(TestServer(create_app(dispatcher)))
         await client.start_server()
         try:
@@ -633,10 +527,10 @@ def test_the_manifest_and_the_install_script_carry_the_chains_requires(tmp_path:
             base = (await (await client.get("/reef/harness", headers=headers)).json())["release_id"]
             ids = []
             for step, requires in enumerate(([], [first], [second]), start=1):
-                response = await _post(client, {**_request(f"ask {step}"), "requires": requires})
+                response = await post_request(client, {**train_request(f"ask {step}"), "requires": requires})
                 assert response.status == 200, await response.text()
-                rows = await _committed(scenario, step)
-                assert rows[-1]["metrics"]["published"] is True
+                rows = await committed(scenario, step)
+                assert rows[-1]["metrics"]["selected"] is True
                 ids.append((await (await client.get("/reef/harness", headers=headers)).json())["release_id"])
             r1, r2, r3 = ids
             assert len({base, r1, r2, r3}) == 4
@@ -652,39 +546,19 @@ def test_the_manifest_and_the_install_script_carry_the_chains_requires(tmp_path:
                 row["release_id"]: row["metrics"]["training_request"]["requires"] for row in rows if "metrics" in row
             }
             assert own == {r1: [], r2: [first], r3: [second]}
-            response = await client.get("/reef/harness/install", params={"adapter": "pi"}, headers=headers)
-            assert response.status == 200
-            script = await response.text()
-            # r2 requires an item too, so a machine with nothing set up installs r1, the newest that requires nothing.
-            assert f"REQUIRES='{json.dumps(REQUIRES)}'" in script and f"FALLBACK='{r1}'" in script
-            return script, r1
         finally:
             await client.close()
 
     try:
-        script, fallback = asyncio.run(run())
+        asyncio.run(run())
     finally:
         dispatcher.close()
-    # Step 3's script on a machine that checked nothing off: refused, r1 named, no directory made.
-    prefix, env = _pinned_env(tmp_path)
-    path = tmp_path / "install-v3.sh"
-    path.write_text(script, encoding="utf-8")
-    result = _run_install(path, tmp_path / "dest", prefix, env)
-    assert result.returncode == 1
-    assert result.stderr.splitlines()[-4:] == [
-        "reef: this release requires:",
-        "    TWILIO_SID (env): TWILIO_SID",
-        "    notify (permission): test -d /",
-        "reef: run reef-pi setup, then install again; with nothing set up yet, "
-        f"install ?release_id={fallback} first: it requires nothing",
-    ]
-    assert not (tmp_path / "dest").exists()
 
 
-def test_a_chain_union_past_one_requests_cap_still_renders_the_install_script(tmp_path: Path) -> None:
+def test_a_chain_union_past_one_requests_cap_is_still_the_manifests_requires(tmp_path: Path) -> None:
     """The cap of eight is per request: three published requests of three items each make a union of nine, which
-    the manifest carries and the install script embeds; the cap never refuses a release for what its chain named."""
-    dispatcher = _seeded(tmp_path, _growing_recipe(tmp_path, _rules_proposer()))
+    the manifest carries; the cap never refuses a release for what its chain named."""
+    dispatcher = harness_dispatcher(tmp_path, growing_recipe(tmp_path, adding_rules))
     scenario = dispatcher.get_or_create_scenario("agents")
     assert scenario is not None
 
@@ -697,17 +571,12 @@ def test_a_chain_union_past_one_requests_cap_still_renders_the_install_script(tm
             for step in range(1, 4):
                 items = [{"name": f"VAR_{step}_{index}", "kind": "env"} for index in range(3)]
                 names += [item["name"] for item in items]
-                response = await _post(client, {**_request(f"ask {step}"), "requires": items})
+                response = await post_request(client, {**train_request(f"ask {step}"), "requires": items})
                 assert response.status == 200, await response.text()
-                rows = await _committed(scenario, step)
-                assert rows[-1]["metrics"]["published"] is True
+                rows = await committed(scenario, step)
+                assert rows[-1]["metrics"]["selected"] is True
             head = await (await client.get("/reef/harness", headers=headers)).json()
             assert [item["name"] for item in head["requires"]] == names and len(names) == 9
-            response = await client.get("/reef/harness/install", params={"adapter": "pi"}, headers=headers)
-            assert response.status == 200, await response.text()
-            # The script lists each item as parse_requires orders its keys; compare the values.
-            [line] = [line for line in (await response.text()).splitlines() if line.startswith("REQUIRES=")]
-            assert json.loads(line.removeprefix("REQUIRES=").strip("'")) == head["requires"]
         finally:
             await client.close()
 
@@ -718,17 +587,19 @@ def test_a_chain_union_past_one_requests_cap_still_renders_the_install_script(tm
 
 
 def test_an_activated_release_needs_what_it_named(tmp_path: Path) -> None:
-    """Under the never activation rule a release waits for a person to activate it; the activation serves that release itself, so the
-    served head lists what the release named."""
+    """Under the never activation rule a release waits for a person to activate it; the activation serves that
+    release itself, so the served head lists what the release named and serves its tree."""
+    # The seed holds defaultTools; the release's setting leaves the built-in tools on.
+    tuned = json.dumps({}) + "\n"
 
-    def propose(nodes, samples, models, *, requests=()):
-        return (
-            (MARKER, Mutation("create", "theme", {"name": "config", "config": {"data": {"theme": "light"}}}))
-            if requests
-            else None
-        )
+    def method(workspace, services):
+        if workspace.request() is None:
+            return None
+        return TreePatch({**changed_rules("marker rules, a longer text\n"), "config/primary.json": tuned})
 
-    dispatcher = _seeded(tmp_path, _growing_recipe(tmp_path, propose, activation=PluginReference(NeverActivate, {})))
+    dispatcher = harness_dispatcher(
+        tmp_path, growing_recipe(tmp_path, method, activation=PluginReference(NeverActivate, {}))
+    )
     scenario = dispatcher.get_or_create_scenario("agents")
     assert scenario is not None
 
@@ -738,9 +609,9 @@ def test_an_activated_release_needs_what_it_named(tmp_path: Path) -> None:
         try:
             headers = {"x-reef-scenario": "agents"}
             base = (await (await client.get("/reef/harness", headers=headers)).json())["release_id"]
-            response = await _post(client, {**_request(), "requires": REQUIRES})
+            response = await post_request(client, {**train_request(), "requires": REQUIRES})
             assert response.status == 200, await response.text()
-            await _committed(scenario, 1)
+            await committed(scenario, 1)
             rows = (await (await client.get("/reef/harness/releases", headers=headers)).json())["releases"]
             (inactive,) = [row for row in rows if row["operation"] == "training"]
             assert not inactive["active"] and inactive["metrics"]["training_request"]["requires"] == REQUIRES
@@ -762,20 +633,9 @@ def test_an_activated_release_needs_what_it_named(tmp_path: Path) -> None:
                 (base, False),
                 (inactive["release_id"], True),
             ]
-            entries = scenario.release_queries.entries_for_version(
-                inactive["release_id"], scenario.surface.files_component
-            )
-            assert entries is not None and any(entry["id"] == "r1" for entry in entries)
-            # The creation carries the base artifact's entries: the seed's, without the evolved one.
-            base_entries = scenario.release_queries.entries_for_version(base, scenario.surface.files_component)
-            assert base_entries is not None and not any(entry["id"] == "r1" for entry in base_entries)
-            # Installing the activated release rebinds the model endpoint without losing evolved settings.
-            service = RequestService(dispatcher)
-            manifest = service.harness_manifest(headers, release_id=inactive["release_id"])
-            bound = service._install_binding(
-                scenario, manifest, get_adapter("pi"), {**headers, "host": "localhost:8000"}
-            )
-            assert json.loads(bound["pi-agent/settings.json"])["theme"] == "light"
+            # The activation serves the release's source tree, the evolved setting included.
+            source = await client.get("/reef/harness", params={"form": "source"}, headers=headers)
+            assert (await source.json())["files"]["config/primary.json"] == tuned
         finally:
             await client.close()
 
@@ -806,22 +666,9 @@ def test_a_request_carries_the_clients_machine_and_drops_what_does_not_fit() -> 
     assert plain.client == {} and "client" not in plain.to_dict()
 
 
-def test_both_proposers_are_told_the_machine_the_change_runs_on() -> None:
-    from reef.recipe.reefine.evolution import client_text
-
-    told = client_text(
-        {"client": {"platform": "darwin", "release": "24.6.0", "commands": {"afplay": True, "mpv": False}}}
-    )
-    assert "platform: darwin 24.6.0" in told and "on its PATH: afplay" in told and "not on its PATH: mpv" in told
-    assert "requires item" in told
-    assert "unknown" in client_text({}) and "WSL 2" in client_text({})
-
-
 def test_a_binary_item_names_the_program_and_its_check_stays_optional() -> None:
     """``binary`` is a kind the route admits: the name is the program to look for, the check is optional, and
     the entry name pattern, which admits no separator, is the whole of what a program name has to satisfy."""
-    from reef.core.requirements import parse_requires
-
     assert "binary" in REQUIRE_KINDS
     items = [
         {"name": "pdftotext", "kind": "binary", "prompt": "  Install poppler  "},

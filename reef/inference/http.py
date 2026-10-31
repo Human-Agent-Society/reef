@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 
 from reef.artifact.artifact import Artifact
 from reef.core.config import config_option
+from reef.inference.provider_protocol import provider_headers
 from reef.runtime.deployment import RuntimeFactory, RuntimeRegistry, config_secret, config_string
 from reef.runtime.interfaces import InferenceHandler, InferenceRuntime, InferenceStream, UpstreamStatusError
 
@@ -32,10 +33,6 @@ HOP_BY_HOP_HEADERS = frozenset(
         "upgrade",
     }
 )
-
-#: Routes that speak the Anthropic Messages API and take its native auth headers.
-ANTHROPIC_PATHS = frozenset({"/v1/messages", "/v1/messages/count_tokens"})
-ANTHROPIC_VERSION = "2023-06-01"
 
 #: Provider API dialects the proxy can describe to the training side.
 PROVIDER_APIS = ("openai", "responses", "anthropic")
@@ -70,10 +67,13 @@ class ArtifactRequestHeaders(RequestHeadersFactory):
 
 
 class ProviderRequestHeaders(RequestHeadersFactory):
-    """Attach artifact identity and provider-specific authentication.
+    """Attach artifact identity and provider authentication.
 
-    Anthropic routes take the key as ``x-api-key`` plus a version header;
-    OpenAI-compatible routes take it as a bearer token.
+    Values: the object holds ``api_key``, a non-empty provider credential.
+    Purpose: an :class:`HttpInferenceHandler` that calls a provider asks it
+    for the headers of each call. ``headers(artifact, path)`` returns the
+    identity headers of ``artifact`` followed by
+    :func:`~reef.inference.provider_protocol.provider_headers` for ``path``.
     """
 
     def __init__(self, api_key: str) -> None:
@@ -82,13 +82,7 @@ class ProviderRequestHeaders(RequestHeadersFactory):
         self._api_key = api_key
 
     def headers(self, artifact: Artifact, path: str) -> Mapping[str, str]:
-        headers = content_identity_headers(artifact)
-        if path in ANTHROPIC_PATHS:
-            headers["x-api-key"] = self._api_key
-            headers["anthropic-version"] = ANTHROPIC_VERSION
-        else:
-            headers["Authorization"] = f"Bearer {self._api_key}"
-        return headers
+        return {**content_identity_headers(artifact), **provider_headers(path, self._api_key)}
 
 
 def provider_request_headers(api_key: str) -> RequestHeadersFactory:
@@ -241,6 +235,10 @@ class InferenceProxyRuntime(InferenceRuntime):
         if api not in PROVIDER_APIS:
             raise ValueError("model.api must be openai, responses or anthropic")
         return cls(base_url=url, model_path=value["model"].strip(), api=api, api_key=api_key)
+
+    def model_config(self) -> dict[str, str]:
+        """The per-scenario model override that ``from_model_config`` builds this runtime from, without its key."""
+        return {"url": self.base_url, "model": self._model_path, "api": self._api}
 
     @property
     def model_path(self) -> str:

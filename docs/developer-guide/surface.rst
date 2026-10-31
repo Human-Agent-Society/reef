@@ -32,7 +32,7 @@ GPU placement, or adapter caches. Those live in ``train/``, ``artifact/``,
 Components
 ----------
 
-A release binds named components: ``weights``, ``harness``, ``skills``, or
+A release binds named components: ``weights``, ``harness``, ``config``, or
 whatever a recipe declares. ``Surface.components`` maps each name to a
 ``ComponentSurface`` holding that component's ``validator``, ``loader``,
 and ``files`` tree. Every shipped recipe declares one
@@ -104,16 +104,12 @@ Built-in surfaces
 |                                          |             |                     | that scenario's         |                  |
 |                                          |             |                     | adapter revision        |                  |
 +------------------------------------------+-------------+---------------------+-------------------------+------------------+
-| ``create_harness_surface()``             | ``harness`` | accepts any         | none                    | ``TextFileTree`` |
-+------------------------------------------+-------------+---------------------+-------------------------+------------------+
-| ``create_skill_surface(...)``            | ``skills``  | ``SkillValidator``  | none                    | ``TextFileTree`` |
-+------------------------------------------+-------------+---------------------+-------------------------+------------------+
-| ``create_config_surface()``              | ``config``  | ``ConfigValidator`` | none                    | none             |
+| ``create_harness_surface(descriptor)``   | ``harness`` | accepts any         | none                    | ``HarnessFiles`` |
 +------------------------------------------+-------------+---------------------+-------------------------+------------------+
 
 **Kinds.** Each built-in surface declares the ``ArtifactKind`` of its
-component in ``ComponentSurface.kind``. The harness, skill and config
-surfaces declare ``harness_plugin``. The weight surface declares the ``kind``
+component in ``ComponentSurface.kind``. The harness surface declares
+``harness_plugin``. The weight surface declares the ``kind``
 that it is built with: ``model`` for full weights, or ``model_adapter`` for a
 LoRA adapter. A weight recipe passes its runtime's
 ``InferenceRuntime.served_weight_kind``. A surface built from the ``loader``
@@ -145,22 +141,15 @@ engine-global, not per surface: the serving runtime owns one
 loaded. It evicts a leaked adapter first, then the oldest-activated adapter
 that is no scenario's current one. The surface never touches it.
 
-**Harness file trees.** ``create_harness_surface()`` exposes the artifact's
-UTF-8 text files through ``TextFileTree``, excluding repository bookkeeping
-and binary files. Paths and text are otherwise unchanged, because the harness
-client owns how the tree is installed and interpreted.
-
-**Configuration.** ``create_config_surface()`` admits the ``config``
-component: one ``config.json`` object, checked by ``ConfigValidator``. A
-change of the configuration is a release like any other. Reef does not apply
-the configuration to inference requests, and the component exposes no pulled
-tree, so it composes beside a harness component.
-
-**Skill trees.** ``create_skill_surface()`` exposes the skills through the
-same ``TextFileTree``. A client pulls them with ``GET /reef/harness``, and the
-client harness applies them; Reef adds no skill to an inference request. A
-``SkillLayer`` owns one top-level directory and validates it. The layers form
-the component's ``SkillValidator``, its admission policy.
+**Harness file trees.** ``create_harness_surface(descriptor)``, in
+``reef.harness.sync``, serves each release of the ``harness`` component
+through ``HarnessFiles``. A release stores the harness source tree, and a read
+renders it for the descriptor's adapter without a model binding, so the
+client gets the files its agent reads and binds its own model.
+``GET /reef/harness?form=source`` reads the stored source tree instead (see
+`Rendering <harness-adapters.rst#rendering>`__). The function lives in
+``reef.harness`` because it renders; the surface contracts it builds on stay
+in ``reef.surface``.
 
 Building a surface
 ------------------

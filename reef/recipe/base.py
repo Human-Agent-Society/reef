@@ -21,6 +21,7 @@ from reef.core.config import config_arguments
 from reef.core.plugins import PluginConfigError, PluginReference
 from reef.core.reports import ReportBase
 from reef.evaluation.activation import activation_reference, build_activation_rule
+from reef.harness.tasks.model_binding import ModelBinding
 from reef.inference.http import resolve_proxy_runtime
 from reef.inference.model_config import ModelConfig
 from reef.observability import ExperimentLogger
@@ -37,6 +38,7 @@ from reef.storage.tasks import TaskStorage
 from reef.surface.base import AcceptAnyArtifact, Surface
 from reef.surface.weights import create_weight_surface
 from reef.train.algos.registry import resolve_objective
+from reef.train.backend import CommittedReleases, ComponentReleases
 from reef.train.jobs import JobLoop
 from reef.train.pipeline import PipelineConfig, PipelineSpec, TrainingPipeline
 from reef.train.trainer import ComponentTrainer, Trainer
@@ -81,6 +83,13 @@ class ServedEndpoint:
         object.__setattr__(self, "url", self.url.strip().rstrip("/"))
 
 
+def check_job_components(recipe: Recipe, components: Mapping[str, TrainingComponent]) -> None:
+    """Raise ``ValueError`` unless ``components`` names exactly the job components of ``recipe``."""
+    names = sorted(component.name for component in recipe.job_components())
+    if sorted(components) != names:
+        raise ValueError(f"the job components of {type(recipe).__name__} are {names}, not {sorted(components)}")
+
+
 @dataclass(frozen=True, kw_only=True)
 class Recipe:
     """Default inference recipe and base contract for update recipes.
@@ -115,10 +124,11 @@ class Recipe:
         """The recipe's default stage classes. The default passes records through and makes no job data."""
         return PipelineSpec()
 
-    def activation_rule(self) -> ActivationRule:
-        """The rule that decides whether an artifact that the recipe's trainers make serves (``activation``)."""
+    def activation_rule(self, reference: PluginReference | None = None) -> ActivationRule:
+        """The rule that decides whether an artifact that the recipe's trainers make serves: the one ``reference``
+        names, such as a scenario's own rule, else the ``activation`` section's."""
         try:
-            return build_activation_rule(self.activation)
+            return build_activation_rule(self.activation if reference is None else reference)
         except PluginConfigError as exc:
             raise RecipeConfigError(str(exc)) from exc
 
@@ -146,12 +156,18 @@ class Recipe:
         stage = self.stages().record2sample
         return Record2Sample.referenced_class(stage).scenario_state_dirs(stage.config, scenario)
 
-    def with_training_component(self, component: TrainingComponent) -> Recipe:
-        """This recipe with ``component`` in place of its training component: the same recipe, whose trainers
-        submit their jobs to ``component``. Only a recipe with a training component has one to replace."""
+    def job_components(self) -> tuple[TrainingComponent, ...]:
+        """The training components whose jobs this recipe's trainers submit, each under its own ``name``: the
+        weight trainer's ``training_component``, and the ones that a recipe adds, such as a harness's."""
+        return () if self.training_component is None else (self.training_component,)
+
+    def with_job_components(self, components: Mapping[str, TrainingComponent]) -> Recipe:
+        """This recipe whose trainers submit the jobs of each job component to ``components[name]``, such as the
+        jobs queue's view of it. Raise ``ValueError`` unless ``components`` names exactly the job components."""
+        check_job_components(self, components)
         if self.training_component is None:
-            raise ValueError(f"{type(self).__name__} has no training component to replace")
-        return replace(self, training_component=component)
+            return self
+        return replace(self, training_component=components[self.training_component.name])
 
     def with_model_config(self, config: ModelConfig) -> Recipe:
         """Bind model settings supplied for this scenario."""
@@ -258,6 +274,7 @@ class Recipe:
         algorithm_state: Mapping[str, Any] | None = None,
         experiment_logger: ExperimentLogger | None = None,
         task_storage: TaskStorage | None = None,
+        releases: ComponentReleases | None = None,
         samples: TrainerSamples | None = None,
     ) -> Trainer:
         return Trainer.build(
@@ -281,6 +298,7 @@ class Recipe:
         algorithm_states: Mapping[str, Mapping[str, Any] | None],
         experiment_logger: ExperimentLogger | None = None,
         task_storage: TaskStorage | None = None,
+        releases: CommittedReleases | None = None,
         samples: SampleStore | None = None,
     ) -> tuple[ComponentTrainer, ...]:
         """Build every trainer of the named scenario, each bound to the component it evolves.
@@ -295,6 +313,8 @@ class Recipe:
         the scenario session, and ``samples`` is its sample store. Each trainer
         gives them to its pipeline; a trainer reads the samples as
         ``TrainerSamples`` of its key (``""`` for the only trainer).
+        ``releases`` reads the scenario's committed releases; each trainer
+        reads those of its own component.
         """
         if len(surface.names) > 1:
             raise RecipeConfigError(
@@ -311,6 +331,7 @@ class Recipe:
                     algorithm_state=algorithm_states.get(component),
                     experiment_logger=experiment_logger,
                     task_storage=task_storage,
+                    releases=None if releases is None else ComponentReleases(releases, component),
                     samples=None if samples is None else TrainerSamples(samples),
                 ),
             ),
@@ -362,9 +383,21 @@ class Recipe:
         """The content of the deployment's base artifact, which every new scenario starts from; empty by default."""
         return BaseArtifactSource()
 
+    def harness_state_dir(self, scenario: str, component: str) -> Path | None:
+        """The directory of ``component``'s harness evolution state in ``scenario``: its history, its step records
+        and the running step's progress (``reef.train.harness_backend.component``); ``None`` for a recipe that
+        evolves no harness."""
+        return None
+
+    def harness_served_model(self, scenario: str, component: str, model: ModelConfig) -> ModelBinding | None:
+        """The model that ``component``'s harness in ``scenario`` calls, on the scenario's model selection
+        ``model``: a client's layer asks Reef for this model by name and dialect. ``None`` for a recipe that evolves
+        no harness."""
+        return None
+
     @property
     def harness_adapter(self) -> str | None:
-        """The adapter a client installs this recipe's harness tree with (``reef-<adapter>``).
+        """The adapter this recipe's harness releases render for, as ``GET /reef/harness`` serves them.
 
         ``None`` for a recipe that serves no harness tree. Every scenario of
         the process shares it, so the scenario list names it before a
@@ -561,6 +594,7 @@ class WeightTrainingRecipe(Recipe):
         algorithm_state: Mapping[str, Any] | None = None,
         experiment_logger: ExperimentLogger | None = None,
         task_storage: TaskStorage | None = None,
+        releases: ComponentReleases | None = None,
         samples: TrainerSamples | None = None,
     ) -> Trainer:
         """Build a trainer from this recipe's pipeline, objective, and report contract.

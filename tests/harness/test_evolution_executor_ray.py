@@ -8,20 +8,17 @@ from pathlib import Path
 
 import pytest
 import tests
-from tests.support._strategies import resolve_proposer
+from tests.support.harness_steps import PI_SEED, harness_backend
 
-from reef.evaluation.harness import HarnessCandidate, RolloutScorer
-from reef.harness.adapters import get_adapter
-from reef.harness.rollouts.model_binding import ModelBinding
+from reef.evaluation.harness import HarnessCandidate, TaskScorer
 from reef.runtime.executor import Executor, ExecutorConfig, WorkerSpec
 from reef.runtime.executor.config import executor_settings
 from reef.runtime.executor.requirements import ExecutionRequirements
-from reef.train.cordis_backend.backend import CordisBackend
 
 pytestmark = pytest.mark.skipif(os.environ.get("REEF_TEST_RAY") != "1", reason="opt-in real Ray integration")
 
 
-class GPUScorer(RolloutScorer):
+class GPUScorer(TaskScorer):
     def execution_requirements(self):
         return ExecutionRequirements(gpus_per_worker=1)
 
@@ -50,45 +47,38 @@ def test_evolution_explicit_ray_places_scorer_on_declared_ray_gpu(tmp_path):
         log_to_driver=False,
         runtime_env={"env_vars": {"PYTHONPATH": str(Path(tests.__file__).parent.parent)}},
     )
-    binary = tmp_path / "fake-pi"
-    binary.write_text(
-        "#!/usr/bin/env python3\nimport os\nfrom pathlib import Path\n"
-        "root = Path(os.environ['PI_CODING_AGENT_SESSION_DIR'])\n"
-        "root.mkdir(parents=True, exist_ok=True)\n"
-        "(root / 'session.jsonl').write_text('{\"type\":\"agent_end\"}\\n')\n"
-    )
-    binary.chmod(0o755)
     try:
-        backend = CordisBackend(
-            descriptor=get_adapter("pi"),
-            propose=resolve_proposer(lambda *args: None),
-            score_rollout=GPUScorer(),
+        backend, _ = harness_backend(
+            tmp_path,
+            lambda workspace, services: None,
+            score=GPUScorer(),
             tasks=("one",),
-            models=ModelBinding(base_url="http://127.0.0.1:8000", model="unused", api_key="dummy"),
-            binary=str(binary),
             worker_executor=executor_settings(
                 {}, {"backend": "ray", "workers": 1, "resources": {"cpus_per_worker": 2}}
             ),
         )
+        backend.history.add_candidate(PI_SEED, step=1, origin="seed")
         candidate = HarnessCandidate(
             candidate_id="test",
-            candidate_files={},
-            current_files={},
-            candidate_entries=(),
-            current_entries=(),
-            mutations=(),
-            record_dir=tmp_path / "first-record",
+            candidate_tree=PI_SEED,
+            current_tree=PI_SEED,
+            evaluation_tasks=("one",),
+            step=1,
         )
-        assert backend._rollout_evaluator.worker_selection.settings.backend == "ray"
+        assert backend.evaluator.worker_pool.selection.settings.backend == "ray"
         result = backend.evaluate(candidate)
-        assert result.metrics["candidate_scores"] == (1.0,)
-        assert result.metrics["current_scores"] == (1.0,)
-        assert (tmp_path / "first-record/rollouts/candidate-0/session.jsonl").is_file()
-        assert (tmp_path / "first-record/rollouts/current-0/rollout.json").is_file()
-        assert backend.evaluate(replace(candidate, record_dir=tmp_path / "second-record")).metrics[
-            "candidate_scores"
-        ] == (1.0,)
-        assert (tmp_path / "second-record/rollouts/candidate-0/session.jsonl").is_file()
+        assert result.metrics["candidate_scores"] == [{"task": "one", "scores": [1.0]}]
+        assert result.metrics["current_scores"] == [{"task": "one", "scores": [1.0]}]
+        # A second evaluation on another task runs on the same workers.
+        second = backend.evaluate(replace(candidate, evaluation_tasks=("two",)))
+        assert second.metrics["candidate_scores"] == [{"task": "two", "scores": [1.0]}]
+        assert second.metrics["runs_run"] == 2
+        # Each run's record comes back from its Ray worker into the history.
+        history = backend.history
+        assert all((history.run_dir(record.run_id) / "run.json").is_file() for record in history.runs)
+        for evaluation in (result, second):
+            (task_run,) = evaluation.metrics["candidate_runs"]
+            assert (history.run_dir(task_run["run"]) / "session.jsonl").is_file()
         backend.close()
         # Shutdown is asynchronous in Ray: a following actor must be able to
         # acquire the same GPU, proving that backend.close released its workers.

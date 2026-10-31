@@ -1,0 +1,12 @@
+{
+  "name": "reef",
+  "plugins": [
+    {
+      "name": "reef",
+      "source": {
+        "source": "local",
+        "path": "./plugin"
+      }
+    }
+  ]
+}

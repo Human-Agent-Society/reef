@@ -100,21 +100,6 @@ class ServingEngines(ABC):
         return
 
 
-class RunningEngines(ServingEngines):
-    """Engines that their owner started behind ``backend`` for this runtime, and stops: opening returns them as
-    new engines, and closing stops nothing."""
-
-    def __init__(self, backend: InferenceBackend) -> None:
-        self.backend = backend
-
-    @property
-    def base_url(self) -> str:
-        return self.backend.inference_url()
-
-    def open(self) -> OpenedEngines:
-        return OpenedEngines(self.backend, attached=False)
-
-
 class ReleaseWeights(ConfiguredPlugin, ABC):
     """Where a serving runtime gets the weight files of a published release.
 

@@ -194,50 +194,33 @@ reef.post(
 
 ### Harness 进化部署
 
-用模型 API（而非 GPU）根据自然语言请求改进编码 harness。
+用模型 API（而非 GPU），根据打分反馈进化编码 agent 的 skills 和 rules。
 
-Reefine 是内置的 harness 改进 recipe，自带部署配置；只需指定 provider URL 和模型。在 Reef checkout 和已激活的 Python 环境中：
-
-```bash
-reef serve --recipe reefine \
-  --inference.upstream-url http://127.0.0.1:11434 \
-  --inference.upstream-model gemma4:26b
-```
-使用其他 provider 时，修改
-`--inference.upstream-url` 和 `--inference.upstream-model`；需要认证时设置
-`REEF_UPSTREAM_API_KEY`。使用此配置时，Reef 监听 `127.0.0.1:8901`，不启用认证（启动前设置 `REEF_TOKEN` 即要求该 token），状态保存在
-`.reef/reefine/`。
-需要修改其他内容时，复制[该部署配置](reef/service/profiles/reefine.yaml) 并用 `-c` 传入你的副本。
-
-在另一个已激活同一 Python 环境的终端中（安装会把该终端的 `python3` 写入 `reef-pi`），创建 scenario、安装 harness 并提出修改请求：
+Harness 部署服务的是 `reef.recipe.harness:HarnessEvolutionRecipe`。该 recipe 把 agent 的 harness 保存为一个文本文件 tree。每一步，method 根据该步的 trace 修改这个 tree 的副本，评估用候选版本让真实的 agent 运行任务，胜出的候选版本发布为任何客户端都能拉取的 release。[Harness 进化教程](tutorials/evolve-your-harness/README.md)在 pi 上运行最小的完整循环。它需要一个 OpenAI 兼容端点，以及供 pi 使用的 Node.js 和 npm。在 Reef checkout 和已激活的 Python 环境中：
 
 ```bash
-curl -fsS -H "Content-Type: application/json" \
-  -d '{"name": "my-harness"}' http://127.0.0.1:8901/reef/scenarios
-curl -fsS -H "x-reef-scenario: my-harness" \
-  'http://127.0.0.1:8901/reef/harness/install?adapter=pi' | bash
-
-reef-pi evolve "when I ask you to fix a bug, reproduce it with a failing test first"
+cd tutorials/evolve-your-harness
+./run.sh
 ```
 
-脚本安装到 `~/reef-harness/<scenario>`（这里是 `~/reef-harness/my-harness`）；用 `bash -s -- <dir>` 可以指定其他安装根目录。无论装在哪里，都请放在 agent 工作的项目之外：会话可以写入其项目中的文件，安装根目录若在项目内，会话就可能改变下一个会话运行的内容。安装写入 `reef-pi` 的 Python 环境和它导入的 Reef checkout 也一样：`reef-pi` 启动时，那里的代码以你的身份运行。对 codex 和 dsh，也不要把它们放在 `/tmp` 或 `$TMPDIR` 下：它们的沙箱同样允许命令写入这些目录。`reef-pi` 在会话开始前做的检查，只对只能写入其项目、`/tmp` 和 `$TMPDIR` 的会话有效；pi 运行命令时没有沙箱（见 [Recover a changed installation](https://reefinfra.ai/docs/user-guide/evolve-your-harness/#recover-a-changed-installation)）。
+`configs/serve.yaml` 指定端点（`inference.upstream-url`，不带 `/v1` 后缀）和模型（`inference.upstream-model`）。把它们改成你自己的 provider；端点需要密钥时设置 `REEF_UPSTREAM_API_KEY`。`run.sh` 在 `127.0.0.1:8900` 启动 Reef，经由它发送任务、上报每个分数，并拉取已发布的 tree。每次运行都会写出 `work/replay.html`，其中包含 release 链和每个步骤修改的文件。
 
-在 `reef-pi` 会话内，`/reefine <text>` 提交同样的请求。所服务的模型把修改写成一个 skill、一条 rules 条目、一个 agent 命令或一个 pi extension。主机能隔离它时（Linux，装有 `bwrap` 和 `pasta`，以非 root 用户运行），或在你信任的机器上设置 `REEF_PROPOSER_SANDBOX=none` 时，它以 coding agent 的方式工作，先真实运行改过的 harness 再交回修改。下一个会话启动时的更新提示会提供安装；若某个步骤在你两轮对话之间完成，会立即询问是否安装。用 `/versions` 查看各版本（会打开该步骤的页面），用 `/versions <version> install` 安装。要更换模型，用另一个 `--inference.upstream-model` 重启 `reef serve` 并重新执行安装命令：安装过程会将模型 ID 写入本地 harness 配置。脚本化的 bug 修复与研究演示见 [Reefine 教程](tutorials/reefine/README.md)，配置说明见 [Reefine 指南](docs/user-guide/recipes/reefine.rst)。
+`GET /reef/harness` 提供已发布的 tree，按部署的 adapter 渲染。这些文件不含端点、密钥或模型：客户端把它们写到 agent 读取的位置，并把 agent 的模型绑定到这个 Reef（见 [Use a published tree](https://reefinfra.ai/docs/user-guide/evolve-your-harness/#use-a-published-tree)）。请把 tree 放在 agent 工作的项目之外：会话可以写入其项目中的文件，tree 若在项目内，就可能改变下一个会话运行的内容。[Evolve agent prompts, rules, and skills](https://reefinfra.ai/docs/user-guide/evolve-your-harness/) 说明了该循环及其配置。
 
 ## 📚 Recipes 与示例
 
 根据工作负载的**任务类型**和希望**进化的对象**（模型权重或 Agent 的 harness）来选择
 recipe。进化权重的 recipe 需要 GPU 训练栈，而 harness recipe 只需要一个模型端点。下表中每个
 recipe 链接到其指南，每个已测 benchmark 链接到其结果页，[Recipe 目录](https://reefinfra.ai/docs/user-guide/recipes/)
-还列出了每个 recipe 的代码和示例。Reefine 和 [SFT](https://reefinfra.ai/docs/user-guide/recipes/sft/)
-随 `reef-infra` 内置提供，SFT 在 demonstration 或导入的样例上训练，适用于所有任务类型。
+还列出了每个 recipe 的代码和示例。[SFT](https://reefinfra.ai/docs/user-guide/recipes/sft/)
+随 `reef-infra` 内置提供，在 demonstration 或导入的样例上训练，适用于所有任务类型。
 其他实现位于本仓库的 `recipes/` cookbook 中，通过带点号的类路径指定，不随 Reef wheel 发布。
 
 | 任务类型 | 任务形状 | 进化模型 | 进化 harness | 标准 benchmark |
 |---|---|---|---|---|
 | 开放式发现 | 对一个有可度量目标、没有已知答案的难题反复尝试 | [TTT-Discover](https://reefinfra.ai/docs/user-guide/recipes/tttd/)、[Guidance-TTT](recipes/tttd/examples/guidance_ttt/README.md) | 暂无 | 已测：[TriMul](recipes/tttd/examples/guidance_ttt/results/README.md)、[圆填充](recipes/tttd/examples/tttd/README.md#formal-8x64-results)、[Erdős 最小重叠](recipes/tttd/examples/tttd/README.md#formal-8x64-results)。 |
 | 有已知答案的离线任务 | 来自固定集合的独立任务，每个都有参考答案 | [SAO](https://reefinfra.ai/docs/user-guide/recipes/sao/)、[SDFT](https://reefinfra.ai/docs/user-guide/recipes/sdft/)、[SDPO](https://reefinfra.ai/docs/user-guide/recipes/sdpo/)、[OPD](https://reefinfra.ai/docs/user-guide/recipes/opd/) | [GEPA](https://reefinfra.ai/docs/user-guide/recipes/gepa/)、[Meta-Harness](recipes/meta_harness/README.md) | 已测：[IMOAnswerBench](recipes/sao/examples/imo_answerbench/README.md#results)、[AIME 2024](recipes/opd/examples/math/README.md#results)、[AIME 2025](recipes/gepa/examples/aime/README.md#the-validation-contract)、[SciKnowEval](recipes/sdpo/examples/sciknoweval/README.md#results)、[ToolAlpaca](recipes/sdft/examples/skill_stream/README.md#results)、[Terminal-Bench](recipes/meta_harness/examples/terminal_bench/README.md#results)。 |
-| 从使用中在线学习 | 与用户的会话，交互本身就是信号 | [OpenClaw-RL](https://reefinfra.ai/docs/user-guide/recipes/openclawrl/) | [SkillClaw](https://reefinfra.ai/docs/user-guide/recipes/skillclaw/)、[Reefine](docs/user-guide/recipes/reefine.rst) | 已测：[GSM8K 与模拟学生用户](recipes/openclawrl/examples/openclawrl/README.md#results)、[WildClawBench](recipes/skillclaw/README.md#the-2026-08-29-results-glm-53-flash-preliminary)。 |
+| 从使用中在线学习 | 与用户的会话，交互本身就是信号 | [OpenClaw-RL](https://reefinfra.ai/docs/user-guide/recipes/openclawrl/) | [ACE](recipes/ace/README.md)、[ReasoningBank](recipes/reasoning_bank/README.md) | 已测：[GSM8K 与模拟学生用户](recipes/openclawrl/examples/openclawrl/README.md#results)。 |
 
 [`recipes/basic/`](recipes/basic/) 是只记录、不学习的起始栈，不在目录之内。如果想快速了解
 反馈、候选修改和发布流程，可以从[编程 harness 教程](tutorials/evolve-your-harness/README.md)开始。
@@ -350,4 +333,3 @@ Reef 汇聚了一群探索 Agent 如何从经验中学习、持续进化的人�
 
 - [SGLang](https://github.com/sgl-project/sglang) — 高性能推理
 - [slime](https://github.com/THUDM/slime) — 模型权重训练
-- [cordis](https://github.com/cordiverse/cordis) — harness 进化

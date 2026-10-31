@@ -1,0 +1,655 @@
+"""Run rollouts of Harbor task directories with a Harbor agent through Reef, and report each scored rollout.
+
+The agent's model calls go through Reef's capture proxy, so every inference is a record on the service
+and its receipt comes back here. When the verifier scores the rollout, one report goes to
+``/reef/report``: the reward as the score, the receipts as the references, and the task's name, path
+and digest under ``metadata.task``. A recipe's reported processor turns those records into training
+samples the way it does for any report. The agent is the caller's choice: any name Harbor knows
+(``terminus-2`` unless told otherwise) or an import path, with the served model and the proxy filled
+into the ``{model}``, ``{base_url}`` and ``{api_key}`` placeholders of its configuration. The proxy
+listens on the host's loopback, which an agent running in the host process reaches; an agent that runs
+inside the task container (Harbor's installed agents) needs ``agent_host``, an address of this host the
+container can reach, and the proxy then listens on every interface.
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import contextlib
+import json
+import math
+import os
+import re
+import sys
+import urllib.parse
+import urllib.request
+import uuid
+from abc import ABC, abstractmethod
+from collections import Counter
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from reef_client.client import ReefClient, ReefClientError
+
+from reef.core.evaluation import PolicyHarness, PolicyModel, RolloutRequest, RolloutRunner, RolloutScore
+from reef.core.tasks import HarborTaskError, TaskSplitError, manifest_task_paths, primary_reward, read_harbor_task
+from reef.execution.sandbox.remote import REMOTE_TASK_ENVIRONMENTS
+from reef.harness.capture import CaptureProxy
+
+#: Terminus 2 with its model and endpoint left to the binding, the same placeholders the adapter descriptors use.
+#: LiteLLM routes to api_base only under a provider prefix and strips it before the call, so Reef sees the model name.
+DEFAULT_AGENT: Mapping[str, object] = {
+    "name": "terminus-2",
+    "model_name": "openai/{model}",
+    "kwargs": {"api_base": "{base_url}/v1", "llm_kwargs": {"api_key": "{api_key}"}},
+}
+#: What the agent presents as its key: the proxy replaces it with Reef's bearer, so no trial directory holds the token.
+PLACEHOLDER_API_KEY = "reef"
+#: A label rides every call as an ``x-reef-tag-<name>`` header; the service keeps the name in lower case.
+LABEL_NAME = re.compile(r"[a-z0-9][a-z0-9_.-]{0,63}")
+RESERVED_LABELS = ("task", "rollout")
+
+
+class TaskRolloutError(RuntimeError):
+    """A task's rollout could not run, or could not be reported."""
+
+
+@dataclass(frozen=True)
+class RolloutRow:
+    """What one rollout came back with: the verifier's rewards, an error text, and where the trial is."""
+
+    rewards: Mapping[str, float]
+    error: str = ""
+    trial_uri: str | None = None
+
+
+class TaskLab(ABC):
+    """What runs one rollout of a Harbor task under one agent: reef-eval's Lab, behind an interface a test can stand in for.
+
+    ``run`` runs one rollout of a task. ``build_environment`` starts the task's environment and stops it, with no
+    agent run and no verifier, so the environment's build (an image, a template) exists before the task's
+    rollouts start; it returns the error that stopped the start, or "" when the environment started.
+    """
+
+    @abstractmethod
+    async def run(
+        self,
+        task_path: Path,
+        agent: Mapping[str, object],
+        *,
+        key: str,
+        tags: Mapping[str, str],
+        overrides: Mapping[str, object],
+    ) -> RolloutRow: ...
+
+    @abstractmethod
+    async def build_environment(self, task_path: Path, *, overrides: Mapping[str, object]) -> str: ...
+
+
+class ReefEvalLab(TaskLab):
+    """reef-eval's Lab under ``work_dir``: Harbor trials under ``trials/``, results in ``results.sqlite``.
+
+    ``build_environment`` runs Harbor's ``install_only`` trial of its nop agent: Harbor starts the task's
+    environment, sets up the agent, which does nothing, and stops the environment.
+    """
+
+    def __init__(self, work_dir: Path) -> None:
+        self.work_dir = Path(work_dir)
+
+    async def run(
+        self,
+        task_path: Path,
+        agent: Mapping[str, object],
+        *,
+        key: str,
+        tags: Mapping[str, str],
+        overrides: Mapping[str, object],
+    ) -> RolloutRow:
+        try:
+            from reef_eval import Lab
+        except ImportError as exc:
+            raise TaskRolloutError(
+                "running rollouts needs reef-eval, a dependency of reef-infra; reinstall reef-infra"
+            ) from exc
+        # A Lab binds its asyncio primitives to the loop of its first use, so every rollout gets its own Lab.
+        # reef-eval types each override by name; the caller's mapping passes through as it is.
+        options: dict[str, Any] = dict(overrides)
+        row = await Lab(self.work_dir).run(str(task_path), dict(agent), tags=dict(tags), key=key, **options)
+        row_tags = dict(row.tags)
+        rewards = {str(name): float(value) for name, value in dict(row.rewards).items()}
+        return RolloutRow(rewards=rewards, error=str(row_tags.get("error") or ""), trial_uri=row.uri)
+
+    async def build_environment(self, task_path: Path, *, overrides: Mapping[str, object]) -> str:
+        row = await self.run(
+            task_path, {"name": "nop"}, key=uuid.uuid4().hex, tags={}, overrides={**overrides, "install_only": True}
+        )
+        return row.error
+
+
+def verifier_timed_out(trial_uri: str | None) -> bool:
+    """Whether Harbor's result file for a local trial records that its verifier ran past its timeout."""
+    if not trial_uri or not trial_uri.startswith("file://"):
+        return False
+    # The URI is percent-encoded (Path.as_uri), so a work dir with a space or a non-ASCII name needs decoding.
+    result_path = Path(urllib.request.url2pathname(urllib.parse.urlparse(trial_uri).path)) / "result.json"
+    # A trial whose harbor process was killed has no result file; its rollout stays unscored.
+    if not result_path.is_file():
+        return False
+    exception = json.loads(result_path.read_text(encoding="utf-8"))["exception_info"]
+    return exception is not None and exception["exception_type"] == "VerifierTimeoutError"
+
+
+def bound_agent(agent: Mapping[str, object], *, model: str, base_url: str, api_key: str) -> dict[str, object]:
+    """The agent configuration with ``{model}``, ``{base_url}`` and ``{api_key}`` filled in wherever they sit."""
+    values = {"{model}": model, "{base_url}": base_url, "{api_key}": api_key}
+
+    def fill(value: object) -> object:
+        if isinstance(value, str):
+            for placeholder, replacement in values.items():
+                value = value.replace(placeholder, replacement)
+            return value
+        if isinstance(value, Mapping):
+            return {str(name): fill(item) for name, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [fill(item) for item in value]
+        return value
+
+    return {str(name): fill(item) for name, item in agent.items()}
+
+
+def checked_labels(labels: Mapping[str, str]) -> dict[str, str]:
+    """Labels as the service stores them: lower case names of header token characters, printable ASCII values."""
+    checked: dict[str, str] = {}
+    for raw_name, raw_value in labels.items():
+        name = str(raw_name).strip().lower()
+        value = str(raw_value).strip()
+        if LABEL_NAME.fullmatch(name) is None:
+            raise TaskRolloutError(
+                f"label name {raw_name!r} must be letters, digits, '_', '.' or '-' (it rides as a header)"
+            )
+        if name in RESERVED_LABELS:
+            raise TaskRolloutError(f"label {name!r} is the rollout runner's own tag; choose another name")
+        if not value or not value.isascii() or not value.isprintable():
+            raise TaskRolloutError(f"label {name!r} needs a non-empty printable ASCII value, not {raw_value!r}")
+        checked[name] = value
+    return checked
+
+
+def rollout_reward(rewards: Mapping[str, float]) -> float | None:
+    """The verifier's primary reward (``primary_reward``); None when it names none or wrote nothing finite."""
+    value = primary_reward(rewards)
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        return None
+    return float(value)
+
+
+def task_identity(task_path: Path) -> dict[str, str]:
+    """What names the task in a report: its directory name and path, plus the reef digest when it carries one."""
+    identity = {"name": task_path.name, "path": str(task_path)}
+    # A task that reef.core.tasks did not write has no digest; the name and the path still identify it.
+    with contextlib.suppress(HarborTaskError):
+        identity["digest"] = read_harbor_task(task_path).digest
+    return identity
+
+
+def call_failure(turns: Sequence[Mapping[str, object]]) -> str:
+    """Why no model call got a receipt: the count of failed calls and what the service answered the first one."""
+    failed = [turn for turn in turns if turn.get("status") != 200 or not turn.get("receipt")]
+    if not failed:
+        return ""
+    first = failed[0]
+    response = first.get("response")
+    if isinstance(response, Mapping):
+        error = response.get("error")
+        message = error.get("message") if isinstance(error, Mapping) else error
+        detail = str(message) if message else json.dumps(response)[:200]
+    else:
+        detail = str(response or "no body")[:200]
+    return f"{len(failed)} model calls failed; the first answered {first.get('status')}: {detail}"
+
+
+def unrecorded_call_failure(turns: Sequence[Mapping[str, object]]) -> str:
+    """Why no model call of a rollout answered: the count of failed calls and the first answer."""
+    failed = [turn for turn in turns if turn.get("status") != 200]
+    if not failed:
+        return "the agent made no model call"
+    first = failed[0]
+    response = first.get("response")
+    detail = json.dumps(response)[:200] if isinstance(response, Mapping) else str(response or "no body")[:200]
+    return f"{len(failed)} model calls failed; the first answered {first.get('status')}: {detail}"
+
+
+@dataclass(frozen=True)
+class RolloutTurn:
+    """One answered model call of a rollout.
+
+    Values: ``(request, response)`` with ``request`` the JSON body the agent sent and ``response`` the JSON
+    body that Reef answered, with its ``training`` block.
+    Purpose: ``TaskRolloutRunner`` makes it for each call of a rollout that answered 200, in call
+    order; the rollout's caller assembles the rollout's training sample from them. A rollout is not
+    a record: Reef keeps no record of these calls.
+    """
+
+    request: Mapping[str, Any]
+    response: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
+class TaskRollout:
+    """One rollout of a task: what the verifier said and what reached Reef.
+
+    ``turns`` holds the answered model calls of a rollout, in call order; a rollout that reports to
+    Reef has none, because its calls are records.
+    """
+
+    task_path: Path
+    name: str
+    rollout_id: str
+    reward: float | None
+    rewards: Mapping[str, float]
+    error: str
+    receipts: tuple[str, ...]
+    failed_calls: int
+    report_agent_record_ids: tuple[str, ...]
+    trial_uri: str | None
+    turns: tuple[RolloutTurn, ...] = ()
+
+    @property
+    def is_infrastructure_failure(self) -> bool:
+        """Whether the rollout could not run: the sandbox, the agent or the verifier failed before it scored.
+
+        That is a failure of the infrastructure, not of the solver.
+        """
+        return self.reward is None and bool(self.error)
+
+    def as_line(self) -> dict[str, object]:
+        """The JSON line the command prints for this task."""
+        return {
+            "task": self.name,
+            "reward": self.reward,
+            "receipts": len(self.receipts),
+            "failed_calls": self.failed_calls,
+            "reports": list(self.report_agent_record_ids),
+            "error": self.error,
+        }
+
+
+def rewards_of(rollouts: tuple[TaskRollout, ...]) -> tuple[float, ...]:
+    """The rewards of the rollouts that ran, in order. A rollout that ran without a reward counts as 0."""
+    return tuple(
+        rollout.reward if rollout.reward is not None else 0.0
+        for rollout in rollouts
+        if not rollout.is_infrastructure_failure
+    )
+
+
+class TaskRolloutRunner(RolloutRunner[TaskRollout]):
+    """Runs rollouts of task directories with one agent against one Reef scenario, and reports every scored rollout.
+
+    This is the Harbor agent runner of ``RolloutRunner``. It runs the harness ``harness``, the Harbor agent with
+    no plugin, and the model ``served_model``, which ``reef_url`` serves: ``model``, with the LoRA adapter
+    ``model_adapter`` when it is given. A request names a task directory, and ``run_rollouts`` runs up to
+    ``concurrency`` rollouts at a time.
+    """
+
+    def __init__(
+        self,
+        *,
+        reef_url: str,
+        scenario: str,
+        model: str,
+        work_dir: Path,
+        model_adapter: str | None = None,
+        token: str | None = None,
+        agent: Mapping[str, object] | None = None,
+        agent_host: str | None = None,
+        environment: str = "docker",
+        labels: Mapping[str, str] | None = None,
+        extra_instruction_paths: Sequence[Path] = (),
+        per_receipt: bool = False,
+        is_reporting: bool = True,
+        is_unrecorded: bool = False,
+        lab: TaskLab | None = None,
+        verifier_timeout_reward: float | None = None,
+        concurrency: int = 1,
+    ) -> None:
+        for label, value in (
+            ("reef_url", reef_url),
+            ("scenario", scenario),
+            ("model", model),
+            ("environment", environment),
+        ):
+            if not isinstance(value, str) or not value.strip():
+                raise TaskRolloutError(f"{label} must be a non-empty string")
+        if isinstance(concurrency, bool) or not isinstance(concurrency, int) or concurrency < 1:
+            raise TaskRolloutError("concurrency must be an integer of at least 1")
+        if is_unrecorded and is_reporting:
+            raise TaskRolloutError("an unrecorded rollout reports nothing")
+        if agent_host is not None and (not isinstance(agent_host, str) or not agent_host.strip()):
+            raise TaskRolloutError("agent_host must be a non-empty host name or address")
+        self.reef_url = reef_url.rstrip("/")
+        self.scenario = scenario
+        self.model = model
+        # The model that reef_url serves, which every request must name.
+        self.served_model = PolicyModel(model, model_adapter)
+        self.token = token
+        self.work_dir = Path(work_dir)
+        self.agent: dict[str, object] = dict(agent) if agent is not None else dict(DEFAULT_AGENT)
+        if not (self.agent.get("name") or self.agent.get("import_path")):
+            raise TaskRolloutError("agent must carry a Harbor agent name or an import_path")
+        self.agent_host = agent_host
+        self.environment = environment
+        self.labels = checked_labels(dict(labels or {}))
+        for path in extra_instruction_paths:
+            if not Path(path).is_file():
+                raise TaskRolloutError(f"extra instruction file {path} does not exist")
+        self.extra_instruction_paths = tuple(Path(path) for path in extra_instruction_paths)
+        self.per_receipt = per_receipt
+        # A measurement run (an arm run for its reward alone) keeps its rollouts out of the training data.
+        self.is_reporting = is_reporting
+        # An unrecorded rollout: Reef keeps no record of its calls, and the rollout keeps their turns.
+        self.is_unrecorded = is_unrecorded
+        # The reward for a rollout whose verifier ran past its timeout; None leaves such a rollout unscored.
+        self.verifier_timeout_reward = verifier_timeout_reward
+        self.concurrency = concurrency
+        self.work_dir.mkdir(parents=True, exist_ok=True)
+        self.lab: TaskLab = lab if lab is not None else ReefEvalLab(self.work_dir / "lab")
+        self.client = ReefClient(self.reef_url, token=token)
+
+    @property
+    def agent_name(self) -> str:
+        return str(self.agent.get("name") or self.agent.get("import_path"))
+
+    @property
+    def harness(self) -> PolicyHarness:
+        """The harness that every request must name: the Harbor agent, with no plugin."""
+        return PolicyHarness(self.agent_name)
+
+    def run(self, task_path: Path) -> TaskRollout:
+        """Run one rollout of a task directory and report it when the verifier scored it."""
+        return asyncio.run(self.run_async(task_path))
+
+    def run_rollouts(self, requests: Sequence[RolloutRequest]) -> list[TaskRollout]:
+        """Run one rollout of each request's task directory, ``concurrency`` at a time, in request order."""
+
+        async def run_all() -> list[TaskRollout]:
+            return await self.run_rollouts_async(requests, asyncio.Semaphore(self.concurrency))
+
+        return asyncio.run(run_all())
+
+    async def run_rollouts_async(
+        self, requests: Sequence[RolloutRequest], slots: asyncio.Semaphore
+    ) -> list[TaskRollout]:
+        """``run_rollouts`` in a running event loop: each rollout holds one of ``slots`` while it runs.
+
+        On a remote environment (``REMOTE_TASK_ENVIRONMENTS``), a task directory that two or more requests name
+        gets one ``TaskLab.build_environment`` first, which holds one slot, and the task's rollouts start when it
+        ends. So they never build the task's environment at the same time, which E2B refuses: it cancels all but one
+        build of a template. Rollouts of other tasks do not wait for it. A failed build is tried once more, since a
+        sandbox create can fail for a moment while the template is fine. When the second build fails too, no rollout
+        of the task runs: each comes back as an infrastructure failure with the build's error. Docker needs no build
+        first: Harbor builds one Docker image at a time. Two calls that run the same task at once can still build its
+        template together.
+
+        Raise ``ValueError`` before any rollout runs when a request names another harness or model than this
+        runner's, or a record directory: Harbor keeps each trial under ``work_dir``. Raise ``TaskRolloutError``
+        before any rollout runs when a request's task directory has no ``task.toml``.
+        """
+        for request in requests:
+            if request.harness != self.harness:
+                raise ValueError(f"this runner runs the Harbor agent {self.agent_name!r} with no plugin")
+            if request.model != self.served_model:
+                raise ValueError(f"this runner serves {self.served_model}, not {request.model}")
+            if request.record_dir is not None:
+                raise ValueError("this runner keeps each trial under its work_dir, not in a request's record_dir")
+            if not (Path(request.task) / "task.toml").is_file():
+                raise TaskRolloutError(f"{request.task} is not a Harbor task directory: no task.toml")
+        task_paths = [Path(request.task) for request in requests]
+
+        async def build(task_path: Path) -> str:
+            error = ""
+            for _ in range(2):
+                async with slots:
+                    error = await self.lab.build_environment(
+                        task_path, overrides={"environment": {"type": self.environment}}
+                    )
+                if not error:
+                    break
+            return error
+
+        builds = {
+            task_path: asyncio.ensure_future(build(task_path))
+            for task_path, count in Counter(task_paths).items()
+            if count > 1 and self.environment in REMOTE_TASK_ENVIRONMENTS
+        }
+
+        async def run_one(task_path: Path) -> TaskRollout:
+            build_error = await builds[task_path] if task_path in builds else ""
+            if build_error:
+                return TaskRollout(
+                    task_path=task_path,
+                    name=task_path.name,
+                    rollout_id=uuid.uuid4().hex,
+                    reward=None,
+                    rewards={},
+                    error=f"the environment of {task_path.name} did not start: {build_error}",
+                    receipts=(),
+                    failed_calls=0,
+                    report_agent_record_ids=(),
+                    trial_uri=None,
+                )
+            async with slots:
+                return await self.run_async(task_path)
+
+        return list(await asyncio.gather(*(run_one(task_path) for task_path in task_paths)))
+
+    def rollout_score(self, rollout: TaskRollout) -> RolloutScore:
+        """Failed when the environment could not run the rollout, else its reward, 0 when it ran without one."""
+        if rollout.is_infrastructure_failure:
+            return RolloutScore.failed()
+        return RolloutScore.scored(0.0 if rollout.reward is None else rollout.reward)
+
+    async def run_async(self, task_path: Path) -> TaskRollout:
+        task_path = Path(task_path)
+        if not (task_path / "task.toml").is_file():
+            raise TaskRolloutError(f"{task_path} is not a Harbor task directory: no task.toml")
+        rollout_id = uuid.uuid4().hex
+        tags = {**self.labels, "task": task_path.name, "rollout": rollout_id}
+        listen_host = "0.0.0.0" if self.agent_host else "127.0.0.1"
+        proxy = CaptureProxy(
+            self.reef_url,
+            self.scenario,
+            self.token,
+            tags=tags,
+            listen_host=listen_host,
+            is_unrecorded=self.is_unrecorded,
+        )
+        proxy.start()
+        try:
+            base_url = f"http://{self.agent_host or '127.0.0.1'}:{proxy.port}"
+            agent = bound_agent(self.agent, model=self.model, base_url=base_url, api_key=PLACEHOLDER_API_KEY)
+            overrides: dict[str, object] = {"environment": {"type": self.environment}}
+            if self.extra_instruction_paths:
+                overrides["extra_instruction_paths"] = [str(path) for path in self.extra_instruction_paths]
+            row = await self.lab.run(task_path, agent, key=rollout_id, tags=tags, overrides=overrides)
+        finally:
+            turns = proxy.drain()
+            proxy.stop()
+        receipts: tuple[str, ...] = ()
+        answered: tuple[RolloutTurn, ...] = ()
+        if self.is_unrecorded:
+            answered = tuple(
+                RolloutTurn(turn["request"], turn["response"])
+                for turn in turns
+                if turn.get("status") == 200
+                and isinstance(turn.get("request"), Mapping)
+                and isinstance(turn.get("response"), Mapping)
+            )
+            failed_calls = len(turns) - len(answered)
+            error = row.error or ("" if answered else unrecorded_call_failure(turns))
+        else:
+            receipts = tuple(
+                str(turn["receipt"]) for turn in turns if turn.get("receipt") and turn.get("status") == 200
+            )
+            failed_calls = len(turns) - len(receipts)
+            error = row.error or ("" if receipts else call_failure(turns))
+        reward = rollout_reward(row.rewards)
+        if row.rewards and primary_reward(row.rewards) is None and not error:
+            error = f"the verifier wrote {', '.join(sorted(row.rewards))} and no reward entry"
+        if reward is None and self.verifier_timeout_reward is not None and verifier_timed_out(row.trial_uri):
+            reward = self.verifier_timeout_reward
+        report_ids: tuple[str, ...] = ()
+        if self.is_reporting and reward is not None and receipts:
+            try:
+                report_ids = self.report(task_path, rollout_id, reward, row, receipts)
+            except TaskRolloutError as exc:
+                # A refused report is this rollout's failure, not the caller's: the rollout comes back unreported
+                # with the reason, and the other rollouts in flight go on.
+                error = str(exc)
+        return TaskRollout(
+            task_path=task_path,
+            name=task_path.name,
+            rollout_id=rollout_id,
+            reward=reward,
+            rewards=dict(row.rewards),
+            error=error,
+            receipts=receipts,
+            failed_calls=failed_calls,
+            report_agent_record_ids=report_ids,
+            trial_uri=row.trial_uri,
+            turns=answered,
+        )
+
+    def report(
+        self, task_path: Path, rollout_id: str, reward: float, row: RolloutRow, receipts: Sequence[str]
+    ) -> tuple[str, ...]:
+        """Post the rollout's reward against its receipts; one report, or one per receipt; the record ids."""
+        payload: dict[str, object] = {
+            "score": reward,
+            "feedback": f"verifier reward {reward} on {task_path.name}",
+            "metadata": {
+                "task": task_identity(task_path),
+                "rollout": {
+                    "id": rollout_id,
+                    "agent": self.agent_name,
+                    "labels": dict(self.labels),
+                    "rewards": dict(row.rewards),
+                    "trial_uri": row.trial_uri,
+                },
+            },
+        }
+        groups = [[receipt] for receipt in receipts] if self.per_receipt else [list(receipts)]
+        record_ids = []
+        for references in groups:
+            try:
+                answer = self.client.report(self.scenario, payload, references=references)
+            except ReefClientError as exc:
+                raise TaskRolloutError(
+                    f"the report for {task_path.name} was refused ({exc.status}): {exc.body[:300]}"
+                ) from exc
+            except OSError as exc:
+                raise TaskRolloutError(
+                    f"the report for {task_path.name} did not reach {self.reef_url}: {exc}"
+                ) from exc
+            record_ids.append(str(answer.get("agent_record_id", "")))
+        return tuple(record_ids)
+
+
+def parsed_labels(pairs: Sequence[str]) -> dict[str, str]:
+    labels = {}
+    for pair in pairs:
+        name, separator, value = pair.partition("=")
+        if not separator or not name:
+            raise TaskRolloutError(f"a label is NAME=VALUE, not {pair!r}")
+        labels[name] = value
+    return labels
+
+
+def main(argv: Sequence[str] | None = None, *, lab: TaskLab | None = None) -> int:
+    """Run a rollout of each task directory, or of one side of a split manifest, and print one JSON line per task as it finishes."""
+    parser = argparse.ArgumentParser(
+        prog="python -m reef.harness.tasks.rollouts",
+        description="Run a rollout of each Harbor task directory through Reef and report each scored rollout.",
+    )
+    parser.add_argument("tasks", nargs="*", type=Path, help="task directories; or --manifest with --tasks-root")
+    parser.add_argument("--manifest", type=Path, help="a split manifest written by reef.core.tasks")
+    parser.add_argument("--tasks-root", type=Path, help="the directory the manifest's task names live under")
+    parser.add_argument("--side", choices=("train", "eval"), default="train", help="which side of the manifest")
+    parser.add_argument("--reef-url", required=True, help="the Reef service, e.g. http://127.0.0.1:8900")
+    parser.add_argument("--scenario", required=True, help="the scenario the records and reports belong to")
+    parser.add_argument("--model", required=True, help="the served model name the agent asks for")
+    parser.add_argument("--token", default=os.environ.get("REEF_TOKEN") or None, help="defaults to REEF_TOKEN")
+    parser.add_argument("--work-dir", type=Path, default=Path("work/rollouts"), help="trials and results land here")
+    parser.add_argument(
+        "--agent-json",
+        default=None,
+        help="Harbor AgentConfig fields as JSON with {model}, {base_url} and {api_key} placeholders; terminus-2 by default",
+    )
+    parser.add_argument(
+        "--agent-host",
+        default=None,
+        help="an address of this host the task container can reach, for an agent that runs inside the container "
+        "(host.docker.internal on Docker Desktop); the proxy then listens on every interface",
+    )
+    parser.add_argument("--environment", default="docker", help="the Harbor environment type")
+    parser.add_argument(
+        "--label", action="append", default=[], metavar="NAME=VALUE", help="tags every call and report"
+    )
+    parser.add_argument(
+        "--instructions", action="append", type=Path, default=[], help="a file appended to every task's instruction"
+    )
+    parser.add_argument(
+        "--per-receipt", action="store_true", help="one report per model call instead of one per rollout"
+    )
+    arguments = parser.parse_args(argv)
+    try:
+        if arguments.manifest is not None:
+            if arguments.tasks or arguments.tasks_root is None:
+                raise TaskRolloutError("--manifest goes with --tasks-root and no task directories")
+            task_paths: tuple[Path, ...] = manifest_task_paths(
+                arguments.manifest, arguments.tasks_root, arguments.side
+            )
+            if not task_paths:
+                raise TaskRolloutError(f"the manifest's {arguments.side} side names no task")
+        elif arguments.tasks:
+            task_paths = tuple(arguments.tasks)
+        else:
+            raise TaskRolloutError("name task directories or a --manifest")
+        for task_path in task_paths:
+            if not (task_path / "task.toml").is_file():
+                raise TaskRolloutError(f"{task_path} is not a Harbor task directory: no task.toml")
+        agent = json.loads(arguments.agent_json) if arguments.agent_json else None
+        if agent is not None and not isinstance(agent, dict):
+            raise TaskRolloutError("--agent-json must hold an object")
+        runner = TaskRolloutRunner(
+            reef_url=arguments.reef_url,
+            scenario=arguments.scenario,
+            model=arguments.model,
+            work_dir=arguments.work_dir,
+            token=arguments.token,
+            agent=agent,
+            agent_host=arguments.agent_host,
+            environment=arguments.environment,
+            labels=parsed_labels(arguments.label),
+            extra_instruction_paths=arguments.instructions,
+            per_receipt=arguments.per_receipt,
+            lab=lab,
+        )
+    except (TaskRolloutError, TaskSplitError, HarborTaskError, json.JSONDecodeError) as exc:
+        parser.error(str(exc))
+    is_complete = True
+    for task_path in task_paths:
+        try:
+            line = runner.run(task_path).as_line()
+        except TaskRolloutError as exc:
+            line = {"task": task_path.name, "error": str(exc)}
+        print(json.dumps(line), flush=True)
+        is_complete = is_complete and bool(line.get("reports"))
+    return 0 if is_complete else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

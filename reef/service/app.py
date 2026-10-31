@@ -17,9 +17,11 @@ from reef.runtime.interfaces import FixedEngineClients, InferenceHandler
 from reef.service.artifact_evaluations import ArtifactEvaluations
 from reef.service.artifact_imports import ArtifactImports
 from reef.service.cors import configure_browser_access
+from reef.service.harness_imports import QueuedImports
 from reef.service.inference_service import InferenceReplica, ServedModelsCache
 from reef.service.request_service import RequestService
 from reef.service.routes import register_data_service_routes, register_routes
+from reef.service.routes.harness import register_harness_routes
 from reef.service.web import service_application
 from reef.storage.records import RecordRetention
 
@@ -76,6 +78,35 @@ def create_data_app(
     return app
 
 
+def create_harness_app(
+    dispatcher: Dispatcher,
+    *,
+    tokens: str | Iterable[str] | None = None,
+    console_origins: Iterable[str] = (),
+    inference_url: str | None = None,
+) -> web.Application:
+    """The HTTP app of the harness service: the routes that a harness client calls (RFC #1048, harness supplement).
+
+    ``dispatcher`` runs the harness service and no control (``reef serve --component harness``): it loads each
+    scenario on demand, without activating it, and reads its commits and artifacts. An import goes to control as a
+    ``harness_sync`` item (``QueuedImports``). ``inference_url`` is ``harness.inference_url``. The app closes the
+    dispatcher on cleanup.
+    """
+    if not dispatcher.services.runs_harness or dispatcher.services.runs_control:
+        raise ValueError("the harness app runs the harness service without control")
+    request_service = RequestService(dispatcher, inference_url=inference_url)
+    app = service_application(tokens)
+    configure_browser_access(app, console_origins)
+    app[REQUEST_SERVICE_KEY] = request_service
+    register_harness_routes(app, request_service=request_service, imports=QueuedImports(dispatcher.queue))
+
+    async def cleanup(app: web.Application) -> None:
+        await asyncio.to_thread(dispatcher.close)
+
+    app.on_cleanup.append(cleanup)
+    return app
+
+
 def create_app(
     dispatcher: Dispatcher,
     *,
@@ -88,6 +119,7 @@ def create_app(
     open_local_cycles_at: str | None = None,
     evaluations: ArtifactEvaluations | None = None,
     artifact_imports: ArtifactImports | None = None,
+    harness_inference_url: str | None = None,
 ) -> web.Application:
     """Build the HTTP app around an existing dispatcher; close it only when requested.
 
@@ -100,6 +132,7 @@ def create_app(
     with reef-eval's Harbor lab and evaluates no new artifact.
     ``artifact_imports`` reads and holds artifact imports; None reads the
     built-in sources into the system's temporary directory.
+    ``harness_inference_url`` is ``harness.inference_url``: where a client's harness layer sends its model calls.
 
     The app runs the inference routes in the same process (``reef.service.inference_service``): they read
     ``served_models`` and reach each row's engine through the runtime that control serves it with, or through
@@ -116,7 +149,7 @@ def create_app(
         timeout_seconds=300.0 if runtime is None else runtime.inference_timeout_s,
         for_codex=dispatcher.recipe.harness_adapter == "codex",
     )
-    request_service = RequestService(dispatcher)
+    request_service = RequestService(dispatcher, inference_url=harness_inference_url)
     app = service_application(tokens, evaluation_tokens=evaluation_tokens)
     configure_browser_access(app, console_origins)
     app[REQUEST_SERVICE_KEY] = request_service

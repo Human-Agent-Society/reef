@@ -1,15 +1,16 @@
-"""Built-in candidate-evaluation mixins, the default plugin, and the selection plugin base.
+"""Built-in candidate-evaluation mixins and the rules that read rollout scores.
 
-A harness recipe's ``evolution.selection`` names a :class:`SelectionPlugin`
-class, which the recipe builds for each scenario with ``from_config``.
+A harness recipe builds its publication policy from ``evolution.evaluation``
+(``reef.evaluation.harness.policy``). The policies decide by the rules here:
+``compare_scores`` pairs two sides' rollouts and ``check_floor`` checks one
+side against a floor score.
 
 A :class:`~reef.core.evaluation.CandidateEvaluationPlugin` is a single
 class that both measures a candidate (``evaluate``) and decides whether to
-publish it (``decide``). Rather than composing an evaluator object with a
-selector object, a plugin mixes in the methods it needs: a *decide* mixin
-(:class:`AlwaysSelectMixin`, :class:`RegressionCheckMixin`) and, when the
-measurement comes from the candidate backend rather than the plugin's own code,
-the :class:`BackendEvaluateMixin`.
+select it (``decide``). Rather than composing an evaluator object with a
+selector object, a plugin mixes in the *decide* mixin it needs
+(:class:`AlwaysSelectMixin`, :class:`RegressionCheckMixin`) and measures in its
+own ``evaluate``.
 
 Every mixin inherits the plugin contract and implements one half of it, so the
 other half stays abstract: a mixin cannot be instantiated on its own, and a
@@ -20,29 +21,19 @@ plugin is only concrete once both halves are supplied.
             super().__init__(metric="clean_rate", margin=0.17)
             ...
         def evaluate(self, candidate): ...   # its own measurement
-
-    class BackendScored(ScoreMixin, BackendEvaluateMixin):
-        def __init__(self, candidate_backend, **kw):
-            super().__init__(**kw)           # the decide mixin's config
-            self._candidate_backend = candidate_backend          # BackendEvaluateMixin reads this
 """
 
 from __future__ import annotations
 
-from abc import abstractmethod
-from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Self
 
 from reef.core.evaluation import (
     CandidateEvaluationPlugin,
-    CandidateEvaluator,
     EvaluationResult,
     RolloutScores,
     SelectionDecision,
     UpdateCandidate,
 )
-from reef.core.plugins import Plugin, PluginConfigError
 
 
 @dataclass(frozen=True)
@@ -50,7 +41,7 @@ class ScoreComparison:
     """How a candidate's rollouts compare with the current release's, pair by pair.
 
     Values: ``wins``, ``losses``, ``ties`` and ``dropped`` are non-negative ints, and their sum is the number of
-    pairs. Purpose: ``compare_scores`` makes it; the ``score_comparison`` policy reads it.
+    pairs. Purpose: ``compare_scores`` makes it; the ``compare`` policy reads it.
     """
 
     wins: int
@@ -125,20 +116,8 @@ def check_floor(candidate: RolloutScores, floor_score: float) -> FloorCheck:
     return FloorCheck(passed, len(candidate.tasks) - passed, candidate.failed_count())
 
 
-class SelectionPlugin(CandidateEvaluationPlugin, Plugin):
-    """A candidate evaluation plugin that a harness recipe's ``evolution.selection`` names.
-
-    The recipe builds one for each scenario with ``from_config``, from the
-    setting's configuration and the scenario's candidate backend.
-    """
-
-    @classmethod
-    @abstractmethod
-    def from_config(cls, config: Mapping[str, Any], *, candidate_backend: CandidateEvaluator) -> Self: ...
-
-
 class AlwaysSelectMixin(CandidateEvaluationPlugin):
-    """Give a plugin a ``decide()`` that publishes every evaluated candidate.
+    """Give a plugin a ``decide()`` that selects every evaluated candidate.
 
     Abstract on its own: ``evaluate`` is inherited unimplemented, so this
     mixes into a plugin rather than standing up as one.
@@ -156,7 +135,7 @@ class AlwaysSelectMixin(CandidateEvaluationPlugin):
 class RegressionCheckMixin(CandidateEvaluationPlugin):
     """Give a plugin a best-checkpoint ``decide()`` over one scalar metric.
 
-    Where :class:`AlwaysSelectMixin` publishes every evaluated candidate, this
+    Where :class:`AlwaysSelectMixin` selects every evaluated candidate, this
     reads one scalar metric from the evaluation and selects a candidate only
     while that score stays within ``margin`` of the best score selected so far;
     otherwise it rejects, and serving holds the last selected weights. That makes
@@ -219,46 +198,11 @@ class RegressionCheckMixin(CandidateEvaluationPlugin):
         )
 
 
-class BackendEvaluateMixin(CandidateEvaluationPlugin):
-    """Give a plugin an ``evaluate()`` that delegates to ``self._candidate_backend``.
-
-    For methods whose measurement is the candidate backend's own candidate
-    evaluation rather than code in the plugin. The plugin sets ``self._candidate_backend``
-    in its ``__init__``; this mixin holds no state of its own.
-    """
-
-    _candidate_backend: Any
-
-    def evaluate(self, candidate: UpdateCandidate) -> EvaluationResult:
-        return self._candidate_backend.evaluate(candidate)
-
-
-class BackendAlwaysSelectPlugin(AlwaysSelectMixin, BackendEvaluateMixin, SelectionPlugin):
-    """The default plugin of a harness trainer: evaluate via the candidate backend, publish every candidate.
-
-    A harness trainer that configures no evaluation gets it, and a harness
-    recipe's ``always`` selection names it.
-    """
-
-    def __init__(self, candidate_backend: Any) -> None:
-        super().__init__()
-        self._candidate_backend = candidate_backend
-
-    @classmethod
-    def from_config(cls, config: Mapping[str, Any], *, candidate_backend: CandidateEvaluator) -> Self:
-        if config:
-            raise PluginConfigError(f"the always selection takes no config, got {', '.join(sorted(map(str, config)))}")
-        return cls(candidate_backend)
-
-
 __all__ = [
     "AlwaysSelectMixin",
-    "BackendAlwaysSelectPlugin",
-    "BackendEvaluateMixin",
     "FloorCheck",
     "RegressionCheckMixin",
     "ScoreComparison",
-    "SelectionPlugin",
     "check_floor",
     "compare_scores",
 ]

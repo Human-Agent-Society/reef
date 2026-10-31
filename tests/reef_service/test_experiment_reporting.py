@@ -1,7 +1,6 @@
 """A slow or failing tracker blocks no serving operation: its calls run on the report thread."""
 
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import nullcontext
 from threading import Event
 
 import pytest
@@ -9,9 +8,7 @@ from tests.support.artifact_versions import RecordingExperimentTracker, dispatch
 from tests.support.component_trainers import HARNESS, _dispatcher, _RecordingTracker, _scenario
 from tests.support.samples_service import make_samples
 
-from reef.artifact import Artifact
 from reef.observability import ExperimentRun
-from reef.train import TrainStepResult
 from reef.train.job_queue import scenario_jobs
 
 
@@ -126,91 +123,4 @@ def test_local_tracker_read_locks(tmp_path, monkeypatch, callback, failing):
         assert scenario.scenario_step == 1
     finally:
         release.set()
-        value.close()
-
-
-@pytest.mark.parametrize("operation", ["load", "reload"])
-@pytest.mark.parametrize("nested", [False, True])
-@pytest.mark.parametrize("tracker_fails", [False, True])
-def test_a_load_that_publishes_shipped_content_does_not_wait_for_the_tracker(
-    tmp_path, monkeypatch, operation, nested, tracker_fails
-):
-    tracker = _RecordingTracker()
-    value, backends = _dispatcher(tmp_path, experiment_tracker=tracker)
-    original = _scenario(value)
-    if operation == "load":
-        with value.registry.lock_for("agent"):
-            value.registry.remove("agent")
-        original.close()
-    update = tmp_path / "updated-harness"
-    update.mkdir()
-    (update / "harness.txt").write_text("updated shipped content")
-    entered, release = Event(), Event()
-
-    def shipped(state, tree):
-        return TrainStepResult(state, artifact=Artifact.local(update), metrics={"shipped_content_update": True})
-
-    def blocked(event):
-        entered.set()
-        release.wait(10)
-        tracker.events.append(event)
-        if tracker_fails:
-            raise ConnectionError("tracker unavailable")
-
-    def load():
-        with value.registry.lock_for("agent") if nested else nullcontext():
-            if operation == "reload":
-                return value.registry.reload("agent")
-            return value.get_or_create_scenario("agent")
-
-    monkeypatch.setattr(backends[HARNESS], "shipped_content_update", shipped)
-    monkeypatch.setattr(tracker, "record", blocked)
-    try:
-        loaded = load()
-        assert entered.wait(5), "shipped-content update did not reach tracker"
-        assert loaded is not original and loaded.scenario_step == 1
-        assert value.get_or_create_scenario("agent") is loaded
-        release.set()
-        value.registry.experiment_reports.flush()
-        assert len(tracker.events) == 1
-        assert tracker.events[0].metrics == loaded.store.history()[0].metrics
-    finally:
-        release.set()
-        value.close()
-
-
-def test_a_failed_load_still_reports_the_commit_that_landed(tmp_path, monkeypatch):
-    from reef.scenario.scenario import Scenario
-
-    tracker = _RecordingTracker()
-    value, backends = _dispatcher(tmp_path, experiment_tracker=tracker)
-    original = _scenario(value)
-    update = tmp_path / "updated-harness"
-    update.mkdir()
-    (update / "harness.txt").write_text("updated shipped content")
-    publish = Scenario.publish_shipped_content
-
-    def shipped(state, tree):
-        return TrainStepResult(state, artifact=Artifact.local(update), metrics={"shipped_content_update": True})
-
-    def fail_after_publication(scenario):
-        publish(scenario)
-        raise RuntimeError("load failed after publication")
-
-    def failing_record(event):
-        tracker.events.append(event)
-        raise ConnectionError("tracker unavailable")
-
-    monkeypatch.setattr(backends[HARNESS], "shipped_content_update", shipped)
-    monkeypatch.setattr(Scenario, "publish_shipped_content", fail_after_publication)
-    monkeypatch.setattr(tracker, "record", failing_record)
-    try:
-        with pytest.raises(RuntimeError, match="load failed after publication"):
-            value.registry.reload("agent")
-        assert value.get_or_create_scenario("agent") is original
-        value.registry.experiment_reports.flush()
-        assert len(tracker.events) == 1
-        assert tracker.events[0].context.step == 1
-        assert original.store.history()[0].step == 1
-    finally:
         value.close()

@@ -1,15 +1,17 @@
-"""Test-only adapters that wrap a plain function as a Proposer or a RolloutScorer.
+"""Test-only adapters that wrap a plain function as a Method or a TaskScorer.
 
 Reef takes harness evolution plugins as classes only. Tests keep their short
-lambdas through these adapters. As before, a keyword reaches the function only
-when its signature names it (or takes ``**kwargs``), and the function declares
-``reads_requests`` and ``runs_agent`` by naming ``requests`` and ``agent_host``.
+functions through these adapters. A method function takes the step's
+``Workspace`` and ``Services`` and returns a ``TreePatch`` (which the adapter
+applies to the workspace's tree) or ``None`` (the tree stays as the function
+left it). It says what the step did with ``workspace.write_output``. A scorer function takes ``(task, result)``, and
+``models`` too when its signature names it.
 """
 
 import inspect
 
-from reef.evaluation.harness import RolloutScorer
-from reef.train.cordis_backend.strategies import Proposer
+from reef.evaluation.harness import TaskScorer
+from reef.train.harness_backend import Method
 
 
 def _accepts(fn, name):
@@ -17,36 +19,21 @@ def _accepts(fn, name):
     return any(parameter.name == name or parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters)
 
 
-def _names(fn, name):
-    parameter = inspect.signature(fn).parameters.get(name)
-    return parameter is not None and parameter.kind in (
-        inspect.Parameter.POSITIONAL_OR_KEYWORD,
-        inspect.Parameter.KEYWORD_ONLY,
-    )
+class FunctionMethod(Method):
+    """A method made of ``fn(workspace, services)``, the two parts of the step's context; a returned ``TreePatch``
+    applies to the head tree."""
 
-
-class FunctionProposer(Proposer):
     def __init__(self, fn):
         self.fn = fn
 
-    @property
-    def reads_requests(self):
-        return _names(self.fn, "requests")
-
-    @property
-    def runs_agent(self):
-        return _names(self.fn, "agent_host")
-
-    def propose(self, nodes, samples, models, **keywords):
-        forwarded = {name: value for name, value in keywords.items() if _accepts(self.fn, name)}
-        if not self.reads_requests:
-            forwarded.pop("requests", None)
-        if not self.runs_agent:
-            forwarded.pop("agent_host", None)
-        return self.fn(nodes, samples, models, **forwarded)
+    def step(self, context):
+        workspace = context.workspace
+        patch = self.fn(workspace, context.services)
+        if patch is not None:
+            workspace.write_tree(workspace.tree().apply(patch))
 
 
-class FunctionScorer(RolloutScorer):
+class FunctionScorer(TaskScorer):
     def __init__(self, fn):
         self.fn = fn
 
@@ -59,9 +46,9 @@ class FunctionScorer(RolloutScorer):
         return self.fn(task, result)
 
 
-def resolve_proposer(value):
-    return value if isinstance(value, Proposer) else FunctionProposer(value)
+def resolve_method(value):
+    return value if isinstance(value, Method) else FunctionMethod(value)
 
 
-def resolve_rollout_scorer(value):
-    return value if isinstance(value, RolloutScorer) else FunctionScorer(value)
+def resolve_task_scorer(value):
+    return value if isinstance(value, TaskScorer) else FunctionScorer(value)

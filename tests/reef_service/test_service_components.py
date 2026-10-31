@@ -30,6 +30,8 @@ from reef.service.deploy.cli import build_serve_parser
 from reef.service.deploy.service_config import ServiceConfig
 from reef.storage.sql_coordination import memory_coordination, open_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.storage.work_queue import NewWork
+from reef.train.job_queue import JOBS_QUEUE
 
 MEMORY_BACKEND = "tests.support.artifact_backend_plugin:MemoryArtifactBackend"
 TOKEN = "service-token"
@@ -95,6 +97,7 @@ class Changes(StoreChanges):
     def __init__(self) -> None:
         self.records: list[str] = []
         self.samples: list[str] = []
+        self.jobs: list[str] = []
 
     def records_added(self, current) -> None:
         self.records.append(current.name)
@@ -102,9 +105,12 @@ class Changes(StoreChanges):
     def samples_added(self, scenario: str) -> None:
         self.samples.append(scenario)
 
+    def job_changed(self, scenario: str) -> None:
+        self.jobs.append(scenario)
+
 
 @pytest.mark.unit
-def test_control_learns_of_records_and_samples_that_other_processes_add() -> None:
+def test_control_learns_of_records_samples_and_jobs_that_other_processes_add() -> None:
     sequence = {"math": 3}
     scenario = SimpleNamespace(name="math", records=SimpleNamespace(last_sequence=lambda name: sequence[name]))
     registry = SimpleNamespace(loaded_scenarios=lambda: (scenario,))
@@ -122,6 +128,18 @@ def test_control_learns_of_records_and_samples_that_other_processes_add() -> Non
     assert changes.records == ["math"] and changes.samples == ["math"]
     watcher.run_once()
     assert changes.records == ["math"] and changes.samples == ["math"]
+
+    # A job that a worker takes changes nothing to commit; its checkpoint and its end each wake control.
+    queue.add(NewWork(JOBS_QUEUE, "job-1", "math", "job:stub"))
+    job = queue.take(JOBS_QUEUE, "training-1", ["job:stub"])
+    watcher.run_once()
+    assert changes.jobs == []
+    queue.add_progress(JOBS_QUEUE, job.id, "training-1", {"step": 0}, number=0)
+    watcher.run_once()
+    assert changes.jobs == ["math"]
+    queue.finish(JOBS_QUEUE, job.id, "training-1", {"state": "finished", "metrics": {}})
+    watcher.run_once()
+    assert changes.jobs == ["math", "math"]
 
 
 @pytest.mark.unit
@@ -151,6 +169,12 @@ def test_the_evaluation_service_runs_on_its_own_and_an_unknown_service_is_refuse
     asyncio.run(run())
     with pytest.raises(ValueError, match="unknown service"):
         build_component_app("router", settings(tmp_path))
+
+
+@pytest.mark.unit
+def test_the_harness_service_needs_a_recipe_that_evolves_a_harness(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="evolves no harness, so it has no harness service"):
+        build_component_app("harness", settings(tmp_path))
 
 
 @pytest.mark.unit

@@ -121,6 +121,10 @@ def checkpoint_from_json(entry: Mapping[str, JsonValue]) -> SavedCheckpoint:
     )
 
 
+#: The metadata entry of a failed job's item that holds the metrics the component reported for it.
+FAILED_METRICS_KEY = "failed_metrics"
+
+
 def status_from_item(item: WorkItem) -> JobStatus:
     """The ``JobStatus`` of the job in ``item``: running until the item is final, then finished or failed."""
     checkpoints = tuple(checkpoint_from_json(entry) for entry in item.progress)
@@ -129,8 +133,10 @@ def status_from_item(item: WorkItem) -> JobStatus:
             item.id, "finished", checkpoints, metrics=json_object(item.result.get("metrics", {}), "metrics")
         )
     if item.state == "failed":
-        # A failed item always carries its error (``WorkItem``).
-        return JobStatus(item.id, "failed", checkpoints, error=item.error)
+        # A failed item always carries its error (``WorkItem``); a job that failed with metrics keeps them in the
+        # item's metadata, since a failed item has no result.
+        metrics = json_object(item.metadata.get(FAILED_METRICS_KEY, {}), "a failed job's metrics")
+        return JobStatus(item.id, "failed", checkpoints, metrics=metrics, error=item.error)
     return JobStatus(item.id, "running", checkpoints)
 
 
@@ -325,8 +331,9 @@ class JobExperimentRecorder(ExperimentTracker):
     ``record(event)`` gives ``event`` to ``tracker``. Then, for an event of a training job, it sets
     ``metadata["experiment"]`` of the job's item to ``tracker.experiment_run(event.context).to_dict()``
     (``WorkQueue.set_metadata``). Nothing is written when the tracker has no run for the event, or the queue
-    has no such item, such as for the step of a candidate backend. Each commit of a job (its submission, its
-    checkpoints and its end) records the same run, so a write after the first changes nothing.
+    has no such item, such as for a job that its component runs in the trainer's own process. Each commit of a
+    job (its submission, its checkpoints and its end) records the same run, so a write after the first changes
+    nothing.
 
     Purpose: the dispatcher of control wraps its tracker in it when the recipe trains with a training component.
     The tracker reports from control's report thread (``ExperimentReportQueue``), after each commit lands. The
@@ -433,6 +440,10 @@ class TrainingJobWorker(QueueWorker):
                 if status.state == "finished":
                     return {"state": "finished", "metrics": cast(JsonValue, dict(status.metrics))}
                 if status.state == "failed":
+                    if status.metrics:
+                        self.queue.set_metadata(
+                            JOBS_QUEUE, item.id, FAILED_METRICS_KEY, cast(JsonValue, dict(status.metrics))
+                        )
                     raise ItemFailed(status.error or "the job failed")
                 if self.stopped.wait(self.poll_seconds):
                     raise WorkerStopped

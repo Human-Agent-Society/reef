@@ -31,7 +31,7 @@ from reef.execution.sandbox.task_environment import (
     EnvironmentVariableProbe,
     ModuleProbe,
 )
-from reef.harness.client.tasks import ReefEvalLab, RolloutTurn, TaskRollout, TaskRolloutRunner, rewards_of
+from reef.harness.tasks.rollouts import ReefEvalLab, RolloutTurn, TaskRollout, TaskRolloutRunner, rewards_of
 from reef.recipe.generated_tasks.results import TaskRolloutResult
 from reef.record2sample.generator import (
     Designer,

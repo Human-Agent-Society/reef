@@ -16,11 +16,9 @@ const excludedDirectories = new Set([
   ".reef",
   ".ruff_cache",
   ".venv",
-  "historical",
   "node_modules",
   "out",
   "public",
-  "roadmap",
   // Upstream submodule docs keep their own conventions and dead links;
   // reef links INTO third_party are still resolved as targets.
   "third_party",

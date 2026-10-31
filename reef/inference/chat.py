@@ -14,7 +14,6 @@ native request and parses the native response into a
 
 from __future__ import annotations
 
-import codecs
 import copy
 import json
 import math
@@ -28,6 +27,7 @@ from typing import Any
 
 from reef.artifact.artifact import Artifact
 from reef.inference.http import HttpInferenceHandler, RequestHeadersFactory
+from reef.inference.provider_protocol import SSE_DONE, SSEFrameDecoder, frame_data, usage_of
 from reef.runtime.interfaces import InferenceStream
 
 CHAT_COMPLETIONS_PATH = "/v1/chat/completions"
@@ -121,24 +121,11 @@ class NativeGenerateClient(ABC):
 
 
 async def sse_json_events(chunks: AsyncIterator[bytes]) -> AsyncIterator[dict[str, Any]]:
-    """Decode arbitrarily chunked SSE bytes into JSON data events."""
+    """Decode arbitrarily chunked SSE bytes into JSON data events, up to the ``[DONE]`` event.
 
-    decoder = codecs.getincrementaldecoder("utf-8")()
-    buffer = ""
-
-    def complete_events(*, final: bool = False) -> tuple[list[str], str]:
-        nonlocal buffer
-        # Engines use LF, but accepting CRLF keeps the proxy correct behind
-        # HTTP middleware that normalizes line endings.
-        buffer = buffer.replace("\r\n", "\n").replace("\r", "\n")
-        blocks = buffer.split("\n\n")
-        buffer = blocks.pop() if not final else ""
-        payloads = []
-        for block in blocks:
-            data = [line[5:].removeprefix(" ") for line in block.split("\n") if line.startswith("data:")]
-            if data:
-                payloads.append("\n".join(data))
-        return payloads, buffer
+    An event without data is skipped. An event whose data is not a JSON object,
+    or that reports an ``error``, raises :class:`ValueError`.
+    """
 
     def decode_event(payload: str) -> dict[str, Any]:
         value = json.loads(payload)
@@ -148,19 +135,17 @@ async def sse_json_events(chunks: AsyncIterator[bytes]) -> AsyncIterator[dict[st
             raise ValueError(f"native stream failed: {value['error'].get('message', value['error'])}")
         return value
 
+    decoder = SSEFrameDecoder()
     async for chunk in chunks:
-        buffer += decoder.decode(chunk)
-        payloads, _ = complete_events()
-        for payload in payloads:
-            if payload == "[DONE]":
+        for frame in decoder.feed(chunk):
+            payload = frame_data(frame)
+            if payload == SSE_DONE:
                 return
-            yield decode_event(payload)
+            if payload:
+                yield decode_event(payload)
 
-    buffer += decoder.decode(b"", final=True)
-    payloads, _ = complete_events(final=True)
-    for payload in payloads:
-        if payload == "[DONE]":
-            return
+    payload = frame_data(decoder.finish())
+    if payload and payload != SSE_DONE:
         yield decode_event(payload)
 
 
@@ -1144,8 +1129,6 @@ class TokenNativeChatHandler(HttpInferenceHandler):
                 }
             )
 
-        usage = response.get("usage")
-        usage = usage if isinstance(usage, Mapping) else {}
         training = dict(response.get("training") or {})
         # Provider-neutral transcript fields are private (client responses
         # strip the whole training block) and let processors render Anthropic
@@ -1166,10 +1149,7 @@ class TokenNativeChatHandler(HttpInferenceHandler):
             "content": content,
             "stop_reason": cls._anthropic_stop_reason(choice.get("finish_reason")),
             "stop_sequence": None,
-            "usage": {
-                "input_tokens": int(usage.get("prompt_tokens") or 0),
-                "output_tokens": int(usage.get("completion_tokens") or 0),
-            },
+            "usage": usage_of(response) or {"input_tokens": 0, "output_tokens": 0},
             "training": training,
         }
 

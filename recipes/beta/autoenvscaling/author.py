@@ -24,21 +24,23 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 
 from reef_client.client import ReefClient, ReefClientError
 from reef_client.serve import RECEIPT_HEADER
 
 from recipes.beta.autoenvscaling.sources import SESSION_BUDGET_CHARS, SessionSource, render_session
+from recipes.beta.reefine.agent import launch_pi, rendered_files
 from reef.core.prompts import untrusted_text
 from reef.core.tasks.harbor import TASK_NAME_PATTERN
 from reef.execution.sandbox.environment import download_directory
-from reef.execution.sandbox.process import ProgramExecutor, RolloutLaunchError, RolloutTimeout
+from reef.execution.sandbox.process import ProgramExecutor, ProgramLaunchError, ProgramTimeout
 from reef.harness.adapters import get_adapter
-from reef.harness.rollouts.model_binding import ModelBinding
-from reef.harness.rollouts.vendor_install import AdapterProgram
-from reef.recipe.reefine.agent import launch_pi, rendered_files
-from reef.recipe.reefine.agent_gateway import AgentGateway, WorkspaceTools, refuse, relay, reply_events
+from reef.harness.gateway import AgentGateway, AgentTool, refuse, relay
+from reef.harness.tasks.model_binding import ModelBinding
+from reef.harness.tasks.vendor_install import AdapterProgram
+from reef.harness.tree import HarnessTree
+from reef.inference.provider_protocol import ANTHROPIC_CLIENT_HEADERS, response_events
 from reef.record2sample.generator.designer import (
     HARBOR_OUTPUT_TEXT,
     SYSTEM_PROMPT,
@@ -46,12 +48,13 @@ from reef.record2sample.generator.designer import (
     DesignerError,
     ReefDesigner,
 )
-from reef.train.cordis_backend.strategies import AgentHost, ProposerCalls
+from reef.train import harness_backend
 
 logger = logging.getLogger(__name__)
 
 TOOLS_EXTENSION = Path(__file__).with_name("author_tools.ts")
-TOOLS_ENTRY_ID = "autoenvscaling-tools"
+#: Where the agent's tools land in its harness tree.
+TOOLS_PATH = "extensions/autoenvscaling-tools.ts"
 # The agent is told to finish, with the best task it has, this long before its time runs out.
 FINISH_SECONDS = 420
 MODEL_CALL_TIMEOUT_SECONDS = 1200.0
@@ -314,7 +317,7 @@ class VariantAuthor(TaskAuthor):
         """Write a variant from source and variant, returning its reply and model receipts."""
 
 
-class ModelCalls(ProposerCalls):
+class ModelCalls(harness_backend.ModelCalls):
     """One agent run's model-call budget, and the receipts of the calls Reef recorded.
 
     ``is_spent`` says the budget refused a call: the agent's model error that follows is its own limit, not an outage.
@@ -388,27 +391,25 @@ def call_receipt(headers: Mapping[str, str], body: bytes) -> str | None:
     for name, value in headers.items():
         if name.lower() == RECEIPT_HEADER and value:
             return value
-    for event in reversed(reply_events(body.decode("utf-8", errors="replace"))):
+    for event in reversed(response_events(body.decode("utf-8", errors="replace"))):
         if "reef" in event:
             return str(event["reef"]["agent_record_id"])
     return None
 
 
 class RecordingGateway(AgentGateway):
-    """Reefine's agent gateway, with each model call recorded on Reef and its receipt kept.
+    """The agent gateway, with each model call recorded on Reef and its receipt kept.
 
-    Reefine's gateway relays a model call with the credential alone. Reef records a call only when it names a
+    The agent gateway relays a model call with the credential alone. Reef records a call only when it names a
     scenario, so this relay adds ``x-reef-scenario`` and the run's ``x-reef-tag-*`` labels, sends the call to
-    the upstream binding (a Reef service) with its token, and records the receipt of every call in ``calls``.
-    The request's ``model`` is always the binding's.
+    ``upstream`` (a Reef service, the gateway's ``binding``) with its token, and records the receipt of every
+    call in ``calls``. The request's ``model`` is always the binding's.
     """
 
     def __init__(
-        self, upstream: ModelBinding, calls: ModelCalls, tools: WorkspaceTools, *, headers: Mapping[str, str]
+        self, upstream: ModelBinding, calls: ModelCalls, tools: AgentTool, *, headers: Mapping[str, str]
     ) -> None:
-        super().__init__(upstream, calls, tools, None)
-        self.upstream = upstream
-        self.calls = calls
+        super().__init__(upstream, calls, (tools,))
         self.reef_headers = dict(headers)
 
     def relay_model_call(self, client: BaseHTTPRequestHandler, route: str, payload: dict[str, Any]) -> None:
@@ -418,23 +419,23 @@ class RecordingGateway(AgentGateway):
             refuse(client, 429, str(exc))
             return
         headers = {"Content-Type": "application/json", "Accept-Encoding": "identity", **self.reef_headers}
-        if self.upstream.api_key:
-            headers["Authorization"] = f"Bearer {self.upstream.api_key}"
-        for name in ("anthropic-version", "anthropic-beta"):
+        if self.binding.api_key:
+            headers["Authorization"] = f"Bearer {self.binding.api_key}"
+        for name in ANTHROPIC_CLIENT_HEADERS:
             value = client.headers.get(name)
             if value:
                 headers[name] = value
         status, body, upstream_headers = relay(
             client,
-            f"{self.upstream.base_url.rstrip('/')}{route}",
+            f"{self.binding.base_url.rstrip('/')}{route}",
             headers,
-            {**payload, "model": self.upstream.model},
-            timeout_s=self.upstream.timeout_s,
+            {**payload, "model": self.binding.model},
+            timeout_s=self.binding.timeout_s,
         )
         self.calls.record({"status": status, "receipt": call_receipt(upstream_headers, body)})
 
 
-class AgentTools(WorkspaceTools):
+class AgentTools(AgentTool):
     """The gateway's ``/check`` for one agent run, answered at once, and the polls that follow it.
 
     Values: ``root`` is the run directory, ``checks`` implements CandidateChecks, and
@@ -444,13 +445,21 @@ class AgentTools(WorkspaceTools):
     the sole unfinished check ID. Construction starts with no session or check results.
     Purpose: author gateways use this object to serialize checks and retain results.
 
-    ``/check`` starts a check on a thread of its own (the workspace pulled from the sandbox, then the candidate
-    checks) and answers ``state: running`` with its ``check_id``; while one runs, ``/check`` answers that one and
-    starts nothing. This agent runs no trials, so ``/trial`` carries the polls: the task ``check <check_id>``
-    answers ``running`` until the check ends, then its result with ``state: done``. No HTTP exchange outlasts a
-    check, and every caller waiting on one gets its result.
-    Unknown or malformed check IDs return ``ran: false`` without starting a check.
+    ``/check`` with no arguments starts a check on a thread of its own (the workspace pulled from the sandbox,
+    then the candidate checks) and answers ``state: running`` with its ``check_id``; while one runs, it answers
+    that one and starts nothing. ``/check`` with a ``check_id`` polls that check: it answers ``running`` until the
+    check ends, then its result with ``state: done``. No HTTP exchange outlasts a check, and every caller waiting
+    on one gets its result.
+    A ``check_id`` that names no check of this run is refused.
     """
+
+    name = "check"
+    description = "Start a check of the task in ./task, or poll the check that check_id names."
+    input_schema: ClassVar[Mapping[str, Any]] = {
+        "type": "object",
+        "properties": {"check_id": {"type": "integer"}},
+        "additionalProperties": False,
+    }
 
     def __init__(self, root: Path, checks: CandidateChecks) -> None:
         self.root = root
@@ -462,7 +471,15 @@ class AgentTools(WorkspaceTools):
         self.results: dict[int, dict[str, object] | None] = {}
         self.running_id: int | None = None
 
-    def check(self) -> dict[str, object]:
+    def call(self, arguments: Mapping[str, Any]) -> Mapping[str, Any]:
+        check_id = arguments.get("check_id")
+        if check_id is None:
+            return self.start()
+        if isinstance(check_id, bool) or not isinstance(check_id, int) or check_id not in self.results:
+            raise ValueError("check_id must name a check this run started")
+        return self.poll(check_id)
+
+    def start(self) -> dict[str, Any]:
         with self.lock:
             if self.running_id is None:
                 self.running_id = len(self.results) + 1
@@ -472,12 +489,8 @@ class AgentTools(WorkspaceTools):
                 ).start()
             return {"state": "running", "check_id": self.running_id}
 
-    def trial(self, task: str, script: dict[str, object] | None = None) -> dict[str, object]:
-        number = task.removeprefix("check ")
+    def poll(self, check_id: int) -> dict[str, Any]:
         with self.lock:
-            if not number.isdigit() or int(number) not in self.results:
-                return {"ran": False, "error": f"no check is named {task!r}; start one without --wait"}
-            check_id = int(number)
             result = self.results[check_id]
         if result is None:
             return {"state": "running", "check_id": check_id}
@@ -709,16 +722,6 @@ class AgentAuthor(VariantAuthor):
         if stop.is_set():
             raise AuthorError("the agent's run was stopped before it started")
         executor, binary = self.executor.for_program(AdapterProgram(self.descriptor))
-        host = AgentHost(
-            descriptor=self.descriptor,
-            binary=binary,
-            executor=executor,
-            step_dir=None,
-            calls=calls,
-            timeout_s=self.timeout_seconds,
-            # This agent runs no trials of its own.
-            trial_timeout_s=0.0,
-        )
         rules = AGENT_RULES.format(
             system_prompt=SYSTEM_PROMPT,
             rules=rebuild_rules(self.has_behaviour_rule),
@@ -726,10 +729,7 @@ class AgentAuthor(VariantAuthor):
             review=REVIEW_TEXT if tools.checks.is_reviewing else "",
             variant=extra_rules,
         )
-        nodes = (
-            ("rules", {"text": rules}),
-            ("code_extension", {"name": TOOLS_ENTRY_ID, "code": TOOLS_EXTENSION.read_text(encoding="utf-8")}),
-        )
+        agent_tree = HarnessTree({"rules.md": rules, TOOLS_PATH: TOOLS_EXTENSION.read_text(encoding="utf-8")})
         binding = ModelBinding(base_url=gateway.base_url, model=self.upstream.model, api=self.upstream.api)
         env = {
             "REEF_AUTHOR_URL": gateway.base_url,
@@ -749,19 +749,20 @@ class AgentAuthor(VariantAuthor):
                 target=close_when_stopped, args=(stop, finished, session), name="autoenvscaling-stop", daemon=True
             ).start()
             outcome, trajectory = launch_pi(
-                host,
+                self.descriptor,
+                binary,
                 session,
-                rendered_files(nodes, binding, host),
+                rendered_files(agent_tree, binding, self.descriptor),
                 prompt,
                 env,
                 root=work_dir,
                 timeout=self.timeout_seconds,
             )
             ended = f"exited {outcome.exit_code}"
-        except RolloutTimeout:
+        except ProgramTimeout:
             # The sandbox copied the workspace back: the task stands as the agent left it.
             trajectory = []
-        except RolloutLaunchError as exc:
+        except ProgramLaunchError as exc:
             if stop.is_set():
                 raise AuthorError("the agent's run was stopped") from exc
             raise AuthorError(f"the agent could not run: {exc}") from exc
@@ -770,7 +771,7 @@ class AgentAuthor(VariantAuthor):
             if session is not None:
                 try:
                     session.close()
-                except RolloutLaunchError as exc:
+                except ProgramLaunchError as exc:
                     logger.warning(
                         "the AutoEnvScaling agent's sandbox did not stop; its provider timeout applies: %s", exc
                     )

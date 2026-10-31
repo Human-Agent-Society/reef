@@ -363,7 +363,17 @@ def test_a_restarted_job_continues_after_its_last_saved_rollout(tmp_path, stacks
     write_json(jobs / ROLLOUT_FILE, {"rollout_id": 0, "step": 1})
     write_json(
         jobs / "checkpoints.json",
-        {"checkpoints": [{"step": 1, "path": str(first), "release_path": str(tmp_path / "hf" / "0"), "metrics": {}}]},
+        {
+            "checkpoints": [
+                {
+                    "step": 1,
+                    "path": str(first),
+                    "release_path": str(tmp_path / "hf" / "0"),
+                    "metrics": {},
+                    "changed_kinds": [],
+                }
+            ]
+        },
     )
 
     stack = stacks(tmp_path, start_rollout_id=1, storage=storage)
@@ -602,7 +612,13 @@ def test_a_restarted_component_resumes_its_unfinished_job_without_training_a_sav
             jobs / "checkpoints.json",
             {
                 "checkpoints": [
-                    {"step": 2, "path": str(saved_start), "release_path": str(tmp_path / "hf" / "0"), "metrics": {}}
+                    {
+                        "step": 2,
+                        "path": str(saved_start),
+                        "release_path": str(tmp_path / "hf" / "0"),
+                        "metrics": {},
+                        "changed_kinds": [],
+                    }
                 ]
             },
         )

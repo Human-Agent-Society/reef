@@ -32,7 +32,7 @@ Start with Recipe and add only what the method actually needs.
 +---------------------------------------------+--------------------------------------------------+------------------------------+
 | deliver a new artifact medium               | `Surface <#surface>`__                           | only a new evolution medium  |
 +---------------------------------------------+--------------------------------------------------+------------------------------+
-| propose a harness edit and grade a rollout  | `Harness method <#harness-method>`__             | harness-evolution methods    |
+| evolve a harness tree and score a task run  | `Harness method <#harness-method>`__             | harness-evolution methods    |
 +---------------------------------------------+--------------------------------------------------+------------------------------+
 | evaluate a produced candidate               | `Candidate evaluation <#candidate-evaluation>`__ | optional, any recipe         |
 +---------------------------------------------+--------------------------------------------------+------------------------------+
@@ -88,10 +88,12 @@ happen to expose similarly named methods.
 
 Two other extension points have separate names and purposes:
 
-- ``reef.train.CandidateBackend`` prepares, evaluates and settles harness
-  updates; ``Trainer`` accepts it as ``candidate_backend``. A weight trainer
-  takes a ``JobLoop`` as ``job_loop`` instead (see `Training jobs and
-  components`_); a trainer takes one or the other, not both.
+- ``reef.train.jobs.JobLoop`` is how a ``Trainer`` trains: ``Trainer.build``
+  takes it as ``job_loop`` (see `Training jobs and components`_), and a
+  trainer without one trains nothing. Every training step is a job of a
+  training component; the harness recipe's ``HarnessTrainingComponent``
+  (``reef.train.harness_backend.component``) runs each harness step's
+  ``HarnessBackend`` as one job, in the training service.
   ``Trainer.build(..., default_job_samples=...)`` takes the default
   ``job_samples`` of the sample-to-job stage: a harness recipe passes
   ``evolution.batch_size``, and a weight recipe passes none, so its
@@ -130,8 +132,7 @@ Recipe
 .. code:: python
 
    from reef.recipe import Recipe, WeightTrainingRecipe, config_field
-   from reef.recipe.cordis import CordisRecipe
-   from reef.recipe.reefine import ReefineRecipe
+   from reef.recipe.harness import HarnessEvolutionRecipe
    from reef.recipe.sft import SFTRecipe
 
 A recipe is one frozen dataclass configuring the serving and evolution behavior
@@ -146,8 +147,13 @@ for every scenario in a deployment.
    │   ├── TTTDRecipe                                       recipes.tttd.recipe
    │   ├── SDFTRecipe                                       recipes.sdft.recipe
    │   └── OpenClawRLRecipe                                 recipes.openclawrl.recipe
-   └── CordisRecipe             harness tree + rollouts  reef.recipe.cordis
-       └── SkillClawRecipe                                recipes.skillclaw.recipe
+   └── HarnessEvolutionRecipe   harness tree + task runs reef.recipe.harness
+       └── ReefineRecipe (beta)                           recipes.beta.reefine
+
+A harness method is a ``Method`` that ``HarnessEvolutionRecipe`` runs, not a
+recipe: GEPA, Meta-Harness, ACE and ReasoningBank name the base recipe and set
+``evolution.method``. The beta Reefine subclasses it because it changes more
+than the tree.
 
 Choose the narrowest class whose assumptions all hold. Inheriting ``Recipe``
 starts without the extra contracts of a specialized base; it does not force the
@@ -160,8 +166,10 @@ recipe to remain record-only.
 +---------------------------------+------------------------------------------------------+
 | train and publish weights       | subclass ``WeightTrainingRecipe``                    |
 +---------------------------------+------------------------------------------------------+
-| use Reef's harness loop         | configure ``CordisRecipe``; subclass it only         |
-|                                 | for a named preset or extra validation               |
+| use Reef's harness loop         | configure ``HarnessEvolutionRecipe`` with a          |
+|                                 | ``Method`` in ``evolution.method``; subclass it only |
+|                                 | when the method changes more than the tree, such as  |
+|                                 | the delivery surface                                 |
 +---------------------------------+------------------------------------------------------+
 | evolve a different artifact     | subclass ``Recipe``, override ``build()`` and        |
 |                                 | ``build_surface()``                                  |
@@ -190,12 +198,14 @@ Common members
 |                                                   |                             | its first positional argument  |
 +---------------------------------------------------+-----------------------------+--------------------------------+
 | ``build(scenario, records, algorithm_state=...,`` | ``Trainer``                 | construct the scenario trainer |
-| ``task_storage=...)``                             |                             | and give ``task_storage`` to   |
-|                                                   |                             | ``Trainer.build``              |
+| ``task_storage=..., releases=...)``               |                             | and give ``task_storage`` to   |
+|                                                   |                             | ``Trainer.build``;             |
+|                                                   |                             | ``releases`` reads the         |
+|                                                   |                             | component's committed releases |
 +---------------------------------------------------+-----------------------------+--------------------------------+
 | ``build_trainers(scenario, records,``             | ``tuple[ComponentTrainer,   | one trainer per release        |
 | ``surface=..., algorithm_states=...,``            | ...]``                      | component; defaults to the     |
-| ``task_storage=...)``                             |                             |                                |
+| ``task_storage=..., releases=...)``               |                             |                                |
 |                                                   |                             | single trainer ``build``       |
 |                                                   |                             | returns, bound to the          |
 |                                                   |                             | surface's one component        |
@@ -221,13 +231,13 @@ Common members
 +---------------------------------------------------+-----------------------------+--------------------------------+
 
 Every recipe may declare ``report_type``, the ``ReportBase`` subclass its
-reports parse as (``None`` keeps ingress open). It may also declare
-``harness_adapter``, the adapter a client installs its harness tree with.
-``None``, the default, is for a recipe with no harness tree;
-``CordisRecipe`` names ``evolution.adapter``. The scenario list names the
-adapter for every scenario. Every recipe declares ``pipeline_spec()``, the
-default class of each pipeline stage (see `Pipeline stages
-<#pipeline-stages>`__). Weight-training recipes add these members:
+reports parse as (``None`` keeps ingress open), and ``harness_adapter``, the
+adapter ``GET /reef/harness`` renders the recipe's harness releases for
+(``None``, the default, for a recipe with no harness tree;
+``HarnessEvolutionRecipe`` names ``evolution.adapter``).
+The scenario list names it for every scenario. Every recipe declares
+``pipeline_spec()``, the default class of each pipeline stage (see `Pipeline
+stages <#pipeline-stages>`__). Weight-training recipes add these members:
 
 - ``training_spec()`` binds the registered or dotted training objective.
   The objective declares the backend loss family.
@@ -546,8 +556,9 @@ The session contract is:
    * - ``close()``
      - Release the session's record and commit resources; repeated calls are safe.
 
-``CommitRecord`` carries the operation (``training``, ``activate`` or
-``train_from``), the artifact ref, algorithm state, record watermark,
+``CommitRecord`` carries the operation (``training``, ``activate``,
+``train_from``, ``import`` or ``sync``; a ``sync`` activates its release and
+makes it the component's training start in one commit), the artifact ref, algorithm state, record watermark,
 consumed IDs, checkpoint/pending flags, metrics, and training job identity.
 An ``activate`` or ``train_from`` record carries no trainer state. The store must atomically validate
 the current step before accepting a new successor: two different commits
@@ -602,12 +613,20 @@ uses its own ``name``.
 A pipeline stage gets ``task_storage`` from ``PipelineContext.task_storage``.
 The scenario factory gives ``session.tasks`` to ``Recipe.build_trainers``,
 which gives it to ``Trainer.build``. A recipe that overrides ``build`` must
-give ``task_storage`` to ``Trainer.build`` too. A composite recipe gives each
+give ``task_storage`` to ``Trainer.build`` too, and accept the ``releases``
+keyword, which the scenario always passes. A composite recipe gives each
 component a ``TaskStorage`` that opens ``<component>/<name>``. Thus two
 components never share a store. The scenario's imported tasks are not a task
 store: they are tasks in the scenario's ``SampleStore``, which the factory
 gives to ``Recipe.build_trainers`` as ``samples`` and every component reads
 from ``PipelineContext.samples``.
+
+The service takes a task item in the ``train`` split of a scenario
+(``POST /reef/namespaces/{owner}/data/tasks``) only when a trainer of the
+scenario trains imported tasks (``Trainer.accepts_imported_tasks``). A sample-to-job stage that trains
+them sets the class attribute ``accepts_imported_tasks``. An upload to the
+``eval`` split is open to every recipe, because an evaluation runs those
+tasks.
 
 A store holds generations. A generation holds its source record ids and its
 candidates. ``save_candidates`` saves a copy of each candidate task directory
@@ -866,9 +885,9 @@ revision, each read downloads that file. The built-in recipes bind one:
   the component's ``check_release`` (see `Training jobs and components`_).
   For full weights and adapters it reads only file names and
   ``adapter/adapter_config.json``.
-- A harness recipe binds ``HarnessLayout``. ``reef-entries.json`` must hold
-  entries that a seed may hold, and the other files must be exactly their
-  render for the adapter.
+- A harness recipe binds ``HarnessLayout``. Every file must be UTF-8 text,
+  and the files must form a ``HarnessTree`` that passes ``validate_tree`` for
+  the adapter: the source tree a harness release stores.
 
 After the layout, the release's own admission check runs on what Reef stores,
 as at a training publication.
@@ -1559,92 +1578,158 @@ the selected backend resolves its own loss implementation lazily.
 Harness method
 --------------
 
-A harness-evolution method fills three slots with plugin classes. Reef runs
-the loop around them: snapshot, apply, run the paired rollouts, record,
-publish or revert.
+This section lists the harness method API. `Write a harness method
+<../developer-guide/write-a-harness-method.rst>`__ explains the step, the
+plugin settings (``from_config`` and ``PluginSettings``), and when a step is
+skipped or fails.
 
 .. code:: python
 
-   from reef.evaluation import SelectionPlugin
-   from reef.evaluation.harness import RolloutScorer
-   from reef.train.cordis_backend import Proposer
+   from reef.evaluation.harness import TaskScorer, History, TaskCollector
+   from reef.harness.adapters import get_adapter
+   from reef.harness.adapters.parts import Format, Part, TreeLayout
+   from reef.harness.tree import HarnessTree, TreePatch
+   from reef.train.harness_backend import (
+       AgentMethod, AgentOutcome, Method, ModelCalls, Services, StepContext, Trace, Workspace,
+   )
 
-   class MyProposer(Proposer):
-       def propose(self, nodes, samples, models, *, manifest=None, rejected=(), sources=(),
-                   requests=(), entries=(), agent_host=None) -> Mutation | Sequence[Mutation] | StepProposal | None: ...
+   class MyMethod(Method):
+       def step(self, context: StepContext) -> None: ...
 
-   class MyScorer(RolloutScorer):
+   class MyScorer(TaskScorer):
        def score(self, task, result) -> float: ...
 
-   class MySelection(SelectionPlugin):  # optional
-       @classmethod
-       def from_config(cls, config, *, candidate_backend) -> "MySelection": ...
-       def evaluate(self, candidate) -> EvaluationResult: ...
-       def decide(self, candidate, evaluation) -> SelectionDecision: ...
+.. list-table::
+   :header-rows: 1
+   :widths: 36 64
 
-A deployment names each class as ``package.module:ClassName``, or as a mapping
-with ``module`` and ``config``. Reef builds it with the class method
-``from_config``. ``Proposer``, ``RolloutScorer`` and ``Promoter`` inherit
-``reef.core.plugins.ConfiguredPlugin``, whose default ``from_config(config)``
-builds the class with no arguments and refuses a non-empty ``config``.
+   * - Member
+     - Contract
+   * - ``Method.step(context)``
+     - edit ``context.workspace.harness`` into the step's candidate, or leave
+       it unchanged to skip the step; say what the step did with
+       ``context.workspace.write_output``
+   * - ``Method.runs_agent``
+     - a class attribute, ``False`` by default; ``True`` for a method that
+       calls ``Services.run_agent``, which then gets ``evolution.agent`` and is
+       refused at startup without it
+   * - ``AgentMethod``
+     - a method that is a folder of prompts (``config``: ``prompts``, the
+       folder, and ``model``, ``served`` by default): ``START.md``, an
+       optional ``RESUME.md``, and the agent's own tree; each step runs the
+       agent once and reads ``output/summary.md``, ``notes.json`` and
+       ``requires.json``
+   * - ``StepContext``
+     - ``workspace``, the step's ``Workspace``, and ``services``, the step's
+       ``Services``; the backend makes one per step
+   * - ``Workspace``
+     - ``root``, ``history_dir`` and ``step`` (1 or more); the directory
+       paths ``harness``, ``material``, ``state``, ``scratch`` and ``output``;
+       ``tree()``, ``write_tree(tree)``, ``traces()``, ``request()`` (a
+       ``TrainingRequest`` or ``None``), ``tasks()``,
+       ``evaluation_repeats()`` (the runs per task and tree, 0 when the
+       deployment configured no scorer), ``host()`` (the host facts of
+       ``material/host.json``: ``adapter``, ``parts``, ``config_targets`` and
+       ``tasks_are_directories``), ``history()`` and ``state_files()`` (every
+       file of ``state/`` as a path mapped to its text; ``ValueError`` past
+       16 MiB or for a file that is not UTF-8 text);
+       ``write_output(summary="", notes=None, requires=())`` writes
+       ``output/summary.md`` (the commit's ``method_summary``),
+       ``output/notes.json`` (a JSON object, the commit's ``method_notes``)
+       and ``output/requires.json`` (``reef.core.requirements`` items, read on
+       a request step only), and raises ``ValueError`` before writing when
+       ``notes`` or ``requires`` is not valid
+   * - ``TreeLayout``
+     - the parts of an adapter's tree, from the ``evolve`` section of its ``adapter.yaml``; a method gets
+       its adapter's as ``get_adapter(workspace.host()["adapter"]).layout``.
+       ``parts`` maps each part name to a ``Part`` (``name``, ``path``,
+       ``format``, a ``Format``, ``renders``, ``holds`` and ``review``);
+       ``locate(path)`` returns the ``TreeLocation`` of a tree path
+       (``part``, and ``name``, the name in the part's ``{name}``, ``""`` for
+       a part without one), or ``None`` when no part takes the path
+   * - ``Trace``
+     - ``directory``, ``source`` (``traffic`` or ``run``), ``task``,
+       ``reply``, ``score``, ``feedback``, ``failure``, ``record`` and
+       ``client``; ``trajectory()`` reads the ATIF trajectory of a traffic
+       trace, and returns ``None`` for a run, whose run files the
+       history keeps
+   * - ``Services.models``
+     - a ``ModelBindings``: ``served`` and every ``evolution.models`` entry;
+       ``chat(messages, *, timeout_s=None, **params)`` returns the assistant
+       text, ``complete(body)`` the provider's response. Every call counts
+       against ``evolution.max_model_calls_per_step`` and lands in
+       ``calls.json``
+   * - ``Services.calls``
+     - the step's ``ModelCalls``: ``spend()`` counts one call and raises
+       ``RuntimeError`` past the budget, ``record(entry)`` appends one call
+       to ``calls.json``, and ``note(kind, text, *, failed=False)`` adds one
+       line to the step's activity
+   * - ``Services.check(tree)``
+     - the ``ValidationResult`` of ``tree`` for the adapter: ``passed``,
+       ``problems`` and ``message()``
+   * - ``Services.evaluate(tree, tasks, *, repeats=1)``
+     - ``repeats`` ``RunRecord`` values per task of the list ``tasks``
+       (a single string is refused), task by task; reuses the scored
+       runs the history holds; ``RuntimeError`` without a scorer, or
+       when the call needs more runs than
+       ``evolution.max_runs_per_step`` leaves, and then no task runs;
+       ``ValueError`` for a tree that fails ``check``
+   * - ``Services.run_agent(prompt, *, tree, model)``
+     - one run of the deployment's coding agent in the workspace, its own
+       harness ``tree`` rendered after Reef's protocol rules and its model
+       calls on the binding ``model`` names, through a gateway that serves
+       ``check`` and ``evaluate`` too; an ``AgentOutcome``. ``RuntimeError``
+       when no agent runs for the method, ``KeyError`` for an unknown
+       ``model``, ``ValueError`` for a tree that does not render
+   * - ``AgentOutcome``
+     - ``exit_code`` (``None`` when the agent did not exit by itself),
+       ``timed_out``, ``error`` (why it could not start) and ``seconds``;
+       ``succeeded`` is an exit with status 0
+   * - ``History``
+     - ``candidates`` (``CandidateRecord`` by tree checksum), ``runs``
+       and ``decisions`` in file order; ``tree(checksum)``,
+       ``runs_of(checksum)``, ``scores(checksum, tasks, *, repeats=1)``,
+       ``decision(step)`` and ``run_dir(run)``
+   * - ``CandidateRecord``
+     - ``tree``, ``step``, ``origin`` (``seed``, ``method``, ``proposal`` or
+       ``release``), ``parent``, ``summary`` and ``notes``
+   * - ``RunRecord``
+     - ``run``, ``tree``, ``task``, ``task_key``, ``repeat``,
+       ``context``, ``step``, ``score`` (a ``RolloutScore``: a finite value, or
+       failed when the environment could not run the task), ``failure``,
+       ``reply``, ``residue``, ``agents``, ``path`` and ``transcript_read``
+   * - ``DecisionRecord``
+     - ``step``, ``tree`` (the candidate's checksum), ``head`` (the checksum
+       of the head tree that the step started from), ``selected``
+       (published; the activation rule decides whether it serves),
+       ``policy`` and ``reason``
+   * - ``TaskScorer.score(task, result)``
+     - a finite float for one finished run, higher is better; ``result``
+       holds ``exit_code``, ``stdout``, ``stderr``, the parsed
+       ``trajectory`` and ``residue``. The evaluation calls
+       ``score_with_models(task, result, models)``, whose default calls
+       ``score``. A model-based judge overrides ``score_with_models`` to use
+       the step's model bindings, and still implements the abstract
+       ``score``, for example by raising. A scorer that needs a local GPU
+       overrides ``execution_requirements()``
+   * - ``TaskCollector.collect(samples)``
+     - the prompts to collect from the step's trace samples, with
+       ``evolution.evaluation.collect_failures``
+   * - ``evaluation.metrics``
+     - holds ``candidate_scores`` and ``current_scores`` under
+       ``policy: compare`` and ``policy: floor``: ``RolloutScores``
+       (``reef.core.evaluation``) in JSON, one entry per task in task order
+       with the scores of its runs in run order, each a number or
+       ``"failed"``; read them with ``RolloutScores.from_json``.
+       ``current_scores`` is empty under ``floor``, which runs the candidate
+       alone. Under ``policy: none``, which runs no task, it holds no
+       score
 
-+------------------------+----------------------------------------------------------+
-| Member                 | Contract                                                 |
-+========================+==========================================================+
-| ``nodes``              | the tree as ``(kind, config)`` pairs                     |
-+------------------------+----------------------------------------------------------+
-| ``samples``            | the job data's ATIF ``TrajectorySample`` values          |
-+------------------------+----------------------------------------------------------+
-| ``models``             | the method's only path to a model: ``models.served`` is  |
-|                        | the model under test, ``models["teacher"]`` comes from   |
-|                        | ``evolution.models``                                     |
-+------------------------+----------------------------------------------------------+
-| ``manifest``           | keyword-only: the previous step's ``FailureManifest``,   |
-|                        | the per-task record of which rollouts failed and how;    |
-|                        | ``None`` before the first settled step                   |
-+------------------------+----------------------------------------------------------+
-| ``reads_requests``     | property, ``False`` by default: ``True`` when the        |
-|                        | proposer answers the ``requests`` of a manual step       |
-+------------------------+----------------------------------------------------------+
-| ``runs_agent``         | property, ``False`` by default: ``True`` when the        |
-|                        | proposer uses ``agent_host`` to run a coding agent       |
-+------------------------+----------------------------------------------------------+
-| ``entries``            | keyword-only: the tree as entry options,                 |
-|                        | ``{"id", "name", "config"}`` mappings in tree order, so  |
-|                        | an ``update`` or ``remove`` can name its entry           |
-+------------------------+----------------------------------------------------------+
-| ``Mutation``           | ``create``, ``update``, or ``remove`` on one root-level  |
-|                        | entry; a sequence applies as one composite proposal      |
-+------------------------+----------------------------------------------------------+
-| ``StepProposal``       | the mutations plus ``notes``, a JSON mapping the step    |
-|                        | records under ``proposal_notes`` and never reads; empty  |
-|                        | mutations skip the step                                  |
-+------------------------+----------------------------------------------------------+
-| ``result``             | one finished rollout: exit code, stdout, stderr, and the |
-|                        | parsed ``trajectory``                                    |
-+------------------------+----------------------------------------------------------+
-| ``evaluation.metrics`` | guarantees ``candidate_scores`` and ``current_scores``:  |
-|                        | ``RolloutScores`` in JSON, each rollout a number or      |
-|                        | ``"failed"``; ``current_scores`` is empty under          |
-|                        | ``selection: floor``, which runs the candidate alone     |
-+------------------------+----------------------------------------------------------+
-
-Returning ``None`` from ``propose`` skips the step. Reef passes every keyword
-on every call.
-
-Migration:
-
-- Wrap a plain ``propose`` or ``evaluate`` function in a ``Proposer`` or
-  ``RolloutScorer`` subclass. Its ``propose`` or ``score`` method calls the
-  function. Name the class in the deployment file.
-- Rename ``__call__`` on a ``Proposer``, ``RolloutScorer`` or ``Promoter``
-  subclass to ``propose``, ``score`` or ``promote``.
-- A proposer that named the ``requests`` or ``agent_host`` keyword overrides
-  ``reads_requests`` or ``runs_agent``.
-- Move the body of a ``CandidatePluginFactory`` or
-  ``CandidateEvaluationPluginFactory`` to the class method ``from_config`` on
-  the plugin. The plugin then inherits ``SelectionPlugin``. The worked examples are in
-`Evolve your harness <../user-guide/evolve-your-harness.rst#write-a-method>`__.
+``reef.evaluation.harness`` holds the publication policies that
+``evolution.evaluation.policy`` names: ``ComparePolicy`` (``compare``, with
+``statistic`` ``wins`` or ``mean`` and ``min_margin``), ``FloorPolicy``
+(``floor``, with ``floor_score``) and ``NoEvaluationPolicy`` (``none``). A
+harness recipe takes no other policy.
 
 Candidate evaluation
 --------------------
@@ -1677,12 +1762,9 @@ Make evaluations idempotent by ``candidate.candidate_id`` because recovery may
 repeat work whose result was not durably committed. Whether a kept tree serves
 is the activation rule's decision, not the plugin's.
 
-A harness recipe names a ``reef.evaluation.SelectionPlugin``
-class in ``evolution.selection``. Its ``from_config(config, *,
-candidate_backend)`` binds the plugin to the scenario's candidate backend.
-``BackendAlwaysSelectPlugin`` and ``reef.evaluation.harness``'s
-``ScoreComparisonPlugin`` and ``FloorPlugin`` are the built-in policies
-``always``, ``score_comparison`` and ``floor``.
+A harness recipe builds its plugin for each scenario from
+``evolution.evaluation.policy`` and takes no other plugin (see `Harness
+method`_).
 
 Activation rule
 ---------------
@@ -1723,16 +1805,16 @@ Surface
 
 .. code:: python
 
+   from reef.harness.sync import create_harness_surface
    from reef.surface import (
-       ComponentSurface, Surface, create_config_surface, create_harness_surface,
-       create_skill_surface, create_weight_surface,
+       ComponentSurface, Surface, create_config_surface, create_weight_surface,
    )
 
 A surface binds one frozen release to its consumers.
 ``WeightTrainingRecipe.build_surface()`` already calls
 ``create_weight_surface(kind=...)`` with its runtime's ``served_weight_kind``,
-and ``CordisRecipe`` calls
-``create_harness_surface()``, so most methods never touch this.
+and ``HarnessEvolutionRecipe`` calls ``create_harness_surface(descriptor)``,
+so most methods never touch this.
 
 ``Surface`` is a frozen dataclass mapping each named release component to a
 ``ComponentSurface``, whose capabilities are fields, not subclass identity.
@@ -1979,17 +2061,24 @@ A subclass implements ``check_job(job)`` and ``run(job, directory)``. It must
 call ``start_jobs()`` once it can train. Until then no job runs, including
 the jobs that a restart left.
 
-``reef.train.jobs.JobLoop`` is the control plane's side. It holds the weight
+``reef.train.jobs.JobLoop`` is the control plane's side. It holds the
 trainer's one training component. It returns the result that the trainer
 commits:
 
 1. When no job runs, the trainer reserves ready job data. The pipeline's
-   sample-to-job stage gives the job's parameters, the loop submits it, and the trainer commits the submission, which
-   consumes the records of the job's data.
+   sample-to-job stage gives the job's parameters, the loop submits it, and the
+   trainer commits the submission, which consumes the records of the job's
+   data.
 2. While the job runs, the trainer commits each new saved checkpoint: its
    ``release_path`` becomes a new artifact, with the checkpoint's training
    metrics. The scenario's activation rule decides whether it serves.
 3. When the job ends, the trainer commits its outcome.
+
+A recipe may subclass the loop. The harness recipe's ``HarnessJobLoop``
+(``reef.recipe.harness``) adds the parameters that only the scenario knows at
+submit time, such as its model and its eval split. It also names, on each
+checkpoint's commit, the parts of the tree that the checkpoint changed from
+the job's start, which the scenario's activation rule reads.
 
 Training is linear: the next job starts from the newest saved checkpoint,
 whether or not it serves. A restarted job replaces the trainer's start
