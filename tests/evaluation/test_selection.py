@@ -3,10 +3,9 @@
 A candidate-evaluation plugin is one class that both measures (``evaluate``)
 and decides (``decide``). The built-in policies are abstract mixins a plugin
 composes at class-definition time — :class:`AlwaysSelectMixin` and
-:class:`RegressionCheckMixin` — paired with :class:`BackendEvaluateMixin` when
-the measurement comes from the training backend. Each implements one half of
-the contract and leaves the other abstract, so only the pairing is
-instantiable. The harness publication policies (``compare``, ``floor`` and
+:class:`RegressionCheckMixin` — with its own ``evaluate``. Each implements one
+half of the contract and leaves the other abstract, so only a plugin that
+supplies both halves is instantiable. The harness publication policies (``compare``, ``floor`` and
 ``none``) are whole plugins that measure through a harness evaluator.
 """
 
@@ -16,8 +15,6 @@ import pytest
 
 from reef.evaluation import (
     AlwaysSelectMixin,
-    BackendAlwaysSelectPlugin,
-    BackendEvaluateMixin,
     CandidateEvaluationPlugin,
     CandidateEvaluator,
     CandidateSelector,
@@ -34,11 +31,10 @@ from reef.evaluation.harness import (
     NoEvaluationPolicy,
     TaskScorePolicy,
 )
-from reef.train.backend import CandidateBackend
 
 
 class DecideOnlyBackend(CandidateEvaluator):
-    """Stands in for the training backend: these cases exercise ``decide`` only."""
+    """Stands in for an evaluator: these cases exercise ``decide`` only."""
 
     def evaluate(self, candidate: UpdateCandidate) -> EvaluationResult:
         raise AssertionError("this case exercises decide(), not evaluate()")
@@ -75,9 +71,8 @@ def test_evaluation_and_selection_remain_independent_nominal_capabilities() -> N
 
 
 def test_built_ins_explicitly_implement_their_public_contracts() -> None:
-    assert issubclass(CandidateBackend, CandidateEvaluator)
     # The shipped plugins are whole plugins: they evaluate and decide.
-    for plugin in (BackendAlwaysSelectPlugin, ComparePolicy, FloorPolicy, NoEvaluationPolicy):
+    for plugin in (ComparePolicy, FloorPolicy, NoEvaluationPolicy):
         assert issubclass(plugin, CandidateEvaluationPlugin)
         assert callable(plugin.evaluate)
         assert callable(plugin.decide)
@@ -86,7 +81,6 @@ def test_built_ins_explicitly_implement_their_public_contracts() -> None:
     for mixin in (AlwaysSelectMixin, RegressionCheckMixin):
         assert callable(mixin.decide)
         assert mixin.__abstractmethods__ == frozenset({"evaluate"})
-    assert BackendEvaluateMixin.__abstractmethods__ == frozenset({"decide"})
     # The harness run policies share their measurement, and each one decides.
     assert TaskScorePolicy.__abstractmethods__ == frozenset({"decide"})
     with pytest.raises(TypeError, match="abstract"):
@@ -94,8 +88,12 @@ def test_built_ins_explicitly_implement_their_public_contracts() -> None:
 
 
 def test_always_select_returns_an_explainable_structured_decision() -> None:
+    class AlwaysSelect(AlwaysSelectMixin):
+        def evaluate(self, candidate: UpdateCandidate) -> EvaluationResult:
+            raise AssertionError("this case exercises decide(), not evaluate()")
+
     candidate = UpdateCandidate("job-7")
-    decision = BackendAlwaysSelectPlugin(DecideOnlyBackend()).decide(candidate, evaluation())
+    decision = AlwaysSelect().decide(candidate, evaluation())
 
     assert decision.selected is True
     assert decision.policy == "always"
@@ -129,26 +127,6 @@ def test_a_plugin_mixes_its_measurement_and_its_decision() -> None:
 
     assert decision.selected is True
     assert calls == [("evaluate", candidate), ("decide", decision.evaluation)]
-
-
-def test_the_backend_always_select_plugin_measures_through_the_backend() -> None:
-    calls = []
-
-    class Backend:
-        def evaluate(self, candidate: UpdateCandidate) -> EvaluationResult:
-            calls.append(candidate)
-            return evaluation()
-
-    candidate = UpdateCandidate("job-7")
-    backend = Backend()
-    plugin = BackendAlwaysSelectPlugin(backend)
-
-    result = plugin.evaluate(candidate)
-    decision = plugin.decide(candidate, result)
-
-    assert calls == [candidate]
-    assert decision.selected is True
-    assert decision.policy == "always"
 
 
 def task_scores(*tasks: float | tuple[float | None, ...] | None) -> list[dict[str, object]]:
@@ -316,19 +294,3 @@ def test_decision_rejects_non_boolean_selected(selected: object) -> None:
             reason="invalid selection flag",
             evaluation=evaluation(),
         )
-
-
-def test_backend_evaluate_mixin_delegates_to_the_plugins_backend() -> None:
-    class Backend:
-        def evaluate(self, candidate: UpdateCandidate) -> EvaluationResult:
-            return evaluation()
-
-    class Plugin(AlwaysSelectMixin, BackendEvaluateMixin, CandidateEvaluationPlugin):
-        def __init__(self, backend: object) -> None:
-            super().__init__()
-            self._candidate_backend = backend
-
-    candidate = UpdateCandidate("job-7")
-    plugin = Plugin(Backend())
-    assert plugin.evaluate(candidate).evaluator == "held-out-suite"
-    assert plugin.decide(candidate, plugin.evaluate(candidate)).selected is True

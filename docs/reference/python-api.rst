@@ -88,14 +88,12 @@ happen to expose similarly named methods.
 
 Two other extension points have separate names and purposes:
 
-- ``reef.train.CandidateBackend`` prepares, evaluates and settles one
-  candidate step in the trainer's process; ``Trainer`` accepts it as
-  ``candidate_backend``. A trainer that submits jobs takes a ``JobLoop`` as
-  ``job_loop`` instead (see `Training jobs and components`_); a trainer takes
-  one or the other, not both. The built-in harness recipe takes a
-  ``JobLoop``: its ``HarnessTrainingComponent``
-  (``reef.train.harness_backend.component``) runs each step's
-  ``HarnessBackend`` as one training job, in the training service.
+- ``reef.train.jobs.JobLoop`` is how a ``Trainer`` trains: ``Trainer.build``
+  takes it as ``job_loop`` (see `Training jobs and components`_), and a
+  trainer without one trains nothing. Every training step is a job of a
+  training component; the harness recipe's ``HarnessTrainingComponent``
+  (``reef.train.harness_backend.component``) runs each harness step's
+  ``HarnessBackend`` as one job, in the training service.
   ``Trainer.build(..., default_job_samples=...)`` takes the default
   ``job_samples`` of the sample-to-job stage: a harness recipe passes
   ``evolution.batch_size``, and a weight recipe passes none, so its

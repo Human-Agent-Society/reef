@@ -343,7 +343,7 @@ class JobExperimentRecorder(ExperimentTracker):
     ``record(event)`` gives ``event`` to ``tracker``. Then, for an event of a training job, it sets
     ``metadata["experiment"]`` of the job's item to ``tracker.experiment_run(event.context).to_dict()``
     (``WorkQueue.set_metadata``). Nothing is written when the tracker has no run for the event, or the queue
-    has no such item, such as for the step of a candidate backend. Each commit of a job (its submission, its
+    has no such item, such as for a job that its component runs in the trainer's own process. Each commit of a job (its submission, its
     checkpoints and its end) records the same run, so a write after the first changes nothing.
 
     Purpose: the dispatcher of control wraps its tracker in it when the recipe trains with a training component.

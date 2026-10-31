@@ -1,4 +1,4 @@
-"""The candidate lifecycle of harness evolution backends."""
+"""The values of one harness step: a prepared step, and the committed releases that a step reads its head from."""
 
 from __future__ import annotations
 
@@ -7,9 +7,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from reef.artifact.artifact import Artifact
-from reef.core.evaluation import CandidateEvaluator, EvaluationResult, SelectionDecision, UpdateCandidate
-from reef.train.types import JobData, TrainStepResult
+from reef.core.evaluation import UpdateCandidate
 
 
 @dataclass(frozen=True)
@@ -59,8 +57,8 @@ class ReleaseFiles:
     Values: ``release_id`` is the non-empty id of the release; ``files`` maps
     each relative path of the component's view of that release to its UTF-8
     text, without the repository's own files.
-    Purpose: ``CommittedReleases`` makes it; a candidate backend builds its
-    head, or a recheck target, from ``files``.
+    Purpose: ``CommittedReleases`` makes it; a harness step builds its
+    head from ``files``.
     """
 
     release_id: str
@@ -74,8 +72,8 @@ class ReleaseFiles:
 class CommittedReleases(ABC):
     """The releases a scenario's commits recorded, read for one component at a time.
 
-    Purpose: a candidate backend that builds each candidate from the committed
-    head reads it here, and the scenario layer implements it over its commit
+    Purpose: a harness trainer reads the committed head here, as the release of
+    its next job's start, and the scenario layer implements it over its commit
     history and artifact repository. A component's head is its training
     start: the release of the later of its newest ``train_from`` record and
     its newest training commit that made an artifact, active or not. An
@@ -99,7 +97,7 @@ class ComponentReleases:
     Values: ``releases`` is the scenario's reader, and ``component`` names a
     component of the scenario's release, non-empty.
     Purpose: ``Recipe.build_trainers`` makes one per component and hands it
-    to ``Recipe.build``; a candidate backend reads its head through it.
+    to ``Recipe.build``; a harness trainer reads its head through it.
     """
 
     releases: CommittedReleases
@@ -116,86 +114,7 @@ class ComponentReleases:
         return self.releases.release(release_id, self.component)
 
 
-class CandidateBackend(CandidateEvaluator, ABC):
-    """Prepare and evaluate updates while Reef owns candidate selection.
-
-    The backend owns method-specific candidate construction and settlement,
-    and supplies the default evaluator. A recipe may inject a cohesive
-    :class:`reef.evaluation.CandidateEvaluationPlugin`; otherwise the trainer
-    wraps this evaluator in :class:`reef.evaluation.BackendAlwaysSelectPlugin`.
-    Every backend therefore follows the same evaluate-then-decide lifecycle
-    between preparation and settlement.
-    """
-
-    @abstractmethod
-    def initial_state(self) -> Mapping[str, Any]: ...
-
-    def close(self) -> None:
-        """Release resources owned by this backend; safe to call repeatedly."""
-        return
-
-    def commit_applied(self, state: Mapping[str, Any]) -> None:
-        """Observe algorithm state only after its scenario commit is durable.
-
-        Backends normally need no side effect here. A backend that maintains
-        a derived local mirror may update it from ``state`` without letting
-        speculative prepare/evaluate work escape Reef's commit boundary.
-        """
-        return
-
-    def started_from(self, state: Mapping[str, Any], artifact: Artifact) -> Mapping[str, Any]:
-        """The state whose next step starts from ``artifact``, given the current ``state``.
-
-        Reef calls this when a person sets the training start (``train-from``).
-        ``artifact`` is the backend's component of a release, materialized.
-        Raise ``ValueError`` when the backend cannot start from ``artifact``.
-        The default refuses every artifact.
-        """
-        raise ValueError(f"the {type(self).__name__} backend cannot start from a published artifact")
-
-    def experiment_config(self) -> Mapping[str, Any]:
-        """Non-secret backend identity/config attached to experiment runs."""
-        return {}
-
-    def operational_metrics(self) -> Mapping[str, float | int]:
-        """Nonblocking process-local measurements, independent of successful commits."""
-        return {}
-
-    def failed_step_metrics(self) -> Mapping[str, Any]:
-        """Metadata to retain when the current instruction fails before producing a result."""
-        return {}
-
-    @abstractmethod
-    def prepare_step(
-        self,
-        data: JobData,
-        state: Mapping[str, Any],
-        scenario_step: int,
-    ) -> PreparedStep: ...
-
-    @abstractmethod
-    def evaluate(self, candidate: UpdateCandidate) -> EvaluationResult:
-        """Measure ``candidate``; the trainer's default plugin calls this with the candidate alone.
-
-        A backend may accept further keyword-only options with defaults (the
-        harness backend's ``sides``) for the plugins it ships; this contract
-        stays the one every plugin can rely on.
-        """
-
-    @abstractmethod
-    def settle_step(
-        self,
-        prepared: PreparedStep,
-        decision: SelectionDecision,
-    ) -> TrainStepResult: ...
-
-    @abstractmethod
-    def abort_step(self, prepared: PreparedStep) -> None:
-        """Restore backend-local state after evaluation or settlement fails."""
-
-
 __all__ = [
-    "CandidateBackend",
     "CommittedReleases",
     "ComponentReleases",
     "PreparedStep",

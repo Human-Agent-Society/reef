@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
-from tests.train.test_reef_trainer_contracts import ExampleBackend
+from tests.support.runtime_stubs import RecordingComponent
 
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core.reports import ScoredRolloutReport
@@ -23,7 +23,8 @@ from reef.service.app import create_app
 from reef.service.routes.records import MAX_RECORD_IMPORT_BYTES
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.train import JobData, PreparedStep, Trainer
+from reef.train import JobData, Trainer
+from reef.train.jobs import JobLoop
 from reef.train.pipeline import TrainingPipeline
 from reef.train.types import TaskSample
 
@@ -66,16 +67,6 @@ def feedback_pipeline(context):
     )
 
 
-class LearningBackend(ExampleBackend):
-    def __init__(self, scenario, batches):
-        super().__init__(scenario, [])
-        self.batches = batches
-
-    def prepare_step(self, batch, state, scenario_step):
-        self.batches.append(batch)
-        return PreparedStep.skipped(state={"trained": state.get("trained", 0) + len(batch.samples)})
-
-
 @dataclass(frozen=True, kw_only=True)
 class LearningRecipe(Recipe):
     batches: list[JobData] = field(default_factory=list)
@@ -99,7 +90,7 @@ class LearningRecipe(Recipe):
             scenario,
             records,
             pipeline_factory=feedback_pipeline,
-            candidate_backend=LearningBackend(scenario, self.batches),
+            job_loop=JobLoop(RecordingComponent(self.batches), scenario=scenario),
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
             report_type=self.report_type,
@@ -134,11 +125,22 @@ def dispatcher_for(tmp_path, recipe):
     )
 
 
-async def wait_for_training(scenario, count):
+async def wait_for_training(scenario, recipe, count):
+    """Wait until the recipe's jobs trained ``count`` samples and the last job's end committed."""
+
+    def trained() -> int:
+        return sum(len(batch.samples) for batch in recipe.batches)
+
+    def ended() -> int:
+        return sum(
+            (record.metrics or {}).get("training_job", {}).get("event") in ("finished", "failed")
+            for record in scenario.store.history()
+        )
+
     async with asyncio.timeout(5):
-        while scenario.trainer.state.get("trained", 0) < count:
+        while trained() < count or ended() < len(recipe.batches):
             await asyncio.sleep(0.01)
-    assert scenario.trainer.state["trained"] == count
+    assert trained() == count
 
 
 @pytest.mark.parametrize("endpoint", ("/v1/chat/completions", "/v1/messages"))
@@ -217,7 +219,7 @@ def test_import_then_chat_continue_with_the_same_reported_processor(tmp_path, bu
                     assert response.status == 200, await response.text()
             scenario = dispatcher.get_or_create_scenario("s")
             processor = scenario.trainer.pipeline
-            await wait_for_training(scenario, 6)
+            await wait_for_training(scenario, recipe, 6)
             if bulk:
                 retry = await client.post("/reef/records/batch", headers=HEADERS, json={"records": records})
                 assert retry.status == 200
@@ -246,10 +248,11 @@ def test_import_then_chat_continue_with_the_same_reported_processor(tmp_path, bu
                     "/reef/report", headers=HEADERS, json={"score": 1, "references": [receipt]}
                 )
                 assert feedback.status == 200, await feedback.text()
-            await wait_for_training(scenario, 8)
+            await wait_for_training(scenario, recipe, 8)
             assert handler.calls == 2
             assert scenario.trainer.pipeline is processor
-            assert len(scenario.store.history()) == len(recipe.batches) == 4
+            # Each batch is one job: its submission and its end.
+            assert len(scenario.store.history()) == 2 * len(recipe.batches) == 8
             samples = [sample for batch in recipe.batches for sample in batch.samples]
             assert [sample.metadata["messages"][0]["content"] for sample in samples] == [
                 *(f"offline-{index}" for index in range(6)),

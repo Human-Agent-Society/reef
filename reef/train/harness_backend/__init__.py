@@ -5,8 +5,8 @@ A method imports this package's root and nothing below it::
     from reef.train.harness_backend import Method, StepContext
 
 One step goes from the head tree to a kept tree in ``backend``:
-``HarnessBackend`` is the step as the trainer runs it (prepare, evaluate,
-settle). It holds the deployment's ``Method`` and calls ``Method.step`` once
+``HarnessBackend`` is the step as one training job of the harness training
+component (``component``) runs it (prepare, evaluate, settle). It holds the deployment's ``Method`` and calls ``Method.step`` once
 per step in ``propose``; the tree the method leaves in the step's workspace is
 the candidate. The recipe ``reef.recipe.harness.HarnessEvolutionRecipe``
 builds the backend; methods never subclass it.

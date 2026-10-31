@@ -751,24 +751,14 @@ class ScenarioCommitter:
         observer = self.experiment_observer
         if observer is None:
             return result
-        backend = trainer.candidate_backend
         job_loop = trainer.job_loop
-        try:
-            if backend is not None:
-                backend_config: dict[str, Any] | None = dict(backend.experiment_config())
-            elif job_loop is not None:
+        backend_config: dict[str, Any] | None = None
+        if job_loop is not None:
+            try:
                 backend_config = dict(trainer.pipeline.sample2job.experiment_config())
-            else:
-                backend_config = None
-        except Exception:
-            logger.exception("training backend failed to describe experiment configuration")
-            backend_config = None
-        if backend is not None:
-            backend_name: str | None = type(backend).__name__
-        elif job_loop is not None:
-            backend_name = job_loop.component.name
-        else:
-            backend_name = None
+            except Exception:
+                logger.exception("training backend failed to describe experiment configuration")
+        backend_name = None if job_loop is None else job_loop.component.name
         context = TrainingExperimentContext(
             scenario=self._name,
             recipe=observer.recipe,
@@ -1011,7 +1001,6 @@ class ScenarioCommitter:
                     expected_checkpoint=expected_checkpoint,
                     activate=record.activated,
                 )
-        trainer.commit_applied(prepared.algorithm_state)
         trainer.commit(prepared)
         if not self._store.durable:
             self._artifact_head_sync = _ArtifactHeadSync("synchronized", self._artifacts.checkpoint.release_id)

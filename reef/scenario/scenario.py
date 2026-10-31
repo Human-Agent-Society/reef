@@ -303,7 +303,7 @@ class Scenario:
             # serves one fixed model, so its data never goes stale.
             weights_load = self._binding.surface.loader_component is not None and self.runtime is not None
             serving = self.serving_artifact_id() if weights_load else None
-            return trainer.run_once(self.scenario_step, serving_artifact_id=serving)
+            return trainer.run_once(serving_artifact_id=serving)
 
     def served_component(self) -> str | None:
         """The component whose artifact the runtime serves: the component that the runtime loads, or the only

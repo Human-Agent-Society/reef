@@ -240,9 +240,8 @@ In ``train/``, ``trainer.py`` holds the ``Trainer``; ``jobs.py`` holds the
 ``JobLoop`` and the committed ``JobLoopState``;
 ``local_jobs.py`` holds ``LocalJobComponent``, the base of the built-in
 training components; ``deployment.py`` holds the ``TrainingDeployment``
-definitions; and ``backend.py`` holds ``CandidateBackend``, the prepare,
-evaluate and settle lifecycle of one candidate step, which ``HarnessBackend``
-implements. ``train/slime_backend/component.py`` and
+definitions; and ``backend.py`` holds ``PreparedStep`` and the committed
+releases that a harness step reads its head from. ``train/slime_backend/component.py`` and
 ``train/tinker_backend/component.py`` supply the Slime and Tinker training
 components, and each ``launch.py`` supplies its deployment definition and
 runtime factory. No training backend builds serving:

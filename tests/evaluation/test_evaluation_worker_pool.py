@@ -12,10 +12,7 @@ from reef.core.evaluation import PolicyHarness, PolicyModel, RolloutRequest
 from reef.evaluation.harness import EvaluationWorkerPool, TaskScorer, evaluation_selection
 from reef.runtime.executor import ExecutorFailedError, WorkerSpec
 from reef.runtime.executor.config import ExecutorSettings
-from reef.storage.sqlite import SQLiteRecordStore
-from reef.train import PipelineContext, TrainingPipeline
 from reef.train.backend import ComponentReleases
-from reef.train.trainer import Trainer
 
 
 def run_requests(evaluator, *pairings):
@@ -134,15 +131,6 @@ def test_backend_reuses_scorers_but_isolates_real_run_files(tmp_path, executor_b
     )
     backend = recipe.build_backend("test", ComponentReleases(TreeReleases(recipe.seed), COMPONENT), None)
     pool = backend.evaluator.worker_pool
-    records = SQLiteRecordStore()
-    trainer = Trainer(
-        scenario="test",
-        records=records,
-        pipeline=TrainingPipeline(PipelineContext("test")),
-        candidate_backend=backend,
-        candidate_evaluator=None,
-        state=backend.initial_state(),
-    )
     try:
         for cycle in range(2):
             requests = run_requests(
@@ -164,9 +152,9 @@ def test_backend_reuses_scorers_but_isolates_real_run_files(tmp_path, executor_b
         assert len(paths) == len(set(paths)) == 4
         assert all(not Path(path).exists() for path in paths)
     finally:
-        trainer.close()
-        records.close()
-    trainer.close()
+        # The harness training component closes each backend it made; a second close changes nothing.
+        backend.close()
+    backend.close()
     assert pool.closed
     with pytest.raises(RuntimeError, match="closed"):
         backend.evaluator.run_rollouts(run_requests(backend.evaluator, ({}, "current")))

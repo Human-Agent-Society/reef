@@ -148,7 +148,7 @@ def drive_trainer_job(trainer: Trainer, *, seconds: float = 30.0) -> TrainStepRe
     step: TrainStepResult | None = None
     submitted = False
     while time.monotonic() < deadline:
-        result = trainer.run_once(0)
+        result = trainer.run_once()
         if result is None:
             if not submitted:
                 return None

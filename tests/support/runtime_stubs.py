@@ -8,6 +8,7 @@ from typing import Any
 
 from reef.artifact import Artifact, BaseArtifactSource
 from reef.core.evaluation import PolicyModel
+from reef.core.job_data import JobData
 from reef.core.served_models import ServedArtifact
 from reef.inference.http import InferenceProxyRuntime
 from reef.runtime.jobs import JobStatus, ReleaseFormat, SavedCheckpoint, TrainingComponent, TrainingJob
@@ -108,6 +109,22 @@ class StubTrainingComponent(TrainingComponent):
 
     def close(self) -> None:
         self.closed = True
+
+
+class RecordingComponent(StubTrainingComponent):
+    """A training component that keeps the data of every job it ran, in ``batches``, and saves no checkpoint, so each
+    job ends at once in ``submit``.
+
+    Purpose: a test of how a trainer reads, batches and commits records, which trains nothing worth publishing.
+    """
+
+    def __init__(self, batches: list[JobData] | None = None, *, name: str = "recording") -> None:
+        super().__init__(name=name, shares_scenarios=True)
+        self.batches: list[JobData] = [] if batches is None else batches
+
+    def train(self, job: TrainingJob) -> tuple[SavedCheckpoint, ...]:
+        self.batches.append(job.data)
+        return ()
 
 
 class StubInferenceRuntime(InferenceProxyRuntime):

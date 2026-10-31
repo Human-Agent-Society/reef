@@ -26,6 +26,7 @@ import pytest
 from tests.recipes.sdpo.test_sdpo_pipeline import SDPOTokenizer
 from tests.support._threshold_processor import ThresholdJobData, ThresholdSamples
 from tests.support._trajectories import policy_trajectory
+from tests.support.runtime_stubs import RecordingComponent
 from tests.support.samples_service import make_samples
 
 from recipes.beta.coral.recipe import CoralRecipe
@@ -57,7 +58,7 @@ from reef.sample2job import DistillJobData, Sample2Job, Sample2JobSettings
 from reef.sample2job.traces import TraceJobData
 from reef.storage.sqlite import SQLiteRecordStore
 from reef.train import PipelineContext, Trainer
-from reef.train.backend import CandidateBackend, PreparedStep
+from reef.train.jobs import JobLoop
 from reef.train.pipeline import PipelineConfig, PipelineSpec
 from reef.train.types import JobData, Sample, TaskSample, TrajectorySample
 
@@ -87,23 +88,10 @@ Step = AgentRecord | Serve | Insert | str
 # ------------------------------------------------------------------- the driver
 
 
-class CountingBackend(CandidateBackend):
-    """A backend that trains nothing and counts steps, so each reserved batch commits."""
-
-    def initial_state(self) -> dict[str, Any]:
-        return {"steps": 0}
-
-    def prepare_step(self, batch: JobData, state: Mapping[str, Any], scenario_step: int) -> PreparedStep:
-        return PreparedStep.skipped(state={"steps": int(state.get("steps", 0)) + 1}, metrics={})
-
-    def evaluate(self, candidate: object) -> object:
-        raise AssertionError("the counting backend produces no candidates")
-
-    def settle_step(self, prepared: PreparedStep, decision: object) -> object:
-        raise AssertionError("the counting backend settles no candidates")
-
-    def abort_step(self, prepared: PreparedStep) -> None:
-        return None
+def counting_jobs() -> JobLoop:
+    """The job loop of scenario ``s`` over a component that trains nothing, so each reserved batch is one job that
+    ends at once: its submission commits the batch."""
+    return JobLoop(RecordingComponent(), scenario="s")
 
 
 def json_value(value: object) -> object:
@@ -164,7 +152,7 @@ class StreamRun:
             "s",
             self.records,
             pipeline_factory=PipelineConfig.from_setting(self.pipeline, spec=self.spec, environ={}).build,
-            candidate_backend=CountingBackend(),
+            job_loop=counting_jobs(),
             report_type=self.report_type,
             training_mode=self.training_mode,
             default_job_samples=self.batch_size,
@@ -187,16 +175,17 @@ class StreamRun:
         reserve now."""
         while True:
             make_samples(trainer)
-            result = trainer.run_once(len(self.commits), serving_artifact_id=self.serving_artifact_id)
+            result = trainer.run_once(serving_artifact_id=self.serving_artifact_id)
             if result is None:
                 return
             batch = trainer.pending_job_data
-            if batch is None:
-                raise AssertionError("a commit was prepared without a reserved batch")
             prepared = trainer.prepare_commit(result)
             trainer.commit(prepared)
             self.consumed |= prepared.consumed_ids
             self.high_water = (prepared.high_water_sequence, prepared.high_water_offset)
+            if batch is None:
+                # The end of the batch's job: it consumes no batch, so the goldens list only the submissions.
+                continue
             self.commits.append(
                 {
                     "data_id": batch.data_id,

@@ -337,7 +337,7 @@ class HarnessTrainingComponent(LocalJobComponent):
             tree = directory / TREE_DIR
             shutil.rmtree(tree, ignore_errors=True)
             shutil.copytree(result.artifact.local_path, tree)
-            backend.commit_applied(result.state)
+            backend.discard_kept_tree()
             checkpoint = {"path": str(tree), "changed_kinds": sorted(result.changed_kinds)}
         return {
             "steps": steps + 1,

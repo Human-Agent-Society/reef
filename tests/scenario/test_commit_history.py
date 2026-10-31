@@ -24,12 +24,11 @@ from tests.support.harness_steps import PI_SEED, harness_recipe
 from tests.support.runtime_stubs import StubTrainingComponent, runtime_bindings
 from tests.support.samples_service import make_samples
 
-from reef.artifact import Artifact, ArtifactRef, InMemoryRepositoryBackend
+from reef.artifact import ArtifactRef, InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
 from reef.core.errors import ReefError
 from reef.core.trajectories import source_record_id
 from reef.dispatcher import Dispatcher, local_workers
-from reef.evaluation import EvaluationResult, SelectionDecision, UpdateCandidate
 from reef.recipe.base import Recipe
 from reef.record2record import ReportGrouping, ReportRecord2Record
 from reef.runtime.jobs import SavedCheckpoint, TrainingJob
@@ -38,7 +37,7 @@ from reef.storage.commits import CommitRecord, active_artifact_ref
 from reef.storage.samples import SAMPLE_KINDS, consumed_sample_id
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
-from reef.train import CandidateBackend, PreparedStep, Trainer, TrainStepResult
+from reef.train import Trainer
 from reef.train.jobs import JobLoop, JobLoopState
 from reef.train.pipeline import TrainingPipeline
 
@@ -438,37 +437,23 @@ def train_pair(dispatcher: Dispatcher, index: int, artifact_id: str | None = Non
     wait_for_jobs(dispatcher, index)
 
 
-class _SavedArtifactBackend(CandidateBackend):
+class _SavedArtifactJobs(StubTrainingComponent):
+    """A training component whose every job saves the checkpoint ``artifact_path``; ``data_ids`` lists the data of
+    the jobs it ran."""
+
     def __init__(self, artifact_path: Path) -> None:
-        self._artifact_path = artifact_path
+        super().__init__(name="saved", shares_scenarios=True)
+        self.artifact_path = artifact_path
         self.data_ids: list[str] = []
 
-    def initial_state(self):
-        return {"steps": 0}
-
-    def prepare_step(self, batch, state, scenario_step):
-        del scenario_step
-        self.data_ids.append(batch.data_id)
-        return PreparedStep.with_candidate(
-            UpdateCandidate(batch.data_id),
-            state={"steps": int(state["steps"]) + 1},
-        )
-
-    def evaluate(self, candidate):
-        del candidate
-        return EvaluationResult("test", "1", {})
-
-    def settle_step(self, prepared, decision: SelectionDecision):
-        del decision
-        return TrainStepResult(prepared.state, artifact=Artifact.local(self._artifact_path))
-
-    def abort_step(self, prepared):
-        del prepared
+    def train(self, job: TrainingJob) -> tuple[SavedCheckpoint, ...]:
+        self.data_ids.append(job.data.data_id)
+        return (SavedCheckpoint(0, str(self.artifact_path), str(self.artifact_path)),)
 
 
 @dataclass(frozen=True)
 class _SavedArtifactRecipe(Recipe):
-    backend: CandidateBackend
+    backend: _SavedArtifactJobs
 
     def build(
         self,
@@ -486,7 +471,7 @@ class _SavedArtifactRecipe(Recipe):
             scenario,
             records,
             pipeline_factory=threshold_pipeline,
-            candidate_backend=self.backend,
+            job_loop=JobLoop(self.backend, scenario=scenario),
             algorithm_state=algorithm_state,
             default_job_samples=1,
         )
@@ -496,7 +481,7 @@ def _build_saved_artifact_dispatcher(tmp_path, *, agent_record_dir=None):
     artifact_path = tmp_path / "candidate"
     artifact_path.mkdir()
     (artifact_path / "model.txt").write_text("trained")
-    backend = _SavedArtifactBackend(artifact_path)
+    backend = _SavedArtifactJobs(artifact_path)
     dispatcher = Dispatcher(
         _SavedArtifactRecipe(backend=backend),
         repository_factory(tmp_path),
@@ -999,10 +984,15 @@ def test_artifact_commit_failure_keeps_the_pending_job_data_retryable(tmp_path, 
     scenario.records.append(sft_inference("i1"))
     scenario.records.append(sft_report("r1", "i1"))
     make_samples(scenario)
-    result = scenario.prepare_training_step()
-    assert result is not None
+    # The job's submission consumes the batch; its checkpoint is the commit that publishes the artifact.
+    submitted = scenario.prepare_training_step()
+    assert submitted is not None
     pending = scenario.trainer.pending_job_data
     assert pending is not None
+    scenario.commit(submitted)
+    submitted_state = dict(scenario.trainer.state)
+    result = scenario.prepare_training_step()
+    assert result is not None and result.artifact is not None
     committer = scenario._committer
 
     if failure_point == "commit_history":
@@ -1034,29 +1024,23 @@ def test_artifact_commit_failure_keeps_the_pending_job_data_retryable(tmp_path, 
 
     # The active release moves only after the runtime serves the new one and its record lands.
     assert scenario.current_artifact_ref() == active
-    assert scenario.scenario_step == 0
-    assert scenario.trainer.state == {"steps": 0}
-    assert scenario.trainer.pending_job_data is pending
+    assert scenario.scenario_step == 1
+    assert scenario.trainer.state == submitted_state
     assert [record.agent_record_id for record in scenario.records.replay("math")] == ["i1", "r1"]
 
     scenario.records.append(sft_inference("i2"))
     scenario.commit(result)
 
     assert backend.data_ids == [pending.data_id]
-    assert scenario.trainer.state == {"steps": 1}
-    assert scenario.trainer.pending_job_data is None
+    assert scenario.trainer.state == result.state
+    assert scenario.current_artifact_ref() != active
     assert [record.agent_record_id for record in scenario.records.replay("math")] == ["i1", "r1", "i2"]
-    assert len(scenario.store.history()) == 1
+    assert len(scenario.store.history()) == 2
     dispatcher.close()
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("failure_point", ["commit_applied", "release_records"])
-def test_post_commit_failure_resumes_the_recorded_step_without_republication(
-    tmp_path,
-    monkeypatch,
-    failure_point,
-) -> None:
+def test_post_commit_failure_resumes_the_recorded_step_without_republication(tmp_path, monkeypatch) -> None:
     dispatcher, backend = _build_saved_artifact_dispatcher(
         tmp_path,
         agent_record_dir=tmp_path / "records",
@@ -1069,8 +1053,8 @@ def test_post_commit_failure_resumes_the_recorded_step_without_republication(
     assert result is not None
     pending = scenario.trainer.pending_job_data
     assert pending is not None
-    target = scenario.trainer.pipeline if failure_point == "release_records" else scenario.trainer
-    original = getattr(target, failure_point)
+    pipeline = scenario.trainer.pipeline
+    original = pipeline.release_records
     should_fail = True
 
     def fail_after_effect(*args, **kwargs):
@@ -1078,30 +1062,32 @@ def test_post_commit_failure_resumes_the_recorded_step_without_republication(
         outcome = original(*args, **kwargs)
         if should_fail:
             should_fail = False
-            raise RuntimeError(f"injected {failure_point} failure")
+            raise RuntimeError("injected release_records failure")
         return outcome
 
-    monkeypatch.setattr(target, failure_point, fail_after_effect)
+    monkeypatch.setattr(pipeline, "release_records", fail_after_effect)
+    initial_state = dict(scenario.trainer.state)
 
-    with pytest.raises(RuntimeError, match=f"injected {failure_point} failure"):
+    # The job's submission consumes the batch, so its commit releases the batch's records.
+    with pytest.raises(RuntimeError, match="injected release_records failure"):
         scenario.commit(result)
 
     assert scenario.scenario_step == 0
-    assert scenario.trainer.state == {"steps": 0}
+    assert scenario.trainer.state == initial_state
     assert scenario.trainer.pending_job_data is pending
     assert scenario.store.durable
     [record] = scenario.store.history()
-    published_release = record.artifact_ref.release_id
+    recorded_release = record.artifact_ref.release_id
     with pytest.raises(RuntimeError, match="does not match the pending step"):
         scenario.commit(replace(result, state={"steps": 999}))
 
     scenario.commit(result)
 
     assert scenario.scenario_step == 1
-    assert scenario.trainer.state == {"steps": 1}
+    assert scenario.trainer.state == result.state
     assert scenario.trainer.pending_job_data is None
     assert len(scenario.store.history()) == 1
-    assert scenario.repository.require_current_artifact().release_id == published_release
+    assert scenario.repository.require_current_artifact().release_id == recorded_release
     assert backend.data_ids == [pending.data_id]
     dispatcher.close()
 

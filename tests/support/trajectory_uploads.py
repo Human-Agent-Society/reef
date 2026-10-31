@@ -11,10 +11,11 @@ from typing import Any
 from aiohttp import ClientResponse
 from aiohttp.test_utils import TestClient
 
+from tests.support.runtime_stubs import RecordingComponent
+
 from reef.artifact import InMemoryRepositoryBackend
 from reef.artifact.repository import RepositoryBackendFactory
 from reef.artifact.sources import ArtifactSources
-from reef.core.evaluation import EvaluationResult, SelectionDecision, UpdateCandidate
 from reef.dispatcher import Dispatcher
 from reef.recipe import Recipe
 from reef.record2sample import NoSamples
@@ -26,7 +27,8 @@ from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sql_data import SQLiteDataStore
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.tasks import LocalTaskFileStore
-from reef.train import CandidateBackend, JobData, PreparedStep, Trainer, TrainStepResult
+from reef.train import JobData, Trainer
+from reef.train.jobs import JobLoop
 from reef.train.pipeline import TrainingPipeline
 
 TOKEN = "upload-test-token"
@@ -73,29 +75,6 @@ async def upload_trajectories(
     )
 
 
-class CountingBackend(CandidateBackend):
-    """Keeps every batch and skips its step, so the trainer commits it."""
-
-    def __init__(self, batches: list[JobData]) -> None:
-        self.batches = batches
-
-    def initial_state(self) -> Mapping[str, Any]:
-        return {"trained": 0}
-
-    def prepare_step(self, batch: JobData, state: Mapping[str, Any], scenario_step: int) -> PreparedStep:
-        self.batches.append(batch)
-        return PreparedStep.skipped(state={"trained": int(state["trained"]) + len(batch.samples)})
-
-    def evaluate(self, candidate: UpdateCandidate) -> EvaluationResult:
-        raise NotImplementedError
-
-    def settle_step(self, prepared: PreparedStep, decision: SelectionDecision) -> TrainStepResult:
-        raise NotImplementedError
-
-    def abort_step(self, prepared: PreparedStep) -> None:
-        pass
-
-
 class UploadJobData(Sample2Job):
     accepts_trajectories = True
 
@@ -139,7 +118,7 @@ class UploadRecipe(Recipe):
             pipeline_factory=lambda context: TrainingPipeline(
                 context, record2sample=self.task_stage(), sample2job=self.batch_stage(context, None, None)
             ),
-            candidate_backend=CountingBackend(self.batches),
+            job_loop=JobLoop(RecordingComponent(self.batches), scenario=scenario),
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
             training_mode=self.training_mode,

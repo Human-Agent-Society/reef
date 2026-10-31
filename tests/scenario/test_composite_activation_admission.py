@@ -8,11 +8,11 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pytest
-from tests.support.component_trainers import HARNESS, WEIGHTS, WeightsJobComponent, _ComponentBackend
+from tests.support.component_trainers import HARNESS, WEIGHTS, ComponentJobs, WeightsJobComponent
 from tests.support.component_trainers import _dispatcher as two_trainer_dispatcher
 from tests.support.component_trainers import _records
 from tests.support.component_trainers import _scenario as two_trainer_scenario
-from tests.support.component_trainers import _TwoTrainerRecipe, component_files, stop_workers
+from tests.support.component_trainers import _TwoTrainerRecipe, component_files, finish_job, stop_workers
 from tests.support.runtime_stubs import StubInferenceRuntime
 from tests.support.samples_service import make_samples
 
@@ -55,7 +55,7 @@ def _dispatcher(tmp_path: Path, recipe: type[_LoadedRecipe] = _LoadedRecipe) -> 
     for component in (WEIGHTS, HARNESS):
         (initial / component).mkdir(parents=True)
         (initial / component / f"{component}.txt").write_text(f"{component} seed", encoding="utf-8")
-    backends = {component: _ComponentBackend(component, tmp_path / "candidates") for component in (WEIGHTS, HARNESS)}
+    backends = {component: ComponentJobs(component, tmp_path / "candidates") for component in (WEIGHTS, HARNESS)}
     records = tmp_path / "records"
     return Dispatcher(
         recipe(backends=backends),
@@ -87,6 +87,7 @@ def _step(scenario, component: str, step: int) -> str:
     result = scenario.prepare_training_step(component)
     assert result is not None
     scenario.commit(result, component=component)
+    finish_job(scenario, component)
     return scenario.current_artifact_ref().release_id
 
 

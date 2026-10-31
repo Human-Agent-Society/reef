@@ -11,24 +11,23 @@ from typing import Any
 from tests.support._threshold_processor import ThresholdJobData, threshold_pipeline
 from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent
 
-from reef.artifact import Artifact, ArtifactRef, InMemoryRepositoryBackend
+from reef.artifact import ArtifactRef, InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
 from reef.core.activation import ActivationRule
 from reef.dispatcher import Dispatcher
-from reef.evaluation import EvaluationResult, UpdateCandidate
 from reef.evaluation.activation import AlwaysActivate
 from reef.execution.jobs import SupportsReceipt
 from reef.observability import ExperimentTracker, NullExperimentLogger
 from reef.pipeline_context import PipelineContext
 from reef.recipe import Recipe
-from reef.runtime.jobs import SavedCheckpoint, TrainingJob
+from reef.runtime.jobs import JobStatus, SavedCheckpoint, TrainingJob
 from reef.scenario import Scenario
 from reef.storage.samples import TrainerSamples
 from reef.storage.sql_coordination import open_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.surface import ComponentSurface, Surface, TextFileTree
 from reef.surface.weights import WeightLoader
-from reef.train import CandidateBackend, ComponentTrainer, PreparedStep, Trainer, TrainStepResult
+from reef.train import ComponentTrainer, Trainer
 from reef.train.jobs import JobLoop
 from reef.train.pipeline import TrainingPipeline
 
@@ -37,60 +36,75 @@ HARNESS = "harness"
 from reef.execution.workers import SERVICE_COMPONENTS
 
 
-class _ComponentBackend(CandidateBackend):
-    """A local candidate cycle publishing one file for its component per step."""
+class ComponentJobs(StubTrainingComponent):
+    """The training component of one release component: its jobs run in ``submit``, on the trainer's own thread.
+
+    Each job runs ``step``, which saves one checkpoint holding ``<component>.txt`` = ``<component> step <n>`` for the
+    ``n``-th job, with the metrics ``{prepared}``. ``prepared`` counts the steps that started, a step that raised
+    included; a step that raises records no job, so ``submit`` raises as a refused job does and the trainer's cycle
+    fails. ``reject_next`` ends the next job without a checkpoint, with ``selected: False``. ``hold_next`` makes the
+    next checkpoint change the ``HELD`` kind, which the test recipe's activation rule does not activate. ``started``
+    is the text of the last start that ``import_start`` took. A subclass blocks or fails a step in ``step``.
+    """
 
     def __init__(self, component: str, artifact_dir: Path) -> None:
+        super().__init__(artifact_dir, name=component, shares_scenarios=True, release_format=None)
         self.component = component
         self.artifact_dir = artifact_dir
         self.prepared = 0
-        self.evaluated = 0
         self.reject_next = False
         self.hold_next = False
-        self.result: TrainStepResult | None = None
+        self.started: str | None = None
 
     def unblock(self) -> None:
         """Let go of any step the test holds, so the dispatcher can close."""
 
-    def initial_state(self) -> Mapping[str, Any]:
-        return {"steps": 0}
+    def import_start(self, release: Path) -> str:
+        self.started = (release / f"{self.component}.txt").read_text(encoding="utf-8")
+        return super().import_start(release)
 
-    def started_from(self, state: Mapping[str, Any], artifact: Artifact) -> Mapping[str, Any]:
-        """The state whose next step starts from ``artifact``: it records the file the artifact holds."""
-        assert artifact.local_path is not None
-        return {**state, "start": (artifact.local_path / f"{self.component}.txt").read_text(encoding="utf-8")}
-
-    def prepare_step(self, batch, state, scenario_step):
-        step = int(state["steps"]) + 1
-        self.prepared += 1
+    def step(self, job: TrainingJob) -> JobStatus:
+        """The job's end: a checkpoint of the component's file, or none when the step is rejected."""
+        number = len(self.submitted) + 1
         if self.reject_next:
-            # A rejected step publishes nothing: the row it leaves carries the head's own release.
+            # A rejected step publishes nothing: the job ends without a checkpoint.
             self.reject_next = False
-            self.result = TrainStepResult({"steps": step}, metrics={"prepared": self.prepared, "selected": False})
-            return PreparedStep.with_candidate(UpdateCandidate(batch.data_id), state={"steps": step})
+            return JobStatus(job.job_id, "finished", metrics={"prepared": self.prepared, "selected": False})
         path = self.artifact_dir / self.component / uuid.uuid4().hex
         path.mkdir(parents=True)
-        (path / f"{self.component}.txt").write_text(f"{self.component} step {step}", encoding="utf-8")
-        # A held artifact changes the HELD kind, which the test recipe's activation rule reviews.
-        self.result = TrainStepResult(
-            {"steps": step},
-            metrics={"prepared": self.prepared},
-            artifact=Artifact.local(path),
-            changed_kinds=frozenset({HELD}) if self.hold_next else frozenset(),
+        (path / f"{self.component}.txt").write_text(f"{self.component} step {number}", encoding="utf-8")
+        checkpoint = SavedCheckpoint(
+            0,
+            str(path),
+            str(path),
+            {"prepared": self.prepared},
+            frozenset({HELD}) if self.hold_next else frozenset(),
         )
         self.hold_next = False
-        return PreparedStep.with_candidate(UpdateCandidate(batch.data_id), state={"steps": step})
+        return JobStatus(job.job_id, "finished", (checkpoint,))
 
-    def evaluate(self, candidate):
-        self.evaluated += 1
-        return EvaluationResult("test", "1", {})
+    def submit(self, job: TrainingJob) -> None:
+        if job.job_id in self.statuses:
+            return
+        self.prepared += 1
+        status = self.step(job)
+        self.submitted.append(job)
+        self.statuses[job.job_id] = status
 
-    def settle_step(self, prepared, decision):
-        assert self.result is not None
-        return self.result
 
-    def abort_step(self, prepared):
-        pass
+def finish_job(scenario: Scenario, component: str, checkpoint_metrics: Mapping[str, Any] | None = None) -> None:
+    """Commit the checkpoint and the end of ``component``'s running job, when its trainer's component is a
+    ``ComponentJobs``, whose jobs end in ``submit``: the commits that follow the job's submission. ``checkpoint_metrics``
+    join the checkpoint's commit. A job of another component runs in the training service, so it is left alone."""
+    trainer = scenario.trainer_for(component)
+    if not isinstance(trainer.job_loop_required().component, ComponentJobs):
+        return
+    while trainer.job_running:
+        result = scenario.prepare_training_step(component)
+        assert result is not None, "a job that ended in submit has its checkpoint and its end to commit"
+        if checkpoint_metrics is not None and result.metrics["training_job"]["event"] == "checkpoint":
+            result = trainer.add_commit_metrics(result, checkpoint_metrics)
+        scenario.commit(result, component=component)
 
 
 class WeightsJobComponent(StubTrainingComponent):
@@ -147,9 +161,9 @@ MAX_STALENESS = 100
 
 @dataclass(frozen=True)
 class _TwoTrainerRecipe(Recipe):
-    """A scenario serving weights and a harness tree, each evolved by its own local backend."""
+    """A scenario serving weights and a harness tree, each evolved by its own training component."""
 
-    backends: Mapping[str, CandidateBackend]
+    backends: Mapping[str, ComponentJobs]
     auto_only_components: frozenset[str] = frozenset()
 
     def activation_rule(self) -> ActivationRule:
@@ -201,7 +215,7 @@ class _TwoTrainerRecipe(Recipe):
                     scenario,
                     records,
                     pipeline_factory=factory_for(component),
-                    candidate_backend=backend,
+                    job_loop=JobLoop(backend, scenario=scenario),
                     algorithm_state=algorithm_states.get(component),
                     experiment_logger=experiment_logger,
                     default_job_samples=1,
@@ -323,14 +337,14 @@ def component_files(scenario: Scenario, ref: ArtifactRef) -> dict[str, str]:
     }
 
 
-def _local_pair(tmp_path: Path) -> dict[str, _ComponentBackend]:
-    return {component: _ComponentBackend(component, tmp_path / "candidates") for component in (WEIGHTS, HARNESS)}
+def _local_pair(tmp_path: Path) -> dict[str, ComponentJobs]:
+    return {component: ComponentJobs(component, tmp_path / "candidates") for component in (WEIGHTS, HARNESS)}
 
 
 def _dispatcher(
     tmp_path: Path,
     *,
-    backends: dict[str, _ComponentBackend] | None = None,
+    backends: dict[str, ComponentJobs] | None = None,
     recipe: Recipe | None = None,
     auto_only_components: frozenset[str] = frozenset(),
     training: StubTrainingComponent | None = None,
@@ -339,7 +353,7 @@ def _dispatcher(
     experiment_tracker: ExperimentTracker | None = None,
     hold_local_cycles: bool = False,
     components: frozenset[str] = frozenset(SERVICE_COMPONENTS),
-) -> tuple[Dispatcher, dict[str, _ComponentBackend]]:
+) -> tuple[Dispatcher, dict[str, ComponentJobs]]:
     """A dispatcher over the two trainer recipe of ``backends``, or over ``recipe`` when one is given. ``components``
     are the services that it runs; without ``samples``, only the test makes samples (``make_samples``)."""
     repository = _seeded_repository(tmp_path) if backend_factory is None else backend_factory
@@ -351,7 +365,7 @@ def _dispatcher(
     else:
         # A training component binds the scenario: a process trains one scenario on it. It trains the weights; the
         # harness keeps its local backend.
-        backends = {HARNESS: _ComponentBackend(HARNESS, tmp_path / "candidates")} if backends is None else backends
+        backends = {HARNESS: ComponentJobs(HARNESS, tmp_path / "candidates")} if backends is None else backends
         recipe = _TwoTrainerRecipe(
             backends=backends,
             auto_only_components=auto_only_components,

@@ -200,7 +200,7 @@ def run_reef(tmp_path: Path, iterations: int) -> tuple[Archive, dict[int, dict[s
             if result.artifact is not None:
                 # What the committer does with a selected candidate: it becomes the head release.
                 releases.publish(f"r{step}", HarnessTree.read(result.artifact.local_path))
-                backend.commit_applied(result.state)
+                backend.discard_kept_tree()
             state = dict(result.state)
         # The last step's validation folds in as the next step would fold it.
         return committed_archive(state, releases.head(COMPONENT).files["rules.md"]), plans

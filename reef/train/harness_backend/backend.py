@@ -1,10 +1,10 @@
 """The harness backend: one evolution step, from the head tree to a release.
 
-One step runs in the trainer's three phases:
+One step runs in three phases, one training job of the harness training
+component (``reef.train.harness_backend.component``):
 
 ``prepare_step``
-    Read the head tree from git through ``ComponentReleases`` and the step's
-    evaluation tasks. The step's job data is its material: the traces of
+    Read the head tree, which the job names, and the step's evaluation tasks. The step's job data is its material: the traces of
     traffic, and on an offline step the train tasks, which the step rolls
     out on the head tree first. Write them to a fresh ``Workspace``, then
     ``propose`` runs the method in it:
@@ -26,7 +26,8 @@ One step runs in the trainer's three phases:
 ``settle_step``
     Fold the decision into the state and the history. A selected tree is
     the step's kept tree: an ``Artifact.local`` of its source tree, which the
-    scenario committer stores as a git commit. The scenario's activation rule
+    component saves as the job's checkpoint and the scenario committer stores
+    as a git commit. The scenario's activation rule
     decides whether it serves, from the tree kinds it changes.
 
 Nothing is restored on a rejection or an abort: the candidate is a new value,
@@ -61,7 +62,7 @@ from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.tasks.model_binding import ModelBindings, ModelBindingsResolver
 from reef.harness.tree import HarnessTree, validate_tree
 from reef.harness.tree.checks import clip_record_text, clip_record_value, directive_shaped, secret_shaped
-from reef.train.backend import CandidateBackend, ComponentReleases, PreparedStep, ReleaseFiles
+from reef.train.backend import ComponentReleases, PreparedStep, ReleaseFiles
 from reef.train.harness_backend.agent.run import AgentExecution
 from reef.train.harness_backend.calls import StepCalls, call_tokens
 from reef.train.harness_backend.contract import Method, StepContext
@@ -167,7 +168,7 @@ class StepLimits:
                 raise ValueError(f"{label} must be an integer of at least 0 (0 turns the limit off)")
 
 
-class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator):
+class HarnessBackend(HarnessCandidateEvaluator):
     """Evolve one harness component: one candidate per step, evaluated against the head tree.
 
     Values: ``releases`` reads the head tree of each step from the scenario's commits, or is ``None`` when each
@@ -220,22 +221,8 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator):
     # -- the candidate lifecycle ------------------------------------------------------------------------------------
 
     def initial_state(self) -> Mapping[str, Any]:
+        """The state before the first step: ``HarnessState()`` in its JSON form."""
         return HarnessState().to_json()
-
-    def started_from(self, state: Mapping[str, Any], artifact: Artifact) -> Mapping[str, Any]:
-        """``state`` unchanged, once ``artifact``'s tree passes validation.
-
-        The next step builds on the head that ``ComponentReleases`` reads, which
-        a ``"train_from"`` or ``"sync"`` record moves to ``artifact``.
-        ``ValueError`` when ``artifact`` has no local files or its tree does
-        not pass validation.
-        """
-        if artifact.local_path is None:
-            raise ValueError(f"release {artifact.ref.release_id!r} has no local files to start from")
-        validation = validate_tree(HarnessTree.read(artifact.local_path), self.descriptor)
-        if not validation.passed:
-            raise ValueError(f"the tree of release {artifact.ref.release_id!r} is refused: {validation.message()}")
-        return state
 
     def close(self) -> None:
         if self.evaluator is not None:
@@ -527,8 +514,8 @@ class HarnessBackend(CandidateBackend, HarnessCandidateEvaluator):
             },
         }
 
-    def commit_applied(self, state: Mapping[str, Any]) -> None:
-        """Discard the step's local source tree once the committer stored it in git."""
+    def discard_kept_tree(self) -> None:
+        """Discard the local source tree of the step's kept tree, once its job's checkpoint holds a copy."""
         if self.pending_artifact is not None:
             self.pending_artifact.discard()
             self.pending_artifact = None

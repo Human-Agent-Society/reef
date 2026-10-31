@@ -312,8 +312,8 @@ def test_recipe_pipeline_has_no_update_algorithm() -> None:
         scenario_storage=SQLiteScenarioStorage(), coordination=memory_coordination()
     ).get_or_create_scenario("math")
 
+    assert not runtime.trainer.trains
     assert runtime.trainer.pipeline.output_schema is JobData
-    assert runtime.trainer.candidate_backend is None
 
 
 @pytest.mark.unit

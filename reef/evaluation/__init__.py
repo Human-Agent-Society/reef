@@ -26,19 +26,12 @@ from reef.core.evaluation import (
     UpdateCandidate,
 )
 from reef.evaluation.activation import AlwaysActivate, EvaluatedActivation, NeverActivate
-from reef.evaluation.evaluators import (
-    AlwaysSelectMixin,
-    BackendAlwaysSelectPlugin,
-    BackendEvaluateMixin,
-    RegressionCheckMixin,
-)
+from reef.evaluation.evaluators import AlwaysSelectMixin, RegressionCheckMixin
 
 __all__ = [
     "ActivationRule",
     "AlwaysActivate",
     "AlwaysSelectMixin",
-    "BackendAlwaysSelectPlugin",
-    "BackendEvaluateMixin",
     "CandidateEvaluationPlugin",
     "CandidateEvaluator",
     "CandidateSelector",

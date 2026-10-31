@@ -96,7 +96,7 @@ def test_a_winning_candidate_publishes_and_the_history_keeps_it(tmp_path: Path) 
     assert [record.score.value for record in history.runs] == [1.0, 0.0]
     assert [(decision.step, decision.selected) for decision in history.decisions] == [(1, True)]
     # The committer publishes; the backend's own copy goes once the commit is durable.
-    backend.commit_applied(result.state)
+    backend.discard_kept_tree()
     assert not result.artifact.local_path.exists()
 
 

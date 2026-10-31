@@ -1,4 +1,4 @@
-"""Built-in candidate-evaluation mixins, the default plugin, and the rules that read rollout scores.
+"""Built-in candidate-evaluation mixins and the rules that read rollout scores.
 
 A harness recipe builds its publication policy from ``evolution.evaluation``
 (``reef.evaluation.harness.policy``). The policies decide by the rules here:
@@ -8,10 +8,9 @@ side against a floor score.
 A :class:`~reef.core.evaluation.CandidateEvaluationPlugin` is a single
 class that both measures a candidate (``evaluate``) and decides whether to
 select it (``decide``). Rather than composing an evaluator object with a
-selector object, a plugin mixes in the methods it needs: a *decide* mixin
-(:class:`AlwaysSelectMixin`, :class:`RegressionCheckMixin`) and, when the
-measurement comes from the candidate backend rather than the plugin's own code,
-the :class:`BackendEvaluateMixin`.
+selector object, a plugin mixes in the *decide* mixin it needs
+(:class:`AlwaysSelectMixin`, :class:`RegressionCheckMixin`) and measures in its
+own ``evaluate``.
 
 Every mixin inherits the plugin contract and implements one half of it, so the
 other half stays abstract: a mixin cannot be instantiated on its own, and a
@@ -22,17 +21,11 @@ plugin is only concrete once both halves are supplied.
             super().__init__(metric="clean_rate", margin=0.17)
             ...
         def evaluate(self, candidate): ...   # its own measurement
-
-    class BackendScored(ScoreMixin, BackendEvaluateMixin):
-        def __init__(self, candidate_backend, **kw):
-            super().__init__(**kw)           # the decide mixin's config
-            self._candidate_backend = candidate_backend          # BackendEvaluateMixin reads this
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
 
 from reef.core.evaluation import (
     CandidateEvaluationPlugin,
@@ -205,37 +198,8 @@ class RegressionCheckMixin(CandidateEvaluationPlugin):
         )
 
 
-class BackendEvaluateMixin(CandidateEvaluationPlugin):
-    """Give a plugin an ``evaluate()`` that delegates to ``self._candidate_backend``.
-
-    For methods whose measurement is the candidate backend's own candidate
-    evaluation rather than code in the plugin. The plugin sets ``self._candidate_backend``
-    in its ``__init__``; this mixin holds no state of its own.
-    """
-
-    _candidate_backend: Any
-
-    def evaluate(self, candidate: UpdateCandidate) -> EvaluationResult:
-        return self._candidate_backend.evaluate(candidate)
-
-
-class BackendAlwaysSelectPlugin(AlwaysSelectMixin, BackendEvaluateMixin):
-    """The default plugin of a trainer with a candidate backend and no evaluation plugin.
-
-    It evaluates through the candidate backend and selects every candidate.
-    A harness recipe always names its own publication policy, so a trainer
-    gets this default only when it is built without one, as in tests.
-    """
-
-    def __init__(self, candidate_backend: Any) -> None:
-        super().__init__()
-        self._candidate_backend = candidate_backend
-
-
 __all__ = [
     "AlwaysSelectMixin",
-    "BackendAlwaysSelectPlugin",
-    "BackendEvaluateMixin",
     "FloorCheck",
     "RegressionCheckMixin",
     "ScoreComparison",

@@ -1,11 +1,9 @@
-"""The trainer: record consumption, training jobs or harness steps, and commit preparation.
+"""The trainer: record consumption, training jobs, and commit preparation.
 
-A trainer pages records into its pipeline. A weight trainer hands each ready
-job's data to its ``JobLoop``, which submits training jobs and turns their saved
-checkpoints into commits (``reef.train.jobs``). A harness trainer runs each
-step through its candidate backend: the backend prepares a candidate, the
-trainer runs one candidate evaluator, and the backend settles the step.
-Consumption progress is committed before pipeline memory is released. Storage
+A trainer pages records into its pipeline. A trainer that trains hands each
+ready job's data to its ``JobLoop``, which submits training jobs and turns their
+saved checkpoints into commits (``reef.train.jobs``): weight jobs, and the
+harness steps of the harness training component. Consumption progress is committed before pipeline memory is released. Storage
 owns disk eviction independently; new training commits never retire record
 bodies.
 """
@@ -22,13 +20,11 @@ from typing import Any
 
 from reef.artifact.artifact import Artifact
 from reef.core.errors import CommitPending, TrainingStartRefused
-from reef.core.evaluation import CandidateEvaluationPlugin, SelectionDecision, UpdateCandidate
 from reef.core.job_data import JobOutcome, TrajectorySample
 from reef.core.plugins import PluginConfigError
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.reports import ReportBase
 from reef.core.training_request import TrainingRequest
-from reef.evaluation.evaluators import BackendAlwaysSelectPlugin
 from reef.observability import ExperimentLogger, NullExperimentLogger
 from reef.observability.operations import OperationMetrics
 from reef.pipeline_context import PipelineContext
@@ -36,7 +32,6 @@ from reef.record2sample.service import ProducedSamples
 from reef.storage.records import RecordStore
 from reef.storage.samples import SAMPLE_KINDS, SampleKind, TrainerSamples
 from reef.storage.tasks import TaskStorage
-from reef.train.backend import CandidateBackend, PreparedStep
 from reef.train.jobs import JobLoop, JobLoopState
 from reef.train.pipeline import InstructionFailure, TrainingPipeline
 from reef.train.types import JobData, PreparedCommit, TrainStepResult
@@ -93,8 +88,8 @@ logger = logging.getLogger(__name__)
 class Trainer:
     """Turn a scenario's records into job data, and each training job's progress into commits.
 
-    A weight trainer submits jobs through its ``JobLoop``; a harness trainer runs a step on its candidate
-    backend. A trainer with neither trains nothing: it reads every record and is never ready.
+    A trainer that trains submits jobs through its ``JobLoop``. A trainer without one trains nothing: it reads
+    every record and is never ready.
     """
 
     _DATA_READ_BATCH_SIZE = 256
@@ -106,8 +101,6 @@ class Trainer:
         records: RecordStore,
         *,
         pipeline_factory: Callable[[PipelineContext], TrainingPipeline],
-        candidate_backend: CandidateBackend | None = None,
-        candidate_evaluator: CandidateEvaluationPlugin | None = None,
         job_loop: JobLoop | None = None,
         algorithm_state: Mapping[str, Any] | None = None,
         report_type: type[ReportBase] | None = None,
@@ -120,8 +113,8 @@ class Trainer:
     ) -> Trainer:
         """Build a trainer and its pipeline.
 
-        A trainer trains through ``job_loop`` (weights) or ``candidate_backend``
-        (harness steps), or through neither, when it only consumes records.
+        A trainer trains through ``job_loop`` (weight jobs, or harness steps as jobs of the harness training
+        component), or without one, when it only consumes records.
         ``default_job_samples`` is None or a positive int: ``evolution.batch_size``
         for harness evolution, and None for a weight trainer, whose
         deployment sets the size. The trainer's ``job_samples`` is the
@@ -134,11 +127,7 @@ class Trainer:
         every kind empty parameters, so the training component's defaults
         apply.
         """
-        if candidate_backend is None and candidate_evaluator is not None:
-            raise ValueError("candidate evaluation requires a candidate backend; a job loop holds its own")
-        if candidate_evaluator is not None and not isinstance(candidate_evaluator, CandidateEvaluationPlugin):
-            raise TypeError("candidate_evaluator must inherit CandidateEvaluationPlugin")
-        trains = candidate_backend is not None or job_loop is not None
+        trains = job_loop is not None
         pipeline = pipeline_factory(
             PipelineContext(
                 scenario=scenario,
@@ -163,21 +152,18 @@ class Trainer:
                 f"{type(stage).__name__} has no job_samples: set pipeline.sample2job.config.job_samples, "
                 "the fewest samples one training job trains"
             )
-        if candidate_backend is not None:
-            default_state: Mapping[str, Any] = candidate_backend.initial_state()
-        elif job_loop is not None:
-            # A new trainer starts from the untrained checkpoint that the base artifact holds.
-            default_state = JobLoopState(job_loop.component.base_start).to_dict()
-        else:
-            default_state = {}
+        default_state: Mapping[str, Any] = (
+            # A new trainer starts from the base artifact's start: the untrained checkpoint, or the seed tree.
+            {}
+            if job_loop is None
+            else JobLoopState(job_loop.component.base_start).to_dict()
+        )
         initial_state = dict(default_state if algorithm_state is None else algorithm_state)
         try:
             trainer = cls(
                 scenario=scenario,
                 records=records,
                 pipeline=pipeline,
-                candidate_backend=candidate_backend,
-                candidate_evaluator=candidate_evaluator,
                 job_loop=job_loop,
                 state=initial_state,
             )
@@ -197,24 +183,13 @@ class Trainer:
         scenario: str,
         records: RecordStore,
         pipeline: TrainingPipeline,
-        candidate_backend: CandidateBackend | None,
-        candidate_evaluator: CandidateEvaluationPlugin | None,
         state: Mapping[str, Any],
         job_loop: JobLoop | None = None,
     ) -> None:
-        if candidate_backend is not None and job_loop is not None:
-            raise ValueError("a trainer trains through a job loop or a candidate backend, not both")
         self._scenario = scenario
         self._records = records
         self._pipeline = pipeline
-        self._candidate_backend = candidate_backend
         self._job_loop = job_loop
-        if candidate_backend is None:
-            self._candidate_evaluator = None
-        elif candidate_evaluator is not None:
-            self._candidate_evaluator = candidate_evaluator
-        else:
-            self._candidate_evaluator = BackendAlwaysSelectPlugin(candidate_backend)
         #: The fewest samples one job trains: automatic job data holds at least this many. None when the
         #: trainer trains nothing (it reads every record and is never ready).
         self.job_samples = pipeline.sample2job.job_samples if self.trains else None
@@ -246,8 +221,6 @@ class Trainer:
                 "records/data_incomplete": int(loss.record_count > 0),
             }
         )
-        if self._candidate_backend is not None:
-            values.update(self._candidate_backend.operational_metrics())
         if not self._lock.acquire(blocking=False):
             return values
         try:
@@ -293,8 +266,7 @@ class Trainer:
             pending = self._pending
             if pending is None or pending.result is not None or pending.data is None or pending.data.request is None:
                 return False
-            metadata = {} if self._candidate_backend is None else self._candidate_backend.failed_step_metrics()
-            self._pipeline.mark_request_failed(pending.data.request.id, error, metadata)
+            self._pipeline.mark_request_failed(pending.data.request.id, error, {})
             return True
 
     def instruction_failures(self) -> Mapping[str, InstructionFailure]:
@@ -325,25 +297,18 @@ class Trainer:
             self._pipeline.admit_reports_of(report_type)
 
     @property
-    def candidate_backend(self) -> CandidateBackend | None:
-        return self._candidate_backend
-
-    @property
     def job_loop(self) -> JobLoop | None:
         return self._job_loop
 
     @property
     def trains(self) -> bool:
-        """Whether this trainer trains: through a job loop or a candidate backend."""
-        return self._job_loop is not None or self._candidate_backend is not None
+        """Whether this trainer trains: through a job loop."""
+        return self._job_loop is not None
 
     @property
     def can_train_from(self) -> bool:
-        """Whether ``start_from`` can take an artifact: a harness trainer always can, a weight trainer when its
-        training component takes releases (``TrainingComponent.starts_from_releases``), and a trainer that trains
-        nothing never can."""
-        if self._candidate_backend is not None:
-            return True
+        """Whether ``start_from`` can take an artifact: a trainer whose training component takes releases
+        (``TrainingComponent.starts_from_releases``); a trainer that trains nothing never can."""
         return self._job_loop is not None and self._job_loop.component.starts_from_releases
 
     @property
@@ -372,11 +337,6 @@ class Trainer:
         """
         with self._lock:
             return self._pipeline.uploaded_sample(trajectory)
-
-    @property
-    def candidate_evaluator(self) -> CandidateEvaluationPlugin | None:
-        """The external or built-in candidate evaluator, when training."""
-        return self._candidate_evaluator
 
     @property
     def state(self) -> Mapping[str, Any]:
@@ -415,7 +375,7 @@ class Trainer:
             return self.trains and self._pipeline.holds_job_data(self.job_samples)
 
     def holds_untrained_records(self) -> bool:
-        """Whether this trainer has records that its backend would still train on.
+        """Whether this trainer has records that its jobs would still train on.
 
         That is the case when rows are unread, job data is ready or reserved,
         or a background job runs. A trainer that trains nothing (``trains``
@@ -485,7 +445,7 @@ class Trainer:
         """Build the next job's data and hold the pipeline to its declared schema.
 
         ``Sample2Job.output_schema`` is the recipe's published contract for
-        what the training component or candidate backend receives; enforcing it at the only place
+        what the training component receives; enforcing it at the only place
         job data enters the trainer turns a drifting recipe into a loud error
         instead of a backend-side shape failure.
         """
@@ -553,12 +513,7 @@ class Trainer:
                 self._data_offset += 1
                 self._data_sequence = sequence
 
-    def run_once(
-        self,
-        scenario_step: int = 0,
-        *,
-        serving_artifact_id: str | None = None,
-    ) -> TrainStepResult | None:
+    def run_once(self, *, serving_artifact_id: str | None = None) -> TrainStepResult | None:
         """Consume available data and prepare the next commit, if any.
 
         Returns ``None`` when this trainer trains nothing (it only advances
@@ -579,7 +534,7 @@ class Trainer:
             data = None if job is not None else self.reserve_job_data(serving_artifact_id)
             if job is None and data is None:
                 return None
-        # Submitting a job, evaluating a checkpoint or preparing a harness candidate can take minutes.
+        # Submitting a job or reading its checkpoints can take a while.
         # Keep the job data reserved, but release the trainer lock so status remains live.
         with self.operations.measure("execution"):
             result: TrainStepResult | None
@@ -589,13 +544,13 @@ class Trainer:
                 polled = self.job_loop_required().poll(JobLoopState.from_dict(observed_state))
                 result, ended = (None, None) if polled is None else (polled.result, polled.ended)
             elif data.request is not None and failure is not None:
-                # Committed without the backend: the failed instruction is consumed alone and the catalog row names why.
+                # Committed without a job: the failed instruction is consumed alone and the catalog row names why.
                 result = self._skip_failed_instruction(data, data.request, failure)
-            elif self._job_loop is None:
-                result = self._execute_backend_step(data, scenario_step)
             else:
                 parameters = self._pipeline.sample2job.job_parameters(data)
-                result = self._job_loop.submit(JobLoopState.from_dict(observed_state), data, parameters).result
+                result = (
+                    self.job_loop_required().submit(JobLoopState.from_dict(observed_state), data, parameters).result
+                )
         with self._lock:
             if data is None:
                 # A new training start set meanwhile replaced the state this poll read: its result is stale.
@@ -608,31 +563,6 @@ class Trainer:
                 self._pending.result = result
             return result
 
-    def _execute_backend_step(self, data: JobData, scenario_step: int) -> TrainStepResult:
-        backend = self._candidate_backend
-        if backend is None:
-            raise RuntimeError("cannot execute a training step without a backend")
-        prepared = backend.prepare_step(data, self._state, scenario_step)
-        if not isinstance(prepared, PreparedStep):
-            raise TypeError(f"{type(backend).__name__}.prepare_step must return PreparedStep")
-        if prepared.outcome == "skip":
-            return TrainStepResult(prepared.state, prepared.metrics)
-        candidate = prepared.candidate
-        if not isinstance(candidate, UpdateCandidate):
-            raise TypeError("candidate preparation must carry an UpdateCandidate")
-        return self.settle_candidate(backend, prepared, candidate)
-
-    def settle_candidate(
-        self, backend: CandidateBackend, prepared: PreparedStep, candidate: UpdateCandidate
-    ) -> TrainStepResult:
-        """Evaluate ``prepared``'s candidate and settle the step; a failure aborts it at the backend."""
-        try:
-            decision = self._evaluate_candidate(candidate)
-            return backend.settle_step(prepared, decision)
-        except BaseException:
-            backend.abort_step(prepared)
-            raise
-
     def _skip_failed_instruction(self, data: JobData, request: TrainingRequest, error: str) -> TrainStepResult:
         """Consume the instruction alone; the samples of its job data stay in the buffer."""
         with self._lock:
@@ -644,12 +574,6 @@ class Trainer:
             pending.consumed_ids = self._pipeline.discard_request(request.id)
         metrics = {**metadata, "skipped": "instruction failed", "error": error}
         return TrainStepResult(dict(self._state), metrics)
-
-    def _evaluate_candidate(self, candidate: UpdateCandidate) -> SelectionDecision:
-        evaluator = self._candidate_evaluator
-        if evaluator is None:
-            raise RuntimeError("candidate preparation has no candidate evaluator")
-        return evaluator.evaluate_and_decide(candidate)
 
     def reserve_job_data(self, serving_artifact_id: str | None) -> JobData | None:
         """Return the reserved job data, or reserve the next data when the pipeline is ready. The caller holds the lock.
@@ -712,7 +636,7 @@ class Trainer:
                 metrics.update({"records/evicted_count": loss.record_count, "records/data_incomplete": 1})
             request = None if self._pending.data is None else self._pending.data.request
             if request is not None:
-                # The backend's own dict, when it wrote one, carries what its proposer added to ``requires``.
+                # The step's own dict, when it wrote one, carries what its method added to ``requires``.
                 metrics.setdefault("training_request", {"id": request.id, **request.to_dict()})
             prepared = PreparedCommit(
                 algorithm_state=dict(result.state),
@@ -775,10 +699,8 @@ class Trainer:
         """Set the training start to ``artifact``, and cancel the running job.
 
         ``artifact`` is the trainer's component of a release, materialized. A
-        weight trainer's next job starts from what its training component
-        imports of ``artifact`` (``TrainingComponent.import_start``). A
-        harness trainer's next step starts from the state its backend gives
-        (``CandidateBackend.started_from``). Raise ``TrainingStartRefused``,
+        trainer's next job starts from what its training component imports of
+        ``artifact`` (``TrainingComponent.import_start``). Raise ``TrainingStartRefused``,
         and change nothing, when this trainer cannot start from ``artifact``;
         raise ``CommitPending`` while a commit is in preparation.
         """
@@ -789,42 +711,28 @@ class Trainer:
             if self._pending is not None:
                 raise CommitPending("cannot set the training start while a training result waits for its commit")
             observed_state = self._state
-        job_loop, backend = self._job_loop, self._candidate_backend
-        if job_loop is None and backend is None:
+        job_loop = self._job_loop
+        if job_loop is None:
             raise TrainingStartRefused(f"the trainer of scenario {self.scenario!r} trains nothing to start")
         # An import copies weights, which can take minutes: the trainer lock stays free meanwhile.
         try:
-            imported = None if job_loop is None else job_loop.component.import_start(tree)
-            started = None if backend is None else backend.started_from(observed_state, artifact)
+            imported = job_loop.component.import_start(tree)
         except ValueError as exc:
             raise TrainingStartRefused(f"scenario {self.scenario!r} cannot train from this artifact: {exc}") from exc
         with self._lock:
             if self._pending is not None or self._state is not observed_state:
                 raise CommitPending("a training result reached its commit while the training start was being set")
             # The running job is cancelled only once the new start is sure to apply.
-            if job_loop is not None and imported is not None:
-                self._state = job_loop.started_from(JobLoopState.from_dict(self._state), imported).to_dict()
-            elif started is not None:
-                self._state = dict(started)
-
-    def commit_applied(self, state: Mapping[str, Any]) -> None:
-        """Notify the backend after ``state`` enters the durable commit history."""
-        backend = self._candidate_backend
-        if backend is not None:
-            backend.commit_applied(state)
+            self._state = job_loop.started_from(JobLoopState.from_dict(self._state), imported).to_dict()
 
     def close(self) -> None:
-        """Release pipeline and backend resources owned by the trainer.
+        """Release the pipeline, which the trainer owns.
 
         Held under the trainer lock so a pipeline is never closed while a
         record is being pushed or job data is built on the training thread.
         """
         with self._lock:
-            try:
-                self._pipeline.close()
-            finally:
-                if self._candidate_backend is not None:
-                    self._candidate_backend.close()
+            self._pipeline.close()
 
     def replay_retained(self, *, up_to_sequence: int, consumed_ids: frozenset[str]) -> None:
         """Rebuild pipeline memory from retained rows at or below a watermark.

@@ -1,4 +1,4 @@
-"""The scenario's committed releases as files, for a candidate backend that builds on its head.
+"""The scenario's committed releases as files: the head that a harness step builds on.
 
 ``ScenarioReleaseFiles`` reads the commit history and the artifact
 repository of one scenario. It is what ``reef.train.backend.CommittedReleases``
