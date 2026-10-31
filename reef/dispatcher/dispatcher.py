@@ -51,7 +51,7 @@ from reef.storage.record_items import request_record_copy, sync_scenario_records
 from reef.storage.records import RecordRetention
 from reef.storage.samples import StoredSample
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage
-from reef.train.job_queue import JobQueueComponent, TrainingJobWorker
+from reef.train.job_queue import JobExperimentRecorder, JobQueueComponent, TrainingJobWorker
 from reef.train.trainer import Trainer
 
 logger = logging.getLogger(__name__)
@@ -171,7 +171,11 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         self.record_storage = scenario_storage if record_storage is None else record_storage
         self.data_store = data_store
         self.record_retention_lock = Lock()
-        self.experiment_tracker = experiment_tracker if experiment_tracker is not None else NullExperimentTracker()
+        tracker = experiment_tracker if experiment_tracker is not None else NullExperimentTracker()
+        if recipe.training_component is not None and not isinstance(tracker, NullExperimentTracker):
+            # Control's tracker also writes each training job's run into the job's item, for the job listing.
+            tracker = JobExperimentRecorder(tracker, self.queue)
+        self.experiment_tracker = tracker
         self.registry = ScenarioRegistry(
             recipe,
             backend_factory,
