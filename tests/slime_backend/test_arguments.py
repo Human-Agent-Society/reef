@@ -85,6 +85,22 @@ def test_finalize_arguments_chains_user_hooks_and_enables_explicit_critic() -> N
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("provider", [None, "custom.model_provider"])
+def test_finalize_arguments_installs_the_reef_provider_without_lora(provider) -> None:
+    # Every actor builds through Reef's provider: it installs the checkpoint's
+    # YaRN scaling even when no LoRA adapter is applied.
+    args = slime_args(megatron_lora_rank=0, custom_model_provider_path=provider)
+
+    finalize_reef_slime_args(args, [])
+
+    assert args.custom_model_provider_path == REEF_MODEL_PROVIDER_PATH
+    assert args.reef_chained_model_provider_path == provider
+    # A second finalize keeps the chain as it is.
+    finalize_reef_slime_args(args, [])
+    assert args.reef_chained_model_provider_path == provider
+
+
+@pytest.mark.unit
 def test_finalize_arguments_lets_an_explicit_no_offload_train_stand() -> None:
     # --use-critic offloads the idle model by default; a launch that says
     # --no-offload-train keeps the actor and the critic resident.
