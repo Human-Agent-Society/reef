@@ -20,6 +20,8 @@ from reef.core.job_data import JobData, TaskSample
 from reef.runtime.executor.placement import GpuBundles
 from reef.runtime.interfaces import TrainingMethod
 from reef.runtime.jobs import TrainingJob
+from reef.train.algos.objective import TrainingObjective
+from reef.train.algos.registry import register_objective, unregister_objective
 from reef.train.slime_backend import component as slime_component
 from reef.train.slime_backend import rollout_group as rollout_group_module
 from reef.train.slime_backend.component import ROLLOUTS_FILE
@@ -147,6 +149,64 @@ def test_a_task_job_is_checked_at_submit(tmp_path, task_stack):
     assert events == []
 
 
+@pytest.mark.unit
+def test_a_job_names_an_objective_whose_loss_family_slime_trains(tmp_path, task_stack):
+    stack, events, _ = task_stack
+    add = task(tmp_path / "a", "add")
+    # The generated-task objective's family, importance_sampling, is Slime's too.
+    stack.component.check_job(
+        TrainingJob(
+            "j",
+            "slime",
+            stack.component.base_start,
+            JobData("d", (add,)),
+            {**parameters(TrainingMethod("task_group")), "rollout": ROLLOUT},
+            scenario="s",
+        )
+    )
+
+    class Elsewhere(TrainingObjective):
+        name = "elsewhere"
+        loss_family = "only-on-another-backend"
+
+        def prepare(self, data, state):
+            raise AssertionError("a refused job prepares nothing")
+
+    register_objective(Elsewhere())
+    try:
+        with pytest.raises(ValueError, match="no loss family 'only-on-another-backend'"):
+            stack.component.submit(
+                TrainingJob(
+                    "j",
+                    "slime",
+                    stack.component.base_start,
+                    JobData("d", (add,)),
+                    {**parameters(TrainingMethod("elsewhere")), "rollout": ROLLOUT},
+                    scenario="s",
+                )
+            )
+    finally:
+        unregister_objective("elsewhere")
+    assert events == []
+
+
+@pytest.mark.unit
+def test_a_task_job_with_score_centering_trains_the_untruncated_distribution_at_temperature_one():
+    def checked(**sampling):
+        args = SimpleNamespace(
+            score_centering=True,
+            score_centering_top_k=4,
+            score_centering_min_tail_mass=1e-6,
+            **{"rollout_temperature": 1.0, "rollout_top_p": 1.0, "rollout_top_k": -1, **sampling},
+        )
+        slime_component.SlimeJobs.check_task_jobs(SimpleNamespace(args=args), {"rollout": ROLLOUT})
+
+    checked()
+    for sampling in ({"rollout_temperature": 0.7}, {"rollout_top_p": 0.9}, {"rollout_top_k": 20}):
+        with pytest.raises(ValueError, match="--rollout-temperature 1, --rollout-top-p 1 and --rollout-top-k -1"):
+            checked(**sampling)
+
+
 class FakeManager:
     """The rollout manager's Ray handle: each remote call records its name."""
 
@@ -214,8 +274,14 @@ def test_closing_the_rollout_group_detaches_the_driver_and_keeps_the_session() -
 class Chat(EngineChat):
     """An engine chat whose template renders three prompt tokens and whose router answers ``answer``."""
 
-    def __init__(self, answer: tuple[int, Any]) -> None:
-        super().__init__("http://router:3000", model_path="/models/m", timeout_s=10.0, runtime_load_id="slime:base")
+    def __init__(self, answer: tuple[int, Any], topk_logprobs: int = 0) -> None:
+        super().__init__(
+            "http://router:3000",
+            model_path="/models/m",
+            timeout_s=10.0,
+            runtime_load_id="slime:base",
+            topk_logprobs=topk_logprobs,
+        )
         self.reply = answer
         self.bodies: list[Any] = []
 
@@ -258,6 +324,35 @@ def test_the_engine_chat_answers_with_the_capture_of_the_engines_tokens():
         [-0.1, -0.2],
     )
     assert (training["prompt_length"], training["runtime_load_id"]) == (3, "slime:base")
+
+
+HEADS = [[[-0.1, 7, None], [-2.5, 9, None]], [[-0.2, 8, None], [-1.9, 7, None]]]
+
+
+@pytest.mark.unit
+def test_the_engine_chat_records_the_engines_heads_at_temperature_one_only():
+    answer = {"text": "done", "meta_info": {**GENERATED["meta_info"], "output_top_logprobs": HEADS}}
+    chat = Chat((200, answer), topk_logprobs=2)
+    status, body = chat.answer("/v1/chat/completions", {**CHAT, "temperature": 1})
+    assert status == 200
+    assert chat.bodies[0]["top_logprobs_num"] == 2
+    assert (body["training"]["topk_indices"], body["training"]["topk_log_probs"]) == (
+        [[7, 9], [8, 7]],
+        [[-0.1, -2.5], [-0.2, -1.9]],
+    )
+    # A head must be of the distribution the trainer reads: the untruncated one at temperature 1.
+    for sampling in ({"temperature": 0.7}, {"top_p": 0.9}, {"top_k": 20}):
+        status, body = chat.answer("/v1/chat/completions", {**CHAT, "temperature": 1, **sampling})
+        assert status == 400 and "untruncated distribution at temperature 1" in body["error"]["message"]
+    for heads in (None, HEADS[:1], [HEADS[0], HEADS[1][:1]], [HEADS[0], [[float("inf"), 8, None], HEADS[1][1]]]):
+        meta = {**GENERATED["meta_info"], "output_top_logprobs": heads}
+        status, _ = Chat((200, {"text": "done", "meta_info": meta}), topk_logprobs=2).answer(
+            "/v1/chat/completions", {**CHAT, "temperature": 1}
+        )
+        assert status == 502
+    # Without score centering the engines record no head, at any temperature.
+    status, body = Chat((200, GENERATED)).answer("/v1/chat/completions", CHAT)
+    assert status == 200 and "topk_indices" not in body["training"]
 
 
 @pytest.mark.unit
