@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 import yaml
 from tests.support._training_deployment import LocalDeployment
+from tests.support.runtime_stubs import STUB_ROOT
 
 from reef.runtime.deployment import RuntimeConfigError
 from reef.service.assembly import _training_recipe, connect_training_component
@@ -128,7 +129,7 @@ def test_recipe_build_submits_jobs_to_the_backend_component_and_preserves_cleanu
     recipe = _training_recipe(SAORecipe, service_config_from_mapping(config), {})
     records = SQLiteRecordStore()
     try:
-        trainer = recipe.build("scenario", records)
+        trainer = recipe.build("scenario", records, root=STUB_ROOT)
         assert trainer.job_loop.component is recipe.training_component
         assert type(recipe.training_component).__name__ == "LocalRuntime"
         # The deployment's pipeline section sets the job size.

@@ -16,11 +16,9 @@ from reef.storage.sqlite import SQLiteScenarioStorage
 
 
 def _dispatcher(tmp_path, *, allow_implicit_creation: bool = True) -> Dispatcher:
-    bootstrap = tmp_path / "bootstrap"
-    bootstrap.mkdir(exist_ok=True)
     return Dispatcher(
         Recipe(),
-        InMemoryRepositoryBackend.factory(bootstrap, root=tmp_path / "repository"),
+        InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "local",
         allow_implicit_creation=allow_implicit_creation,
         scenario_storage=SQLiteScenarioStorage(None),
@@ -113,12 +111,10 @@ def test_delete_scenario_refuses_names_that_are_paths() -> None:
 def test_delete_scenario_archives_its_records_and_commit_log(tmp_path) -> None:
     """With a record directory, the scenario's SQLite store and commit history move under ``archived``; the
     directory keeps nothing of the name at the top level, so a restart does not find it."""
-    bootstrap = tmp_path / "bootstrap"
-    bootstrap.mkdir()
     record_dir = tmp_path / "records"
     value = Dispatcher(
         Recipe(),
-        InMemoryRepositoryBackend.factory(bootstrap, root=tmp_path / "repository"),
+        InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "local",
         scenario_storage=SQLiteScenarioStorage(record_dir),
         coordination=memory_coordination(),
@@ -166,11 +162,9 @@ def test_delete_scenario_over_http() -> None:
 
 @pytest.mark.unit
 def test_scenario_limits_answer_409_and_503_over_http(tmp_path) -> None:
-    bootstrap = tmp_path / "bootstrap"
-    bootstrap.mkdir()
     dispatcher = Dispatcher(
         Recipe(),
-        InMemoryRepositoryBackend.factory(bootstrap, root=tmp_path / "repository"),
+        InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "local",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
         scenario_admission=ScenarioLimits(max_loaded_scenarios=1, max_scenarios=2),

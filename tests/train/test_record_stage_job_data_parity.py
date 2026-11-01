@@ -23,7 +23,7 @@ from typing import Any, Self
 import pytest
 from tests.support._threshold_processor import ThresholdJobData, ThresholdSamples
 from tests.support._trajectories import policy_trajectory
-from tests.support.runtime_stubs import RecordingComponent, job_sized_stages
+from tests.support.runtime_stubs import STUB_ROOT, RecordingComponent, job_sized_stages
 from tests.support.samples_service import make_samples
 
 from recipes.beta.coral.recipe import CoralRecipe
@@ -163,6 +163,7 @@ class StreamRun:
             job_loop=counting_jobs(),
             report_type=self.report_type,
             training_mode=self.training_mode,
+            root=STUB_ROOT,
         )
 
     def reload(self, trainer: Trainer) -> Trainer:

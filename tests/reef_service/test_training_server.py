@@ -291,10 +291,7 @@ def test_build_dispatcher_builds_the_training_component_and_injects_selected_rec
     assert isinstance(dispatcher.recipe.runtime, StubInferenceRuntime)
     assert backend == {
         "config": {"repository": "/state/artifacts.git"},
-        # The base artifact is the training component's untrained checkpoint.
-        "context": RepositoryBackendContext(
-            work_dir=Path("/state/work"), cache_dir=Path("/state/cache"), base=component.base_artifact_source()
-        ),
+        "context": RepositoryBackendContext(work_dir=Path("/state/work"), cache_dir=Path("/state/cache")),
     }
 
 
@@ -513,14 +510,11 @@ def test_status_reports_the_running_job_the_finished_jobs_and_the_served_adapter
     tmp_path, monkeypatch, per_scenario_adapters
 ) -> None:
     monkeypatch.setattr("reef.dispatcher.local_workers.POLL_SECONDS", 0.01)
-    initial = tmp_path / "initial"
-    initial.mkdir()
-    (initial / "model.txt").write_text("w0")
     component = HeldJobComponent(tmp_path / "checkpoints")
     runtime = AdapterInference(per_scenario_adapters=per_scenario_adapters)
     dispatcher = Dispatcher(
         TestPolicyRecipe(**runtime_bindings(component, runtime)),
-        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
+        InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
         coordination=memory_coordination(),

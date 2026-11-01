@@ -55,16 +55,13 @@ def cell(tmp_path: Path, name: str) -> Dispatcher:
     records.
     """
     root = tmp_path / name
-    initial = root / "initial"
-    initial.mkdir(parents=True)
-    (initial / "model.txt").write_text("w0")
     runtime = ImportingComponent(root / "exported")
     task_files = LocalTaskFileStore(tmp_path / "task-files")
     data = SQLiteDataStore(tmp_path / "data", task_files)
     storage = SQLiteScenarioStorage(root / "records", task_files=task_files)
     dispatcher = Dispatcher(
         TestPolicyRecipe(**runtime_bindings(runtime, runtime.inference)),
-        UriBackend.factory(initial, root=root / "repository"),
+        UriBackend.factory(directory=root / "repository"),
         local_artifact_dir=root / "staged",
         scenario_storage=DataScenarioStorage(storage, data),
         record_storage=storage,
@@ -169,7 +166,8 @@ def upload_item(item_id: str, directory: Path) -> dict[str, Any]:
 
 @pytest.mark.integration
 def test_a_new_scenario_starts_from_an_artifact_item_of_its_owner(tmp_path: Path) -> None:
-    """RFC #1062: the item is imported, and the import is the scenario's active artifact and its training start.
+    """RFC #1062, RFC #1070: the item is the scenario's root release, so it is the active artifact and the training
+    start, and the creation row names the item as its source.
 
     A process trains one scenario, so each new scenario has a Cell of its own; the Cells share the data store.
     """
@@ -210,7 +208,11 @@ def test_a_new_scenario_starts_from_an_artifact_item_of_its_owner(tmp_path: Path
                     imported["component"]: {"active": started, "training_start": started}
                 }
                 listed = (await (await client.get(f"/reef/scenarios/{name}/artifacts")).json())["artifacts"]
-                assert [row["source"]["item"] for row in listed if row["artifact_id"] == started] == [item]
+                (root,) = [row for row in listed if row["artifact_id"] == started]
+                assert root["operation"] == "creation" and root["parent_release_id"] is None
+                assert (root["source"]["kind"], root["source"]["item"]) == ("item", item)
+                # The root is the only release: no default start was written first.
+                assert len(scenario.releases()) == 1
 
                 # An existing scenario keeps its start: creation is idempotent, and artifact_id is not read.
                 again = await client.post(
@@ -228,7 +230,7 @@ def test_a_new_scenario_starts_from_an_artifact_item_of_its_owner(tmp_path: Path
 
 @pytest.mark.integration
 def test_a_refused_start_leaves_no_scenario(tmp_path: Path) -> None:
-    """A start that the import refuses answers as the import route does, and deletes the scenario it made."""
+    """A start that the import refuses answers as the import route does, and registers no scenario."""
     dispatcher = cell(tmp_path, "cell-a")
 
     async def run() -> None:

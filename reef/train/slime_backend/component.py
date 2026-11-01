@@ -51,7 +51,7 @@ from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from reef.artifact.repository import BaseArtifactSource, ModelDirectory
+from reef.artifact.repository import DefaultStart, ModelDirectory
 from reef.core.chat_rendering import ChatTemplate, TokenizerChatTemplate, needs_rendering, rendered_job_data
 from reef.core.evaluation import RolloutScores
 from reef.core.job_data import JobData, TaskSample, trajectories
@@ -63,7 +63,7 @@ from reef.runtime.interfaces import (
     learning_rate_metrics,
     resolve_learning_rate_schedule_state,
 )
-from reef.runtime.jobs import ReleaseFormat, SavedCheckpoint, TrainingJob
+from reef.runtime.jobs import ReleaseFormat, SavedCheckpoint, ScenarioRoot, TrainingJob
 from reef.train.algos.registry import job_training, resolve_objective
 from reef.train.local_jobs import LocalJobComponent
 from reef.train.slime_backend.algorithm import SlimeAlgorithm
@@ -274,7 +274,7 @@ class SlimeJobs(LocalJobComponent):
         root = self.root_of(args)
         self.root = root
         self.starts_root = root / "reef-starts"
-        # The start of the startup weights, the untrained checkpoint that the base artifact holds.
+        # The start of the startup weights, the untrained checkpoint that the default start holds.
         self.base_start_dir = self.starts_root / "base"
         if not (self.base_start_dir / START_STATE).exists():
             SlimeStart(None, None, {}, None).write(self.base_start_dir)
@@ -305,40 +305,66 @@ class SlimeJobs(LocalJobComponent):
             "adapter", int(self.args.megatron_lora_rank), tuple(sglang_lora_target_modules(self.args))
         )
 
-    def base_artifact_source(self) -> BaseArtifactSource:
-        """The startup weights as a release: the model directory, or with LoRA an adapter whose weights are zero.
-
-        Full-weight releases are Hugging Face checkpoints, so the base artifact
-        is ``hf_checkpoint`` itself. LoRA releases hold the adapter in
-        ``adapter/``, so the base artifact holds the untrained adapter there:
-        every LoRA weight is zero, so it serves the startup weights unchanged.
-        """
+    @property
+    def default_start_inputs(self) -> dict[str, str]:
+        """The configuration that decides the startup weights: the model, and with LoRA the adapter's settings."""
         model = Path(self.args.hf_checkpoint).expanduser().resolve()
         if not self.lora:
-            return BaseArtifactSource(model_files=ModelDirectory(model), inputs={"model": str(model)})
+            return {"model": str(model)}
         from reef.train.slime_backend.reef_adapters.megatron.lora import sglang_lora_target_modules
+
+        return {
+            "model": str(model),
+            "lora_rank": str(self.args.megatron_lora_rank),
+            "lora_alpha": str(self.args.megatron_lora_alpha),
+            "lora_target_modules": ",".join(sorted(sglang_lora_target_modules(self.args))),
+        }
+
+    def default_start(self) -> DefaultStart:
+        """The startup weights as a release: the model directory, or with LoRA an adapter whose weights are zero.
+
+        Full-weight releases are Hugging Face checkpoints, so the default start
+        is ``hf_checkpoint`` itself. LoRA releases hold the adapter in
+        ``adapter/``, so the default start holds the untrained adapter there:
+        every LoRA weight is zero, so it serves the startup weights unchanged.
+        """
+        inputs = self.default_start_inputs
+        if not self.lora:
+            return DefaultStart(model_files=ModelDirectory(Path(inputs["model"])), inputs=inputs)
         from reef.train.slime_backend.reef_adapters.megatron.lora_checkpoint import save_untrained_lora_adapter
 
         release = self.base_start_dir / "release"
         if not (release / ADAPTER_DIR).is_dir():
             save_untrained_lora_adapter(self.args, release / ADAPTER_DIR)
-        return BaseArtifactSource(
-            model_files=ModelDirectory(release),
-            inputs={
-                "model": str(model),
-                "lora_rank": str(self.args.megatron_lora_rank),
-                "lora_alpha": str(self.args.megatron_lora_alpha),
-                "lora_target_modules": ",".join(sorted(sglang_lora_target_modules(self.args))),
-            },
-        )
+        return DefaultStart(model_files=ModelDirectory(release), inputs=inputs)
 
     @property
     def base_start(self) -> str:
+        """The start of the startup weights, which the workers load when they first start."""
         return str(self.base_start_dir)
 
     @property
     def starts_from_releases(self) -> bool:
         return False
+
+    def root_start(self, root: ScenarioRoot) -> str:
+        """The startup weights, when ``root`` holds the default start of this configuration; else ``ValueError``.
+
+        Slime's workers load ``hf_checkpoint`` when they start and cannot load a release, so they train a scenario
+        only when its root came from the same configured inputs.
+        """
+        configured = self.default_start_inputs
+        if root.source.kind != "default" or dict(root.source.inputs) != configured:
+            started = (
+                f"the item {root.source.item!r}"
+                if root.source.kind == "item"
+                else f"the inputs {dict(root.source.inputs)!r}"
+            )
+            raise ValueError(
+                f"Slime trains the weights that it starts with, from the inputs {configured!r}, but the scenario's root "
+                f"release came from {started}; create the scenario again with this configuration"
+            )
+        return self.base_start
 
     def import_start(self, release: Path) -> str:
         raise ValueError(

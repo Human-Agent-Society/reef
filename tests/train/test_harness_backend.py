@@ -1,7 +1,7 @@
 """The harness backend's step: from the head tree and the method's workspace to a published, rejected or skipped step.
 
 Each step runs through the phases the trainer runs (``backend_step``) on an
-in-memory commit history whose base release is the pi seed; the test
+in-memory commit history whose root release is the pi seed; the test
 records a published tree as the next release, as the scenario committer
 does. Tasks run the fake pi binary, whose score prefers rules that hold
 the marker.

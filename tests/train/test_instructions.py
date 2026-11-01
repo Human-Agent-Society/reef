@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from tests.support.runtime_stubs import RecordingComponent
+from tests.support.runtime_stubs import STUB_ROOT, RecordingComponent
 from tests.support.samples_service import make_samples
 
 from reef.core.training_request import normalize_training_request_payload
@@ -63,6 +63,7 @@ def test_a_trainer_gets_the_queued_instructions_and_a_commit_settles_the_one_it_
         pipeline_factory=lambda context: TrainingPipeline(context, sample2job=InstructionJobData(context, None, 1)),
         job_loop=JobLoop(component, scenario="s"),
         training_mode="manual",
+        root=STUB_ROOT,
     )
     instructions = InstructionQueue(memory_coordination().work_queue).of("s")
     try:

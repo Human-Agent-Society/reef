@@ -43,8 +43,8 @@ class ScenarioReleaseFiles(CommittedReleases):
         return self.files(ref, component)
 
     def release(self, release_id: str, component: str) -> ReleaseFiles:
-        if release_id == self.repository.base_artifact.release_id:
-            return self.files(self.repository.base_artifact, component)
+        if release_id == self.repository.start_artifact.release_id:
+            return self.files(self.repository.start_artifact, component)
         current = self.repository.require_current_artifact()
         if release_id == current.release_id:
             return self.files(current, component)

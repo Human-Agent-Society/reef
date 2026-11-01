@@ -14,9 +14,9 @@ from threading import Event
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from tests.support._threshold_processor import threshold_pipeline
-from tests.support.harness_service import catalog, drive_trainer_job, harness_dispatcher, job_backend
+from tests.support.harness_service import catalog, drive_trainer_job, harness_dispatcher, job_backend, seed_root
 from tests.support.harness_steps import COMPONENT, UNCHANGED, TreeReleases, changed_rules, harness_recipe
-from tests.support.runtime_stubs import RecordingComponent, StubInferenceRuntime, StubTrainingComponent
+from tests.support.runtime_stubs import STUB_ROOT, RecordingComponent, StubInferenceRuntime, StubTrainingComponent
 from tests.support.samples_service import make_samples as produce_samples
 from tests.train.test_harness_evolve_processor import harness_stages, records_pipeline, reports_pipeline
 from tests.train.test_reef_trainer_contracts import ExampleJobData
@@ -160,6 +160,7 @@ def build(records, instructions):
             pipeline_factory=partial(processor, job_samples=job_samples),
             job_loop=JobLoop(component, scenario="s"),
             training_mode=mode,
+            root=STUB_ROOT,
         )
         trainers.append(trainer)
         return trainer
@@ -205,7 +206,9 @@ def recipe_in(mode, tmp_path, method, **fields) -> HarnessEvolutionRecipe:
 
 def _trainer(recipe: HarnessEvolutionRecipe, records) -> Trainer:
     """The recipe's trainer over an in-memory commit history whose base is the recipe's seed."""
-    return recipe.build("s", records, releases=ComponentReleases(TreeReleases(recipe.seed), COMPONENT))
+    return recipe.build(
+        "s", records, releases=ComponentReleases(TreeReleases(recipe.seed), COMPONENT), root=seed_root(recipe)
+    )
 
 
 @pytest.mark.parametrize("processor", [reports_pipeline, records_pipeline])
@@ -921,9 +924,7 @@ def test_a_logless_scenario_ends_a_failed_instructions_job_and_runs_the_next_ins
         entered.set()
         release.wait(10)
 
-    initial = tmp_path / "initial"
-    initial.mkdir(parents=True, exist_ok=True)
-    factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
+    factory = InMemoryRepositoryBackend.factory(directory=tmp_path / "repository")
     dispatcher = Dispatcher(
         recipe_in("manual", tmp_path, method),
         factory,
@@ -999,6 +1000,7 @@ class _InstructionJobRecipe(WeightTrainingRecipe):
         task_storage=None,
         releases=None,
         samples=None,
+        root=None,
     ):
         component = self.training_component
         return Trainer.build(
@@ -1010,6 +1012,7 @@ class _InstructionJobRecipe(WeightTrainingRecipe):
             experiment_logger=experiment_logger,
             samples=samples,
             training_mode=self.training_mode,
+            root=root,
         )
 
 
@@ -1121,6 +1124,7 @@ def test_a_job_trainer_skips_a_failed_instruction_instead_of_submitting_it_again
         pipeline_factory=partial(threshold_pipeline, job_samples=1),
         job_loop=JobLoop(component, scenario="s"),
         training_mode="manual",
+        root=STUB_ROOT,
     )
     failure(records, "a")
     make_samples(trainer)

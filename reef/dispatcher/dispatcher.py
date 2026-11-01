@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import shutil
-import tempfile
 import time
 import uuid
 from collections.abc import Iterable, Iterator, Mapping, Sequence
@@ -40,6 +39,7 @@ from reef.runtime.deployment import close_runtimes
 from reef.runtime.interfaces import InferenceRuntime
 from reef.scenario.admission import ScenarioAdmission
 from reef.scenario.committer import ComponentArtifact
+from reef.scenario.factory import ItemStart
 from reef.scenario.registry import ScenarioLifecycle, ScenarioRegistry
 from reef.scenario.releases import ServedBesideArtifact
 from reef.scenario.scenario import Scenario
@@ -279,29 +279,21 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
     def has_scenario(self, scenario: str) -> bool:
         return self.registry.has(scenario)
 
-    def get_or_create_scenario(
-        self,
-        scenario: str,
-        *,
-        release_id: str | None = None,
-        allow_implicit_creation: bool | None = None,
-    ) -> Scenario | None:
-        return self.registry.get_or_create(
-            scenario,
-            release_id,
-            allow_implicit_creation=allow_implicit_creation,
-        )
+    def get_or_create_scenario(self, scenario: str, *, allow_implicit_creation: bool | None = None) -> Scenario | None:
+        return self.registry.get_or_create(scenario, allow_implicit_creation=allow_implicit_creation)
 
-    def create_scenario(self, scenario: str) -> tuple[Scenario, bool]:
-        """The scenario ``scenario``, created from the deployment's base when it does not exist, and True exactly
-        when this call created it.
+    def create_scenario(self, scenario: str, start: ItemStart | None = None) -> tuple[Scenario, bool]:
+        """The scenario ``scenario``, and True exactly when this call created it.
 
-        The check and the creation hold the scenario's lock, so of several calls for one new name only one gets
-        True. Raise as ``get_or_create_scenario`` does when the creation is refused.
+        A new scenario's root release holds the artifact item ``start``, or the recipe's default start when
+        ``start`` is ``None`` (``ScenarioFactory.load_or_create``); an existing scenario ignores ``start``. The check
+        and the creation hold the scenario's lock, so of several calls for one new name only one gets True. Raise as
+        ``get_or_create_scenario`` does when the creation is refused, and ``ValueError`` when the item's layout or
+        admission check refuses it; no scenario is registered then.
         """
         with self.registry.lock_for(scenario):
             created = not self.registry.has(scenario)
-            current = self.registry.get_or_create(scenario, allow_implicit_creation=True)
+            current = self.registry.get_or_create(scenario, start, allow_implicit_creation=True)
         if current is None:
             raise RuntimeError("scenario creation returned no scenario")
         return current, created
@@ -612,27 +604,17 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
             self.scenario_committed(current)
             return published
 
-    def current_artifact(
-        self,
-        scenario: str,
-        *,
-        release_id: str | None = None,
-    ) -> Artifact:
-        current = self.get_or_create_scenario(scenario, release_id=release_id)
+    def current_artifact(self, scenario: str) -> Artifact:
+        current = self.get_or_create_scenario(scenario)
         if current is None:
             raise UnknownScenario(f"unknown scenario {scenario!r}")
         return Artifact(current.repository.require_current_artifact(), current.repository)
 
     # -- Record acceptance -----------------------------------------------
 
-    def accept_record(
-        self,
-        item: AgentRecord,
-        *,
-        release_id: str | None = None,
-    ) -> AgentRecord:
+    def accept_record(self, item: AgentRecord) -> AgentRecord:
         with self.registry.lock_for(item.scenario):
-            current = self.get_or_create_scenario(item.scenario, release_id=release_id)
+            current = self.get_or_create_scenario(item.scenario)
             if current is None:
                 raise UnknownScenario(f"unknown scenario {item.scenario!r}")
             stored, inserted = ingest.append_record(current, item)
@@ -646,7 +628,6 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         payload: Mapping[str, Any],
         *,
         request_id: str | None = None,
-        release_id: str | None = None,
     ) -> WorkItem:
         """Queue a training instruction of ``scenario`` (``ingest.file_instruction``) and wake its workers.
 
@@ -654,16 +635,14 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         ID. Return the instruction's queue item.
         """
         with self.registry.lock_for(scenario):
-            current = self.get_or_create_scenario(scenario, release_id=release_id, allow_implicit_creation=False)
+            current = self.get_or_create_scenario(scenario, allow_implicit_creation=False)
             if current is None:
                 raise UnknownScenario(f"unknown scenario {scenario!r}")
             item = ingest.file_instruction(current, request_id or uuid.uuid4().hex, payload)
             self.local_workers.wake(current)
             return item
 
-    def accept_records(
-        self, items: Sequence[AgentRecord], *, release_id: str | None = None
-    ) -> tuple[AgentRecord, ...]:
+    def accept_records(self, items: Sequence[AgentRecord]) -> tuple[AgentRecord, ...]:
         """Validate an ordered import batch, commit it, then wake its consumer."""
         if not items:
             raise ValueError("a record batch must not be empty")
@@ -671,7 +650,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         if any(item.scenario != scenario for item in items):
             raise ValueError("a record batch must contain records from one scenario")
         with self.registry.lock_for(scenario):
-            current = self.get_or_create_scenario(scenario, release_id=release_id)
+            current = self.get_or_create_scenario(scenario)
             if current is None:
                 raise UnknownScenario(f"unknown scenario {scenario!r}")
             stored, inserted = ingest.append_records(current, items)
@@ -1020,10 +999,7 @@ def build_default_dispatcher(
     ``scenario_storage``, and the coordination store through ``coordination``; this helper selects neither.
     """
     if backend_factory is None:
-        root = Path(tempfile.mkdtemp(prefix="reef-artifacts-"))
-        initial = root / "initial"
-        initial.mkdir()
-        backend_factory = InMemoryRepositoryBackend.factory(initial, root=root / "repository")
+        backend_factory = InMemoryRepositoryBackend.factory()
     return Dispatcher(
         Recipe(),
         backend_factory,

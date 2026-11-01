@@ -29,12 +29,10 @@ class SharedRuntime(StubInferenceRuntime):
 def _dispatcher(
     tmp_path, runtime: StubInferenceRuntime, *, shares_scenarios: bool = False
 ) -> tuple[Dispatcher, StubTrainingComponent]:
-    initial = tmp_path / "initial"
-    initial.mkdir()
     component = StubTrainingComponent(tmp_path / "checkpoints", shares_scenarios=shares_scenarios)
     dispatcher = Dispatcher(
         TestPolicyRecipe(component, runtime=runtime),
-        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
+        InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
         coordination=memory_coordination(),

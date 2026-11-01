@@ -14,7 +14,7 @@ from typing import Any
 
 import pytest
 from tests.support.chat_templates import CharTemplate
-from tests.support.runtime_stubs import runtime_bindings
+from tests.support.runtime_stubs import STUB_ROOT, runtime_bindings
 
 from recipes.sdpo import SDPOJobData, SDPORecipe, SDPOReport, SDPOSamples
 from recipes.sdpo.processor import SDPODemonstrationSettings, SDPOSettings
@@ -120,6 +120,7 @@ def test_the_trainer_refuses_job_samples_above_one_grid() -> None:
             "science",
             SQLiteRecordStore(),
             pipeline_factory=lambda context: processor(groups_per_step=2, job_samples=job_samples),
+            root=STUB_ROOT,
         )
 
     build(4).close()

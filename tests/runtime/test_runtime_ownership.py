@@ -55,7 +55,7 @@ def dispatcher_for(recipe: Recipe, tmp_path) -> Dispatcher:
     initial.mkdir()
     return Dispatcher(
         recipe,
-        InMemoryRepositoryBackend.factory(initial),
+        InMemoryRepositoryBackend.factory(),
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
         coordination=memory_coordination(),
     )

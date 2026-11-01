@@ -26,7 +26,7 @@ from tests.support.trajectory_uploads import (
 from reef.artifact.artifact import ArtifactRef
 from reef.artifact.files import DirectoryFiles
 from reef.artifact.memory import InMemoryRepositoryBackend
-from reef.artifact.repository import FileDownload
+from reef.artifact.repository import DefaultStart, FileDownload
 from reef.core.job_data import JobData
 from reef.core.tasks import write_harbor_task
 from reef.dispatcher import Dispatcher
@@ -148,10 +148,8 @@ def test_an_item_archive_downloads_with_the_token_or_with_a_signed_url_alone(tmp
 
 
 def test_an_artifacts_files_list_and_download_and_the_jobs_of_a_scenario_read_from_the_queue(tmp_path: Path) -> None:
-    # The base artifact that each scenario starts from holds one file.
-    (tmp_path / "initial").mkdir()
-    (tmp_path / "initial" / "model.txt").write_text("w0")
-    dispatcher = dispatcher_for(tmp_path, UploadRecipe())
+    # The root release that each scenario starts with holds one file.
+    dispatcher = dispatcher_for(tmp_path, UploadRecipe(start=DefaultStart(files={"model.txt": "w0"})))
     dispatcher.queue.add(queued_job("job-1", "s"))
 
     async def check(client: TestClient) -> None:
@@ -207,10 +205,8 @@ class SigningBackend(InMemoryRepositoryBackend):
 def test_an_artifacts_file_list_gives_the_repositorys_urls_without_materializing_the_artifact(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    (tmp_path / "initial").mkdir()
-    (tmp_path / "initial" / "model.txt").write_text("w0")
-    factory = SigningBackend.factory(tmp_path / "initial", root=tmp_path / "repository")
-    dispatcher = dispatcher_for(tmp_path, UploadRecipe(), factory)
+    factory = SigningBackend.factory(directory=tmp_path / "repository")
+    dispatcher = dispatcher_for(tmp_path, UploadRecipe(start=DefaultStart(files={"model.txt": "w0"})), factory)
 
     def materialized(*args: object) -> None:
         raise AssertionError("the file list materialized the artifact")

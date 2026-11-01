@@ -387,7 +387,7 @@ class AdapterServingRuntime(SavedWeightServingRuntime):
 
         A release whose content the engines already serve for the scenario
         loads nothing. Any other release loads its adapter under a new
-        version; the base artifact holds an untrained adapter, which loads in
+        version; a root release made from the default start holds an untrained adapter, which loads in
         the same way. Raise ``ReefError`` without ``scenario``.
         A failed load can leave the scenario serving no adapter, when the new
         adapter took the slot of its own previous one; the residency manager
@@ -467,7 +467,7 @@ class FullWeightServingRuntime(SavedWeightServingRuntime):
     requests that follow. The runtime serves one scenario, so it ignores
     ``scenario``; the registry refuses a second training scenario on it
     (``shared_by_training_scenarios`` is False). The engines start with the
-    base model. Every release loads its files, the base artifact's included,
+    base model. Every release loads its files, a root release's included,
     unless the engines serve its content already.
     """
 

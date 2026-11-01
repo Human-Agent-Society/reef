@@ -19,100 +19,59 @@ from reef.artifact.repository import CachedRepositoryBackendFactory, StagedRelea
 
 
 class _InMemoryStorage:
-    def __init__(self, bootstrap_path: Path, root: Path | None) -> None:
-        source = Path(bootstrap_path)
-        if not source.is_dir():
-            raise ArtifactNotFound(f"bootstrap artifact directory does not exist: {source}")
-        self.root = Path(root) if root is not None else Path(tempfile.mkdtemp(prefix="reef-artifacts-"))
+    def __init__(self, directory: Path | None) -> None:
+        self.root = Path(directory) if directory is not None else Path(tempfile.mkdtemp(prefix="reef-artifacts-"))
         self.root.mkdir(parents=True, exist_ok=True)
         self.lock = Lock()
         self.refs: dict[str, ArtifactRef] = {}
         self.paths: dict[str, Path] = {}
         self.metadata: dict[str, dict[str, object]] = {}
-        self.head = self.copy_artifact(
-            source,
-            parent_release_id=None,
-            content_id=f"content:{uuid.uuid4().hex}",
-        )
-        self.base = self.head
 
-    def copy_artifact(
-        self,
-        source: Path,
-        *,
-        parent_release_id: str | None,
-        content_id: str | None = None,
-    ) -> ArtifactRef:
+    def copy_artifact(self, source: Path, *, parent_release_id: str | None, content_id: str) -> ArtifactRef:
         release_id = uuid.uuid4().hex
         destination = self.root / release_id
         try:
             shutil.copytree(source, destination)
         except OSError as exc:
             raise ArtifactPublicationError(f"failed to copy artifact into repository from {source}: {exc}") from exc
-        ref = ArtifactRef(
-            content_id=content_id or f"content:{release_id}",
-            release_id=release_id,
-            parent_release_id=parent_release_id,
-        )
+        ref = ArtifactRef(content_id=content_id, release_id=release_id, parent_release_id=parent_release_id)
         self.refs[release_id] = ref
         self.paths[release_id] = destination
         return ref
 
 
 class InMemoryRepositoryBackend(StagedReleaseRepositoryBackend):
-    """One scenario's releases in process memory, over a base artifact copied from ``bootstrap_path``."""
+    """One scenario's releases in process memory, with their files under ``directory`` (a new temporary
+    directory when ``None``)."""
 
-    def __init__(
-        self,
-        scenario: str,
-        bootstrap_path: Path,
-        *,
-        root: Path | None = None,
-    ) -> None:
+    def __init__(self, scenario: str, *, directory: Path | None = None) -> None:
         if not scenario:
             raise ValueError("scenario must be non-empty")
-        self._storage = _InMemoryStorage(bootstrap_path, root)
+        self._storage = _InMemoryStorage(directory)
         self.root = self._storage.root
         self._current: ArtifactRef | None = None
         self._metadata: dict[str, object] | None = None
 
     @classmethod
-    def factory(
-        cls,
-        bootstrap_path: Path,
-        *,
-        root: Path | None = None,
-    ) -> CachedRepositoryBackendFactory:
-        return _InMemoryRepositoryBackendFactory(cls, bootstrap_path, root)
+    def factory(cls, *, directory: Path | None = None) -> CachedRepositoryBackendFactory:
+        return _InMemoryRepositoryBackendFactory(cls, directory)
 
-    def resolve_release(self, release_id: str | None = None) -> ArtifactRef:
-        if release_id == "base":
-            return self._storage.base
-        if release_id is None or release_id == "head":
-            return self._storage.head
+    def resolve_release(self, release_id: str) -> ArtifactRef:
         ref = self._storage.refs.get(release_id)
         if ref is not None:
             return ref
         raise ArtifactNotFound(f"release does not exist: {release_id}")
 
-    def fork(
-        self,
-        release_id: str | None = None,
-        *,
-        metadata: Mapping[str, object] | None = None,
-    ) -> ArtifactRef:
+    def register(self, root: Artifact, *, metadata: Mapping[str, object]) -> ArtifactRef:
+        if root.local_path is None or not root.local_path.is_dir():
+            raise ArtifactPublicationError("a root release needs an existing local artifact directory")
         with self._storage.lock:
             if self._current is not None:
                 return self._current
-            selected = self.resolve_release(release_id)
-            ref = self._storage.copy_artifact(
-                self._storage.paths[selected.release_id],
-                parent_release_id=selected.release_id,
-                content_id=selected.content_id,
-            )
+            ref = self._storage.copy_artifact(root.local_path, parent_release_id=None, content_id=root.ref.content_id)
             self._current = ref
-            self._metadata = dict(metadata or {})
-            self._storage.metadata[ref.release_id] = dict(self._metadata)
+            self._metadata = dict(metadata)
+            self._storage.metadata[ref.release_id] = dict(metadata)
             return ref
 
     def metadata(self) -> Mapping[str, object] | None:
@@ -156,7 +115,6 @@ class InMemoryRepositoryBackend(StagedReleaseRepositoryBackend):
             if advance_head:
                 self._current = ref
                 self._metadata = dict(artifact.metadata)
-                self._storage.head = ref
             return ref
 
     def commit_release(self, ref: ArtifactRef, *, expected_parent: ArtifactRef) -> None:
@@ -170,20 +128,13 @@ class InMemoryRepositoryBackend(StagedReleaseRepositoryBackend):
                 raise ArtifactConflict("repository head changed before the staged release was committed")
             self._current = ref
             self._metadata = dict(self._storage.metadata[ref.release_id])
-            self._storage.head = ref
 
 
 class _InMemoryRepositoryBackendFactory(CachedRepositoryBackendFactory):
-    def __init__(
-        self,
-        backend_type: type[InMemoryRepositoryBackend],
-        bootstrap_path: Path,
-        root: Path | None,
-    ) -> None:
+    def __init__(self, backend_type: type[InMemoryRepositoryBackend], directory: Path | None) -> None:
         super().__init__()
         self._backend_type = backend_type
-        self._bootstrap_path = Path(bootstrap_path)
-        self._root = None if root is None else Path(root)
+        self._directory = None if directory is None else Path(directory)
 
     def _build_backend(self, scenario: str) -> InMemoryRepositoryBackend:
-        return self._backend_type(scenario, self._bootstrap_path, root=self._root)
+        return self._backend_type(scenario, directory=self._directory)

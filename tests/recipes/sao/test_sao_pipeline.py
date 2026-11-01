@@ -18,7 +18,13 @@ import yaml
 from tests.support._trajectories import policy_trajectory
 from tests.support.chat_templates import CharTemplate
 from tests.support.conversations import conversation
-from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, job_sized_stages, runtime_bindings
+from tests.support.runtime_stubs import (
+    STUB_ROOT,
+    StubInferenceRuntime,
+    StubTrainingComponent,
+    job_sized_stages,
+    runtime_bindings,
+)
 from tests.support.samples_service import make_samples
 
 from recipes.sao import SAORecipe
@@ -387,9 +393,7 @@ class _SAOComponent(StubTrainingComponent):
 
 
 def _repository(tmp_path: Path) -> CachedRepositoryBackendFactory:
-    initial = tmp_path / "initial"
-    initial.mkdir(exist_ok=True)
-    return InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
+    return InMemoryRepositoryBackend.factory(directory=tmp_path / "repository")
 
 
 def _sao_dispatcher(
@@ -481,7 +485,7 @@ def test_an_activation_rule_that_activates_nothing_keeps_the_checkpoint_from_ser
 
         _wait_for_finished_jobs(dispatcher, 1)
 
-        # The checkpoint is published as the chain tip, but never serves: only the base release was activated.
+        # The checkpoint is published as the chain tip, but never serves: only the root release was activated.
         assert inference.activated == base
         [job] = component.submitted
         [record] = _checkpoint_commits(dispatcher)
@@ -595,6 +599,7 @@ def test_sao_train_step_recovers_across_a_restart(tmp_path) -> None:
             pipeline_factory=lambda context: sao_processor(context, job_samples=1),
             job_loop=JobLoop(component, scenario="math"),
             job_parameters=SAORecipe(**runtime_bindings(component)).parameters_by_kind(),
+            root=STUB_ROOT,
             algorithm_state=algorithm_state,
             samples=TrainerSamples(session.samples),
         )
