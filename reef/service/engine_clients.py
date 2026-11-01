@@ -2,9 +2,8 @@
 
 ``DeploymentEngineClients`` holds the deployment's serving runtime, built from the same configuration as control's
 and never opened, so it changes no engine. A row at a URL that the runtime serves uses the runtime's own handler for
-that URL (``InferenceRuntime.handler_for``), with its dialect and its credentials. A row at another URL is a
-scenario's own model (its model config): it uses a provider proxy with the deployment's provider key, as control's
-runtime of that scenario does.
+that URL (``InferenceRuntime.handler_for``), with its dialect and its credentials. A row at another URL uses a
+provider proxy with the deployment's provider key.
 """
 
 from __future__ import annotations
@@ -17,9 +16,9 @@ from reef.runtime.interfaces import EngineClients, InferenceHandler, InferenceRu
 class DeploymentEngineClients(EngineClients):
     """The engines of a separate inference service.
 
-    Values: ``runtime`` is the deployment's serving runtime, or None for a deployment that serves only scenarios'
-    own models; ``provider_key`` is the deployment's provider key, or None; ``timeout_seconds`` bounds each call
-    of a proxy handler; ``proxies`` holds the proxy handler of each other URL, made on first use.
+    Values: ``runtime`` is the deployment's serving runtime, or None for a deployment without one;
+    ``provider_key`` is the deployment's provider key, or None; ``timeout_seconds`` bounds each call of a proxy
+    handler; ``proxies`` holds the proxy handler of each other URL, made on first use.
 
     Purpose: ``reef.service.components`` gives it to the replica of the inference service.
     """

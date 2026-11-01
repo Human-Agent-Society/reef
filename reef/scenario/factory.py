@@ -29,7 +29,6 @@ from reef.core.components import (
     release_components,
 )
 from reef.core.errors import ReefError
-from reef.inference.model_config import ModelConfig
 from reef.observability import ExperimentTracker, NullExperimentTracker
 from reef.observability.commits import CommitExperimentObserver, ExperimentReportQueue
 from reef.recipe.base import Recipe
@@ -166,8 +165,6 @@ class ScenarioFactory:
         self,
         scenario: str,
         release_id: str | None = None,
-        *,
-        model_config: ModelConfig,
     ) -> Scenario:
         """Create or recover a scenario in this deployment's repository."""
         backend = self._backend_factory(scenario)
@@ -177,8 +174,7 @@ class ScenarioFactory:
             )
         metadata = backend.metadata()
         registration = None if metadata is None else metadata.get(SCENARIO_METADATA_KEY)
-        recipe = self._recipe.with_model_config(model_config)
-        surface = recipe.serving_surface(scenario)
+        surface = self._recipe.serving_surface(scenario)
         if registration is None:
             # A scenario starts from the repository's base artifact unless the request selects another release.
             selected = backend.resolve_release("base" if release_id is None else release_id)
@@ -210,7 +206,6 @@ class ScenarioFactory:
             backend,
             registration,
             release_id=release_id,
-            model_config=model_config,
             surface=surface,
             registered_components=release_components(metadata),
         )
@@ -291,7 +286,6 @@ class ScenarioFactory:
         registration: object,
         *,
         release_id: str | None,
-        model_config: ModelConfig,
         surface: Surface,
         registered_components: ReleaseComponents | None,
     ) -> Scenario:
@@ -350,8 +344,7 @@ class ScenarioFactory:
             backend,
             release_id,
         )
-        recipe = self._recipe.with_model_config(model_config)
-        runtime = recipe.runtime
+        runtime = self._recipe.runtime
         store = self._storage.open(name)
         scenario: Scenario | None = None
         trainers: tuple[ComponentTrainer, ...] = ()
@@ -388,11 +381,11 @@ class ScenarioFactory:
 
             experiment_logger = self._experiment_tracker.bind_scenario(
                 scenario=name,
-                recipe=recipe.name,
+                recipe=self._recipe.name,
                 source_artifact_ref=repository.require_current_artifact(),
                 run_segment=store.training_run_position()[0] if store.durable else 0,
             )
-            trainers = recipe.build_trainers(
+            trainers = self._recipe.build_trainers(
                 name,
                 store.records,
                 surface=surface,
@@ -404,7 +397,7 @@ class ScenarioFactory:
             )
             if any(
                 component_trainer.trainer.trains
-                and component_trainer.trainer.pipeline.training_mode != recipe.training_mode
+                and component_trainer.trainer.pipeline.training_mode != self._recipe.training_mode
                 for component_trainer in trainers
             ):
                 # A trainer that runs no step keeps no mode; every stepping trainer runs the recipe's.
@@ -419,7 +412,7 @@ class ScenarioFactory:
                 experiment_observer = CommitExperimentObserver(
                     self._experiment_tracker,
                     scenario=name,
-                    recipe=recipe.name,
+                    recipe=self._recipe.name,
                     source_artifact_ref=repository.require_current_artifact(),
                     scenario_step=scenario_step,
                     store=store,
@@ -428,15 +421,14 @@ class ScenarioFactory:
                 store = experiment_observer.store
             scenario = Scenario(
                 name=name,
-                model_config=model_config,
                 binding=ScenarioBinding(
                     surface=surface,
                     runtime=runtime,
-                    training_component=recipe.training_component,
-                    activation_rule=recipe.activation_rule(),
+                    training_component=self._recipe.training_component,
+                    activation_rule=self._recipe.activation_rule(),
                     # The recipe's own contract, not the first trainer's: a composite agrees
                     # one across its components, whatever order they are listed in.
-                    report_type=recipe.report_type,
+                    report_type=self._recipe.report_type,
                 ),
                 repository=repository,
                 trainers=trainers,

@@ -60,7 +60,6 @@ const navigationSources: ReadonlyArray<{ title: string; files: ReadonlyArray<str
     files: [
       "user-guide/recipes.rst",
       "user-guide/evolve-your-harness.rst",
-      "user-guide/scenario-models.rst",
       "user-guide/evolve-your-model.rst",
       "user-guide/tinker.rst",
       "user-guide/recipes/sft.rst",

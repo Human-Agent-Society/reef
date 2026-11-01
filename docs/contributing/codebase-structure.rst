@@ -298,12 +298,9 @@ The extension points those packages expose are in `Python API
   and returns a complete ``Scenario``; failure closes its owned resources. ``committer.py`` owns writes and retry ordering;
   ``releases.py`` owns release and artifact queries under the same publication
   lock. ``history.py`` pages retained records and commits. ``registry.py`` owns
-  loaded instances, model configuration caching, updates, and scenario
-  archival coordination. Recipes, scenarios, and the factory use the concrete
-  ``ModelConfig`` in ``reef/inference/model_config.py``. The factory receives
-  one configuration per creation or recovery; it owns no configuration cache.
-  The registry reads and writes each scenario's settings (model configuration
-  and training mode) through the injected ``ScenarioStorage``, like records and
+  loaded instances and scenario archival coordination. The registry reads and
+  writes each scenario's settings (such as the training mode and the
+  activation rule) through the injected ``ScenarioStorage``, like records and
   commits; it imports no storage implementation.
   ``Dispatcher`` calls the storage service directly for retention and closes
   it after closing the loaded scenarios. It never imports or chooses a

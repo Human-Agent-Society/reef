@@ -202,7 +202,7 @@ def test_shared_sql_operations_use_supplied_tables_and_join_the_outer_transactio
             committed = replace(original, payload={"value": "replacement"})
             with connection.begin():
                 assert records.read_settings() == ScenarioSettings()
-                records.write_settings(ScenarioSettings(model_config={"url": "http://model", "model": "m"}))
+                records.write_settings(ScenarioSettings(activation={"module": "always"}))
                 assert records.audit_page("math") == ()
                 assert records.consumption_receipts("math") == ()
                 assert records.existing_receipt(original) is None
@@ -217,7 +217,7 @@ def test_shared_sql_operations_use_supplied_tables_and_join_the_outer_transactio
                 assert [entry.agent_record_id for entry in records.replay("math")] == ["first", "second"]
                 assert [entry.item.agent_record_id for entry in records.audit_page("math")] == ["first", "second"]
                 assert records.consumption_receipts("math")[0]["metadata"] == {"step": 2}
-                assert records.read_settings() == ScenarioSettings(model_config={"url": "http://model", "model": "m"})
+                assert records.read_settings() == ScenarioSettings(activation={"module": "always"})
             records.close()
     finally:
         engine.dispose()

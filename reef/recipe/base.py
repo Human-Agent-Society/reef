@@ -23,7 +23,6 @@ from reef.core.reports import ReportBase
 from reef.evaluation.activation import activation_reference, build_activation_rule
 from reef.harness.tasks.model_binding import ModelBinding
 from reef.inference.http import resolve_proxy_runtime
-from reef.inference.model_config import ModelConfig
 from reef.observability import ExperimentLogger
 from reef.pipeline_context import PipelineContext
 from reef.recipe.config_fields import config_field, resolve_config_field_values
@@ -168,12 +167,6 @@ class Recipe:
         if self.training_component is None:
             return self
         return replace(self, training_component=components[self.training_component.name])
-
-    def with_model_config(self, config: ModelConfig) -> Recipe:
-        """Bind model settings supplied for this scenario."""
-        if config.runtime is not None and self.training_component is not None:
-            raise RecipeConfigError("model overrides require an inference-only runtime")
-        return self
 
     @classmethod
     def from_environment(
@@ -389,10 +382,9 @@ class Recipe:
         evolves no harness."""
         return None
 
-    def harness_served_model(self, scenario: str, component: str, model: ModelConfig) -> ModelBinding | None:
-        """The model that ``component``'s harness in ``scenario`` calls, on the scenario's model selection
-        ``model``: a client's layer asks Reef for this model by name and dialect. ``None`` for a recipe that evolves
-        no harness."""
+    def harness_served_model(self, scenario: str, component: str) -> ModelBinding | None:
+        """The model that ``component``'s harness in ``scenario`` calls: a client's layer asks Reef for this model
+        by name and dialect. ``None`` for a recipe that evolves no harness."""
         return None
 
     @property

@@ -31,9 +31,8 @@ class ScenarioStoreConflict(ReefError):
 class ScenarioSettings:
     """The settings of one scenario, kept with its records and commits.
 
-    ``model_config`` is the validated model override as JSON (``None`` selects
-    the recipe's model). ``training_mode`` is the selected mode (``None``
-    selects the recipe's default). ``artifact_evaluation`` is the
+    ``training_mode`` is the selected mode (``None`` selects the recipe's
+    default). ``artifact_evaluation`` is the
     ``ArtifactEvaluationSettings`` as JSON that Reef evaluates each new
     artifact with (``None`` evaluates none). ``activation`` is the scenario's
     own activation rule as JSON: ``{"module": <built-in rule>, "config": {...}}``.
@@ -41,18 +40,19 @@ class ScenarioSettings:
     registry checks the rule before it stores it. ``owner`` is the data store
     owner whose items the scenario uses (RFC #1028), a name that passes
     ``check_owner``. It is ``None`` only for a scenario that the data sync has
-    not opened yet; the first open sets it.
+    not opened yet; the first open sets it. Construction checks these types.
+
+    Purpose: the scenario registry and the dispatcher write the settings
+    through ``ScenarioStorage.write_settings`` and read them back when a
+    scenario loads.
     """
 
-    model_config: Mapping[str, object] | None = None
     training_mode: str | None = None
     artifact_evaluation: Mapping[str, object] | None = None
     activation: Mapping[str, object] | None = None
     owner: str | None = None
 
     def __post_init__(self) -> None:
-        if self.model_config is not None and not isinstance(self.model_config, Mapping):
-            raise ValueError("scenario settings model_config must be an object or null")
         if self.training_mode is not None and not isinstance(self.training_mode, str):
             raise ValueError("scenario settings training_mode must be a string or null")
         if self.artifact_evaluation is not None and not isinstance(self.artifact_evaluation, Mapping):
