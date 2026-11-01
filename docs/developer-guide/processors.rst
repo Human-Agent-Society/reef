@@ -769,6 +769,24 @@ sessions does not count. A round whose generation ran out of attempts counts
 too, and the next round retries the same sessions and finishes the same
 generation from its saved candidates.
 
+In ``manual`` mode the stage starts no round of its own and holds no source
+session; ``jobs_per_round`` and ``refill_tasks`` do not apply. A client
+requests each round and names its source sessions
+(``POST /reef/scenarios/{scenario}/task-generations``, see the
+`HTTP API reference <../reference/http-api.rst#request-a-task-generation-round>`__).
+The stage implements ``RequestedTaskGeneration``
+(``reef.record2sample.requested_generation``): control checks the request
+with the stage and queues a ``task_generation`` item in the ``samples``
+queue. The samples service's ``TaskGenerationWorker`` reads the sessions again
+from the record store, gives the round to the stage, and holds the item until
+the round ends, as the training service holds a job. The stage runs the
+requested rounds one at a time, before a round of its own, also in ``auto``.
+A requested round counts toward ``rounds``. A requested round whose
+generation runs out of attempts is not retried; a new request of the same
+sessions continues the same generation. A switch to ``manual`` releases the
+waiting sessions and lets the running round finish. A switch to ``auto``
+makes the next round due at once.
+
 The record-to-sample stage keeps its tasks in the task store ``generated-tasks``
 of the scenario session (see `Where the stages live`_). It records each
 publication or rejection, so a retry of a generation uses the saved candidates
@@ -781,7 +799,7 @@ sample store counts the tasks that trained.
 After a restart, the record-to-sample stage continues with the next generation number.
 The sample store still holds the train tasks that did not train, so the buffer takes them again. The stage sends the results that the generator did not receive, even when no other job is due. A task that trained before its result was saved gets an infrastructure-failure result, so its generation's feedback completes.
 A replayed session that a complete generation already used makes no new generation.
-``GET /reef/status`` shows the generator, the generation in flight, the completed generations and the last error under ``task_generation``, task counts under ``task_store``, and the stored tasks that wait under ``ready_samples``.
+``GET /reef/status`` shows the generator, the generation in flight, the requested rounds that wait, the completed generations and the last error under ``task_generation``, task counts under ``task_store``, and the stored tasks that wait under ``ready_samples``.
 
 Container operations run in the generator service, ``reef.record2sample.generator``.
 The record-to-sample stage calls this service over HTTP. The task store is the

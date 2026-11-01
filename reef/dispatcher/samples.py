@@ -1,16 +1,22 @@
-"""The samples service on the scenarios of this process: it makes their trainers' samples.
+"""The samples service on the scenarios of this process: it makes their trainers' samples and runs their requested
+task-generation rounds.
 
 ``LocalSampleProducers`` makes the samples of a trainer of a scenario with this process's copy of the scenario. When
 the process runs control, it uses the loaded scenario and then wakes the trainer's worker, which builds the next job
-from the sample store. When control runs in another process, it loads the scenario on demand, and control learns of
-the samples from the samples queue.
+from the sample store. When control runs in another process, it loads the scenario on demand, selects the training
+mode that control stored, and control learns of the samples from the samples queue.
+
+``LocalTaskGenerations`` gives a requested round to the trainer of this process's copy of the scenario, loaded on
+demand, and asks for a selection of the trainer, so that the ``SamplesWorker`` starts the round and stores its tasks.
 """
 
 from __future__ import annotations
 
 from reef.dispatcher.local_workers import LocalTrainingWorkers
-from reef.record2sample.service import ProducedSamples, SampleProducers
+from reef.record2sample.requested_generation import RequestedRoundResult
+from reef.record2sample.service import ProducedSamples, SampleProducers, TaskGenerations, request_selection
 from reef.scenario.registry import ScenarioRegistry
+from reef.storage.work_queue import WorkQueue
 
 
 class LocalSampleProducers(SampleProducers):
@@ -31,6 +37,8 @@ class LocalSampleProducers(SampleProducers):
             current = self.registry.get_loaded(scenario)
         else:
             current = self.registry.get_or_create(scenario, allow_implicit_creation=False)
+            # Control changes the mode in its own copy and stores it; this copy follows at each selection.
+            self.registry.apply_stored_training_mode(scenario)
         if current is None:
             # Control asks again when the scenario loads; a scenario that does not exist has no samples.
             return ProducedSamples(changed=False, background=False)
@@ -44,4 +52,34 @@ class LocalSampleProducers(SampleProducers):
         return produced
 
 
-__all__ = ["LocalSampleProducers"]
+class LocalTaskGenerations(TaskGenerations):
+    """Gives requested task-generation rounds to the trainers of the scenarios that ``registry`` holds.
+
+    Values: ``registry`` holds the scenarios, loaded on demand; ``queue`` is the work queue, where it asks for a
+    selection of a trainer whose stage took a new round.
+
+    Purpose: the dispatcher gives it to the task-generation worker that it runs in this process.
+    """
+
+    def __init__(self, registry: ScenarioRegistry, queue: WorkQueue) -> None:
+        self.registry = registry
+        self.queue = queue
+
+    def advance_request(
+        self, scenario: str, component: str, request_id: str, report_ids: tuple[str, ...]
+    ) -> RequestedRoundResult | None:
+        current = self.registry.get_or_create(scenario, allow_implicit_creation=False)
+        if current is None:
+            raise ValueError(f"unknown scenario {scenario!r}")
+        trainers = [entry.trainer for entry in current.trainers if entry.component == component]
+        if not trainers:
+            raise ValueError(f"scenario {scenario!r} has no trainer for component {component!r}")
+        (trainer,) = trainers
+        # A stage that a reload or an unload rebuilt holds no request: it takes the round again and continues the
+        # same generation from the task store.
+        if trainer.request_task_generation(request_id, report_ids):
+            request_selection(self.queue, scenario, component)
+        return trainer.take_task_generation_result(request_id)
+
+
+__all__ = ["LocalSampleProducers", "LocalTaskGenerations"]

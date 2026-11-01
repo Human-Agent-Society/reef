@@ -53,6 +53,9 @@ Values and shared parts:
   sets whose samples the pipeline stores as one group, which trains together.
 * ``is_stale`` (``staleness.py``): whether training data is more than ``max_staleness`` artifacts behind the
   artifact that the scenario serves.
+* ``RequestedTaskGeneration`` (``requested_generation.py``): a stage that generates tasks in rounds and runs a
+  round that a client requests with the source sessions it names, the only way such a stage generates in
+  ``manual`` mode.
 * ``SampleAssembly`` (``assembly.py``): a report and its inference records into one policy sample, or one
   multi-turn sample. ``samples.py``: readers of recorded inferences and the policy sample builders.
 

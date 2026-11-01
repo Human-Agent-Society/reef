@@ -41,5 +41,9 @@ class ManualBufferRefused(ReefError):
     """A client asked to change a trainer's buffer by hand while it trains in automatic mode."""
 
 
+class TaskGenerationRefused(ReefError):
+    """A client asked for a task-generation round while the trainer trains in automatic mode."""
+
+
 class TrainingStartRefused(ReefError):
     """A trainer cannot start training from the artifact it was given; nothing changed."""

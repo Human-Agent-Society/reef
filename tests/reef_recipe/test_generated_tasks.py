@@ -45,8 +45,9 @@ from reef.recipe.generated_tasks.processor import (
     train_task_names,
 )
 from reef.recipe.generated_tasks.results import TaskRolloutResult, delivered_generations, rollout_results
-from reef.record2sample import NoSamples, Record2Sample, RecordSet, SampleResult
+from reef.record2sample import NoSamples, Record2Sample, RecordSet, ReportContext, SampleResult
 from reef.record2sample.generator.inputs import TaskGenerationRequest
+from reef.record2sample.requested_generation import RequestedRoundResult
 from reef.runtime.jobs import TrainingComponent
 from reef.sample2job import Sample2JobSettings
 from reef.storage.commit_history import CommitHistoryScenarioStore
@@ -187,9 +188,22 @@ def test_the_contract_values_refuse_what_the_recipe_cannot_run(build: Any, messa
         build()
 
 
-def test_in_manual_mode_a_client_chooses_the_generated_tasks_that_train(tmp_path: Path) -> None:
-    p, _ = rounds(tmp_path, ScriptedGenerator([generated(0, 0, 1)]), rounds=1, training_mode="manual")
+def test_in_manual_mode_only_a_requested_round_generates_and_a_client_chooses_the_tasks_that_train(
+    tmp_path: Path,
+) -> None:
+    task_generator = ScriptedGenerator([generated(0, 0, 1)])
+    p, _ = rounds(tmp_path, task_generator, rounds=1, training_mode="manual", **SOURCES)
+    sessions(p, "a", "b")
     looked(p)
+    assert task_generator.requests == [], "manual starts no round of its own"
+    assert {"rec-a", "rep-a", "rec-b", "rep-b"} <= p.releasable_record_ids(), "and holds no source session"
+    stage = stage_of(p)
+    stage.request_round("request-1", (source(p, "b"),))
+    assert stage.holds_request("request-1") and stage.take_round_result("request-1") is None
+    looked(p)
+    assert [source_ids(request) for request in task_generator.requests] == [["rec-b", "rep-b"]]
+    assert stage.take_round_result("request-1") == RequestedRoundResult(0, ("harbor-00000-000", "harbor-00000-001"))
+    assert not stage.holds_request("request-1")
     assert handed_out_names(p) == [], "manual adds no generated task to the buffer by itself"
     p.insert_into_buffer(("generated-tasks/harbor-00000-001",))
     p.queue_instructions(
@@ -902,6 +916,93 @@ def test_replayed_sessions_of_a_complete_generation_are_not_used_again_and_do_no
     for _ in range(6):
         restarted.ready(BATCH_SIZE)
     assert [source_ids(request) for request in task_generator.requests] == [["rec-b", "rep-b"]]
+
+
+def stage_of(p: TrainingPipeline) -> GeneratedTaskSamples:
+    stage = p.record2sample
+    assert isinstance(stage, GeneratedTaskSamples)
+    return stage
+
+
+def source(p: TrainingPipeline, name: str, tags: Mapping[str, str] | None = None) -> ReportContext:
+    """The source session ``name`` as a client names it: read again from its records."""
+    call, session_report = session(name, {"source": "session"} if tags is None else tags)
+    return stage_of(p).source_session(session_report, (call,))
+
+
+def test_a_requested_round_that_runs_out_of_attempts_ends_with_the_error_and_is_not_retried(tmp_path: Path) -> None:
+    task_generator = FailingGenerator()
+    p, _ = rounds(tmp_path, task_generator, generation_attempts=2, training_mode="manual")
+    stage = stage_of(p)
+    stage.request_round("request-1", ())
+    for _ in range(6):
+        p.ready(BATCH_SIZE)
+    assert stage.take_round_result("request-1") == RequestedRoundResult(0, error="the generator service is down")
+    assert len(task_generator.requests) == 2, "two attempts, then no round until a client asks again"
+    stage.request_round("request-2", ())
+    looked(p)
+    result = stage.take_round_result("request-2")
+    assert result is not None and result.generation == 0, "a new request continues the same generation"
+
+
+def test_a_request_that_the_stage_cannot_run_is_refused_and_changes_nothing(tmp_path: Path) -> None:
+    p, _ = rounds(tmp_path, ScriptedGenerator(), rounds=1, training_mode="manual", **SOURCES)
+    stage = stage_of(p)
+    with pytest.raises(ValueError, match="no source session"):
+        source(p, "untagged", tags={"source": "other"})
+    with pytest.raises(ValueError, match="at most 2 source sessions"):
+        stage.request_round("request-1", tuple(source(p, name) for name in "abc"))
+    assert not stage.holds_request("request-1")
+    stage.request_round("request-1", ())
+    looked(p)
+    assert stage.take_round_result("request-1") == RequestedRoundResult(0)
+    with pytest.raises(ValueError, match="finished its 1 rounds"):
+        stage.request_round("request-2", ())
+    with pytest.raises(ValueError, match="generates no tasks"):
+        stage_of(processor()).check_request(())
+
+
+def test_a_request_of_sessions_that_a_complete_generation_used_ends_with_that_generation(tmp_path: Path) -> None:
+    task_generator = ScriptedGenerator([generated(0, 0)])
+    p, _ = rounds(tmp_path, task_generator, training_mode="manual", **SOURCES)
+    stage = stage_of(p)
+    for request_id in ("request-1", "request-2"):
+        stage.request_round(request_id, (source(p, "a"),))
+        looked(p)
+        assert stage.take_round_result(request_id) == RequestedRoundResult(0, ("harbor-00000-000",))
+    assert len(task_generator.requests) == 1
+    assert p.status()["task_generation"]["completed"] == 1, "a round that made nothing new does not count"
+
+
+def test_a_switch_to_manual_releases_the_waiting_sessions_and_a_switch_back_starts_a_round_at_once(
+    tmp_path: Path,
+) -> None:
+    worker = DeferredWorker()
+    p, _ = rounds(tmp_path, ScriptedGenerator([generated(0, 0)]), worker=worker, refill_tasks=5, **SOURCES)
+    sessions(p, "a", "b", "c")
+    p.ready(BATCH_SIZE)
+    p.set_training_mode("manual")
+    assert {"rec-c", "rep-c"} <= p.releasable_record_ids(), "the waiting session is released"
+    worker.finish()
+    for _ in range(3):
+        p.ready(BATCH_SIZE)
+    assert generation_numbers(worker) == [0], "the running round finished, and manual starts no other"
+    p.set_training_mode("auto")
+    p.ready(BATCH_SIZE)
+    assert generation_numbers(worker) == [0, 1], "auto starts the next round at once"
+
+
+def test_a_round_that_fails_after_a_switch_to_manual_holds_no_session_for_a_retry(tmp_path: Path) -> None:
+    worker = DeferredWorker()
+    p, _ = rounds(tmp_path, FailingGenerator(), worker=worker, generation_attempts=1, **SOURCES)
+    sessions(p, "a")
+    p.ready(BATCH_SIZE)
+    p.set_training_mode("manual")
+    worker.finish()
+    for _ in range(3):
+        p.ready(BATCH_SIZE)
+    assert {"rec-a", "rep-a"} <= p.releasable_record_ids()
+    assert generation_numbers(worker) == [0]
 
 
 @pytest.mark.parametrize(

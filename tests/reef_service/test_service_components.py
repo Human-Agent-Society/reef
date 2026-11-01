@@ -21,7 +21,13 @@ from reef.dispatcher.store_changes import StoreChanges, StoreChangesWatcher
 from reef.dispatcher.work_retention import EndedWorkSweeper
 from reef.evaluation.rollout_worker import EvaluationRolloutWorker
 from reef.execution.workers import SERVICE_COMPONENTS, service_components
-from reef.record2sample.service import RECORD_SELECTION_KIND, SAMPLES_QUEUE, SamplesWorker, request_selection
+from reef.record2sample.service import (
+    RECORD_SELECTION_KIND,
+    SAMPLES_QUEUE,
+    SamplesWorker,
+    TaskGenerationWorker,
+    request_selection,
+)
 from reef.service import assembly
 from reef.service.app import create_data_app
 from reef.service.components import build_component_app
@@ -66,11 +72,12 @@ def test_a_process_runs_the_workers_of_its_own_services_only(tmp_path: Path) -> 
     control = {ServedModelsPublisher, StoreChangesWatcher, EndedWorkSweeper, DataSyncWorker}
     assert worker_types(tmp_path / "all", frozenset(SERVICE_COMPONENTS)) == control | {
         SamplesWorker,
+        TaskGenerationWorker,
         DataWorker,
         EvaluationRolloutWorker,
     }
     assert worker_types(tmp_path / "control", frozenset({"control"})) == control
-    assert worker_types(tmp_path / "samples", frozenset({"samples"})) == {SamplesWorker}
+    assert worker_types(tmp_path / "samples", frozenset({"samples"})) == {SamplesWorker, TaskGenerationWorker}
     assert worker_types(tmp_path / "data", frozenset({"data"})) == {DataWorker}
     assert worker_types(tmp_path / "evaluation", frozenset({"evaluation"})) == {EvaluationRolloutWorker}
     with pytest.raises(ValueError, match="unknown services"):
@@ -80,7 +87,9 @@ def test_a_process_runs_the_workers_of_its_own_services_only(tmp_path: Path) -> 
 
 
 @pytest.mark.unit
-def test_the_samples_service_of_another_process_loads_the_scenario_and_leaves_the_jobs_to_control() -> None:
+def test_the_samples_service_of_another_process_loads_the_scenario_follows_its_stored_mode_and_leaves_the_jobs_to_control() -> (
+    None
+):
     made: list[str] = []
     trainer = SimpleNamespace(trains=True, produce_samples=lambda: made.append("weights") or False)
     current = SimpleNamespace(trainers=(SimpleNamespace(component="weights", trainer=trainer),))
@@ -91,8 +100,11 @@ def test_the_samples_service_of_another_process_loads_the_scenario_and_leaves_th
             loads.append((scenario, allow_implicit_creation))
             return current
 
+        def apply_stored_training_mode(self, scenario: str) -> None:
+            loads.append((scenario, "stored mode"))
+
     assert LocalSampleProducers(Registry(), None).produce("math", "weights") is False
-    assert made == ["weights"] and loads == [("math", False)]
+    assert made == ["weights"] and loads == [("math", False), ("math", "stored mode")]
 
 
 class Changes(StoreChanges):

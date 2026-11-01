@@ -1495,10 +1495,10 @@ which are not records.
 
 .. config::
 
-   pipeline.record2sample.config.jobs_per_round | 1 | trained jobs after which the next round starts
-   pipeline.record2sample.config.source_records_per_round | 0 | recorded sessions that each round gives the generator, at most; 0 generates from the description only
+   pipeline.record2sample.config.jobs_per_round | 1 | trained jobs after which the next round starts; ``auto`` mode only
+   pipeline.record2sample.config.source_records_per_round | 0 | recorded sessions that each round gives the generator, at most, also in a requested round; 0 generates from the description only
    pipeline.record2sample.config.source_tag | the ``name=value`` tag that marks a source session: each of its model calls carries the header ``x-reef-tag-<name>: <value>``. Required when ``source_records_per_round`` is above 0.
-   pipeline.record2sample.config.refill_tasks | 1 | the next round starts only while fewer saved tasks than this wait to train; a task in a running job does not wait
+   pipeline.record2sample.config.refill_tasks | 1 | the next round starts only while fewer saved tasks than this wait to train; a task in a running job does not wait; ``auto`` mode only
    pipeline.record2sample.config.rounds | 0 | rounds of task generation; 0 generates nothing. A round counts when it finishes a generation or runs out of its attempts; a round of replayed sessions does not count. After a restart, only complete generations count.
    pipeline.record2sample.config.generator | the ``TaskGenerator`` class (``module``) and its ``config``. Required with rounds.
    pipeline.record2sample.config.description | what the tasks are about; every generation request carries it. Required with rounds.
@@ -1507,6 +1507,12 @@ which are not records.
    pipeline.record2sample.config.split_seed | 0 | fixed seed for the task store's train/eval split
    pipeline.record2sample.config.generation_attempts | 3 | attempts of a generation whose generator or checks fail to run; after them the round is skipped, and the next round finishes the same generation
    pipeline.record2sample.config.generation_deadline_seconds | 1800 | seconds that all attempts of one generation may take
+
+In ``manual`` training mode no round starts on its own. A client requests
+each round and names its source sessions, which must carry ``source_tag``
+(`Request a task-generation round
+<http-api.rst#request-a-task-generation-round>`__). A requested round counts
+toward ``rounds``.
 
 With rounds enabled, each valid task and its split are saved in the scenario's task store.
 A generation saves tasks and runs no rollouts; the saved train tasks run later, and their results are kept in the store.
