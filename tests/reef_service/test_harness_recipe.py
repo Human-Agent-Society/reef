@@ -27,7 +27,6 @@ from tests.support.harness_service import (
     run_step,
 )
 from tests.support.harness_steps import (
-    BACKEND_RELEASES,
     COMPONENT,
     MODEL,
     PI_FAKE,
@@ -74,7 +73,6 @@ from reef.harness.tasks.model_binding import ModelBinding, ModelBindingError, Mo
 from reef.harness.tasks.run import TaskResult
 from reef.harness.tree import HarnessTree, TreePatch
 from reef.inference.http import InferenceProxyRuntime
-from reef.inference.model_config import ModelConfig
 from reef.recipe import RecipeConfigError
 from reef.recipe.base import ServedEndpoint
 from reef.recipe.harness import EvolutionSettings, HarnessEvolutionRecipe, HarnessJobLoop
@@ -423,7 +421,6 @@ def test_each_step_evaluates_on_the_eval_split_of_the_imported_tasks_as_the_step
             built.harness_component,
             scenario="s",
             releases=releases_for(built),
-            model=None,
             eval_samples=TrainerSamples(samples),
             seed=built.seed,
             layout=get_adapter("pi").layout,
@@ -621,46 +618,6 @@ def test_a_winning_step_binds_only_its_runs_records_its_context_and_names_its_ki
     assert not NeverActivate().activates(made)
 
 
-def test_runs_and_scorers_use_the_model_that_each_job_names(tmp_path: Path, monkeypatch) -> None:
-    """A job names the scenario's model; the harness component's backend of a new model renders and scores the
-    job's runs with it."""
-    rendered: list[str] = []
-    scored: list[str] = []
-
-    def spy(descriptor, files, prompt, **kwargs):
-        rendered.append(json.loads(files["pi-agent/settings.json"])["defaultModel"])
-        return run_task(descriptor, files, prompt, **kwargs)
-
-    def score(task, result, models):
-        scored.append(models.served.model)
-        return marker_score(task, result)
-
-    def endpoint(model: str) -> dict:
-        return {"url": MODEL.base_url, "model": model}
-
-    def job_model(model: str) -> dict:
-        runtime = ModelConfig.from_value(endpoint(model)).runtime
-        assert runtime is not None
-        return runtime.model_config()
-
-    monkeypatch.setattr(RUN_RUN, spy)
-    recipe = harness_recipe(tmp_path, lambda workspace, services: MARKER, score=score)
-    component = recipe.harness_component
-    assert isinstance(component, HarnessTrainingComponent)
-    backend = component.backend_for("demo", COMPONENT, job_model("first-model"))
-    assert component.backend_for("demo", COMPONENT, job_model("first-model")) is backend
-    BACKEND_RELEASES[backend] = TreeReleases(recipe.seed)
-    first = step(backend)
-    changed = component.backend_for("demo", COMPONENT, job_model("second-model"))
-    assert changed is not backend
-    BACKEND_RELEASES[changed] = TreeReleases(recipe.seed)
-    # The head did not move, so the second step evaluates the same trees in a new context: none of them is cached.
-    step(changed, first.state)
-    component.close()
-    assert rendered == ["reef/first-model"] * 2 + ["reef/second-model"] * 2
-    assert scored == ["first-model"] * 2 + ["second-model"] * 2
-
-
 def test_the_method_receives_the_served_model_binding(tmp_path: Path) -> None:
     received = []
     backend, _ = harness_backend(tmp_path, lambda workspace, services: received.append(services.models))
@@ -698,19 +655,8 @@ def test_the_served_binding_targets_the_scenario_evaluation_route() -> None:
         component.model_binding("agent").base_url
         == "http://127.0.0.1:8900/reef/scenarios/agent/components/harness/evaluation"
     )
-    # A scenario with its own model binds through the same route, whether resolved at build or at every step.
-    configured = served.with_model_config(ModelConfig())
-    assert (
-        configured.model_bindings("agent").served.base_url == "http://127.0.0.1:8900/reef/scenarios/agent/evaluation"
-    )
-    assert configured.model_bindings("agent", ModelConfig()).served.base_url.endswith("/agent/evaluation")
-    overridden = configured.with_model_config(
-        ModelConfig.from_value({"url": "http://other.test", "model": "other-model"})
-    )
-    resolved = overridden.model_bindings("agent").served
-    assert resolved.base_url == "http://127.0.0.1:8900/reef/scenarios/agent/evaluation"
-    assert resolved.model == "other-model" and resolved.api_key == "reef-local"
-    assert overridden.model_bindings().served.base_url == "http://other.test"
+    # Every run of the scenario binds the served model through the same route.
+    assert served.model_bindings("agent").served == binding
 
 
 @pytest.mark.parametrize("change", ["none", "binary", "run-executor", "scorer-config", "named-model"])

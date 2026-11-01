@@ -220,9 +220,7 @@ class RequestService:
         )
         if form == "client" and service_url is not None and root is not None:
             descriptor = self.harness_descriptor(scenario)
-            served = self._dispatcher.recipe.harness_served_model(
-                scenario.name, str(scenario.surface.files_component), scenario.model_config
-            )
+            served = self._dispatcher.recipe.harness_served_model(scenario.name, str(scenario.surface.files_component))
             if served is None:
                 raise ArtifactNotFound(f"scenario {scenario.name!r} evolves no harness that calls a model")
             # The layer's model calls go to the inference service when the deployment names its address.

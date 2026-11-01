@@ -32,7 +32,6 @@ from recipes.beta.reefine.multimodal import MultimodalProvider, MultimodalSettin
 from recipes.beta.reefine.scorer import HEALTH_TASK_DIRECTORY, AnswerScorer
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import DescriptorError
-from reef.inference.model_config import ModelConfig
 from reef.recipe.config_fields import config_field
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.harness import HarnessEvolutionRecipe
@@ -152,21 +151,14 @@ class ReefineRecipe(HarnessEvolutionRecipe):
         self,
         scenario: str,
         component: str,
-        *,
-        scenario_model: ModelConfig | None = None,
     ) -> HarnessBackend:
         """The scenario's backend. With an agent configured, its Reefine method runs the agent, bound here to pi
         once per scenario as the evaluator is: the binary is resolved, and installed when missing, on the Reef
         host, or named in a cloud sandbox's image."""
         if self.agent is None or not isinstance(self.method, ReefineMethod):
-            return super().build_backend(scenario, component, scenario_model=scenario_model)
+            return super().build_backend(scenario, component)
         method = ReefineMethod(ReefineAgent(self.agent.bind(), self.trial_timeout_s, self.multimodal_provider))
-        return HarnessEvolutionRecipe.build_backend(
-            replace(self, method=method),
-            scenario,
-            component,
-            scenario_model=scenario_model,
-        )
+        return HarnessEvolutionRecipe.build_backend(replace(self, method=method), scenario, component)
 
 
 __all__ = ["DEFAULT_TRIAL_TIMEOUT_S", "SEED_DIRECTORY", "ReefineRecipe"]

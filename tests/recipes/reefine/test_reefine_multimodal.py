@@ -9,7 +9,6 @@ import pytest
 
 from recipes.beta.reefine.multimodal import MultimodalSettings
 from reef.inference.http import InferenceProxyRuntime
-from reef.inference.model_config import ModelConfig
 from reef.recipe.errors import RecipeConfigError
 
 
@@ -58,9 +57,6 @@ def test_reefine_hands_its_gateway_to_the_agent() -> None:
     upstream = InferenceProxyRuntime(base_url="https://openrouter.ai/api", api_key="sk-upstream", model_path="m")
     recipe = ReefineRecipe(**kwargs, runtime=upstream)
     assert recipe.multimodal_provider is not None and recipe.multimodal_provider.api_key == "sk-upstream"
-    # A scenario on its own model still calls the gateway with the deployment's key, which the platform bills.
-    own = InferenceProxyRuntime(base_url="https://openrouter.ai/api", api_key="sk-upstream", model_path="other")
-    assert recipe.with_model_config(ModelConfig(runtime=own)).multimodal_provider.api_key == "sk-upstream"
     elsewhere = InferenceProxyRuntime(base_url="http://127.0.0.1:11434", api_key="ollama", model_path="m")
     assert ReefineRecipe(**kwargs, runtime=elsewhere).multimodal_provider is None
     with pytest.raises(RecipeConfigError, match=r"evolution\.multimodal"):

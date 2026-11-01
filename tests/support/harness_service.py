@@ -166,7 +166,7 @@ def drive_trainer_job(trainer: Trainer, *, seconds: float = 30.0) -> TrainStepRe
     raise AssertionError(f"the job of trainer {trainer.scenario!r} did not end in {seconds}s")
 
 
-def job_backend(trainer: Trainer, component: str = "harness", scenario_model: Any = None) -> HarnessBackend:
+def job_backend(trainer: Trainer, component: str = "harness") -> HarnessBackend:
     """The backend that ``trainer``'s harness component runs the steps of ``component`` on."""
     harness = trainer.job_loop_required().component
     if isinstance(harness, JobQueueComponent):
@@ -174,7 +174,7 @@ def job_backend(trainer: Trainer, component: str = "harness", scenario_model: An
         harness = harness.component
     if not isinstance(harness, HarnessTrainingComponent):
         raise TypeError(f"trainer {trainer.scenario!r} submits no harness jobs")
-    return harness.backend_for(trainer.scenario, component, scenario_model)
+    return harness.backend_for(trainer.scenario, component)
 
 
 def run_step(scenario: Scenario, suffix: str) -> TrainStepResult:
