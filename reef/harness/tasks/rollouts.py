@@ -289,7 +289,6 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
         environment: str = "docker",
         labels: Mapping[str, str] | None = None,
         extra_instruction_paths: Sequence[Path] = (),
-        per_receipt: bool = False,
         is_reporting: bool = True,
         is_unrecorded: bool = False,
         lab: TaskLab | None = None,
@@ -327,7 +326,6 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
             if not Path(path).is_file():
                 raise TaskRolloutError(f"extra instruction file {path} does not exist")
         self.extra_instruction_paths = tuple(Path(path) for path in extra_instruction_paths)
-        self.per_receipt = per_receipt
         # A measurement run (an arm run for its reward alone) keeps its rollouts out of the training data.
         self.is_reporting = is_reporting
         # An unrecorded rollout: Reef keeps no record of its calls, and the rollout keeps their turns.
@@ -462,7 +460,7 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
     def report(
         self, task_path: Path, rollout_id: str, reward: float, row: RolloutRow, receipts: Sequence[str]
     ) -> tuple[str, ...]:
-        """Post the rollout's reward against its receipts; one report, or one per receipt; the record ids."""
+        """Post the rollout's reward in one report against its last receipt, which ends its trajectory; the record id."""
         payload: dict[str, object] = {
             "score": reward,
             "feedback": f"verifier reward {reward} on {task_path.name}",
@@ -477,21 +475,16 @@ class TaskRolloutRunner(RolloutRunner[TaskRollout]):
                 },
             },
         }
-        groups = [[receipt] for receipt in receipts] if self.per_receipt else [list(receipts)]
-        record_ids = []
-        for references in groups:
-            try:
-                answer = self.client.report(self.scenario, payload, references=references)
-            except ReefClientError as exc:
-                raise TaskRolloutError(
-                    f"the report for {task_path.name} was refused ({exc.status}): {exc.body[:300]}"
-                ) from exc
-            except OSError as exc:
-                raise TaskRolloutError(
-                    f"the report for {task_path.name} did not reach {self.reef_url}: {exc}"
-                ) from exc
-            record_ids.append(str(answer.get("agent_record_id", "")))
-        return tuple(record_ids)
+        # The rollout's last call ends its trajectory; Reef expands it to the rollout's calls (RFC #1054).
+        try:
+            answer = self.client.report(self.scenario, payload, references=[receipts[-1]])
+        except ReefClientError as exc:
+            raise TaskRolloutError(
+                f"the report for {task_path.name} was refused ({exc.status}): {exc.body[:300]}"
+            ) from exc
+        except OSError as exc:
+            raise TaskRolloutError(f"the report for {task_path.name} did not reach {self.reef_url}: {exc}") from exc
+        return (str(answer.get("agent_record_id", "")),)
 
 
 def parsed_labels(pairs: Sequence[str]) -> dict[str, str]:
@@ -537,9 +530,6 @@ def main(argv: Sequence[str] | None = None, *, lab: TaskLab | None = None) -> in
     parser.add_argument(
         "--instructions", action="append", type=Path, default=[], help="a file appended to every task's instruction"
     )
-    parser.add_argument(
-        "--per-receipt", action="store_true", help="one report per model call instead of one per rollout"
-    )
     arguments = parser.parse_args(argv)
     try:
         if arguments.manifest is not None:
@@ -571,7 +561,6 @@ def main(argv: Sequence[str] | None = None, *, lab: TaskLab | None = None) -> in
             environment=arguments.environment,
             labels=parsed_labels(arguments.label),
             extra_instruction_paths=arguments.instructions,
-            per_receipt=arguments.per_receipt,
             lab=lab,
         )
     except (TaskRolloutError, TaskSplitError, HarborTaskError, json.JSONDecodeError) as exc:

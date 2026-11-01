@@ -52,23 +52,21 @@ def test_a_record_item_keeps_the_record_and_says_where_it_came_from():
         "release_id": None,
         "artifact_id": None,
     }
-    with pytest.raises(ValueError, match="training instruction"):
-        record_item(record("t1", RequestType.TRAIN))
 
 
-def test_a_copy_makes_one_page_of_items_skips_instructions_and_is_safe_to_repeat(tmp_path, monkeypatch):
+def test_a_copy_makes_one_page_of_items_and_is_safe_to_repeat(tmp_path, monkeypatch):
     monkeypatch.setattr(record_items, "RECORD_PAGE_SIZE", 2)
     task_files = LocalTaskFileStore(tmp_path / "task-files")
     data = MemoryDataStore(task_files)
     with closing(SQLiteScenarioStorage(tmp_path / "records")) as storage, closing(storage.open("math")) as session:
-        for appended in (record("r1", score=1.0), record("t1", RequestType.TRAIN), record("r2", score=0.0)):
+        for appended in (record("r1", score=1.0), record("r2", score=0.0), record("r3", score=0.5)):
             session.records.append(appended)
         assert copy_records(session.records, data, "acme", "math", 0) == 2
         assert copy_records(session.records, data, "acme", "math", 2) == 3
         assert copy_records(session.records, data, "acme", "math", 3) == 3
-        assert [item.item_id for item in data.query("acme")] == ["math/r1", "math/r2"]
+        assert [item.item_id for item in data.query("acme")] == ["math/r1", "math/r2", "math/r3"]
         assert copy_records(session.records, data, "acme", "math", 0) == 2, "a copy again changes nothing"
-        assert len(data.query("acme")) == 2
+        assert len(data.query("acme")) == 3
 
         # A client item with a record item's ID and other content stops the copy.
         data.delete("acme", "math/r1")

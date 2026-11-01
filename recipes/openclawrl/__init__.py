@@ -2,11 +2,11 @@
 
 - ``recipe`` — the OpenClaw-RL recipe class, its ``WeightTrainingSpec``, and
   its ``PipelineSpec``.
-- ``judging`` — the record-to-record stage ``OpenClawRLRecord2Record`` and
-  its correlation and judge: sessions correlated from record tags or, as a
-  fallback, matching traces; turns judged on the stage's PRM worker.
-- ``processor`` — the record-to-sample and sample-to-job stages: judged turns
-  into samples and batches, and the PRM record file.
+- ``judging`` — the correlation and the judge: sessions correlated from
+  record tags or, as a fallback, matching traces; turns judged on a PRM worker.
+- ``processor`` — the record-to-sample stage ``OpenClawRLSamples``, which runs
+  the judging, and the sample-to-job stage: judged turns into samples and
+  batches, and the PRM record file.
 - ``sessions`` / ``turns`` / ``prm`` — the derivation machinery the
   judging calls: how a session is recognized, what one turn's judgment
   gets and answers, what one PRM call does.
@@ -16,7 +16,7 @@
   package's public surface never loads it.
 """
 
-from recipes.openclawrl.judging import OpenClawRLJudgingSettings, OpenClawRLRecord2Record
+from recipes.openclawrl.judging import OpenClawRLJudgingSettings
 from recipes.openclawrl.objective import OpenClawRLObjective
 from recipes.openclawrl.processor import OpenClawRLJobData, OpenClawRLJobSettings, OpenClawRLSamples
 from recipes.openclawrl.recipe import OpenClawRLRecipe
@@ -30,6 +30,5 @@ __all__ = [
     "OpenClawRLJudgingSettings",
     "OpenClawRLObjective",
     "OpenClawRLRecipe",
-    "OpenClawRLRecord2Record",
     "OpenClawRLSamples",
 ]

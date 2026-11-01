@@ -6,13 +6,15 @@ from contextlib import closing
 
 import pytest
 from sqlalchemy import Column, Integer, MetaData, String, Table, Text, create_engine, inspect, select, update
+from tests.support.conversations import conversation
 from tests.support.task_service_stubs import task_for
 
 from reef.artifact import ArtifactRef
 from reef.core.job_data import TaskSample, TrajectorySample
 from reef.core.tasks import write_harbor_task
+from reef.core.trajectories import make_trajectory
 from reef.storage.commits import CommitRecord
-from reef.storage.postgres import PostgresScenarioStorage, postgres_url
+from reef.storage.postgres import POSTGRES_SCHEMA_VERSION, PostgresScenarioStorage, postgres_url
 from reef.storage.samples import SampleConflict, consumed_sample_id
 from reef.storage.sql_samples import trajectory_content
 from reef.storage.sqlite import SQLiteScenarioStorage
@@ -209,7 +211,7 @@ def test_postgres_moves_the_uploaded_trajectories_of_schema_version_9_with_their
     with engine.connect() as connection:
         assert not inspect(connection).has_table("uploaded_trajectory", schema=schema)
         version = Table("schema_version", MetaData(schema=schema), autoload_with=connection)
-        assert connection.execute(select(version.c.version)).scalars().all() == [13]
+        assert connection.execute(select(version.c.version)).scalars().all() == [POSTGRES_SCHEMA_VERSION]
     engine.dispose()
 
 
@@ -389,3 +391,58 @@ def test_removing_uploads_keeps_stage_samples_and_train_counts_and_empties_the_b
         assert again.sequence > last
         assert again.train_counts == {"": 1}
         assert samples.remove_uploads(()) == ()
+
+
+def content_json(samples, sample_id: str) -> dict:
+    """The ``content_json`` of a stored sample, as the SQL sample store keeps it."""
+    table = samples.table.table
+    with samples.records._transaction(write=False) as connection:
+        encoded = connection.execute(
+            select(table.c.content_json).where(samples.table.condition(), table.c.sample_id == sample_id)
+        ).scalar_one()
+    return json.loads(encoded)
+
+
+def scored_trajectory(calls) -> TrajectorySample:
+    """A sample that a stage made from ``calls``: their trajectory with a reward and training tokens."""
+    return make_trajectory(calls, 0.5, "good").with_training(tokens=[1, 2, 3], loss_mask=[0, 1, 1])
+
+
+def test_a_trajectory_made_from_stored_calls_keeps_their_ids_and_reads_back_whole(storage):
+    with closing(storage.open("math")) as session:
+        calls = tuple(conversation(f"call-{turns}", turns, filler="x" * 200) for turns in (1, 3))
+        for call in calls:
+            session.records.append(call)
+        sample = scored_trajectory(calls)
+        assert session.samples.add_record_samples("", None, ("call-1", "call-3"), (("s:0", sample),))
+        content = content_json(session.samples, "s:0")
+        assert content["calls"] == ["call-1", "call-3"]
+        assert "records" not in json.dumps(content), "the content holds no copy of the calls"
+        assert len(json.dumps(content)) < len(trajectory_content(sample)) / 3
+        assert session.samples.get(("s:0",))[0].sample == sample
+        assert not session.samples.add_record_samples("", None, ("call-1", "call-3"), (("s:0", sample),))
+        with pytest.raises(SampleConflict, match="other content"):
+            session.samples.add_record_samples("", None, ("call-1",), (("s:0", scored_trajectory(calls[:1])),))
+
+
+def test_a_trajectory_whose_calls_are_not_stored_keeps_its_whole_content(storage):
+    with closing(storage.open("math")) as session:
+        sample = scored_trajectory((conversation("absent", 1),))
+        session.samples.add_record_samples("", None, ("absent",), (("s:0", sample),))
+        assert "trajectory" in content_json(session.samples, "s:0")
+        assert session.samples.get(("s:0",))[0].sample == sample
+
+
+def test_capacity_eviction_keeps_the_calls_that_a_stored_sample_holds(open_durable_storage):
+    with closing(open_durable_storage()) as storage:
+        with closing(storage.open("math")) as session:
+            held = conversation("held", 2, created_at=1.0, filler="x" * 500)
+            free = conversation("free", 2, created_at=2.0, filler="y" * 500, tools=("bash",))
+            for call in (held, free):
+                session.records.append(call)
+            session.samples.add_record_samples("", None, ("held",), (("s:0", scored_trajectory((held,))),))
+        assert storage.prune(max_bytes=1) == 1
+        with closing(storage.open("math")) as session:
+            assert session.records.get("math", "held") is not None
+            assert session.records.get("math", "free") is None
+            assert session.samples.get(("s:0",))[0].sample == scored_trajectory((held,))

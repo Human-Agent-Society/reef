@@ -11,11 +11,10 @@ import pytest
 from reef.core import AgentRecord, RequestType
 from reef.core.reports import ReportBase, ReportValidationError
 from reef.pipeline_context import PipelineContext
-from reef.record2record import GroupDecision, ReportContext, ReportGrouping, ReportRecord2Record
-from reef.record2sample import ReportSamples
+from reef.record2sample import GroupDecision, ReportContext, ReportGrouping, ReportSamples
 from reef.sample2job import Sample2Job
 from reef.train.pipeline import TrainingPipeline
-from reef.train.types import JobData, Sample, TaskSample
+from reef.train.types import JobData, Sample, TaskSample, TrajectorySample
 
 
 def inference(record_id: str) -> AgentRecord:
@@ -33,20 +32,12 @@ def report(record_id: str, *references: str, score: float = 1.0) -> AgentRecord:
     )
 
 
-def exclusive_stage(context: PipelineContext, grouping: ReportGrouping | None = None) -> ReportRecord2Record:
-    """A report stage in which a terminal report owns its sources."""
-    return ReportRecord2Record(
-        context,
-        ReportGrouping() if grouping is None else grouping,
-        exclusive_sources=True,
-    )
-
-
 class NamedReportSamples(ReportSamples):
-    """Each report becomes a task named after it. ``fail_assembly`` breaks the training contract."""
+    """Each report becomes a task named after it, in the groups of ``grouping``; a terminal report owns its sources.
+    ``fail_assembly`` breaks the training contract."""
 
-    def __init__(self) -> None:
-        super().__init__()
+    def __init__(self, context: PipelineContext, grouping: ReportGrouping | None = None) -> None:
+        super().__init__(context, grouping, exclusive_sources=True)
         self.assembled: list[str] = []
         self.fail_assembly = False
 
@@ -63,21 +54,20 @@ class SampleJobData(Sample2Job):
 
 
 class SamplePipeline(TrainingPipeline):
-    """A reported-feedback pipeline over an exclusive report stage, with ``NamedReportSamples`` and ``batches``."""
+    """A reported-feedback pipeline over a ``NamedReportSamples`` stage (or ``tasks``), with ``batches``."""
 
     def __init__(
         self,
         *,
         grouping: ReportGrouping | None = None,
         report_type: type[ReportBase] | None = None,
-        tasks: NamedReportSamples | None = None,
+        tasks: type[NamedReportSamples] = NamedReportSamples,
         batches: type[SampleJobData] = SampleJobData,
     ) -> None:
         context = PipelineContext("math", report_type)
-        self.sample_tasks = NamedReportSamples() if tasks is None else tasks
+        self.sample_tasks = tasks(context, grouping)
         super().__init__(
             context,
-            record2record=exclusive_stage(context, grouping),
             record2sample=self.sample_tasks,
             sample2job=batches(context, None, None),
         )
@@ -117,9 +107,7 @@ class GroupPipeline(SamplePipeline):
 
     @property
     def grouping_policy(self) -> PairGrouping:
-        stage = self.record2record
-        assert isinstance(stage, ReportRecord2Record)
-        grouping = stage.grouping
+        grouping = self.sample_tasks.grouping
         assert isinstance(grouping, PairGrouping)
         return grouping
 
@@ -172,13 +160,16 @@ def test_a_report_shaped_for_another_component_is_released_not_raised() -> None:
         )
 
 
-def test_processor_requires_sample_assembly_instead_of_judge() -> None:
-    with pytest.raises(TypeError, match="abstract"):
-        ReportSamples()
+def test_the_default_sample_of_a_report_is_its_trajectory_with_the_score_and_feedback() -> None:
+    scored = replace(report("r1", "i1", score=0.5), payload={"score": 0.5, "feedback": "close", "references": ["i1"]})
+    sample = ReportSamples(PipelineContext("math")).make_sample(ReportContext(scored, 0.5, (inference("i1"),)))
+    assert isinstance(sample, TrajectorySample)
+    assert sample.metadata["reward"] == 0.5 and sample.metadata["feedback"] == "close"
+    assert sample.metadata["source_agent_record_id"] == "i1"
     assert not hasattr(ReportSamples, "judge")
 
 
-def test_operational_backlog_counts_the_reports_that_wait_in_the_record_stage() -> None:
+def test_operational_backlog_counts_the_reports_that_wait_in_the_stage() -> None:
     processor = GroupPipeline()
     processor.push(inference("i1"))
     processor.push(report("r1", "i1"))
@@ -394,7 +385,7 @@ def test_untyped_assembly_output_fails_and_keeps_report_retryable() -> None:
         def make_sample(self, context):
             return object() if self.fail_assembly else super().make_sample(context)
 
-    processor = SamplePipeline(tasks=BrokenTasks())
+    processor = SamplePipeline(tasks=BrokenTasks)
     processor.push(inference("i1"))
     processor.fail_assembly = True
     with pytest.raises(TypeError, match="Sample"):

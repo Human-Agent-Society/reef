@@ -11,6 +11,7 @@ import pytest
 from aiohttp import web
 from sqlalchemy.exc import OperationalError
 from tests.support.consumption_receipts import write_consumption_receipt
+from tests.support.conversations import conversation
 
 from reef.core import AgentRecord, RequestType
 from reef.dispatcher import build_default_dispatcher
@@ -64,6 +65,45 @@ def test_capacity_evicts_unconsumed_and_consumed_records_across_archives(tmp_pat
     assert "Record capacity exceeded" in caplog.text
     assert "scenario=math" in caplog.text
     assert "sequence=1..1" in caplog.text
+
+
+def stored_bytes(database, where: str = "1") -> int:
+    """The body bytes of the record rows that match ``where``, plus, without a condition, every trajectory node."""
+    with closing(sqlite3.connect(database)) as connection:
+        rows = connection.execute(f"SELECT COALESCE(SUM(body_bytes), 0) FROM agent_record WHERE {where}").fetchone()
+        nodes = connection.execute("SELECT COALESCE(SUM(body_bytes), 0) FROM record_node").fetchone()
+    return rows[0] + (nodes[0] if where == "1" else 0)
+
+
+def test_eviction_frees_exactly_the_nodes_that_no_remaining_record_needs(tmp_path, store_factory):
+    database = tmp_path / "records.sqlite3"
+    alone = conversation("alone", 1, filler="y" * 5000, created_at=10.0)
+    first, second = (
+        conversation(name, turns, created_at=20.0 + turns) for name, turns in (("first", 1), ("second", 2))
+    )
+    with SQLiteRecordStore(database) as records:
+        for call in (alone, first, second):
+            records.append(call)
+    with closing(sqlite3.connect(database)) as connection:
+        alone_node = connection.execute(
+            "SELECT body_bytes FROM record_node WHERE agent_record_id = 'alone'"
+        ).fetchone()
+    alone_bytes = stored_bytes(database, "agent_record_id = 'alone'") + alone_node[0]
+    first_bytes = stored_bytes(database, "agent_record_id = 'first'")
+
+    # No other call needs the node of "alone", so evicting it alone brings the store under the budget.
+    assert store_factory.prune(max_bytes=stored_bytes(database) - alone_bytes) == 1
+    # "second" continues "first", so evicting "first" frees only its row and its node stays.
+    assert store_factory.prune(max_bytes=stored_bytes(database) - first_bytes) == 1
+    with SQLiteRecordStore(database) as records:
+        assert records.replay("math") == (second,)
+        assert records.trajectory("math", "second") == ("first", "second")
+        assert records.loss("math").body_bytes == alone_bytes + first_bytes
+        assert records.append_result(alone).inserted is False
+    with closing(sqlite3.connect(database)) as connection:
+        assert connection.execute("SELECT COUNT(*), SUM(record_count) FROM record_node").fetchone() == (2, 2)
+    assert store_factory.prune(max_bytes=1) == 1
+    assert stored_bytes(database) == 0
 
 
 def test_record_age_and_training_completion_do_not_trigger_deletion(tmp_path, store_factory):

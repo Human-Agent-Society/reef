@@ -1,10 +1,11 @@
-"""OpenClaw-RL's record-to-record stage: every main turn is judged by its next state.
+"""OpenClaw-RL's judging: every main turn is judged by its next state.
 
-:class:`OpenClawRLRecord2Record` is a :class:`~reef.record2record.JudgingRecord2Record`
-that runs :class:`OpenClawRLJudging` on a PRM worker. ``observe`` correlates
-main turns into sessions and hands each completed turn over for judgment;
-``judge`` is upstream's combine dispatch. The deployment configures the stage
-in ``pipeline.record2record.config`` (:class:`OpenClawRLJudgingSettings`).
+:class:`~recipes.openclawrl.processor.OpenClawRLSamples` is a
+:class:`~reef.record2sample.JudgedSamples` that runs :class:`OpenClawRLJudging`
+on a PRM worker. ``observe`` correlates main turns into sessions and hands each
+completed turn over for judgment; ``judge`` is upstream's combine dispatch. The
+deployment configures it in ``pipeline.record2sample.config``
+(:class:`OpenClawRLJudgingSettings`).
 
 No proxy and no judgment on the wire: the method derives every verdict
 from the traffic the agent already produces. Correlation prefers a
@@ -17,12 +18,10 @@ from __future__ import annotations
 import asyncio
 import collections
 import logging
-from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Self
+from typing import Any
 
 from recipes.openclawrl.prm import (
-    DirectiveTeacher,
     PRMJudge,
     ResponseRenderer,
     append_hint_to_messages,
@@ -33,9 +32,7 @@ from recipes.openclawrl.sessions import DEFAULT_MAX_SESSIONS, SessionIndex
 from recipes.openclawrl.turns import TurnJob, TurnJudgment, main_turn_message, turn_job, turn_request_messages
 from reef.core.config import config_option
 from reef.core.records_types import AgentRecord, RequestType
-from reef.execution.jobs import BackgroundJobWorker
-from reef.pipeline_context import PipelineContext
-from reef.record2record import JudgingRecord2Record, Record2RecordSettings, RecordJudging
+from reef.record2sample import JudgedSamples, Record2SampleSettings, RecordJudging
 
 logger = logging.getLogger(__name__)
 
@@ -56,12 +53,12 @@ def session_tag(payload: Any) -> str | None:
 
 
 @dataclass(frozen=True)
-class OpenClawRLJudgingSettings(Record2RecordSettings):
-    """The config of ``OpenClawRLRecord2Record``: session correlation, the PRM judge, and the staleness limit.
+class OpenClawRLJudgingSettings(Record2SampleSettings):
+    """The config of ``OpenClawRLSamples``: session correlation, the PRM judge, and the staleness limit.
 
     An empty ``prm_url`` is correlate-only mode: sessions resolve, nothing is
     judged, and nothing trains. ``max_staleness`` is as in
-    ``Record2RecordSettings``.
+    ``Record2SampleSettings``.
     """
 
     session_ttl_s: float = config_option(900.0, help="The idle time in seconds before a session expires.")
@@ -102,14 +99,14 @@ class OpenClawRLJudgingSettings(Record2RecordSettings):
             raise ValueError("prm_max_hint_candidates must be positive")
 
 
-def prm_clients(settings: OpenClawRLJudgingSettings) -> tuple[Any, Any, Any]:
-    """The PRM judge, the directive teacher, and the response renderer that ``settings`` describe.
+def prm_clients(settings: OpenClawRLJudgingSettings) -> tuple[Any, Any]:
+    """The PRM judge and the response renderer that ``settings`` describe.
 
-    Without ``prm_url`` all three are ``None``: correlate-only mode.
+    Without ``prm_url`` both are ``None``: correlate-only mode.
     """
     url = settings.prm_url.strip()
     if not url:
-        return None, None, None
+        return None, None
     tokenizer_path = settings.prm_tokenizer_path.strip()
     prm = PRMJudge(
         generate_url=url.rstrip("/") + "/generate",
@@ -119,19 +116,19 @@ def prm_clients(settings: OpenClawRLJudgingSettings) -> tuple[Any, Any, Any]:
         max_tokens=settings.prm_max_tokens,
         timeout_s=settings.prm_timeout_s,
     )
-    return prm, DirectiveTeacher(tokenizer_path=tokenizer_path), ResponseRenderer(tokenizer_path)
+    return prm, ResponseRenderer(tokenizer_path)
 
 
 class OpenClawRLJudging(RecordJudging):
     """Turns judged by their next state; terminal exclusions mirror upstream.
 
     Side calls, retried turns, session-final turns, and reports retire
-    terminal instead of ever being judged. ``clients`` (PRM judge, directive
-    teacher, renderer) overrides the configured clients for tests.
+    terminal instead of ever being judged. ``clients`` (PRM judge, renderer)
+    overrides the configured clients for tests.
     """
 
-    def __init__(self, settings: OpenClawRLJudgingSettings, clients: tuple[Any, Any, Any] | None = None) -> None:
-        self.prm, self.teacher, self.renderer = clients if clients is not None else prm_clients(settings)
+    def __init__(self, settings: OpenClawRLJudgingSettings, clients: tuple[Any, Any] | None = None) -> None:
+        self.prm, self.renderer = clients if clients is not None else prm_clients(settings)
         self.max_hint_candidates = settings.prm_max_hint_candidates
         self.index = SessionIndex(settings.session_ttl_s, max_sessions=settings.max_open_sessions)
         # Correlation reports itself through the log, not the record file:
@@ -143,7 +140,7 @@ class OpenClawRLJudging(RecordJudging):
         # What the judge actually saw, since the processor last wrote the PRM record file.
         self.judged: collections.Counter[str] = collections.Counter()
 
-    def observe(self, item: AgentRecord, now: float, stage: JudgingRecord2Record) -> None:
+    def observe(self, item: AgentRecord, now: float, stage: JudgedSamples) -> None:
         # 1. The stage has caught up: expiry ran before this read, so an
         #    expired session can never capture this request as its successor.
         # 2. Reports never train here; owning them keeps the store
@@ -218,38 +215,21 @@ class OpenClawRLJudging(RecordJudging):
         )
         # 3. The accepted hindsight hints, shortest first, capped.
         candidates = collect_hint_candidates(hint_votes, max_cand=self.max_hint_candidates)
-        # 4. Every candidate ships as a TOKEN SEQUENCE — upstream's
-        #    ``teacher_tokens_candidates`` — for the train actor's Megatron
-        #    teacher pass; an RL-only turn ships the un-enhanced native ids
-        #    (the anchor, whose construction cannot fail). Without the
-        #    generation-time capture the turn cannot train regardless, so no
-        #    candidate is built for it.
+        # 4. Every candidate ships as a hint-enhanced REQUEST, which the
+        #    training component renders into upstream's
+        #    ``teacher_tokens_candidates`` (the enhanced prompt's tokens, then
+        #    the student's reply tokens verbatim) for the train actor's
+        #    Megatron teacher pass; an RL-only turn ships the un-enhanced
+        #    anchor, whose teacher reads the student's own sequence.
         messages = list(job.request_messages)
-        native_ok = bool(
-            job.native_tokens
-            and job.response_token_count
-            and 0 < job.response_token_count < len(job.native_tokens)
-            and job.topk_indices
-            and len(job.topk_indices) == job.response_token_count
-        )
         teacher_cands: list[dict[str, Any]] = []
-        if candidates and messages and native_ok:
-            if job.native_tokens is None or job.response_token_count is None:
-                raise RuntimeError("native OpenClaw job lost its token capture")
-            for candidate in candidates:
-                enhanced = append_hint_to_messages(messages, candidate)
-                ids = await self.teacher.candidate_tokens(
-                    enhanced,
-                    tools=job.request_tools,
-                    native_tokens=job.native_tokens,
-                    response_token_count=job.response_token_count,
-                )
-                if ids is not None:
-                    teacher_cands.append({"hint": candidate, "teacher_tokens": ids})
-        if not teacher_cands and eval_score in (1.0, -1.0) and native_ok:
-            if job.native_tokens is None:
-                raise RuntimeError("native OpenClaw job lost its token capture")
-            teacher_cands.append({"hint": "", "teacher_tokens": [int(v) for v in job.native_tokens]})
+        if candidates and messages:
+            teacher_cands = [
+                {"hint": candidate, "messages": append_hint_to_messages(messages, candidate)}
+                for candidate in candidates
+            ]
+        if not teacher_cands and eval_score in (1.0, -1.0):
+            teacher_cands.append({"hint": "", "messages": None})
         # 5. The dispatch table decides.
         has_rl = eval_score in (1.0, -1.0)
         self.judged[f"next_state:{job.next_state_role}"] += 1
@@ -316,32 +296,3 @@ class OpenClawRLJudging(RecordJudging):
                 stats.dropped_unbound,
                 stats.bound,
             )
-
-
-class OpenClawRLRecord2Record(JudgingRecord2Record):
-    """OpenClaw-RL's record stage: sessions correlated, and turns judged on a PRM worker.
-
-    Config: :class:`OpenClawRLJudgingSettings`. Without a ``worker``, the
-    stage starts one when the config names a PRM judge. ``worker`` and
-    ``clients`` (PRM judge, directive teacher, renderer) replace the
-    configured ones in tests.
-    """
-
-    def __init__(
-        self,
-        settings: OpenClawRLJudgingSettings,
-        *,
-        worker: BackgroundJobWorker | None = None,
-        clients: tuple[Any, Any, Any] | None = None,
-    ) -> None:
-        #: The judging that the batches read for the PRM record file.
-        self.openclawrl_judging = OpenClawRLJudging(settings, clients)
-        if worker is None and self.openclawrl_judging.prm is not None:
-            worker = BackgroundJobWorker(
-                self.openclawrl_judging, thread_name="openclawrl-judging", concurrency=settings.prm_concurrency
-            )
-        super().__init__(self.openclawrl_judging, worker, max_staleness=settings.max_staleness)
-
-    @classmethod
-    def from_config(cls, config: Mapping[str, Any], *, context: PipelineContext, environ: Mapping[str, str]) -> Self:
-        return cls(OpenClawRLJudgingSettings.parse(config, plugin_class=cls))

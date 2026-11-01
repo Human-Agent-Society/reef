@@ -1,4 +1,4 @@
-"""Record sets and record set units: the input of the record-to-sample stage, and the sets whose samples are stored together.
+"""Record sets and record set units: the records whose samples are made together, and the sets whose samples are stored together.
 
 Notation: ``refs(r)`` is the set of records that a record ``r`` references.
 """
@@ -14,15 +14,15 @@ from reef.core.records_types import AgentRecord
 
 @dataclass(frozen=True, kw_only=True)
 class RecordSet(ABC):
-    """The records that the record-to-sample stage makes samples from, together.
+    """The records that a record-to-sample stage makes samples from, together.
 
     Values: ``X`` is a record set if and only if ``records(X)`` is not empty and
     ``refs(r) ⊆ records(X)`` for each record ``r`` in ``records(X)``. ``set_id``
-    identifies ``X`` among the sets of its record stage. No record is in two
-    record sets of one stage (``Record2Record.form``).
+    identifies ``X`` among the sets of its stage. No record is in two
+    record sets of one stage (``Record2Sample.form``).
 
-    Purpose: the record stage forms it, and the pipeline pushes it to the
-    record-to-sample stage. Its one result settles all records of the set together.
+    Purpose: a record-to-sample stage forms it and makes its samples. Its one result settles all records of the set
+    together.
     """
 
     set_id: Hashable
@@ -61,10 +61,10 @@ class RecordSetUnit(ABC):
     Values: ``U`` is a record set unit if and only if ``record_sets(U)`` is not
     empty. Its record sets are distinct and share no record, because a record
     stage forms each record into one set only. ``unit_id`` identifies ``U`` among
-    the ready units of its record stage; a ready unit replaces the one with its ID.
+    the ready units of its stage; a ready unit replaces the one with its ID.
 
-    Purpose: the record stage makes it ready when the samples of its record sets
-    are ready (``Record2Record.take_ready_units``). The pipeline stores those
+    Purpose: the stage makes it ready when the samples of its record sets
+    are ready (``Record2Sample.take_ready_units``). The pipeline stores those
     samples as one group in one transaction, which consumes ``consumed_ids(U)``,
     the IDs of the records of its record sets. Then the stage ends it (``consume``).
     """

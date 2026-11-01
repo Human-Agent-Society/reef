@@ -1,33 +1,32 @@
-"""The training pipeline: records become job data through three stages.
+"""The training pipeline: records become job data through two stages.
 
 ::
 
-    record ─► record2record ─► record set ─► record2sample ─► sample ─► sample2job ─► job data ─► trainer
+    record ─► record2sample ─► sample ─► sample2job ─► job data ─► trainer
 
-``TrainingPipeline`` holds a recipe's three stages and is the only object
+``TrainingPipeline`` holds a recipe's two stages and is the only object
 that the trainer gives records to and takes job data from. A recipe writes the
 stages; it does not subclass the pipeline:
 
-* the record-to-record stage (:class:`~reef.record2record.Record2Record`)
-  decides which records train, and in which record sets and units;
-* the record-to-sample stage (:class:`~reef.record2sample.Record2Sample`) turns each
+* the record-to-sample stage (:class:`~reef.record2sample.Record2Sample`)
+  decides which records train, in which record sets and units, and turns each
   record set into samples;
 * the sample-to-job stage (:class:`~reef.sample2job.Sample2Job`) bounds
   the sample buffer and shapes the samples of the buffer into one job's data.
 
-The pipeline owns what is the same for every recipe: it routes records, gives
-each record set's sample result back to its stage, saves the samples of each
+The pipeline owns what is the same for every recipe: it routes records, saves the samples of each
 ready unit to the scenario's sample store, computes the buffer from the store
 (the first ``buffer_size`` untrained samples in store order, and the rest of
 each group that those touch), hands out the data of one job at a time until the
 trainer acknowledges or releases it, and runs the training modes and the
-training instructions. ``ready`` and ``build_job_data`` take a sample count:
+training instructions, which the scenario gives it from the instructions queue
+(``reef.train.instructions``). ``ready`` and ``build_job_data`` take a sample count:
 the trainer asks for its stage's ``job_samples``, and a test or a tool may ask
 for another count. Automatic job data holds at least that many samples. It
 takes whole groups, so it can hold more.
 
 A client can also upload an ATIF trajectory. It is not a record, so the
-record-to-record stage never sees it; the record-to-sample stage renders it into
+record-to-sample stage never reads it as a record; the stage renders it into
 its training sample (``Record2Sample.uploaded_sample``), which counts as one
 sample. It waits in the store with the other samples, in store order.
 
@@ -41,7 +40,7 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Hashable, Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from typing import Any
 
@@ -53,14 +52,13 @@ from reef.core.reports import ReportBase
 from reef.core.training_request import TrainingRequest
 from reef.observability import ExperimentLogger
 from reef.pipeline_context import PipelineContext
-from reef.record2record import NoRecordSets, Record2Record, RecordSet, RecordSetUnit, SampleStatus
-from reef.record2sample import NoSamples, Record2Sample
+from reef.record2sample import NoSamples, Record2Sample, RecordSetUnit
 from reef.sample2job import NoJobData, Sample2Job
 from reef.storage.samples import SAMPLE_KINDS, MemorySampleStore, StoredSample, TrainerSamples, consumed_sample_id
 from reef.train.types import JobData, Sample, TrajectorySample
 
 #: The keys of the deployment's ``pipeline`` section, one for each stage.
-PIPELINE_STAGES = ("record2record", "record2sample", "sample2job")
+PIPELINE_STAGES = ("record2sample", "sample2job")
 
 logger = logging.getLogger(__name__)
 
@@ -69,14 +67,13 @@ logger = logging.getLogger(__name__)
 class PipelineSpec:
     """A recipe's default stage classes. A deployment's ``pipeline`` section can name others."""
 
-    record2record: type[Record2Record] = NoRecordSets
     record2sample: type[Record2Sample] = NoSamples
     sample2job: type[Sample2Job] = NoJobData
 
 
 @dataclass(frozen=True)
 class PipelineConfig:
-    """The three stages of a recipe's pipeline: each stage's class and its config.
+    """The two stages of a recipe's pipeline: each stage's class and its config.
 
     It comes from the deployment's ``pipeline`` section over the recipe's
     ``PipelineSpec``. Each key of the section is ``{module, config}``; a key
@@ -86,7 +83,6 @@ class PipelineConfig:
     order.
     """
 
-    record2record: PluginReference
     record2sample: PluginReference
     sample2job: PluginReference
     environ: Mapping[str, str] = field(default_factory=dict, repr=False, compare=False)
@@ -102,10 +98,8 @@ class PipelineConfig:
             raise PluginConfigError(
                 f"pipeline has unknown key(s) {', '.join(unknown)}; expected {', '.join(PIPELINE_STAGES)}"
             )
-        record2record, record2sample, sample2job = (section.get(stage) for stage in PIPELINE_STAGES)
+        record2sample, sample2job = (section.get(stage) for stage in PIPELINE_STAGES)
         return cls(
-            record2record=stage_reference(spec.record2record, record2record, "record2record")
-            or Record2Record.reference(record2record, setting="pipeline.record2record"),
             record2sample=stage_reference(spec.record2sample, record2sample, "record2sample")
             or Record2Sample.reference(record2sample, setting="pipeline.record2sample"),
             sample2job=stage_reference(spec.sample2job, sample2job, "sample2job")
@@ -114,23 +108,14 @@ class PipelineConfig:
         )
 
     def build(self, context: PipelineContext) -> TrainingPipeline:
-        """Build the pipeline of one scenario: each stage from its config, later stages with the earlier ones."""
-        record2record = Record2Record.referenced_class(self.record2record).from_config(
-            self.record2record.config, context=context, environ=self.environ
-        )
+        """Build the pipeline of one scenario: each stage from its config, the job stage with the sample stage."""
         record2sample = Record2Sample.referenced_class(self.record2sample).from_config(
-            self.record2sample.config, context=context, record2record=record2record, environ=self.environ
+            self.record2sample.config, context=context, environ=self.environ
         )
         sample2job = Sample2Job.referenced_class(self.sample2job).from_config(
-            self.sample2job.config,
-            context=context,
-            record2record=record2record,
-            record2sample=record2sample,
-            environ=self.environ,
+            self.sample2job.config, context=context, record2sample=record2sample, environ=self.environ
         )
-        return TrainingPipeline(
-            context, record2record=record2record, record2sample=record2sample, sample2job=sample2job
-        )
+        return TrainingPipeline(context, record2sample=record2sample, sample2job=sample2job)
 
 
 def stage_reference(default: type[Plugin], value: object, stage: str) -> PluginReference | None:
@@ -158,7 +143,7 @@ def grouped(stored: StoredSample, sample: Sample) -> Sample:
 
 
 class TrainingPipeline:
-    """Turn a scenario's records into typed job data through a recipe's three stages.
+    """Turn a scenario's records into typed job data through a recipe's two stages.
 
     Without stages it is the no-update default: it reads records for audit
     but never becomes ready and never produces job data.
@@ -184,15 +169,12 @@ class TrainingPipeline:
         self,
         context: PipelineContext,
         *,
-        record2record: Record2Record | None = None,
         record2sample: Record2Sample | None = None,
         sample2job: Sample2Job | None = None,
     ) -> None:
         self.context = context
         self.scenario = context.scenario
-        #: The record-to-record stage that turns the records into record sets.
-        self.record2record = NoRecordSets() if record2record is None else record2record
-        #: The record-to-sample stage that turns each record set into samples.
+        #: The record-to-sample stage that turns the records into samples.
         self.record2sample = NoSamples() if record2sample is None else record2sample
         #: The sample-to-job stage that shapes the samples of the buffer into job data.
         self.sample2job = NoJobData(context) if sample2job is None else sample2job
@@ -207,10 +189,6 @@ class TrainingPipeline:
         #: reshuffle what it references.
         self.pending: JobData | None = None
         self.data_number = 0
-        #: The samples of each record set whose unit is not ready yet, by set ID; a ready unit goes to the store.
-        self.set_samples: dict[Hashable, tuple[Sample, ...]] = {}
-        #: Record sets pushed to the record-to-sample stage that have no result yet, by set ID. Their records stay held.
-        self.waiting_sets: dict[Hashable, RecordSet] = {}
         #: The scenario's samples as this trainer reads them; in memory for a trainer without a scenario session.
         self.store = TrainerSamples(MemorySampleStore()) if context.samples is None else context.samples
         #: The sequence of the last stored sample that the pipeline read.
@@ -233,9 +211,7 @@ class TrainingPipeline:
 
     @property
     def required_request_types(self) -> frozenset[RequestType]:
-        """The kinds of record that the trainer gives the pipeline: the stage's, and instructions in ``manual``."""
-        if "manual" in self.supported_training_modes:
-            return self.sample2job.required_request_types | {RequestType.TRAIN}
+        """The kinds of record that the trainer gives the pipeline: the stage's."""
         return self.sample2job.required_request_types
 
     @property
@@ -281,18 +257,30 @@ class TrainingPipeline:
             self.read_store()
             self.store.insert_into_buffer(self.buffer())
         self.context = replace(self.context, training_mode=training_mode)
-        self.record2record.context_changed(self.context)
+        self.record2sample.context_changed(self.context)
 
     def admit_reports_of(self, report_type: type[ReportBase] | None) -> None:
         """Name the contract the scenario's ingress admits when it is wider than this recipe's own."""
         self.context = replace(self.context, admitted_report_type=report_type)
-        self.record2record.context_changed(self.context)
+        self.record2sample.context_changed(self.context)
 
     # ------------------------------------------------------------ instructions
 
     def buffered_requests(self) -> int:
         """How many instructions are read into memory and not yet consumed."""
         return len(self.training_requests)
+
+    def queue_instructions(self, requests: Iterable[TrainingRequest]) -> None:
+        """Hold the scenario's queued instructions, oldest first: each one that this pipeline did not consume yet.
+
+        The scenario reads them from the instructions queue before each step. An instruction that left the queue,
+        because a commit consumed it, leaves the pipeline with its failure.
+        """
+        queued = {request.id: request for request in requests if request.id not in self.consumed_requests}
+        if set(queued) - set(self.training_requests):
+            self.received_input = True
+        self.training_requests = queued
+        self.failed_requests = {key: value for key, value in self.failed_requests.items() if key in queued}
 
     def request_failure(self, request_id: str) -> str | None:
         """What the instruction's failed step said, when it failed at all."""
@@ -320,43 +308,24 @@ class TrainingPipeline:
         return frozenset({request_id})
 
     def consume_request(self, request_id: str) -> None:
-        """Take a queued instruction out of the queue; a replay of its record no longer queues it."""
-        self.training_requests.pop(request_id)
+        """Take a queued instruction out of the pipeline; ``queue_instructions`` no longer holds it."""
+        self.training_requests.pop(request_id, None)
         self.failed_requests.pop(request_id, None)
         self.consumed_requests.add(request_id)
 
     # ------------------------------------------------------------- records
 
-    def move_record_sets(self) -> bool:
-        """Push each record set that the record stage formed to the sample stage, settle each sample result, and
-        store the samples of each unit that became ready, and the samples that the sample stage made from no set.
+    def store_samples(self) -> bool:
+        """Store the samples of each unit that the stage made ready, and the samples that it made from no set.
 
-        The sample stage returns the result of each pushed set one time. Until
-        then the set waits, and its records stay held. A ready set's samples
-        wait for their unit. When the record stage makes a unit ready (``take_ready_units``), the pipeline
-        saves its samples to the sample store in one
-        transaction (``TrainerSamples.add_record_samples``), which consumes its
-        records, and the record stage ends the unit. Return whether one or more stored sample is new.
+        When the stage makes a unit ready (``take_ready_units``), the pipeline saves its samples to the sample store
+        in one transaction (``TrainerSamples.add_record_samples``), which consumes its records, and the stage ends
+        the unit. Return whether one or more stored sample is new.
         """
-        for record_set in self.record2record.pull():
-            self.record2sample.push(record_set)
-            self.waiting_sets[record_set.set_id] = record_set
-        for set_id, result in self.record2sample.pull():
-            if set_id not in self.waiting_sets:
-                raise ValueError(
-                    f"{type(self.record2sample).__name__} returned a result for set {set_id!r}, which no set waits for"
-                )
-            record_set = self.waiting_sets.pop(set_id)
-            if result.status is SampleStatus.READY:
-                self.set_samples[set_id] = result.samples
-            self.record2record.settle(record_set, result.status)
-        ready_units = self.record2record.take_ready_units()
+        ready_units = self.record2sample.take_ready_units()
         stored = False
         for unit in ready_units:
             stored = self.store_unit(unit) or stored
-        # The samples of the sets that the record stage ended are stored or never train.
-        for set_id in self.record2record.take_ended():
-            self.set_samples.pop(set_id, None)
         made = self.record2sample.made_samples()
         if made:
             stored = (
@@ -377,7 +346,7 @@ class TrainingPipeline:
         return f"{self.store.trainer}:" if self.store.trainer else ""
 
     def store_unit(self, unit: RecordSetUnit) -> bool:
-        """Save the samples of the ready ``unit`` to the sample store, and end the unit in the record stage; return
+        """Save the samples of the ready ``unit`` to the sample store, and end the unit in the stage; return
         whether one or more of them is new.
 
         Sample ``i`` of record set ``s`` has the ID ``<trainer>:<s>:<i>``, or ``<s>:<i>`` for the only trainer of a
@@ -388,26 +357,18 @@ class TrainingPipeline:
         prefix = self.sample_id_prefix
         samples = tuple(
             (f"{prefix}{set_id}:{index}", sample)
-            for set_id in unit.set_ids()
-            for index, sample in enumerate(self.set_samples[set_id])
+            for set_id, set_samples in self.record2sample.unit_samples(unit)
+            for index, sample in enumerate(set_samples)
         )
         group = f"{prefix}{unit.set_ids()[0]}" if len(samples) > 1 else None
         stored = self.store.add_record_samples(group, tuple(unit.consumed_ids()), samples)
-        self.record2record.consume(unit)
+        self.record2sample.consume(unit)
         return stored
 
     def push(self, item: AgentRecord) -> None:
-        """Read one record. Training instructions stay here; every other record goes through the record stage."""
-        if item.request_type is RequestType.TRAIN:
-            if item.scenario != self.scenario:
-                raise ValueError("training records must belong to the pipeline's scenario")
-            request = TrainingRequest.from_dict(item.payload, request_id=item.agent_record_id)
-            if request.id not in self.consumed_requests and request.id not in self.training_requests:
-                self.training_requests[request.id] = request
-                self.received_input = True
-            return
-        self.record2record.push(item)
-        self.move_record_sets()
+        """Read one record through the record-to-sample stage."""
+        self.record2sample.push(item)
+        self.store_samples()
 
     def uploaded_sample(self, trajectory: TrajectorySample) -> TrajectorySample:
         """The training sample of an uploaded trajectory (``Record2Sample.uploaded_sample``); ``ValueError`` when the
@@ -421,8 +382,8 @@ class TrainingPipeline:
         self.record2sample.job_ended(outcome)
 
     def observe_serving_artifact_id(self, artifact_id: str) -> None:
-        """Give the record-to-record stage the artifact that serves the scenario now, for its staleness check."""
-        self.record2record.observe_serving_artifact_id(artifact_id)
+        """Give the record-to-sample stage the artifact that serves the scenario now, for its staleness check."""
+        self.record2sample.observe_serving_artifact_id(artifact_id)
 
     # --------------------------------------------------------- job data cycle
 
@@ -495,8 +456,8 @@ class TrainingPipeline:
 
         In ``auto``, the candidates are the held samples that no job data reserved, of a kind that the recipe gives
         job parameters (``PipelineContext.job_parameters``; every kind for a trainer without a job loop), of the
-        kind of the first of them, and that are not stale: a sample that the record stages made is stale when the record stage's
-        staleness check finds its data too many versions behind (``Record2Record.is_stale``), and so is every
+        kind of the first of them, and that are not stale: a sample that the record-to-sample stage made is stale when
+        the stage's staleness check finds its data too many versions behind (``Record2Sample.is_stale``), and so is every
         sample of its group. The buffer is the first ``buffer_size`` candidates, or all of them without a
         ``buffer_size``, and the other candidates of every group that those touch, so a group trains whole.
         """
@@ -518,7 +479,7 @@ class TrainingPipeline:
         stale_groups = {
             stored.group or stored.sample_id
             for stored, sample in candidates
-            if stored.component is not None and self.record2record.is_stale((sample,))
+            if stored.component is not None and self.record2sample.is_stale((sample,))
         }
         fresh = [entry for entry in candidates if (entry[0].group or entry[0].sample_id) not in stale_groups]
         prefix = fresh if self.buffer_size is None else fresh[: self.buffer_size]
@@ -568,7 +529,7 @@ class TrainingPipeline:
                 "group": stored.group,
                 "component": stored.component,
                 "train_count": stored.train_count(self.store.trainer),
-                "stale": stored.component is not None and self.record2record.is_stale((sample,)),
+                "stale": stored.component is not None and self.record2sample.is_stale((sample,)),
             }
             for stored, sample in self.buffer_entries()
         )
@@ -581,15 +542,15 @@ class TrainingPipeline:
         self.read_store()
 
     def produce(self) -> bool:
-        """Advance the record-to-sample work: settle background work and move the formed record sets to samples;
+        """Advance the record-to-sample work: take in background work and store the samples that it made;
         return whether the trainer received new input since the last call: a sample stored here or by ``push`` when
         a record completed a set, or a training instruction that ``push`` read.
 
         The samples service calls it (``Trainer.produce_samples``); ``advance`` only reads the sample store.
         """
         # Background work, such as judgments or finished rounds, forms sets or makes samples without a new record.
-        self.record2record.advance(time.monotonic())
-        self.move_record_sets()
+        self.record2sample.advance(time.monotonic())
+        self.store_samples()
         stored, self.received_input = self.received_input, False
         return stored
 
@@ -661,29 +622,27 @@ class TrainingPipeline:
     # ------------------------------------------------------------- lifecycle
 
     def releasable_record_ids(self) -> frozenset[str]:
-        """Records whose held state can be released after a durable commit. A waiting set's records stay held."""
-        waiting = {record_id for record_set in self.waiting_sets.values() for record_id in record_set.record_ids()}
-        return (frozenset(self.consumed_requests) | self.record2record.releasable_record_ids()) - waiting
+        """Records whose held state can be released after a durable commit."""
+        return frozenset(self.consumed_requests) | self.record2sample.releasable_record_ids()
 
     def release_records(self, agent_record_ids: frozenset[str]) -> None:
         """Release committed in-memory state without changing stored records."""
         self.consumed_requests -= agent_record_ids
-        self.record2record.release_records(agent_record_ids)
+        self.record2sample.release_records(agent_record_ids)
 
     def background_jobs_running(self) -> bool:
-        """Return True while background work runs: a waiting set, or a record stage job such as a judgment.
+        """Return True while background work of the record-to-sample stage runs, such as a judgment.
 
         A finished job can make the pipeline ready without a new record.
         While this is True, the scenario's worker polls at a fixed interval.
         Otherwise it sleeps until the next accepted record. It must not block.
         """
-        return bool(self.waiting_sets) or self.record2record.background_jobs_running()
+        return self.record2sample.background_jobs_running()
 
     def operational_metrics(self) -> Mapping[str, float | int]:
         """Numeric queue state, sampled under the trainer lock without advancing work."""
         return {
             "buffered_requests": self.buffered_requests(),
-            **self.record2record.operational_metrics(),
             **self.record2sample.operational_metrics(),
         }
 
@@ -705,7 +664,7 @@ class TrainingPipeline:
         }
         if "manual" in self.supported_training_modes:
             state["buffered_requests"] = self.buffered_requests()
-        return {**state, **self.record2record.status(), **self.record2sample.status(), **self.sample2job.status()}
+        return {**state, **self.record2sample.status(), **self.sample2job.status()}
 
     def close(self) -> None:
         """Close the stages; safe to call more than once.
@@ -714,9 +673,6 @@ class TrainingPipeline:
         shared state or deliver further results.
         """
         try:
-            self.record2record.close()
+            self.sample2job.close()
         finally:
-            try:
-                self.sample2job.close()
-            finally:
-                self.record2sample.close()
+            self.record2sample.close()

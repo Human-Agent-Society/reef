@@ -31,6 +31,7 @@ from typing import Any, TextIO
 
 from reef.artifact.files import ArtifactFiles
 from reef.artifact.repository import BaseArtifactSource, BaseModelFiles
+from reef.core.chat_rendering import needs_rendering, rendered_job_data
 from reef.core.evaluation import RolloutScores
 from reef.core.job_data import JobData, TaskSample, trajectories
 from reef.runtime.durable_files import read_json, write_json
@@ -384,6 +385,16 @@ class TinkerJobComponent(LocalJobComponent, ABC):
                 # No task has a group of two samples to compare, so the job trains nothing.
                 return rollout_metrics
             data = JobData(data.data_id, rollouts.samples)
+        # A trajectory that serving recorded carries no tokens: the component renders it with the base model's chat
+        # template, and the client computes its log probabilities with the weights of the job's start.
+        if needs_rendering(data):
+            data, left_out = rendered_job_data(
+                data, self._client.chat_template(self._config.chat_template_kwargs or {})
+            )
+            if left_out:
+                rollout_metrics["unrenderable_samples"] = len(left_out)
+                if not data.samples:
+                    return rollout_metrics
         prepared = prepare_tinker_job(
             data,
             method,

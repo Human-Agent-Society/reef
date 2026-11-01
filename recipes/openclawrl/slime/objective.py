@@ -11,10 +11,9 @@
 # ``args`` instead (reef carries them as --openclawrl-* flags; defaults match
 # the paper launcher). Everything else is upstream text.
 #
-# ell_old on S^q is upstream's: gathered from the old-actor forward, never
-# from the serving engine. Reef's index set S^q still comes from the
-# generation-time capture — that is only an index set, and it is the one the
-# teacher was scored against.
+# S^q and ell_old on it are upstream's: the old actor's top-K and its
+# log-probs, which the pre-train hook computes from the weights the step starts
+# from, never from the serving engine.
 
 from __future__ import annotations
 
@@ -502,11 +501,9 @@ def openclawrl_loss(
     )
     new_log_probs = torch.cat(log_probs_and_entropy["log_probs"], dim=0)
 
-    # Reef adaptation: old-policy log-probs come from the Megatron
-    # old-actor recompute for the sampled-token GRPO branch (upstream
-    # semantics), while the OPD branch's ell_old on S^q ships from the
-    # serving engine's generation-time top-K capture — the true rollout
-    # policy, replacing upstream's megatron old-actor top-K.
+    # Old-policy log-probs come from the Megatron old-actor recompute: for the
+    # sampled-token GRPO branch, and for the OPD branch's ell_old on S^q, which
+    # the pre-train hook gathers with the old actor's top-K (upstream semantics).
 
     grpo_pg_loss = torch.zeros((), device=logits.device, dtype=torch.float32)
     grpo_pg_clipfrac = torch.zeros((), device=logits.device, dtype=torch.float32)
@@ -574,8 +571,8 @@ def openclawrl_loss(
                 "(topk_log_probs / topk_indices) and the teacher top-K "
                 f"(prm_teacher_topk_log_probs{cand_suffix} / "
                 f"prm_teacher_topk_indices{cand_suffix}) in the batch. "
-                "Confirm the serving backend captures generation top-K and "
-                "the grader ships per-candidate teacher top-K tensors."
+                "Confirm the pre-train hook computed the student top-K and "
+                "the teacher pass filled the per-candidate teacher top-K tensors."
             )
         # Narrow the Optionals for the type checker; have_student/have_teacher
         # established this above.
@@ -867,12 +864,20 @@ def _same_weights(backuper: Any, left: str, right: str) -> bool:
 
 @objective("reef_actor_pre_train_hook_path")
 def openclawrl_actor_pre_train(actor: Any, rollout_data: dict) -> None:
-    """Run the frozen-teacher K-loop over the batch's hint candidates."""
+    """Compute the student's top-K S^q and ell_old on it with the weights the step starts from, then run the
+    frozen-teacher K-loop over the batch's hint candidates at S^q."""
     if not rollout_data.get("teacher_tokens_cand"):
         return
     from slime.observability.timer import timer
 
     from recipes.openclawrl.slime.teacher import compute_openclaw_teacher_cands
+    from reef.train.slime_backend.distill.teacher import student_topk
 
+    args = actor.args
+    budget = int(getattr(args, "max_tokens_per_gpu", 0) or args.seq_length)
+    with timer("openclaw_student_topk"):
+        topk_indices, topk_log_probs = student_topk(actor, rollout_data, budget, top_k=int(args.openclawrl_topk))
+    rollout_data["topk_indices"] = topk_indices
+    rollout_data["topk_log_probs"] = topk_log_probs
     with timer("openclaw_teacher"):
         compute_openclaw_teacher_cands(actor, rollout_data)

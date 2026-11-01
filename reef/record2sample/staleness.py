@@ -8,18 +8,12 @@ from reef.core.job_data import Sample, TrajectorySample
 
 
 def producing_artifact_ids(samples: Sequence[Sample]) -> frozenset[str | None]:
-    """Return the artifacts that produced the training data of ``samples``, by ``artifact_id``.
+    """Return the artifacts that produced the training data of ``samples`` (``TrajectorySample.artifact_id``).
 
     A sample without a recorded artifact gives None. A ``TaskSample`` gives nothing: the algorithm rolls it out
     with the weights it trains.
     """
-    artifacts: set[str | None] = set()
-    for sample in samples:
-        if not isinstance(sample, TrajectorySample):
-            continue
-        artifact_id = sample.training.get("artifact_id")
-        artifacts.add(artifact_id if isinstance(artifact_id, str) and artifact_id else None)
-    return frozenset(artifacts)
+    return frozenset(sample.artifact_id for sample in samples if isinstance(sample, TrajectorySample))
 
 
 def is_stale(artifact_ids: frozenset[str | None], served_artifact_ids: Sequence[str], max_staleness: int) -> bool:

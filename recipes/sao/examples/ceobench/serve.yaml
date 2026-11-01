@@ -12,7 +12,7 @@
 # left) and the discounted changes of the weeks after it, scaled against the
 # weeks before (harness/report.py). A global batch size of 8 trains about a week of decision turns per step
 # (the SAO example trains one rollout per step; the paper trains 128), and
-# pipeline.record2record.config.max_staleness admits the turns of a week that earlier steps have aged.
+# pipeline.record2sample.config.max_staleness admits the turns of a week that earlier steps have aged.
 #
 # Context: a CEO-Bench week is one conversation whose tool outputs accumulate
 # until the agent calls next-week, and the agent reads the benchmark's docs
@@ -69,7 +69,7 @@ inference:
 recipe:
   implementation: recipes.sao.recipe:SAORecipe
 pipeline:
-  record2record:
+  record2sample:
     config:
       max_staleness: 64
   sample2job:
@@ -161,7 +161,6 @@ training:
     lr: "1e-5"
     lr-decay-style: "constant"
     loss-type: "policy_loss"
-    use-rollout-logprobs: true
     use-critic: true
     eps-clip: "0.3"
     eps-clip-high: "5.0"

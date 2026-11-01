@@ -63,16 +63,16 @@ def test_the_route_screens_the_text_and_stores_nothing_for_a_refusal(tmp_path: P
                 assert response.status == 400 and rule in reason, reason
                 # The reason names the rule, never the text.
                 assert "sk-" not in reason and "ghp_" not in reason and "<|" not in reason and "ignore" not in reason
-            assert scenario.records.count("agents", request_type=RequestType.TRAIN) == 0
-            assert scenario.trainer.pending_instructions() == 0
+            assert scenario.instructions.queued() == ()
+            assert scenario.pending_instructions() == 0
             assert not entered.is_set()
 
             response = await _post(client, {**_request(), "extra": "dropped"})
             assert response.status == 200, await response.text()
             answer = await response.json()
             assert answer["scenario"] == "agents" and answer["request_type"] == "train"
-            stored = scenario.records.get("agents", answer["agent_record_id"])
-            # The stored payload has one shape: a request that named nothing carries an empty ``requires``.
+            stored = scenario.instructions.get(answer["agent_record_id"])
+            # The queued payload has one shape: a request that named nothing carries an empty ``requires``.
             assert stored is not None and dict(stored.payload) == {**_request(), "requires": []}
             assert await asyncio.to_thread(entered.wait, 5)
         finally:
@@ -127,33 +127,30 @@ def test_requests_beyond_eight_are_accepted_and_pending_status_tracks_consumptio
                 assert response.status == 200, await response.text()
                 ids.append((await response.json())["agent_record_id"])
             assert await asyncio.to_thread(entered.wait, 5)
-            # One runs as a job, whose submission consumed it. The samples service reads every new record, whatever
-            # the cycle does, so the processor holds the nine others.
+            # One runs as a job, whose submission commit consumed it; the queue holds the nine others.
             for _ in range(200):
-                if scenario.trainer.pipeline_status()["buffered_requests"] == 9:
+                if scenario.pending_instructions() == 9:
                     break
                 await asyncio.sleep(0.05)
-            assert scenario.trainer.pipeline_status()["buffered_requests"] == 9
-            assert scenario.trainer.pending_instructions() == 9
+            assert scenario.pending_instructions() == 9
             status = await client.get("/reef/status")
             assert status.status == 200, await status.text()
             processor = (await status.json())["scenarios"]["agents"]["processor"]
-            assert processor["buffered_requests"] == 9
             assert processor["pending_instructions"] == 9
             # job_samples defaults to evolution.batch_size; the default buffer holds the data of one job.
             assert (processor["ready_samples"], processor["job_samples"], processor["buffer_size"]) == (0, 3, 3)
-            assert scenario.records.count("agents", request_type=RequestType.TRAIN) == 10
+            assert len(scenario.instructions.queued()) == 9
             # Retrying an accepted instruction does not add another pending request.
             retry = await _post(client, {**_request("request 0"), "agent_record_id": ids[0]})
             assert retry.status == 200 and (await retry.json())["agent_record_id"] == ids[0]
 
-            assert scenario.trainer.pending_instructions() == 9
+            assert scenario.pending_instructions() == 9
             release.set()
             for _ in range(600):
-                if scenario.trainer.pending_instructions() == 0:
+                if scenario.pending_instructions() == 0 and scenario.trainer.pending_instructions() == 0:
                     break
                 await asyncio.sleep(0.05)
-            assert scenario.trainer.pending_instructions() == 0
+            assert scenario.pending_instructions() == 0
             status = await client.get("/reef/status")
             assert status.status == 200, await status.text()
             drained = (await status.json())["scenarios"]["agents"]["processor"]

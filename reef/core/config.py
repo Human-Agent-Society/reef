@@ -313,7 +313,7 @@ class Settings:
         """Read one config into this settings dataclass, in the hyphen or the field spelling.
 
         ``setting`` names the config in errors, for example
-        ``pipeline.record2record.config``. An unknown field is refused.
+        ``pipeline.record2sample.config``. An unknown field is refused.
         """
         if not isinstance(config, Mapping):
             raise ValueError(f"{setting} must be an object")

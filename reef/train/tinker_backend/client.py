@@ -9,8 +9,10 @@ import time
 import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from typing import Any
 
+from reef.core.chat_rendering import ChatTemplate, TokenizerChatTemplate
 from reef.tinker.checkpoint import FreshStart, TinkerCheckpoint
 from reef.tinker.service import close_service, tinker_sdk
 from reef.train.tinker_backend.config import TinkerServiceConfig
@@ -75,6 +77,11 @@ class TinkerClient(ABC):
         ``learning_rates`` differ in length, ``loss`` refuses ``kl_coef``, or ``start`` is of another model or
         parameterization than the client's.
         """
+
+    @abstractmethod
+    def chat_template(self, template_kwargs: Mapping[str, Any]) -> ChatTemplate:
+        """The chat template of the configured base model with ``template_kwargs``, which renders a trajectory
+        that carries no tokens (``reef.core.chat_rendering``)."""
 
     @abstractmethod
     def check_remote(self, checkpoint: TinkerCheckpoint) -> None:
@@ -246,6 +253,8 @@ class TinkerSDKClient(TinkerClient):
                 )
                 self._check_info(info, start.state_path)
                 trainer = service.create_training_client_from_state_with_optimizer(start.state_path)
+            if loss.uses_rollout_log_probs and any(not row.logprobs for rows in steps for row in rows):
+                steps = self._with_start_logprobs(trainer, steps)
             step_metrics: list[Mapping[str, float]] = []
             for rows, learning_rate in zip(steps, learning_rates, strict=True):
                 base = self._base_logprobs(rows) if loss.needs_base_logprobs and kl_coef else []
@@ -293,6 +302,44 @@ class TinkerSDKClient(TinkerClient):
                     # The checkpoint is saved; a deployment reclaims the idle model later, so the job stands.
                     logger.warning("could not unload full-parameter model %s: %s", trainer.model_id, exc)
             close_service(self._sdk, service, status, timeout_s=self._config.train_timeout_s)
+
+    def _with_start_logprobs(self, trainer: Any, steps: Sequence[Sequence[TokenRow]]) -> list[tuple[TokenRow, ...]]:
+        """``steps`` with the log probabilities of each row that has none, from ``trainer``'s weights before the first
+        step: the old-policy log probabilities of the job's start, as serving returns none."""
+        result: list[tuple[TokenRow, ...]] = []
+        for rows in steps:
+            missing = [row for row in rows if not row.logprobs]
+            computed: dict[int, tuple[float, ...]] = {}
+            if missing:
+                data = [
+                    self._sdk.Datum(
+                        model_input=self._sdk.ModelInput.from_ints(list(row.tokens[:-1])),
+                        loss_fn_inputs={
+                            "target_tokens": self._sdk.TensorData(
+                                data=list(row.tokens[1:]), dtype="int64", shape=[len(row.tokens) - 1]
+                            ),
+                            "weights": self._sdk.TensorData(
+                                data=[1.0] * (len(row.tokens) - 1), dtype="float32", shape=[len(row.tokens) - 1]
+                            ),
+                        },
+                    )
+                    for row in missing
+                ]
+                output = trainer.forward(data, loss_fn="cross_entropy").result(timeout=self._config.train_timeout_s)
+                for row, values in zip(missing, output.loss_fn_outputs, strict=True):
+                    logprobs = [float(value) for value in values["logprobs"].data][-len(row.mask) :]
+                    if len(logprobs) != len(row.mask) or not all(math.isfinite(value) for value in logprobs):
+                        raise ValueError("Tinker log probabilities must be finite for every response token")
+                    computed[id(row)] = tuple(logprobs)
+            result.append(
+                tuple(replace(row, logprobs=computed[id(row)]) if id(row) in computed else row for row in rows)
+            )
+        return result
+
+    def chat_template(self, template_kwargs: Mapping[str, Any]) -> ChatTemplate:
+        if self.base_client is None:
+            self.base_client = self._service.create_sampling_client(base_model=self._model)
+        return TokenizerChatTemplate(self.base_client.get_tokenizer(), template_kwargs)
 
     def _base_logprobs(self, rows: Sequence[TokenRow]) -> list[list[float]]:
         if self.base_client is None:

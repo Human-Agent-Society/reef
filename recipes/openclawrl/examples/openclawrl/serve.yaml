@@ -48,8 +48,6 @@ inference:
     reef.inference.sglang.chat.SGLangInferenceHandler
   handler-config:
     tool_call_parser: qwen25
-    # Old-policy top-K capture (S^q / ell_old) for the top-K objective.
-    capture_topk: 4
     # The native /generate path has engine sampling defaults (T=1.0), not
     # the model generation_config the chat endpoint would apply; pin the
     # upstream-effective values (Qwen3-4B-Thinking generation_config) so
@@ -63,7 +61,7 @@ recipe:
   implementation: recipes.openclawrl.recipe:OpenClawRLRecipe
 pipeline:
   # The judging stage: sessions correlated, and each turn judged by the PRM.
-  record2record:
+  record2sample:
     config:
       # The recipe consumes this external service; Reef does not launch or schedule it.
       prm_url: http://127.0.0.1:23001

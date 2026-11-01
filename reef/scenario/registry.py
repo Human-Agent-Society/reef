@@ -40,6 +40,7 @@ from reef.scenario.admission import LoadedScenario, ScenarioAdmission, ScenarioL
 from reef.scenario.factory import ScenarioFactory
 from reef.scenario.scenario import Scenario
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage
+from reef.train.instructions import InstructionQueue
 
 logger = logging.getLogger(__name__)
 
@@ -132,6 +133,7 @@ class ScenarioRegistry:
         admission: ScenarioAdmission | None = None,
         lifecycle: ScenarioLifecycle | None = None,
         activates_runtime: bool = True,
+        instructions: InstructionQueue | None = None,
     ) -> None:
         self._model_configs: dict[str, ModelConfig] = {}
         self._storage = scenario_storage
@@ -146,6 +148,7 @@ class ScenarioRegistry:
             experiment_reports=self.experiment_reports,
             experiment_tracker=tracker,
             activates_runtime=activates_runtime,
+            instructions=instructions,
         )
         self._backend_factory = backend_factory
         self._recipe = recipe

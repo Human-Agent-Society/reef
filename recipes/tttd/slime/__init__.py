@@ -13,7 +13,6 @@ from reef.train.slime_backend.algorithm import SlimeAlgorithm, register_loss_fam
 class TttdAlgorithm(SlimeAlgorithm):
     loss_family = "tttd"
     loss_type = "custom_loss"
-    requires_rollout_logprobs = True
     advantages = "required"
     allows_slime_advantage_computation = True
     required_objective_hooks = ("custom_loss_function_path", "custom_advantage_function_path")

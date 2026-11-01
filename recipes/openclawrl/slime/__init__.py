@@ -17,7 +17,7 @@ from reef.train.slime_backend.data_builder import build_policy_rollout_data
 
 _HINT_SELECTIONS = ("shortest", "token_optimal", "sequence_optimal")
 _SUBSET_MODES = ("student", "overlap", "teacher")
-ROW_SHAPE = "[source_id, tokens, loss_mask, rollout_log_probs, reward, topk_indices, topk_log_probs, teacher_cands]"
+ROW_SHAPE = "[source_id, tokens, loss_mask, rollout_log_probs, reward, teacher_cands]"
 
 
 @dataclass(frozen=True)
@@ -34,6 +34,8 @@ class OpenclawrlSettings:
     adv_diff_clip: float = 1.0
     hint_selection: str = "sequence_optimal"
     subset_mode: str = "student"
+    #: K of the student's top-K index set S^q, which the actor computes from the weights the step starts from.
+    topk: int = 4
 
     def __post_init__(self) -> None:
         for name, value in (("w_rl", self.w_rl), ("w_opd", self.w_opd), ("adv_diff_clip", self.adv_diff_clip)):
@@ -43,12 +45,15 @@ class OpenclawrlSettings:
             raise ValueError(f"openclawrl hint_selection must be one of: {', '.join(_HINT_SELECTIONS)}")
         if self.subset_mode not in _SUBSET_MODES:
             raise ValueError(f"openclawrl subset_mode must be one of: {', '.join(_SUBSET_MODES)}")
+        if isinstance(self.topk, bool) or not isinstance(self.topk, int) or self.topk <= 0:
+            raise ValueError("openclawrl topk must be a positive int")
 
 
 def openclawrl_sample_row(sample: TrajectorySample) -> list[Any]:
-    """Shape one Reef sample into this family's 8-column wire row.
+    """Shape one Reef sample into this family's 6-column wire row.
 
-    Outbound mirror of :func:`build_openclawrl_rollout_data`.
+    Outbound mirror of :func:`build_openclawrl_rollout_data`. The teacher candidates are those that the component
+    rendered (``reef.core.chat_rendering.rendered_job_data``).
     """
     return [
         source_record_id(sample),
@@ -56,9 +61,7 @@ def openclawrl_sample_row(sample: TrajectorySample) -> list[Any]:
         list(sample.training.get("loss_mask", [])),
         list(sample.training.get("rollout_log_probs", [])),
         trajectory_reward(sample),
-        [list(row) for row in sample.training.get("topk_indices", [])],
-        [list(row) for row in sample.training.get("topk_log_probs", [])],
-        [dict(cand) for cand in sample.training.get("extras", {}).get("teacher_cands", ())],
+        [dict(cand) for cand in sample.training.get("teacher_candidates", ())],
     ]
 
 
@@ -69,14 +72,14 @@ def build_openclawrl_rollout_data(
 ) -> dict:
     """Validate and convert the family's rows into Slime's external rollout payload.
 
-    The three extra channels ride the family's wire row as columns 5-7 after the
+    The teacher candidates ride the family's wire row as column 5 after the
     shared policy 5-tuple (``openclawrl_sample_row``); the builder unpacks them
-    back into Slime's per-sample rollout keys:
+    back into Slime's per-sample rollout keys. The student's top-K vocab ids and
+    log-probs per response token (S^q and ``ell_old`` on it) are not on the wire:
+    the actor computes them from the weights the step starts from, before the
+    teacher pass, as upstream does.
 
-    * ``topk_indices`` / ``topk_log_probs`` — the student's generation-time
-      top-K vocab ids and log-probs per response token (``ell_old`` on S^q),
-      captured by the serving backend at sampling time.
-    * ``teacher_cands`` (carried in ``sample.training["extras"]``) — per
+    * ``teacher_cands`` (``sample.training["teacher_candidates"]``) — per
       candidate (accepted hints, shortest-first, up to the recipe's
       ``prm_max_hint_candidates``; or the un-enhanced anchor upstream ships for
       every RL-only turn), the candidate TOKEN SEQUENCE (upstream's
@@ -90,35 +93,19 @@ def build_openclawrl_rollout_data(
     candidate list as a contract violation rather than something to repair.
     """
     base_rows: list[list[Any]] = []
-    student_idx_rows: list[Any] = []
-    student_lp_rows: list[Any] = []
     cand_rows: list[Any] = []
     for index, row in enumerate(samples):
-        if not isinstance(row, Sequence) or isinstance(row, str | bytes) or len(row) != 8:
+        if not isinstance(row, Sequence) or isinstance(row, str | bytes) or len(row) != 6:
             raise ValueError(f"sample {index} must be {ROW_SHAPE}")
         base_rows.append(list(row[:5]))
-        student_idx_rows.append(row[5])
-        student_lp_rows.append(row[6])
-        cand_rows.append(row[7])
+        cand_rows.append(row[5])
 
     data = build_policy_rollout_data({**payload, "samples": base_rows}, base_rows, spec)
     response_lengths = data["response_lengths"]
 
-    topk_indices: list[list[list[int]]] = []
-    topk_log_probs: list[list[list[float]]] = []
     teacher_tokens_cand: list[list[list[int]]] = []
 
-    for index, (s_idx, s_lp, cands, response_length) in enumerate(
-        zip(student_idx_rows, student_lp_rows, cand_rows, response_lengths, strict=True)
-    ):
-        if len(s_idx) != response_length or len(s_lp) != response_length:
-            raise ValueError(f"sample {index} top-K rows must cover the {response_length}-token response")
-        k = len(s_idx[0]) if s_idx else 0
-        if any(len(row) != k for row in s_idx) or any(len(row) != k for row in s_lp):
-            raise ValueError(f"sample {index} top-K rows must be rectangular")
-        topk_indices.append([[int(v) for v in row] for row in s_idx])
-        topk_log_probs.append([[float(v) for v in row] for row in s_lp])
-
+    for index, (cands, response_length) in enumerate(zip(cand_rows, response_lengths, strict=True)):
         if not cands:
             raise ValueError(f"sample {index} carries no teacher candidate; the processor must retire such turns")
         sample_tokens: list[list[int]] = []
@@ -131,9 +118,7 @@ def build_openclawrl_rollout_data(
             sample_tokens.append([int(v) for v in tokens])
         teacher_tokens_cand.append(sample_tokens)
 
-    data["topk_indices"] = topk_indices
-    data["topk_log_probs"] = topk_log_probs
-    # The numeric prm_teacher_*_cand tensors are filled trainer-side by the
+    # The student's top-K and the numeric prm_teacher_*_cand tensors are filled trainer-side by the
     # Megatron teacher pass (recipes/openclawrl/slime/teacher.py);
     # the wire carries only the candidate sequences it forwards.
     data["teacher_tokens_cand"] = teacher_tokens_cand
@@ -144,7 +129,6 @@ def build_openclawrl_rollout_data(
 class OpenclawrlAlgorithm(SlimeAlgorithm):
     loss_family = "openclawrl"
     loss_type = "custom_loss"
-    requires_rollout_logprobs = False
     advantages = "required"
     # The worker's pre-train pass recomputes old-actor log-probabilities for
     # the GRPO branch. The objective's custom-advantage hook preserves the
@@ -222,6 +206,7 @@ class OpenclawrlAlgorithm(SlimeAlgorithm):
             dest="subset_mode",
             choices=list(_SUBSET_MODES),
         )
+        parser.add_argument("--openclawrl-topk", dest="topk", type=int)
         options, remaining = parser.parse_known_args(list(arguments))
         return OpenclawrlSettings(**vars(options)), remaining
 
@@ -233,6 +218,7 @@ class OpenclawrlAlgorithm(SlimeAlgorithm):
         args.openclawrl_adv_diff_clip = settings.adv_diff_clip
         args.openclawrl_hint_selection = settings.hint_selection
         args.openclawrl_subset_mode = settings.subset_mode
+        args.openclawrl_topk = settings.topk
 
     def bind(self, config=None, *, critic_steps_per_actor=1, critic_only_steps=0):
         # The component forwards whatever parse_specific_options returned; the

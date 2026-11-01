@@ -15,7 +15,6 @@ from tests.support.harness_service import backend_step, catalog, drive_trainer_j
 from tests.support.harness_steps import COMPONENT, TreeReleases, changed_rules, harness_backend, harness_recipe
 from tests.support.samples_service import make_samples
 
-from reef.core import AgentRecord, RequestType
 from reef.core.plugins import PluginReference
 from reef.core.requirements import REQUIRE_KINDS, merge_requires, parse_requires
 from reef.core.training_request import TrainingRequest
@@ -221,7 +220,7 @@ def test_the_route_stores_requires_and_refuses_a_credential_or_directive_shaped_
             response = await post_request(client, {**train_request(), "requires": [*REQUIRES, twilio]})
             assert response.status == 200, await response.text()
             answer = await response.json()
-            stored = scenario.records.get("agents", answer["agent_record_id"])
+            stored = scenario.instructions.get(answer["agent_record_id"])
             assert stored is not None
             assert stored.payload["requires"] == [
                 *REQUIRES,
@@ -230,7 +229,7 @@ def test_the_route_stores_requires_and_refuses_a_credential_or_directive_shaped_
             assert await asyncio.to_thread(entered.wait, 5)
             # A request without the field is stored with an empty list, so every record has one shape.
             plain = await (await post_request(client, train_request("plain"))).json()
-            assert scenario.records.get("agents", plain["agent_record_id"]).payload["requires"] == []
+            assert scenario.instructions.get(plain["agent_record_id"]).payload["requires"] == []
             # The two screens run over every name and check; the reason names the rule, never the literal.
             for item, rule in (
                 (
@@ -284,7 +283,12 @@ def test_the_route_stores_requires_and_refuses_a_credential_or_directive_shaped_
             ):
                 response = await post_request(client, {**train_request(), "requires": requires})
                 assert response.status == 400 and message in await response.text()
-            assert scenario.records.count("agents", request_type=RequestType.TRAIN) == 2
+            # Only the two accepted instructions are stored; the first one's job submission consumed it.
+            for _ in range(200):
+                if scenario.instructions.get(answer["agent_record_id"]).final:
+                    break
+                await asyncio.sleep(0.05)
+            assert [request.id for request in scenario.instructions.queued()] == [plain["agent_record_id"]]
         finally:
             release.set()
             await client.close()
@@ -460,11 +464,7 @@ def test_the_step_row_keeps_the_backends_training_request_and_fills_a_step_that_
         records = SQLiteRecordStore()
         trainer = recipe.build("agents", records, releases=ComponentReleases(TreeReleases(recipe.seed), COMPONENT))
         try:
-            records.append(
-                AgentRecord.create(
-                    scenario="agents", request_type=RequestType.TRAIN, payload=payload, agent_record_id="ask-1"
-                )
-            )
+            trainer.queue_instructions([TrainingRequest.from_dict(payload, request_id="ask-1")])
             make_samples(trainer)
             result = drive_trainer_job(trainer)
             assert result is not None

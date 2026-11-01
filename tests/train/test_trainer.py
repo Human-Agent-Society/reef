@@ -8,6 +8,8 @@ import pytest
 from tests.support._grouped_pg import GROUPED_PG_OBJECTIVE as _GROUPED_PG_OBJECTIVE
 from tests.support._grouped_pg import grouped_policy_pipeline
 from tests.support._threshold_processor import ThresholdJobData, threshold_pipeline
+from tests.support.chat_templates import CharTemplate
+from tests.support.conversations import conversation
 from tests.support.runtime_stubs import (
     RecordingComponent,
     StubInferenceRuntime,
@@ -16,17 +18,16 @@ from tests.support.runtime_stubs import (
 )
 from tests.support.samples_service import make_samples
 
-import reef.record2sample.assembly as reported_module
 from recipes.sao import SAOJobData, SAOSamples
-from recipes.tttd import TTTDGridSettings, TTTDGroupedRolloutReport, TTTDJobData, TTTDRecord2Record, TTTDSamples
+from recipes.tttd import TTTDGroupedRolloutReport, TTTDJobData, TTTDSamples, TTTDSettings
 from reef.artifact import ArtifactRef, InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
+from reef.core.chat_rendering import rendered_job_data
 from reef.core.plugins import PluginConfigError
 from reef.core.reports import ReportValidationError
 from reef.core.trajectories import source_record_id, trajectory_reward
 from reef.dispatcher import Dispatcher
 from reef.recipe import WeightTrainingRecipe, WeightTrainingSpec
-from reef.record2record import ExclusiveReportRecord2Record
 from reef.record2sample.assembly import SampleAssemblySettings
 from reef.record2sample.service import ProducedSamples
 from reef.runtime.interfaces import TrainingMethod
@@ -40,7 +41,7 @@ from reef.train.algos.schedule import StepScheduling
 from reef.train.jobs import JobLoop, JobLoopState
 from reef.train.pipeline import PipelineConfig, PipelineSpec
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
-from reef.train.types import JobData, TrajectorySample
+from reef.train.types import JobData
 
 NUM_GPUS = 0
 
@@ -48,8 +49,7 @@ NUM_GPUS = 0
 def sao_pipeline(context: PipelineContext, *, accept_multi_turn: bool = False) -> TrainingPipeline:
     return TrainingPipeline(
         context,
-        record2record=ExclusiveReportRecord2Record(context),
-        record2sample=SAOSamples(SampleAssemblySettings(accept_multi_turn_policy_samples=accept_multi_turn)),
+        record2sample=SAOSamples(context, SampleAssemblySettings(accept_multi_turn_policy_samples=accept_multi_turn)),
         sample2job=SAOJobData(context, None, None),
     )
 
@@ -100,27 +100,11 @@ def inference(agent_record_id: str, *, candidate: str | None = None) -> AgentRec
     )
 
 
-def training_inference(
-    agent_record_id: str,
-    tokens: list[int],
-    loss_mask: list[int],
-    rollout_log_probs: list[float],
-) -> AgentRecord:
-    return AgentRecord.create(
-        scenario="math",
-        request_type=RequestType.INFERENCE,
-        agent_record_id=agent_record_id,
-        payload={
-            "response": {
-                "training": {
-                    "tokens": tokens,
-                    "loss_mask": loss_mask,
-                    "rollout_log_probs": rollout_log_probs,
-                    "artifact_id": "artifact-1",
-                }
-            }
-        },
-    )
+def served_call(agent_record_id: str, turns: int, *, filler: str = "") -> AgentRecord:
+    """A call of the conversation ``filler`` names (``conversation``), which the inference service recorded as served
+    by ``artifact-1``; a call with more turns continues a call of the same conversation with fewer."""
+    record = conversation(agent_record_id, turns, filler=filler)
+    return replace(record, payload={**record.payload, "artifact_id": "artifact-1"})
 
 
 def report(agent_record_id: str, references: str | tuple[str, ...], score: float, **metadata) -> AgentRecord:
@@ -195,10 +179,9 @@ def test_pairing_processor_emits_policy_samples_for_spo() -> None:
     (item,) = batch.samples
     assert source_record_id(item) == "i1"
     assert trajectory_reward(item) == 0.8
-    assert item.training["tokens"] == [1, 2]
-    assert item.training["loss_mask"] == [0, 1]
-    assert item.training["rollout_log_probs"] == [-0.2]
-    assert item.training["artifact_id"] is None
+    # The sample is the ATIF trajectory of the call, which the training component renders: it carries no tensors.
+    assert not {"tokens", "loss_mask", "rollout_log_probs"} & set(item.training)
+    assert item.artifact_id is None
     assert item.metadata["report_agent_record_id"] == "r1"
 
 
@@ -215,8 +198,9 @@ def test_pairing_processor_rejects_a_non_finite_score(bad_score: float) -> None:
 @pytest.mark.unit
 def test_pairing_processor_assembles_ordered_multi_reference_report() -> None:
     processor = threshold_pipeline(PipelineContext("math"), accept_multi_turn=True)
-    first = training_inference("i1", [10, 20], [1], [-0.1])
-    second = training_inference("i2", [10, 20, 11, 21], [1], [-0.2])
+    # Two conversations: the report names two trajectories, and the sample holds the calls of both in order.
+    first = served_call("i1", 1)
+    second = served_call("i2", 1, filler=" again")
     final_report = report("r1", ("i1", "i2"), 0.75)
 
     processor.push(first)
@@ -226,13 +210,12 @@ def test_pairing_processor_assembles_ordered_multi_reference_report() -> None:
 
     batch = processor.build_job_data(1)
     (item,) = batch.samples
-    assert source_record_id(item) == "r1"
+    assert source_record_id(item) == "i2"
     assert trajectory_reward(item) == 0.75
-    assert item.training["tokens"] == [10, 20, 11, 21]
-    assert item.training["loss_mask"] == [1, 0, 1]
-    assert item.training["rollout_log_probs"] == [-0.1, 0.0, -0.2]
-    assert item.training["artifact_id"] == "artifact-1"
-    assert item.training["turn_count"] == 2
+    # Both replies train: no agent step is copied context.
+    agent_steps = [step for step in item.trajectory["steps"] if step["source"] == "agent"]
+    assert [step.get("is_copied_context", False) for step in agent_steps] == [False, False]
+    assert item.artifact_id == "artifact-1"
     assert [record["payload"] for record in item.metadata["records"]] == [first.payload, second.payload]
     processor.acknowledge(batch.data_id)
     assert processor.releasable_record_ids() == frozenset({"i1", "i2", "r1"})
@@ -248,21 +231,9 @@ def test_pairing_processor_assembles_ordered_multi_reference_report() -> None:
         pytest.param(TTTDJobData, id="tttd"),
     ],
 )
-def test_cookbook_processors_assemble_before_rejecting_multi_turn_reports(
+def test_cookbook_processors_wait_for_references_before_rejecting_a_report_of_several_trajectories(
     processor_type,
-    monkeypatch,
 ) -> None:
-    assembled_samples: list[TrajectorySample] = []
-    assembler = reported_module.make_multi_turn_policy_trajectory
-
-    def record_assembly(*args, **kwargs):
-        sample = assembler(*args, **kwargs)
-        assert sample is not None
-        assembled_samples.append(sample)
-        return sample
-
-    monkeypatch.setattr(reported_module, "make_multi_turn_policy_trajectory", record_assembly)
-
     metadata = {}
     if processor_type is TTTDJobData:
         metadata = {
@@ -275,43 +246,35 @@ def test_cookbook_processors_assemble_before_rejecting_multi_turn_reports(
             "comparison_set": "tttd-step-0-group-0",
         }
         context = PipelineContext("math", TTTDGroupedRolloutReport)
-        tttd_record2record = TTTDRecord2Record(context, TTTDGridSettings(groups_per_step=1, rollouts_per_group=2))
+        tttd_samples = TTTDSamples(context, TTTDSettings(groups_per_step=1, rollouts_per_group=2))
         processor = TrainingPipeline(
             context,
-            record2record=tttd_record2record,
-            record2sample=TTTDSamples(SampleAssemblySettings(), tttd_record2record),
-            sample2job=TTTDJobData(context, tttd_record2record, None, None),
+            record2sample=tttd_samples,
+            sample2job=TTTDJobData(context, tttd_samples, None, None),
         )
     else:
         context = PipelineContext("math")
         processor = TrainingPipeline(
             context,
-            record2record=ExclusiveReportRecord2Record(context),
-            record2sample=SAOSamples(SampleAssemblySettings()),
+            record2sample=SAOSamples(context, SampleAssemblySettings()),
             sample2job=SAOJobData(context, None, None),
         )
-    processor.push(training_inference("i1", [10, 20], [1], [-0.1]))
-    multi_turn_report = report("r1", ("i1", "i2"), 1.0, **metadata)
+    processor.push(served_call("i1", 1))
+    # i2 does not continue i1, so the report names two trajectories.
+    multi_trajectory_report = report("r1", ("i1", "i2"), 1.0, **metadata)
     with pytest.raises(ReportValidationError, match="unavailable"):
-        processor.push(multi_turn_report)
-    assert assembled_samples == []
-    processor.push(training_inference("i2", [10, 20, 11, 21], [1], [-0.2]))
+        processor.push(multi_trajectory_report)
+    processor.push(served_call("i2", 1))
     with pytest.raises(ValueError, match="accept_multi_turn"):
-        processor.push(multi_turn_report)
-    assert assembled_samples
-    assert all(
-        sample.training.get("turn_count", 1) == 2 and (sample.training.get("turn_count", 1) > 1)
-        for sample in assembled_samples
-    )
+        processor.push(multi_trajectory_report)
     assert processor.releasable_record_ids().isdisjoint({"i1", "i2", "r1"})
 
 
 @pytest.mark.unit
 def test_failed_multi_turn_assembly_preserves_inputs_and_other_live_reports() -> None:
     processor = threshold_pipeline(PipelineContext("math"))
-    processor.push(training_inference("i1", [10, 20], [1], [-0.1]))
-    processor.push(training_inference("i2", [10, 20], [1], [-0.1]))
-    processor.push(training_inference("i3", [10, 20, 11, 21], [1], [-0.2]))
+    for record_id in ("i1", "i2", "i3"):
+        processor.push(served_call(record_id, 1))
     processor.push(report("single", "i1", 1.0))
     with pytest.raises(ValueError, match="accept_multi_turn"):
         processor.push(report("multi", ("i2", "i3"), 1.0))
@@ -320,17 +283,6 @@ def test_failed_multi_turn_assembly_preserves_inputs_and_other_live_reports() ->
     assert processor.releasable_record_ids().isdisjoint({"i2", "i3", "multi"})
     assert processor.acknowledge(processor.build_job_data(1).data_id) == {"sample:single:0"}
     assert processor.releasable_record_ids().isdisjoint({"i2", "i3", "multi"})
-
-
-@pytest.mark.unit
-def test_pairing_processor_raises_for_forked_multi_turn_rollout() -> None:
-    processor = threshold_pipeline(PipelineContext("math"), accept_multi_turn=True)
-    processor.push(training_inference("i1", [1, 2, 3], [1], [-0.1]))
-    processor.push(training_inference("i2", [1, 9, 3, 4], [1], [-0.2]))
-    with pytest.raises(ValueError, match="cannot assemble"):
-        processor.push(report("r1", ("i1", "i2"), 1.0))
-    assert not processor.ready(1)
-    assert processor.releasable_record_ids().isdisjoint({"i1", "i2", "r1"})
 
 
 @pytest.mark.unit
@@ -693,42 +645,38 @@ def test_a_grouped_recipe_trains_one_comparison_set_as_one_job(tmp_path) -> None
 
 
 @pytest.mark.unit
-def test_sao_processor_defaults_action_mask_for_assembled_rollouts() -> None:
-    """A multi-turn rollout reaches SAO through the shared assembly path,
-    which fills no SAO-only fields; the processor must apply its documented
-    single-turn default (action mask = loss mask) instead of rejecting the
-    assembled sample on an empty action mask."""
+def test_the_slime_sao_row_defaults_the_action_mask_to_the_loss_mask_of_a_rendered_rollout() -> None:
+    """A record-made SAO sample carries no tensors and no action mask; once the training component renders it, the
+    SAO row's action mask is the loss mask, so every trained token is an action."""
     processor = sao_pipeline(PipelineContext("math"), accept_multi_turn=True)
-    processor.push(training_inference("i1", [10, 20], [1], [-0.1]))
-    processor.push(training_inference("i2", [10, 20, 11, 21], [1], [-0.2]))
-    processor.push(report("r1", ("i1", "i2"), 1.0))
+    processor.push(served_call("i1", 1))
+    processor.push(served_call("i2", 3))
+    processor.push(report("r1", "i2", 1.0))
 
     assert processor.ready(1)
     batch = processor.build_job_data(1)
     (sample,) = batch.samples
-    assert sample.training.get("turn_count", 1) > 1
-    assert tuple(sample.training.get("action_mask", [])) == tuple(sample.training.get("loss_mask", []))
-    assert any(tuple(sample.training.get("action_mask", [])))
+    assert "action_mask" not in sample.training
+    rendered, left_out = rendered_job_data(batch, CharTemplate())
+    assert left_out == ()
+    prepared = prepare_slime_job(rendered, TrainingMethod("sao"), {}, StepScheduling(), step_size=1)
+    assert prepared.payload is not None
+    (row,) = prepared.payload["samples"]
+    loss_mask, action_mask, producing_artifact_id = row[2], row[5], row[6]
+    assert action_mask == loss_mask and any(action_mask)
+    assert producing_artifact_id == "artifact-1"
 
 
-@pytest.mark.parametrize("missing", ["tokens", "rollout_log_probs"])
-def test_reported_samples_leave_required_tensor_validation_to_training_backend(missing: str) -> None:
+def test_reported_samples_leave_rendering_and_tensor_validation_to_the_training_component() -> None:
     from reef.train.slime_backend.data_builder import to_slime_rollout_data
 
     processor = sao_pipeline(PipelineContext("math"))
-    payload = {"tokens": [10, 20], "loss_mask": [1], "rollout_log_probs": [-0.1]}
-    payload.pop(missing)
-    processor.push(
-        AgentRecord.create(
-            scenario="math",
-            request_type=RequestType.INFERENCE,
-            agent_record_id="i1",
-            payload=payload,
-        )
-    )
+    processor.push(served_call("i1", 1))
     processor.push(report("r1", "i1", 1.0))
     batch = processor.build_job_data(1)
-    assert len(batch.samples) == 1
+    (sample,) = batch.samples
+    # The stage stores the trajectory without tensors; a job that is prepared without rendering it fails explicitly.
+    assert "tokens" not in sample.training
     prepared = prepare_slime_job(batch, TrainingMethod("sao"), {}, StepScheduling(), step_size=1)
     assert prepared.payload is not None
     with pytest.raises(ValueError):

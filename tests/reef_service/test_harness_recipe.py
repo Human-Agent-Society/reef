@@ -491,7 +491,6 @@ def test_recipe_builds_the_stages_its_pipeline_section_names(tmp_path: Path) -> 
         from_config(
             settings(
                 pipeline={
-                    "record2record": {"module": "reef.record2record:InferenceRecord2Record"},
                     "record2sample": {"module": "reef.record2sample.traces:InferenceSamples"},
                     "sample2job": {"config": {"buffer_size": 6}},
                 },
@@ -500,14 +499,14 @@ def test_recipe_builds_the_stages_its_pipeline_section_names(tmp_path: Path) -> 
             runtime=proxy,
         )
     )
-    stages = (records.pipeline.record2record, records.pipeline.record2sample, records.pipeline.sample2job)
-    assert [type(stage).__name__ for stage in stages] == ["InferenceRecord2Record", "InferenceSamples", "TraceJobData"]
+    stages = (records.pipeline.record2sample, records.pipeline.sample2job)
+    assert [type(stage).__name__ for stage in stages] == ["InferenceSamples", "TraceJobData"]
     # evolution.batch_size is the default job_samples.
     assert (records.job_samples, records.pipeline.buffer_size) == (2, 6)
 
     reported = trainer_of(from_config(settings(), runtime=proxy))
-    stages = (reported.pipeline.record2record, reported.pipeline.record2sample, reported.pipeline.sample2job)
-    assert [type(stage).__name__ for stage in stages] == ["ReportRecord2Record", "TraceSamples", "TraceJobData"]
+    stages = (reported.pipeline.record2sample, reported.pipeline.sample2job)
+    assert [type(stage).__name__ for stage in stages] == ["TraceSamples", "TraceJobData"]
     # The default buffer holds the data of one job.
     assert (reported.job_samples, reported.pipeline.buffer_size) == (1, 1)
     # The stage config sets job_samples over evolution.batch_size.
@@ -520,6 +519,9 @@ def test_recipe_builds_the_stages_its_pipeline_section_names(tmp_path: Path) -> 
         from_config(settings({"batch_size": 2}))
     with pytest.raises(RecipeConfigError, match="batch_policy"):
         from_config(settings({"batch_policy": "records"}))
+    # The record-to-record stage merged into record2sample, so its key is unknown.
+    with pytest.raises(RecipeConfigError, match="pipeline has unknown key"):
+        from_config(settings(pipeline={"record2record": {}}), runtime=proxy)
     # A bad stage config fails when the scenario's pipeline builds.
     for stage_config, message in (
         ({"batch_size": 2}, "unknown config fields: batch_size"),

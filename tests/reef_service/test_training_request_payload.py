@@ -4,9 +4,7 @@ from dataclasses import replace
 
 import pytest
 
-from reef.core import RequestType
 from reef.core.training_request import TrainingRequest, normalize_training_request_payload
-from reef.service.request_service import normalize_request_payload
 
 
 def test_request_normalization_preserves_text_and_cleans_optional_fields() -> None:
@@ -31,7 +29,6 @@ def test_request_normalization_preserves_text_and_cleans_optional_fields() -> No
         "client": {"platform": "darwin", "commands": {"git": True, "node": False}},
     }
     assert normalize_training_request_payload(payload) == expected
-    assert normalize_request_payload(RequestType.TRAIN, payload) == (expected, ())
     request = TrainingRequest.from_dict(payload, request_id="record-1")
     assert request.id == "record-1"
     assert request.to_dict() == expected

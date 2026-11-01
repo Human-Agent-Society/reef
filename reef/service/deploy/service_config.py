@@ -337,12 +337,11 @@ class ServiceConfig:
         default=None,
         metadata=config_metadata("Activation rule of new artifacts as a JSON/YAML object.", path=("activation",)),
     )
-    #: The stage classes that replace a weight-training recipe's own: ``record2record``, ``record2sample``, ``sample2job``.
+    #: The stage classes that replace a weight-training recipe's own: ``record2sample`` and ``sample2job``.
     pipeline_settings: Mapping[str, Any] | None = field(
         default=None,
         metadata=config_metadata(
-            "Pipeline stages as a JSON/YAML object: record2record, record2sample and sample2job, each with module and "
-            "config.",
+            "Pipeline stages as a JSON/YAML object: record2sample and sample2job, each with module and config.",
             path=("pipeline",),
         ),
     )

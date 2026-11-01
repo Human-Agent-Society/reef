@@ -581,28 +581,15 @@ def test_processes_depend_only_on_the_standard_library_and_lifecycle() -> None:
     assert all(target.split(".")[0] in sys.stdlib_module_names for target in imports)
 
 
-def test_record_to_record_stage_depends_only_on_contracts_below_training() -> None:
-    # Record-to-sample and the trainer both use this stage, so it never imports either of them.
+def test_record_to_sample_stage_depends_only_on_contracts_below_training() -> None:
+    # The trainer and the recipes import the stage, so it never imports them or the generator service.
     allowed = (
         "reef.core",
         "reef.runtime.interfaces",
-        "reef.observability",
         "reef.execution.jobs",
         "reef.pipeline_context",
-        "reef.record2record",
+        "reef.record2sample",
     )
-    for path in sorted((REPO_ROOT / "reef" / "record2record").rglob("*.py")):
-        package = ".".join(path.parent.relative_to(REPO_ROOT).parts)
-        for target in _imported_modules(ast.parse(path.read_text(encoding="utf-8")), package=package):
-            if target == "reef" or target.startswith("reef."):
-                assert any(
-                    target == prefix or target.startswith(prefix + ".") for prefix in allowed
-                ), f"{path.relative_to(REPO_ROOT)} imports {target}"
-
-
-def test_record_to_task_contract_depends_only_on_record2record() -> None:
-    # The trainer and the recipes import the contract, so it never imports them or the generator service.
-    allowed = ("reef.core", "reef.record2record", "reef.record2sample", "reef.pipeline_context")
     for path in sorted((REPO_ROOT / "reef" / "record2sample").glob("*.py")):
         for target in _imported_modules(ast.parse(path.read_text(encoding="utf-8")), package="reef.record2sample"):
             if target.startswith("reef.record2sample.generator"):
@@ -619,7 +606,6 @@ def test_task_to_job_stage_depends_only_on_contracts_below_training() -> None:
         "reef.core",
         "reef.observability",
         "reef.pipeline_context",
-        "reef.record2record",
         "reef.record2sample",
         "reef.storage.samples",
         "reef.storage.tasks",

@@ -187,9 +187,9 @@ loading, and an optional client-pulled file tree, composed as fields on one
 Training pipeline
 -----------------
 
-The method's data side. Three stages turn records into typed job data: the
-record-to-record stage decides which records train, the record-to-sample stage
-turns each record set into samples, and the sample-to-job stage shapes the samples
+The method's data side. Two stages turn records into typed job data. The
+record-to-sample stage decides which records train and in which groups, and
+turns each record set into samples. The sample-to-job stage shapes the samples
 into one job's data. Reported feedback uses valid reports with existing
 inference references; computed feedback derives its signal from traffic.
 Reef's ``TrainingPipeline`` drives the stages and owns job size,
@@ -342,9 +342,9 @@ Staleness
 ---------
 
 The number of artifacts that a scenario served after the artifact that
-produced a sample, bounded by the record-to-record stage's ``max_staleness``
-(``pipeline.record2record.config.max_staleness``). Zero trains a sample only
-while the artifact that produced it serves. The record-to-record stage checks
+produced a sample, bounded by the record-to-sample stage's ``max_staleness``
+(``pipeline.record2sample.config.max_staleness``). Zero trains a sample only
+while the artifact that produced it serves. The record-to-sample stage checks
 it before job data forms.
 
 Reported and computed feedback

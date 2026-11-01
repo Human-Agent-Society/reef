@@ -377,13 +377,11 @@ def test_http_app_records_inference_and_returns_backend_response(tmp_path) -> No
 
 
 @pytest.mark.unit
-def test_a_rollout_call_keeps_no_record_and_returns_its_training_block(tmp_path) -> None:
-    training = {"tokens": [1, 2, 3], "loss_mask": [1], "rollout_log_probs": [-0.5]}
-
+def test_a_rollout_call_keeps_no_record_and_returns_no_training_block(tmp_path) -> None:
     async def backend(artifact: Artifact, path: str, payload: dict) -> dict:
-        # The engine's own name for its loaded weights stays inside the engine.
-        engine_training = {**training, "runtime_load_id": "engine:3", "runtime_load_spans": []}
-        return {"choices": [{"message": {"content": "hi"}}], "training": engine_training}
+        # An engine handler may still return a training block; serving never passes it on.
+        training = {"tokens": [1, 2, 3], "loss_mask": [1], "rollout_log_probs": [-0.5]}
+        return {"choices": [{"message": {"content": "hi"}}], "training": training}
 
     dispatcher = serving_dispatcher(tmp_path)
     served_artifact_id = dispatcher.get_or_create_scenario("chat").serving_artifact_id()
@@ -394,18 +392,17 @@ def test_a_rollout_call_keeps_no_record_and_returns_its_training_block(tmp_path)
             body = {"model": "reef", "messages": [{"role": "user", "content": "hi"}]}
             response = await client.post("/v1/chat/completions", headers=rollout, json=body)
             assert response.status == 200 and "x-reef-agent-record-id" not in response.headers
-            # The training block names the artifact that answered.
-            assert (await response.json())["training"] == {**training, "artifact_id": served_artifact_id}
+            assert await response.json() == {"choices": [{"message": {"content": "hi"}}]}
             streamed = await client.post("/v1/chat/completions", headers=rollout, json={**body, "stream": True})
             assert streamed.status == 400
             served = await client.post("/v1/chat/completions", headers={"x-reef-scenario": "chat"}, json=body)
-            assert "training" not in await served.json(), "a served call never shows its training block"
+            assert "training" not in await served.json(), "a served call never shows a training block"
 
     asyncio.run(run())
     records = dispatcher.get_or_create_scenario("chat").records.replay("chat")
     assert len(records) == 1, "only the served call is a record"
     assert records[0].payload["artifact_id"] == served_artifact_id
-    assert records[0].payload["response"]["training"] == training
+    assert "training" not in records[0].payload["response"]
 
 
 @pytest.mark.unit
@@ -755,26 +752,29 @@ class StreamRecordHandler(InferenceHandler):
 STREAM_TRAINING = {"tokens": [10, 11, 20, 21], "loss_mask": [1, 1], "rollout_log_probs": [-0.5, -0.5]}
 CHAT_STREAM_FRAMES = (b'data: {"choices":[{"delta":{"content":"a b"}}]}\n\n', b"data: [DONE]\n\n")
 MESSAGES_STREAM_FRAMES = (
-    b'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,'
-    b'"delta":{"type":"text_delta","text":"a b"}}\n\n',
+    (
+        b'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,'
+        b'"delta":{"type":"text_delta","text":"a b"}}\n\n'
+    ),
     b'event: message_stop\ndata: {"type":"message_stop"}\n\n',
 )
 
 
 def chat_stream_record(finish_reason: str) -> dict:
+    """A chat record as an engine handler returns it; the training block must not reach the stored record."""
     return {
         "choices": [{"index": 0, "message": {"content": "a b"}, "finish_reason": finish_reason}],
         "training": STREAM_TRAINING,
     }
 
 
-#: An Anthropic record shows an abort only in its private training block: stop_reason maps abort to end_turn.
+#: An Anthropic record shows an abort only in its ``meta_info``: stop_reason maps abort to end_turn.
 ABORTED_MESSAGES_RECORD = {
     "type": "message",
     "role": "assistant",
     "content": [{"type": "text", "text": "a b"}],
     "stop_reason": "end_turn",
-    "training": {**STREAM_TRAINING, "finish_reason": "abort"},
+    "meta_info": {"finish_reason": "abort"},
 }
 
 
@@ -820,7 +820,7 @@ def test_aborted_stream_has_no_receipt_and_is_recorded_incomplete(
         assert handler.calls == 1
         [record] = dispatcher.get_or_create_scenario("chat").records.replay("chat")
         recorded = record.payload["response"]
-        assert recorded["training"] == record_response["training"]
+        assert "training" not in recorded
         assert recorded["stream_delivery"]["complete"] is False
         assert recorded["stream_delivery"]["error"] == "upstream engine aborted the generation"
 
@@ -844,14 +844,14 @@ def test_aborted_non_sse_stream_has_no_receipt_header(tmp_path) -> None:
         assert "x-reef-agent-record-id" not in headers
         [record] = dispatcher.get_or_create_scenario("chat").records.replay("chat")
         recorded = record.payload["response"]
-        assert recorded["training"] == STREAM_TRAINING
+        assert "training" not in recorded
         assert recorded["stream_delivery"]["complete"] is False
         assert recorded["stream_delivery"]["error"] == "upstream engine aborted the generation"
 
 
 @pytest.mark.unit
 @pytest.mark.parametrize("record_before_terminal", [True, False], ids=["record-before-terminal", "record-with-stream"])
-def test_finished_stream_keeps_its_receipt_and_training_block(tmp_path, record_before_terminal) -> None:
+def test_finished_stream_keeps_its_receipt_and_drops_the_training_block(tmp_path, record_before_terminal) -> None:
     handler = StreamRecordHandler(
         chat_stream_record("stop"), CHAT_STREAM_FRAMES, record_before_terminal=record_before_terminal
     )
@@ -861,7 +861,7 @@ def test_finished_stream_keeps_its_receipt_and_training_block(tmp_path, record_b
         [record] = dispatcher.get_or_create_scenario("chat").records.replay("chat")
         assert record.agent_record_id.encode() in body
         recorded = record.payload["response"]
-        assert recorded["training"] == STREAM_TRAINING
+        assert "training" not in recorded
         assert recorded["stream_delivery"]["complete"] is True
         assert "error" not in recorded["stream_delivery"]
 
@@ -1163,6 +1163,35 @@ def test_http_app_closes_dispatcher_only_when_requested(monkeypatch, close_dispa
         assert calls == (["close"] if close_dispatcher else [])
 
 
+def test_a_report_references_only_the_last_call_of_each_trajectory() -> None:
+    from tests.support.conversations import conversation
+
+    from reef.core import AgentRecord
+    from reef.core.reports import ReportValidationError
+
+    with closing(
+        build_default_dispatcher(scenario_storage=SQLiteScenarioStorage(), coordination=memory_coordination())
+    ) as dispatcher:
+        for turns in (1, 2, 3):
+            dispatcher.accept_record(conversation(f"call-{turns}", turns))
+        dispatcher.accept_record(conversation("other", 1, tools=("bash",)))
+
+        def scored(record_id: str, *references: str) -> AgentRecord:
+            return AgentRecord.create(
+                agent_record_id=record_id,
+                scenario="math",
+                request_type=RequestType.REPORT,
+                payload={"score": 1.0},
+                references=references,
+            )
+
+        with pytest.raises(ReportValidationError, match="inside the trajectory"):
+            dispatcher.accept_record(scored("all-calls", "call-1", "call-2", "call-3"))
+        # The ends of two trajectories are both last calls.
+        dispatcher.accept_record(scored("two-ends", "call-3", "other"))
+        dispatcher.accept_record(scored("one-end", "call-2"))
+
+
 def test_ingest_metrics_distinguish_new_records_retries_rejections_and_write_failures(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1190,13 +1219,7 @@ def test_ingest_metrics_distinguish_new_records_retries_rejections_and_write_fai
                 )
             )
         with pytest.raises(ValueError, match="training_mode"):
-            dispatcher.accept_record(
-                AgentRecord.create(
-                    scenario="math",
-                    request_type=RequestType.TRAIN,
-                    payload={"text": "train"},
-                )
-            )
+            dispatcher.accept_instruction("math", {"text": "train"})
         scenario = dispatcher.get_or_create_scenario("math")
 
         def fail_write(item: AgentRecord) -> None:

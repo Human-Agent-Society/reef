@@ -250,7 +250,8 @@ def test_a_scored_rollout_is_reported_against_its_receipts(reef: StandInReef, tm
     report = reef.reports[0]
     assert report["headers"]["x-reef-scenario"] == "guess" and report["headers"]["authorization"] == "Bearer tok"
     body = report["body"]
-    assert body["score"] == 1.0 and body["references"] == ["rec-1", "rec-2"]
+    # The last call ends the rollout's trajectory; Reef expands it to both calls.
+    assert body["score"] == 1.0 and body["references"] == ["rec-2"]
     assert body["feedback"] == "verifier reward 1.0 on t1"
     assert body["metadata"]["task"] == task_identity(task_path)
     assert body["metadata"]["rollout"] == {
@@ -314,14 +315,6 @@ def test_a_rollout_without_model_calls_is_not_reported(reef: StandInReef, tmp_pa
     assert ran.reward == 1.0 and ran.receipts == () and ran.report_agent_record_ids == () and reef.reports == []
 
 
-def test_per_receipt_sends_one_report_per_model_call(reef: StandInReef, tmp_path: Path) -> None:
-    task_path = written_task(tmp_path / "tasks", "t1")
-    ran = runner(reef, tmp_path, StandInLab({"reward": 0.25}), per_receipt=True).run(task_path)
-    assert ran.report_agent_record_ids == ("rep-1", "rep-2")
-    assert [report["body"]["references"] for report in reef.reports] == [["rec-1"], ["rec-2"]]
-    assert {report["body"]["score"] for report in reef.reports} == {0.25}
-
-
 def test_a_refused_report_is_the_rollouts_error_and_the_rollout_comes_back_unreported(tmp_path: Path) -> None:
     task_path = written_task(tmp_path / "tasks", "t1")
     with contextlib.closing(StandInReef(refuse_reports=True)) as reef:
@@ -369,7 +362,7 @@ def test_two_runs_are_two_rollouts(reef: StandInReef, tmp_path: Path) -> None:
     rollout_runner = runner(reef, tmp_path, lab)
     first, second = rollout_runner.run(task_path), rollout_runner.run(task_path)
     assert first.rollout_id != second.rollout_id and lab.calls[0]["key"] != lab.calls[1]["key"]
-    assert [report["body"]["references"] for report in reef.reports] == [["rec-1", "rec-2"], ["rec-3", "rec-4"]]
+    assert [report["body"]["references"] for report in reef.reports] == [["rec-2"], ["rec-4"]]
 
 
 @pytest.mark.parametrize(

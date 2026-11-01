@@ -53,15 +53,13 @@ recipe:
               extra_body:
                 chat_template_kwargs:
                   enable_thinking: false
-# The config of the generated-task recipe's three stages. Each config is the stage's own, keyed as the stage reads it.
+# The config of the generated-task recipe's two stages. Each config is the stage's own, keyed as the stage reads it.
 pipeline:
-  # The next round is due after jobs_per_round jobs trained.
-  record2record:
-    config:
-      jobs_per_round: 2
-  # The rounds: one generation of tasks each, run through the generator service.
+  # The rounds: one generation of tasks each, run through the generator service. The next round is due after
+  # jobs_per_round jobs trained.
   record2sample:
     config:
+      jobs_per_round: 2
       generator_url: ${endpoints.generator}
       rounds: 20
       # The stage requires a description; the generator takes what the tasks are from its sources file.
