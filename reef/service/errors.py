@@ -21,6 +21,7 @@ from reef.core.errors import (
     ReefError,
     ScenarioCapacityFull,
     ScenarioLimitReached,
+    TaskGenerationRefused,
     UnknownScenario,
 )
 from reef.runtime.interfaces import UpstreamStatusError
@@ -43,6 +44,7 @@ ERROR_STATUS_TABLE: tuple[tuple[type[Exception], type[web.HTTPError]], ...] = (
     (ArtifactConflict, web.HTTPConflict),
     (CommitPending, web.HTTPConflict),
     (ManualBufferRefused, web.HTTPConflict),
+    (TaskGenerationRefused, web.HTTPConflict),
     (ReleaseNotRestorable, web.HTTPBadRequest),
     (RecordConflict, web.HTTPConflict),
     (SampleConflict, web.HTTPConflict),

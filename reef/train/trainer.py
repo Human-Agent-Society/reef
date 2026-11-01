@@ -19,7 +19,7 @@ from threading import Lock
 from typing import Any
 
 from reef.artifact.artifact import Artifact
-from reef.core.errors import CommitPending, TrainingStartRefused
+from reef.core.errors import CommitPending, TaskGenerationRefused, TrainingStartRefused
 from reef.core.job_data import JobOutcome, TrajectorySample
 from reef.core.plugins import PluginConfigError
 from reef.core.records_types import AgentRecord, RequestType
@@ -28,6 +28,8 @@ from reef.core.training_request import TrainingRequest
 from reef.observability import ExperimentLogger, NullExperimentLogger
 from reef.observability.operations import OperationMetrics
 from reef.pipeline_context import PipelineContext
+from reef.record2sample.reports import ReportContext
+from reef.record2sample.requested_generation import RequestedRoundResult, RequestedTaskGeneration
 from reef.record2sample.service import ProducedSamples
 from reef.storage.records import RecordStore
 from reef.storage.samples import SAMPLE_KINDS, SampleKind, TrainerSamples
@@ -415,6 +417,63 @@ class Trainer:
             else:
                 self._pipeline.remove_from_buffer(sample_ids)
         return self.buffer_listing()
+
+    def check_task_generation(self, report_ids: tuple[str, ...]) -> None:
+        """Raise unless a client can request a task-generation round of the reports ``report_ids`` now.
+
+        The trainer must train in ``manual`` mode, else ``TaskGenerationRefused``. Its record-to-sample stage must
+        generate tasks on request (``RequestedTaskGeneration``), and each ID must name a report of the scenario that
+        the stage takes as a source session, with the calls of its trajectories stored; the stage checks the round
+        (``check_request``). Otherwise raise ``ValueError``. Nothing changes.
+        """
+        with self._lock:
+            if self._pipeline.training_mode != "manual":
+                raise TaskGenerationRefused("a client requests task generation only in manual training mode")
+            stage = self.requested_generation_stage()
+            stage.check_request(self.source_sessions(stage, report_ids))
+
+    def request_task_generation(self, request_id: str, report_ids: tuple[str, ...]) -> bool:
+        """Give the record-to-sample stage the round of the request ``request_id``, whose source sessions are the
+        reports ``report_ids``, unless the stage holds the request; return whether the stage holds it now for the
+        first time. Raise ``ValueError`` as ``check_task_generation`` does, in either training mode."""
+        with self._lock:
+            stage = self.requested_generation_stage()
+            if stage.holds_request(request_id):
+                return False
+            stage.request_round(request_id, self.source_sessions(stage, report_ids))
+            return True
+
+    def take_task_generation_result(self, request_id: str) -> RequestedRoundResult | None:
+        """The result of the requested round ``request_id`` once it ended (``RequestedTaskGeneration``)."""
+        with self._lock:
+            return self.requested_generation_stage().take_round_result(request_id)
+
+    def requested_generation_stage(self) -> RequestedTaskGeneration:
+        """The record-to-sample stage as one that generates tasks on request; ``ValueError`` when it does not."""
+        stage = self._pipeline.record2sample
+        if not isinstance(stage, RequestedTaskGeneration):
+            raise ValueError(f"{type(stage).__name__} generates no tasks on request")
+        return stage
+
+    def source_sessions(
+        self, stage: RequestedTaskGeneration, report_ids: tuple[str, ...]
+    ) -> tuple[ReportContext, ...]:
+        """The source session of each report of ``report_ids``, read from the record store: the report and the calls
+        of the trajectory of each of its references, oldest first, each once. The caller holds the lock."""
+        sessions: list[ReportContext] = []
+        for report_id in report_ids:
+            report = self._records.get(self.scenario, report_id)
+            if report is None or report.request_type is not RequestType.REPORT:
+                raise ValueError(f"scenario {self.scenario!r} holds no report {report_id!r}")
+            calls: dict[str, AgentRecord] = {}
+            for reference in report.references:
+                for call_id in self._records.trajectory(self.scenario, reference) or (reference,):
+                    call = self._records.get(self.scenario, call_id)
+                    if call is None:
+                        raise ValueError(f"the model calls of report {report_id!r} are no longer stored")
+                    calls.setdefault(call_id, call)
+            sessions.append(stage.source_session(report, tuple(calls.values())))
+        return tuple(sessions)
 
     def forget_samples(self, sample_ids: tuple[str, ...]) -> None:
         """Stop holding the uploads that the data sync removed (``TrainingPipeline.forget_samples``)."""

@@ -58,6 +58,7 @@ from reef.record2sample import Record2Sample, Record2SampleSettings, ReportConte
 from reef.record2sample.generator.client import Generator, HttpGenerator
 from reef.record2sample.generator.inputs import TaskGenerationRequest
 from reef.record2sample.reports import report_score
+from reef.record2sample.requested_generation import RequestedRoundResult, RequestedTaskGeneration
 from reef.sample2job import Sample2Job, Sample2JobSettings
 from reef.storage.samples import StoredSample, TrainerSamples
 from reef.storage.tasks import GenerationState, SplitName, StoredTask, TaskConflict, TaskStore, TaskStoreError
@@ -132,6 +133,14 @@ def completed_source_record_ids(store: TaskStore) -> frozenset[str]:
     return frozenset(
         record_id for state in store.generations() if state.is_complete for record_id in state.source_record_ids
     )
+
+
+def newest_generation_of(store: TaskStore, record_ids: frozenset[str]) -> GenerationState:
+    """The newest complete generation that used one of ``record_ids``; ``ValueError`` when none did."""
+    used = [state for state in store.generations() if state.is_complete and record_ids & set(state.source_record_ids)]
+    if not used:
+        raise ValueError("no complete generation used these source records")
+    return max(used, key=lambda state: state.generation)
 
 
 def next_generation(store: TaskStore) -> int:
@@ -246,12 +255,19 @@ class TaskGenerationRound:
     """One task-generation round.
 
     Values: ``sources`` holds at most ``source_records_per_round`` source
-    sessions, in arrival order.
-    Purpose: ``GeneratedTaskSamples`` makes it when a round is due.
+    sessions: in arrival order for a round of the stage, in the client's order for a requested round.
+    ``request_id`` is None for a round that the stage started on its own, and the non-empty ID of the request
+    for a requested round.
+    Purpose: ``GeneratedTaskSamples`` makes it when a round is due or requested.
     ``GeneratedTaskSamples`` runs it.
     """
 
     sources: tuple[ReportContext, ...]
+    request_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.request_id is not None and (not isinstance(self.request_id, str) or not self.request_id):
+            raise ValueError("request_id is None or a non-empty string")
 
     def record_ids(self) -> frozenset[str]:
         """Return the IDs of the records of the sources, which the stage holds while the round runs."""
@@ -264,19 +280,36 @@ class TaskGenerationRound:
 class RoundResult:
     """How a round ended.
 
-    Values: ``made_train_tasks`` says whether the round's generation published
-    a train task. ``counts`` is False for a
-    round that made nothing new, because a complete generation already used
-    its sessions; such a round does not count toward the round limit.
-    ``retry`` is True when the generation is incomplete, so the next round
-    takes the same sessions again and finishes it.
+    Values: ``generation`` is the generation that the round made or continued, a non-negative int.
+    ``train_tasks`` holds the names of the train tasks that the generation published. ``counts`` is False for a
+    round that made nothing new, because a complete generation already used its sessions; such a round does not
+    count toward the round limit, and ``generation`` is the newest such generation. ``retry`` is True when the
+    generation is incomplete, so the next round takes the same sessions again and finishes it; ``error`` then
+    names the last failure, and ``train_tasks`` is empty. The constructor refuses other values.
     Purpose: ``GeneratedTaskSamples.finished_rounds`` makes it when a round ends.
     ``GeneratedTaskSamples.advance`` reads it.
     """
 
-    made_train_tasks: bool = False
+    generation: int
+    train_tasks: tuple[str, ...] = ()
     counts: bool = True
     retry: bool = False
+    error: str = ""
+
+    def __post_init__(self) -> None:
+        if isinstance(self.generation, bool) or not isinstance(self.generation, int) or self.generation < 0:
+            raise ValueError("generation must be a non-negative integer")
+        if self.retry != bool(self.error) or (self.retry and self.train_tasks):
+            raise ValueError("a round retries exactly when it names an error, and then it made no train task")
+
+    @property
+    def made_train_tasks(self) -> bool:
+        """Whether the round's generation published a train task."""
+        return bool(self.train_tasks)
+
+    def requested_result(self) -> RequestedRoundResult:
+        """The result of a requested round, for the client that asked for it."""
+        return RequestedRoundResult(self.generation, self.train_tasks, self.error)
 
 
 @dataclass(frozen=True)
@@ -452,7 +485,7 @@ class GeneratedTaskSettings(Record2SampleSettings):
             TaskGenerator.reference(self.generator, setting="pipeline.record2sample.config.generator")
 
 
-class GeneratedTaskSamples(ReportSamples, BackgroundJobRunner):
+class GeneratedTaskSamples(ReportSamples, BackgroundJobRunner, RequestedTaskGeneration):
     """The generated-task stage: the source sessions, the pace of the rounds, the runner of the generations, and the
     source of their tasks.
 
@@ -472,6 +505,16 @@ class GeneratedTaskSamples(ReportSamples, BackgroundJobRunner):
     * no train task is unfinished (``unfinished_task_count``), so no job end can come.
 
     At the limit, the stage stops the rounds and holds no more source sessions.
+
+    **Requested rounds.** In ``manual`` mode the stage starts no round of its own, holds no source session, and
+    ``jobs_per_round`` and ``refill_tasks`` do not apply. A client requests each round with its source sessions
+    (``RequestedTaskGeneration``): reports of the scenario that ``SourceSessionGrouping.is_source_report`` accepts,
+    at most ``source_records_per_round`` of them, or none for a round of the description alone. The stage runs the
+    requested rounds one at a time, in the order they came, before a round of its own, also in ``auto`` mode. A
+    requested round counts toward ``rounds`` like any round, and a request at the limit is refused. A requested
+    round whose generation runs out of attempts is not retried: its result names the error, and a new request of
+    the same sessions continues the same generation. A switch to ``manual`` releases the waiting sessions and lets
+    the running round finish; a switch to ``auto`` makes the next round due at once.
 
     **Source sessions.** A source session is a report that ``SourceSessionGrouping.is_source_report`` accepts, with
     its inference records. The stage holds source sessions in arrival order, and each round takes at most
@@ -504,6 +547,11 @@ class GeneratedTaskSamples(ReportSamples, BackgroundJobRunner):
     ) -> None:
         self.source_grouping = SourceSessionGrouping(source_tag_of(settings.source_tag))
         super().__init__(context, self.source_grouping, exclusive_sources=True, max_staleness=settings.max_staleness)
+        self.training_mode = context.training_mode
+        #: The requested rounds that have not started, by request ID, in the order they came.
+        self.requested_rounds: dict[str, TaskGenerationRound] = {}
+        #: The results of the requested rounds that ended, by request ID, until the request's worker takes them.
+        self.request_results: dict[str, RequestedRoundResult] = {}
         self.jobs_per_round = settings.jobs_per_round
         self.sources_per_round = settings.source_records_per_round
         self.refill_tasks = settings.refill_tasks
@@ -592,10 +640,20 @@ class GeneratedTaskSamples(ReportSamples, BackgroundJobRunner):
             )
         return cls(context, settings, task_generator=task_generator)
 
+    def context_changed(self, context: PipelineContext) -> None:
+        super().context_changed(context)
+        previous, self.training_mode = self.training_mode, context.training_mode
+        if previous == "auto" and self.training_mode == "manual":
+            # A client names the sessions of each round now; the running round finishes.
+            self.waiting_sources = []
+            self.retry_sources = ()
+        elif previous == "manual" and self.training_mode == "auto":
+            self.follow_at_once = True
+
     def handle_other_report(self, report: AgentRecord) -> None:
         # The report ends here. releasable_record_ids holds back a session's records until its round ends.
         super().handle_other_report(report)
-        if self.sources_per_round == 0 or self.rounds_stopped:
+        if self.sources_per_round == 0 or self.rounds_stopped or self.training_mode == "manual":
             return
         if any(reference not in self.inferences for reference in report.references):
             return
@@ -607,8 +665,8 @@ class GeneratedTaskSamples(ReportSamples, BackgroundJobRunner):
             self.waiting_sources.append(context)
 
     def round_due(self) -> bool:
-        """Whether the next round should start now."""
-        if self.rounds_stopped or self.running_round is not None:
+        """Whether the next round of the stage's own should start now; never in ``manual`` mode."""
+        if self.rounds_stopped or self.running_round is not None or self.training_mode == "manual":
             return False
         # With no unfinished task, no job end comes to count toward the next round.
         if not (self.follow_at_once or self.trained_jobs >= self.jobs_per_round or self.unfinished_task_count() == 0):
@@ -616,16 +674,25 @@ class GeneratedTaskSamples(ReportSamples, BackgroundJobRunner):
         return self.waiting_task_count() < self.refill_tasks
 
     def advance(self, now: float) -> None:
-        """End the rounds that finished, then start the next round when it is due, or stop the rounds at the limit."""
+        """End the rounds that finished, then start the oldest requested round, or else the next round when it is
+        due, or stop the rounds at the limit."""
         super().advance(now)
         for result in self.finished_rounds():
             finished = self.running_round
             self.running_round = None
-            self.follow_at_once = not result.made_train_tasks
             if result.counts:
                 self.completed_rounds += 1
-            if result.retry and finished is not None and not self.rounds_stopped:
+            if finished is not None and finished.request_id is not None:
+                # A requested round ends for its client; it neither paces nor retries the stage's own rounds.
+                self.request_results[finished.request_id] = result.requested_result()
+                continue
+            self.follow_at_once = not result.made_train_tasks
+            # In manual a client asks again; the stage holds no session for a retry.
+            if result.retry and finished is not None and not self.rounds_stopped and self.training_mode == "auto":
                 self.retry_sources = finished.sources
+        if self.running_round is None and self.requested_rounds:
+            self.start_requested_round()
+            return
         if not self.round_due():
             return
         if self.completed_rounds >= self.rounds:
@@ -645,6 +712,22 @@ class GeneratedTaskSamples(ReportSamples, BackgroundJobRunner):
         self.follow_at_once = False
         # The task jobs of the round's tasks count toward the next one.
         self.trained_jobs = 0
+
+    def start_requested_round(self) -> None:
+        """Start the oldest requested round, or end it with the reason when the stage can run no round now."""
+        request_id = next(iter(self.requested_rounds))
+        generation_round = self.requested_rounds.pop(request_id)
+        if self.completed_rounds >= self.rounds:
+            self.request_results[request_id] = RequestedRoundResult(
+                None, error=f"the scenario finished its {self.rounds} rounds of task generation"
+            )
+            return
+        if not self.start_round(generation_round):
+            self.request_results[request_id] = RequestedRoundResult(None, error=self.last_error)
+            self.stop_rounds()
+            return
+        self.running_round = generation_round
+        self.next_round += 1
 
     def task_job_ended(self, *, finished: bool) -> None:
         """A task job ended: one that finished counts toward the next round; after one that failed, no job
@@ -671,8 +754,45 @@ class GeneratedTaskSamples(ReportSamples, BackgroundJobRunner):
         return super().releasable_record_ids() - held
 
     def background_jobs_running(self) -> bool:
-        """Return True while a round runs: its end can start the next round without a new record."""
-        return self.running_round is not None or super().background_jobs_running()
+        """Return True while a round runs or a requested round waits: its end or its start comes without a new
+        record."""
+        return self.running_round is not None or bool(self.requested_rounds) or super().background_jobs_running()
+
+    # ---------------------------------------------------------------- requested rounds
+
+    def source_session(self, report: AgentRecord, calls: tuple[AgentRecord, ...]) -> ReportContext:
+        context = ReportContext(report, report_score(report), calls)
+        if not self.source_grouping.is_source_report(context):
+            raise ValueError(
+                f"report {report.agent_record_id!r} is no source session: each of its model calls must carry the "
+                "source_tag of the stage"
+            )
+        return context
+
+    def check_request(self, sources: tuple[ReportContext, ...]) -> None:
+        if self.worker is None or self.task_store is None:
+            raise ValueError("this scenario generates no tasks: set pipeline.record2sample.config.rounds")
+        if len(sources) > self.sources_per_round:
+            raise ValueError(
+                f"a round takes at most {self.sources_per_round} source sessions (source_records_per_round)"
+            )
+        if self.completed_rounds >= self.rounds:
+            raise ValueError(f"the scenario finished its {self.rounds} rounds of task generation")
+        if self.rounds_stopped:
+            raise ValueError(f"the rounds of task generation stopped: {self.last_error}")
+
+    def request_round(self, request_id: str, sources: tuple[ReportContext, ...]) -> None:
+        if self.holds_request(request_id):
+            return
+        self.check_request(sources)
+        self.requested_rounds[request_id] = TaskGenerationRound(sources=sources, request_id=request_id)
+
+    def holds_request(self, request_id: str) -> bool:
+        running = self.running_round is not None and self.running_round.request_id == request_id
+        return running or request_id in self.requested_rounds or request_id in self.request_results
+
+    def take_round_result(self, request_id: str) -> RequestedRoundResult | None:
+        return self.request_results.pop(request_id, None)
 
     def made_samples(self) -> tuple[tuple[str, TaskSample], ...]:
         """The published train tasks that the pipeline has not stored, each named ``generated-tasks/<task name>``."""
@@ -718,7 +838,8 @@ class GeneratedTaskSamples(ReportSamples, BackgroundJobRunner):
         remaining = tuple(record for record in records if record.agent_record_id not in completed)
         # A restart replays sessions that a complete generation already used; their tasks are saved.
         if records and not remaining:
-            self.ended_rounds.append(RoundResult(counts=False))
+            used = newest_generation_of(self.task_store, frozenset(record.agent_record_id for record in records))
+            self.ended_rounds.append(RoundResult(used.generation, train_task_names(used), counts=False))
             return True
         existing = find_generation(self.task_store, tuple(record.agent_record_id for record in remaining))
         generation = next_generation(self.task_store) if existing is None else existing.generation
@@ -740,11 +861,13 @@ class GeneratedTaskSamples(ReportSamples, BackgroundJobRunner):
                     outcome.error if isinstance(outcome, DeliveryOutcome) else "the delivery did not finish"
                 )
                 continue
-            self.generation_in_flight = None
+            generation, self.generation_in_flight = self.generation_in_flight, None
             if isinstance(outcome, Failed):
                 self.last_error = f"{outcome.receipt} did not finish; see the service log"
                 logger.error("generated-task %s failed on scenario %r", outcome.receipt, self.scenario)
-                finished.append(RoundResult(retry=True))
+                if generation is None:
+                    raise RuntimeError(f"{outcome.receipt} ended, but no generation was in flight")
+                finished.append(RoundResult(generation, retry=True, error=self.last_error))
                 continue
             if not isinstance(outcome, GenerationOutcome):
                 raise TypeError("the round worker must hand back a GenerationOutcome")
@@ -755,7 +878,9 @@ class GeneratedTaskSamples(ReportSamples, BackgroundJobRunner):
                 self.scenario,
                 len(outcome.tasks),
             )
-            finished.append(RoundResult(made_train_tasks=bool(outcome.tasks), retry=not outcome.is_complete))
+            names = tuple(task.metadata["task"]["name"] for task in outcome.tasks)
+            error = "" if outcome.is_complete else outcome.error
+            finished.append(RoundResult(outcome.generation, names, retry=not outcome.is_complete, error=error))
             self.made.extend(outcome.tasks)
             self.unfinished.update(task.metadata["task"]["name"] for task in outcome.tasks)
         return tuple(finished)
@@ -781,6 +906,7 @@ class GeneratedTaskSamples(ReportSamples, BackgroundJobRunner):
             "task_generation": {
                 "generator": None if self.task_generator is None else type(self.task_generator).__name__,
                 "in_flight": self.generation_in_flight,
+                "requested": len(self.requested_rounds),
                 "next": self.next_round,
                 "completed": self.completed_rounds,
                 "of": self.rounds,

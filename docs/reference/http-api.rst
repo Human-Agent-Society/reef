@@ -141,6 +141,11 @@ Routes
 | ``POST /reef/scenarios/{scenario}/buffer/remove``                                | remove samples from the manual buffer; manual     |
 |                                                                                  | mode only                                         |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/scenarios/{scenario}/task-generations``                             | request one task-generation round from chosen     |
+|                                                                                  | sessions; manual mode only                        |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/scenarios/{scenario}/task-generations/{request_id}``                 | one task-generation request: its state and result |
++----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/scenarios/{scenario}/evaluations``                                  | evaluate one artifact of a release                |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/scenarios/{scenario}/evaluations``                                   | artifact evaluations, newest first                |
@@ -765,6 +770,52 @@ optional ``component``, and return the buffer as the ``GET`` does:
 
 The next instruction trains the whole manual buffer, and its commit removes
 the trained samples from it in the same transaction.
+
+Request a task-generation round
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A recipe that generates tasks, such as the built-in generated-task recipe,
+starts no generation round on its own in ``manual``. A client asks for each
+round and names the recorded sessions that the generator reads:
+
+.. code:: bash
+
+   curl -sS http://127.0.0.1:8900/reef/scenarios/my-agent/task-generations \
+     -H "Authorization: Bearer $REEF_TOKEN" -H "Content-Type: application/json" \
+     -d '{"report_ids": ["report-17", "report-21"]}'
+
+The body holds ``report_ids``, the IDs of reports in the scenario's records,
+and an optional ``component``. A record item of another scenario that this
+scenario uses has its copy here under the item ID, so name that ID. An empty
+list asks for a round from the configured ``description`` alone. The route
+answers 202 with the request:
+
+.. code:: json
+
+   {"id": "task_generation:my-agent:5f0c...", "scenario": "my-agent", "component": "",
+    "report_ids": ["report-17", "report-21"], "state": "queued", "result": null, "error": null}
+
+- It returns 409 while the trainer trains in ``auto``.
+- It returns 400, and queues nothing, when the recipe generates no tasks, when
+  an ID is not a report of the scenario or its model calls are no longer
+  stored, when a report is not a source session (each of its model calls
+  carries the stage's ``source_tag``), when the request names more than
+  ``source_records_per_round`` reports, and when the scenario finished its
+  ``rounds``.
+
+The samples service runs the requests of one trainer one at a time, in the
+order they came. ``GET /reef/scenarios/{scenario}/task-generations/{request_id}``
+returns the request with its ``state``: ``queued``, ``running``, ``finished``
+or ``failed``. A finished request has ``result``, ``{"generation": 0,
+"train_tasks": ["harbor-00000-000"]}``: the generation of the scenario's task
+store and its published train tasks. The tasks are stored as samples
+``generated-tasks/<task name>``; insert the ones that should train into the
+buffer. A request whose sessions a complete generation used already makes no
+new generation, and its result names that generation. A failed request has
+``error``, such as the generator's last error after all attempts. Reef does
+not retry it: a new request of the same sessions continues the same
+generation from its saved candidates. Reef deletes the request after the work
+retention, and then the ``GET`` returns 404.
 
 Evaluate an artifact
 --------------------

@@ -6,7 +6,14 @@ from aiohttp import web
 
 from reef.service.request_service import RequestService
 from reef.service.routes.payload import read_object
-from reef.service.samples import MAX_SAMPLES_PER_PAGE, change_buffer, list_samples, read_buffer
+from reef.service.samples import (
+    MAX_SAMPLES_PER_PAGE,
+    change_buffer,
+    list_samples,
+    read_buffer,
+    read_task_generation,
+    request_task_generation,
+)
 
 
 def register_sample_reads(app: web.Application, *, request_service: RequestService) -> None:
@@ -28,7 +35,8 @@ def register_sample_reads(app: web.Application, *, request_service: RequestServi
 
 
 def register_buffer_routes(app: web.Application, *, request_service: RequestService) -> None:
-    """The read and the changes of a trainer's buffer, which is the trainer's state that control holds."""
+    """The read and the changes of a trainer's buffer, which is the trainer's state that control holds, and the
+    trainer's requested task-generation rounds, which control checks and queues for the samples service."""
     dispatcher = request_service.dispatcher
 
     async def buffer(request: web.Request) -> web.Response:
@@ -49,9 +57,22 @@ def register_buffer_routes(app: web.Application, *, request_service: RequestServ
         )
         return web.json_response(listing)
 
+    async def generate(request: web.Request) -> web.Response:
+        body = await read_object(request)
+        queued = await asyncio.to_thread(request_task_generation, dispatcher, request.match_info["scenario"], body)
+        return web.json_response(queued, status=202)
+
+    async def generation(request: web.Request) -> web.Response:
+        found = await asyncio.to_thread(
+            read_task_generation, dispatcher, request.match_info["scenario"], request.match_info["request_id"]
+        )
+        return web.json_response(found)
+
     app.router.add_get("/reef/scenarios/{scenario}/buffer", buffer)
     app.router.add_post("/reef/scenarios/{scenario}/buffer/insert", insert)
     app.router.add_post("/reef/scenarios/{scenario}/buffer/remove", remove)
+    app.router.add_post("/reef/scenarios/{scenario}/task-generations", generate)
+    app.router.add_get("/reef/scenarios/{scenario}/task-generations/{request_id}", generation)
 
 
 __all__ = ["register_buffer_routes", "register_sample_reads"]

@@ -26,7 +26,7 @@ from reef.dispatcher import ingest
 from reef.dispatcher.data_sync_worker import DataSyncWorker, ItemSync
 from reef.dispatcher.errors import TrainingErrors
 from reef.dispatcher.local_workers import LocalTrainingWorkers
-from reef.dispatcher.samples import LocalSampleProducers
+from reef.dispatcher.samples import LocalSampleProducers, LocalTaskGenerations
 from reef.dispatcher.served import ControlInstance, ServedModelsPublisher, take_control_lease
 from reef.dispatcher.status import TrainingStatus
 from reef.dispatcher.store_changes import StoreChanges, StoreChangesWatcher
@@ -35,7 +35,13 @@ from reef.evaluation.artifact_endpoint import CandidateArtifacts
 from reef.execution.workers import SERVICE_COMPONENTS, ServiceSet, ServiceWorkers
 from reef.observability import ExperimentTracker, NullExperimentTracker
 from reef.recipe.base import Recipe
-from reef.record2sample.service import SamplesWorker, request_selection
+from reef.record2sample.service import (
+    SamplesWorker,
+    TaskGenerationWorker,
+    file_task_generation,
+    request_selection,
+    task_generation_item,
+)
 from reef.runtime.deployment import close_runtimes
 from reef.runtime.interfaces import InferenceRuntime
 from reef.scenario.admission import ScenarioAdmission
@@ -46,7 +52,7 @@ from reef.scenario.scenario import Scenario
 from reef.storage.artifact_items import request_artifact_copy
 from reef.storage.control_lease import ControlLeaseState
 from reef.storage.coordination import Coordination, instance_id
-from reef.storage.data import DataStore, check_owner
+from reef.storage.data import DataStore, ItemNotFound, check_owner
 from reef.storage.data_sync import ScenarioUses, sync_scenario_samples, uploads
 from reef.storage.record_items import request_record_copy, sync_scenario_records
 from reef.storage.records import RecordRetention
@@ -248,6 +254,13 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
                     worker_id=instance_id("samples"),
                 )
             )
+            self.workers.add(
+                TaskGenerationWorker(
+                    self.queue,
+                    LocalTaskGenerations(self.registry, self.queue),
+                    worker_id=instance_id("task-generation"),
+                )
+            )
         self.training_status = TrainingStatus(recipe, self.registry, self.errors)
         if self.services.runs_control and isinstance(backend_factory, EnumerableRepositoryBackendFactory):
             self.background_threads.preload_thread = Thread(
@@ -310,6 +323,8 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         with self.registry.lock_for(scenario):
             current = self.registry.set_training_mode(scenario, training_mode)
             self.local_workers.wake(current)
+            # The samples service reads the stored mode at its next selection; this one comes at once.
+            self.request_samples(current)
             return {"scenario": scenario, "training_mode": current.training_mode}
 
     def list_scenarios(self) -> tuple[dict[str, Any], ...]:
@@ -763,6 +778,33 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
             # A queued instruction may now have samples to train.
             self.local_workers.wake(current)
             return listing
+
+    def request_task_generation(
+        self, scenario: str, report_ids: tuple[str, ...], *, component: str | None = None
+    ) -> WorkItem:
+        """Queue a task-generation round of the trainer of ``component`` from the reports ``report_ids``, for the
+        samples service (``reef.record2sample.service.task_generation``); return its item.
+
+        Raise ``TaskGenerationRefused`` in automatic mode and ``ValueError`` for a request that the trainer cannot
+        run (``Trainer.check_task_generation``). Nothing is queued then.
+        """
+        with self.locked_scenario(scenario) as current:
+            trainer = self.trainer_of(current, component)
+            trainer.check_task_generation(report_ids)
+            (named,) = [entry.component for entry in current.trainers if entry.trainer is trainer]
+            return file_task_generation(self.queue, scenario, named, report_ids)
+
+    def task_generation(self, scenario: str, request_id: str) -> WorkItem:
+        """The item of the requested task-generation round ``request_id`` of ``scenario``.
+
+        Raise ``UnknownScenario`` for a scenario that does not exist, and ``ItemNotFound`` for an unknown request or
+        one whose item control deleted after the work retention.
+        """
+        with self.locked_scenario(scenario):
+            item = task_generation_item(self.queue, scenario, request_id)
+        if item is None:
+            raise ItemNotFound(f"scenario {scenario!r} has no task generation {request_id!r}")
+        return item
 
     def stored_samples(self, scenario: str, *, after_sequence: int, limit: int) -> tuple[StoredSample, ...]:
         """The scenario's stored samples after ``after_sequence``, at most ``limit``, in arrival order."""

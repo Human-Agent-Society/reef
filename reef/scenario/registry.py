@@ -330,6 +330,28 @@ class ScenarioRegistry:
             self._storage.write_settings(scenario, replace(settings, training_mode=training_mode))
             return current
 
+    def apply_stored_training_mode(self, scenario: str) -> None:
+        """Select on the loaded instance of ``scenario`` the training mode that control stored last.
+
+        A process that does not run control calls it before it works on a loaded scenario, so a mode change
+        reaches it without a reload. A scenario that is not loaded, or has no stored mode, is unchanged. A stored
+        mode that the instance cannot run keeps its mode, as at load (``apply_stored_settings``).
+        """
+        with self.lock_for(scenario):
+            current = self.get_optional(scenario)
+            stored = None if current is None else self._storage.read_settings(scenario).training_mode
+            if current is None or stored is None or current.training_mode == stored:
+                return
+            try:
+                current.set_training_mode(stored)
+            except (ValueError, NotImplementedError) as exc:
+                logger.warning(
+                    "Scenario %r keeps its training mode: the stored mode %r is not supported (%s)",
+                    scenario,
+                    stored,
+                    exc,
+                )
+
     def set_evaluation_and_activation(
         self,
         scenario: str,
