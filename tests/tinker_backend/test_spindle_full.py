@@ -11,10 +11,17 @@ import pytest
 from tests.support.chat_templates import CharTemplate
 from tests.support.hugging_face_hub import COMMIT, MemoryHub
 
-from reef.artifact import REFERENCE_FILE, Artifact, DirectoryFiles, HuggingFaceRevision, read_reference
+from reef.artifact import (
+    REFERENCE_FILE,
+    Artifact,
+    DirectoryFiles,
+    DirectorySource,
+    HuggingFaceRevision,
+    read_reference,
+)
 from reef.core.evaluation import PolicyModel
 from reef.core.job_data import JobData, TrajectorySample
-from reef.inference.tinker import TinkerInferenceRuntime
+from reef.inference.tinker import TinkerInferenceConfig, TinkerInferenceRuntime
 from reef.runtime.interfaces import TrainingMethod
 from reef.runtime.jobs import ReleaseFormat, TrainingJob, job_id_for
 from reef.service.deploy.training import training_deployment_for
@@ -41,6 +48,18 @@ FILES = {"config.json": b"{}", "model.safetensors": b"base-weights"}
 def settings(tmp_path: Path, **options: str) -> SpindleFullConfig:
     values = {"state_dir": str(tmp_path / "state"), "base_url": SPINDLE, "base": BASE, "release_repo": RELEASES}
     return SpindleFullConfig(**{**values, **options})
+
+
+class PinnedFiles(DirectorySource):
+    """The files of ``revision``, a pinned commit, which an import keeps by reference."""
+
+    def __init__(self, directory: Path, revision: HuggingFaceRevision) -> None:
+        super().__init__(directory, source_version=revision.commit, link=False)
+        self.revision = revision
+
+    @property
+    def reference(self):
+        return {REFERENCE_FILE: json.dumps(self.revision.to_dict()).encode()}
 
 
 class Exporter(CheckpointExporter):
@@ -213,7 +232,9 @@ def test_a_new_base_commit_replaces_the_base_reference_in_the_state_dir(tmp_path
 
 
 @pytest.mark.unit
-def test_an_import_is_a_full_parameter_manifest_or_the_bases_files(component, client, hub, tmp_path):
+def test_an_import_is_a_manifest_full_weights_at_a_pinned_commit_or_a_copy_of_the_base(
+    component, client, hub, tmp_path
+):
     full = TinkerCheckpoint(MODEL, None, "tinker://f/state", "tinker://f/sampler", service=SPINDLE)
     full.write(tmp_path / "full")
     with pytest.raises(ValueError, match=f"holds {REFERENCE_FILE} beside its manifest"):
@@ -235,9 +256,16 @@ def test_an_import_is_a_full_parameter_manifest_or_the_bases_files(component, cl
     for path, data in FILES.items():
         (copy / path).write_bytes(data)
     component.check_release(DirectoryFiles(copy))
+    # Other full weights are imported by their pinned commit, and refused as a copy.
+    other = HuggingFaceRevision("org/other-model", "a" * 40)
+    component.check_release(PinnedFiles(copy, other))
     (copy / "model.safetensors").write_bytes(b"other-weights")
-    with pytest.raises(ValueError, match=f"trains only its base {BASE}"):
+    component.check_release(PinnedFiles(copy, other))
+    with pytest.raises(ValueError, match=f"holds the files of its base {BASE}"):
         component.check_release(DirectoryFiles(copy))
+    (copy / "config.json").unlink()
+    with pytest.raises(ValueError, match="holds no full weights"):
+        component.check_release(PinnedFiles(copy, other))
 
 
 @pytest.mark.unit
@@ -249,7 +277,7 @@ def test_train_from_takes_a_manifest_or_the_base(component, tmp_path):
     (reference / REFERENCE_FILE).write_text(json.dumps(HuggingFaceRevision(MODEL, COMMIT).to_dict()))
     assert component.import_start(reference) == component.base_start
     (reference / REFERENCE_FILE).write_text(json.dumps(HuggingFaceRevision(MODEL, "f" * 40).to_dict()))
-    with pytest.raises(ValueError, match="starts only from its base"):
+    with pytest.raises(ValueError, match=f"starts only from its base {BASE} or its own checkpoints"):
         component.import_start(reference)
 
 
@@ -265,7 +293,11 @@ def test_the_component_trains_the_repo_of_its_base_on_a_spindle_deployment(tmp_p
 
 @pytest.mark.unit
 def test_spindles_sampler_serves_the_base_as_the_base_model_and_a_release_by_its_sampler(client, tmp_path):
-    runtime = TinkerInferenceRuntime(client, base_model=MODEL, service=SPINDLE, weight_kind="model")
+    with pytest.raises(ValueError, match="is not a revision of org/model"):
+        TinkerInferenceRuntime(client, base_model=MODEL, full_base=HuggingFaceRevision("org/other", COMMIT))
+    runtime = TinkerInferenceRuntime(
+        client, base_model=MODEL, service=SPINDLE, full_base=HuggingFaceRevision(MODEL, COMMIT)
+    )
     lora_runtime = TinkerInferenceRuntime(client, base_model=MODEL, service=SPINDLE)
     try:
         assert runtime.served_weight_kind == "model"
@@ -276,12 +308,13 @@ def test_spindles_sampler_serves_the_base_as_the_base_model_and_a_release_by_its
         full = TinkerCheckpoint(MODEL, None, "tinker://f/state", "tinker://f/sampler", service=SPINDLE)
         full.write(tmp_path / "full")
         assert runtime.artifact_model(Artifact.local(tmp_path / "full")) == PolicyModel("tinker://f/sampler")
-        # A LoRA's runtime serves manifests only, and a full-parameter runtime only its base model's weights.
+        # A LoRA's runtime serves manifests only, and a full-parameter runtime only its base revision's weights.
         with pytest.raises(ValueError, match=r"missing tinker-checkpoint\.json"):
             lora_runtime.artifact_model(Artifact.local(reference))
-        (reference / REFERENCE_FILE).write_text(json.dumps(HuggingFaceRevision("other/model", COMMIT).to_dict()))
-        with pytest.raises(ValueError, match="not to the base model"):
-            runtime.artifact_model(Artifact.local(reference))
+        for other in (HuggingFaceRevision("other/model", COMMIT), HuggingFaceRevision(MODEL, "a" * 40)):
+            (reference / REFERENCE_FILE).write_text(json.dumps(other.to_dict()))
+            with pytest.raises(ValueError, match=f"serves only the base {BASE}"):
+                runtime.artifact_model(Artifact.local(reference))
     finally:
         runtime.shutdown()
         lora_runtime.shutdown()
@@ -357,6 +390,11 @@ def test_the_deployment_trains_on_spindle_and_serves_through_its_sampler() -> No
     assert (settings.base_revision, settings.learning_rate) == (HuggingFaceRevision(MODEL, COMMIT), 1e-6)
     serving = SpindleFullDeployment().trainer_serving_config({"training_backend_options": options})
     assert (serving["type"], serving["base_url"], serving["parameterization"]) == ("tinker", SPINDLE, "full")
+    assert serving["base"] == BASE
+    with pytest.raises(ValueError, match=r"base is set exactly when runtime\.parameterization is full"):
+        TinkerInferenceConfig(parameterization="full")
+    with pytest.raises(ValueError, match=r"base is set exactly when runtime\.parameterization is full"):
+        TinkerInferenceConfig(base=BASE)
     assert MANIFEST == "tinker-checkpoint.json"
 
 

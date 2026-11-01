@@ -23,7 +23,7 @@ from typing import Any
 from reef_client.sse import synthesize_sse_events
 
 from reef.artifact.artifact import Artifact
-from reef.artifact.sources import read_reference
+from reef.artifact.sources import HuggingFaceRevision, read_reference
 from reef.core.config import config_option
 from reef.core.evaluation import ArtifactKind, PolicyModel
 from reef.core.served_models import ServedArtifact
@@ -44,25 +44,29 @@ TINKER_URL = "https://tinker.thinkingmachines.ai"
 
 
 def checkpoint_sampler_path(
-    artifact: Artifact, base_model: str, service: str | None, *, full: bool = False
+    artifact: Artifact, base_model: str, service: str | None, *, full_base: HuggingFaceRevision | None = None
 ) -> str | None:
     """The sampler that a release's checkpoint manifest names; ``None`` for the base model's own weights.
 
     A LoRA's base artifact holds the untrained adapter's manifest, so its sampler serves the base model's outputs.
-    Under full-parameter training (``full``), a release without a manifest has the base model's weights: the
-    component's base, a reference to the base revision, or an import of the base's files (RFC #996).
-    ``ValueError``: the release is not materialized; it has no manifest and is not full-parameter, or refers to
-    another repo; or its manifest names another model or another service than ``service``.
+    Under full-parameter training of the base ``full_base``, a release without a manifest has the base model's
+    weights when it refers to ``full_base`` or holds a copy of the base's files, the only copy that the training
+    component imports (RFC #996). ``ValueError``: the release is not materialized; it has no manifest and is not
+    full-parameter, or refers to another revision, whose weights the sampler cannot load; or its manifest names
+    another model or another service than ``service``.
     """
     path = artifact.materialize().local_path
     if path is None:
         raise ValueError("Tinker requires a materialized checkpoint manifest")
     if not (path / MANIFEST).exists():
-        if not full:
+        if full_base is None:
             raise ValueError(f"artifact is missing {MANIFEST}")
         revision = read_reference(path)
-        if revision is not None and revision.repo != base_model:
-            raise ValueError(f"the artifact refers to {revision.uri}, not to the base model {base_model}")
+        if revision is not None and revision != full_base:
+            raise ValueError(
+                f"the artifact refers to {revision.uri}; Spindle's sampler serves only the base {full_base.uri} "
+                "and its checkpoints"
+            )
         return None
     checkpoint = TinkerCheckpoint.read(path)
     checkpoint.check_compatible(base_model, service=service)
@@ -73,7 +77,8 @@ class TinkerInferenceRuntime(InferenceRuntime):
     """Serve the sampler each release names, on the Tinker-compatible service ``service`` (None: hosted Tinker).
 
     ``served_weight_kind`` is ``model_adapter`` for a LoRA's releases, and ``model`` for the releases of
-    Spindle's full-parameter training, whose base serves the base model (``checkpoint_sampler_path``).
+    Spindle's full-parameter training of ``full_base``, a revision of ``base_model``, whose base serves the base
+    model (``checkpoint_sampler_path``).
     Every sampler served in this process gets a runtime load ID of this
     incarnation; activating a release whose sampler is not the one served
     mints a new one. A release of another service is refused.
@@ -86,15 +91,16 @@ class TinkerInferenceRuntime(InferenceRuntime):
         base_model: str,
         service: str | None = None,
         inference_timeout_s: float = 300.0,
-        weight_kind: ArtifactKind = "model_adapter",
+        full_base: HuggingFaceRevision | None = None,
     ) -> None:
         super().__init__(base_url=service or TINKER_URL, inference_timeout_s=inference_timeout_s)
-        if weight_kind not in ("model", "model_adapter"):
-            raise ValueError(f"a Tinker sampler serves a model or a model_adapter, not {weight_kind!r}")
+        if full_base is not None and full_base.repo != base_model:
+            raise ValueError(f"the full-parameter base {full_base.uri} is not a revision of {base_model}")
         self._sampler = sampler
         self._model = base_model
         self._service = service
-        self._kind = weight_kind
+        self._full_base = full_base
+        self._kind: ArtifactKind = "model_adapter" if full_base is None else "model"
         self._handler = TinkerInferenceHandler(self, sampler, base_model)
         self._lock = RLock()
         self._incarnation = new_runtime_load_id_incarnation()
@@ -110,7 +116,7 @@ class TinkerInferenceRuntime(InferenceRuntime):
 
     def sampler_path(self, artifact: Artifact) -> str | None:
         """The sampler that serves ``artifact``; ``None`` for the base model (``checkpoint_sampler_path``)."""
-        return checkpoint_sampler_path(artifact, self._model, self._service, full=self._kind == "model")
+        return checkpoint_sampler_path(artifact, self._model, self._service, full_base=self._full_base)
 
     def served_model_name(self, scenario: str) -> str:
         """The name of the sampler that serves now: its sampler path, or the base model before any release.
@@ -248,12 +254,19 @@ class TinkerInferenceConfig:
     parameterization: str = config_option(
         "lora", help="lora: each release is a LoRA's manifest; full: Spindle's full-parameter releases."
     )
+    base: str | None = config_option(
+        None, help="hf://<repo>@<commit>: the base of Spindle's full-parameter training; required with full."
+    )
 
     def __post_init__(self) -> None:
         if self.timeout_s <= 0:
             raise ValueError("runtime.timeout_s must be positive")
         if self.parameterization not in ("lora", "full"):
             raise ValueError("runtime.parameterization must be lora or full")
+        if (self.base is None) != (self.parameterization == "lora"):
+            raise ValueError("runtime.base is set exactly when runtime.parameterization is full")
+        if self.base is not None:
+            HuggingFaceRevision.parse(self.base)
         if self.base_url is not None and not self.base_url.startswith(("https://", "http://")):
             raise ValueError("runtime.base_url must be an http(s) URL")
 
@@ -289,7 +302,7 @@ class TinkerInferenceRuntimeFactory(RuntimeFactory):
                 base_model=model_path,
                 service=config.get("base_url"),
                 inference_timeout_s=config["timeout_s"],
-                weight_kind="model" if config.get("parameterization") == "full" else "model_adapter",
+                full_base=None if config.get("base") is None else HuggingFaceRevision.parse(config["base"]),
             )
         except BaseException:
             sampler.close()

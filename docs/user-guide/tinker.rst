@@ -382,11 +382,23 @@ which holds exactly that checkpoint's files. The release holds two files:
   restores its weights and optimizer state, and Spindle's sampler, the default
   serving (``inference.serving: trainer``), serves its sampler path.
 
-An import into a ``spindle_full`` scenario must be a full-parameter manifest of
-the base model on the same service beside a reference to full weights, or the
-base's own files, by reference or as a copy. The engine trains only its base, so other full weights are refused
-with HTTP 400. To train another checkpoint, deploy a Spindle engine for it and
-a scenario with it as ``base``. A component trains one base.
+An import into a ``spindle_full`` scenario takes one of these forms. Other
+files are refused with HTTP 400.
+
+- A full-parameter manifest of the base model on the same service, beside a
+  reference to full weights. Jobs can train from it.
+- The base's own files, by reference or as a copy. Jobs train from it as from
+  the base.
+- Full weights at a pinned commit, ``hf://<repo>@<commit>``: the commit holds
+  ``config.json`` and safetensors files. Reef keeps a reference to the commit.
+  A runtime that loads from the Hub serves and evaluates it, and you can
+  activate it. Training from it is refused: the engine trains only its base.
+  Spindle's sampler also refuses to serve it, since it loads only the base.
+
+Import other weights by their commit, not as a copy: a copy of other weights
+is refused, because no runtime could tell it from the base. To train from
+other weights, deploy a Spindle engine for them and a scenario with them as
+``base``. A component trains one base.
 
 Score centering
 ~~~~~~~~~~~~~~~

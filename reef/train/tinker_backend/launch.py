@@ -159,6 +159,7 @@ class SpindleFullDeployment(InProcessTrainingDeployment):
             "base_url": spindle.base_url,
             "timeout_s": spindle.inference_timeout_s,
             "parameterization": "full",
+            "base": spindle.base,
         }
 
 

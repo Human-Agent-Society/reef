@@ -14,7 +14,13 @@ from pathlib import Path
 
 from reef.artifact.files import ArtifactFiles
 from reef.artifact.repository import BaseArtifactSource
-from reef.artifact.sources import REFERENCE_FILE, HuggingFaceRevision, HuggingFaceRevisionFiles, read_reference
+from reef.artifact.sources import (
+    REFERENCE_FILE,
+    HuggingFaceRevision,
+    HuggingFaceRevisionFiles,
+    SourceFiles,
+    read_reference,
+)
 from reef.runtime.jobs import ReleaseFormat
 from reef.tinker.checkpoint import MANIFEST, FreshStart, TinkerCheckpoint
 from reef.tinker.sampling import TinkerSampler
@@ -42,10 +48,12 @@ class SpindleFullTrainingComponent(TinkerJobComponent):
 
     So every release refers to its weights on the Hub (``release_format`` ``"full"``): Spindle's sampler serves a
     manifest's ``sampler_path``, and any other runtime loads the referenced weights. An import takes exactly these
-    forms: a manifest that ``validated`` takes beside a reference that resolves to full weights, or files that are
-    the base's files (equal content ID), whether Reef keeps them by reference or as a copy. Any other full weights
-    are refused, since the engine trains its base only. So every artifact without a manifest has the base's
-    weights: ``train-from`` starts it fresh, and Spindle's sampler serves it as the base model.
+    forms: a manifest that ``validated`` takes beside a reference that resolves to full weights; a pinned Hugging
+    Face commit that holds full weights, which Reef keeps by reference; or a copy of the base's files (equal
+    content ID). A copy of other weights is refused: no runtime could tell it from the base. So an artifact without
+    a manifest is a reference to a revision, or has the base's files. ``train-from`` starts the base and the base's
+    files fresh, and refuses a reference to another revision, since the engine trains its base only. Spindle's
+    sampler serves the base and the base's files as the base model (``checkpoint_sampler_path``).
     """
 
     def __init__(
@@ -112,29 +120,35 @@ class SpindleFullTrainingComponent(TinkerJobComponent):
         return BaseArtifactSource(model_files=TinkerBaseFiles(self), inputs=inputs)
 
     def check_release(self, files: ArtifactFiles) -> None:
-        """A full-parameter manifest of this component's model and service whose state resolves, or the base's files."""
+        """A full-parameter manifest of this component's model and service whose state resolves, full weights that
+        an import keeps by reference to a pinned Hugging Face commit, or a copy of the base's files."""
         if MANIFEST in files.paths():
             self.check_manifest(files)
             if REFERENCE_FILE not in files.paths():
                 raise ValueError(f"a {self.name} release holds {REFERENCE_FILE} beside its manifest")
             revision = HuggingFaceRevision.from_dict(json.loads(files.read_bytes(REFERENCE_FILE)))
-            weights = HuggingFaceRevisionFiles(revision.repo, revision.commit).paths()
-            if "config.json" not in weights or not any(path.endswith(".safetensors") for path in weights):
-                raise ValueError(f"{revision.uri} holds no full weights: config.json and safetensors")
+            check_full_weights(revision, HuggingFaceRevisionFiles(revision.repo, revision.commit).paths())
+        elif isinstance(files, SourceFiles) and files.reference is not None:
+            check_full_weights(
+                HuggingFaceRevision.from_dict(json.loads(files.reference[REFERENCE_FILE])), files.paths()
+            )
         elif files.content_id() != self.base_files_id():
             raise ValueError(
-                f"the {self.name} training component trains only its base {self._revision.uri}: an import of full "
-                "weights holds the base's files, or a manifest of a full-parameter checkpoint of it"
+                f"a {self.name} import of a copy holds the files of its base {self._revision.uri}; import other full "
+                "weights by their hf://<repo>@<commit>, which serving reads from the Hub"
             )
 
     def import_start(self, release: Path) -> str:
-        """A manifest's start, else the base start: every artifact of this component without a manifest has the base's
-        files, since its base holds them and ``check_release`` admits no other."""
+        """A manifest's start; else the base start for the base and a copy of the base's files, which
+        ``check_release`` admits as the only copy; else ``ValueError`` for a reference to another revision."""
         if (release / MANIFEST).exists():
             return self.import_manifest(release)
         revision = read_reference(release)
         if revision is not None and revision != self._revision:
-            raise ValueError(f"the {self.name} training component starts only from its base {self._revision.uri}")
+            raise ValueError(
+                f"the {self.name} training component starts only from its base {self._revision.uri} or its own "
+                f"checkpoints, not from {revision.uri}"
+            )
         return self.base_start
 
     def base_files_id(self) -> str:
@@ -142,3 +156,9 @@ class SpindleFullTrainingComponent(TinkerJobComponent):
         if self.base_content_id is None:
             self.base_content_id = HuggingFaceRevisionFiles(self._revision.repo, self._revision.commit).content_id()
         return self.base_content_id
+
+
+def check_full_weights(revision: HuggingFaceRevision, paths: tuple[str, ...]) -> None:
+    """Raise ``ValueError`` unless ``paths``, the files of ``revision``, are full weights: config.json and safetensors."""
+    if "config.json" not in paths or not any(path.endswith(".safetensors") for path in paths):
+        raise ValueError(f"{revision.uri} holds no full weights: config.json and safetensors")
