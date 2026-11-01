@@ -35,7 +35,7 @@ def compose_release(components: Mapping[str, Artifact], *, directory: Path) -> A
 
     Released files are immutable, so a carried-forward component is
     hard-linked rather than copied where the filesystem allows; a component
-    whose source has no directory yet (a base release that seeded nothing for
+    whose source has no directory yet (a default start that seeded nothing for
     it) composes as an empty directory. The result is a process-local
     artifact whose ``content_id`` derives from the component content ids, so
     republishing the same combination keeps one content identity. A

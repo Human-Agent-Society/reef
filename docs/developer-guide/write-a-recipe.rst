@@ -207,7 +207,8 @@ name it.
   reference for an objective from another package, such as the built-in
   `SFT <../user-guide/recipes/sft.rst>`__ objective above.
 - To train again from the base weights with no training state, call
-  ``POST /reef/scenarios/{scenario}/train-from`` with the base artifact.
+  ``POST /reef/scenarios/{scenario}/train-from`` with the scenario's root
+  release, when it holds the default start.
 - The parameters can also give the optional ``scheduling`` parameter, an object
   of ``epochs`` (a positive int, default 1), ``shuffle`` (default ``false``),
   ``remainder`` (``"partial"``, the default, ``"drop"`` or ``"error"``) and

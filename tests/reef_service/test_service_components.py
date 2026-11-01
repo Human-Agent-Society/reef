@@ -205,7 +205,7 @@ def test_a_process_without_control_loads_a_scenario_without_activating_it(tmp_pa
     (initial / "model.txt").write_text("w0")
     component = ImportingComponent(tmp_path / "checkpoints")
     # Both processes reach the same artifact repository.
-    repository = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
+    repository = InMemoryRepositoryBackend.factory(directory=tmp_path / "repository")
 
     def dispatcher(components: frozenset[str]) -> Dispatcher:
         return Dispatcher(

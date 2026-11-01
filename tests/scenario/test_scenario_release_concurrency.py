@@ -13,7 +13,7 @@ from tests.support._threshold_processor import threshold_pipeline
 from tests.support.runtime_stubs import StubTrainingComponent
 from tests.support.samples_service import make_samples
 
-from reef.artifact import Artifact, ArtifactPublicationError, InMemoryRepositoryBackend
+from reef.artifact import Artifact, ArtifactPublicationError, DefaultStart, InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
 from reef.core.errors import CommitPending
 from reef.dispatcher import Dispatcher
@@ -53,6 +53,9 @@ class _LocalJobs(StubTrainingComponent):
 class _LocalRecipe(Recipe):
     backend: _LocalJobs
 
+    def default_start(self) -> DefaultStart:
+        return DefaultStart(files={"model.txt": "initial"})
+
     def build(
         self,
         scenario,
@@ -63,6 +66,7 @@ class _LocalRecipe(Recipe):
         task_storage=None,
         releases=None,
         samples=None,
+        root=None,
     ):
         return Trainer.build(
             scenario,
@@ -71,18 +75,16 @@ class _LocalRecipe(Recipe):
             job_loop=JobLoop(self.backend, scenario=scenario),
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
+            root=root,
         )
 
 
 @pytest.fixture
 def local_scenario(tmp_path):
-    initial = tmp_path / "initial"
-    initial.mkdir()
-    (initial / "model.txt").write_text("initial", encoding="utf-8")
     backend = _LocalJobs(tmp_path / "candidates")
     dispatcher = Dispatcher(
         _LocalRecipe(backend=backend),
-        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
+        InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
         coordination=memory_coordination(),
@@ -379,7 +381,7 @@ def test_activation_does_no_storage_io(local_scenario, monkeypatch):
         raise ArtifactPublicationError("storage unavailable")
 
     with monkeypatch.context() as patch:
-        for method in ("commit_release", "publish", "fork"):
+        for method in ("commit_release", "publish", "register"):
             patch.setattr(backend, method, unavailable)
         activated = scenario.activate(initial.release_id)
     assert (activated.artifact_id, activated.release_id) == (initial.release_id, initial.release_id)

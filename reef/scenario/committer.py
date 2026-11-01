@@ -18,10 +18,10 @@ from threading import RLock
 from typing import Any, Literal
 
 from reef.artifact.artifact import Artifact, ArtifactConflict, ArtifactNotFound, ArtifactPublicationError, ArtifactRef
-from reef.artifact.files import directory_content_id
 from reef.artifact.release_chain import ArtifactReleaseChain, ReleaseNotRestorable
 from reef.artifact.sources import SourceFiles
 from reef.core.activation import MadeArtifact
+from reef.core.artifact_ref import RootSource
 from reef.core.components import COMPONENTS_METADATA_KEY, ComponentEntry, ReleaseComponents, made_artifact_id
 from reef.core.errors import CommitPending, ReefError
 from reef.observability.base import TrainingExperimentContext
@@ -90,6 +90,7 @@ class ScenarioCommitter:
         binding: ScenarioBinding,
         artifacts: ArtifactReleaseChain,
         trainers: tuple[ComponentTrainer, ...],
+        root_source: RootSource,
         scenario_step: int = 0,
         store: ScenarioStore,
         recovered_head_record: CommitRecord | None = None,
@@ -106,6 +107,8 @@ class ScenarioCommitter:
         #: Decides whether a training step's artifact serves. It starts as the binding's rule.
         self.activation_rule = binding.activation_rule
         self._artifacts = artifacts
+        #: Where the scenario's root release came from; every release that a training step makes records it.
+        self.root_source = root_source
         self.trainers = trainers
         self._step = scenario_step
         self._store = store
@@ -124,7 +127,7 @@ class ScenarioCommitter:
             artifacts=artifacts,
             store=store,
             publication_lock=self._publication_lock,
-            scenario_step=scenario_step,
+            root_source=root_source,
         )
         records = (
             (() if recovered_head_record is None else (recovered_head_record,))
@@ -187,7 +190,7 @@ class ScenarioCommitter:
 
         A scenario of one trainer writes its commit records, release metadata,
         consumption receipts and tracking as it did before components, so
-        every write path names no component and no base release for it.
+        every write path names no component for it.
         """
         return component if len(self.trainers) > 1 else None
 
@@ -301,22 +304,9 @@ class ScenarioCommitter:
         return self.release_manifest(artifact).artifact_ids(release_id)
 
     def import_target(self, component: str | None) -> tuple[str, ArtifactLayout]:
-        """The component an import into ``component`` lands in, and the layout that checks its directory.
-
-        ``component`` may be left out when the scenario has one component. Raise ``ValueError`` for an unknown
-        component or one that takes no import. Purpose: the import service calls it before it downloads anything.
-        """
-        names = self.component_names()
-        if component is None:
-            if len(names) > 1:
-                raise ValueError(f"scenario {self._name!r} has components {list(names)}: name the component")
-            component = names[0]
-        if component not in names:
-            raise ValueError(f"scenario {self._name!r} has no component {component!r}")
-        component_surface = self._binding.surface.components.get(component)
-        if component_surface is None or component_surface.layout is None:
-            raise ValueError(f"component {component!r} of scenario {self._name!r} takes no imported artifact")
-        return component, component_surface.layout
+        """The component an import into ``component`` lands in, and the layout that checks its directory
+        (``Surface.import_target``). Purpose: the import service calls it before it downloads anything."""
+        return self._binding.surface.import_target(component)
 
     def component_names(self) -> tuple[str, ...]:
         """The components whose artifacts this scenario names: the surface's, or the lone trainer's when it serves none."""
@@ -541,12 +531,8 @@ class ScenarioCommitter:
 
         ``component`` may be left out when the scenario has one component.
         The component's layout (``ComponentSurface.layout``) checks ``files``
-        first, outside the locks, since it can ask a remote service, and
-        before anything is copied. Then Reef stores the artifact in the empty
-        ``directory``: ``files.reference`` when the source keeps the files
-        fixed and the layout's readers resolve a reference (RFC #995,
-        ``ArtifactLayout.resolves_references``), else a copy of the files
-        (RFC #980). The release's
+        and stores them in the empty ``directory``, outside the locks, since
+        the check can ask a remote service (``ArtifactLayout.stored``). The release's
         own admission check runs on what is stored, as at a training
         publication. The artifact's content id is the content id of
         ``files``: a copy's is computed from the copy, which has the same
@@ -564,15 +550,7 @@ class ScenarioCommitter:
         component, layout = self.import_target(component)
         surface = self._binding.surface
         component_surface = surface.components[component]
-        layout.check(files)
-        if files.reference is None or not layout.resolves_references:
-            files.copy_into(directory)
-            content_id = directory_content_id(directory)
-        else:
-            for path, data in files.reference.items():
-                (directory / path).write_bytes(data)
-            content_id = files.content_id()
-        imported = Artifact.local(directory, content_id=content_id)
+        imported = layout.stored(files, directory)
         with self._lock, self._publication_lock:
             self.require_no_pending_commit("import an artifact")
             next_step = self._step + 1
@@ -870,7 +848,8 @@ class ScenarioCommitter:
         """
         scenario_metadata = scenario_metadata_for(
             name=self._name,
-            base_artifact=self._artifacts.base,
+            source=self.root_source,
+            start_artifact=self._artifacts.start,
             scenario_step=scenario_step,
             algorithm_state=prepared.algorithm_state,
             record_progress=RecordProgress(

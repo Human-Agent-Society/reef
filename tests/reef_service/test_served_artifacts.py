@@ -54,11 +54,8 @@ class NamedComponent(ImportingComponent):
 
 def serving_dispatcher(tmp_path) -> tuple[Dispatcher, NamedComponent, RepositoryBackendFactory]:
     """The dispatcher of ``tests.support.artifact_versions.dispatcher`` whose runtime serves under a model name."""
-    initial = tmp_path / "initial"
-    initial.mkdir(exist_ok=True)
-    (initial / "model.txt").write_text("w0")
     component = NamedComponent(tmp_path / "exported")
-    backend_factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
+    backend_factory = InMemoryRepositoryBackend.factory(directory=tmp_path / "repository")
     value = Dispatcher(
         TestPolicyRecipe(**runtime_bindings(component, component.inference)),
         backend_factory,

@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from reef.artifact.files import ArtifactFiles
-from reef.artifact.repository import BaseArtifactSource
+from reef.artifact.repository import DefaultStart
 from reef.core.artifact_ref import ArtifactRef
 from reef.core.job_data import JobData
 from reef.execution.workers import ItemFailed, QueueWorker, WorkerStopped
@@ -43,7 +43,7 @@ from reef.observability.base import (
     TrainingExperimentContext,
     TrainingExperimentEvent,
 )
-from reef.runtime.jobs import JobStatus, ReleaseFormat, SavedCheckpoint, TrainingComponent, TrainingJob
+from reef.runtime.jobs import JobStatus, ReleaseFormat, SavedCheckpoint, ScenarioRoot, TrainingComponent, TrainingJob
 from reef.storage.work_queue import JsonValue, NewWork, WorkItem, WorkLeaseLost, WorkQueue
 
 logger = logging.getLogger(__name__)
@@ -268,12 +268,11 @@ class JobQueueComponent(TrainingComponent):
     def release_format(self) -> ReleaseFormat | None:
         return self.component.release_format
 
-    def base_artifact_source(self) -> BaseArtifactSource:
-        return self.component.base_artifact_source()
+    def default_start(self) -> DefaultStart:
+        return self.component.default_start()
 
-    @property
-    def base_start(self) -> str:
-        return self.component.base_start
+    def root_start(self, root: ScenarioRoot) -> str:
+        return self.component.root_start(root)
 
     @property
     def shares_scenarios(self) -> bool:

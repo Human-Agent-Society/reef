@@ -53,8 +53,8 @@ def test_training_starts_and_reads_finish_while_the_tracker_blocks(tmp_path, mon
     tracker = RecordingExperimentTracker()
     value, _, _ = dispatcher(tmp_path, experiment_tracker=tracker)
     scenario = value.get_or_create_scenario("math")
-    # The creation carries the base artifact, named by the repository base release.
-    base_artifact = scenario.repository.backend.resolve_release("base").release_id
+    # The creation's artifact is the scenario's root release.
+    base_artifact = scenario.repository.start_artifact.release_id
     entered, release = Event(), Event()
     record_train_from = tracker.record_train_from
 

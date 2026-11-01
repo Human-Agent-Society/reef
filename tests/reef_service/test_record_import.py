@@ -83,6 +83,7 @@ class LearningRecipe(Recipe):
         task_storage=None,
         releases=None,
         samples=None,
+        root=None,
     ):
         return Trainer.build(
             scenario,
@@ -93,6 +94,7 @@ class LearningRecipe(Recipe):
             experiment_logger=experiment_logger,
             report_type=self.report_type,
             training_mode=self.training_mode,
+            root=root,
         )
 
 
@@ -112,11 +114,9 @@ class EchoHandler(InferenceHandler):
 
 
 def dispatcher_for(tmp_path, recipe):
-    initial = tmp_path / "initial"
-    initial.mkdir()
     return Dispatcher(
         recipe,
-        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
+        InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
         coordination=memory_coordination(),
     )

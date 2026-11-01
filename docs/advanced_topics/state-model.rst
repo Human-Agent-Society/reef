@@ -29,8 +29,10 @@ survive a restart.
 The release chain
 -----------------
 
-A scenario's first release holds the *creation artifact* of each component.
-Every later release has a parent. A release binds one *artifact*, the content
+A scenario's first release, its *root release*, holds the *creation artifact*
+of each component. Reef writes it when it creates the scenario, from the
+deployment's default start or from an artifact item, and no other scenario
+shares it. The root has no parent; every later release has one. A release binds one *artifact*, the content
 of one component, for each component. Four identities stay separate: ``release_id`` names the release, ``artifact_id``
 names an artifact, ``content_id`` names the model or harness content, and
 ``runtime_load_id`` names a concrete serving-engine weight load. A runtime
@@ -107,8 +109,8 @@ Commit ordering
 ``ScenarioStore`` owns a scenario's committed state, its ``RecordStore`` and
 its task stores. It validates step progression and settles record
 consumption with each commit.
-Deployment assembly supplies ``ScenarioStorage``; ``ScenarioFactory`` handles
-registration and release selection, opens a storage session, and returns the
+Deployment assembly supplies ``ScenarioStorage``; ``ScenarioFactory`` writes a
+new scenario's root release, opens a storage session, and returns the
 complete ``Scenario``. The scenario owns that session and
 coordinates trainer and artifact operations. Both built-in storages
 assemble their record store with ``CommitHistoryScenarioStore`` and keep
@@ -199,7 +201,9 @@ therefore rejects the step before its records are consumed. In-memory commit his
 only for the lifetime of that session.
 
 Artifact metadata stores scenario registration and checkpoint commit data
-under ``scenario_commit_record``. Recovery decodes it into a ``CommitRecord`` and
+under ``scenario_commit_record`` (format ``reef-scenario/5``): the root's
+``source``, and after step zero the root release as ``start_artifact``.
+Recovery refuses metadata of another format. It decodes the metadata into a ``CommitRecord`` and
 reconciles it with the store before restoring the trainer. Initial registration
 has no commit and passes ``None``. A committed checkpoint ahead of the backend pointer
 repairs that pointer. An older checkpoint ahead of the commit history can

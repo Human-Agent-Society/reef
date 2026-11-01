@@ -88,7 +88,7 @@ def load_recipe(sections: Mapping[str, Any], directory: Path) -> HarnessEvolutio
 def open_campaign(recipe: HarnessEvolutionRecipe, directory: Path) -> Dispatcher:
     """Use persistent artifacts and SQLite records so a new process can resume.
 
-    The recipe's seed is the base release of a new scenario, as the service makes it, so the search starts there.
+    The recipe's seed is the root release of a new scenario, as the service makes it, so the search starts there.
 
     ``search`` prepares and commits every step itself, so the dispatcher runs no training cycle of its own: a
     cycle that its preload starts would commit the same replayed step a second time.
@@ -99,7 +99,6 @@ def open_campaign(recipe: HarnessEvolutionRecipe, directory: Path) -> Dispatcher
             directory / "artifacts.git",
             work_dir=directory / "artifact-work",
             cache_dir=directory / "artifact-cache",
-            base=recipe.base_artifact_source(),
         ),
         scenario_storage=SQLiteScenarioStorage(directory / "reef-data"),
         hold_local_cycles=True,

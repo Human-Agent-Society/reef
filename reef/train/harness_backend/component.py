@@ -29,7 +29,7 @@ from typing import Any
 
 from reef.artifact.artifact import Artifact
 from reef.artifact.files import ArtifactFiles
-from reef.artifact.repository import BaseArtifactSource
+from reef.artifact.repository import DefaultStart
 from reef.core.evaluation import CandidateEvaluationPlugin, UpdateCandidate
 from reef.harness.tree import HarnessTree
 from reef.runtime.durable_files import read_json, write_json
@@ -43,7 +43,6 @@ from reef.train.local_jobs import JOB_FILE, LocalJobComponent
 #: The name of the component, which its jobs carry.
 HARNESS_COMPONENT = "harness"
 #: The start of a job from the recipe's seed tree: this prefix and the tree's checksum.
-BASE_START_PREFIX = "base:"
 #: The backend's history and step records under the state directory of a scenario component.
 HISTORY_DIR = "history"
 STEPS_DIR = "steps"
@@ -130,16 +129,6 @@ class ProgressFile:
             written = value
 
 
-def start_tree(start: str, seed: HarnessTree) -> HarnessTree:
-    """The tree of the job start ``start``: ``seed`` for the base start ``base:<seed checksum>``, else the tree in the
-    directory ``start``. ``ValueError`` for the base start of another seed tree."""
-    if start.startswith(BASE_START_PREFIX):
-        if start != f"{BASE_START_PREFIX}{seed.checksum()}":
-            raise ValueError(f"start {start!r} is the base of another seed tree")
-        return seed
-    return HarnessTree.read(Path(start))
-
-
 class HarnessTrainingComponent(LocalJobComponent):
     """The training component whose jobs are harness evolution steps, one step per job.
 
@@ -172,14 +161,10 @@ class HarnessTrainingComponent(LocalJobComponent):
     def shares_scenarios(self) -> bool:
         return True
 
-    def base_artifact_source(self) -> BaseArtifactSource:
-        """The seed tree, as ``HarnessEvolutionRecipe.base_artifact_source`` gives it."""
+    def default_start(self) -> DefaultStart:
+        """The seed tree, as ``HarnessEvolutionRecipe.default_start`` gives it."""
         seed = self.steps.seed
-        return BaseArtifactSource(files=dict(seed.files), inputs={"seed": seed.checksum()})
-
-    @property
-    def base_start(self) -> str:
-        return f"{BASE_START_PREFIX}{self.steps.seed.checksum()}"
+        return DefaultStart(files=dict(seed.files), inputs={"seed": seed.checksum()})
 
     def check_task_jobs(self, parameters: Mapping[str, Any]) -> None:
         """Accept: an offline step runs the head tree on its train tasks."""
@@ -202,8 +187,6 @@ class HarnessTrainingComponent(LocalJobComponent):
         previous = parameters.get("previous_job")
         if previous is not None and (not isinstance(previous, str) or not previous):
             raise ValueError("parameters.previous_job of a harness job must be a job ID or null")
-        if job.start.startswith(BASE_START_PREFIX) and job.start != self.base_start:
-            raise ValueError(f"start {job.start!r} is the base of another seed tree")
 
     def import_start(self, release: Path) -> str:
         """Copy the tree of ``release`` to ``starts/<checksum>`` and return that directory; ``ValueError`` when the
@@ -221,10 +204,6 @@ class HarnessTrainingComponent(LocalJobComponent):
             tree.write(staging)
             staging.replace(directory)
         return str(directory)
-
-    def start_tree(self, start: str) -> HarnessTree:
-        """The tree of ``start`` (``start_tree``)."""
-        return start_tree(start, self.steps.seed)
 
     def status(self, job_id: str) -> JobStatus:
         status = super().status(job_id)
@@ -296,7 +275,7 @@ class HarnessTrainingComponent(LocalJobComponent):
         component = str(parameters["component"])
         backend = self.backend_for(job.scenario, component)
         steps, state = self.state_after(parameters.get("previous_job"))
-        head = ReleaseFiles(str(parameters["head_release_id"]), dict(self.start_tree(job.start).files))
+        head = ReleaseFiles(str(parameters["head_release_id"]), dict(HarnessTree.read(Path(job.start)).files))
         tasks = parameters.get("evaluation_tasks")
         progress = self.steps.state_root(job.scenario, component) / PROGRESS_FILE
         try:
@@ -355,7 +334,6 @@ class HarnessTrainingComponent(LocalJobComponent):
 
 
 __all__ = [
-    "BASE_START_PREFIX",
     "HARNESS_COMPONENT",
     "HISTORY_DIR",
     "PROGRESS_FILE",
@@ -364,5 +342,4 @@ __all__ = [
     "HarnessTrainingComponent",
     "ProgressFile",
     "read_step_progress",
-    "start_tree",
 ]
