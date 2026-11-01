@@ -21,6 +21,8 @@ from typing import Any, Literal, Self, get_args
 
 from reef.core.errors import ReefError
 from reef.core.plugins import Plugin, PluginConfigError
+from reef.core.records_types import AgentRecord, RequestType
+from reef.core.trajectory_index import TrajectoryIndex
 from reef.storage.item_kinds import ITEM_KIND_RULES, task_partition
 from reef.storage.tasks import SPLIT_NAMES, TaskFileStore
 
@@ -204,6 +206,30 @@ class StoredItem:
         return self.metadata["scenarios"]
 
 
+@dataclass(frozen=True)
+class RecordLink:
+    """The place of one record item in its owner's trajectory tree (RFC #1054).
+
+    Values: ``parent`` is None or a non-empty item ID: the item of the nearest ancestor of the item's trajectory node
+    whose item the owner still stores, None when there is none. ``entry_count`` is a non-negative int, the number of
+    ATIF entries of the item's request (``CallKey.entry_count``). An ancestor's ``entry_count`` is at most its
+    descendant's; it is equal when the descendant retries the ancestor's request.
+
+    Purpose: ``DataStore.record_links`` returns it. A reader of record items forms each trajectory from the links:
+    an end is a call that no stored call names as ``parent``, and its calls are
+    ``reef.core.trajectory_index.trajectory_calls`` of the path of ``(item ID, entry_count)`` from the root to it.
+    """
+
+    parent: str | None
+    entry_count: int
+
+    def __post_init__(self) -> None:
+        if self.parent is not None and (not isinstance(self.parent, str) or not self.parent):
+            raise ValueError("a record link's parent is None or a non-empty item ID")
+        if isinstance(self.entry_count, bool) or not isinstance(self.entry_count, int) or self.entry_count < 0:
+            raise ValueError("a record link's entry_count is a non-negative int")
+
+
 class DataStore(Plugin, ABC):
     """The data of a deployment: items of content and metadata, each in one owner.
 
@@ -224,6 +250,10 @@ class DataStore(Plugin, ABC):
       (``patched_metadata``). An unknown ID is an ``ItemNotFound``. It returns the updated items.
     * ``delete(owner, item_id)`` removes the item and returns True, or returns False for an unknown ID.
     * ``task_path(item)`` returns a local directory with the files of a task item.
+    * ``record_links(owner, item_ids)`` maps each ID of ``item_ids`` that names a stored record item of ``owner``
+      with a message list to its ``RecordLink``. The store links such an item into a trajectory when it creates
+      it, by the rule of ``reef.core.trajectory_index`` among the earlier record items of the same origin scenario,
+      and the link never changes; a deleted ancestor is skipped. Other IDs are left out.
 
     The store checks the form of the metadata. It does not know the scenarios, so the service checks that
     ``scenarios`` names only scenarios of the owner.
@@ -267,6 +297,9 @@ class DataStore(Plugin, ABC):
 
     @abstractmethod
     def task_path(self, item: StoredItem) -> Path: ...
+
+    @abstractmethod
+    def record_links(self, owner: str, item_ids: Sequence[str]) -> dict[str, RecordLink]: ...
 
     @abstractmethod
     def close(self) -> None:
@@ -314,12 +347,14 @@ class MemoryDataStore(DataStore):
     """A data store in memory, for tests and for a deployment that keeps nothing.
 
     It keeps the items of each owner in a dict from ID to item, and the next sequence. Task directories go to the
-    task file store that it is given.
+    task file store that it is given. ``trajectories`` links the record items of each owner and origin scenario as
+    they are created; a deleted item stays there as a link of later calls.
     """
 
     def __init__(self, task_files: TaskFileStore) -> None:
         self.task_files = task_files
         self.items: dict[str, dict[str, StoredItem]] = {}
+        self.trajectories: dict[tuple[str, str], TrajectoryIndex] = {}
         self.next_sequence = 1
 
     @classmethod
@@ -345,6 +380,16 @@ class MemoryDataStore(DataStore):
             created = StoredItem(self.next_sequence, owner, item.item_id, metadata, digest, content)
             self.next_sequence += 1
             stored[item.item_id] = created
+            if content is not None and metadata["kind"] == "record" and content["request_type"] == "inference":
+                scenario = metadata["origin"]["scenario"]
+                self.trajectories.setdefault((owner, scenario), TrajectoryIndex()).add(
+                    AgentRecord.create(
+                        scenario=scenario,
+                        request_type=RequestType.INFERENCE,
+                        payload=content["payload"],
+                        agent_record_id=item.item_id,
+                    )
+                )
             result.append(created)
         return tuple(result)
 
@@ -403,6 +448,24 @@ class MemoryDataStore(DataStore):
         if item.kind != "task":
             raise ValueError(f"item {item.item_id!r} is a {item.kind}, not a task")
         return self.task_files.path(task_partition(item.owner), item.digest)
+
+    def record_links(self, owner: str, item_ids: Sequence[str]) -> dict[str, RecordLink]:
+        check_owner(owner)
+        stored = self.items.get(owner, {})
+        links: dict[str, RecordLink] = {}
+        for item_id in item_ids:
+            item = stored.get(item_id)
+            if item is None or item.kind != "record":
+                continue
+            index = self.trajectories.get((owner, item.metadata["origin"]["scenario"]))
+            call = None if index is None else index.calls.get(item_id)
+            if index is None or call is None:
+                continue
+            parent = call.parent
+            while parent is not None and parent not in stored:
+                parent = index.calls[parent].parent
+            links[item_id] = RecordLink(parent, call.entry_count)
+        return links
 
     def close(self) -> None:
         return None
