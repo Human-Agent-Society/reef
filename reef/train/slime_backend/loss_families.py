@@ -17,14 +17,21 @@ starts with an empty registry, which is why the driver also stamps the
 reference itself on ``args.loss_family_ref`` (see
 :func:`~reef.train.slime_backend.algorithm.resolve_args_loss_family`).
 
+This module registers one family by reference itself: ``importance_sampling``,
+Tinker's built-in loss of the same name, so a recipe that names it trains on
+either backend.
 """
 
 from __future__ import annotations
 
 import importlib
 
-from reef.train.algos.registry import _unregister_loss_family_ref, loss_family_refs
+from reef.train.algos.registry import _unregister_loss_family_ref, loss_family_refs, register_loss_family_ref
 from reef.train.slime_backend.algorithm import SlimeAlgorithm, _loss_families
+
+register_loss_family_ref(
+    "importance_sampling", "reef.train.slime_backend.importance_sampling:ImportanceSamplingAlgorithm"
+)
 
 
 class UnknownLossFamilyError(RuntimeError):
