@@ -3,7 +3,8 @@
 An inference replica holds no scenario. For each request it reads the ``ServedArtifact`` of the request's
 ``ScenarioModel`` from ``served_models``, keeps it for the whole request, sends the request to the engine at its URL
 under its model name (``EngineClients``), appends the request's ``AgentRecord`` to the scenario's record store, and
-returns the answer with the record's ID. Control is needed only to change ``served_models``. The one-process layout
+returns the answer with the record's ID. The request that it sends and records is the body that the engine's handler
+gives for the client's body (``InferenceHandler.request_payload``). Control is needed only to change ``served_models``. The one-process layout
 runs the same routes in control's app.
 
 Routes:
@@ -19,6 +20,7 @@ Routes:
 
 Rules:
 
+- A body that the engine's handler refuses (``request_payload``): 400.
 - No row: 404. A replica that cannot read ``served_models`` and has no read from the last ``max_cache_age_seconds``:
   503.
 - An engine that fails or cannot be reached: 502; one that does not answer within the timeout: 504.
@@ -305,6 +307,14 @@ class InferenceReplica:
         except LookupError as exc:
             raise web.HTTPServiceUnavailable(text=str(exc)) from exc
 
+    def request_payload(self, served: ServedArtifact, payload: Mapping[str, Any]) -> dict[str, Any]:
+        """The body that the engine of ``served`` receives for the client's ``payload``; 400 when its handler refuses
+        it."""
+        try:
+            return self.handler(served).request_payload(payload)
+        except ValueError as exc:
+            raise web.HTTPBadRequest(text=str(exc)) from exc
+
     async def forward(
         self, served: ServedArtifact, ref: ArtifactRef | None, path: str, payload: Mapping[str, Any]
     ) -> dict[str, Any]:
@@ -346,15 +356,17 @@ class InferenceReplica:
         if payload.get("stream") is True:
             if rollout:
                 raise web.HTTPBadRequest(text="a rollout's call does not stream; send it without stream")
-            return await self.relay_stream(request, path, parsed, payload, served, ref, record=record)
+            sent = self.request_payload(served, payload)
+            return await self.relay_stream(request, path, parsed, sent, served, ref, record=record)
         for attempt in range(2):
-            response = await self.forward(served, ref, path, payload)
+            sent = self.request_payload(served, payload)
+            response = await self.forward(served, ref, path, sent)
             if not inference_aborted(response):
                 break
             if attempt == 1:
                 raise web.HTTPConflict(text=INFERENCE_ABORT_ERROR)
             served, ref = await self.resolve(parsed.scenario, payload.get("model"), name=name, refresh=True)
-        stamped = {**payload, "artifact_id": served.artifact_id}
+        stamped = {**sent, "artifact_id": served.artifact_id}
         reply_headers = {RELEASE_HEADER: served.artifact_id}
         if record:
             try:
