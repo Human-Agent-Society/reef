@@ -53,22 +53,26 @@ The harness chooses ``groups_per_step`` parent candidates and samples
 instruction. When a parent already has a valid program, the prompt also contains
 that program, its reward, and the end of its recorded output.
 
-Every model request passes through Reef's OpenAI-compatible chat endpoint. The
-SGLang backend records the sampled token IDs, response loss mask, and rollout log
-probabilities. Reef assigns the scenario's current adapter to the request and
-records the adapter version with the inference.
+Every model request passes through Reef's OpenAI-compatible chat endpoint.
+Reef assigns the scenario's current adapter to the request and records the
+provider exchange with the artifact that answered. The record holds no tokens
+or log probabilities: the training component renders each rollout with the
+model's chat template.
 
 The task judge executes the generated program and computes its reward. The
 harness reports that reward with the inference receipt and the rollout's step,
-group, and position. The record stage, ``TTTDRecord2Record``, waits for every
-position in the grid. It rejects a grid that contains more than one release.
+group, and position. The record-to-sample stage, ``TTTDSamples``, waits for
+every position in the grid. It rejects a grid that contains more than one release.
 ``TTTDJobData`` removes the groups with one reward value across all siblings
 after the grid reaches the barrier. If every group is constant, ``TTTDJobData``
 keeps one group so that the training runtime receives zero-signal job data.
 
 Slime computes adaptive-beta entropic leave-one-out advantages within each
-group. The loss uses the rollout log probabilities without PPO clipping and adds
-centered token KL against the frozen base model. Megatron updates rank-32 LoRA
+group. The loss uses the old-policy log probabilities without PPO clipping and
+adds centered token KL against the frozen base model. The training component
+computes the old-policy log probabilities with the weights of the step's
+start; with the default ``max_staleness`` of 0, these are the weights that
+sampled the grid. Slime refuses ``--use-rollout-logprobs``. Megatron updates rank-32 LoRA
 matrices on the attention and MLP projections. Reef publishes the adapter to
 SGLang after the optimizer step succeeds.
 
@@ -81,17 +85,17 @@ starts the next search step.
 Configuration
 -------------
 
-The recipe has three pipeline stages: ``TTTDRecord2Record``, ``TTTDSamples``, and
-``TTTDJobData``. The deployment's ``pipeline`` section configures them. Write
-the step grid once, in the record stage. ``TTTDSamples`` and ``TTTDJobData`` read
-the grid from the record stage.
+The recipe has two pipeline stages: ``TTTDSamples`` and ``TTTDJobData``. The
+deployment's ``pipeline`` section configures them. Write the step grid once, in
+the record-to-sample stage. ``TTTDJobData`` reads the grid from
+``TTTDSamples``.
 
 .. code:: yaml
 
    recipe:
      implementation: recipes.tttd.recipe:TTTDRecipe
    pipeline:
-     record2record:
+     record2sample:
        config:
          groups_per_step: 8
          rollouts_per_group: 64
@@ -101,13 +105,13 @@ the grid from the record stage.
 
 .. config::
 
-   pipeline.record2record.config.groups_per_step | 8 | comparison groups in one step; at least one.
-   pipeline.record2record.config.rollouts_per_group | 64 | siblings per group; at least two, since a group of one has no relative reward.
-   pipeline.record2record.config.max_staleness | 0 | accepted lag, in artifacts that the scenario served, between the producing and served artifact.
-   pipeline.record2sample.config.accept_multi_turn_policy_samples | false | train on a report that references several model calls as one multi-turn sample.
+   pipeline.record2sample.config.groups_per_step | 8 | comparison groups in one step; at least one.
+   pipeline.record2sample.config.rollouts_per_group | 64 | siblings per group; at least two, since a group of one has no relative reward.
+   pipeline.record2sample.config.max_staleness | 0 | accepted lag, in artifacts that the scenario served, between the producing and served artifact.
+   pipeline.record2sample.config.accept_multi_turn_policy_samples | false | train a report's trajectory of several model calls as one multi-turn sample; otherwise the report trains only the trajectory's last call.
    pipeline.sample2job.config.job_samples | required | the fewest samples of one job; at most the grid's rollouts. Set it to the grid.
 
-``TTTDJobData`` reads only ``job_samples`` and ``buffer_size``. One job's data
+The config of ``TTTDJobData`` has only ``job_samples`` and ``buffer_size``. One job's data
 is always one complete grid: the pipeline stores a complete grid as one group
 of samples, and a job takes a whole group. ``job_samples`` must not exceed the grid's
 rollouts; with a larger one the scenario's pipeline fails to build. Leave
@@ -241,7 +245,7 @@ sum the radii. They do not use the sum reported by the generated program.
 Configure a trajectory
 ----------------------
 
-The grid has one source in ``serve.yaml``: ``pipeline.record2record.config``.
+The grid has one source in ``serve.yaml``: ``pipeline.record2sample.config``.
 The harness reads the same ``groups_per_step`` and ``rollouts_per_group``
 values, and ``steps`` and ``max_new_tokens`` from ``training.config``, when it
 starts. Slime's ``--global-batch-size`` and
@@ -250,8 +254,8 @@ starts. Slime's ``--global-batch-size`` and
 
 .. config::
 
-   pipeline.record2record.config.groups_per_step | 8 | parent candidates selected for one step, in ``serve.yaml``.
-   pipeline.record2record.config.rollouts_per_group | 64 | sibling rollouts sampled from each parent, in ``serve.yaml``.
+   pipeline.record2sample.config.groups_per_step | 8 | parent candidates selected for one step, in ``serve.yaml``.
+   pipeline.record2sample.config.rollouts_per_group | 64 | sibling rollouts sampled from each parent, in ``serve.yaml``.
    training.steps | 1 | search and optimizer steps, in ``serve.yaml``; the Slime command reads it as ``--num-rollout``.
    training.max_new_tokens | 26000 | maximum completion length, in ``serve.yaml``.
    MAX_WORKERS | 512 | concurrent rollout and evaluator calls, derived from the task in ``harness/harbor_agent.py``; packing uses ``256``.

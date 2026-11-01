@@ -1,11 +1,12 @@
-"""Judged sets: records that a model judges asynchronously, after later traffic completes them.
+"""Judged records as samples: records that a model judges asynchronously, after later traffic completes them.
 
 A computed-feedback method makes its training signal from the traffic itself.
 A record only becomes judgeable when some later record completes it, and the
-judgment calls models, so it runs on a background worker. ``JudgingRecord2Record``
+judgment calls models, so it runs on a background worker. ``JudgedSamples``
 owns the record lifecycle around that: tracked (awaiting later traffic), in
-flight (judging), then a judged set, or terminal. A recipe writes the
-correlation and the judge as a ``RecordJudging``.
+flight (judging), then a judged set that becomes one sample, or terminal. A
+recipe writes the correlation and the judge as a ``RecordJudging``, and the
+sample of one judged record as ``JudgedSamples.make_sample``.
 
 Everything here is reconstructible state: after a crash the trainer replays the
 unacknowledged tail and judging runs again, with a cost bounded by the
@@ -20,10 +21,11 @@ from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+from reef.core.job_data import TrajectorySample
 from reef.core.records_types import AgentRecord
 from reef.execution.jobs import BackgroundJobRunner, BackgroundJobWorker, Failed, SupportsReceipt
-from reef.record2record.base import Record2Record
-from reef.record2record.sets import RecordSet
+from reef.record2sample.base import Record2Sample, SampleResult
+from reef.record2sample.sets import RecordSet
 
 
 class RecordJudging(BackgroundJobRunner, ABC):
@@ -35,7 +37,7 @@ class RecordJudging(BackgroundJobRunner, ABC):
     """
 
     @abstractmethod
-    def observe(self, record: AgentRecord, now: float, stage: JudgingRecord2Record) -> None:
+    def observe(self, record: AgentRecord, now: float, stage: JudgedSamples) -> None:
         """Correlate one record, with the stage's verbs: ``dispatch``, ``track``, ``retire``, and ``tracked_record``.
 
         The stage has already retired expired records and absorbed finished
@@ -70,8 +72,8 @@ class JudgedSet(RecordSet):
         return (self.record,)
 
 
-class JudgingRecord2Record(Record2Record):
-    """Judge records on a background worker, and form a set of each judged record.
+class JudgedSamples(Record2Sample, ABC):
+    """Judge records on a background worker, and make one sample of each judged record (``make_sample``).
 
     Every record is in exactly one state: tracked, in flight, formed into a
     judged set, or terminal. Terminal records are released from memory and never train. Judged sets form in the
@@ -86,6 +88,16 @@ class JudgingRecord2Record(Record2Record):
         self.worker = worker
         self.tracked: dict[str, AgentRecord] = {}
         self.in_flight: dict[str, AgentRecord] = {}
+
+    @abstractmethod
+    def make_sample(self, record: AgentRecord, judgment: SupportsReceipt) -> TrajectorySample | None:
+        """One judged record into a sample; ``None`` cannot train."""
+
+    def make_samples(self, record_set: RecordSet) -> SampleResult:
+        if not isinstance(record_set, JudgedSet):
+            raise TypeError(f"{type(self).__name__} makes samples from judged sets, not {type(record_set).__name__}")
+        sample = self.make_sample(record_set.record, record_set.judgment)
+        return SampleResult.skipped() if sample is None else SampleResult.ready((sample,))
 
     # ------------------------------------------------------------- formation
 

@@ -99,7 +99,8 @@ def test_opd_loss_matches_full_vocabulary_centered_gradient(
         "unconcat_tokens": [torch.cat([torch.tensor([0]), tokens]) for tokens in sampled.split(lengths)],
         "loss_masks": masks,
         "distill_sample_weights": sample_weights,
-        "rollout_log_probs": list(sampler_log_probs.gather(-1, sampled[:, None])[:, 0].split(lengths)),
+        # The old-policy log-probabilities that the actor computes with the job's start weights.
+        "log_probs": list(sampler_log_probs.gather(-1, sampled[:, None])[:, 0].split(lengths)),
         "distill_teacher_topk_ids": list(teacher_head_ids.split(lengths)),
         "distill_teacher_topk_log_probs": list(teacher_log_probs.gather(-1, teacher_head_ids).split(lengths)),
         "distill_teacher_sampled_log_probs": list(teacher_log_probs.gather(-1, sampled[:, None])[:, 0].split(lengths)),

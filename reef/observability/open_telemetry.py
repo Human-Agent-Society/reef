@@ -121,7 +121,7 @@ class OpenTelemetryRecordObserver(RecordObserver):
             attributes.update(self.inference_attributes(item.payload))
             model = attributes.get("gen_ai.request.model")
             name = f"chat {model}" if isinstance(model, str) else "chat"
-        elif item.request_type is RequestType.REPORT:
+        else:
             name = "feedback"
             attributes.update(self._report_attributes(item.payload))
             if item.references:
@@ -131,9 +131,6 @@ class OpenTelemetryRecordObserver(RecordObserver):
                     Link(record_span_context(item.scenario, reference), {"reef.agent_record_id": reference})
                     for reference in item.references[1:]
                 ]
-        else:
-            name = "training request"
-            attributes.update(self._training_request_attributes(item.payload))
         self._emit(
             name,
             planned=record_span_context(item.scenario, item.agent_record_id),
@@ -272,17 +269,6 @@ class OpenTelemetryRecordObserver(RecordObserver):
         feedback = payload.get("feedback")
         if feedback is not None:
             attributes["reef.feedback"] = feedback if isinstance(feedback, str) else _json_text(feedback)
-        return attributes
-
-    def _training_request_attributes(self, payload: Mapping[str, Any]) -> dict[str, AttributeValue]:
-        attributes: dict[str, AttributeValue] = {}
-        for key in ("session", "release_id"):
-            value = payload.get(key)
-            if isinstance(value, str) and value:
-                attributes[f"reef.{key}"] = value
-        text = payload.get("text")
-        if isinstance(text, str):
-            attributes["reef.instruction"] = text
         return attributes
 
 

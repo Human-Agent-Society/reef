@@ -1,13 +1,13 @@
 """The CORAL weight-training recipe: what a deployment names in ``serve.yaml``.
 
-Binds the CORAL stages (``CoralRecord2Record`` here, and ``CoralSamples`` and
-``CoralJobData`` in :mod:`recipes.beta.coral.processor`) to the grouped
+Binds the CORAL stages (``CoralSamples`` and ``CoralJobData`` in
+:mod:`recipes.beta.coral.processor`) to the grouped
 relative-reward training machinery. CORAL sibling groups have the same shape
 as TTT-Discover steps — comparison sets of scored rollouts from one shared
 starting point — so the recipe reuses the ``tttd`` training objective (grouped
 adaptive-entropic leave-one-out advantages) and the ``tttd`` Slime loss
 family rather than duplicating either. The recipe's only method setting is the
-group barrier, ``group_size`` in ``pipeline.record2record.config``.
+group barrier, ``group_size`` in ``pipeline.record2sample.config``.
 
 Deployment reference: ``recipes.beta.coral.recipe:CoralRecipe``. Run from
 the repository checkout, which also provides the ``tttd`` registrations this
@@ -16,111 +16,21 @@ recipe reuses; ``reef serve`` finds it beside the example config.
 
 from __future__ import annotations
 
-import logging
-from collections.abc import Hashable, Mapping
 from dataclasses import dataclass
-from typing import Any, Self
 
 # The tttd training objective and loss-family reference live in the repository
 # cookbook; importing them is what registers both names this recipe binds.
 import recipes.tttd  # noqa: F401  (registration side effect)
-from recipes.beta.coral.processor import CoralJobData, CoralSamples, attempt_release_ids, sibling_group
-from reef.core.config import config_option
-from reef.pipeline_context import PipelineContext
+from recipes.beta.coral.processor import CoralJobData, CoralSamples
 from reef.recipe.base import WeightTrainingRecipe, WeightTrainingSpec
-from reef.record2record import GroupDecision, Record2RecordSettings, ReportContext, ReportGrouping, ReportRecord2Record
 from reef.train.pipeline import PipelineSpec
-
-logger = logging.getLogger(__name__)
-
-
-class CoralGrouping(ReportGrouping):
-    """The siblings of one parent commit form one group, and each attempt's commit hash is its slot.
-
-    A group is ready once ``group_size`` siblings are present. A group whose
-    attempts span releases is discarded and listed in ``discarded_groups``.
-    """
-
-    def __init__(self, group_size: int) -> None:
-        self.group_size = group_size
-        self.mixed_release_groups: dict[str, tuple[str, ...]] = {}
-
-    def placement(self, context: ReportContext) -> tuple[Hashable | None, Hashable | None]:
-        return sibling_group(context)
-
-    def decide(self, key: Hashable, members: tuple[ReportContext, ...]) -> GroupDecision:
-        if len(members) < self.group_size:
-            return GroupDecision.INCOMPLETE
-        versions = {release_id for member in members for release_id in attempt_release_ids(member)}
-        if len(versions) <= 1:
-            return GroupDecision.READY
-        ordered = tuple(sorted(versions))
-        self.mixed_release_groups[str(key)] = ordered
-        logger.error(
-            "CORAL sibling group %s discarded: %d attempts span releases %s",
-            key,
-            len(members),
-            list(ordered),
-        )
-        return GroupDecision.DISCARD
-
-    def status(self) -> Mapping[str, Any]:
-        return {
-            "discarded_groups": [
-                {"parent": parent, "reason": "mixed_release_ids", "release_ids": list(versions)}
-                for parent, versions in sorted(self.mixed_release_groups.items())
-            ],
-        }
-
-
-@dataclass(frozen=True)
-class CoralGroupSettings(Record2RecordSettings):
-    """The config of ``CoralRecord2Record``: the size of a sibling group, and the staleness limit.
-
-    Values: ``group_size`` is an int of at least two; ``max_staleness`` is as in ``Record2RecordSettings``.
-    The constructor refuses other values.
-    Purpose: ``CoralRecord2Record.from_config`` parses it from ``pipeline.record2record.config``.
-    """
-
-    group_size: int = config_option(
-        4,
-        help=(
-            "The scored siblings of one parent commit that complete its group. "
-            "A parent with fewer scored children never trains."
-        ),
-    )
-
-    def __post_init__(self) -> None:
-        super().__post_init__()
-        if self.group_size < 2:
-            raise ValueError("group_size must be at least two (relative rewards need contrast)")
-
-
-class CoralRecord2Record(ReportRecord2Record):
-    """CORAL's record stage: sibling groups in the order that they close; a terminal report owns its sources.
-
-    Config: ``group_size`` and ``max_staleness`` (``CoralGroupSettings``). CORAL sibling counts are
-    dynamic, so the barrier is a recipe setting, not a CORAL invariant.
-    """
-
-    def __init__(self, context: PipelineContext, settings: CoralGroupSettings) -> None:
-        super().__init__(
-            context,
-            CoralGrouping(settings.group_size),
-            exclusive_sources=True,
-            max_staleness=settings.max_staleness,
-        )
-
-    @classmethod
-    def from_config(cls, config: Mapping[str, Any], *, context: PipelineContext, environ: Mapping[str, str]) -> Self:
-        return cls(context, CoralGroupSettings.parse(config, plugin_class=cls))
 
 
 @dataclass(frozen=True, kw_only=True)
 class CoralRecipe(WeightTrainingRecipe):
     """Train on CORAL sibling groups with the ``tttd`` objective.
 
-    The stages are ``CoralRecord2Record``, ``CoralSamples``, and ``CoralJobData``.
+    The stages are ``CoralSamples`` and ``CoralJobData``.
     """
 
     name: str = "coral"
@@ -131,4 +41,4 @@ class CoralRecipe(WeightTrainingRecipe):
 
     @classmethod
     def pipeline_spec(cls) -> PipelineSpec:
-        return PipelineSpec(record2record=CoralRecord2Record, record2sample=CoralSamples, sample2job=CoralJobData)
+        return PipelineSpec(record2sample=CoralSamples, sample2job=CoralJobData)

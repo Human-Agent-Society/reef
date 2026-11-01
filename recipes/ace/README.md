@@ -121,13 +121,11 @@ With `batch_size: 1`, each report starts one step. The step's record is under
 `recipes/ace/work/harness/<scenario>/harness/steps/<step>/`: the new tree in `harness/`, the playbook in
 `state/playbook.json`, each model call in `calls.json`, and the summary and notes in `output/`.
 
-To learn from recorded traffic without reports, name the inference stages in the deployment file. Then each
+To learn from recorded traffic without reports, name the inference stage in the deployment file. Then each
 recorded request is one trace, without a score:
 
 ```yaml
 pipeline:
-  record2record:
-    module: reef.record2record:InferenceRecord2Record
   record2sample:
     module: reef.record2sample.traces:InferenceSamples
 ```

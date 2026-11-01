@@ -16,8 +16,8 @@ from reef.core import AgentRecord, RequestType
 from reef.core.errors import CommitPending, TrainingStartRefused
 from reef.core.job_data import JobOutcome
 from reef.core.tasks import write_harbor_task
+from reef.core.training_request import TrainingRequest
 from reef.pipeline_context import PipelineContext
-from reef.record2record import ReportGrouping, ReportRecord2Record
 from reef.runtime.jobs import JobStatus, ReleaseFormat, SavedCheckpoint, TrainingComponent, TrainingJob
 from reef.sample2job import Sample2Job
 from reef.storage.samples import TrainerSamples
@@ -358,8 +358,8 @@ def test_a_running_job_the_component_does_not_know_ends_failed_and_keeps_the_sta
 class EndedJobs(ThresholdSamples):
     """Threshold samples that keep each job outcome the pipeline gives them, in order."""
 
-    def __init__(self) -> None:
-        super().__init__()
+    def __init__(self, context: PipelineContext) -> None:
+        super().__init__(context)
         self.outcomes: list[JobOutcome] = []
 
     def job_ended(self, outcome: JobOutcome) -> None:
@@ -371,10 +371,9 @@ def test_the_pipeline_learns_a_jobs_outcome_exactly_when_the_commit_of_its_end_s
     stages: list[EndedJobs] = []
 
     def pipeline(context: PipelineContext) -> TrainingPipeline:
-        stages.append(EndedJobs())
+        stages.append(EndedJobs(context))
         return TrainingPipeline(
             context,
-            record2record=ReportRecord2Record(context, ReportGrouping()),
             record2sample=stages[-1],
             sample2job=ThresholdJobData(context, None, None),
         )
@@ -425,11 +424,9 @@ class TrajectoryAndTaskJobData(Sample2Job):
         return JobData(data_id, samples)
 
 
-def train_record(record_id: str, parameters: dict) -> AgentRecord:
+def train_record(record_id: str, parameters: dict) -> TrainingRequest:
     payload = {"text": "train", "session": "s-1", "release_id": "r-1", "parameters": parameters}
-    return AgentRecord.create(
-        scenario="math", request_type=RequestType.TRAIN, payload=payload, agent_record_id=record_id
-    )
+    return TrainingRequest.from_dict(payload, request_id=record_id)
 
 
 @pytest.mark.unit
@@ -453,9 +450,9 @@ def test_an_sft_job_and_then_an_rl_job_each_take_the_parameters_of_their_instruc
     )
     pipeline = trainer.pipeline
 
-    def train(sample_id: str, record: AgentRecord) -> dict:
+    def train(sample_id: str, record: TrainingRequest) -> dict:
         pipeline.insert_into_buffer((sample_id,))
-        pipeline.push(record)
+        pipeline.queue_instructions([record])
         trainer.commit(trainer.prepare_commit(trainer.run_once()))
         job = component.jobs[-1]
         component.statuses[job.job_id] = JobStatus(job.job_id, "finished")

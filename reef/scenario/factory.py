@@ -47,6 +47,7 @@ from reef.storage.commits import (
 from reef.storage.scenario import ScenarioStorage, ScenarioStore
 from reef.surface.base import Surface
 from reef.surface.files import REPOSITORY_FILES
+from reef.train.instructions import InstructionQueue
 from reef.train.trainer import ComponentTrainer
 
 
@@ -141,8 +142,11 @@ class ScenarioFactory:
         scenario_storage: ScenarioStorage,
         experiment_reports: ExperimentReportQueue | None = None,
         activates_runtime: bool = True,
+        instructions: InstructionQueue | None = None,
     ) -> None:
         self._recipe = recipe
+        #: The training instructions of every scenario; None builds scenarios that take no instruction.
+        self._instructions = instructions
         self._activates_runtime = activates_runtime
         self._backend_factory = backend_factory
         self._local_artifact_dir = local_artifact_dir
@@ -440,6 +444,7 @@ class ScenarioFactory:
                 store=store,
                 recovered_head_record=head_record,
                 experiment_observer=experiment_observer,
+                instructions=None if self._instructions is None else self._instructions.of(name),
             )
             # Replay retained, unconsumed rows behind each trainer's watermark
             # before resuming its cursor. Retention may keep already-consumed

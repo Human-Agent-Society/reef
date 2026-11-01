@@ -58,14 +58,9 @@ from reef.core import AgentRecord, RequestType
 from reef.core.plugins import PluginConfigError
 from reef.core.tasks import HarborTask, read_harbor_task
 from reef.pipeline_context import PipelineContext
-from reef.recipe.generated_tasks import GeneratedTaskRecord2Record, GeneratedTaskSamples
+from reef.recipe.generated_tasks import GeneratedTaskSamples, GeneratedTaskSettings
 from reef.recipe.generated_tasks.generator import FailedTask, HeldOutTask, RejectedTask, RolledOutTask
-from reef.recipe.generated_tasks.processor import (
-    GenerationJob,
-    RoundSettings,
-    TaskGroupSettings,
-    complete_generation_count,
-)
+from reef.recipe.generated_tasks.processor import GenerationJob, complete_generation_count
 from reef.recipe.generated_tasks.results import TaskRolloutResult, rollout_results
 from reef.record2sample.generator import DuplicateTask, GeneratorError, WrittenTask
 from reef.record2sample.generator.harbor import ORACLE_TIMEOUT_S
@@ -784,8 +779,7 @@ def test_a_round_of_the_generated_task_recipe_runs_autoenvscaling_end_to_end(tmp
     context = PipelineContext("autoenvscaling", task_storage=session.tasks, samples=TrainerSamples(session.samples))
     generation = GeneratedTaskSamples(
         context,
-        RoundSettings(rounds=1, description=DESCRIPTION),
-        GeneratedTaskRecord2Record(context, TaskGroupSettings()),
+        GeneratedTaskSettings(rounds=1, description=DESCRIPTION),
         task_generator=generator,
         generator_service=service,
     )
@@ -811,8 +805,7 @@ def test_an_outage_that_makes_no_task_leaves_the_round_incomplete_so_a_restart_g
     context = PipelineContext("autoenvscaling", task_storage=session.tasks, samples=TrainerSamples(session.samples))
     generation = GeneratedTaskSamples(
         context,
-        RoundSettings(rounds=1, description=DESCRIPTION, generation_attempts=2),
-        GeneratedTaskRecord2Record(context, TaskGroupSettings()),
+        GeneratedTaskSettings(rounds=1, description=DESCRIPTION, generation_attempts=2),
         task_generator=generator,
         generator_service=service,
     )
@@ -840,8 +833,7 @@ def test_a_task_whose_calibration_rollouts_cannot_run_leaves_the_generation_comp
     context = PipelineContext("autoenvscaling", task_storage=session.tasks, samples=TrainerSamples(session.samples))
     generation = GeneratedTaskSamples(
         context,
-        RoundSettings(rounds=1, description=DESCRIPTION),
-        GeneratedTaskRecord2Record(context, TaskGroupSettings()),
+        GeneratedTaskSettings(rounds=1, description=DESCRIPTION),
         task_generator=generator,
         generator_service=service,
     )

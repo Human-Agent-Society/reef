@@ -20,6 +20,7 @@ from reef.core.job_data import JobData, JobOutcome, TaskSample, TrajectorySample
 from reef.core.plugins import PluginConfigError
 from reef.core.reports import ScoredRolloutReport
 from reef.core.tasks import HarborTask, write_harbor_task
+from reef.core.training_request import TrainingRequest
 from reef.execution.jobs import BackgroundJobRunner, BackgroundJobWorker, Failed, SupportsReceipt
 from reef.inference.http import InferenceProxyRuntime
 from reef.pipeline_context import PipelineContext
@@ -37,17 +38,14 @@ from reef.recipe.generated_tasks.generator import (
 )
 from reef.recipe.generated_tasks.processor import (
     DeliveryJob,
-    GeneratedTaskRecord2Record,
     GeneratedTaskSamples,
+    GeneratedTaskSettings,
     GenerationJob,
     GenerationOutcome,
-    RoundSettings,
-    TaskGroupSettings,
     train_task_names,
 )
 from reef.recipe.generated_tasks.results import TaskRolloutResult, delivered_generations, rollout_results
-from reef.record2record import InferenceRecord2Record
-from reef.record2sample import NoSamples
+from reef.record2sample import NoSamples, Record2Sample, RecordSet, SampleResult
 from reef.record2sample.generator.inputs import TaskGenerationRequest
 from reef.runtime.jobs import TrainingComponent
 from reef.sample2job import Sample2JobSettings
@@ -105,17 +103,15 @@ def report(
     )
 
 
-def stage_settings(config: Mapping[str, object]) -> tuple[TaskGroupSettings, RoundSettings, Sample2JobSettings]:
-    """Split one flat config, as a test writes it, into the settings of the three stages."""
-    group_names = {field.name for field in dataclasses.fields(TaskGroupSettings)}
-    round_names = {field.name for field in dataclasses.fields(RoundSettings)}
+def stage_settings(config: Mapping[str, object]) -> tuple[GeneratedTaskSettings, Sample2JobSettings]:
+    """Split one flat config, as a test writes it, into the settings of the two stages."""
+    sample_names = {field.name for field in dataclasses.fields(GeneratedTaskSettings)}
     batch_names = {field.name for field in dataclasses.fields(Sample2JobSettings)}
-    unknown = sorted(set(config) - group_names - round_names - batch_names)
+    unknown = sorted(set(config) - sample_names - batch_names)
     if unknown:
         raise ValueError(f"unknown stage settings: {', '.join(unknown)}")
     return (
-        TaskGroupSettings(**{key: value for key, value in config.items() if key in group_names}),
-        RoundSettings(**{key: value for key, value in config.items() if key in round_names}),
+        GeneratedTaskSettings(**{key: value for key, value in config.items() if key in sample_names}),
         Sample2JobSettings(**{key: value for key, value in config.items() if key in batch_names}),
     )
 
@@ -130,11 +126,11 @@ def job_data_stage(settings: Sample2JobSettings, context: PipelineContext) -> Ge
 
 def processor(**config: object) -> TrainingPipeline:
     context = PipelineContext("tasks")
-    group_settings, round_settings, batch_settings = stage_settings({"buffer_size": 2, **config})
-    stage = GeneratedTaskRecord2Record(context, group_settings)
-    generation = GeneratedTaskSamples(context, round_settings, stage)
+    sample_settings, batch_settings = stage_settings({"buffer_size": 2, **config})
     return TrainingPipeline(
-        context, record2record=stage, record2sample=generation, sample2job=job_data_stage(batch_settings, context)
+        context,
+        record2sample=GeneratedTaskSamples(context, sample_settings),
+        sample2job=job_data_stage(batch_settings, context),
     )
 
 
@@ -196,13 +192,8 @@ def test_in_manual_mode_a_client_chooses_the_generated_tasks_that_train(tmp_path
     looked(p)
     assert handed_out_names(p) == [], "manual adds no generated task to the buffer by itself"
     p.insert_into_buffer(("generated-tasks/harbor-00000-001",))
-    p.push(
-        AgentRecord.create(
-            scenario="tasks",
-            request_type=RequestType.TRAIN,
-            payload={"text": "train it", "session": "s-1", "release_id": "r-1"},
-            agent_record_id="train-1",
-        )
+    p.queue_instructions(
+        [TrainingRequest.from_dict({"text": "train it", "session": "s-1", "release_id": "r-1"}, request_id="train-1")]
     )
     assert p.ready(BATCH_SIZE) and handed_out_names(p) == ["harbor-00000-001"]
     assert train_job(p) == ["harbor-00000-001"]
@@ -398,17 +389,15 @@ def rounds(
         samples=TrainerSamples(session.samples),
         training_mode=str(config.pop("training_mode", "auto")),
     )
-    group_settings, round_settings, batch_settings = stage_settings(
+    sample_settings, batch_settings = stage_settings(
         {"buffer_size": 2, "rounds": 3, "description": DESCRIPTION, **config}
     )
-    stage = GeneratedTaskRecord2Record(context, group_settings)
     generation = GeneratedTaskSamples(
-        context, round_settings, stage, task_generator=task_generator, generator_service=service, worker=worker
+        context, sample_settings, task_generator=task_generator, generator_service=service, worker=worker
     )
     built = CommittingPipeline(
         context,
         session,
-        record2record=stage,
         record2sample=generation,
         sample2job=job_data_stage(batch_settings, context),
     )
@@ -746,7 +735,7 @@ def test_a_generator_that_always_fails_stops_at_the_round_limit(tmp_path: Path) 
     for _ in range(20):
         p.ready(BATCH_SIZE)
     assert len(task_generator.requests) == 6, "three rounds, two attempts each"
-    assert p.record2record.rounds_stopped
+    assert p.record2sample.rounds_stopped
 
 
 class FirstResultsFail(ScriptedGenerator):
@@ -806,12 +795,10 @@ def test_a_failed_job_gives_each_of_its_tasks_an_infrastructure_failure_with_the
     assert len(results) == 2
 
 
-def test_the_sample_to_job_stage_needs_the_generated_task_stages() -> None:
+def test_the_sample_to_job_stage_needs_the_generated_task_stage() -> None:
     context = PipelineContext("tasks")
-    with pytest.raises(PluginConfigError, match="needs GeneratedTaskRecord2Record"):
-        GeneratedTaskJobData.from_config(
-            {}, context=context, record2record=InferenceRecord2Record(), record2sample=NoSamples(), environ={}
-        )
+    with pytest.raises(PluginConfigError, match="needs GeneratedTaskSamples, not NoSamples"):
+        GeneratedTaskJobData.from_config({}, context=context, record2sample=NoSamples(), environ={})
 
 
 # --------------------------------------------------------------------------------------- source sessions
@@ -934,9 +921,8 @@ def test_a_processor_configuration_that_cannot_train_is_refused(config: dict[str
 def test_rounds_need_a_description_the_generator_service_and_task_storage() -> None:
     def built(**config: object) -> GeneratedTaskSamples:
         context = PipelineContext("tasks")
-        group_settings, round_settings, _ = stage_settings({"rounds": 1, **config})
-        stage = GeneratedTaskRecord2Record(context, group_settings)
-        return GeneratedTaskSamples(context, round_settings, stage, task_generator=ScriptedGenerator())
+        sample_settings, _ = stage_settings({"rounds": 1, **config})
+        return GeneratedTaskSamples(context, sample_settings, task_generator=ScriptedGenerator())
 
     with pytest.raises(ValueError, match="description"):
         built()
@@ -967,7 +953,6 @@ def test_the_recipe_binds_the_objective_and_its_stages() -> None:
     recipe = training_recipe()
     assert recipe.parameters_by_kind()["task"]["rollout"] == ROLLOUT, "every job is a task job"
     built = recipe.build_pipeline(PipelineContext("one"))
-    assert isinstance(built.record2record, GeneratedTaskRecord2Record)
     assert (
         isinstance(built.record2sample, GeneratedTaskSamples) and built.record2sample.worker is None
     ), "no round runs"
@@ -1012,7 +997,6 @@ def test_the_pipeline_section_configures_the_stages_and_builds_the_generator_onc
     recipe = generated_pipeline_recipe(
         environ,
         {
-            "record2record": {"module": "reef.recipe.generated_tasks:GeneratedTaskRecord2Record"},
             "record2sample": {
                 "module": "reef.recipe.generated_tasks:GeneratedTaskSamples",
                 "config": {
@@ -1084,9 +1068,19 @@ def test_the_rollout_settings_of_a_task_job_are_no_sample2job_config() -> None:
         recipe.build_pipeline(PipelineContext("one"))
 
 
+class ConfiglessSamples(Record2Sample):
+    """A record-to-sample stage that only code builds: it has no ``from_config``."""
+
+    def push(self, record: AgentRecord) -> None:
+        return
+
+    def make_samples(self, record_set: RecordSet) -> SampleResult:
+        raise TypeError("ConfiglessSamples forms no record set")
+
+
 def test_a_stage_without_from_config_cannot_be_named_in_the_pipeline_section() -> None:
-    recipe = generated_pipeline_recipe({}, {"record2record": {"module": "reef.record2record:JudgingRecord2Record"}})
-    with pytest.raises(RecipeConfigError, match="JudgingRecord2Record cannot be built from a deployment file"):
+    recipe = generated_pipeline_recipe({}, {"record2sample": {"module": f"{MODULE}:ConfiglessSamples"}})
+    with pytest.raises(RecipeConfigError, match="ConfiglessSamples cannot be built from a deployment file"):
         recipe.build_pipeline(PipelineContext("one"))
 
 

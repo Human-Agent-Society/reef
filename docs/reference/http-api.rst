@@ -45,7 +45,7 @@ Routes
 | ``POST /reef/scenarios/{scenario}/evaluation/v1/{route}``                        | one of the inference routes above, answered by    |
 |                                                                                  | the scenario's active model and kept by nobody:   |
 |                                                                                  | what a recipe's evaluation rollouts call. The     |
-|                                                                                  | answer keeps its ``training`` block. 404 for an   |
+|                                                                                  | answer has no ``training`` block. 404 for an      |
 |                                                                                  | unknown scenario or one that serves no model      |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/scenarios/{scenario}/components/{component}/evaluation/v1/{route}`` | the same, for a candidate of one component of a   |
@@ -87,7 +87,7 @@ Routes
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/namespaces/{owner}/data/exports/{id}``                               | the status of one export                          |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
-| ``POST /reef/report``                                                            | submit feedback about one or more receipts        |
+| ``POST /reef/report``                                                            | submit feedback about one or more trajectories    |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/train``                                                             | enqueue one training instruction                  |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
@@ -210,10 +210,10 @@ Headers
 +-----------------------------------+---------------------------------------------------------+
 | ``x-reef-rollout: 1``             | optional on inference: a call of a rollout that Reef    |
 |                                   | runs itself. It is served like any other call, but no   |
-|                                   | record is kept, and the response keeps its ``training`` |
-|                                   | block with the ``artifact_id`` that answered. The call  |
-|                                   | must not stream (HTTP 400). Only the service token      |
-|                                   | opens it.                                               |
+|                                   | record is kept. The response has no ``training`` block; |
+|                                   | ``x-reef-release-id`` names the artifact that answered. |
+|                                   | The call must not stream (HTTP 400). Only the service   |
+|                                   | token opens it.                                         |
 +-----------------------------------+---------------------------------------------------------+
 
 Client release tags
@@ -282,8 +282,10 @@ headers; envelope fields other than the three shown above are rejected.
 ``request_type`` may be ``inference`` or ``report``. Inference payloads follow
 the selected recipe's recorded-input contract: native provider request fields
 with an existing ``response``, or another complete example that its processor
-understands. Import does not synthesize missing training tensors, run inference,
-or assign the active artifact to externally generated examples.
+understands. Import does not run inference or assign the active artifact to
+externally generated examples. Training reads no token IDs or log
+probabilities from an imported record: the training component renders the
+recorded exchange with the model's chat template.
 Reports use the same schema and reference validation as ``POST /reef/report``;
 import referenced inferences first. Training instructions use ``POST /reef/train``.
 To train on ATIF trajectories that are already complete, see `Data items
@@ -457,7 +459,10 @@ scenario must have the owner, and its recipe must train on the items:
 - A trajectory needs a recipe that accepts uploaded trajectories, and the
   recipe must turn it into a training sample. The SFT recipe trains every
   agent turn, except the steps marked ``is_copied_context: true`` (`SFT
-  <../user-guide/recipes/sft.rst#train-on-whole-conversations>`__).
+  <../user-guide/recipes/sft.rst#train-on-whole-conversations>`__). This
+  check is structural; the training component renders the trajectory with
+  the model's chat template when a job trains it, and leaves out one that
+  cannot render.
 - A task in the ``train`` split needs a recipe that trains imported tasks
   (``Sample2Job.accepts_imported_tasks``), such as ``sft``, the
   generated-task recipe, or harness evolution that runs offline (`Offline runs
@@ -903,7 +908,9 @@ Manual training
 
 ``POST /reef/train`` queues one training instruction for a scenario in
 ``data.training_mode: manual``; in harness evolution, every method takes it.
-It takes the user's ``text``,
+An instruction is not a record: it waits in the deployment's instructions queue
+until a training commit consumes it, and the commit keeps it in its
+``training_request`` metrics. It takes the user's ``text``,
 originating ``session`` and ``release_id``. These fields identify the session
 and release the request came from. The backend operates on the current
 committed state; it does not restore the originating release. The API
@@ -990,7 +997,9 @@ only on a job of tasks. Slime takes ``method``, ``scheduling`` and
 The response is ``{agent_record_id, scenario, request_type: "train"}``,
 plus ``page_path``, the request's page with the query a browser opens it by
 (see Request page).
-HTTP 200 acknowledges durable acceptance, not successful training. Requests
+An optional top-level ``agent_record_id`` names the instruction: an identical
+resend returns the queued instruction, and the same ID with another body is
+HTTP 409. HTTP 200 acknowledges durable acceptance, not successful training. Requests
 are executed one at a time by the normal training worker; later requests
 do not change a step already in flight. A step that fails with an
 instruction (a method error, for one) is not retried: the next step
@@ -1003,11 +1012,10 @@ stay held for the next job, so no failing trace is consumed unread. The
 every step, instruction steps included, and stop automatic steps only; an
 instruction still runs past them. The existing evaluation and publication
 rules still determine whether the result becomes served.
-``GET /reef/status`` reports ``training_mode``. Processors using the shared
-instruction queue also report ``buffered_requests`` (requests already
-read into the processor; later records may still wait in storage) and
-``pending_instructions`` (accepted instructions not yet consumed: the
-buffered ones plus those still unread in storage).
+``GET /reef/status`` reports ``training_mode``. Processors that take
+instructions also report ``buffered_requests`` (the instructions that the
+trainer holds since its last step) and ``pending_instructions`` (accepted
+instructions that no commit consumed yet, read from the queue).
 Committed step metrics include ``training_request`` with the instruction
 id, text, session, release id and ``requires``; the releases row of a step
 that answered a request carries, for example:
@@ -1375,7 +1383,7 @@ its terminal event carries no receipt. A stream from Reef's SGLang or vLLM
 backend that the engine aborts also carries no receipt, because Reef cannot
 restart a stream after it sent frames. In both cases a harness that reports by
 receipt does not reference the record. Reef stores it as an incomplete delivery
-record and preserves the captured response, including any training tensors.
+record and preserves the provider response.
 The record-to-record stage excludes aborted records from sample creation and
 training, including when a report references their IDs directly or retained
 records are replayed after a restart.
@@ -1392,16 +1400,17 @@ alone, and hands it to the recipe. The evaluation runs, which run candidate code
 the method's calls to the served model use it: they can sample the active
 release but reach no other route. A restart issues a new one.
 
-Artifact of a training response
+Artifact of a recorded response
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Each inference record names the artifact that answered: Reef writes its
-``artifact_id`` into the record, the same ID as ``x-reef-release-id``. The
-staleness check reads it (see `Staleness
-<../developer-guide/processors.rst#staleness>`__). The engine's own weight-load
-IDs (``runtime_load_id`` and ``runtime_load_spans`` in the ``training`` block)
-stay inside the engines: Reef removes them from the record and from a
-rollout's response. It does not refuse a response because of them.
+An inference record holds the provider exchange and ``artifact_id``, the
+artifact that answered: the same ID as ``x-reef-release-id``. The staleness
+check reads it (see `Staleness
+<../developer-guide/processors.rst#staleness>`__). Serving returns no training
+tensors. Reef removes any ``training`` block that an engine handler returns
+from the record, from the client's answer, and from rollout and evaluation
+answers. The training component renders each recorded call and computes the
+log probabilities that it needs.
 
 Report
 ------
@@ -1427,8 +1436,10 @@ data inside ``metadata`` or ``feedback``.
    * - ``references``
      - list of strings
      - no
-     - Unique existing inference receipts in this scenario. Reported-feedback
-       processors require at least one reference; several form one trajectory.
+     - Unique existing inference receipts in this scenario: the last call of
+       each trajectory that the report scores, usually one. Reef expands each
+       reference to the calls of its trajectory. Reported-feedback processors
+       require at least one reference.
    * - ``metadata``
      - object
      - no
@@ -1462,8 +1473,10 @@ through, except the removed ``metadata.training.eligible`` field, which is
 rejected with HTTP 400 regardless of its value. Reports cannot opt out of training.
 
 Every supplied reference must identify an already stored inference record in the
-same scenario. Missing, foreign, non-inference, or duplicate references produce
-HTTP 400 without persisting the report. Reef does not wait for future records;
+same scenario, and no reference may lie inside the trajectory of another: a
+report references only the last call of each trajectory. Missing, foreign,
+non-inference, duplicate, or inner references produce HTTP 400 without
+persisting the report. Reef does not wait for future records;
 the producer may resubmit after the referenced inference has been stored.
 Identical retries of previously accepted reports retain their original behavior
 after reference cleanup; they do not restart training.

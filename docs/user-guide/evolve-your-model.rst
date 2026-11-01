@@ -119,10 +119,14 @@ Three things to get right:
    component checks this at startup. Each recipe page names its loss family, and
    `Loss families <../developer-guide/loss-families.rst#family-to-slime-flags>`__
    maps each one to its flags.
-3. **The serving backend must capture training tensors.** Weight training needs
-   the exact token ids, loss mask, and rollout log probabilities produced during
-   inference. The bundled SGLang training backend records them in
-   ``response.training``.
+3. **Training must render as the engine serves.** Serving records the
+   provider exchange only, without tokens or log probabilities. The training
+   component renders each sample with the model's chat template and computes
+   the log probabilities with the weights of the job's start. Give Slime the
+   serving engine's chat template arguments in
+   ``training.options.apply-chat-template-kwargs``, for example
+   ``'{"enable_thinking": false}'``. A sample that cannot render does not
+   train, and the job metric ``unrenderable_samples`` counts it.
 
 Keep the ``training.options`` mapping from the closest working config and change only what
 your model or recipe needs.

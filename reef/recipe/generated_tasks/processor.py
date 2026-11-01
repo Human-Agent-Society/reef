@@ -1,14 +1,13 @@
 """The generated-task stages: tasks generated and saved here, stored in the sample store, and trained from the buffer.
 
-When a round is due, the record stage (``GeneratedTaskRecord2Record``) gives a ``TaskGenerationRound`` to
-``GeneratedTaskSamples``, which runs it as one generation job on a private worker, off the trainer's thread. A
-generation job:
+When a round is due, ``GeneratedTaskSamples`` makes a ``TaskGenerationRound`` and runs it as one generation job on
+a private worker, off the trainer's thread. A generation job:
 
-1. Asks the generator for tasks, with the round's source sessions when the record stage gave any.
+1. Asks the generator for tasks, with the round's source sessions when the round has any.
 2. Saves the candidates in the scenario's task store, and validates each task with the generator.
 3. Publishes each valid task with its train/eval split. Eval tasks run no rollouts.
 
-The record-to-sample stage hands each train task of a complete generation to the pipeline
+The stage hands each train task of a complete generation to the pipeline
 (``made_samples``), which stores it in the scenario's sample store as ``generated-tasks/<task name>``. The
 tasks then train from the buffer like any other sample: ``GeneratedTaskJobData`` makes one task job of the
 buffer's tasks, and the commit that submits the job counts them trained. The training component rolls the
@@ -23,8 +22,8 @@ that made no train task, a failed task job, and no unfinished task are followed 
 the task store and the sample store: the store holds the train tasks that did not train, and the buffer takes
 them again.
 
-The record stage trains on no report. It holds the reports that are source sessions for the rounds, and
-releases the others, such as a generator's own reports.
+The stage trains on no report. It holds the reports that are source sessions for the rounds, and releases the
+others, such as a generator's own reports.
 """
 
 from __future__ import annotations
@@ -34,7 +33,7 @@ import logging
 import queue
 import tempfile
 from collections import Counter
-from collections.abc import Hashable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Self
@@ -42,7 +41,7 @@ from typing import Any, Self
 from reef.core import AgentRecord
 from reef.core.config import config_option
 from reef.core.job_data import JobOutcome, TaskSample
-from reef.core.plugins import PluginConfigError, PluginSettings
+from reef.core.plugins import PluginConfigError
 from reef.core.tasks import HarborTask, read_harbor_task, write_harbor_task
 from reef.core.tasks.split import TaskSplit, TaskSplitConflict, extend_split_by_source
 from reef.execution.jobs import BackgroundJobRunner, BackgroundJobWorker, Failed, SupportsReceipt
@@ -55,17 +54,10 @@ from reef.recipe.generated_tasks.results import (
     rollout_results,
     save_rollout_result,
 )
-from reef.record2record import (
-    Record2Record,
-    Record2RecordSettings,
-    RecordSet,
-    ReportContext,
-    ReportGrouping,
-    ReportRecord2Record,
-)
-from reef.record2sample import Record2Sample, SampleResult
+from reef.record2sample import Record2Sample, Record2SampleSettings, ReportContext, ReportGrouping, ReportSamples
 from reef.record2sample.generator.client import Generator, HttpGenerator
 from reef.record2sample.generator.inputs import TaskGenerationRequest
+from reef.record2sample.reports import report_score
 from reef.sample2job import Sample2Job, Sample2JobSettings
 from reef.storage.samples import StoredSample, TrainerSamples
 from reef.storage.tasks import GenerationState, SplitName, StoredTask, TaskConflict, TaskStore, TaskStoreError
@@ -255,14 +247,14 @@ class TaskGenerationRound:
 
     Values: ``sources`` holds at most ``source_records_per_round`` source
     sessions, in arrival order.
-    Purpose: ``GeneratedTaskRecord2Record`` makes it when a round is due.
+    Purpose: ``GeneratedTaskSamples`` makes it when a round is due.
     ``GeneratedTaskSamples`` runs it.
     """
 
     sources: tuple[ReportContext, ...]
 
     def record_ids(self) -> frozenset[str]:
-        """Return the IDs of the records of the sources, which the record stage holds while the round runs."""
+        """Return the IDs of the records of the sources, which the stage holds while the round runs."""
         return frozenset(
             record_id for source in self.sources for record_id in (*source.references, source.report.agent_record_id)
         )
@@ -279,7 +271,7 @@ class RoundResult:
     ``retry`` is True when the generation is incomplete, so the next round
     takes the same sessions again and finishes it.
     Purpose: ``GeneratedTaskSamples.finished_rounds`` makes it when a round ends.
-    ``GeneratedTaskRecord2Record.advance`` reads it.
+    ``GeneratedTaskSamples.advance`` reads it.
     """
 
     made_train_tasks: bool = False
@@ -391,15 +383,25 @@ class SourceSessionGrouping(ReportGrouping):
 
 
 @dataclass(frozen=True)
-class TaskGroupSettings(Record2RecordSettings):
-    """The config of ``GeneratedTaskRecord2Record``: the pace of the rounds, the source sessions, and the staleness limit.
+class GeneratedTaskSettings(Record2SampleSettings):
+    """The config of ``GeneratedTaskSamples``: the rounds, their pace, the source sessions, and the generations.
 
-    Values: ``jobs_per_round`` and ``refill_tasks`` are positive ints; ``source_records_per_round`` is a
-    non-negative int, and above 0 it needs a ``source_tag`` of the form ``name=value``; ``max_staleness`` is
-    as in ``Record2RecordSettings``. The constructor refuses other values.
-    Purpose: ``GeneratedTaskRecord2Record.from_config`` parses it from ``pipeline.record2record.config``.
+    Values:
+
+    * ``rounds`` is a non-negative int; above 0 it needs a ``description``.
+    * ``jobs_per_round`` and ``refill_tasks`` are positive ints.
+    * ``source_records_per_round`` is a non-negative int; above 0 it needs a ``source_tag`` of the form
+      ``name=value``.
+    * ``generator`` is ``None`` or a ``TaskGenerator`` reference ``{module, config}``.
+    * ``eval_fraction`` is a number in [0, 1]; ``split_seed`` an int.
+    * ``generation_attempts`` and ``generation_deadline_seconds`` are positive.
+    * ``max_staleness`` is as in ``Record2SampleSettings``.
+
+    The constructor refuses other values.
+    Purpose: ``GeneratedTaskSamples.from_config`` parses it from ``pipeline.record2sample.config``.
     """
 
+    rounds: int = config_option(0, help="The generations to finish; 0 generates nothing.")
     jobs_per_round: int = config_option(
         DEFAULT_JOBS_PER_ROUND, help="The finished task jobs after which the next round starts."
     )
@@ -409,24 +411,6 @@ class TaskGroupSettings(Record2RecordSettings):
         1, help="The next round starts only while fewer saved tasks than this wait to train."
     )
 
-    def __post_init__(self) -> None:
-        super().__post_init__()
-        if self.jobs_per_round < 1:
-            raise ValueError("jobs_per_round must be positive")
-        if self.refill_tasks < 1:
-            raise ValueError("refill_tasks must be positive")
-        if self.source_records_per_round < 0:
-            raise ValueError("source_records_per_round must be non-negative")
-        if self.source_records_per_round > 0 and not self.source_tag:
-            raise ValueError("source_records_per_round needs a source_tag that marks the source sessions")
-        source_tag_of(self.source_tag)
-
-
-@dataclass(frozen=True)
-class RoundSettings(PluginSettings):
-    """The config of ``GeneratedTaskSamples``."""
-
-    rounds: int = config_option(0, help="The generations to finish; 0 generates nothing.")
     generator: Mapping[str, Any] | None = config_option(
         None, help="The TaskGenerator class (module) and its config. Required with rounds."
     )
@@ -444,6 +428,16 @@ class RoundSettings(PluginSettings):
     )
 
     def __post_init__(self) -> None:
+        super().__post_init__()
+        if self.jobs_per_round < 1:
+            raise ValueError("jobs_per_round must be positive")
+        if self.refill_tasks < 1:
+            raise ValueError("refill_tasks must be positive")
+        if self.source_records_per_round < 0:
+            raise ValueError("source_records_per_round must be non-negative")
+        if self.source_records_per_round > 0 and not self.source_tag:
+            raise ValueError("source_records_per_round needs a source_tag that marks the source sessions")
+        source_tag_of(self.source_tag)
         if self.rounds < 0:
             raise ValueError("rounds must be non-negative")
         if self.generation_attempts < 1 or self.generation_deadline_seconds <= 0:
@@ -458,44 +452,61 @@ class RoundSettings(PluginSettings):
             TaskGenerator.reference(self.generator, setting="pipeline.record2sample.config.generator")
 
 
-class GeneratedTaskRecord2Record(ReportRecord2Record):
-    """The generated-task record stage: the source sessions and the pace of the rounds.
+class GeneratedTaskSamples(ReportSamples, BackgroundJobRunner):
+    """The generated-task stage: the source sessions, the pace of the rounds, the runner of the generations, and the
+    source of their tasks.
 
-    Config: ``jobs_per_round``, ``source_records_per_round`` (the source sessions that each request takes, at most), ``source_tag``
-    (``name=value``; required when ``source_records_per_round`` is above 0), ``refill_tasks``, and
-    ``max_staleness``. A terminal report owns its sources. No report trains: the training component trains on
-    the rollouts of the task jobs, which are not records.
+    Config: ``GeneratedTaskSettings``. No report trains: the training component trains on the rollouts of the task
+    jobs, which are not records, so the stage makes no sample from records. A terminal report owns its sources.
 
-    The stage starts no round until ``resume_rounds`` gives it the record-to-sample stage that runs the rounds,
-    the next round number, the complete generations of the task store, and the round limit. The limit counts
-    the rounds that finished a generation and the rounds whose generation ran out of attempts; a round of
-    sessions that a complete generation already used does not count. A restart counts complete generations
-    only, so a generation that ran out of attempts gets new attempts after a restart. A round is due when no
-    round is running, the limit is not reached, fewer than ``refill_tasks`` train tasks wait to train
-    (``GeneratedTaskSamples.waiting_task_count``), and one of these is true:
+    **Rounds.** The round limit is ``rounds``. It counts the rounds that finished a generation and the rounds whose
+    generation ran out of attempts; a round of sessions that a complete generation already used does not count. A
+    start reads the next round number and the complete generations from the task store. A restart counts complete
+    generations only, so a generation that ran out of attempts gets new attempts after a restart. A round is due
+    when no round is running, the limit is not reached, fewer than ``refill_tasks`` train tasks wait to train
+    (``waiting_task_count``), and one of these is true:
 
     * it is the first round after a start;
     * the last round made no train task, or the last task job failed, so no job data comes;
     * ``jobs_per_round`` task jobs finished since the last round started;
-    * no train task is unfinished (``GeneratedTaskSamples.unfinished_task_count``), so no job end can come.
+    * no train task is unfinished (``unfinished_task_count``), so no job end can come.
 
-    At the limit, the stage stops the rounds and holds no more source sessions. A source session is a report
-    that ``SourceSessionGrouping.is_source_report`` accepts, with its inference records.
-    The stage holds source sessions in arrival order, and each round takes at most
-    ``source_records_per_round`` of them. A round whose generation is incomplete gives its sessions to the
-    next round. The stage holds the records of a round's sources until the round ends.
+    At the limit, the stage stops the rounds and holds no more source sessions.
+
+    **Source sessions.** A source session is a report that ``SourceSessionGrouping.is_source_report`` accepts, with
+    its inference records. The stage holds source sessions in arrival order, and each round takes at most
+    ``source_records_per_round`` of them. A round whose generation is incomplete gives its sessions to the next
+    round. The stage holds the records of a round's sources until the round ends.
+
+    **Generations.** The stage runs a due round's generation on its worker (``start_round``): it generates tasks
+    from the round's description and source sessions, validates them and saves them in the task store
+    ``generated-tasks`` of the scenario session; it runs no rollouts. A generator or check that fails to run is
+    retried up to ``generation_attempts`` times within ``generation_deadline_seconds``. ``finished_rounds`` hands
+    back each round with its published train tasks.
+
+    **Tasks.** The stage hands each published train task of a complete generation to the pipeline
+    (``made_samples``), which stores it as ``generated-tasks/<task name>``; a start hands back each one that the
+    sample store does not hold. A train task is unfinished until it has a result. When a job's end commits
+    (``job_ended``), the stage saves ``rollout(n)`` of :mod:`reef.recipe.generated_tasks.results` for each task that
+    a committed job trained and that has no result. When every train task of a generation has a result, the next
+    job sends the generation's results to the generator. A restart sends the results that the generator did not
+    receive.
     """
 
-    def __init__(self, context: PipelineContext, settings: TaskGroupSettings) -> None:
+    def __init__(
+        self,
+        context: PipelineContext,
+        settings: GeneratedTaskSettings,
+        *,
+        task_generator: TaskGenerator | None = None,
+        generator_service: Generator | None = None,
+        worker: BackgroundJobWorker | None = None,
+    ) -> None:
         self.source_grouping = SourceSessionGrouping(source_tag_of(settings.source_tag))
         super().__init__(context, self.source_grouping, exclusive_sources=True, max_staleness=settings.max_staleness)
         self.jobs_per_round = settings.jobs_per_round
         self.sources_per_round = settings.source_records_per_round
         self.refill_tasks = settings.refill_tasks
-        self.runner: GeneratedTaskSamples | None = None
-        self.next_round = 0
-        self.completed_rounds = 0
-        self.round_limit = 0
         self.running_round: TaskGenerationRound | None = None
         # The first round after a start is due at once.
         self.follow_at_once = True
@@ -505,140 +516,6 @@ class GeneratedTaskRecord2Record(ReportRecord2Record):
         self.waiting_sources: list[ReportContext] = []
         #: The sessions of a round whose generation is incomplete; the next round takes exactly these.
         self.retry_sources: tuple[ReportContext, ...] = ()
-
-    @classmethod
-    def from_config(cls, config: Mapping[str, Any], *, context: PipelineContext, environ: Mapping[str, str]) -> Self:
-        return cls(context, TaskGroupSettings.parse(config, plugin_class=cls))
-
-    def resume_rounds(
-        self, runner: GeneratedTaskSamples, *, next_round: int, completed_rounds: int, round_limit: int
-    ) -> None:
-        """Set the runner, the next round number, the rounds that finished a generation, and the round limit."""
-        self.runner = runner
-        self.next_round = next_round
-        self.completed_rounds = completed_rounds
-        self.round_limit = round_limit
-
-    def handle_other_report(self, report: AgentRecord) -> None:
-        # The report ends here. releasable_record_ids holds back a session's records until its round ends.
-        super().handle_other_report(report)
-        if self.sources_per_round == 0 or self.rounds_stopped:
-            return
-        if any(reference not in self.inferences for reference in report.references):
-            return
-        context = self.report_context(report, None)
-        if self.source_grouping.is_source_report(context):
-            self.waiting_sources.append(context)
-
-    def round_due(self) -> bool:
-        """Whether the next round should start now."""
-        if self.runner is None or self.rounds_stopped or self.running_round is not None:
-            return False
-        # With no unfinished task, no job end comes to count toward the next round.
-        if not (
-            self.follow_at_once or self.trained_jobs >= self.jobs_per_round or self.runner.unfinished_task_count() == 0
-        ):
-            return False
-        return self.runner.waiting_task_count() < self.refill_tasks
-
-    def advance(self, now: float) -> None:
-        """End the rounds that finished, then start the next round when it is due, or stop the rounds at the limit."""
-        super().advance(now)
-        if self.runner is None:
-            return
-        for result in self.runner.finished_rounds():
-            finished = self.running_round
-            self.running_round = None
-            self.follow_at_once = not result.made_train_tasks
-            if result.counts:
-                self.completed_rounds += 1
-            if result.retry and finished is not None and not self.rounds_stopped:
-                self.retry_sources = finished.sources
-        if not self.round_due():
-            return
-        if self.completed_rounds >= self.round_limit:
-            self.stop_rounds()
-            return
-        sources = self.retry_sources or tuple(self.waiting_sources[: self.sources_per_round])
-        generation_round = TaskGenerationRound(sources=sources)
-        if not self.runner.start_round(generation_round):
-            self.stop_rounds()
-            return
-        if self.retry_sources:
-            self.retry_sources = ()
-        else:
-            self.waiting_sources = self.waiting_sources[self.sources_per_round :]
-        self.running_round = generation_round
-        self.next_round += 1
-        self.follow_at_once = False
-        # The task jobs of the round's tasks count toward the next one.
-        self.trained_jobs = 0
-
-    def task_job_ended(self, *, finished: bool) -> None:
-        """A task job ended: one that finished counts toward the next round; after one that failed, no job
-        data comes to wait for, so the next round may follow."""
-        if finished:
-            self.trained_jobs += 1
-        else:
-            self.follow_at_once = True
-
-    def stop_rounds(self) -> None:
-        """No round runs again, so no session waits for one."""
-        self.rounds_stopped = True
-        self.waiting_sources = []
-        self.retry_sources = ()
-
-    def releasable_record_ids(self) -> frozenset[str]:
-        held = {
-            record_id
-            for context in (*self.retry_sources, *self.waiting_sources)
-            for record_id in (*context.references, context.report.agent_record_id)
-        }
-        if self.running_round is not None:
-            held |= self.running_round.record_ids()
-        return super().releasable_record_ids() - held
-
-    def background_jobs_running(self) -> bool:
-        """Return True while a round runs: its end can start the next round without a new record."""
-        return self.running_round is not None or super().background_jobs_running()
-
-    def operational_metrics(self) -> Mapping[str, float | int]:
-        return {**super().operational_metrics(), "waiting_source_sessions": len(self.waiting_sources)}
-
-
-class GeneratedTaskSamples(Record2Sample, BackgroundJobRunner):
-    """The record-to-sample stage of generated tasks: the runner of the generations, and the source of their tasks.
-
-    The record stage forms no record set, so the stage makes no sample from records.
-
-    The record stage starts a round when it is due (``start_round``). The stage runs the round's generation
-    on its worker: it generates tasks from the round's description and source sessions, validates them and
-    saves them in the task store ``generated-tasks`` of the scenario session; it runs no rollouts. A generator or
-    check that fails to run is retried up to ``generation_attempts`` times within
-    ``generation_deadline_seconds``. ``finished_rounds`` hands back each round with its published train tasks.
-
-    The stage hands each published train task of a complete generation to the pipeline (``made_samples``), which
-    stores it as ``generated-tasks/<task name>``; a start hands back each one that the sample store does not hold.
-    A train task is unfinished until it has a result. When a job's end commits (``job_ended``), the stage saves
-    ``rollout(n)`` of :mod:`reef.recipe.generated_tasks.results` for each task that a committed job trained and
-    that has no result. When every train task of a generation has a result, the next job sends the generation's
-    results to the generator. A restart sends the results that the generator did not receive.
-    """
-
-    def __init__(
-        self,
-        context: PipelineContext,
-        settings: RoundSettings,
-        round_stage: GeneratedTaskRecord2Record,
-        *,
-        task_generator: TaskGenerator | None = None,
-        generator_service: Generator | None = None,
-        worker: BackgroundJobWorker | None = None,
-    ) -> None:
-        super().__init__()
-        #: The record stage that paces the rounds.
-        self.round_stage = round_stage
-        self.scenario = context.scenario
         self.rounds = settings.rounds
         self.description = settings.description
         self.generation_attempts = settings.generation_attempts
@@ -681,12 +558,8 @@ class GeneratedTaskSamples(Record2Sample, BackgroundJobRunner):
         self.generation_in_flight: int | None = None
         self.last_error = ""
         store = self.task_store
-        round_stage.resume_rounds(
-            self,
-            next_round=next_generation(store) if store is not None else 0,
-            completed_rounds=complete_generation_count(store) if store is not None else 0,
-            round_limit=self.rounds,
-        )
+        self.next_round = next_generation(store) if store is not None else 0
+        self.completed_rounds = complete_generation_count(store) if store is not None else 0
         if store is not None:
             saved = rollout_results(store)
             stored = self.stored_tasks()
@@ -707,28 +580,99 @@ class GeneratedTaskSamples(Record2Sample, BackgroundJobRunner):
         config: Mapping[str, Any],
         *,
         context: PipelineContext,
-        record2record: Record2Record,
         environ: Mapping[str, str],
     ) -> Self:
         """Build the rounds of one scenario, with the ``TaskGenerator`` that ``generator`` names."""
-        settings = RoundSettings.parse(config, plugin_class=cls)
-        if not isinstance(record2record, GeneratedTaskRecord2Record):
-            raise PluginConfigError(
-                f"{cls.__name__} needs GeneratedTaskRecord2Record as record2record, not {type(record2record).__name__}"
-            )
+        settings = GeneratedTaskSettings.parse(config, plugin_class=cls)
         task_generator = None
         if settings.generator is not None:
             generator = TaskGenerator.reference(settings.generator, setting="pipeline.record2sample.config.generator")
             task_generator = TaskGenerator.referenced_class(generator).from_config(
                 generator.config, scenario=context.scenario, environ=environ
             )
-        return cls(context, settings, record2record, task_generator=task_generator)
+        return cls(context, settings, task_generator=task_generator)
 
-    def push(self, record_set: RecordSet) -> None:
-        raise TypeError(f"{type(self).__name__} makes no tasks from records: its record stage forms no record set")
+    def handle_other_report(self, report: AgentRecord) -> None:
+        # The report ends here. releasable_record_ids holds back a session's records until its round ends.
+        super().handle_other_report(report)
+        if self.sources_per_round == 0 or self.rounds_stopped:
+            return
+        if any(reference not in self.inferences for reference in report.references):
+            return
+        calls = self.report_calls(report)
+        if calls is None:
+            return
+        context = ReportContext(report, report_score(report), tuple(self.inferences[call] for call in calls))
+        if self.source_grouping.is_source_report(context):
+            self.waiting_sources.append(context)
 
-    def pull(self) -> tuple[tuple[Hashable, SampleResult], ...]:
-        return ()
+    def round_due(self) -> bool:
+        """Whether the next round should start now."""
+        if self.rounds_stopped or self.running_round is not None:
+            return False
+        # With no unfinished task, no job end comes to count toward the next round.
+        if not (self.follow_at_once or self.trained_jobs >= self.jobs_per_round or self.unfinished_task_count() == 0):
+            return False
+        return self.waiting_task_count() < self.refill_tasks
+
+    def advance(self, now: float) -> None:
+        """End the rounds that finished, then start the next round when it is due, or stop the rounds at the limit."""
+        super().advance(now)
+        for result in self.finished_rounds():
+            finished = self.running_round
+            self.running_round = None
+            self.follow_at_once = not result.made_train_tasks
+            if result.counts:
+                self.completed_rounds += 1
+            if result.retry and finished is not None and not self.rounds_stopped:
+                self.retry_sources = finished.sources
+        if not self.round_due():
+            return
+        if self.completed_rounds >= self.rounds:
+            self.stop_rounds()
+            return
+        sources = self.retry_sources or tuple(self.waiting_sources[: self.sources_per_round])
+        generation_round = TaskGenerationRound(sources=sources)
+        if not self.start_round(generation_round):
+            self.stop_rounds()
+            return
+        if self.retry_sources:
+            self.retry_sources = ()
+        else:
+            self.waiting_sources = self.waiting_sources[self.sources_per_round :]
+        self.running_round = generation_round
+        self.next_round += 1
+        self.follow_at_once = False
+        # The task jobs of the round's tasks count toward the next one.
+        self.trained_jobs = 0
+
+    def task_job_ended(self, *, finished: bool) -> None:
+        """A task job ended: one that finished counts toward the next round; after one that failed, no job
+        data comes to wait for, so the next round may follow."""
+        if finished:
+            self.trained_jobs += 1
+        else:
+            self.follow_at_once = True
+
+    def stop_rounds(self) -> None:
+        """No round runs again, so no session waits for one."""
+        self.rounds_stopped = True
+        self.waiting_sources = []
+        self.retry_sources = ()
+
+    def releasable_record_ids(self) -> frozenset[str]:
+        held = {
+            record_id
+            for context in (*self.retry_sources, *self.waiting_sources)
+            for record_id in (*context.references, context.report.agent_record_id)
+        }
+        if self.running_round is not None:
+            held |= self.running_round.record_ids()
+        return super().releasable_record_ids() - held
+
+    def background_jobs_running(self) -> bool:
+        """Return True while a round runs: its end can start the next round without a new record."""
+        return self.running_round is not None or super().background_jobs_running()
 
     def made_samples(self) -> tuple[tuple[str, TaskSample], ...]:
         """The published train tasks that the pipeline has not stored, each named ``generated-tasks/<task name>``."""
@@ -821,19 +765,24 @@ class GeneratedTaskSamples(Record2Sample, BackgroundJobRunner):
             self.worker.close()
 
     def operational_metrics(self) -> Mapping[str, float | int]:
-        return {"generation_in_flight": 0 if self.generation_in_flight is None else 1}
+        return {
+            **super().operational_metrics(),
+            "waiting_source_sessions": len(self.waiting_sources),
+            "generation_in_flight": 0 if self.generation_in_flight is None else 1,
+        }
 
     def status(self) -> Mapping[str, Any]:
         store = self.task_store
         trainer = "" if self.samples is None else self.samples.trainer
         trained = frozenset(name for name, stored in self.stored_tasks().items() if stored.train_count(trainer) > 0)
         return {
+            **super().status(),
             "task_store": task_counts(store, trained) if store is not None else {},
             "task_generation": {
                 "generator": None if self.task_generator is None else type(self.task_generator).__name__,
                 "in_flight": self.generation_in_flight,
-                "next": self.round_stage.next_round,
-                "completed": self.round_stage.completed_rounds,
+                "next": self.next_round,
+                "completed": self.completed_rounds,
                 "of": self.rounds,
                 "last_error": self.last_error,
             },
@@ -960,7 +909,7 @@ class GeneratedTaskSamples(Record2Sample, BackgroundJobRunner):
                 else:
                     self.save_result(TaskRolloutResult(name, error=error, infrastructure_failure=True))
                 self.unfinished.discard(name)
-        self.round_stage.task_job_ended(finished=outcome.event == "finished")
+        self.task_job_ended(finished=outcome.event == "finished")
         self.deliver_later()
 
     def save_result(self, result: TaskRolloutResult) -> None:
@@ -1036,18 +985,12 @@ class GeneratedTaskJobData(Sample2Job):
         config: Mapping[str, Any],
         *,
         context: PipelineContext,
-        record2record: Record2Record,
         record2sample: Record2Sample,
         environ: Mapping[str, str],
     ) -> Self:
         settings = Sample2JobSettings.parse(config, plugin_class=cls)
-        if not isinstance(record2record, GeneratedTaskRecord2Record) or not isinstance(
-            record2sample, GeneratedTaskSamples
-        ):
-            raise PluginConfigError(
-                f"{cls.__name__} needs GeneratedTaskRecord2Record and GeneratedTaskSamples, "
-                f"not {type(record2record).__name__} and {type(record2sample).__name__}"
-            )
+        if not isinstance(record2sample, GeneratedTaskSamples):
+            raise PluginConfigError(f"{cls.__name__} needs GeneratedTaskSamples, not {type(record2sample).__name__}")
         return cls(context, buffer_size=settings.buffer_size, job_samples=settings.job_samples)
 
     def __init__(

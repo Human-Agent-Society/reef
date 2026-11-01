@@ -13,7 +13,7 @@ from __future__ import annotations
 import logging
 import math
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
 from threading import Lock
 from typing import Any
@@ -253,12 +253,20 @@ class Trainer:
             self._pipeline.set_training_mode(training_mode, fill_manual_buffer=fill_manual_buffer)
 
     def pending_instructions(self) -> int:
-        """Instructions accepted and not yet consumed: the ones the pipeline buffers plus those unread in storage."""
+        """The instructions that the pipeline holds: those that the scenario last gave it (``queue_instructions``) and
+        that it did not consume yet. ``Scenario.pending_instructions`` counts the queue itself."""
         with self._lock:
-            unread = self._records.count(
-                self.scenario, request_type=RequestType.TRAIN, after_sequence=self._data_sequence
-            )
-            return self._pipeline.buffered_requests() + unread
+            return self._pipeline.buffered_requests()
+
+    def consumed_among(self, ids: Iterable[str]) -> frozenset[str]:
+        """The IDs among ``ids`` that a commit of this trainer consumed, or that its recovery read as consumed."""
+        with self._lock:
+            return frozenset(ids) & self.consumed_record_ids
+
+    def queue_instructions(self, requests: Iterable[TrainingRequest]) -> None:
+        """Give the pipeline the scenario's queued instructions (``TrainingPipeline.queue_instructions``)."""
+        with self._lock:
+            self._pipeline.queue_instructions(requests)
 
     def fail_pending_instruction(self, error: str) -> bool:
         """Mark the reserved instruction as failed, so its next job data is a skip row; False when none is reserved."""

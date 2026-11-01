@@ -2,19 +2,27 @@
 
 No I/O or model calls live here. Captured requests and responses are retained
 verbatim in ``extra.reef.records``; standard steps make the conversation portable.
-Reef's training extension stores exact rollout tensors, never inferred token IDs.
+A training component renders the steps into the tokens that it trains (``reef.core.chat_rendering``).
 """
 
 from __future__ import annotations
 
 import json
 import math
-import mimetypes
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from reef.core.atif_payloads import (
+    OPENAI_CHAT,
+    atif_agent,
+    canonical_json,
+    folded_steps,
+    message_entry,
+    payload_provider,
+)
 from reef.core.job_data import TrajectorySample
 from reef.core.records_types import AgentRecord
+from reef.core.trajectory_index import comparable_message
 
 
 def source_record_id(item: TrajectorySample) -> str:
@@ -68,20 +76,20 @@ def make_trajectory(
     """Encode ordered inference records as ATIF, retaining all raw provider fields."""
     if not records:
         raise ValueError("an ATIF trajectory requires at least one inference record")
-    steps: list[dict[str, Any]] = []
+    entries: list[list[dict[str, Any]]] = []
     history: list[Mapping[str, Any]] = []
     for record in records:
+        provider = payload_provider(record.payload) or OPENAI_CHAT
         request, responses = exchange_messages(record.payload)
         shared = 0
         for previous, current in zip(history, request, strict=False):
-            if previous != current:
+            if canonical_json(comparable_message(previous)) != canonical_json(comparable_message(current)):
                 break
             shared += 1
-        for message in request[shared:]:
-            _append_message(steps, message, copied=True)
-        for message in responses:
-            _append_message(steps, message, copied=False)
+        entries.extend(message_entry(message, provider, copied=True) for message in request[shared:])
+        entries.extend(message_entry(message, provider, copied=False) for message in responses)
         history = [*request, *responses]
+    steps = folded_steps(entries)
     if not steps:
         steps.append({"step_id": 1, "source": "agent", "message": "", "extra": {"reef": {"text_available": False}}})
     primary = records[-1].agent_record_id
@@ -89,6 +97,9 @@ def make_trajectory(
     model = records[-1].payload.get("model")
     if isinstance(model, str):
         agent["model_name"] = model
+    last = records[-1].payload
+    if "tools" in last:
+        agent.update(atif_agent(last["tools"], payload_provider(last) or OPENAI_CHAT))
     return TrajectorySample(
         {
             "schema_version": "ATIF-v1.7",
@@ -152,140 +163,6 @@ def exchange_messages(payload: Mapping[str, Any]) -> tuple[list[Mapping[str, Any
             **({"text_available": False} if not response else {}),
         }
     ]
-
-
-def _content(value: Any) -> str | list[dict[str, Any]]:
-    if isinstance(value, str):
-        return value
-    if value is None:
-        return ""
-    if not isinstance(value, list):
-        return json.dumps(value, ensure_ascii=False)
-    parts: list[dict[str, Any]] = []
-    for part in value:
-        if not isinstance(part, Mapping):
-            parts.append({"type": "text", "text": str(part)})
-            continue
-        kind = part.get("type")
-        if kind in ("text", "input_text", "output_text"):
-            parts.append({"type": "text", "text": str(part.get("text", ""))})
-        elif kind in ("image", "image_url", "input_image"):
-            source = part.get("source", {})
-            image_url = part.get("image_url", {})
-            path = image_url.get("url") if isinstance(image_url, Mapping) else image_url
-            if isinstance(source, Mapping):
-                path = path or source.get("path") or source.get("url")
-                if source.get("type") == "base64":
-                    path = f"data:{source.get('media_type')};base64,{source.get('data')}"
-            if not isinstance(path, str):
-                parts.append({"type": "text", "text": json.dumps(dict(part), ensure_ascii=False)})
-                continue
-            media_type = (source.get("media_type") if isinstance(source, Mapping) else None) or (
-                path[5:].split(";", 1)[0]
-                if path.startswith("data:")
-                else mimetypes.guess_type(path.split("?", 1)[0])[0]
-            )
-            if media_type not in ("image/jpeg", "image/png", "image/gif", "image/webp"):
-                # Keep unknown media verbatim instead of guessing its MIME type.
-                parts.append({"type": "text", "text": json.dumps(dict(part), ensure_ascii=False)})
-            else:
-                parts.append({"type": "image", "source": {"media_type": media_type, "path": path}})
-        elif kind not in ("tool_use", "tool_result", "thinking", "redacted_thinking"):
-            parts.append({"type": "text", "text": json.dumps(dict(part), ensure_ascii=False)})
-    if all(part["type"] == "text" for part in parts):
-        return "".join(part["text"] for part in parts)
-    return parts
-
-
-def _append_message(steps: list[dict[str, Any]], message: Mapping[str, Any], *, copied: bool) -> None:
-    role = message.get("role", "assistant")
-    kind = message.get("type")
-    content = message.get("content", "")
-    blocks = content if isinstance(content, list) else []
-    results = [part for part in blocks if isinstance(part, Mapping) and part.get("type") == "tool_result"]
-    if role == "tool" or kind == "function_call_output":
-        results.append(
-            {
-                "tool_use_id": message.get("tool_call_id", message.get("call_id")),
-                "content": message.get("output", content),
-            }
-        )
-    for result in results:
-        call_id = result.get("tool_use_id")
-        target = next(
-            (
-                step
-                for step in reversed(steps)
-                if any(call.get("tool_call_id") == call_id for call in step.get("tool_calls", []))
-            ),
-            None,
-        )
-        if target is not None:
-            target.setdefault("observation", {"results": []})["results"].append(
-                {
-                    "source_call_id": call_id,
-                    "content": _content(result.get("content")),
-                    "extra": {"provider_result": dict(result)},
-                }
-            )
-        else:
-            steps.append(
-                {
-                    "step_id": len(steps) + 1,
-                    "source": "user",
-                    "message": _content(result.get("content")),
-                    "extra": {"provider_message": dict(message)},
-                }
-            )
-    if role == "tool" or kind == "function_call_output":
-        return
-    remaining = [part for part in blocks if not isinstance(part, Mapping) or part.get("type") != "tool_result"]
-    if results and not remaining:
-        return
-    source = "agent" if role == "assistant" else "system" if role in ("system", "developer") else "user"
-    step: dict[str, Any] = {
-        "step_id": len(steps) + 1,
-        "source": source,
-        "message": _content(remaining if blocks else content),
-        "extra": {"provider_message": dict(message)},
-    }
-    if copied and source == "agent":
-        step["is_copied_context"] = True
-    calls = list(message.get("tool_calls") or [])
-    calls.extend(
-        {"id": part.get("id"), "function": {"name": part.get("name"), "arguments": part.get("input", {})}}
-        for part in blocks
-        if isinstance(part, Mapping) and part.get("type") == "tool_use"
-    )
-    if kind == "function_call":
-        calls.append({"id": message.get("call_id"), "function": message})
-    if calls and source == "agent":
-        step["tool_calls"] = [_tool_call(call, len(steps) + 1, index) for index, call in enumerate(calls)]
-    reasoning = message.get("reasoning_content") or "".join(
-        str(part.get("thinking", ""))
-        for part in blocks
-        if isinstance(part, Mapping) and part.get("type") == "thinking"
-    )
-    if reasoning and source == "agent":
-        step["reasoning_content"] = reasoning
-    steps.append(step)
-
-
-def _tool_call(call: Mapping[str, Any], step_id: int, index: int) -> dict[str, Any]:
-    function = call.get("function", call)
-    arguments = function.get("arguments", {})
-    if isinstance(arguments, str):
-        try:
-            arguments = json.loads(arguments)
-        except json.JSONDecodeError:
-            arguments = {"raw_arguments": arguments}
-    if not isinstance(arguments, Mapping):
-        arguments = {"raw_arguments": arguments}
-    return {
-        "tool_call_id": str(call.get("id") or f"call-{step_id}-{index}"),
-        "function_name": str(function.get("name") or "unknown"),
-        "arguments": dict(arguments),
-    }
 
 
 def _provider_content(content: Any) -> Any:

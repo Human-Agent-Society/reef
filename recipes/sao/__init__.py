@@ -1,7 +1,6 @@
 """Single-Rollout Asynchronous Optimization (arXiv:2607.07508): one method, one package.
 
-- ``recipe`` — the SAO recipe class and its ``WeightTrainingSpec``. Its
-  record stage is Reef's ``ExclusiveReportRecord2Record``.
+- ``recipe`` — the SAO recipe class and its ``WeightTrainingSpec``.
 - ``processor`` — the stages ``SAOSamples`` and ``SAOJobData``: one scored
   rollout, one record set unit.
 - ``objective`` — the backend-agnostic training objective.

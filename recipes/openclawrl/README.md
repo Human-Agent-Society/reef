@@ -11,8 +11,8 @@ Reproduction of [OpenClaw-RL](https://arxiv.org/abs/2603.10165)'s personal-agent
 ```text
 openclawrl/
   recipe.py        OpenClawRLRecipe: training spec, pipeline stages, loss family "openclawrl"
-  judging.py       OpenClawRLRecord2Record: rebuilds sessions from recorded traffic, judges turns
-  processor.py     OpenClawRLSamples and OpenClawRLJobData: judged turns into samples and job data, the PRM record file
+  judging.py       OpenClawRLJudging and its settings: rebuilds sessions from recorded traffic, judges turns
+  processor.py     OpenClawRLSamples and OpenClawRLJobData: the judging stage, judged turns into samples and job data, the PRM record file
   objective.py     raw reward advantages and backend loss selection
   sessions.py      session reconstruction from the records Reef already keeps
   prm.py           the PRM judge that the judging worker runs

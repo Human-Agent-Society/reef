@@ -264,11 +264,7 @@ section names it (`Activation rule`_).
 
        @classmethod
        def pipeline_spec(cls) -> PipelineSpec:
-           return PipelineSpec(
-               record2record=MyMethodRecord2Record,
-               record2sample=MyMethodTasks,
-               sample2job=MyMethodJobData,
-           )
+           return PipelineSpec(record2sample=MyMethodSamples, sample2job=MyMethodJobData)
 
 ``frozen=True`` is required by the base. ``kw_only=True`` keeps later fields
 keyword-only while the training component stays the positional dependency. Call
@@ -741,6 +737,9 @@ load_id}``). ``kind``, ``owner`` and ``origin`` never change. A deployment
 selects the store in ``storage.data_store``; ``SQLiteDataStore`` and
 ``PostgresDataStore`` (``reef.storage.sql_data``) and ``MemoryDataStore`` are
 built in. Every operation names one owner and reads or writes only its items.
+The SQL stores link the record items of each owner into trajectories, as the
+record stores do, and keep only the messages that each item adds; reads return
+the whole content.
 
 .. list-table::
    :header-rows: 1
@@ -954,6 +953,21 @@ SQLite leaves it empty because each store owns a database. Custom SQL adapters
 must also supply ``RecordTables.eviction`` with scope/scenario keys and the
 ``record_count``, ``body_bytes``, ``first_sequence`` and ``last_sequence`` columns.
 These totals are updated atomically with capacity deletion and retry hashes.
+The records table also has ``message_field`` and ``payload_sha256`` columns,
+and ``RecordTables.nodes`` holds the trajectory node of each record with a
+message list (``messages``, or ``input`` for responses). Define it with
+``trajectory_node_table(metadata, name, *scope_columns)``. The node keeps the
+record's payload as ATIF (``reef.core.atif_payloads``): each request message as
+ATIF steps and observation results, ``tools`` as the agent's
+``tool_definitions``, and the reply as an agent step. Provider fields that ATIF
+cannot hold, such as ``cache_control``, stay in ``extra.reef``. A node links the
+record to the earlier record of its scenario with the same API format and
+``tools`` whose messages are the longest prefix of its own; among equal
+prefixes, it prefers the record whose reply the new messages resend. Other tools
+start another trajectory. The node keeps only the messages after its parent's,
+and the root node of a trajectory keeps its tools. The record row keeps only the
+payload's hash. Reads render the provider payload back exactly. A node stays
+while a stored record needs its messages.
 ``RecordTables.settings`` holds the store's settings as ``name`` and
 ``value_json`` rows under the scope keys; ``SQLRecordStore.read_settings()`` and
 ``write_settings(settings)`` read and replace them.
@@ -991,7 +1005,9 @@ by the shared SQL layer. PostgreSQL timestamps use double precision, and sequenc
 use 64-bit identities. Retention applies the same byte-budget policy to
 all bodies across active and archived generations in the deployment schema.
 
-Existing SQLite databases remain readable without copying record bodies. Direct callers must replace
+Existing SQLite and PostgreSQL stores link their records when they first open;
+the upgrade rewrites the records that have a message list, oldest first. Direct
+callers must replace
 ``RecordStore(path)`` with ``SQLiteRecordStore(path)``; the abstract base cannot
 be instantiated. ``SQLiteRecordStore`` is also exported from ``reef``:
 
@@ -1035,7 +1051,16 @@ and keeps consumption metadata out of record reads.
    * - ``loss(scenario)``
      - Durable ``RecordLoss`` totals: ``record_count``, ``body_bytes``,
        ``first_sequence`` and ``last_sequence`` for capacity-evicted bodies.
-       Counts include consumed and unconsumed records.
+       ``body_bytes`` counts the record rows and the trajectory nodes that the
+       evictions freed. Counts include consumed and unconsumed records.
+   * - ``trajectory(scenario, agent_record_id)``
+     - The record IDs of the trajectory that the record ends, oldest first: the
+       earlier calls with the same API format and tools whose messages the
+       record's messages extend, one per prefix, and then the record. A retry
+       with the same messages replaces the call that it retries. An ID can name
+       a record that capacity eviction deleted. A record without a message list,
+       or a store that keeps no trajectories, gives a trajectory of one call;
+       ``()`` for a record that is not stored.
    * - ``consumption_receipts(scenario)``
      - Ordered receipts with ``receipt_id``, ``consumed_ids``, ``metadata``,
        and ``recorded_at``. Reef no longer writes receipts. A store that an
@@ -1110,33 +1135,39 @@ Pipeline stages
 
 .. code:: python
 
-   from reef.record2record import GroupDecision, RecordJudging, ReportContext, ReportGrouping, ReportRecord2Record
-   from reef.record2sample import JudgedSamples, ReportSamples, SkippedReport
+   from reef.record2sample import (
+       GroupDecision,
+       JudgedSamples,
+       RecordJudging,
+       ReportContext,
+       ReportGrouping,
+       ReportSamples,
+       SkippedReport,
+   )
    from reef.sample2job import DistillJobData, Sample2Job
 
 A training pipeline (``reef.train.pipeline.TrainingPipeline``) turns durable
-records into typed job data through three stages. A recipe names a default class
-for each in ``pipeline_spec()`` (``PipelineSpec(record2record=...,
-record2sample=..., sample2job=...)``):
+records into typed job data through two stages. A recipe names a default class
+for each in ``pipeline_spec()`` (``PipelineSpec(record2sample=...,
+sample2job=...)``):
 
-- ``record2record``: the record-to-record stage
-  (``reef.record2record``). It decides which records train and which train together:
-  it groups reports, judges records, and ends records that can no longer
-  train. Its staleness check (``is_stale``) keeps samples with data more than
-  ``max_staleness`` artifacts behind the served artifact out of the buffer.
-  ``max_staleness`` is the stage's own setting, from
-  ``Record2RecordSettings`` (see `the staleness check
-  <../developer-guide/processors.rst#staleness>`__). Without
-  one, the pipeline forms no record set and nothing trains.
 - ``record2sample``: the record-to-sample stage
-  (``reef.record2sample.Record2Sample``). It turns each record set into samples
-  (``Sample`` values). Reported feedback supplies a ``make_sample`` hook
-  on ``ReportSamples`` that assembles valid reports; computed feedback supplies
-  a ``JudgedSamples`` after an asynchronous ``judge`` derives new feedback.
-  The pipeline pushes each record set (``push``) and pulls the results
-  (``pull``). Most stages inherit ``ImmediateRecord2Sample`` and implement
-  ``make_samples``; a stage with slow work returns a result later (see `slow
-  record-to-sample work <../developer-guide/processors.rst#slow-record-to-sample-work>`__).
+  (``reef.record2sample.Record2Sample``). The pipeline pushes every record to
+  it (``push``). It decides which records train and which train together: it
+  forms record sets (``form``), groups reports, judges records, and ends
+  records that can no longer train. ``form`` makes the samples of each set
+  (``make_samples``) and holds them in a record set unit until the unit is
+  ready. A sample is a ``Sample`` value. Reported feedback supplies a
+  ``make_sample`` hook on ``ReportSamples``; computed feedback supplies one on
+  ``JudgedSamples``, after an asynchronous ``judge`` derives new feedback. A
+  stage with slow work keeps its records and forms the set in
+  ``advance(now)`` when the work ends (see `Slow work
+  <../developer-guide/processors.rst#slow-work>`__). The stage's staleness
+  check (``is_stale``) keeps samples with data more than ``max_staleness``
+  artifacts behind the served artifact out of the buffer. ``max_staleness``
+  is the stage's own setting, from ``Record2SampleSettings`` (see `the
+  staleness check <../developer-guide/processors.rst#staleness>`__). The
+  default, ``NoSamples``, makes no sample, so nothing trains.
   ``uploaded_sample(trajectory) -> TrajectorySample`` turns an uploaded ATIF
   trajectory into its training sample. It must be pure, and it raises
   ``ValueError`` to refuse the upload (see `Uploaded trajectories
@@ -1160,11 +1191,10 @@ record2sample=..., sample2job=...)``):
   extends it. See `Job size <../developer-guide/processors.rst#job-size>`__.
 
 Reef builds the stages for each scenario, in this order, with the class
-methods below; a later stage receives the stages built before it:
+methods below; the sample-to-job stage receives the record-to-sample stage:
 
-- ``Record2Record.from_config(config, *, context, environ)``
-- ``Record2Sample.from_config(config, *, context, record2record, environ)``
-- ``Sample2Job.from_config(config, *, context, record2record, record2sample, environ)``
+- ``Record2Sample.from_config(config, *, context, environ)``
+- ``Sample2Job.from_config(config, *, context, record2sample, environ)``
 
 ``config`` is the stage's config from the deployment's ``pipeline`` section;
 ``environ`` holds the environment the deployment was read with. A stage
@@ -1173,11 +1203,11 @@ with ``reef.core.config.config_option`` fields and validation in
 ``__post_init__``. In ``from_config``, parse the config with
 ``Settings.parse(config, plugin_class=cls)`` (``NoSettings`` for a stage
 without config) and give the settings object to the constructor. A bad config
-fails when the first scenario builds its pipeline. A later stage that needs an
-earlier stage as a specific class checks it with ``isinstance`` and raises
-``PluginConfigError`` otherwise. A value that several stages need
-belongs to the first of them; later stages read it from the stage object
-they receive. A ``Record2Sample`` that keeps
+fails when the first scenario builds its pipeline. A sample-to-job stage that
+needs the record-to-sample stage as a specific class checks it with
+``isinstance`` and raises ``PluginConfigError`` otherwise. A value that both
+stages need belongs to the record-to-sample stage; the sample-to-job stage
+reads it from the stage object that it receives. A ``Record2Sample`` that keeps
 per-scenario state also implements ``scenario_state_dirs(config, scenario)``,
 so a scenario delete archives it. Reef owns replay, retention, deduplication, pending job data,
 and exactly-once consumption; the method implements only the hooks below.
@@ -1214,13 +1244,16 @@ A reported-feedback recipe implements these hooks:
    * - ``Sample2Job.make_job_data(samples, data_id) -> JobData``
      - Shape the flat tuple of selected tasks into job data with the ID ``data_id``.
 
-The recipe owns the report policy. Its record stage is a subclass of
-``ReportRecord2Record(context, grouping, *, exclusive_sources=False)``; ``ReportRecord2Record(context, ReportGrouping())``
-trains every report by itself. ``ExclusiveReportRecord2Record(context)`` also
-trains every report by itself, and a report that ends owns its inference
-records. No inference is in two record sets: a report that references an
-inference of another report ends without training. A ``ReportGrouping`` runs in the
-record-to-record stage and reads only records:
+The recipe owns the report policy. Its record-to-sample stage is a subclass of
+``ReportSamples(context, grouping=None, *, exclusive_sources=False, max_staleness=0)``.
+With no ``grouping``, it trains every report by itself. With
+``exclusive_sources=True``, a report that ends owns its inference records.
+A report references the last call of each trajectory that it scores;
+the stage expands each reference to the calls of its trajectory
+(``reef.core.trajectory_index``). No inference is in two record sets: a report
+whose trajectory holds an inference of another report ends without training,
+and so does a stored report that lists calls inside one trajectory. A
+``ReportGrouping`` runs in the record-to-sample stage and reads only records:
 
 .. list-table::
    :header-rows: 1
@@ -1239,12 +1272,23 @@ record-to-record stage and reads only records:
    * - ``status() -> Mapping``
      - Optional JSON-safe group outcomes, such as steps that can never train. The pipeline adds them to its status.
 
-``ReportContext`` carries ``report``, ordered ``inferences``, optional ``score``,
-and the recipe's ``parsed_report``. ``require_score()`` returns a finite reward or
-raises if the training method cannot use the supplied feedback.
+``ReportContext`` carries ``report``, ``inferences`` (the calls of the report's
+trajectories, oldest first), optional ``score``, and the recipe's
+``parsed_report``. ``ends`` holds the referenced last calls, in reference order.
+``require_score()`` returns a finite reward or raises if the training method
+cannot use the supplied feedback.
 
-``make_sample`` returns a trajectory or task directly. ``ReportSamples`` adds the
-report id and ordered references to ``source_agent_record_ids``. Grouping and
+``make_sample`` returns a trajectory or task directly. Its default makes the
+report's trajectories one ATIF trajectory sample with the report's score.
+``ReportSamples`` adds the calls and the report id to
+``source_agent_record_ids``.
+
+``TrajectorySamples(context, *, trajectory_idle_seconds=300.0,
+max_staleness=0)`` is the stage of a method that needs no report. It forms a
+``TrajectorySet`` of a trajectory's calls once the trajectory's last call has
+had no continuing call and no retry for ``trajectory_idle_seconds``, and makes
+it one ATIF ``TrajectorySample`` (``trajectory_sample``). Every other record
+ends at once. Grouping and
 consumption state stay in the stage; recipes never receive buffered report objects.
 ``placement`` returns ``(None, None)`` by default. A group key collects reports,
 and a slot deduplicates retries within that group (None uses the report id).
@@ -1270,9 +1314,9 @@ Computed feedback
 
 Use this engine when later traffic completes an earlier record and judging it
 calls a model or another slow service. The recipe writes a ``RecordJudging``.
-Its record stage is a ``JudgingRecord2Record(judging, worker)``,
-its record-to-sample stage is a ``JudgedSamples``, and its ``Sample2Job`` shapes
-the judged samples into job data.
+Its record-to-sample stage is a ``JudgedSamples(judging, worker, *,
+max_staleness=0)`` subclass that implements ``make_sample``, and its
+``Sample2Job`` shapes the judged samples into job data.
 
 +------------------------------------------+-----------------------------------+
 | Hook                                     | Contract                          |
@@ -1408,14 +1452,32 @@ Reef-specific fields live inside ``trajectory.extra.reef``:
 - ``source_agent_record_id`` identifies the primary source;
 - ``records`` preserves ordered source ids, timestamps and original provider
   payloads, including provider-specific fields;
-- ``training`` holds exact captured ``tokens``, ``loss_mask`` and
-  ``rollout_log_probs``, and ``artifact_id``, the artifact that produced them.
-  Recipes may also supply ``action_mask``, ``rollout_created_at``, ``turn_count``,
-  ``topk_indices``, ``topk_log_probs`` and method-specific ``extras``.
+- ``teacher`` is a distillation stage's teacher request (``messages``, or
+  null for a teacher that reads the student's own sequence, ``tools``,
+  ``max_prompt_tokens`` and ``max_tokens``); OpenClaw-RL writes one request
+  for each hint in ``teacher_candidates``;
+- ``max_tokens`` is the longest sample, in tokens, that a stage lets train;
+- ``training`` holds what a recipe sets for its objective, such as
+  ``rollout_created_at`` or ``distill_sample_weight``. A sample that serving
+  recorded has no ``tokens`` and no log-probabilities in it.
+
+A sample that the record-to-sample stage makes holds the provider exchange
+and no tokens. The training component renders it with the model's chat
+template and computes the log-probabilities with the weights of the job's
+start (`Chat rendering`_). The rendered sample then holds ``tokens`` and
+``loss_mask`` in ``training``, and ``teacher_tokens`` or
+``teacher_candidates`` when it has a teacher request. A task rollout of a
+training component carries its exact ``tokens``, ``loss_mask`` and
+``rollout_log_probs``, ``artifact_id`` (the artifact that sampled it), and,
+when the component records them, the sampler's ``topk_indices`` and
+``topk_log_probs``.
 
 ``item.metadata`` and ``item.training`` read these extension objects.
 ``with_metadata`` and ``with_training`` return updated documents while preserving
-other extensions. Training arrays are JSON lists.
+other extensions. Training arrays are JSON lists. ``item.artifact_id`` is the
+artifact that produced the trajectory: ``training.artifact_id``, else the
+``artifact_id`` of the last recorded call (``records[-1].payload``), or None
+for an upload. The staleness check reads it.
 
 ``TrajectorySample.group_id`` is an optional string, scoped to the job data.
 None means an independent trajectory. Group-relative policy algorithms require
@@ -1440,14 +1502,20 @@ inputs; processor acknowledgement remains authoritative for consumption,
 including inputs removed by a recipe's existing group rules.
 
 The ``reef.core.trajectories`` helpers construct and consume ATIF:
-``make_trajectory(records, reward, feedback)`` retains original exchanges;
+``make_trajectory(records, reward, feedback)`` converts the exchanges with
+``reef.core.atif_payloads``, as the record stores do, writes the last record's
+``tools`` as the agent's ``tool_definitions``, and retains original exchanges;
 ``recorded_payload`` / ``recorded_payloads`` project exchanges for harness
 methods, including external ATIF without captured records; and
-``trajectory_reward`` reads a finite policy reward. Policy assembly uses
+``trajectory_reward`` reads a finite policy reward. ``SampleAssembly.build``
+(``reef.record2sample.assembly``) makes a report's sample. Without
+``accept_multi_turn_policy_samples``, the sample is the trajectory's last
+call: its earlier agent steps are ``is_copied_context: true``, and only the
+last reply trains. With it, the sample holds every call, and every reply
+trains. A task rollout of a training component uses
 ``make_policy_trajectory`` or ``make_multi_turn_policy_trajectory`` from
-``reef.record2sample.samples`` to add exact captured tensors. Missing required
-tensors fail at the training boundary; these helpers do not invent tokens or
-log probabilities from text. Both job data readers reject unsupported sample kinds
+``reef.record2sample.samples`` to keep the tensors that its engine
+returned. Both job data readers reject unsupported sample kinds
 instead of silently filtering mixed job data.
 
 Completed text-only streaming responses contribute their aggregated
@@ -1458,10 +1526,40 @@ are reused as context without duplicating those steps. An explicit
 
 Migration: the former policy/trace sample types and their batch subclasses are
 removed. Construct ATIF trajectory samples directly and return ``JobData(id, samples)``.
-Use ``group_id`` on each member for grouped job data. Read captured tensors from
+Use ``group_id`` on each member for grouped job data. Read training fields from
 ``item.training`` and rewards through ``trajectory_reward(item)``.
 ``output_schema`` defaults to ``JobData``. Keep job data serializable, with
 no handles to services, files, threads or models.
+
+Chat rendering
+~~~~~~~~~~~~~~
+
+Serving returns no tokens and no log-probabilities. A training component
+renders each trajectory sample with its model's chat template, and computes
+the log-probabilities that its objective needs with the weights of the job's
+start. These are exact when ``max_staleness`` is 0 and an approximation above
+it. ``reef.core.chat_rendering`` holds the shared rendering:
+
+- ``ChatTemplate`` renders messages and tools to token IDs.
+  ``TokenizerChatTemplate(tokenizer, template_kwargs)`` is the chat template of
+  a Hugging Face tokenizer. Its ``template_kwargs`` must equal the chat
+  template arguments that the serving engine renders with.
+- ``render_trajectory(template, trajectory)`` renders the conversation up to
+  its last trained turn, with the agent's ``tool_definitions`` as the tools.
+  Each agent step that is not ``is_copied_context`` trains: the loss mask is
+  1 on its tokens. It raises ``ValueError`` when the trajectory has no
+  trained step, or when the template does not render each trained turn as a
+  prefix of the whole conversation.
+- ``TeacherRequest`` is the ``extra.reef.teacher`` value. Its
+  ``teacher_tokens`` is the rendered teacher prompt followed by the student's
+  reply tokens verbatim, or the student's own tokens when it names no
+  messages.
+- ``rendered_job_data(data, template)`` renders each trajectory sample that
+  has no ``tokens``. It returns the job data and the positions of the samples
+  that it leaves out: a sample that cannot render, that is longer than its
+  ``max_tokens``, or whose teacher sequence is longer than its teacher
+  request allows. The Slime and Tinker components count them in the job
+  metric ``unrenderable_samples``.
 
 Training objective
 ------------------

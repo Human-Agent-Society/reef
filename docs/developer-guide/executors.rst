@@ -208,7 +208,7 @@ owning controller.
 Independent SGLang backend
 --------------------------
 
-``reef/inference/sglang/`` owns the chat/capture backend, SGLang plugin, native
+``reef/inference/sglang/`` owns the chat backend, SGLang plugin, native
 engine process, router, Ray engine groups and inference lifecycle. Native
 ``ServerArgs`` and ``launch_server`` come directly from SGLang, not from
 Slime. The runtime-load-ID value type lives in ``reef.runtime.interfaces``.
@@ -224,7 +224,7 @@ through ``load_lora_adapter_from_disk``. The plugin name ``reef`` is
 preserved.
 
 CPU tests cover native launch bindings, multi-node rendezvous, shared placement,
-external engine validation and ownership, capture, LoRA requirements and
+external engine validation and ownership, response parsing, LoRA requirements and
 recovery.
 Actual GPU execution and backend combinations still require acceptance testing.
 

@@ -10,13 +10,12 @@ from typing import Any
 
 import pytest
 
-from recipes.tttd import TTTDGridSettings, TTTDGroupedRolloutReport, TTTDJobData, TTTDRecord2Record, TTTDSamples
+from recipes.tttd import TTTDGroupedRolloutReport, TTTDJobData, TTTDSamples, TTTDSettings
 from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
 from reef.core.reports import ReportBase, ReportValidationError, ScoredRolloutReport, TeacherContextReport
 from reef.dispatcher import Dispatcher
 from reef.recipe.base import Recipe
-from reef.record2sample.assembly import SampleAssemblySettings
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train import PipelineContext
@@ -251,12 +250,11 @@ def test_undeclared_recipe_keeps_open_ingress_via_anyreport() -> None:
 
 def test_tttd_raises_for_grid_mismatch_and_schema_violations() -> None:
     context = PipelineContext("discovery", report_type=TTTDGroupedRolloutReport)
-    record2record = TTTDRecord2Record(context, TTTDGridSettings(groups_per_step=2, rollouts_per_group=3))
+    record2sample = TTTDSamples(context, TTTDSettings(groups_per_step=2, rollouts_per_group=3))
     processor = TrainingPipeline(
         context,
-        record2record=record2record,
-        record2sample=TTTDSamples(SampleAssemblySettings(), record2record),
-        sample2job=TTTDJobData(context, record2record, None, None),
+        record2sample=record2sample,
+        sample2job=TTTDJobData(context, record2sample, None, None),
     )
     processor.push(
         AgentRecord.create(

@@ -42,7 +42,9 @@ class TokenRow:
 
     ``tokens`` is the prompt and the response, ``mask`` has one 0/1 entry per
     response token, and ``logprobs`` one rollout log probability per response
-    token, or is empty for a loss that reads none (``TinkerLoss.uses_rollout_log_probs``).
+    token, or is empty: for a loss that reads none (``TinkerLoss.uses_rollout_log_probs``), and for a
+    rendered trajectory, whose log probabilities the client computes with the weights of the job's start before
+    it trains the row (``TinkerSDKClient.train``).
     ``advantage`` is finite; a loss without advantages ignores it.
     ``topk_indices`` and ``topk_log_probs`` are both empty, for a loss that
     reads no sampler head (``TinkerLoss.sampler_topk`` 0), or hold one row per
@@ -77,12 +79,13 @@ class TokenRow:
     def from_item(
         cls, item: TrajectorySample, advantage: float, *, rollout_log_probs: bool = True, sampler_topk: int = 0
     ) -> TokenRow:
-        """The row of ``item``; ``rollout_log_probs`` requires one rollout log probability per response token, and
-        a positive ``sampler_topk`` the sampler's top-k rows of every response token, which the row carries."""
+        """The row of ``item``; with ``rollout_log_probs``, the row carries the item's rollout log probabilities, one
+        per response token, or none for the client to compute; a positive ``sampler_topk`` requires the sampler's
+        top-k rows of every response token, which the row carries."""
         training = item.training
         logprobs = tuple(training.get("rollout_log_probs", ())) if rollout_log_probs else ()
         mask = tuple(training.get("loss_mask", ()))
-        if rollout_log_probs and len(logprobs) != len(mask):
+        if logprobs and len(logprobs) != len(mask):
             raise ValueError("invalid Tinker training row: rollout_log_probs must have one value per response token")
         if training.get("response_length", len(mask)) != len(mask):
             raise ValueError("Tinker response_length must match the response loss mask")
@@ -90,8 +93,8 @@ class TokenRow:
         topk_log_probs = tuple(tuple(row) for row in training.get("topk_log_probs", ())) if sampler_topk else ()
         if sampler_topk and len(topk_indices) != len(mask):
             raise ValueError(
-                "score centering needs the sampler's top-k log probabilities of every response token: train task "
-                "rollouts of this component, or trajectories recorded with capture_topk"
+                "score centering needs the sampler's top-k log probabilities of every response token, which only the "
+                "task rollouts of this component record; serving records none"
             )
         return cls(tuple(training.get("tokens", ())), mask, logprobs, advantage, topk_indices, topk_log_probs)
 

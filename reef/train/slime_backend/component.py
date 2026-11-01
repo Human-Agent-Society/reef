@@ -52,6 +52,7 @@ from pathlib import Path
 from typing import Any
 
 from reef.artifact.repository import BaseArtifactSource, ModelDirectory
+from reef.core.chat_rendering import ChatTemplate, TokenizerChatTemplate, needs_rendering, rendered_job_data
 from reef.core.evaluation import RolloutScores
 from reef.core.job_data import JobData, TaskSample, trajectories
 from reef.core.weight_layout import ADAPTER_DIR
@@ -446,6 +447,8 @@ class SlimeJobRunner(SlimeJobs):
     ) -> None:
         self.rollout_group = rollout_group
         self.train_timeout_s = train_timeout_s
+        #: The chat template of the trained model, made at the first job that renders a trajectory.
+        self.template: ChatTemplate | None = None
         self.group = actor_group
         if (critic_group is None) != (storage.critic_root is None):
             raise ValueError("the critic group saves into the storage's critic root: give both or neither")
@@ -523,6 +526,17 @@ class SlimeJobRunner(SlimeJobs):
         )
         return rollouts
 
+    def chat_template(self) -> ChatTemplate:
+        """The chat template of ``--hf-checkpoint``'s tokenizer, with ``--apply-chat-template-kwargs``, which must be
+        the template arguments that the serving engine renders with."""
+        if self.template is None:
+            # transformers is part of the training environment.
+            from transformers import AutoTokenizer
+
+            tokenizer = AutoTokenizer.from_pretrained(self.args.hf_checkpoint, trust_remote_code=True)
+            self.template = TokenizerChatTemplate(tokenizer, self.args.apply_chat_template_kwargs or {})
+        return self.template
+
     def close_resources(self) -> None:
         errors = []
         for group in (self.critic_group, self.group):
@@ -571,6 +585,14 @@ class SlimeJobRunner(SlimeJobs):
                 # No task has a group of two samples to compare, so the job trains nothing.
                 return rollout_metrics
             data = JobData(data.data_id, rollouts.samples)
+        # A trajectory that serving recorded carries no tokens: the component renders it with the trained model's
+        # chat template, and the actor computes its log-probabilities with the weights of this job's start.
+        if needs_rendering(data):
+            data, left_out = rendered_job_data(data, self.chat_template())
+            if left_out:
+                rollout_metrics["unrenderable_samples"] = len(left_out)
+                if not data.samples:
+                    return rollout_metrics
         start_state = start.state_for(method.objective)
         prepared = prepare_slime_job(
             data,

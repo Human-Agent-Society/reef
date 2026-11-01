@@ -29,6 +29,7 @@ from reef.storage.migrations import (
     migrate_generated_task_marks,
     migrate_imported_tasks,
     migrate_record_storage,
+    migrate_record_trajectories,
     migrate_sample_columns,
     migrate_uploaded_trajectories,
 )
@@ -36,7 +37,14 @@ from reef.storage.records import RecordRetention
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage
 from reef.storage.sql_commits import SQLCommitHistory, commit_table
 from reef.storage.sql_evaluations import SQLEvaluationStore, evaluation_table
-from reef.storage.sql_records import RecordTables, ScopedTable, SQLRecordRetention, SQLRecordStore
+from reef.storage.sql_records import (
+    RecordTables,
+    ScopedTable,
+    SQLRecordRetention,
+    SQLRecordStore,
+    sample_record_table,
+    trajectory_node_table,
+)
 from reef.storage.sql_samples import SQLSampleStore, manual_buffer_table, sample_table, sample_train_count_table
 from reef.storage.sql_tasks import SQLTaskStorage, task_tables
 from reef.storage.tasks import LocalTaskFileStore, TaskFileStore
@@ -54,9 +62,14 @@ _AGENT_RECORD = Table(
     Column("references_json", Text, nullable=False),
     Column("artifact_json", Text),
     Column("body_bytes", Integer, nullable=False, server_default="0"),
+    # A payload with a message list lives as ATIF in the record's node in record_node (RFC #1054).
+    Column("message_field", Text),
+    Column("payload_sha256", Text),
     # A purged sequence must never be reused by a later append.
     sqlite_autoincrement=True,
 )
+_RECORD_NODE = trajectory_node_table(_METADATA, "record_node")
+_SAMPLE_RECORD = sample_record_table(_METADATA)
 _CONSUMED_RECORD = Table(
     "consumed_agent_record",
     _METADATA,
@@ -105,7 +118,15 @@ EVALUATION_TABLE = ScopedTable(evaluation_table(_METADATA))
 COMMIT_TABLE = ScopedTable(commit_table(_METADATA))
 logger = logging.getLogger(__name__)
 
-_TABLES = RecordTables(_AGENT_RECORD, _CONSUMED_RECORD, CONSUMPTION_RECEIPTS, RECORD_EVICTION, _SCENARIO_SETTING)
+_TABLES = RecordTables(
+    _AGENT_RECORD,
+    _CONSUMED_RECORD,
+    CONSUMPTION_RECEIPTS,
+    RECORD_EVICTION,
+    _SCENARIO_SETTING,
+    _RECORD_NODE,
+    _SAMPLE_RECORD,
+)
 
 
 def enable_wal(connection: Connection, database: str, *, timeout_seconds: float, retry_seconds: float) -> None:
@@ -219,6 +240,7 @@ class SQLiteRecordStore(SQLRecordStore):
                 self._connection.exec_driver_sql("BEGIN IMMEDIATE")
                 _METADATA.create_all(self._connection)
                 migrate_record_storage(self._connection, _AGENT_RECORD, CONSUMPTION_RECEIPTS)
+                migrate_record_trajectories(self._connection, _AGENT_RECORD, _RECORD_NODE)
                 migrate_sample_columns(self._connection, SAMPLE_TABLE.table)
                 migrate_uploaded_trajectories(
                     self._connection, SAMPLE_TABLE.table, SAMPLE_TRAIN_COUNT_TABLE.table, COMMIT_TABLE.table
@@ -297,11 +319,14 @@ class SQLiteRecordRetention:
         self._queries = SQLRecordRetention(_TABLES)
 
     def prune(self, directory: Path) -> int:
-        """Evict oldest bodies under capacity pressure, regardless of training state.
+        """Evict oldest bodies under capacity pressure, regardless of training state, except the records that a stored
+        sample holds.
 
-        Deletes commit in bounded batches. Concurrent appends can exceed the
-        configured body budget until the next sweep. Freed database pages are
-        reusable; the budget does not measure filesystem allocation.
+        The sweep first selects the oldest records whose eviction brings the stored bodies, record rows and
+        trajectory nodes, under the budget; deletes then commit in bounded batches. A database that an older version
+        wrote gets its trajectory nodes first (``migrate_record_trajectories``). Concurrent appends can exceed the
+        configured body budget until the next sweep. Freed database pages are reusable; the budget does not measure
+        filesystem allocation.
         """
         paths = sorted((*directory.glob("*.sqlite3"), *(directory / "archived").rglob("*.sqlite3")))
         purged = 0
@@ -323,23 +348,24 @@ class SQLiteRecordRetention:
                 with connection.begin():
                     connection.exec_driver_sql("BEGIN IMMEDIATE")
                     RECORD_EVICTION.create(connection, checkfirst=True)
+                    _RECORD_NODE.create(connection, checkfirst=True)
+                    _SAMPLE_RECORD.create(connection, checkfirst=True)
+                    migrate_record_trajectories(connection, _AGENT_RECORD, _RECORD_NODE)
                 with connection.begin():
                     total += self._queries.retained_bytes(connection)
         if total <= self._retention.max_bytes:
             return purged
-        pending: dict[str, list[int]] = {path: [] for path in retained_paths}
+        # Select before deleting: the size of a record counts the nodes that the records before it release.
+        selected: dict[str, list[int]] = {path: [] for path in retained_paths}
         rows = heapq.merge(*(self._rows(path) for path in retained_paths))
         for _, path, sequence, size in rows:
-            pending[path].append(sequence)
+            selected[path].append(sequence)
             total -= size
-            if len(pending[path]) == 256:
-                purged += self._delete(path, pending[path])
-                pending[path].clear()
             if total <= self._retention.max_bytes:
                 break
-        for path, sequences in pending.items():
-            if sequences:
-                purged += self._delete(path, sequences)
+        for path, sequences in selected.items():
+            for start in range(0, len(sequences), 256):
+                purged += self._delete(path, sequences[start : start + 256])
         return purged
 
     @staticmethod
@@ -361,9 +387,10 @@ class SQLiteRecordRetention:
     def _rows(self, path: str) -> Iterator[tuple[float, str, int, int]]:
         after_time: float = -math.inf
         after_sequence = 0
+        sizes = self._queries.eviction_sizes()
         while True:
             with self._connect(path) as connection, connection.begin():
-                rows = self._queries.page(connection, after_time=after_time, after_sequence=after_sequence)
+                rows = self._queries.page(connection, sizes, after_time=after_time, after_sequence=after_sequence)
             if not rows:
                 return
             for created_at, sequence, size in rows:

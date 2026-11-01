@@ -77,8 +77,8 @@ class TrainingStatus:
         stepping_pipeline_status = stepping_trainer.pipeline_status()
         processor = dict(stepping_pipeline_status)
         if "buffered_requests" in processor:
-            # Include instructions still unread in storage alongside the buffered ones.
-            processor["pending_instructions"] = stepping_trainer.pending_instructions()
+            # The queue's count: the trainer holds the instructions that the last step gave it.
+            processor["pending_instructions"] = current.pending_instructions()
         block: dict[str, Any] = {
             **current.commit_status,
             # The artifact that answers the scenario's requests now: the one that served_models names.
