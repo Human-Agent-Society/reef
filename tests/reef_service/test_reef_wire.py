@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from reef.core import AgentRecord, RequestType
-from reef.service.wire import HeaderError, ReportPayload, parse_request_headers
+from reef.service.wire import HeaderError, ReportPayload, RequestHeaders, parse_request_headers
 
 
 @pytest.mark.unit
@@ -22,9 +22,8 @@ def test_parse_request_headers_is_case_insensitive_and_preserves_scenario() -> N
         RequestType.REPORT,
     )
 
-    assert parsed.scenario == "code-repair"
-    assert parsed.release_id == "checkpoint-v42"
-    assert parsed.request_type is RequestType.REPORT
+    # A request's x-reef-release-id names nothing that Reef reads: only an inference answer carries it.
+    assert parsed == RequestHeaders(scenario="code-repair", request_type=RequestType.REPORT)
 
 
 @pytest.mark.unit

@@ -92,7 +92,7 @@ def test_a_deployment_without_a_data_store_serves_no_data_route(tmp_path: Path) 
     (tmp_path / "initial").mkdir()
     dispatcher = Dispatcher(
         UploadRecipe(),
-        InMemoryRepositoryBackend.factory(tmp_path / "initial", root=tmp_path / "repository"),
+        InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
         coordination=memory_coordination(),
     )

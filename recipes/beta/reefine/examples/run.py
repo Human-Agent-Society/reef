@@ -162,7 +162,7 @@ def harness_manifest(client):
 
 
 def ensure_scenario(client):
-    """Create the scenario on its base release if it does not exist yet; its harness manifest."""
+    """Create the scenario, with its root release, if it does not exist yet; its harness manifest."""
     client.post("/reef/scenarios", SCENARIO, {"name": SCENARIO})
     return harness_manifest(client)
 

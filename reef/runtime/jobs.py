@@ -20,8 +20,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, cast
 
+from reef.artifact.artifact import Artifact
 from reef.artifact.files import ArtifactFiles
-from reef.artifact.repository import BaseArtifactSource
+from reef.artifact.repository import DefaultStart
+from reef.core.artifact_ref import RootSource
 from reef.core.job_data import JobData
 from reef.core.weight_layout import ADAPTER_DIR, WEIGHT_LAYOUTS, WeightLayout
 from reef.surface.base import ArtifactLayout
@@ -34,7 +36,7 @@ class TrainingJob:
     """One bounded training job: a data snapshot, the weights it starts from, and the backend's parameters.
 
     A value has a non-empty ``job_id``, a non-empty ``backend`` name, ``start``
-    (the non-empty start that the component reads, ``TrainingComponent.base_start`` for the base artifact),
+    (the non-empty start that the component reads, ``TrainingComponent.root_start`` for a scenario's root release),
     ``data`` (the job data that the job trains; the component cuts it into
     optimizer batches by its own batch size),
     ``parameters``, a mapping that encodes as JSON, and ``scenario``, the non-empty name of the scenario whose
@@ -213,6 +215,25 @@ class ReleaseFormat:
         return cls(value["layout"], value.get("adapter_rank"), tuple(modules))
 
 
+@dataclass(frozen=True)
+class ScenarioRoot:
+    """A scenario's root release, as one trainer's component sees it, and where the root came from.
+
+    Values: ``artifact`` is the trainer's component of the scenario's root release (the release itself when the
+    release is flat), which ``materialize`` makes local. ``source`` is the root's ``RootSource``.
+
+    Purpose: ``ScenarioFactory`` makes it when it builds a scenario's trainers, and ``Trainer.build`` gives it to
+    ``TrainingComponent.root_start`` for the first job of a trainer that has no committed state.
+    """
+
+    artifact: Artifact
+    source: RootSource
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.artifact, Artifact) or not isinstance(self.source, RootSource):
+            raise TypeError("a scenario root is an Artifact and a RootSource")
+
+
 class TrainingComponent(ABC):
     """A training backend that runs whole jobs with its framework's own training loop.
 
@@ -239,22 +260,27 @@ class TrainingComponent(ABC):
         """
 
     @abstractmethod
-    def base_artifact_source(self) -> BaseArtifactSource:
+    def default_start(self) -> DefaultStart:
         """The component's untrained checkpoint, laid out as one of its releases, and the configuration it comes from.
 
-        Reef imports it as the base artifact of the component that this
-        component trains. It has the layout of every other release
-        (``release_format``), so serving and training read it as they read
-        any release. Its ``inputs`` name the model and the settings that
-        decide its content. Every service process calls this method, so a
-        component whose model files cost a remote call gives them as
-        ``BaseModelFiles`` that make them on the first ``directory`` call.
+        A scenario that is created without an artifact item holds it in its root release, in the component that
+        this component trains. It has the layout of every other release (``release_format``), so serving and
+        training read it as they read any release. Its ``inputs`` name the model and the settings that decide its
+        content. Every service process can call this method, so a component whose model files cost a remote call
+        gives them as ``BaseModelFiles`` that make them on the first ``directory`` call.
         """
 
-    @property
-    @abstractmethod
-    def base_start(self) -> str:
-        """The start of a job from the untrained checkpoint; the first job of every trainer starts from it."""
+    def root_start(self, root: ScenarioRoot) -> str:
+        """The start of the first job of a trainer whose scenario has the root release ``root``.
+
+        The default is ``import_start`` of the root's files. A component that imports no release
+        (``starts_from_releases`` False) overrides it, and raises ``ValueError`` for a root that it cannot start
+        from.
+        """
+        local_path = root.artifact.materialize().local_path
+        if local_path is None:
+            raise ValueError(f"the root release {root.artifact.ref.release_id} has no local files to train from")
+        return self.import_start(local_path)
 
     @property
     def starts_from_releases(self) -> bool:

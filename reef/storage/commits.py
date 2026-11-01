@@ -14,7 +14,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, Literal, get_args
 
-from reef.core.artifact_ref import ArtifactRef, decode_artifact_ref, encode_artifact_ref
+from reef.core.artifact_ref import ArtifactRef, RootSource, decode_artifact_ref, encode_artifact_ref
 from reef.core.errors import ReefError
 
 
@@ -417,13 +417,14 @@ def active_artifact_ref(records: Sequence[CommitRecord], fallback: ArtifactRef) 
 
 
 SCENARIO_METADATA_KEY = "scenario_commit_record"
-SCENARIO_METADATA_KIND = "reef-scenario/4"
+SCENARIO_METADATA_KIND = "reef-scenario/5"
 
 
 def scenario_metadata_for(
     *,
     name: str,
-    base_artifact: ArtifactRef,
+    source: RootSource,
+    start_artifact: ArtifactRef | None = None,
     scenario_step: int = 0,
     algorithm_state: Mapping[str, Any] | None = None,
     record_progress: RecordProgress | None = None,
@@ -434,21 +435,27 @@ def scenario_metadata_for(
 ) -> dict[str, object]:
     """The scenario metadata of a registration (step zero) or of the artifact a training step made.
 
-    ``active_artifact`` is None when the activation rule activated the step's own artifact. Otherwise it names
+    ``source`` is where the scenario's root release came from. ``start_artifact`` is the root release. The root
+    release carries the registration itself, so a registration names no ``start_artifact`` and every later step
+    names it. ``active_artifact`` is None when the activation rule activated the step's own artifact. Otherwise it names
     the artifact that serves after the step. A recovery without the commit history reads it to find the active
     artifact.
     """
     if not isinstance(scenario_step, int) or isinstance(scenario_step, bool) or scenario_step < 0:
         raise ValueError("scenario_step must be non-negative")
+    if (start_artifact is None) != (scenario_step == 0):
+        raise ValueError("scenario metadata names its start_artifact exactly after step zero")
     if active_artifact is not None and scenario_step == 0:
         raise ValueError("a registration's own artifact serves; it names no active_artifact")
     metadata: dict[str, object] = {
         "format": SCENARIO_METADATA_KIND,
         "scenario": name,
         "scenario_step": scenario_step,
-        "base_artifact": encode_artifact_ref(base_artifact),
+        "source": source.to_dict(),
         "operation": "training",
     }
+    if start_artifact is not None:
+        metadata["start_artifact"] = encode_artifact_ref(start_artifact)
     # The trainer that made the checkpoint: a checkpoint adopted from the artifact head
     # after the commit history is lost must still be attributed to its component's trainer.
     if component is not None:
@@ -474,25 +481,23 @@ def scenario_metadata_for(
 
 def parse_scenario_metadata(
     value: Mapping[str, Any], *, checkpoint_head: ArtifactRef, components: Mapping[str, str] | None = None
-) -> tuple[str, ArtifactRef, CommitRecord | None]:
-    """Read registration and a checkpoint commit; step zero has no commit.
+) -> tuple[str, ArtifactRef, RootSource, CommitRecord | None]:
+    """Read the metadata ``value`` that the release ``checkpoint_head`` carries: the scenario name, the root release,
+    the root's source, and the checkpoint commit (``None`` at step zero, which has no commit).
 
-    ``components`` is the manifest of ``checkpoint_head``, read from the same
-    release metadata, so a commit rebuilt from it carries what a recorded one
-    does.
+    At step zero ``checkpoint_head`` is the root release. ``components`` is the manifest of ``checkpoint_head``,
+    read from the same release metadata, so a commit rebuilt from it carries what a recorded one does. Raise
+    ``ValueError`` for metadata of another format, such as ``reef-scenario/4``, or a malformed value.
     """
     if value.get("format") != SCENARIO_METADATA_KIND:
-        raise ValueError(f"unsupported scenario metadata format: {value.get('format')!r}")
+        raise ValueError(
+            f"scenario metadata has the format {value.get('format')!r}; this Reef reads only {SCENARIO_METADATA_KIND}, "
+            "so create the scenario again"
+        )
     scenario = value.get("scenario")
     if not isinstance(scenario, str) or not scenario:
         raise ValueError("scenario metadata requires scenario")
-    raw_base = value.get("base_artifact")
-    if not isinstance(raw_base, Mapping):
-        raise ValueError("scenario metadata requires base_artifact")
-    try:
-        base_artifact = decode_artifact_ref(raw_base)
-    except ValueError as exc:
-        raise ValueError(f"invalid scenario metadata base_artifact: {exc}") from exc
+    source = RootSource.from_dict(value.get("source"))
     scenario_step = value.get("scenario_step", 0)
     if not isinstance(scenario_step, int) or isinstance(scenario_step, bool) or scenario_step < 0:
         raise ValueError("scenario metadata scenario_step must be non-negative")
@@ -515,8 +520,17 @@ def parse_scenario_metadata(
     component = value.get("component")
     if component is not None and (not isinstance(component, str) or not component):
         raise ValueError("scenario metadata component must be a non-empty string or null")
+    raw_start = value.get("start_artifact")
     if scenario_step == 0:
-        return scenario, base_artifact, None
+        if raw_start is not None:
+            raise ValueError("a registration's scenario metadata names no start_artifact: it is the root release")
+        return scenario, checkpoint_head, source, None
+    if not isinstance(raw_start, Mapping):
+        raise ValueError("scenario metadata after step zero requires start_artifact")
+    try:
+        start_artifact = decode_artifact_ref(raw_start)
+    except ValueError as exc:
+        raise ValueError(f"invalid scenario metadata start_artifact: {exc}") from exc
     if record_progress is None:
         raise ValueError("scenario metadata requires record_progress after step zero")
     commit = CommitRecord(
@@ -535,7 +549,7 @@ def parse_scenario_metadata(
         components=components,
         activated=value.get("active_artifact") is None,
     )
-    return scenario, base_artifact, commit
+    return scenario, start_artifact, source, commit
 
 
 def served_artifact_ref(value: Mapping[str, Any], *, checkpoint_head: ArtifactRef) -> ArtifactRef:

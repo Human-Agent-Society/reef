@@ -5,9 +5,9 @@ artifact item of the scenario's owner, whose ``source_uri`` names the directory 
 (``ArtifactSources``) opens the files there, and the dispatcher checks them against the component's layout and
 stores a copy, or a reference to a revision that cannot change, in a temporary directory under
 ``ArtifactImports.work_dir`` before it publishes it (``Dispatcher.import_artifact``). A new scenario can also start
-from an artifact item (RFC #1062): ``ArtifactImports.start_scenario`` imports the item and makes the import the
-scenario's active artifact and training start. No aiohttp types appear here. ``reef.service.routes.artifact_imports``
-and the create route of ``reef.service.routes.scenarios`` adapt it to HTTP.
+from an artifact item (RFC #1062, RFC #1070): ``ArtifactImports.create_from_item`` reads the item, and the scenario
+factory checks it and writes it as the new scenario's root release. No aiohttp types appear here.
+``reef.service.routes.artifact_imports`` and the create route of ``reef.service.routes.scenarios`` adapt it to HTTP.
 """
 
 from __future__ import annotations
@@ -20,6 +20,8 @@ from typing import Any
 from reef.artifact.sources import ArtifactSources
 from reef.core.errors import UnknownScenario
 from reef.dispatcher import Dispatcher
+from reef.scenario.factory import ItemStart
+from reef.scenario.scenario import Scenario
 from reef.service.data import DataAccess
 from reef.storage.data import ItemNotFound
 
@@ -33,7 +35,7 @@ class ArtifactImports:
     directory when it ends. A copied import of a full model needs its size there, and again in the artifact store;
     an import by reference needs neither.
     Purpose: the service builds it from ``storage.artifact_sources`` and ``storage.artifact_cache_dir``. The
-    import route calls ``import_source`` and ``import_item``, and the create route calls ``start_scenario``.
+    import route calls ``import_source`` and ``import_item``, and the create route calls ``create_from_item``.
     """
 
     sources: ArtifactSources
@@ -72,52 +74,45 @@ class ArtifactImports:
         """Import the artifact item ``item_id`` of the owner of ``scenario`` into ``component``: the files that its
         ``source_uri`` names, as ``import_source`` imports them.
 
-        Raise ``UnknownScenario`` for an unknown scenario, ``NoDataStore`` without a data store, ``ItemNotFound``
-        for an item that the owner does not store, and ``ValueError`` for an item that is not an artifact or that
-        has no ``source_uri``; otherwise raise as ``import_source``.
+        Raise ``UnknownScenario`` for an unknown scenario; otherwise raise as ``item_source`` and
+        ``import_source``.
         """
         owner = dispatcher.scenario_owner(scenario)
         if owner is None:
             raise UnknownScenario(f"unknown scenario {scenario!r}")
-        item = DataAccess.of(dispatcher).require_store().read(owner, item_id)
-        if item is None:
-            raise ItemNotFound(f"{owner!r} stores no item {item_id!r}")
-        if item.kind != "artifact" or item.content is None:
-            raise ValueError(f"item {item_id!r} is a {item.kind}, not an artifact")
-        uri = item.content["source_uri"]
-        if uri is None:
-            raise ValueError(
-                f"artifact item {item_id!r} has no source_uri: its repository gives no URI to import from"
-            )
+        uri = item_source(dispatcher, owner, item_id)
         return self.import_source(dispatcher, scenario, component, uri, item_id=item_id)
 
-    def start_scenario(
-        self, dispatcher: Dispatcher, scenario: str, component: str | None, item_id: str
-    ) -> dict[str, Any]:
-        """Start the scenario ``scenario``, which the caller just created, from the artifact item ``item_id`` of
-        its owner.
+    def create_from_item(
+        self, dispatcher: Dispatcher, scenario: str, owner: str, component: str | None, item_id: str
+    ) -> tuple[Scenario, bool]:
+        """The scenario ``scenario``, and True exactly when this call created it: a new scenario's root release holds
+        the artifact item ``item_id`` of ``owner`` in ``component`` (``Dispatcher.create_scenario``).
 
-        Import the item into ``component`` as ``import_item`` does. Then make the import the component's active
-        artifact (``Dispatcher.activate``). Then make it the component's training start (``Dispatcher.train_from``)
-        when the component's trainer can start from an artifact (``ScenarioCapabilities.train_from``); a component
-        that trains nothing has no training start. Return the import's receipt, as ``import_item`` does.
-
-        When a step raises, delete ``scenario`` (``Dispatcher.delete_scenario``) and raise the step's error, so a
-        refused start leaves no scenario. Each step takes the scenario's lock itself, and the delete runs after the
-        step released it.
+        The item is read and its files opened first, so an item that cannot be read registers nothing. Raise as
+        ``item_source`` and ``ArtifactSources.open`` do, and as ``Dispatcher.create_scenario`` does for an item that
+        the component's layout or admission check refuses.
         """
-        try:
-            imported = self.import_item(dispatcher, scenario, component, item_id)
-            artifact_id, target = imported["artifact_id"], imported["component"]
-            dispatcher.activate(scenario, artifact_id, target)
-            with dispatcher.locked_scenario(scenario) as current:
-                trains = target in current.capabilities().train_from
-            if trains:
-                dispatcher.train_from(scenario, artifact_id, target)
-        except Exception:
-            dispatcher.delete_scenario(scenario)
-            raise
-        return imported
+        uri = item_source(dispatcher, owner, item_id)
+        start = ItemStart(item_id, uri, self.sources.open(uri), component)
+        return dispatcher.create_scenario(scenario, start)
 
 
-__all__ = ["ArtifactImports"]
+def item_source(dispatcher: Dispatcher, owner: str, item_id: str) -> str:
+    """The ``source_uri`` of the artifact item ``item_id`` of ``owner``.
+
+    Raise ``NoDataStore`` without a data store, ``ItemNotFound`` for an item that the owner does not store, and
+    ``ValueError`` for an item that is not an artifact or that has no ``source_uri``.
+    """
+    item = DataAccess.of(dispatcher).require_store().read(owner, item_id)
+    if item is None:
+        raise ItemNotFound(f"{owner!r} stores no item {item_id!r}")
+    if item.kind != "artifact" or item.content is None:
+        raise ValueError(f"item {item_id!r} is a {item.kind}, not an artifact")
+    uri = item.content["source_uri"]
+    if uri is None:
+        raise ValueError(f"artifact item {item_id!r} has no source_uri: its repository gives no URI to import from")
+    return str(uri)
+
+
+__all__ = ["ArtifactImports", "item_source"]

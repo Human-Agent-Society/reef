@@ -198,11 +198,9 @@ def test_report_type_is_not_recipe_configuration() -> None:
 
 def _dispatcher(recipe: Recipe, name: str, *, record_dir: Path | None = None) -> Dispatcher:
     root = Path(tempfile.mkdtemp(prefix="reef-artifacts-"))
-    initial = root / "initial"
-    initial.mkdir()
     return Dispatcher(
         recipe,
-        InMemoryRepositoryBackend.factory(initial, root=root / "repository"),
+        InMemoryRepositoryBackend.factory(directory=root / "repository"),
         scenario_storage=SQLiteScenarioStorage(record_dir),
         coordination=memory_coordination(),
     )

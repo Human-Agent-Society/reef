@@ -78,7 +78,7 @@ class CommittedReleases(ABC):
     start: the release of the later of its newest ``train_from`` record and
     its newest training commit that made an artifact, active or not. An
     ``activate`` record moves what serves, not the head. Before any such
-    record, the head is the base release.
+    record, the head is the scenario's root release.
     """
 
     @abstractmethod

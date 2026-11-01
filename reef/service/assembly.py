@@ -433,11 +433,8 @@ def build_dispatcher(
             artifact_backend, setting="storage.artifact_backend"
         )
         factory_class = ConfigurableRepositoryBackendFactory.referenced_class(reference)
-        # Every scenario starts from the recipe's base artifact: the base model, the base harness, or both.
         context = RepositoryBackendContext(
-            work_dir=Path(settings.artifact_work_dir),
-            cache_dir=Path(settings.artifact_cache_dir),
-            base=recipe.base_artifact_source(),
+            work_dir=Path(settings.artifact_work_dir), cache_dir=Path(settings.artifact_cache_dir)
         )
         try:
             backend_factory = factory_class.from_config(reference.config, context=context)

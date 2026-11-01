@@ -46,12 +46,20 @@ def component_of(tmp_path: Path, method) -> HarnessTrainingComponent:
     return component
 
 
-def job(component: HarnessTrainingComponent, name: str, *, start: str | None = None, previous: str | None = None):
-    """The job ``name`` of scenario ``demo``: one trace from ``start`` (the base by default), after ``previous``."""
+def seed_start(component: HarnessTrainingComponent, tmp_path: Path) -> str:
+    """The start of a job from the seed tree: the component's import of a release that holds the seed."""
+    release = tmp_path / "seed-release"
+    if not release.is_dir():
+        PI_SEED.write(release)
+    return component.import_start(release)
+
+
+def job(component: HarnessTrainingComponent, name: str, *, start: str, previous: str | None = None):
+    """The job ``name`` of scenario ``demo``: one trace from ``start``, after ``previous``."""
     return TrainingJob(
         name,
         component.name,
-        component.base_start if start is None else start,
+        start,
         JobData(name, (recorded_trajectory(f"{name}-trace", {"messages": []}, 0.0),)),
         {
             "component": COMPONENT,
@@ -78,7 +86,7 @@ def test_a_kept_tree_is_the_jobs_checkpoint_and_names_the_parts_it_changed(tmp_p
     component = component_of(tmp_path, lambda workspace, services: MARKER)
     component.start_jobs()
     try:
-        component.submit(job(component, "one"))
+        component.submit(job(component, "one", start=seed_start(component, tmp_path)))
         status = ended(component, "one")
         assert status.state == "finished" and status.metrics == {}
         (checkpoint,) = status.checkpoints
@@ -101,7 +109,7 @@ def test_a_checkpoint_commit_names_the_parts_that_its_tree_changed_from_the_jobs
     component = component_of(tmp_path, lambda workspace, services: MARKER)
     component.start_jobs()
     try:
-        component.submit(job(component, "one"))
+        component.submit(job(component, "one", start=seed_start(component, tmp_path)))
         (checkpoint,) = ended(component, "one").checkpoints
     finally:
         component.close()
@@ -110,18 +118,17 @@ def test_a_checkpoint_commit_names_the_parts_that_its_tree_changed_from_the_jobs
         scenario="demo",
         releases=ComponentReleases(TreeReleases(PI_SEED), COMPONENT),
         eval_samples=None,
-        seed=PI_SEED,
         layout=get_adapter("pi").layout,
     )
-    # The activation rule reads the parts: the step rewrote the rules of the base tree.
-    published = loop.publish(JobLoopState(component.base_start, RunningJob("one")), checkpoint)
+    # The activation rule reads the parts: the step rewrote the rules of the seed tree.
+    published = loop.publish(JobLoopState(seed_start(component, tmp_path), RunningJob("one")), checkpoint)
     assert published.result.artifact is not None and published.result.changed_kinds == {"rules"}
     # From a start that holds the same tree, nothing changed.
     again = loop.publish(JobLoopState(checkpoint.path, RunningJob("two")), checkpoint)
     assert again.result.changed_kinds == frozenset()
     # The harness parameters are the loop's own: the stage cannot name them.
     with pytest.raises(ValueError, match="already name"):
-        loop.submit(JobLoopState(component.base_start), JobData("three"), {"component": "other"})
+        loop.submit(JobLoopState(seed_start(component, tmp_path)), JobData("three"), {"component": "other"})
 
 
 @pytest.mark.unit
@@ -134,7 +141,7 @@ def test_a_resumed_job_commits_its_settled_step_and_runs_no_second_step(tmp_path
 
     component = component_of(tmp_path, method)
     component.start_jobs()
-    component.submit(job(component, "one"))
+    component.submit(job(component, "one", start=seed_start(component, tmp_path)))
     first = ended(component, "one")
     component.close()
     # A restart before the job's end was durable: the job has its outcome, but no result yet.
@@ -157,7 +164,7 @@ def test_a_failed_step_ends_its_job_with_its_error_and_keeps_the_state(tmp_path:
     component = component_of(tmp_path, method)
     component.start_jobs()
     try:
-        component.submit(job(component, "one"))
+        component.submit(job(component, "one", start=seed_start(component, tmp_path)))
         status = ended(component, "one")
         assert status.state == "failed" and status.error == "RuntimeError: the method failed"
         assert status.metrics["skipped"] == "step failed" and status.metrics["error"] == status.error
@@ -174,10 +181,8 @@ def test_a_failed_step_ends_its_job_with_its_error_and_keeps_the_state(tmp_path:
 @pytest.mark.unit
 def test_starts_and_jobs_are_checked_before_a_job_runs(tmp_path: Path) -> None:
     component = component_of(tmp_path, lambda workspace, services: None)
-    assert component.base_start == f"base:{PI_SEED.checksum()}"
-    assert component.start_tree(component.base_start) == PI_SEED
     assert component.release_format is None and component.shares_scenarios
-    assert component.base_artifact_source().files == dict(PI_SEED.files)
+    assert component.default_start().files == dict(PI_SEED.files)
     # An imported start is a copy of the release's tree, under its checksum, without the repository's own files.
     release = tmp_path / "release"
     PI_SEED.apply(MARKER).write(release)
@@ -187,14 +192,12 @@ def test_starts_and_jobs_are_checked_before_a_job_runs(tmp_path: Path) -> None:
     (release / "reef-artifact.json").write_text("{}\n")
     start = component.import_start(release)
     assert Path(start).name == PI_SEED.apply(MARKER).checksum()
-    assert component.start_tree(start) == PI_SEED.apply(MARKER) and component.import_start(release) == start
+    assert HarnessTree.read(Path(start)) == PI_SEED.apply(MARKER) and component.import_start(release) == start
     broken = tmp_path / "broken"
     HarnessTree({"rules.md": ""}).write(broken)
     with pytest.raises(ValueError, match="fails validation"):
         component.import_start(broken)
-    with pytest.raises(ValueError, match="base of another seed tree"):
-        component.check_job(job(component, "other", start="base:other"))
-    valid = job(component, "valid")
+    valid = job(component, "valid", start=seed_start(component, tmp_path))
     for name, value, message in (
         ("component", "", "names the scenario component"),
         ("head_release_id", None, "names the release of its start"),

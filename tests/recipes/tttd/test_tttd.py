@@ -7,7 +7,7 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 from tests.support._trajectories import policy_trajectory
-from tests.support.runtime_stubs import runtime_bindings
+from tests.support.runtime_stubs import STUB_ROOT, runtime_bindings
 
 from recipes.tttd import TTTDGroupedRolloutReport, TTTDJobData, TTTDRecipe, TTTDSamples, TTTDSettings
 from recipes.tttd.objective import TttdObjective
@@ -164,7 +164,10 @@ def test_tttd_refuses_a_bad_stage_config_when_the_pipeline_builds(pipeline: dict
 def test_the_trainer_refuses_tttd_job_samples_above_one_grid() -> None:
     def build(job_samples: int) -> Trainer:
         return Trainer.build(
-            "discovery", SQLiteRecordStore(), pipeline_factory=lambda context: _processor(job_samples=job_samples)
+            "discovery",
+            SQLiteRecordStore(),
+            pipeline_factory=lambda context: _processor(job_samples=job_samples),
+            root=STUB_ROOT,
         )
 
     build(6).close()

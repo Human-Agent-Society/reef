@@ -53,7 +53,7 @@ def channel_dispatcher(
     inference_stages: bool = False,
     job_samples: int = 1,
 ) -> Dispatcher:
-    """A ``delivery`` scenario whose method makes ``patches`` in order, then nothing; its base release is
+    """A ``delivery`` scenario whose method makes ``patches`` in order, then nothing; its root release is
     ``seed``, and each step takes ``job_samples`` traces."""
     candidates = iter(patches)
     stages: dict = (

@@ -227,12 +227,12 @@ def train(component, data, objective_name, **options):
     return wait(component, submit(component, data, objective_name, **options))
 
 
-#: The untrained adapter that ``RemoteClient.initialize`` saves: the content of a Tinker component's base artifact.
+#: The untrained adapter that ``RemoteClient.initialize`` saves: the content of a Tinker component's default start.
 UNTRAINED = TinkerCheckpoint(MODEL, 32, "tinker://base/state", "tinker://base/sampler")
 
 
 def empty_artifact(tmp_path):
-    """The base artifact of a Tinker component: the untrained adapter's checkpoint manifest."""
+    """The default start of a Tinker component: the untrained adapter's checkpoint manifest."""
     directory = tmp_path / "empty"
     directory.mkdir(exist_ok=True)
     UNTRAINED.write(directory)
@@ -406,7 +406,7 @@ def test_a_component_refuses_checkpoints_that_another_tinker_service_holds(confi
 @pytest.mark.parametrize("first_use", ["model_files", "base_start", "start_jobs"])
 def test_a_component_makes_its_base_start_on_first_use_once_and_not_when_it_is_built(config, client, first_use):
     component = TinkerTrainingComponent(MODEL, config, client)
-    files = component.base_artifact_source().model_files
+    files = component.default_start().model_files
     assert files is not None
     assert client.initializations == 0 and not (component.state_dir / "base").exists()
     uses = {
@@ -428,8 +428,8 @@ def test_a_component_makes_its_base_start_on_first_use_once_and_not_when_it_is_b
     other.close()
 
 
-def test_the_base_artifact_is_the_untrained_adapter_and_imports_as_any_release(component, objective, tmp_path):
-    base = component.base_artifact_source()
+def test_the_default_start_is_the_untrained_adapter_and_imports_as_any_release(component, objective, tmp_path):
+    base = component.default_start()
     assert base.model_files is not None
     directory = base.model_files.directory()
     assert TinkerCheckpoint.read(directory) == UNTRAINED
@@ -846,10 +846,7 @@ def test_scenario_commits_recovers_activates_and_trains_from_remote_checkpoint(t
         def pipeline_spec(cls):
             return PipelineSpec(record2sample=ThresholdSamples, sample2job=ThresholdJobData)
 
-    initial = tmp_path / "initial"
-    initial.mkdir()
-    UNTRAINED.write(initial)
-    factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
+    factory = InMemoryRepositoryBackend.factory(directory=tmp_path / "repository")
     settings = TinkerConfig(state_dir=str(tmp_path / "runtime"))
 
     def build(client):
@@ -923,15 +920,15 @@ def test_scenario_commits_recovers_activates_and_trains_from_remote_checkpoint(t
         scenario = second.get_or_create_scenario("math")
         assert scenario.scenario_step == step
         assert loop_state(scenario) == state
-        # The creation carried the base artifact forward: its artifact_id is the repository base's release ID.
+        # The creation is the scenario's root release: its artifact_id is the root's release ID.
         base_artifact = scenario.release_queries.artifact_for_version(base).artifact_id
-        assert base_artifact == scenario.repository.backend.resolve_release("base").release_id != base
+        assert base_artifact == scenario.repository.start_artifact.release_id == base
         scenario.activate(base_artifact)
         scenario.train_from(base_artifact)
         assert scenario.scenario_step == step + 2
         assert scenario.current_artifact_ref().release_id == base
         assert inference.served_model_name("math") == UNTRAINED.sampler_path
-        # The base artifact imports as any release: the next job starts from the untrained adapter.
+        # The root release imports as any release: the next job starts from the untrained adapter.
         assert TinkerCheckpoint.read(Path(loop_state(scenario).start)) == UNTRAINED
     finally:
         second.close()
@@ -969,7 +966,7 @@ def test_documented_smoke_runs_through_http_and_ttdd_recipe(tmp_path, monkeypatc
     )
     dispatcher = Dispatcher(
         TTTDRecipe(component, runtime=inference, pipeline_stages=step_grid),
-        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
+        InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(),
         coordination=memory_coordination(),

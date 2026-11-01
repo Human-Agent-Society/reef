@@ -137,11 +137,8 @@ def start_dispatcher(tmp_path: Path):
     opened = []
 
     def start(backend_type=None, *, experiment_tracker=None, max_staleness=0, **component_options):
-        initial = tmp_path / "initial"
-        initial.mkdir(exist_ok=True)
-        (initial / "model.txt").write_text("w0")
         component = DurableComponent(tmp_path / "checkpoints", **component_options)
-        factory = (backend_type or InMemoryRepositoryBackend).factory(initial, root=tmp_path / "repository")
+        factory = (backend_type or InMemoryRepositoryBackend).factory(directory=tmp_path / "repository")
         dispatcher = Dispatcher(
             TestPolicyRecipe(**runtime_bindings(component, component.inference), max_staleness=max_staleness),
             factory,
@@ -426,7 +423,7 @@ def test_operational_sample_wait_ignores_a_matching_backlog_before_training() ->
 def test_periodic_metrics_report_backlog_during_training_without_status_reads(start_dispatcher, monkeypatch) -> None:
     monkeypatch.setattr(Dispatcher, "operational_metrics_interval_seconds", 0.01)
     tracker = OperationalExperimentTracker()
-    # The base artifact answers the second pair while the first job trains, so that pair trains one artifact behind.
+    # The root release answers the second pair while the first job trains, so that pair trains one artifact behind.
     _, dispatcher = start_dispatcher(experiment_tracker=tracker, max_staleness=1)
     # The trainer's cycle executes while it submits the first job: hold the submission.
     started, release = _hold_job_submission(monkeypatch)

@@ -32,6 +32,7 @@ from reef.observability import ExperimentLogger
 from reef.pipeline_context import PipelineContext
 from reef.recipe import Recipe
 from reef.record2sample import NoSamples
+from reef.runtime.jobs import ScenarioRoot
 from reef.storage.records import RecordStore
 from reef.storage.samples import TrainerSamples
 from reef.storage.sql_coordination import memory_coordination
@@ -95,7 +96,7 @@ def bound_dispatcher(scenario: SimpleNamespace) -> Dispatcher:
     initial.mkdir()
     dispatcher = Dispatcher(
         Recipe(),
-        InMemoryRepositoryBackend.factory(initial, root=root / "repository"),
+        InMemoryRepositoryBackend.factory(directory=root / "repository"),
         scenario_storage=SQLiteScenarioStorage(),
         coordination=memory_coordination(),
     )
@@ -303,6 +304,7 @@ class BackgroundStepRecipe(TestPolicyRecipe):
         task_storage: TaskStorage | None = None,
         releases: ComponentReleases | None = None,
         samples: TrainerSamples | None = None,
+        root: ScenarioRoot | None = None,
     ) -> Trainer:
         return Trainer.build(
             scenario,
@@ -311,6 +313,7 @@ class BackgroundStepRecipe(TestPolicyRecipe):
             job_loop=JobLoop(self.training_component, scenario=scenario),
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
+            root=root,
         )
 
 
@@ -322,7 +325,7 @@ def background_step_dispatcher(tmp_path: Path) -> tuple[Dispatcher, BackgroundSt
     recipe = BackgroundStepRecipe(**runtime_bindings(component))
     dispatcher = Dispatcher(
         recipe,
-        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
+        InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
         coordination=memory_coordination(),

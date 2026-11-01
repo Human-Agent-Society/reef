@@ -18,7 +18,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from tests.support.harness_service import job_backend
+from tests.support.harness_service import job_backend, seed_root
 from tests.support.harness_steps import TreeReleases
 
 from reef.core.evaluation import PolicyHarness, RolloutRequest
@@ -63,7 +63,7 @@ def load(monkeypatch, tmp_path):
 
 
 def releases_of(recipe) -> ComponentReleases:
-    """A commit history whose head is the recipe's seed, as a new scenario's base release is."""
+    """A commit history whose head is the recipe's seed, as a new scenario's root release is."""
     return ComponentReleases(TreeReleases(recipe.seed), "harness")
 
 
@@ -144,7 +144,7 @@ def test_default_driver_pool_uses_a_stable_answer_snapshot(load, monkeypatch, tm
     monkeypatch.setattr("reef.evaluation.harness.runner.run_task", lambda *args, **kwargs: pi_run("### 17"))
     _, recipe = driver.load_recipe(["problem"], api_key="dummy", trainset_size=45)
     with SQLiteRecordStore() as records:
-        trainer = recipe.build("test", records, releases=releases_of(recipe))
+        trainer = recipe.build("test", records, releases=releases_of(recipe), root=seed_root(recipe))
         try:
             evaluator = job_backend(trainer).evaluator
             assert evaluator.worker_pool.selection.settings.backend == "uni"
@@ -197,7 +197,7 @@ def test_driver_evaluates_with_isolated_workers(load, monkeypatch, tmp_path, exe
     assert recipe.model_binding().base_url == driver.aime.OPENAI_BASE_URL
     driver.aime.ANSWERS.clear()
     with driver.worker_runtime(recipe), SQLiteRecordStore() as records:
-        trainer = recipe.build("isolated", records, releases=releases_of(recipe))
+        trainer = recipe.build("isolated", records, releases=releases_of(recipe), root=seed_root(recipe))
         try:
             evaluator = job_backend(trainer).evaluator
             assert evaluator.worker_pool.selection.settings.backend == ("mp" if executor == "auto" else executor)
@@ -364,14 +364,10 @@ def test_driver_reports_each_problem_against_its_recorded_request(load, monkeypa
     driver = load("run")
     problems = ["Find n such that ...", "Let ABC be a triangle ..."]
     recipe_name, recipe = driver.load_recipe(problems, api_key="dummy", trainset_size=45)
-    # The base release holds the source tree, as every harness release does.
-    bootstrap = tmp_path / "bootstrap"
-    recipe.seed.write(bootstrap)
     service = driver.RunService(
         scenario="gepa-test",
         recipe_name=recipe_name,
         recipe=recipe,
-        bootstrap_tree=bootstrap,
         run_dir=tmp_path / "run",
         upstream_url="http://127.0.0.1:9",
         upstream_key="dummy",

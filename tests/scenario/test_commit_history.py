@@ -21,7 +21,7 @@ import pytest
 from tests.support._policy_recipe import TestPolicyRecipe
 from tests.support._threshold_processor import ThresholdJobData, ThresholdSamples, threshold_pipeline
 from tests.support.harness_service import harness_repository
-from tests.support.harness_steps import PI_SEED, harness_recipe
+from tests.support.harness_steps import harness_recipe
 from tests.support.runtime_stubs import StubTrainingComponent, runtime_bindings
 from tests.support.samples_service import make_samples
 
@@ -401,9 +401,7 @@ def delete_commits(agent_record_dir, *steps: int) -> None:
 
 def repository_factory(tmp_path):
     """The in-memory repository factory over an empty test base."""
-    initial = tmp_path / "initial"
-    initial.mkdir()
-    return InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
+    return InMemoryRepositoryBackend.factory(directory=tmp_path / "repository")
 
 
 def wait_until(condition, message: str) -> None:
@@ -465,6 +463,7 @@ class _SavedArtifactRecipe(Recipe):
         task_storage=None,
         releases=None,
         samples=None,
+        root=None,
     ):
         del experiment_logger
         return Trainer.build(
@@ -473,6 +472,7 @@ class _SavedArtifactRecipe(Recipe):
             pipeline_factory=partial(threshold_pipeline, job_samples=1),
             job_loop=JobLoop(self.backend, scenario=scenario),
             algorithm_state=algorithm_state,
+            root=root,
         )
 
 
@@ -575,6 +575,7 @@ class ProtectAllPolicyRecipe(TestPolicyRecipe):
         task_storage=None,
         releases=None,
         samples=None,
+        root=None,
     ):
         component = self.training_component
         return Trainer.build(
@@ -585,6 +586,7 @@ class ProtectAllPolicyRecipe(TestPolicyRecipe):
             job_parameters={kind: {"method": {"objective": "sft"}} for kind in SAMPLE_KINDS},
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
+            root=root,
         )
 
 
@@ -639,7 +641,7 @@ def test_recovery_replays_retained_rows_behind_the_watermark(tmp_path) -> None:
     """
     agent_record_dir = tmp_path / "agent-record"
     backend_factory = repository_factory(tmp_path)
-    # The components save no checkpoint, so the base release serves both inferences and neither is stale.
+    # The components save no checkpoint, so the root release serves both inferences and neither is stale.
     first_component = RecordingComponent()
     first = build_training_dispatcher(first_component, tmp_path, backend_factory, agent_record_dir=agent_record_dir)
     base_artifact_id = served_artifact_id(first)
@@ -876,9 +878,7 @@ def test_harness_growth_does_not_block_acceptance_or_other_scenarios(tmp_path) -
         started.set()
         assert release.wait(10)
 
-    dispatcher = build_harness_evolve_dispatcher(
-        tmp_path, harness_repository(tmp_path, PI_SEED.files), method=blocking_method
-    )
+    dispatcher = build_harness_evolve_dispatcher(tmp_path, harness_repository(tmp_path), method=blocking_method)
     dispatcher.accept_record(trace_inference("a-i1", scenario="skills-a"))
 
     returned = Event()
@@ -946,7 +946,7 @@ def test_a_failed_harness_job_ends_with_its_error_and_the_next_batch_trains(tmp_
         if should_fail:
             raise RuntimeError("the method failed")
 
-    dispatcher = build_harness_evolve_dispatcher(tmp_path, harness_repository(tmp_path, PI_SEED.files), method=method)
+    dispatcher = build_harness_evolve_dispatcher(tmp_path, harness_repository(tmp_path), method=method)
     dispatcher.accept_record(trace_inference("i1"))
     dispatcher.accept_record(trace_report("r1", "i1"))
 
@@ -1109,6 +1109,7 @@ def test_a_commit_failure_keeps_one_retryable_batch_and_one_record(tmp_path, mon
     assert result is not None
     pending = scenario.trainer.pending_job_data
     assert pending is not None
+    started = dict(scenario.trainer.state)
 
     # The step is stored, but the caller sees an error.
     original = scenario.store.commit_step
@@ -1128,7 +1129,7 @@ def test_a_commit_failure_keeps_one_retryable_batch_and_one_record(tmp_path, mon
         scenario.commit(result)
 
     assert scenario.scenario_step == 0
-    assert scenario.trainer.state == JobLoopState(scenario.trainer.job_loop_required().component.base_start).to_dict()
+    assert scenario.trainer.state == started
     assert scenario.trainer.pending_job_data is pending
     assert scenario.store.durable
     assert len(scenario.store.history()) == 1
@@ -1151,12 +1152,12 @@ def test_a_commit_failure_keeps_one_retryable_batch_and_one_record(tmp_path, mon
 def test_durable_local_backend_recovers_after_post_commit_notification_failure(tmp_path) -> None:
     agent_record_dir = tmp_path / "agent-record"
     dispatcher = build_harness_evolve_dispatcher(
-        tmp_path, harness_repository(tmp_path, PI_SEED.files), agent_record_dir=agent_record_dir
+        tmp_path, harness_repository(tmp_path), agent_record_dir=agent_record_dir
     )
     original = dispatcher.get_or_create_scenario("skills")
     assert original is not None
-    # The creation carries the base artifact, whose artifact_id is the repository base release's.
-    activation_target = original.repository.backend.resolve_release("base").release_id
+    # The creation's artifact is the scenario's root release.
+    activation_target = original.repository.start_artifact.release_id
     release_failed = Event()
     reload_started = Event()
     allow_reload = Event()
@@ -1242,7 +1243,7 @@ def test_no_artifact_commit_appends_a_record_and_survives_a_restart(tmp_path) ->
     restores the step, the state, and the record progress without re-training compacted rows.
     """
     agent_record_dir = tmp_path / "agent-record"
-    backend_factory = harness_repository(tmp_path, PI_SEED.files)
+    backend_factory = harness_repository(tmp_path)
     first = build_harness_evolve_dispatcher(tmp_path, backend_factory, agent_record_dir=agent_record_dir)
     first.accept_record(trace_inference("i1"))
     first.accept_record(trace_report("r1", "i1"))
