@@ -272,8 +272,10 @@ skips the job's data, the job saves no checkpoint, so the next job continues
 the start's weights and objective state. The Tinker component does the same.
 
 Every driver loads Slime's latest checkpoint. A job therefore starts from
-the component's latest checkpoint; the base start names the untrained
-weights, until the first rollout is saved. The component checks the start
+the component's latest checkpoint; the start of the startup weights names the
+untrained weights, until the first rollout is saved. A scenario trains on Slime
+only when its root release holds the default start of the configured inputs
+(``root_start``). The component checks the start
 when Reef submits the job, and the driver again when the job runs: a queued
 job whose start an earlier job moved past fails. ``import_start`` refuses
 every release, so a Slime scenario refuses ``train-from``. Because the jobs

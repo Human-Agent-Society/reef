@@ -23,7 +23,7 @@ from reef.artifact.artifact import (
     ArtifactRef,
     ArtifactRepository,
 )
-from reef.artifact.composite import compose_release
+from reef.artifact.composite import compose_release, link_or_copy
 from reef.core.components import validate_component_name
 from reef.core.plugins import Plugin
 
@@ -81,20 +81,22 @@ class RepositoryBackend(ArtifactRepository):
         return None
 
     @abstractmethod
-    def resolve_release(self, release_id: str | None = None) -> ArtifactRef:
-        """The release ``release_id`` names: a release ID, ``"base"`` for the repository's base artifact, or
-        ``"head"`` (also ``None``) for the newest release published in the repository.
+    def resolve_release(self, release_id: str) -> ArtifactRef:
+        """The release that the release ID ``release_id`` names in this repository.
 
         Raise ``ArtifactNotFound`` for a release the repository does not hold.
         """
 
     @abstractmethod
-    def fork(
-        self,
-        release_id: str | None = None,
-        *,
-        metadata: Mapping[str, object] | None = None,
-    ) -> ArtifactRef: ...
+    def register(self, root: Artifact, *, metadata: Mapping[str, object]) -> ArtifactRef:
+        """Register the scenario with ``root`` as its root release, and return the scenario's head.
+
+        ``root`` is an unpublished artifact whose ``local_path`` is a directory. When the scenario has no head, the
+        backend stores the files of ``root`` as a release with no parent, with ``root.ref.content_id`` and
+        ``metadata``, and makes that release the head in one atomic step. When the scenario has a head, also one
+        that another caller registered first, the backend stores nothing and returns that head. Raise
+        ``ArtifactPublicationError`` when the files cannot be stored.
+        """
 
     @abstractmethod
     def metadata(self) -> Mapping[str, object] | None: ...
@@ -150,11 +152,11 @@ class EnumerableRepositoryBackendFactory(RepositoryBackendFactory):
 
 
 class BaseModelFiles(ABC):
-    """The model files of a base artifact, which a process makes only when a repository imports them.
+    """The model files of a default start, which a process makes only when a scenario's root release holds them.
 
-    Purpose: a recipe gives a value in ``BaseArtifactSource.model_files``. A repository backend calls ``directory``
-    only when it imports the base into a repository that has none. Thus a process that opens only repositories that
-    have a base makes no model files.
+    Purpose: a training component gives a value in ``DefaultStart.model_files``. ``ScenarioFactory`` calls
+    ``directory`` only when it creates a scenario from the default start. Thus a process that only opens scenarios
+    makes no model files.
     """
 
     @abstractmethod
@@ -181,8 +183,8 @@ class ModelDirectory(BaseModelFiles):
 
 
 @dataclass(frozen=True)
-class BaseArtifactSource:
-    """The content of a repository's base artifact, and the configuration that the content comes from.
+class DefaultStart:
+    """The content of a new scenario's root release when the scenario starts from the deployment's configuration.
 
     Values:
 
@@ -193,10 +195,10 @@ class BaseArtifactSource:
     - ``inputs`` maps non-empty names to non-empty strings. They identify the configuration, for example the
       configured model and the checksum of the configured seed.
 
-    Purpose: a recipe makes the value (``Recipe.base_artifact_source``). A repository backend imports it as the
-    base artifact of a repository that has none; only that import reads the model files. A repository that has a
-    base opens only when its base came from equal ``inputs``. Thus Reef reads the configuration once, to make the
-    base, and a process that opens only repositories that have a base makes no model files.
+    Purpose: a recipe makes the value (``Recipe.default_start``). ``ScenarioFactory`` writes it as the root release
+    of a scenario that it creates without an artifact item; only that write reads the model files. The root records
+    ``inputs`` in its ``RootSource``, so a training component that cannot import a release (Slime) can compare
+    them with its own configuration.
     """
 
     files: Mapping[str, str] = field(default_factory=dict)
@@ -208,20 +210,31 @@ class BaseArtifactSource:
         for relative in self.files:
             path = PurePosixPath(relative)
             if not relative or path.is_absolute() or ".." in path.parts:
-                raise ValueError(f"base artifact file {relative!r} must be a relative path inside the release")
+                raise ValueError(f"default start file {relative!r} must be a relative path inside the release")
         if self.model_files is None and self.model_component is not None:
             raise ValueError("model_component names where model files go, so it requires model_files")
         if self.model_component is not None:
             validate_component_name(self.model_component)
         for name, value in self.inputs.items():
             if not isinstance(name, str) or not name or not isinstance(value, str) or not value:
-                raise ValueError(f"base artifact input {name!r} must map a non-empty name to a non-empty string")
+                raise ValueError(f"default start input {name!r} must map a non-empty name to a non-empty string")
 
     @property
     def content_id(self) -> str:
-        """The content ID of the base artifact that this source makes. Equal ``inputs`` give equal content IDs."""
+        """The content ID of a root release made from this start. Equal ``inputs`` give equal content IDs."""
         digest = hashlib.sha256(json.dumps(dict(self.inputs), sort_keys=True).encode()).hexdigest()
         return f"content:{digest}"
+
+    def write(self, directory: Path) -> None:
+        """Write the start's files into the empty directory ``directory``: the model files under ``model_component``
+        as hard links where the file system allows, and each of ``files`` at its path."""
+        if self.model_files is not None:
+            target = directory if self.model_component is None else directory / self.model_component
+            shutil.copytree(self.model_files.directory(), target, dirs_exist_ok=True, copy_function=link_or_copy)
+        for relative, text in self.files.items():
+            path = directory / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
 
 
 @dataclass(frozen=True)
@@ -229,13 +242,11 @@ class RepositoryBackendContext:
     """The deployment values that a configured factory gets in addition to its own config.
 
     ``work_dir`` and ``cache_dir`` are ``storage.artifact_work_dir`` and
-    ``storage.artifact_cache_dir``. ``base`` is the content of the recipe's
-    base artifact; every new scenario starts from it.
+    ``storage.artifact_cache_dir``.
     """
 
     work_dir: Path
     cache_dir: Path
-    base: BaseArtifactSource = field(default_factory=BaseArtifactSource)
 
 
 class ConfigurableRepositoryBackendFactory(RepositoryBackendFactory, Plugin):
@@ -314,7 +325,7 @@ class CachedRepositoryBackendFactory(RegistrationAwareRepositoryBackendFactory, 
 
         After this the factory answers ``has_registration`` false and
         ``list_registrations`` without the name, so a later create under the
-        same name starts from the base artifact. Content-addressed storage
+        same name registers a new root release. Content-addressed storage
         the scenario shared with others stays.
         """
         with self._lock:
@@ -337,19 +348,22 @@ class CachedRepositoryBackendFactory(RegistrationAwareRepositoryBackendFactory, 
 
 
 class Repository(ArtifactRepository):
-    """Scenario-scoped release chain and persistence facade."""
+    """Scenario-scoped release chain and persistence facade.
+
+    ``start_artifact`` is the scenario's root release, the release that the scenario was created with.
+    """
 
     def __init__(
         self,
         backend: RepositoryBackend,
-        base_artifact: ArtifactRef,
+        start_artifact: ArtifactRef,
         *,
         current_artifact: ArtifactRef | None = None,
         checkpoint_artifact: ArtifactRef | None = None,
         local_dir: Path | None = None,
     ) -> None:
         self._backend = backend
-        self._base_artifact = base_artifact
+        self._start_artifact = start_artifact
         self._current_artifact = current_artifact
         self._checkpoint_artifact = checkpoint_artifact
         # Guards every mutation of the (current, checkpoint) head pair so the
@@ -399,8 +413,8 @@ class Repository(ArtifactRepository):
         return uri
 
     @property
-    def base_artifact(self) -> ArtifactRef:
-        return self._base_artifact
+    def start_artifact(self) -> ArtifactRef:
+        return self._start_artifact
 
     @property
     def current_artifact(self) -> ArtifactRef | None:
@@ -463,13 +477,6 @@ class Repository(ArtifactRepository):
         if not isinstance(self.backend, StagedReleaseRepositoryBackend):
             raise ArtifactPublicationError("repository backend must implement StagedReleaseRepositoryBackend")
         return self.backend
-
-    def fork(self, *, metadata: Mapping[str, object] | None = None) -> ArtifactRef:
-        ref = self.backend.fork(self.base_artifact.release_id, metadata=metadata)
-        with self._head_lock:
-            self._current_artifact = ref
-            self._checkpoint_artifact = ref
-        return ref
 
     def materialize(self, ref: ArtifactRef) -> Artifact:
         local = self._local_artifacts.get(ref.release_id)

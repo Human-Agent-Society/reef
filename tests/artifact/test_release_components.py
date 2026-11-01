@@ -10,7 +10,14 @@ from typing import Any
 
 import pytest
 
-from reef.artifact import Artifact, ArtifactNotFound, ArtifactPublicationError, InMemoryRepositoryBackend, Repository
+from reef.artifact import (
+    Artifact,
+    ArtifactNotFound,
+    ArtifactPublicationError,
+    DefaultStart,
+    InMemoryRepositoryBackend,
+    Repository,
+)
 from reef.artifact.artifact import ArtifactRef, ArtifactValidator
 from reef.artifact.composite import compose_release
 from reef.core.activation import ActivationRule
@@ -114,24 +121,27 @@ def test_component_views_of_a_composed_release(tmp_path: Path) -> None:
 
 @pytest.mark.unit
 def test_materialized_releases_keep_their_manifest_and_composed_staging_carries_components(tmp_path: Path) -> None:
-    initial = tmp_path / "initial"
-    _tree(initial / WEIGHTS, {"adapter_config.json": "{}"})
-    _tree(initial / HARNESS, {"AGENTS.md": "seed"})
-    backend = InMemoryRepositoryBackend("agent", initial, root=tmp_path / "repository")
-    base = backend.resolve_release()
+    root = tmp_path / "root"
+    _tree(root / WEIGHTS, {"adapter_config.json": "{}"})
+    _tree(root / HARNESS, {"AGENTS.md": "seed"})
+    backend = InMemoryRepositoryBackend("agent", directory=tmp_path / "repository")
     manifest = ReleaseComponents({WEIGHTS: ComponentEntry("w0"), HARNESS: ComponentEntry("h0")})
-    fork = backend.fork(base.release_id, metadata={COMPONENTS_METADATA_KEY: manifest.to_dict()})
+    root_ref = backend.register(
+        Artifact.local(root, content_id=manifest.content_id), metadata={COMPONENTS_METADATA_KEY: manifest.to_dict()}
+    )
     repository = Repository(
-        backend, base, current_artifact=fork, checkpoint_artifact=fork, local_dir=tmp_path / "local"
+        backend, root_ref, current_artifact=root_ref, checkpoint_artifact=root_ref, local_dir=tmp_path / "local"
     )
 
-    materialized = repository.materialize(fork)
+    materialized = repository.materialize(root_ref)
     assert materialized.components == manifest
     assert TextFileTree().read_files(materialized.component(HARNESS)) == {"AGENTS.md": "seed"}
 
     evolved = Artifact.local(_tree(tmp_path / "h1", {"AGENTS.md": "evolved"}))
-    staged = repository.stage_composed(1, {WEIGHTS: materialized.component(WEIGHTS), HARNESS: evolved}, parent=fork)
-    published = repository.publish(staged, expected_parent=fork, metadata=staged.metadata)
+    staged = repository.stage_composed(
+        1, {WEIGHTS: materialized.component(WEIGHTS), HARNESS: evolved}, parent=root_ref
+    )
+    published = repository.publish(staged, expected_parent=root_ref, metadata=staged.metadata)
     again = repository.materialize(published)
     assert again.components is not None
     assert again.components.entries[WEIGHTS].content_id == "w0"
@@ -209,6 +219,9 @@ class _TwoComponentRecipe(Recipe):
             }
         )
 
+    def default_start(self) -> DefaultStart:
+        return DefaultStart(files={f"{WEIGHTS}/adapter_config.json": "{}", f"{HARNESS}/AGENTS.md": "seed"})
+
     def build_trainers(
         self,
         scenario,
@@ -220,6 +233,7 @@ class _TwoComponentRecipe(Recipe):
         task_storage=None,
         releases=None,
         samples=None,
+        root=None,
     ):
         # One trainer, bound to the harness, publishes whichever component a step names.
         return (
@@ -230,6 +244,7 @@ class _TwoComponentRecipe(Recipe):
                     records,
                     algorithm_state=algorithm_states.get(HARNESS),
                     experiment_logger=experiment_logger,
+                    root=root,
                 ),
             ),
         )
@@ -237,15 +252,12 @@ class _TwoComponentRecipe(Recipe):
 
 @pytest.mark.unit
 def test_multi_component_scenario_commits_one_component_and_carries_the_rest(tmp_path: Path) -> None:
-    initial = tmp_path / "initial"
-    _tree(initial / WEIGHTS, {"adapter_config.json": "{}"})
-    _tree(initial / HARNESS, {"AGENTS.md": "seed"})
     recipe = _TwoComponentRecipe()
     activator = recipe.activator
     activator.activated.clear()
     dispatcher = Dispatcher(
         recipe,
-        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
+        InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "store"),
         coordination=memory_coordination(),
@@ -319,10 +331,10 @@ def test_multi_component_scenario_commits_one_component_and_carries_the_rest(tmp
         assert activator.activated[served_before:] == []
         assert service.harness_release_id(scenario) == after_harness.ref.release_id
 
-        # Activating the base's weights loads them and keeps the served harness; the chain tip stays. The creation
-        # carried the base artifact forward, so its artifact_id is the base release's.
+        # Activating the root's weights loads them and keeps the served harness; the chain tip stays. The root
+        # release made its artifacts, so their artifact_id is the root release's.
         base_weights_id = base.components.artifact_ids(base.ref.release_id)[WEIGHTS]
-        assert base_weights_id == f"{scenario.repository.backend.resolve_release('base').release_id}:{WEIGHTS}"
+        assert base_weights_id == f"{scenario.repository.start_artifact.release_id}:{WEIGHTS}"
         trained_weights = scenario.artifact_status()[WEIGHTS]["training_start"]
         scenario.activate(base_weights_id, WEIGHTS)
         # The activation moves the weights' active artifact; their training start stays on the trained weights.
@@ -385,12 +397,9 @@ def test_multi_component_scenario_commits_one_component_and_carries_the_rest(tmp
 @pytest.mark.unit
 def test_a_held_release_activates_without_the_manifest_of_its_parent(tmp_path: Path) -> None:
     """An activation reads the active release and the artifact's release only: the creation's bytes may be gone."""
-    initial = tmp_path / "initial"
-    _tree(initial / WEIGHTS, {"adapter_config.json": "{}"})
-    _tree(initial / HARNESS, {"AGENTS.md": "seed"})
     dispatcher = Dispatcher(
         _TwoComponentRecipe(),
-        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
+        InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "store"),
         coordination=memory_coordination(),
@@ -423,12 +432,9 @@ def test_a_held_release_activates_without_the_manifest_of_its_parent(tmp_path: P
 @pytest.mark.unit
 def test_an_activation_after_a_rejected_harness_step_adds_no_harness_release(tmp_path: Path) -> None:
     """The tree a rejected step served is the last one named; activating the served artifact changes nothing."""
-    initial = tmp_path / "initial"
-    _tree(initial / WEIGHTS, {"adapter_config.json": "{}"})
-    _tree(initial / HARNESS, {"AGENTS.md": "seed"})
     dispatcher = Dispatcher(
         _TwoComponentRecipe(),
-        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
+        InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "store"),
         coordination=memory_coordination(),
@@ -461,13 +467,10 @@ def test_an_activation_after_a_rejected_harness_step_adds_no_harness_release(tmp
 
 @pytest.mark.unit
 def test_an_activation_refused_by_validation_changes_nothing(tmp_path: Path, monkeypatch: Any) -> None:
-    initial = tmp_path / "initial"
-    _tree(initial / WEIGHTS, {"adapter_config.json": "{}"})
-    _tree(initial / HARNESS, {"AGENTS.md": "seed"})
     staged_root = tmp_path / "staged"
     dispatcher = Dispatcher(
         _TwoComponentRecipe(),
-        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
+        InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         local_artifact_dir=staged_root,
         scenario_storage=SQLiteScenarioStorage(tmp_path / "store"),
         coordination=memory_coordination(),

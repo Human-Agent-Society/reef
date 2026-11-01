@@ -162,6 +162,7 @@ class _Recipe(_TwoTrainerRecipe):
         task_storage=None,
         releases=None,
         samples=None,
+        root=None,
     ):
         pipelines = dict(self.pipelines)
         # Each trainer reads the stored samples of its component, so a rebuilt trainer finds the samples made live.
@@ -177,6 +178,7 @@ class _Recipe(_TwoTrainerRecipe):
                     experiment_logger=experiment_logger,
                     report_type=TTTDGroupedRolloutReport if pipelines[component] is tttd_pipeline else None,
                     samples=None if samples is None else TrainerSamples(samples, component),
+                    root=root,
                 ),
             )
             for component, backend in self.backends.items()
@@ -191,7 +193,7 @@ def _dispatcher(tmp_path: Path, pipelines: dict[str, Any]) -> Dispatcher:
     backends = {component: ComponentJobs(component, tmp_path / "candidates") for component in (WEIGHTS, HARNESS)}
     return Dispatcher(
         _Recipe(backends=backends, pipelines=tuple(pipelines.items())),
-        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
+        InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
         # Loading a scenario wakes its workers: held, they leave every step to the test.

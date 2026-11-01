@@ -24,14 +24,15 @@ from tests.support._trajectories import policy_trajectory
 from tests.support.chat_templates import CharTemplate
 from tests.support.slime_component import FakeTrainGroup, RecordingBatchProcessor, checkpoint_storage, finished
 
-from reef.artifact import ModelDirectory
+from reef.artifact import Artifact, ModelDirectory
+from reef.core.artifact_ref import RootSource
 from reef.core.job_data import TaskSample, TrajectorySample
 from reef.core.trajectories import trajectory_reward
 from reef.core.weight_layout import ADAPTER_DIR
 from reef.runtime.durable_files import write_json
 from reef.runtime.executor import ExecutorFuture, base
 from reef.runtime.interfaces import LearningRateSchedule, LearningRateScheduleState, TrainingMethod
-from reef.runtime.jobs import JobStatus, ReleaseFormat, TrainingJob
+from reef.runtime.jobs import JobStatus, ReleaseFormat, ScenarioRoot, TrainingJob
 from reef.train.algos import TrainingObjective, TrainingSignal
 from reef.train.algos.helpers import next_steps
 from reef.train.slime_backend import component as slime_component
@@ -474,11 +475,11 @@ def test_a_queued_job_whose_start_the_workers_left_fails_when_it_runs(tmp_path, 
 
 
 @pytest.mark.unit
-def test_the_base_artifact_is_the_startup_model_and_the_base_start_names_the_startup_weights(tmp_path, stacks) -> None:
+def test_the_default_start_is_the_startup_model_and_the_base_start_names_the_startup_weights(tmp_path, stacks) -> None:
     model = tmp_path / "model"
     model.mkdir()
     stack = stacks(tmp_path, hf_checkpoint=str(model))
-    base = stack.component.base_artifact_source()
+    base = stack.component.default_start()
     assert (base.model_files, base.inputs) == (ModelDirectory(model.resolve()), {"model": str(model.resolve())})
     assert SlimeStart.read(Path(stack.component.base_start)) == SlimeStart(None, None, {}, None)
     # The first job of a trainer starts from the startup weights, which the workers hold.
@@ -488,6 +489,26 @@ def test_the_base_artifact_is_the_startup_model_and_the_base_start_names_the_sta
         )
     )
     assert finished(stack.component, "job-0").state == "finished"
+
+
+@pytest.mark.unit
+def test_a_trainer_starts_from_the_startup_weights_only_for_a_root_of_the_configured_inputs(tmp_path, stacks) -> None:
+    """Slime's workers load ``hf_checkpoint`` and cannot load a release, so a scenario trains only when its root came
+    from the default start of the configured inputs; the refusal names both."""
+    model = tmp_path / "model"
+    model.mkdir()
+    stack = stacks(tmp_path, hf_checkpoint=str(model))
+    configured = {"model": str(model.resolve())}
+    root = ScenarioRoot(Artifact.local(model), RootSource("default", inputs=configured))
+    assert stack.component.root_start(root) == stack.component.base_start
+    changed = ScenarioRoot(Artifact.local(model), RootSource("default", inputs={"model": "/models/other"}))
+    with pytest.raises(
+        ValueError, match=r"from the inputs \{'model': .*\}, but .* came from the inputs \{'model': '/models/other'\}"
+    ):
+        stack.component.root_start(changed)
+    item = ScenarioRoot(Artifact.local(model), RootSource("item", item="upload-1", uri="file:///upload/", version=""))
+    with pytest.raises(ValueError, match="came from the item 'upload-1'"):
+        stack.component.root_start(item)
 
 
 @pytest.mark.unit

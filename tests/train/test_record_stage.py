@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 from tests.support._threshold_processor import ThresholdSamples, threshold_pipeline
+from tests.support.runtime_stubs import STUB_ROOT
 from tests.support.samples_service import make_samples
 from tests.support.task_service_stubs import task_for
 from tests.train.test_record_stage_job_data_parity import counting_jobs, inference, report
@@ -250,6 +251,7 @@ def test_a_record_the_stage_ends_is_consumed_by_the_next_commit_and_then_release
         records,
         pipeline_factory=dropping_pipeline,
         job_loop=counting_jobs(),
+        root=STUB_ROOT,
     )
     make_samples(trainer)
     result = trainer.run_once()
@@ -371,7 +373,11 @@ def test_the_trainer_reserves_a_batch_when_a_waiting_set_finishes() -> None:
     records = SQLiteRecordStore()
     records.append(inference("i1"))
     trainer = Trainer.build(
-        "s", records, pipeline_factory=partial(WaitingPipeline, job_samples=1), job_loop=counting_jobs()
+        "s",
+        records,
+        pipeline_factory=partial(WaitingPipeline, job_samples=1),
+        job_loop=counting_jobs(),
+        root=STUB_ROOT,
     )
     make_samples(trainer)
     assert trainer.run_once() is None
@@ -464,6 +470,7 @@ def test_each_trainer_skips_only_the_samples_that_its_own_component_trained() ->
             pipeline_factory=upload_pipeline,
             job_loop=counting_jobs(),
             samples=TrainerSamples(session.samples, component),
+            root=STUB_ROOT,
         )
         consumed[component] = trainer.prepare_commit(trainer.run_once()).consumed_ids
     # Component a trained t1, so its next job takes t2; component b has not trained t1 yet.
@@ -708,7 +715,11 @@ def test_aborted_report_references_are_released_and_stay_excluded_after_replay(
     for record in (aborted, inference("other"), rejected_report, inference("valid"), report("valid-report", "valid")):
         records.append(record)
     trainer = Trainer.build(
-        "s", records, pipeline_factory=partial(threshold_pipeline, job_samples=1), job_loop=counting_jobs()
+        "s",
+        records,
+        pipeline_factory=partial(threshold_pipeline, job_samples=1),
+        job_loop=counting_jobs(),
+        root=STUB_ROOT,
     )
     if replay_before_commit:
         trainer.replay_retained(up_to_sequence=5, consumed_ids=frozenset())
@@ -731,7 +742,11 @@ def test_aborted_report_references_are_released_and_stay_excluded_after_replay(
     assert not trainer.pipeline.releasable_record_ids()
 
     restored = Trainer.build(
-        "s", records, pipeline_factory=partial(threshold_pipeline, job_samples=1), job_loop=counting_jobs()
+        "s",
+        records,
+        pipeline_factory=partial(threshold_pipeline, job_samples=1),
+        job_loop=counting_jobs(),
+        root=STUB_ROOT,
     )
     restored.replay_retained(up_to_sequence=5, consumed_ids=prepared.consumed_ids)
     records.append(report("later-report", "aborted"))

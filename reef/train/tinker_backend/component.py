@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any, TextIO
 
 from reef.artifact.files import ArtifactFiles
-from reef.artifact.repository import BaseArtifactSource, BaseModelFiles
+from reef.artifact.repository import BaseModelFiles, DefaultStart
 from reef.core.chat_rendering import needs_rendering, rendered_job_data
 from reef.core.evaluation import RolloutScores
 from reef.core.job_data import JobData, TaskSample, trajectories
@@ -127,8 +127,8 @@ class TinkerJobComponent(LocalJobComponent, ABC):
     ``config.state_dir`` holds ``base/`` (the base start), ``imported/<digest>/`` (starts taken from
     releases) and ``jobs/`` (see ``LocalJobComponent``). The constructor makes no base start. ``prepared_base``
     makes ``base/`` on its first call in a process: before the process runs jobs (``start_jobs``), when it reads
-    ``base_start`` or checks a job from it, or when a repository imports the base artifact (``TinkerBaseFiles``).
-    A process that does none of these, such as a service that opens only repositories that have a base, makes
+    ``base_start`` or checks a job from it, or when a new scenario's root release holds the default start
+    (``TinkerBaseFiles``). A process that does none of these, such as a service that only opens scenarios, makes
     nothing. A saved checkpoint is
     ``jobs/<job_id>/<step>/``, which holds its manifest alone. A checkpoint
     directory is both the start of a later job and the release Reef publishes.
@@ -461,11 +461,12 @@ class TinkerJobComponent(LocalJobComponent, ABC):
 
 @dataclass(frozen=True)
 class TinkerBaseFiles(BaseModelFiles):
-    """The base start of a Tinker component as the model files of its base artifact.
+    """The base start of a Tinker component as the model files of its default start.
 
     Values: ``component`` is the ``TinkerJobComponent`` whose ``base/`` the files are. ``directory`` returns
-    ``component.prepared_base()``, so a repository import makes the base start on its first call in a process.
-    Purpose: ``TinkerJobComponent`` subclasses give it in their ``base_artifact_source``, which itself makes nothing.
+    ``component.prepared_base()``, so a new scenario's root release makes the base start on its first call in a
+    process. Purpose: ``TinkerJobComponent`` subclasses give it in their ``default_start``, which itself makes
+    nothing.
     """
 
     component: TinkerJobComponent
@@ -479,8 +480,8 @@ class TinkerTrainingComponent(TinkerJobComponent):
 
     The base start, ``base/``, is the untrained adapter's checkpoint, which the
     client saves on first use (``TinkerClient.initialize``): before the training
-    process runs jobs, or when a repository imports the base artifact
-    (``prepared_base``). Serving reads
+    process runs jobs, or when a new scenario's root release holds the
+    default start (``prepared_base``). Serving reads
     each saved checkpoint from its artifact: Tinker's sampler
     (``reef.inference.tinker``) reads the manifest, and a serving runtime that
     loads the weights into its own engines downloads the adapter from the
@@ -500,7 +501,7 @@ class TinkerTrainingComponent(TinkerJobComponent):
 
     def prepare_base(self) -> None:
         if not (self._base / MANIFEST).exists():
-            # The untrained adapter is the base checkpoint: the base artifact holds it as a release.
+            # The untrained adapter is the base checkpoint: the default start holds it as a release.
             self._client.initialize().write(self._base)
 
     def validated(self, checkpoint: TinkerCheckpoint) -> TinkerCheckpoint:
@@ -512,12 +513,12 @@ class TinkerTrainingComponent(TinkerJobComponent):
             )
         return checkpoint
 
-    def base_artifact_source(self) -> BaseArtifactSource:
+    def default_start(self) -> DefaultStart:
         """The untrained adapter's release: its manifest."""
         inputs = {"model": self._model, "lora_rank": str(self._lora_rank)}
         if self._config.base_url is not None:
             inputs["service"] = self._config.base_url
-        return BaseArtifactSource(model_files=TinkerBaseFiles(self), inputs=inputs)
+        return DefaultStart(model_files=TinkerBaseFiles(self), inputs=inputs)
 
     def check_release(self, files: ArtifactFiles) -> None:
         """A manifest of a checkpoint of this component's model, rank and service, whose state path resolves there."""

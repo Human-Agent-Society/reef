@@ -18,10 +18,11 @@ from tests.support._threshold_processor import ThresholdJobData, threshold_pipel
 from tests.support.runtime_stubs import StubTrainingComponent
 from tests.support.samples_service import make_samples
 
-from reef.artifact import Artifact, BaseArtifactSource, GitLFSRepositoryBackendFactory, InMemoryRepositoryBackend
+from reef.artifact import Artifact, DefaultStart, GitLFSRepositoryBackendFactory, InMemoryRepositoryBackend
 from reef.artifact.artifact import ArtifactValidator
 from reef.artifact.composite import compose_release
 from reef.core import AgentRecord, RequestType
+from reef.core.artifact_ref import RootSource
 from reef.core.plugins import PluginReference
 from reef.core.reports import ReportValidationError, ScoredRolloutReport
 from reef.dispatcher import Dispatcher
@@ -35,7 +36,7 @@ from reef.recipe import CompositeRecipe, Recipe, RecipeConfigError, build_recipe
 from reef.recipe.base import ServedEndpoint
 from reef.recipe.config import recipe_config_from_file_layout
 from reef.runtime.interfaces import InferenceHandler
-from reef.runtime.jobs import SavedCheckpoint, TrainingJob
+from reef.runtime.jobs import SavedCheckpoint, ScenarioRoot, TrainingJob
 from reef.service.app import create_app
 from reef.service.request_service import RequestService
 from reef.storage.samples import consumed_sample_id
@@ -74,8 +75,8 @@ class _TreeRecipe(Recipe):
     def build_surface(self, scenario: str) -> Surface:
         return create_harness_surface(get_adapter("pi"))
 
-    def base_artifact_source(self) -> BaseArtifactSource:
-        return BaseArtifactSource(files=self.seed or {})
+    def default_start(self) -> DefaultStart:
+        return DefaultStart(files=self.seed or {})
 
     def step_pipeline(self, context: PipelineContext) -> TrainingPipeline:
         return threshold_pipeline(context, job_samples=1)
@@ -93,6 +94,7 @@ class _TreeRecipe(Recipe):
         task_storage=None,
         releases=None,
         samples=None,
+        root=None,
     ):
         return Trainer.build(
             scenario,
@@ -104,6 +106,7 @@ class _TreeRecipe(Recipe):
             experiment_logger=experiment_logger,
             training_mode=self.training_mode,
             samples=samples,
+            root=root,
         )
 
 
@@ -123,8 +126,8 @@ class _ConfigRecipe(Recipe):
     def build_surface(self, scenario: str) -> Surface:
         return Surface(components={"config": ComponentSurface(kind="harness_plugin")})
 
-    def base_artifact_source(self) -> BaseArtifactSource:
-        return BaseArtifactSource(files={CONFIG_FILE: json.dumps({"request_defaults": {"temperature": 0.2}})})
+    def default_start(self) -> DefaultStart:
+        return DefaultStart(files={CONFIG_FILE: json.dumps({"request_defaults": {"temperature": 0.2}})})
 
 
 #: The settings file of the second component.
@@ -159,14 +162,21 @@ def _served_composite(tmp_path: Path) -> CompositeRecipe:
     return replace(_composite(tmp_path), runtime=InferenceProxyRuntime(base_url="http://engine.test", model_path="m"))
 
 
+def _root_of(recipe: CompositeRecipe, directory: Path) -> ScenarioRoot:
+    """The root release of a scenario created from ``recipe``'s default start, composed under ``directory``."""
+    start = recipe.default_start()
+    (directory / "start").mkdir(parents=True)
+    start.write(directory / "start")
+    components = {name: Artifact.local(directory / "start" / name) for name in recipe.components}
+    return ScenarioRoot(
+        compose_release(components, directory=directory / "root"), RootSource("default", inputs=start.inputs)
+    )
+
+
 def _serve(recipe: CompositeRecipe, tmp_path: Path) -> Dispatcher:
-    initial = tmp_path / "initial"
-    for relative, text in recipe.base_artifact_source().files.items():
-        (initial / relative).parent.mkdir(parents=True, exist_ok=True)
-        (initial / relative).write_text(text, encoding="utf-8")
     return Dispatcher(
         recipe,
-        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
+        InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
         coordination=memory_coordination(),
@@ -179,7 +189,7 @@ def test_composite_recipe_merges_surfaces_seeds_and_trainers(tmp_path: Path) -> 
     surface = recipe.build_surface("agent")
     assert surface.names == ("harness", "config")
     assert surface.files_component == "harness"
-    base = recipe.base_artifact_source()
+    base = recipe.default_start()
     assert base.files == {
         "harness/AGENTS.md": "seed",
         f"config/{CONFIG_FILE}": json.dumps({"request_defaults": {"temperature": 0.2}}),
@@ -188,7 +198,11 @@ def test_composite_recipe_merges_surfaces_seeds_and_trainers(tmp_path: Path) -> 
     assert base.model_files is None and base.model_component is None
     assert recipe.report_type is None
     trainers = recipe.build_trainers(
-        "agent", SQLiteScenarioStorage().open("agent").records, surface=surface, algorithm_states={}
+        "agent",
+        SQLiteScenarioStorage().open("agent").records,
+        surface=surface,
+        algorithm_states={},
+        root=_root_of(recipe, tmp_path / "root"),
     )
     assert [component_trainer.component for component_trainer in trainers] == ["harness", "config"]
     assert trainers[0].trainer.trains
@@ -525,6 +539,7 @@ def test_components_with_different_report_contracts_admit_what_any_of_them_accep
         SQLiteScenarioStorage().open("agent").records,
         surface=mixed.build_surface("agent"),
         algorithm_states={},
+        root=_root_of(mixed, tmp_path / "root"),
     )
     assert [
         component_trainer.trainer.pipeline.context.admitted_report_type is mixed.report_type
@@ -607,7 +622,7 @@ def test_a_flat_scenario_without_a_durable_log_still_serves_its_head(tmp_path: P
     (tree / "rules.md").write_text("seed")
     dispatcher = Dispatcher(
         _TreeRecipe(label="harness", artifact_dir=tmp_path / "steps", seed={"rules.md": "seed"}),
-        InMemoryRepositoryBackend.factory(tree, root=tmp_path / "repository"),
+        InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(None),
         coordination=memory_coordination(),
@@ -832,7 +847,6 @@ class _GuardedRecordOnlyRecipe(Recipe):
 def test_a_recipe_serving_no_component_admits_the_whole_release_through_its_validator(tmp_path: Path) -> None:
     """With no component to join, the check admits the release as a whole, as every recipe's did before components
     existed: the scenario builds, and a release the check refuses is not published."""
-    (tmp_path / "initial").mkdir()
     dispatcher = _serve(_GuardedRecordOnlyRecipe(), tmp_path)  # type: ignore[arg-type]
     try:
         scenario = dispatcher.get_or_create_scenario("agent")
@@ -931,9 +945,9 @@ def test_a_commit_runs_the_release_check_an_activation_of_that_release_runs(tmp_
         scenario.commit(TrainStepResult(state={}, artifact=_tree(tmp_path, "v", "vetted")), component="harness")
         published = scenario.current_artifact_ref()
         assert published != seed
-        # The creation made no artifact: it carries the base's, under the base release's ID.
+        # The root release made the creation's artifacts, under its own release ID.
         seed_harness = scenario.repository.materialize(seed).components.artifact_ids(seed.release_id)["harness"]
-        assert seed_harness == f"{scenario.repository.backend.resolve_release('base').release_id}:harness"
+        assert seed_harness == f"{scenario.repository.start_artifact.release_id}:harness"
         scenario.activate(seed_harness, "harness")
         scenario.activate(f"{published.release_id}:harness", "harness")
         served = scenario.repository.materialize(scenario.current_artifact_ref()).components
@@ -968,8 +982,8 @@ class _CountedTreeRecipe(_LegacyTreeRecipe):
 class _UnseededConfigRecipe(_ConfigRecipe):
     """A configuration recipe that seeds nothing: its component starts empty, which its own check would refuse."""
 
-    def base_artifact_source(self) -> BaseArtifactSource:
-        return BaseArtifactSource()
+    def default_start(self) -> DefaultStart:
+        return DefaultStart()
 
 
 @pytest.mark.unit

@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from reef.artifact.artifact import Artifact, ArtifactValidator
-from reef.artifact.repository import BaseArtifactSource
+from reef.artifact.repository import DefaultStart
 from reef.core.activation import ActivationRule
 from reef.core.components import RECORDS_COMPONENT
 from reef.core.config import config_arguments
@@ -29,7 +29,7 @@ from reef.recipe.config_fields import config_field, resolve_config_field_values
 from reef.recipe.errors import RecipeConfigError
 from reef.record2sample import Record2Sample
 from reef.runtime.interfaces import InferenceRuntime, TrainingMethod
-from reef.runtime.jobs import ReleaseLayout, TrainingComponent
+from reef.runtime.jobs import ReleaseLayout, ScenarioRoot, TrainingComponent
 from reef.sample2job import NoJobData
 from reef.storage.records import RecordStore
 from reef.storage.samples import SAMPLE_KINDS, SampleKind, SampleStore, TrainerSamples
@@ -269,6 +269,7 @@ class Recipe:
         task_storage: TaskStorage | None = None,
         releases: ComponentReleases | None = None,
         samples: TrainerSamples | None = None,
+        root: ScenarioRoot | None = None,
     ) -> Trainer:
         return Trainer.build(
             scenario,
@@ -293,6 +294,7 @@ class Recipe:
         task_storage: TaskStorage | None = None,
         releases: CommittedReleases | None = None,
         samples: SampleStore | None = None,
+        root: ScenarioRoot | None = None,
     ) -> tuple[ComponentTrainer, ...]:
         """Build every trainer of the named scenario, each bound to the component it evolves.
 
@@ -307,7 +309,10 @@ class Recipe:
         gives them to its pipeline; a trainer reads the samples as
         ``TrainerSamples`` of its key (``""`` for the only trainer).
         ``releases`` reads the scenario's committed releases; each trainer
-        reads those of its own component.
+        reads those of its own component. ``root`` is the scenario's root
+        release, where a new trainer starts; a recipe of several components
+        gives each trainer its own component of it
+        (``Surface.component_artifact``).
         """
         if len(surface.names) > 1:
             raise RecipeConfigError(
@@ -326,6 +331,7 @@ class Recipe:
                     task_storage=task_storage,
                     releases=None if releases is None else ComponentReleases(releases, component),
                     samples=None if samples is None else TrainerSamples(samples),
+                    root=root,
                 ),
             ),
         )
@@ -372,9 +378,10 @@ class Recipe:
         checks = every_check(component.validator, self.build_artifact_validator())
         return replace(surface, components={name: replace(component, validator=checks)})
 
-    def base_artifact_source(self) -> BaseArtifactSource:
-        """The content of the deployment's base artifact, which every new scenario starts from; empty by default."""
-        return BaseArtifactSource()
+    def default_start(self) -> DefaultStart:
+        """The content of a new scenario's root release when no artifact item starts the scenario; empty by
+        default."""
+        return DefaultStart()
 
     def harness_state_dir(self, scenario: str, component: str) -> Path | None:
         """The directory of ``component``'s harness evolution state in ``scenario``: its history, its step records
@@ -506,9 +513,9 @@ class WeightTrainingRecipe(Recipe):
             )
         return create_weight_surface(kind=self.runtime.served_weight_kind, layout=layout)
 
-    def base_artifact_source(self) -> BaseArtifactSource:
-        """The training component's untrained checkpoint (``TrainingComponent.base_artifact_source``)."""
-        return self.training_component.base_artifact_source()
+    def default_start(self) -> DefaultStart:
+        """The training component's untrained checkpoint (``TrainingComponent.default_start``)."""
+        return self.training_component.default_start()
 
     def serving_status(self) -> Mapping[str, Any] | None:
         """The engine's adapter residency on a runtime that serves per-scenario adapters."""
@@ -588,6 +595,7 @@ class WeightTrainingRecipe(Recipe):
         task_storage: TaskStorage | None = None,
         releases: ComponentReleases | None = None,
         samples: TrainerSamples | None = None,
+        root: ScenarioRoot | None = None,
     ) -> Trainer:
         """Build a trainer from this recipe's pipeline, objective, and report contract.
 
@@ -602,6 +610,7 @@ class WeightTrainingRecipe(Recipe):
             experiment_logger=experiment_logger,
             task_storage=task_storage,
             samples=samples,
+            root=root,
         )
 
     def _build_trainer(
@@ -613,6 +622,7 @@ class WeightTrainingRecipe(Recipe):
         experiment_logger: ExperimentLogger | None = None,
         task_storage: TaskStorage | None = None,
         samples: TrainerSamples | None = None,
+        root: ScenarioRoot | None = None,
     ) -> Trainer:
         """Build the shared weight trainer with this recipe's report contract."""
         spec = type(self).training_spec()
@@ -636,6 +646,7 @@ class WeightTrainingRecipe(Recipe):
                 records,
                 pipeline_factory=self.build_pipeline,
                 job_loop=JobLoop(self.training_component, scenario=scenario),
+                root=root,
                 job_parameters=self.parameters_by_kind(),
                 algorithm_state=algorithm_state,
                 report_type=self.report_type,

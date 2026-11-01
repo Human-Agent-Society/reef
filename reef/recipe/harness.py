@@ -31,7 +31,7 @@ from typing import Any, ClassVar
 from urllib.parse import quote
 
 from reef.artifact.files import ArtifactFiles
-from reef.artifact.repository import BaseArtifactSource
+from reef.artifact.repository import DefaultStart
 from reef.core.activation import ActivationRule
 from reef.core.config import Settings, config_option
 from reef.core.errors import ReefError
@@ -69,7 +69,7 @@ from reef.recipe.base import Recipe, ServedEndpoint, check_job_components
 from reef.recipe.errors import RecipeConfigError
 from reef.record2sample.traces import TraceSamples
 from reef.runtime.executor.config import ExecutorSettings, role_executor_settings
-from reef.runtime.jobs import SavedCheckpoint, TrainingComponent
+from reef.runtime.jobs import SavedCheckpoint, ScenarioRoot, TrainingComponent
 from reef.sample2job.traces import TraceJobData, TrainTaskJobData
 from reef.storage.records import RecordStore
 from reef.storage.samples import TrainerSamples
@@ -78,13 +78,7 @@ from reef.surface.base import ArtifactLayout, Surface
 from reef.train.backend import ComponentReleases
 from reef.train.harness_backend.agent.settings import AgentSettings, agent_settings
 from reef.train.harness_backend.backend import HarnessBackend, StepLimits
-from reef.train.harness_backend.component import (
-    HISTORY_DIR,
-    STEPS_DIR,
-    HarnessSteps,
-    HarnessTrainingComponent,
-    start_tree,
-)
+from reef.train.harness_backend.component import HISTORY_DIR, STEPS_DIR, HarnessSteps, HarnessTrainingComponent
 from reef.train.harness_backend.contract import Method
 from reef.train.harness_backend.records import StepRecord
 from reef.train.jobs import JobCommit, JobLoop, JobLoopState
@@ -185,13 +179,12 @@ class HarnessJobLoop(JobLoop):
 
     Values: ``component`` and ``scenario`` as ``JobLoop``. ``releases`` reads the scenario component's head, whose
     release is the job's start. ``eval_samples`` is the sample store whose imported eval split the job evaluates on,
-    or ``None`` for the configured tasks. ``seed`` is the recipe's seed tree, the tree of the base start, and
-    ``layout`` is the adapter's tree layout.
+    or ``None`` for the configured tasks. ``layout`` is the adapter's tree layout.
 
     Operations: ``submit(state, data, parameters)`` is ``JobLoop.submit`` with ``harness_parameters(data,
     state)`` added to ``parameters``; ``ValueError`` when ``parameters`` names one of them. ``publish(state,
     checkpoint)`` is ``JobLoop.publish`` whose result's ``changed_kinds`` are the names of the parts that take a
-    path of ``start_tree(state.start).diff(checkpoint tree)``, the tree at ``checkpoint.release_path``: the parts
+    path of the diff from the tree in the directory ``state.start`` to the tree at ``checkpoint.release_path``: the parts
     that the job's step changed, which the scenario's activation rule reads.
 
     Purpose: ``HarnessEvolutionRecipe.build`` makes one for its trainer; ``HarnessTrainingComponent`` reads the
@@ -205,13 +198,11 @@ class HarnessJobLoop(JobLoop):
         scenario: str,
         releases: ComponentReleases,
         eval_samples: TrainerSamples | None,
-        seed: HarnessTree,
         layout: TreeLayout,
     ) -> None:
         super().__init__(component, scenario=scenario)
         self.releases = releases
         self.eval_samples = eval_samples
-        self.seed = seed
         self.layout = layout
 
     def harness_parameters(self, data: JobData, state: JobLoopState) -> dict[str, Any]:
@@ -244,7 +235,7 @@ class HarnessJobLoop(JobLoop):
 
     def publish(self, state: JobLoopState, checkpoint: SavedCheckpoint) -> JobCommit:
         commit = super().publish(state, checkpoint)
-        changes = start_tree(state.start, self.seed).diff(HarnessTree.read(Path(checkpoint.release_path))).changes
+        changes = HarnessTree.read(Path(state.start)).diff(HarnessTree.read(Path(checkpoint.release_path))).changes
         changed_kinds = frozenset(self.layout.part_names(changes).values())
         return replace(commit, result=replace(commit.result, changed_kinds=changed_kinds))
 
@@ -568,14 +559,13 @@ class HarnessEvolutionRecipe(Recipe):
         descriptor = get_adapter(self.evolution.adapter)
         return create_harness_surface(descriptor, layout=HarnessLayout(descriptor))
 
-    def base_artifact_source(self) -> BaseArtifactSource:
-        """The seed tree as the base harness, which a new scenario serves and the first step builds on.
+    def default_start(self) -> DefaultStart:
+        """The seed tree, which a new scenario's root release holds unless an artifact item starts it.
 
-        The files are the seed tree's files; the empty seed makes a base
-        harness with no files. The input is the seed tree's checksum, so a
-        scenario opens only on a base made from the same seed.
+        The files are the seed tree's files; the empty seed makes a root with no files. The input is the seed
+        tree's checksum.
         """
-        return BaseArtifactSource(files=dict(self.seed.files), inputs={"seed": self.seed.checksum()})
+        return DefaultStart(files=dict(self.seed.files), inputs={"seed": self.seed.checksum()})
 
     def scenario_state_dirs(self, scenario: str) -> tuple[Path, ...]:
         """The scenario's history and step records: what a delete archives beside the record store."""
@@ -601,6 +591,7 @@ class HarnessEvolutionRecipe(Recipe):
         task_storage: TaskStorage | None = None,
         releases: ComponentReleases | None = None,
         samples: TrainerSamples | None = None,
+        root: ScenarioRoot | None = None,
     ) -> Trainer:
         """The scenario's trainer: it submits each step as a job of ``harness_component``, whose start is the
         component's head release in ``releases``."""
@@ -619,9 +610,9 @@ class HarnessEvolutionRecipe(Recipe):
                 scenario=scenario,
                 releases=releases,
                 eval_samples=samples if self.evaluation.imported_tasks else None,
-                seed=self.seed,
                 layout=get_adapter(self.evolution.adapter).layout,
             ),
+            root=root,
             algorithm_state=algorithm_state,
             report_type=self.report_type,
             experiment_logger=experiment_logger,

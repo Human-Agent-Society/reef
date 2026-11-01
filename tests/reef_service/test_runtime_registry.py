@@ -93,11 +93,9 @@ inference:
         raise AssertionError("recipe resolution must not probe the runtime")
 
     monkeypatch.setattr("urllib.request.urlopen", unexpected_probe)
-    initial = tmp_path / "initial"
-    initial.mkdir()
     dispatcher = Dispatcher(
         build_named_recipe("qwen", config_directory=recipes),
-        InMemoryRepositoryBackend.factory(initial),
+        InMemoryRepositoryBackend.factory(),
         scenario_storage=SQLiteScenarioStorage(),
         coordination=memory_coordination(),
     )
@@ -132,9 +130,7 @@ def test_http_app_routes_scenarios_to_runtime_specific_inference_services(tmp_pa
             def activate_checkpoint(self, artifact, *, scenario=None) -> str:
                 return artifact.ref.release_id
 
-        initial = tmp_path / "initial"
-        initial.mkdir()
-        backend_factory = InMemoryRepositoryBackend.factory(initial)
+        backend_factory = InMemoryRepositoryBackend.factory()
         dispatchers = {
             recipe: Dispatcher(
                 Recipe(name=recipe, runtime=RoutingRuntime(recipe)),
@@ -171,11 +167,9 @@ def test_a_deployment_without_an_inference_engine_serves_no_model(tmp_path, path
 
     async def run() -> None:
         runtime = RuntimeRegistry().build({"type": "none"}, model_path="model")
-        initial = tmp_path / "initial"
-        initial.mkdir()
         dispatcher = Dispatcher(
             Recipe(name="sft", runtime=runtime),
-            InMemoryRepositoryBackend.factory(initial),
+            InMemoryRepositoryBackend.factory(),
             scenario_storage=SQLiteScenarioStorage(),
             coordination=memory_coordination(),
         )

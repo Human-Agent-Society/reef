@@ -192,11 +192,11 @@ def test_scenarios_serve_their_own_adapters_and_a_restart_loads_each_release_aga
     assert again.split(":")[0] != math.split(":")[0]
 
 
-def test_an_activation_loads_another_release_and_the_base_artifact_loads_as_any_adapter(serving, tmp_path):
+def test_an_activation_loads_another_release_and_the_default_start_loads_as_any_adapter(serving, tmp_path):
     first = serving.activate_checkpoint(release(saved_adapter(tmp_path / "job-1"), "j1"), scenario="math")
     older = serving.activate_checkpoint(release(saved_adapter(tmp_path / "older"), "o"), scenario="math")
     assert older != first and serving.serving_adapter_runtime_load_id("math") == older
-    # The base artifact holds the untrained adapter, which loads under a version of its own.
+    # A root release made from the default start holds the untrained adapter, which loads under a version of its own.
     base = serving.activate_checkpoint(release(saved_adapter(tmp_path / "untrained"), "base"), scenario="math")
     assert base not in (first, older, serving.base_version)
     assert serving.serving_adapter_runtime_load_id("math") == base

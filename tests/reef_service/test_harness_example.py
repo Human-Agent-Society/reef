@@ -21,7 +21,7 @@ import pytest
 import yaml
 from tests.support._trajectories import recorded_trajectory
 from tests.support.config_helpers import load_harness_deployment as load_config
-from tests.support.harness_service import backend_step
+from tests.support.harness_service import backend_step, seed_root
 from tests.support.harness_steps import COMPONENT, TreeReleases, harness_backend
 
 from reef.evaluation.activation import AlwaysActivate
@@ -284,7 +284,7 @@ def test_the_serve_file_boots_the_recipe_through_from_environment(tmp_path, monk
         "openai",
     )
     assert list(built.model_bindings()) == ["served"]
-    trainer = built.build("demo", SQLiteRecordStore(), releases=releases_for(built))
+    trainer = built.build("demo", SQLiteRecordStore(), releases=releases_for(built), root=seed_root(built))
     assert isinstance(trainer, Trainer)
     # serve.yaml sets no job_samples, so each report is one step.
     assert trainer.job_samples == 1
@@ -313,13 +313,13 @@ def test_the_native_serve_file_boots_the_recipe_with_the_shipped_seed(tmp_path, 
         "native/graphs/main.json",
         "skills/answer-style/SKILL.md",
     } == set(NATIVE_SEED.files)
-    # A fresh scenario's base release is the seed's source tree, which names no endpoint.
-    assert built.base_artifact_source().files == dict(NATIVE_SEED.files)
+    # A fresh scenario's root release is the seed's source tree, which names no endpoint.
+    assert built.default_start().files == dict(NATIVE_SEED.files)
     assert not any("upstream" in text for text in NATIVE_SEED.files.values())
     empty = tmp_path / "empty-seed"
     empty.mkdir()
     emptied = boot_serve_file(tmp_path, monkeypatch, "serve-native.yaml", seed=str(empty))
-    assert emptied.base_artifact_source().files == {}
+    assert emptied.default_start().files == {}
 
 
 @pytest.mark.parametrize("model_id", ["provider/model-a", "provider/model-b"])
@@ -359,7 +359,9 @@ def test_deployment_yaml_names_directories_that_exist_and_boots_its_named_recipe
     assert built.training_mode == "auto" and type(built.method).__name__ == "RulesMethod"
     records = SQLiteRecordStore()
     local = replace(built.evolution, binary=str(tmp_path / "fake-pi"), state_dir=str(tmp_path / "harness"))
-    trainer = replace(built, evolution=local).build("demo", records, releases=releases_for(built))
+    trainer = replace(built, evolution=local).build(
+        "demo", records, releases=releases_for(built), root=seed_root(built)
+    )
     assert trainer.pipeline.training_mode == "auto"
     # Each report is one job's data: the deployment sets no job_samples, and the default is 1.
     assert trainer.job_samples == 1

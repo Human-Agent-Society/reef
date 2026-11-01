@@ -16,7 +16,6 @@ from reef.core.errors import ReefError
 from reef.core.records_types import RequestType, parse_references
 
 SCENARIO_HEADER = "x-reef-scenario"
-RELEASE_ID_HEADER = "x-reef-release-id"
 #: Harness-stamped side-channel context. The
 #: service carries each pair through to the INFERENCE record so a processor
 #: can correlate on it, and reads one value itself: ``release``, the release
@@ -35,23 +34,22 @@ class HeaderError(ReefError):
 class RequestHeaders:
     scenario: str
     request_type: RequestType
-    release_id: str | None = None
     #: ``x-reef-tag-<name>`` pairs, lowercased names, opaque values.
     tags: Mapping[str, str] = field(default_factory=dict)
 
 
-def scenario_headers(headers: Mapping[str, str]) -> tuple[str, str | None]:
-    """The scenario and the release that a request's headers name; ``HeaderError`` without a scenario."""
+def scenario_header(headers: Mapping[str, str]) -> str:
+    """The scenario that a request's headers name; ``HeaderError`` without a scenario."""
     normalized = {key.lower(): value for key, value in headers.items()}
     scenario = normalized.get(SCENARIO_HEADER, "").strip()
     if not scenario:
         raise HeaderError(f"missing or empty {SCENARIO_HEADER}")
-    return scenario, normalized.get(RELEASE_ID_HEADER, "").strip() or None
+    return scenario
 
 
 def parse_request_headers(headers: Mapping[str, str], request_type: RequestType) -> RequestHeaders:
     normalized = {key.lower(): value for key, value in headers.items()}
-    scenario, release_id = scenario_headers(headers)
+    scenario = scenario_header(headers)
 
     tags = {
         key[len(TAG_HEADER_PREFIX) :]: value.strip()
@@ -62,7 +60,6 @@ def parse_request_headers(headers: Mapping[str, str], request_type: RequestType)
     return RequestHeaders(
         scenario=scenario,
         request_type=request_type,
-        release_id=release_id,
         tags=tags,
     )
 

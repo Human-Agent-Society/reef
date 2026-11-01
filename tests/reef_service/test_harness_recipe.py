@@ -25,6 +25,7 @@ from tests.support.harness_service import (
     job_backend,
     report_once,
     run_step,
+    seed_root,
 )
 from tests.support.harness_steps import (
     COMPONENT,
@@ -145,7 +146,7 @@ def test_recipe_resolves_by_dotted_reference() -> None:
 def test_a_deployment_names_its_plugins_by_reference_or_by_module_and_config() -> None:
     built = from_config(evolution_config())
     assert isinstance(built.method, IdleMethod) and isinstance(built.scorer, FixedScorer)
-    assert built.collector is None and built.seed == HarnessTree({}) and built.base_artifact_source().files == {}
+    assert built.collector is None and built.seed == HarnessTree({}) and built.default_start().files == {}
     collecting = from_config(
         evolution_config(
             method={"module": f"{SUPPORT}:IdleMethod", "config": {}},
@@ -272,7 +273,7 @@ def test_the_policy_name_builds_the_publication_policy_the_trainer_decides_with(
         evaluation=evaluation, binary=str(make_pi_binary(tmp_path)), state_dir=str(tmp_path / "state")
     )
     built = from_config(settings, runtime=runtime())
-    trainer = built.build("demo", SQLiteRecordStore(), releases=releases_for(built))
+    trainer = built.build("demo", SQLiteRecordStore(), releases=releases_for(built), root=seed_root(built))
     try:
         backend = job_backend(trainer)
         selection = built.build_policy(backend)
@@ -295,7 +296,7 @@ def test_a_compare_margin_blocks_a_single_lucky_win(tmp_path: Path) -> None:
 
 def test_build_returns_a_trainer_over_the_harness_backend_and_needs_the_committed_releases(tmp_path: Path) -> None:
     built = harness_recipe(tmp_path, lambda workspace, services: None)
-    trainer = built.build("demo", SQLiteRecordStore(), releases=releases_for(built))
+    trainer = built.build("demo", SQLiteRecordStore(), releases=releases_for(built), root=seed_root(built))
     # The trainer submits each step as a job of the recipe's harness component.
     assert isinstance(trainer, Trainer) and trainer.job_loop_required().component is built.harness_component
     assert isinstance(built.harness_component, HarnessTrainingComponent)
@@ -303,7 +304,7 @@ def test_build_returns_a_trainer_over_the_harness_backend_and_needs_the_committe
     assert trainer.pipeline.context.report_type is ScoredRolloutReport
     trainer.close()
     with pytest.raises(RecipeConfigError, match="reads its head tree from the scenario's committed releases"):
-        built.build("demo", SQLiteRecordStore())
+        built.build("demo", SQLiteRecordStore(), root=seed_root(built))
 
 
 def test_each_scenario_keeps_its_history_and_steps_under_the_state_dir(
@@ -321,7 +322,7 @@ def test_each_scenario_keeps_its_history_and_steps_under_the_state_dir(
     assert built.scenario_state_dirs("demo") == (state / "demo",)
     records = SQLiteRecordStore()
     for scenario in ("demo", "other"):
-        trainer = built.build(scenario, records, releases=releases_for(built))
+        trainer = built.build(scenario, records, releases=releases_for(built), root=seed_root(built))
         backend = job_backend(trainer)
         root = state / scenario / COMPONENT
         assert backend.history.root == root / "history" and backend.records.root == root / "steps"
@@ -332,11 +333,11 @@ def test_each_scenario_keeps_its_history_and_steps_under_the_state_dir(
 # -- the seed ------------------------------------------------------------------------------------
 
 
-def test_the_seed_is_a_directory_whose_tree_is_the_base_release(tmp_path: Path) -> None:
+def test_the_seed_is_a_directory_whose_tree_is_the_root_release(tmp_path: Path) -> None:
     seed = tmp_path / "seed"
     PI_SEED.write(seed)
     built = from_config(evolution_config(seed=str(seed)))
-    assert built.seed == PI_SEED and built.base_artifact_source().files == dict(PI_SEED.files)
+    assert built.seed == PI_SEED and built.default_start().files == dict(PI_SEED.files)
     with pytest.raises(RecipeConfigError, match=r"evolution\.seed must be a string"):
         from_config(evolution_config(seed=["rules.md"]))
     with pytest.raises(RecipeConfigError, match=r"evolution\.seed: harness tree directory .* does not exist"):
@@ -422,12 +423,11 @@ def test_each_step_evaluates_on_the_eval_split_of_the_imported_tasks_as_the_step
             scenario="s",
             releases=releases_for(built),
             eval_samples=TrainerSamples(samples),
-            seed=built.seed,
             layout=get_adapter("pi").layout,
         )
 
         def evaluation_tasks() -> list[str]:
-            tasks = loop.harness_parameters(batch, JobLoopState("base:x"))["evaluation_tasks"]
+            tasks = loop.harness_parameters(batch, JobLoopState("start"))["evaluation_tasks"]
             prepared = backend.prepare_step(
                 batch, HarnessState().to_json(), 0, head=head_of(backend), seed_tasks=tuple(tasks)
             )
@@ -442,7 +442,7 @@ def test_each_step_evaluates_on_the_eval_split_of_the_imported_tasks_as_the_step
         (second,) = samples.add_tasks((write_task(root, "held-2"),), "eval")
         assert evaluation_tasks() == [str(task.sample.task_path) for task in (first, second)]
         with pytest.raises(RecipeConfigError, match="needs the sample store"):
-            built.build("s", SQLiteRecordStore(), releases=releases_for(built))
+            built.build("s", SQLiteRecordStore(), releases=releases_for(built), root=seed_root(built))
     retired = {"tasks": [], "task_store": "imported-tasks"}
     with pytest.raises(RecipeConfigError, match=r"evolution\.evaluation\.task_store is gone: .*imported_tasks: true"):
         from_config(evolution_config(evaluation=retired), runtime=runtime())
@@ -480,7 +480,7 @@ def test_recipe_builds_the_stages_its_pipeline_section_names(tmp_path: Path) -> 
         return built
 
     def trainer_of(recipe: HarnessEvolutionRecipe) -> Trainer:
-        return recipe.build("demo", SQLiteRecordStore(), releases=releases_for(recipe))
+        return recipe.build("demo", SQLiteRecordStore(), releases=releases_for(recipe), root=seed_root(recipe))
 
     records = trainer_of(
         from_config(
@@ -1017,7 +1017,7 @@ def test_a_restart_without_a_durable_log_keeps_a_held_tree_inactive(tmp_path: Pa
     built = harness_recipe(
         tmp_path, lambda workspace, services: next(patches, None), activation=PluginReference(NeverActivate, {})
     )
-    factory = harness_repository(tmp_path, built.base_artifact_source().files)
+    factory = harness_repository(tmp_path)
 
     def open_dispatcher() -> Dispatcher:
         return Dispatcher(
@@ -1144,7 +1144,7 @@ def test_a_harness_trainer_evolves_the_tree_it_was_told_to_train_from(tmp_path: 
 
     first_recipe = recipe("r1", "r2")
     # One repository across the restart, as a durable backend keeps it.
-    factory = harness_repository(tmp_path, first_recipe.base_artifact_source().files)
+    factory = harness_repository(tmp_path)
     dispatcher = open_dispatcher(first_recipe)
     try:
         scenario = dispatcher.get_or_create_scenario("start")
@@ -1213,7 +1213,7 @@ def test_a_sync_serves_at_once_and_is_the_training_start_after_a_restart(tmp_pat
 
     first_recipe = recipe("r1")
     # One repository across the restart, as a durable backend keeps it.
-    factory = harness_repository(tmp_path, first_recipe.base_artifact_source().files)
+    factory = harness_repository(tmp_path)
     dispatcher = open_dispatcher(first_recipe)
     try:
         scenario = dispatcher.get_or_create_scenario("sync")
@@ -1312,7 +1312,7 @@ def test_a_keyed_candidate_leaves_no_key_material_in_the_commit_history(tmp_path
     leak = TreePatch({"config/models.json": json.dumps({"providers": {"leak": {"apiKey": key}}}) + "\n"})
     patches = iter((leak,))
     built = harness_recipe(tmp_path, lambda workspace, services: next(patches, None))
-    repository = harness_repository(tmp_path, built.base_artifact_source().files)
+    repository = harness_repository(tmp_path)
     agent_record_dir = tmp_path / "agent-record"
 
     def dispatcher() -> Dispatcher:

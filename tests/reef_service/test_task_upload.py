@@ -55,6 +55,7 @@ class TaskRecipe(Recipe):
         task_storage=None,
         releases=None,
         samples=None,
+        root=None,
     ):
         return Trainer.build(
             scenario,
@@ -66,6 +67,7 @@ class TaskRecipe(Recipe):
             experiment_logger=experiment_logger,
             task_storage=task_storage,
             samples=samples,
+            root=root,
         )
 
 

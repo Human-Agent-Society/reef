@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 
 import pytest
 from tests.support._threshold_processor import ThresholdJobData
-from tests.support.runtime_stubs import StubTrainingComponent
+from tests.support.runtime_stubs import STUB_ROOT, StubTrainingComponent
 from tests.support.samples_service import make_samples
 
 from reef.core import AgentRecord, RequestType
@@ -122,6 +122,7 @@ def test_trainer_dispatches_only_required_data_types() -> None:
         records,
         pipeline_factory=lambda context: ExamplePipeline(context, events),
         job_loop=example_jobs(events),
+        root=STUB_ROOT,
     )
 
     assert isinstance(trainer, Trainer)
@@ -153,6 +154,7 @@ def test_trainer_waits_for_commit_before_acknowledging_batch() -> None:
         records,
         pipeline_factory=lambda context: ExamplePipeline(context, events),
         job_loop=example_jobs(events),
+        root=STUB_ROOT,
     )
     records.append(
         AgentRecord.create(
@@ -188,6 +190,7 @@ def test_a_job_without_a_checkpoint_ends_without_an_artifact() -> None:
         records,
         pipeline_factory=lambda context: ExamplePipeline(context, []),
         job_loop=example_jobs([]),
+        root=STUB_ROOT,
     )
     make_samples(trainer)
     submitted = trainer.run_once()
@@ -216,6 +219,7 @@ def test_trainer_keeps_pending_result_when_external_commit_fails() -> None:
         records,
         pipeline_factory=lambda context: ExamplePipeline(context, events),
         job_loop=example_jobs(events),
+        root=STUB_ROOT,
     )
     records.append(
         AgentRecord.create(
@@ -247,6 +251,7 @@ def test_trainer_reads_only_new_records() -> None:
         records,
         pipeline_factory=lambda context: ExamplePipeline(context, events),
         job_loop=example_jobs(events),
+        root=STUB_ROOT,
     )
 
     make_samples(trainer)
