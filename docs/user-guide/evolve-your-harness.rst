@@ -290,13 +290,12 @@ Step data
 A step starts when ``evolution.batch_size`` traces wait (default 1), or
 ``pipeline.sample2job.config.job_samples`` when set. One trace is one scored
 report, with every model call it names. To learn from inference traffic
-without reports, name the inference stages; each call is then one unscored
+without reports, name the inference stage; each call is then one unscored
 trace:
 
 .. code-block:: yaml
 
    pipeline:
-     record2record: {module: reef.record2record:InferenceRecord2Record}
      record2sample: {module: reef.record2sample.traces:InferenceSamples}
 
 Offline runs on uploaded tasks

@@ -58,7 +58,6 @@ def channel_dispatcher(
     candidates = iter(patches)
     stages = (
         {
-            "record2record": {"module": "reef.record2record:InferenceRecord2Record"},
             "record2sample": {"module": "reef.record2sample.traces:InferenceSamples"},
         }
         if inference_stages

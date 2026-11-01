@@ -1,9 +1,9 @@
 """The OpenClaw-RL record-to-sample and sample-to-job stages: one judged turn, one sample.
 
 A computed-feedback recipe. The correlation and the judge are
-:class:`~recipes.openclawrl.judging.OpenClawRLJudging`, which runs in the
-record-to-record stage :class:`~recipes.openclawrl.judging.OpenClawRLRecord2Record`.
-This file validates the tensors (``make_sample``), shapes the data
+:class:`~recipes.openclawrl.judging.OpenClawRLJudging`, which runs on the PRM
+worker of :class:`OpenClawRLSamples`. This file makes each judged turn's
+sample with its teacher candidates (``make_sample``), shapes the data
 (``make_job_data``), and writes the PRM record file. Rewards pass through raw
 (upstream ``--n-samples-per-prompt 1``; no grouping, no normalization).
 """
@@ -18,28 +18,48 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass, replace
 from typing import Any, Self
 
-from recipes.openclawrl.judging import OpenClawRLRecord2Record
-from recipes.openclawrl.turns import TurnJudgment, validate_teacher_cands
+from recipes.openclawrl.judging import OpenClawRLJudging, OpenClawRLJudgingSettings
+from recipes.openclawrl.turns import TurnJudgment
+from reef.core.chat_rendering import TeacherRequest, trajectory_tools
 from reef.core.config import config_option
-from reef.core.plugins import NoSettings, PluginConfigError
+from reef.core.plugins import PluginConfigError
 from reef.core.records_types import AgentRecord
-from reef.core.trajectories import source_record_id, trajectory_reward
+from reef.core.trajectories import make_trajectory, source_record_id, trajectory_reward
+from reef.execution.jobs import BackgroundJobWorker
 from reef.pipeline_context import PipelineContext
-from reef.record2record import Record2Record
 from reef.record2sample import JudgedSamples, Record2Sample
-from reef.record2sample.samples import make_policy_trajectory
 from reef.sample2job import Sample2Job, Sample2JobSettings
-from reef.train.types import JobData, Sample, TrajectorySample, policy_row_violation
+from reef.train.types import JobData, Sample, TrajectorySample
 
 logger = logging.getLogger(__name__)
 
 
 class OpenClawRLSamples(JudgedSamples):
-    """One judged turn as one sample; a turn whose tensors the top-K select loss cannot train on retires.
+    """Sessions correlated, turns judged on a PRM worker, and one judged turn as one sample.
 
-    The capture must cover every response token, and every trained sample
-    carries at least one teacher candidate. The stage takes no config.
+    The sample is the turn's call as an ATIF trajectory, whose reply trains, with its teacher candidates in
+    ``extra.reef.teacher_candidates`` (``reef.core.chat_rendering.teacher_candidates``). Every trained sample carries
+    at least one teacher candidate; a declined or candidate-less judgment retires the turn. The training component
+    renders the sample and its candidates, and the actor computes the student's top-K. Config:
+    :class:`~recipes.openclawrl.judging.OpenClawRLJudgingSettings`. Without a ``worker``, the stage starts one when
+    the config names a PRM judge. ``worker`` and ``clients`` (PRM judge, renderer) replace the configured ones in
+    tests.
     """
+
+    def __init__(
+        self,
+        settings: OpenClawRLJudgingSettings,
+        *,
+        worker: BackgroundJobWorker | None = None,
+        clients: tuple[Any, Any] | None = None,
+    ) -> None:
+        #: The judging that the batches read for the PRM record file.
+        self.openclawrl_judging = OpenClawRLJudging(settings, clients)
+        if worker is None and self.openclawrl_judging.prm is not None:
+            worker = BackgroundJobWorker(
+                self.openclawrl_judging, thread_name="openclawrl-judging", concurrency=settings.prm_concurrency
+            )
+        super().__init__(self.openclawrl_judging, worker, max_staleness=settings.max_staleness)
 
     @classmethod
     def from_config(
@@ -47,44 +67,28 @@ class OpenClawRLSamples(JudgedSamples):
         config: Mapping[str, Any],
         *,
         context: PipelineContext,
-        record2record: Record2Record,
         environ: Mapping[str, str],
     ) -> Self:
-        NoSettings.parse(config, plugin_class=cls)
-        return cls()
+        return cls(OpenClawRLJudgingSettings.parse(config, plugin_class=cls))
 
     def make_sample(self, record: AgentRecord, judgment: TurnJudgment) -> TrajectorySample | None:
-        # 1. A declined judgment never trains. (Narrow on the score itself:
-        #    it is what step 2 needs, and a property would not narrow it.)
+        # 1. A declined judgment never trains. (Narrow on the score itself.)
         if judgment.score is None:
             return None
-        # 2. The policy tensors must satisfy the Slime row contract, and the
-        #    top-K capture must cover every response token.
-        sample = make_policy_trajectory(record, judgment.score)
-        if (
-            policy_row_violation(
-                sample.training.get("tokens", []),
-                sample.training.get("loss_mask", []),
-                sample.training.get("rollout_log_probs", []),
-            )
-            is not None
-        ):
-            return None
-        if not sample.training.get("topk_indices", []) or len(sample.training.get("topk_indices", [])) != len(
-            sample.training.get("loss_mask", [])
-        ):
-            return None
-        # 3. Every trained sample carries at least one teacher candidate —
-        #    upstream constructs one per sample by design (RL-only turns get
-        #    the anchor), so a candidate-less judgment here means candidate
-        #    construction failed and the turn retires instead of training a
-        #    shape the reference never produces.
+        # 2. Every trained sample carries at least one teacher candidate — upstream constructs one per sample by
+        #    design (RL-only turns get the anchor), so a candidate-less judgment means candidate construction failed
+        #    and the turn retires instead of training a shape the reference never produces.
         if not judgment.teacher_cands:
             return None
-        validated = validate_teacher_cands(judgment.teacher_cands, sample)
-        if validated is None:
-            return None
-        return sample.with_training(extras={**sample.training.get("extras", {}), "teacher_cands": list(validated)})
+        # 3. The turn's call, whose reply trains; the training component renders it and each candidate, and the
+        #    actor computes the student's top-K from the weights the step starts from.
+        sample = make_trajectory((record,), judgment.score)
+        tools = trajectory_tools(sample.trajectory)
+        candidates = [
+            {"hint": str(candidate.get("hint", "")), **TeacherRequest(candidate.get("messages"), tools).as_json()}
+            for candidate in judgment.teacher_cands
+        ]
+        return sample.with_metadata(teacher_candidates=candidates)
 
 
 @dataclass(frozen=True)
@@ -101,12 +105,12 @@ class OpenClawRLJobData(Sample2Job):
     """Judged turns into job data, and the PRM record file.
 
     Config: :class:`OpenClawRLJobSettings`. The PRM record file reports
-    what the judging of ``record2record`` saw, so the stage needs the
-    scenario's ``OpenClawRLRecord2Record``.
+    what the judging of ``record2sample`` saw, so the stage needs the
+    scenario's ``OpenClawRLSamples``.
     """
 
     def __init__(
-        self, context: PipelineContext, settings: OpenClawRLJobSettings, record2record: OpenClawRLRecord2Record
+        self, context: PipelineContext, settings: OpenClawRLJobSettings, record2sample: OpenClawRLSamples
     ) -> None:
         super().__init__(context, settings.buffer_size, settings.job_samples)
         # What the judge actually saw goes to the PRM record file, one line
@@ -115,7 +119,7 @@ class OpenClawRLJobData(Sample2Job):
         # no logging, so anything below WARNING is discarded.
         record_file = settings.prm_record_file.strip()
         self.record_path = pathlib.Path(record_file) if record_file else None
-        self.openclawrl_judging = record2record.openclawrl_judging
+        self.openclawrl_judging = record2sample.openclawrl_judging
 
     @classmethod
     def from_config(
@@ -123,25 +127,24 @@ class OpenClawRLJobData(Sample2Job):
         config: Mapping[str, Any],
         *,
         context: PipelineContext,
-        record2record: Record2Record,
         record2sample: Record2Sample,
         environ: Mapping[str, str],
     ) -> Self:
         settings = OpenClawRLJobSettings.parse(config, plugin_class=cls)
-        if not isinstance(record2record, OpenClawRLRecord2Record):
+        if not isinstance(record2sample, OpenClawRLSamples):
             raise PluginConfigError(
-                f"{cls.__name__} needs OpenClawRLRecord2Record as record2record, not {type(record2record).__name__}"
+                f"{cls.__name__} needs OpenClawRLSamples as record2sample, not {type(record2sample).__name__}"
             )
-        return cls(context, settings, record2record)
+        return cls(context, settings, record2sample)
 
     def make_job_data(self, samples: tuple[Sample, ...], data_id: str) -> JobData:
-        samples = tuple(task for task in samples if isinstance(task, TrajectorySample))
-        if len(samples) != len(samples):
+        turns = tuple(sample for sample in samples if isinstance(sample, TrajectorySample))
+        if len(turns) != len(samples):
             raise TypeError("OpenClaw-RL samples must be trajectories")
-        self.write_record_line(samples, data_id)
+        self.write_record_line(turns, data_id)
         return JobData(
             data_id,
-            tuple(replace(sample, source_agent_record_ids=(source_record_id(sample),)) for sample in samples),
+            tuple(replace(sample, source_agent_record_ids=(source_record_id(sample),)) for sample in turns),
         )
 
     def write_record_line(self, samples: tuple[TrajectorySample, ...], data_id: str) -> None:

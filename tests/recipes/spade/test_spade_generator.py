@@ -15,7 +15,7 @@ from reef.core import AgentRecord, RequestType
 from reef.core.plugins import PluginConfigError
 from reef.core.tasks import read_harbor_task, write_harbor_task
 from reef.pipeline_context import PipelineContext
-from reef.recipe.generated_tasks import GeneratedTaskSamples
+from reef.recipe.generated_tasks import GeneratedTaskSamples, GeneratedTaskSettings
 from reef.recipe.generated_tasks.generator import (
     FailedTask,
     GeneratedTaskResult,
@@ -23,12 +23,7 @@ from reef.recipe.generated_tasks.generator import (
     RejectedTask,
     RolledOutTask,
 )
-from reef.recipe.generated_tasks.processor import (
-    GeneratedTaskRecord2Record,
-    GenerationJob,
-    RoundSettings,
-    TaskGroupSettings,
-)
+from reef.recipe.generated_tasks.processor import GenerationJob
 from reef.recipe.generated_tasks.results import TaskRolloutResult
 from reef.record2sample.generator import GeneratorError, TaskNameConflict
 from reef.record2sample.generator.inputs import TaskGenerationRequest
@@ -289,8 +284,7 @@ def test_a_round_of_the_generated_task_recipe_runs_spade_end_to_end(tmp_path: Pa
     context = PipelineContext("spade", task_storage=session.tasks, samples=TrainerSamples(session.samples))
     generation = GeneratedTaskSamples(
         context,
-        RoundSettings(rounds=1, description=DESCRIPTION),
-        GeneratedTaskRecord2Record(context, TaskGroupSettings()),
+        GeneratedTaskSettings(rounds=1, description=DESCRIPTION),
         task_generator=generator,
         generator_service=service,
     )

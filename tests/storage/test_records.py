@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
@@ -7,10 +9,12 @@ from dataclasses import replace
 
 import pytest
 from sqlalchemy.exc import IntegrityError, OperationalError
-
 from tests.support.consumption_receipts import write_consumption_receipt
+from tests.support.conversations import conversation, turn
+
 from reef.artifact import ArtifactRef
 from reef.core import AgentRecord, RequestType
+from reef.core.atif_payloads import canonical_json
 from reef.core.errors import ReefError
 from reef.storage.records import RecordConflict
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
@@ -334,6 +338,153 @@ def test_failed_append_does_not_include_record_payload_in_error_text(tmp_path) -
 def test_audit_page_rejects_invalid_bounds(options) -> None:
     with SQLiteRecordStore() as records, pytest.raises(ValueError):
         records.audit_page("math", **options)
+
+
+def node_totals(database) -> tuple[int, int, int]:
+    """The number of trajectory nodes, the sum of their counts, and the number of entries (messages) that they keep."""
+    with closing(sqlite3.connect(database)) as connection:
+        return connection.execute(
+            "SELECT COUNT(*), COALESCE(SUM(record_count), 0), COALESCE(SUM(json_array_length(entries_json)), 0) "
+            "FROM record_node"
+        ).fetchone()
+
+
+@pytest.mark.unit
+def test_calls_of_one_conversation_form_a_trajectory_that_keeps_each_message_once(tmp_path) -> None:
+    database = tmp_path / "records.sqlite3"
+    with SQLiteRecordStore(database) as records:
+        records.append_many([conversation(f"call-{turns}", turns) for turns in (1, 2, 3)])
+        records.append_result(conversation("call-3", 3, created_at=9.0))
+        records.append(conversation("retry-2", 2))
+        assert records.trajectory("math", "call-3") == ("call-1", "call-2", "call-3")
+        # The same request as call-2 is a retry of it, so it takes call-2's place.
+        assert records.trajectory("math", "retry-2") == ("call-1", "retry-2")
+        assert records.trajectory("math", "missing") == ()
+        assert records.trajectory("code", "call-3") == ()
+    # call-1 keeps the system message and turn 0, call-2 and call-3 one turn each, and the retry nothing.
+    assert node_totals(database) == (4, 7, 4)
+    with closing(sqlite3.connect(database)) as connection:
+        rows = dict(
+            connection.execute(
+                "SELECT agent_record.agent_record_id, json_array(payload_json, message_field, entries_json, call_json) "
+                "FROM agent_record JOIN record_node ON node_sequence = sequence"
+            ).fetchall()
+        )
+    first, second = json.loads(rows["call-1"]), json.loads(rows["call-2"])
+    assert second[:2] == ["{}", "messages"]
+    # The nodes keep ATIF: call-1's reply as an agent step, and call-2 that reply as copied context.
+    assert json.loads(first[3])["reply"] == [[{"source": "agent", "message": "turn 1 海"}]]
+    assert json.loads(second[2]) == [[{"source": "agent", "message": "turn 1 海", "is_copied_context": True}]]
+
+
+@pytest.mark.unit
+def test_a_call_with_other_tools_starts_another_trajectory_and_each_keeps_its_tools_once(tmp_path) -> None:
+    database = tmp_path / "records.sqlite3"
+    calls = [conversation(f"call-{turns}", turns) for turns in (1, 2)]
+    calls += [conversation("retooled", 3, tools=("bash",)), conversation("untooled", 3, tools=())]
+    calls += [conversation("responses", 3, field="input")]
+    untooled = replace(calls[3], payload={key: value for key, value in calls[3].payload.items() if key != "tools"})
+    calls[3] = untooled
+    with SQLiteRecordStore(database) as records:
+        for call in calls:
+            records.append(call)
+        assert records.replay("math") == tuple(calls)
+        assert records.trajectory("math", "call-2") == ("call-1", "call-2")
+        assert records.trajectory("math", "retooled") == ("retooled",)
+        assert records.trajectory("math", "untooled") == ("untooled",)
+        # Another API format is another shape, so it starts another trajectory too.
+        assert records.trajectory("math", "responses") == ("responses",)
+    with closing(sqlite3.connect(database)) as connection:
+        roots = connection.execute(
+            "SELECT agent_record_id, shape_json FROM record_node WHERE parent_sequence IS NULL"
+        ).fetchall()
+        children_shapes = connection.execute(
+            "SELECT COUNT(*) FROM record_node WHERE parent_sequence IS NOT NULL AND shape_json IS NOT NULL"
+        ).fetchone()
+    tools = {
+        record_id: [
+            definition["function"]["name"]
+            for definition in (json.loads(shape)["agent"] or {}).get("tool_definitions", [])
+        ]
+        for record_id, shape in roots
+    }
+    assert tools == {
+        "call-1": ["read_file", "bash"],
+        "retooled": ["bash"],
+        "untooled": [],
+        "responses": ["read_file", "bash"],
+    }
+    assert children_shapes == (0,)
+
+
+@pytest.mark.unit
+def test_a_call_continues_the_retry_whose_reply_it_resends(tmp_path) -> None:
+    first = conversation("first", 1)
+    retry = replace(first, agent_record_id="retry", payload={**first.payload, "response": {"output": [turn(9)]}})
+    with SQLiteRecordStore(tmp_path / "records.sqlite3") as records:
+        records.append(first)
+        records.append(retry)
+        later = conversation("later", 1)
+        later.payload["messages"] += [turn(9), turn(2)]
+        records.append(later)
+        assert records.trajectory("math", "later") == ("retry", "later")
+        assert records.get("math", "later") == later
+
+
+def earlier_fingerprint(record: AgentRecord) -> str:
+    """The retry fingerprint that an earlier version kept for an evicted record."""
+    content = {
+        "agent_record_id": record.agent_record_id,
+        "scenario": record.scenario,
+        "request_type": record.request_type.value,
+        "payload_json": canonical_json(dict(record.payload)),
+        "references_json": canonical_json(list(record.references)),
+        "artifact_json": None,
+    }
+    return hashlib.sha256(canonical_json(content).encode()).hexdigest()
+
+
+@pytest.mark.unit
+def test_an_upgrade_links_the_stored_calls_and_keeps_the_earlier_fingerprints(tmp_path) -> None:
+    database = tmp_path / "legacy.sqlite3"
+    legacy_database(database)
+    calls = [conversation(f"call-{turns}", turns, filler="x" * 200) for turns in (1, 2, 3)] + [item("plain", "math")]
+    evicted = conversation("evicted", 2)
+    with closing(sqlite3.connect(database)) as connection, connection:
+        connection.execute("ALTER TABLE agent_record ADD COLUMN body_bytes INTEGER NOT NULL DEFAULT 0")
+        for sequence, call in enumerate(calls, start=1):
+            payload_json = canonical_json(dict(call.payload))
+            connection.execute(
+                "INSERT INTO agent_record VALUES (?, ?, 'math', 'inference', ?, ?, '[]', NULL, ?)",
+                (sequence, call.agent_record_id, payload_json, call.created_at, len(payload_json.encode()) + 2),
+            )
+        earlier_bytes = connection.execute("SELECT SUM(body_bytes) FROM agent_record").fetchone()[0]
+        # An instruction of an earlier version is a record; the upgrade deletes it.
+        connection.execute(
+            "INSERT INTO agent_record VALUES (99, 'ask-1', 'math', 'train', '{\"text\":\"x\"}', 1, '[]', NULL, 0)"
+        )
+        connection.execute(
+            "CREATE TABLE consumed_agent_record (agent_record_id TEXT PRIMARY KEY, content_sha256 TEXT)"
+        )
+        connection.execute("INSERT INTO consumed_agent_record VALUES ('evicted', ?)", (earlier_fingerprint(evicted),))
+
+    with SQLiteRecordStore(database) as records:
+        assert records.replay("math") == tuple(calls)
+        assert records.trajectory("math", "call-3") == ("call-1", "call-2", "call-3")
+        assert records.append_result(evicted).inserted is False
+        with pytest.raises(RecordConflict):
+            records.append(conversation("evicted", 3))
+    with closing(sqlite3.connect(database)) as connection:
+        stored_bytes = connection.execute(
+            "SELECT (SELECT SUM(body_bytes) FROM agent_record) + (SELECT SUM(body_bytes) FROM record_node)"
+        ).fetchone()[0]
+        assert stored_bytes < earlier_bytes
+        plain = connection.execute(
+            "SELECT payload_json, message_field, body_bytes FROM agent_record WHERE agent_record_id = 'plain'"
+        ).fetchone()
+        assert connection.execute("SELECT COUNT(*) FROM agent_record WHERE request_type = 'train'").fetchone() == (0,)
+        assert plain == ('{"value":"plain"}', None, len('{"value":"plain"}[]'))
+    assert node_totals(database) == (3, 5, 4)
 
 
 def legacy_database(path) -> None:

@@ -1,8 +1,8 @@
-"""Validate records, uploaded trajectories and uploaded tasks and append them to one loaded scenario.
+"""Validate records, training instructions, uploaded trajectories and uploaded tasks of one loaded scenario.
 
-The dispatcher calls these functions under the scenario's lock. They append
-records, uploaded trajectories and uploaded Harbor tasks durably and count the ``ingest/*`` metrics of records.
-They do not start training: the caller wakes the trainers after new data lands.
+The dispatcher calls these functions under the scenario's lock. They append records, uploaded trajectories and
+uploaded Harbor tasks durably, queue training instructions (``reef.train.instructions``), and count the ``ingest/*``
+metrics of records and instructions. They do not start training: the caller wakes the trainers after new data lands.
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ from reef.core.training_request import normalize_training_request_payload
 from reef.harness.tree.checks import directive_shaped, secret_shaped
 from reef.scenario.scenario import Scenario
 from reef.storage.records import RecordConflict
+from reef.storage.work_queue import WorkItem
 
 
 def training_request_refusal(text: str, requires: Sequence[Mapping[str, Any]] = ()) -> str | None:
@@ -40,6 +41,35 @@ def training_request_refusal(text: str, requires: Sequence[Mapping[str, Any]] = 
     return None
 
 
+def file_instruction(current: Scenario, request_id: str, payload: Mapping[str, Any]) -> WorkItem:
+    """Check a training instruction and queue it in ``current``'s instructions; return its queue item.
+
+    A retry of an instruction that the scenario queued before returns its item, whatever the training mode now.
+    Otherwise the scenario must train in ``manual`` mode with a trainer that trains, and the text and ``requires``
+    must pass the screens (``training_request_refusal``). Raise ``ValueError`` for a refused instruction, and
+    ``RecordConflict`` for an ID that the scenario queued with another payload.
+    """
+    if current.instructions is None:
+        raise ValueError(f"scenario {current.name!r} takes no training instructions: it has no instructions queue")
+    try:
+        retry = current.instructions.get(request_id) is not None
+        if not retry and current.training_mode == "auto":
+            raise ValueError("explicit training requests require training_mode='manual'")
+        if not retry and not any(component_trainer.trainer.trains for component_trainer in current.trainers):
+            raise ValueError("explicit training requests require a training backend")
+        request = normalize_training_request_payload(payload)
+        refusal = None if retry else training_request_refusal(request["text"], request["requires"])
+        if refusal is not None:
+            raise ValueError(refusal)
+        return current.instructions.file(request_id, request)
+    except RecordConflict:
+        current.operations.increment("ingest/rejected_conflict_total")
+        raise
+    except ValueError:
+        current.operations.increment("ingest/rejected_request_total")
+        raise
+
+
 def validate_record(current: Scenario, item: AgentRecord, preceding: Mapping[str, AgentRecord]) -> AgentRecord | None:
     """Check ``item`` before it is appended; return the stored record when ``item`` repeats one.
 
@@ -47,19 +77,6 @@ def validate_record(current: Scenario, item: AgentRecord, preceding: Mapping[str
     report may reference before they are stored.
     """
     try:
-        if item.request_type is RequestType.TRAIN:
-            if (existing := current.records.existing_receipt(item)) is not None:
-                return existing
-            if current.training_mode == "auto":
-                raise ValueError("explicit training requests require training_mode='manual'")
-            if not any(component_trainer.trainer.trains for component_trainer in current.trainers):
-                raise ValueError("explicit training requests require a training backend")
-            request = normalize_training_request_payload(item.payload)
-            if item.references:
-                raise ValueError("training instructions do not reference inference receipts")
-            refusal = training_request_refusal(request["text"], request["requires"])
-            if refusal is not None:
-                raise ValueError(refusal)
         # Reject a malformed report before it is appended. Then the producer's
         # POST fails with an error that names the broken field. Otherwise the
         # record would fail silently at training time. A recipe without a
@@ -83,6 +100,14 @@ def validate_record(current: Scenario, item: AgentRecord, preceding: Mapping[str
                 if source is None or source.request_type is not RequestType.INFERENCE:
                     raise ReportValidationError(
                         f"report reference {reference!r} must identify an existing inference in scenario {item.scenario!r}"
+                    )
+            # A report references the last call of each trajectory that it scores (RFC #1054).
+            for reference in item.references:
+                inner = set(item.references) & set(current.records.trajectory(item.scenario, reference)) - {reference}
+                if inner:
+                    raise ReportValidationError(
+                        f"report references {sorted(inner)!r} inside the trajectory that ends at {reference!r}; "
+                        "reference only the last call of each trajectory"
                     )
     except ReportValidationError:
         current.operations.increment("ingest/rejected_report_total")

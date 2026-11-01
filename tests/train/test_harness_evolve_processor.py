@@ -23,7 +23,6 @@ from reef.core.tasks import write_harbor_task
 from reef.core.trajectories import recorded_payload, recorded_payloads, source_record_id
 from reef.pipeline_context import PipelineContext
 from reef.recipe.harness import HarnessEvolutionRecipe
-from reef.record2record import InferenceRecord2Record, ReportGrouping, ReportRecord2Record
 from reef.record2sample.traces import InferenceSamples, TraceSamples
 from reef.sample2job.traces import TraceJobData, TrainTaskJobData
 from reef.storage.commits import CommitRecord
@@ -56,7 +55,6 @@ def _report(agent_record_id: str, score: object, references: list[str], feedback
 
 #: The ``pipeline`` section that evolves on recorded inference traffic alone, without reports.
 INFERENCE_STAGES = {
-    "record2record": {"module": "reef.record2record:InferenceRecord2Record"},
     "record2sample": {"module": "reef.record2sample.traces:InferenceSamples"},
 }
 
@@ -73,8 +71,7 @@ def reports_pipeline(context: PipelineContext, buffer_size: int | None = None) -
     """Harness traces from reported scores: the default stages, built directly."""
     return TrainingPipeline(
         context,
-        record2record=ReportRecord2Record(context, ReportGrouping()),
-        record2sample=TraceSamples(),
+        record2sample=TraceSamples(context),
         sample2job=TraceJobData(context, buffer_size, None),
     )
 
@@ -83,7 +80,6 @@ def records_pipeline(context: PipelineContext, buffer_size: int | None = None) -
     """Harness traces from recorded inference traffic, unscored: the inference stages, built directly."""
     return TrainingPipeline(
         context,
-        record2record=InferenceRecord2Record(),
         record2sample=InferenceSamples(),
         sample2job=TraceJobData(context, buffer_size, None),
     )
@@ -95,18 +91,10 @@ def _processor() -> TrainingPipeline:
 
 def test_the_default_stages_train_reports_and_the_inference_stages_train_records() -> None:
     reported = harness_stages(buffer_size=6).build(PipelineContext("s", default_job_samples=2))
-    assert (type(reported.record2record), type(reported.record2sample), type(reported.sample2job)) == (
-        ReportRecord2Record,
-        TraceSamples,
-        TraceJobData,
-    )
+    assert (type(reported.record2sample), type(reported.sample2job)) == (TraceSamples, TraceJobData)
     assert reported.buffer_size == 6
     recorded = harness_stages(inference=True).build(PipelineContext("s", default_job_samples=2))
-    assert (type(recorded.record2record), type(recorded.record2sample), type(recorded.sample2job)) == (
-        InferenceRecord2Record,
-        InferenceSamples,
-        TraceJobData,
-    )
+    assert (type(recorded.record2sample), type(recorded.sample2job)) == (InferenceSamples, TraceJobData)
     assert recorded.buffer_size == 2, "the buffer takes one job's data"
 
 
@@ -318,8 +306,7 @@ def test_one_job_holds_traces_or_train_tasks_never_both(tmp_path: Path) -> None:
     context = PipelineContext("s", samples=TrainerSamples(session.samples), default_job_samples=1)
     pipeline = TrainingPipeline(
         context,
-        record2record=ReportRecord2Record(context, ReportGrouping()),
-        record2sample=TraceSamples(),
+        record2sample=TraceSamples(context),
         sample2job=TrainTaskJobData(context, 4, 1),
     )
     pipeline.push(_inference("inf-1", {"messages": []}))

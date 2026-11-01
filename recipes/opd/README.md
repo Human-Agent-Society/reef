@@ -1,6 +1,6 @@
 # opd
 
-On-policy distillation from a separate frozen teacher as a Reef weight-training recipe on Slime. The student samples responses through Reef, the teacher scores the exact prompt and response token ids the engine recorded, and the sampled-token reverse KL between the two updates the student once per batch. The package holds the method. Its report contract is `reef.core.reports.TeacherContextReport` with an empty `teacher_context`; a reported score is metadata, not training input.
+On-policy distillation from a separate frozen teacher as a Reef weight-training recipe on Slime. The student samples responses through Reef, the training component renders each response with the model's chat template, the teacher scores those exact prompt and response token ids, and the sampled-token reverse KL between the two updates the student once per batch. The package holds the method. Its report contract is `reef.core.reports.TeacherContextReport` with an empty `teacher_context`; a reported score is metadata, not training input.
 
 - Method: [Thinking Machines Lab, On-Policy Distillation](https://thinkingmachines.ai/blog/on-policy-distillation/).
 - Reference implementation: the [tinker-cookbook distillation recipe](https://github.com/thinking-machines-lab/tinker-cookbook/tree/dfe4d77e8e8c/tinker_cookbook/recipes/distillation) at `dfe4d77e8e8c`. The Reef implementation configures the Slime backend's distillation base (`reef/train/slime_backend/distill/`) and makes no Tinker API calls.
@@ -12,7 +12,7 @@ On-policy distillation from a separate frozen teacher as a Reef weight-training 
 ```text
 opd/
   recipe.py          OPDRecipe: training spec, loss family "opd", and its stages; its report contract is TeacherContextReport
-  processor.py       OPDSamples: the recorded prompt and response ids as the teacher sequence
+  processor.py       OPDSamples: the student's call, whose rendered sequence is the teacher sequence
   objective.py       selects the opd loss; one optimizer step per job
   slime/             the loss family: OPD's defaults on the Slime backend's distillation base
   examples/
@@ -33,7 +33,7 @@ Clipping requires sampled reverse KL with positive `opd-top-k` and
 ## Teacher engine
 
 The deployment's `teacher` section serves the teacher as a separate frozen
-SGLang model that scores the student's recorded token ids, so the teacher can
+SGLang model that scores the student's rendered token ids, so the teacher can
 be larger than the student. Student and teacher must share a tokenizer. That
 is the only OPD the recipe supports today.
 

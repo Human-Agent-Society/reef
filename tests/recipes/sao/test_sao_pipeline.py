@@ -16,6 +16,8 @@ from typing import Any
 import pytest
 import yaml
 from tests.support._trajectories import policy_trajectory
+from tests.support.chat_templates import CharTemplate
+from tests.support.conversations import conversation
 from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, job_sized_stages, runtime_bindings
 from tests.support.samples_service import make_samples
 
@@ -24,12 +26,12 @@ from recipes.sao.processor import SAOJobData, SAOSamples
 from reef.artifact import CachedRepositoryBackendFactory, InMemoryRepositoryBackend
 from reef.artifact.artifact import ArtifactRef
 from reef.core import AgentRecord, RequestType
+from reef.core.chat_rendering import rendered_job_data
 from reef.core.reports import ReportValidationError
 from reef.core.trajectories import source_record_id, trajectory_reward
 from reef.dispatcher import Dispatcher
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.registry import build_recipe, recipe_class_for
-from reef.record2record import ExclusiveReportRecord2Record
 from reef.record2sample.assembly import SampleAssemblySettings
 from reef.runtime.interfaces import TrainingMethod
 from reef.runtime.jobs import SavedCheckpoint, TrainingJob
@@ -52,8 +54,7 @@ EXAMPLES = Path(__file__).resolve().parents[3] / "recipes" / "sao" / "examples"
 def sao_processor(context: PipelineContext) -> TrainingPipeline:
     return TrainingPipeline(
         context,
-        record2record=ExclusiveReportRecord2Record(context),
-        record2sample=SAOSamples(SampleAssemblySettings()),
+        record2sample=SAOSamples(context, SampleAssemblySettings()),
         sample2job=SAOJobData(context, None, None),
     )
 
@@ -63,22 +64,10 @@ def single_rollout_steps() -> PipelineConfig:
     return job_sized_stages(SAORecipe.pipeline_spec())
 
 
-def _sao_inference(
-    agent_record_id: str,
-    *,
-    tokens: tuple[int, ...] = (5, 1, 2, 3),
-    loss_mask: tuple[int, ...] = (1, 1, 1),
-    action_mask: tuple[int, ...] | None = None,
-    rollout_log_probs: tuple[float, ...] = (-0.1, -0.2, -0.3),
-    artifact_id: str | None = "artifact-3",
-) -> AgentRecord:
-    payload: dict[str, Any] = {
-        "tokens": list(tokens),
-        "loss_mask": list(loss_mask),
-        "rollout_log_probs": list(rollout_log_probs),
-    }
-    if action_mask is not None:
-        payload["action_mask"] = list(action_mask)
+def _sao_inference(agent_record_id: str, *, artifact_id: str | None = "artifact-3") -> AgentRecord:
+    """A served call of one turn, without training tensors, as the inference service records it."""
+    record = conversation(agent_record_id, 1)
+    payload: dict[str, Any] = dict(record.payload)
     # The inference service records the artifact that answered.
     if artifact_id:
         payload["artifact_id"] = artifact_id
@@ -89,7 +78,14 @@ def _sao_inference(
         payload=payload,
         agent_record_id=agent_record_id,
         artifact_ref=artifact_ref,
+        created_at=record.created_at,
     )
+
+
+def _sao_job(**training: Any) -> JobData:
+    """Job data of one SAO sample with the tensors that the training component trains; ``training`` replaces some."""
+    sample = policy_trajectory("i1", (5, 1, 2, 3), (1, 1, 1), (-0.1, -0.2, -0.3), 1.0, action_mask=(1, 1, 1))
+    return JobData("math:data:1", (sample.with_training(**training),))
 
 
 def _sao_report(agent_record_id: str, reference: str, score: float) -> AgentRecord:
@@ -124,11 +120,7 @@ def test_sao_recipe_defaults_are_reef_side_only() -> None:
     # Objective defaults live with the Slime implementation. The Reef recipe
     # owns only its stages.
     stages = recipe.stages()
-    assert (stages.record2record.plugin_class, stages.record2sample.plugin_class, stages.sample2job.plugin_class) == (
-        ExclusiveReportRecord2Record,
-        SAOSamples,
-        SAOJobData,
-    )
+    assert (stages.record2sample.plugin_class, stages.sample2job.plugin_class) == (SAOSamples, SAOJobData)
     # Without a configured buffer_size the buffer holds the data of one job.
     assert recipe.build_pipeline(PipelineContext("math", default_job_samples=128)).buffer_size == 128
 
@@ -161,8 +153,8 @@ def test_example_pipeline_section_builds_the_sao_stages(example: str) -> None:
     pipeline = recipe.build_pipeline(PipelineContext("math"))
     assert pipeline.sample2job.job_samples == global_batch_size
 
-    assert isinstance(pipeline.record2record, ExclusiveReportRecord2Record)
     assert isinstance(pipeline.record2sample, SAOSamples)
+    assert pipeline.record2sample.exclusive_sources, "every rollout owns its inference records"
     assert isinstance(pipeline.sample2job, SAOJobData)
     assert pipeline.buffer_size is not None and pipeline.buffer_size >= global_batch_size
 
@@ -181,11 +173,8 @@ def test_sao_recipe_refuses_batch_size_in_the_recipe_config(key: str) -> None:
         ({"sample2job": {"config": {"batch_size": 8}}}, "SAOJobData: unknown config fields: batch_size"),
         ({"sample2job": {"config": {"buffer_size": 0}}}, "buffer_size must be None or a positive int"),
         ({"sample2job": {"config": {"groups_per_step": 2}}}, "groups_per_step"),
-        (
-            {"record2record": {"config": {"batch_size": 2}}},
-            "ExclusiveReportRecord2Record: unknown config fields: batch_size",
-        ),
-        ({"record2record": {"config": {"max_staleness": -1}}}, "max_staleness must be a non-negative int"),
+        ({"record2sample": {"config": {"batch_size": 2}}}, "SAOSamples: unknown config fields: batch_size"),
+        ({"record2sample": {"config": {"max_staleness": -1}}}, "max_staleness must be a non-negative int"),
     ],
 )
 def test_sao_recipe_refuses_a_bad_stage_config_when_the_pipeline_builds(
@@ -224,11 +213,11 @@ def test_processor_emits_one_independently_scheduled_sample_per_rollout() -> Non
     sample = batch.samples[0]
     assert source_record_id(sample) == "i1"
     assert trajectory_reward(sample) == pytest.approx(0.75)
-    # No explicit action mask -> the whole response is one action.
-    assert tuple(sample.training.get("action_mask", [])) == tuple(sample.training.get("loss_mask", []))
+    # The sample is the rollout's ATIF trajectory: the training component renders its tokens and masks.
+    assert not {"tokens", "loss_mask", "action_mask"} & set(sample.training)
     # The producing artifact and timestamp support the staleness check and queue-age reporting.
-    assert sample.training.get("artifact_id", None) == "artifact-3"
-    assert sample.training.get("rollout_created_at", None) is not None
+    assert sample.artifact_id == "artifact-3"
+    assert sample.training["rollout_created_at"] == 123.0
 
 
 @pytest.mark.unit
@@ -239,12 +228,7 @@ def test_processor_reads_the_producing_artifact_from_the_payload_of_a_record_wit
     inference = AgentRecord.create(
         scenario="math",
         request_type=RequestType.INFERENCE,
-        payload={
-            "tokens": [5, 1, 2, 3],
-            "loss_mask": [1, 1, 1],
-            "rollout_log_probs": [-0.1, -0.2, -0.3],
-            "artifact_id": "artifact-7",
-        },
+        payload={**conversation("i1", 1).payload, "artifact_id": "artifact-7"},
         agent_record_id="i1",
         artifact_ref=None,
     )
@@ -254,69 +238,43 @@ def test_processor_reads_the_producing_artifact_from_the_payload_of_a_record_wit
 
     batch = processor.build_job_data(1)
 
-    assert batch.samples[0].training.get("artifact_id", None) == "artifact-7"
+    assert batch.samples[0].artifact_id == "artifact-7"
 
 
 @pytest.mark.unit
-def test_processor_preserves_explicit_observation_boundaries() -> None:
-    processor = sao_processor(PipelineContext("math"))
-    # Response tokens: action, observation, action. loss_mask trains only the
-    # action tokens.
-    processor.push(
-        _sao_inference(
-            "i1",
-            tokens=(5, 1, 2, 3),
-            loss_mask=(1, 0, 1),
-            action_mask=(1, 0, 1),
-            rollout_log_probs=(-0.1, -0.2, -0.3),
-        )
+def test_backend_keeps_an_explicit_observation_boundary_and_defaults_the_action_mask_to_the_loss_mask() -> None:
+    # Response tokens: action, observation, action. loss_mask trains only the action tokens.
+    explicit = prepare_slime_job(
+        _sao_job(loss_mask=[1, 0, 1], action_mask=[1, 0, 1]), TrainingMethod("sao"), {}, StepScheduling(), step_size=1
     )
-    processor.push(_sao_report("r1", "i1", 1.0))
-
-    batch = processor.build_job_data(1)
-
-    assert tuple(batch.samples[0].training.get("action_mask", [])) == (1, 0, 1)
-    assert tuple(batch.samples[0].training.get("loss_mask", [])) == (1, 0, 1)
+    assert explicit.payload is not None
+    (row,) = explicit.payload["samples"]
+    assert (row[2], row[5]) == ([1, 0, 1], [1, 0, 1])
+    # A rendered sample has no action mask: its actions are the tokens that it trains.
+    rendered = prepare_slime_job(
+        _sao_job(loss_mask=[1, 0, 1], action_mask=[]), TrainingMethod("sao"), {}, StepScheduling(), step_size=1
+    )
+    assert rendered.payload is not None
+    (row,) = rendered.payload["samples"]
+    assert row[5] == [1, 0, 1]
+    to_slime_rollout_data(rendered.payload)
 
 
 @pytest.mark.unit
-def test_backend_rejects_rollout_that_trains_a_non_action_token() -> None:
-    # loss_mask trains index 1, but the action mask marks it an observation.
-    # Skip-observation GAE would give it zero advantage: reject the rollout
-    # rather than silently waste gradient on it.
-    processor = sao_processor(PipelineContext("math"))
-    processor.push(
-        _sao_inference(
-            "i1",
-            tokens=(5, 1, 2, 3),
-            loss_mask=(1, 1, 1),
-            action_mask=(1, 0, 1),
-        )
-    )
-    processor.push(_sao_report("r1", "i1", 1.0))
-
-    batch = processor.build_job_data(1)
-    prepared = prepare_slime_job(batch, TrainingMethod("sao"), {}, StepScheduling(), step_size=1)
+@pytest.mark.parametrize(
+    "training",
+    [
+        # loss_mask trains index 1, but the action mask marks it an observation. Skip-observation GAE would give it
+        # zero advantage: reject the rollout rather than silently waste gradient on it.
+        pytest.param({"action_mask": [1, 0, 1]}, id="trains-a-non-action-token"),
+        pytest.param({"rollout_log_probs": [-0.1, -0.2]}, id="log-prob-length-mismatch"),
+        pytest.param({"loss_mask": [0, 0, 0]}, id="trains-nothing"),
+    ],
+)
+def test_backend_rejects_malformed_rollout_tensors(training: dict[str, Any]) -> None:
+    prepared = prepare_slime_job(_sao_job(**training), TrainingMethod("sao"), {}, StepScheduling(), step_size=1)
     with pytest.raises(ValueError):
         to_slime_rollout_data(prepared.payload)
-    # The job data trains nothing until it is acknowledged: released, the next job data holds the same sample.
-    processor.release_job_data(batch.data_id)
-    assert processor.build_job_data(1).samples == batch.samples
-
-
-@pytest.mark.unit
-def test_backend_rejects_rollout_with_logprob_length_mismatch() -> None:
-    processor = sao_processor(PipelineContext("math"))
-    processor.push(_sao_inference("i1", loss_mask=(1, 1, 1), rollout_log_probs=(-0.1, -0.2)))
-    processor.push(_sao_report("r1", "i1", 1.0))
-
-    batch = processor.build_job_data(1)
-    prepared = prepare_slime_job(batch, TrainingMethod("sao"), {}, StepScheduling(), step_size=1)
-    with pytest.raises(ValueError):
-        to_slime_rollout_data(prepared.payload)
-    # The job data trains nothing until it is acknowledged: released, the next job data holds the same sample.
-    processor.release_job_data(batch.data_id)
-    assert processor.build_job_data(1).samples == batch.samples
 
 
 @pytest.mark.unit
@@ -327,20 +285,6 @@ def test_processor_rejects_non_finite_report_scores() -> None:
         processor.push(_sao_report("r1", "i1", float("nan")))
     assert not processor.ready(1)
     assert processor.releasable_record_ids().isdisjoint({"i1"})
-
-
-@pytest.mark.unit
-def test_malformed_training_data_is_preserved_until_backend_validation() -> None:
-    processor = sao_processor(PipelineContext("math"))
-    processor.push(_sao_inference("i1", loss_mask=(0, 0, 0)))
-    processor.push(_sao_report("r1", "i1", 1.0))
-    batch = processor.build_job_data(1)
-    prepared = prepare_slime_job(batch, TrainingMethod("sao"), {}, StepScheduling(), step_size=1)
-    with pytest.raises(ValueError):
-        to_slime_rollout_data(prepared.payload)
-    # The job data trains nothing until it is acknowledged: released, the next job data holds the same sample.
-    processor.release_job_data(batch.data_id)
-    assert processor.build_job_data(1).samples == batch.samples
 
 
 @pytest.mark.unit
@@ -407,7 +351,8 @@ def test_backend_preparation_advances_step_state() -> None:
 
 
 class _SAOComponent(StubTrainingComponent):
-    """A training component that prepares each job's data as the Slime component does, one sample per step.
+    """A training component that renders and prepares each job's data as the Slime component does, one sample per
+    step.
 
     ``payloads`` lists the prepared Slime payload of each job. Each job saves
     one checkpoint whose metrics carry SAO's async telemetry, as a real SAO
@@ -419,8 +364,10 @@ class _SAOComponent(StubTrainingComponent):
         self.payloads: list[dict[str, Any]] = []
 
     def train(self, job: TrainingJob) -> tuple[SavedCheckpoint, ...]:
+        data, left_out = rendered_job_data(job.data, CharTemplate())
+        assert left_out == ()
         prepared = prepare_slime_job(
-            job.data,
+            data,
             TrainingMethod.from_dict(job.parameters["method"]),
             {},
             StepScheduling.from_parameters(job.parameters),

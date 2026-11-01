@@ -15,7 +15,6 @@ from reef.core.reports import ScoredRolloutReport
 from reef.dispatcher import Dispatcher
 from reef.inference.http import InferenceProxyRuntime
 from reef.recipe import Recipe
-from reef.record2record import ReportGrouping, ReportRecord2Record
 from reef.record2sample import ReportSamples
 from reef.runtime.interfaces import InferenceHandler
 from reef.sample2job import Sample2Job
@@ -61,8 +60,7 @@ class FeedbackJobData(Sample2Job):
 def feedback_pipeline(context):
     return TrainingPipeline(
         context,
-        record2record=ReportRecord2Record(context, ReportGrouping()),
-        record2sample=FeedbackSamples(),
+        record2sample=FeedbackSamples(context),
         sample2job=FeedbackJobData(context, None, None),
     )
 

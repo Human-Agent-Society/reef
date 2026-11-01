@@ -74,22 +74,35 @@ directly.
 
 OpenClaw-RL trains with two signals, reinforcement learning and on-policy
 distillation (OPD). The RL term is a PPO clipped surrogate on the sampled
-tokens, with the turn's raw reward as its advantage. The OPD term pulls the policy toward a teacher on the top-K token
-candidates the engine recorded at generation time. The teacher is the frozen
-base model conditioned on one of the accepted hindsight hints, and the
-objective selects which hint by how well the teacher's top-K overlaps the
-policy's. The weights of the two terms are ``--openclawrl-w-rl`` and
-``--openclawrl-w-opd`` in ``training.options``, both 1.0 by default.
+tokens, with the turn's raw reward as its advantage. The OPD term pulls the
+policy toward a teacher on the student's top-K token candidates. The actor
+computes them, and their old-policy log-probabilities, with the weights of
+the step's start, as upstream does; ``--openclawrl-topk`` sets K (default 4).
+The teacher is the frozen base model conditioned on one of the accepted
+hindsight hints, and the objective selects which hint by how well the
+teacher's top-K overlaps the policy's. The weights of the two terms are
+``--openclawrl-w-rl`` and ``--openclawrl-w-opd`` in ``training.options``,
+both 1.0 by default.
+
+Each sample is the judged turn's call as an ATIF trajectory, with one
+hint-enhanced teacher request for each candidate hint. The training
+component renders the turn and each candidate with the model's chat
+template: a candidate's teacher sequence is its hint-enhanced prompt
+followed by the turn's reply tokens. Give the component the serving engine's
+chat template arguments (`Chat template arguments
+<../../reference/configuration.rst#chat-template-arguments>`__). A turn that
+cannot render, or whose candidates all fail to render, does not train, and
+the job metric ``unrenderable_samples`` counts it.
 
 Configuration
 -------------
 
-The deployment's ``pipeline`` section configures the recipe's three stages.
+The deployment's ``pipeline`` section configures the recipe's two stages.
 The recipe's own classes are the defaults, so the section needs no
-``module``. The record-to-record stage correlates sessions and runs the PRM
-judge. The sample-to-job stage sets the job size and writes the PRM record
-file. The record-to-sample stage takes no config. ``job_samples`` is the judged
-turns of one job. Slime's ``--global-batch-size``,
+``module``. The record-to-sample stage, ``OpenClawRLSamples``, correlates
+sessions, runs the PRM judge, and makes one sample of each judged turn. The
+sample-to-job stage sets the job size and writes the PRM record file.
+``job_samples`` is the judged turns of one job. Slime's ``--global-batch-size``,
 ``training.config.global_batch_size`` in the example, is the judged turns of
 one optimizer step.
 
@@ -98,7 +111,7 @@ one optimizer step.
    recipe:
      implementation: recipes.openclawrl.recipe:OpenClawRLRecipe
    pipeline:
-     record2record:
+     record2sample:
        config:
          prm_url: http://127.0.0.1:23001
          prm_tokenizer_path: /models/prm
@@ -111,17 +124,17 @@ one optimizer step.
 
 .. config::
 
-   pipeline.record2record.config.session_ttl_s | 900.0 | idle time in seconds before a session expires
-   pipeline.record2record.config.max_open_sessions | 4096 | ceiling on live sessions; the least recently active are evicted above it
-   pipeline.record2record.config.prm_url | "" | the PRM's SGLang server. Empty is correlate-only mode: nothing is judged and nothing trains.
-   pipeline.record2record.config.prm_tokenizer_path | "" | the PRM's tokenizer. Required when ``prm_url`` is set.
-   pipeline.record2record.config.prm_m | 3 | judge votes per turn
-   pipeline.record2record.config.prm_temperature | 0.6 | judge sampling temperature
-   pipeline.record2record.config.prm_max_tokens | 8192 | judge generation budget
-   pipeline.record2record.config.prm_timeout_s | 120.0 | per-judge timeout in seconds
-   pipeline.record2record.config.prm_concurrency | 8 | turns judged at once
-   pipeline.record2record.config.prm_max_hint_candidates | 3 | hint candidates collected per turn
-   pipeline.record2record.config.max_staleness | 0 | accepted lag, in artifacts that the scenario served, between the producing and served artifact.
+   pipeline.record2sample.config.session_ttl_s | 900.0 | idle time in seconds before a session expires
+   pipeline.record2sample.config.max_open_sessions | 4096 | ceiling on live sessions; the least recently active are evicted above it
+   pipeline.record2sample.config.prm_url | "" | the PRM's SGLang server. Empty is correlate-only mode: nothing is judged and nothing trains.
+   pipeline.record2sample.config.prm_tokenizer_path | "" | the PRM's tokenizer. Required when ``prm_url`` is set.
+   pipeline.record2sample.config.prm_m | 3 | judge votes per turn
+   pipeline.record2sample.config.prm_temperature | 0.6 | judge sampling temperature
+   pipeline.record2sample.config.prm_max_tokens | 8192 | judge generation budget
+   pipeline.record2sample.config.prm_timeout_s | 120.0 | per-judge timeout in seconds
+   pipeline.record2sample.config.prm_concurrency | 8 | turns judged at once
+   pipeline.record2sample.config.prm_max_hint_candidates | 3 | hint candidates collected per turn
+   pipeline.record2sample.config.max_staleness | 0 | accepted lag, in artifacts that the scenario served, between the producing and served artifact.
    pipeline.sample2job.config.job_samples | required | judged turns per job. Set it to ``training.config.global_batch_size`` so that one job is one optimizer step.
    training.config.global_batch_size | judged turns per optimizer step. Reef passes it to Slime as ``--global-batch-size``.
    pipeline.sample2job.config.prm_record_file | "" | judged population, one JSON line per job; empty disables it
@@ -140,7 +153,7 @@ reward split, and the judge counters.
 
 Reef coordinates inference and training only. OpenClawRL's example Compose
 file owns PRM and student-model startup, health checks and GPU allocation.
-The judging stage consumes ``pipeline.record2record.config.prm_url`` and
+The judging stage consumes ``pipeline.record2sample.config.prm_url`` and
 requires the matching ``prm_tokenizer_path``; it owns judge request handling.
 Reef does not register, schedule or stop the PRM process. The student-model
 endpoint is used by the simulation harness, outside Reef.

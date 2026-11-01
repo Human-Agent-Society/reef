@@ -277,7 +277,7 @@ assert config['services'][-1]['name'] == 'reef'
     raw = training_config()
     raw["recipe"]["implementation"] = recipe
     if "openclawrl" in recipe:
-        raw["pipeline"]["record2record"] = {
+        raw["pipeline"]["record2sample"] = {
             "config": {"prm_url": "http://external:23001", "prm_tokenizer_path": "/models/judge"}
         }
     result = subprocess.run(

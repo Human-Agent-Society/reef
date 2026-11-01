@@ -33,8 +33,8 @@ def recorded_rows(label: str, name: str, rows: object, response_length: int, top
         raise ValueError(f"{label} {name} must be a sequence of rows")
     if not rows:
         raise ValueError(
-            f"{label} carries no sampler top-k log-probs: score centering needs a token-native inference "
-            f"handler with capture_topk >= {top_k}"
+            f"{label} carries no sampler top-k log-probs: score centering trains the task rollouts of this "
+            f"component, which record them; serving records none"
         )
     if len(rows) != response_length:
         raise ValueError(f"{label} {name} has {len(rows)} rows for a {response_length}-token response")
@@ -79,7 +79,7 @@ def sampler_head(
         if len(id_row) < top_k or len(log_prob_row) < top_k:
             raise ValueError(
                 f"{label} position {position} records {min(len(id_row), len(log_prob_row))} top-k entries, "
-                f"fewer than top_k={top_k}; raise the inference handler's capture_topk"
+                f"fewer than top_k={top_k}; raise the rollouts' recorded top-k"
             )
         trained_ids.append(id_row[:top_k])
         trained_log_probs.append(log_prob_row[:top_k])

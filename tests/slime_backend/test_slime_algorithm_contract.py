@@ -165,12 +165,13 @@ def test_sft_spec_refuses_advantages_instead_of_silently_dropping_them() -> None
 @pytest.mark.unit
 def test_common_spec_validation_owns_loss_and_logprob_requirements() -> None:
     pg = resolve_loss_family("pg")
-    pg.validate_backend_args(SimpleNamespace(loss_type="policy_loss", use_rollout_logprobs=True))
+    pg.validate_backend_args(SimpleNamespace(loss_type="policy_loss", use_rollout_logprobs=False))
 
     with pytest.raises(RuntimeError, match="loss-type policy_loss"):
-        pg.validate_backend_args(SimpleNamespace(loss_type="sft_loss", use_rollout_logprobs=True))
-    with pytest.raises(RuntimeError, match="use-rollout-logprobs"):
-        pg.validate_backend_args(SimpleNamespace(loss_type="policy_loss", use_rollout_logprobs=False))
+        pg.validate_backend_args(SimpleNamespace(loss_type="sft_loss", use_rollout_logprobs=False))
+    # Serving returns no log-probabilities, so the actor computes the old-policy ones.
+    with pytest.raises(RuntimeError, match="remove --use-rollout-logprobs"):
+        pg.validate_backend_args(SimpleNamespace(loss_type="policy_loss", use_rollout_logprobs=True))
 
 
 @pytest.mark.unit
@@ -202,6 +203,7 @@ def test_openclawrl_knobs_travel_from_argv_onto_args() -> None:
             "--openclawrl-adv-diff-clip=0.25",
             "--openclawrl-hint-selection=shortest",
             "--openclawrl-subset-mode=teacher",
+            "--openclawrl-topk=8",
             "--loss-type",
             "custom_loss",
         ]
@@ -213,6 +215,7 @@ def test_openclawrl_knobs_travel_from_argv_onto_args() -> None:
         adv_diff_clip=0.25,
         hint_selection="shortest",
         subset_mode="teacher",
+        topk=8,
     )
     assert remaining == ["--loss-type", "custom_loss"]
 
@@ -221,6 +224,7 @@ def test_openclawrl_knobs_travel_from_argv_onto_args() -> None:
     assert args.loss_family == "openclawrl"
     assert (args.openclawrl_w_rl, args.openclawrl_w_opd, args.openclawrl_adv_diff_clip) == (0.5, 2.0, 0.25)
     assert (args.openclawrl_hint_selection, args.openclawrl_subset_mode) == ("shortest", "teacher")
+    assert args.openclawrl_topk == 8
 
     # The deprecated --openclaw-topk-* spellings still parse; an argv naming
     # none of them stamps the paper defaults rather than leaving args bare.
@@ -230,6 +234,7 @@ def test_openclawrl_knobs_travel_from_argv_onto_args() -> None:
     topk.apply_driver_options(defaults, None)
     assert defaults.openclawrl_w_rl == 1.0
     assert defaults.openclawrl_hint_selection == "sequence_optimal"
+    assert defaults.openclawrl_topk == 4
 
     # The driver forwards the parsed Settings into bind on every real boot.
     assert topk.bind(settings) is topk
@@ -255,9 +260,12 @@ def test_openclawrl_rejects_non_finite_numeric_settings(name, value) -> None:
         ("hint_selection", ""),
         ("subset_mode", "hybrid"),
         ("subset_mode", ""),
+        ("topk", 0),
+        ("topk", True),
+        ("topk", 2.0),
     ],
 )
-def test_openclawrl_rejects_unknown_enum_settings(name, value) -> None:
+def test_openclawrl_rejects_unknown_choices_and_a_bad_topk(name, value) -> None:
     from recipes.openclawrl.slime import OpenclawrlSettings
 
     with pytest.raises(ValueError, match=name):
@@ -285,6 +293,7 @@ def test_openclawrl_keeps_valid_configurations() -> None:
         adv_diff_clip=1.0,
         hint_selection="sequence_optimal",
         subset_mode="student",
+        topk=4,
     )
     disabled = OpenclawrlSettings(w_rl=0.0, w_opd=-0.5, adv_diff_clip=-1.0)
     assert disabled.adv_diff_clip == -1.0

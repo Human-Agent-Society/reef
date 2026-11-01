@@ -1,4 +1,4 @@
-"""The context that the training pipeline and its three stages read for one scenario.
+"""The context that the training pipeline and its two stages read for one scenario.
 
 The trainer builds it. It sits below the stage packages so that each of them
 can read it. A stage's own config is not here: each stage parses its config
@@ -41,7 +41,7 @@ class PipelineContext:
     #: Opens the generated task stores of the scenario. ``None`` if the trainer has no scenario session.
     task_storage: TaskStorage | None = None
     #: The training samples of the scenario as this trainer reads them, such as its uploads, its imported tasks and
-    #: the samples that its record stages make. ``None`` if the trainer has no scenario session: the pipeline then
+    #: the samples that its record-to-sample stage makes. ``None`` if the trainer has no scenario session: the pipeline then
     #: keeps its samples in memory.
     samples: TrainerSamples | None = None
     #: The fewest samples of one job when the sample-to-job stage sets no ``job_samples``:

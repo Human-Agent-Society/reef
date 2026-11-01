@@ -93,9 +93,9 @@ def build_slime_payload(
         "rollout_ids": list(schedule.rollout_ids),
         "loss": loss_family,
         # Each wire row's producing artifact, in the schedule's row order: a schedule may repeat (epochs) and
-        # reorder (shuffle) rows. It is training metadata, not a check; the record-to-record stage dropped stale
+        # reorder (shuffle) rows. It is training metadata, not a check; the record-to-sample stage dropped stale
         # samples before the data formed.
-        "producing_artifact_ids": [samples[row].training.get("artifact_id") for row in schedule.row_indices],
+        "producing_artifact_ids": [samples[row].artifact_id for row in schedule.row_indices],
     }
     if advantages is not None:
         payload["advantages"] = [advantages[row] for row in schedule.row_indices]
