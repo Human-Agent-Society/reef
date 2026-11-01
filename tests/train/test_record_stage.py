@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Hashable, Mapping
 from dataclasses import replace
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -85,8 +86,8 @@ class RecordingSamples(InferenceRecordSamples):
 class RecordingJobData(Sample2Job):
     """Makes job data of the samples as they come; in ``manual`` it takes instructions."""
 
-    def __init__(self, context: PipelineContext) -> None:
-        super().__init__(context, None, None)
+    def __init__(self, context: PipelineContext, job_samples: int | None = None) -> None:
+        super().__init__(context, None, job_samples)
 
     def make_job_data(self, samples: tuple[Sample, ...], data_id: str) -> JobData:
         return JobData(data_id, samples)
@@ -131,12 +132,12 @@ class LaterSamples(Record2Sample):
 
 
 class WaitingPipeline(TrainingPipeline):
-    """Holds each inference record as one set whose tasks ``LaterSamples`` makes later."""
+    """Holds each inference record as one set whose tasks ``LaterSamples`` makes later; jobs of ``job_samples``."""
 
-    def __init__(self, context: PipelineContext | None = None) -> None:
+    def __init__(self, context: PipelineContext | None = None, job_samples: int | None = None) -> None:
         context = PipelineContext("s") if context is None else context
         self.later_tasks = LaterSamples()
-        self.batches = RecordingJobData(context)
+        self.batches = RecordingJobData(context, job_samples)
         super().__init__(context, record2sample=self.later_tasks, sample2job=self.batches)
 
 
@@ -151,7 +152,7 @@ class DroppingThresholdSamples(ThresholdSamples):
 
 
 def dropping_pipeline(context: PipelineContext) -> TrainingPipeline:
-    return threshold_pipeline(context, record2sample=DroppingThresholdSamples(context))
+    return threshold_pipeline(context, job_samples=1, record2sample=DroppingThresholdSamples(context))
 
 
 class PairGrouping(ReportGrouping):
@@ -249,7 +250,6 @@ def test_a_record_the_stage_ends_is_consumed_by_the_next_commit_and_then_release
         records,
         pipeline_factory=dropping_pipeline,
         job_loop=counting_jobs(),
-        default_job_samples=1,
     )
     make_samples(trainer)
     result = trainer.run_once()
@@ -371,7 +371,7 @@ def test_the_trainer_reserves_a_batch_when_a_waiting_set_finishes() -> None:
     records = SQLiteRecordStore()
     records.append(inference("i1"))
     trainer = Trainer.build(
-        "s", records, pipeline_factory=WaitingPipeline, job_loop=counting_jobs(), default_job_samples=1
+        "s", records, pipeline_factory=partial(WaitingPipeline, job_samples=1), job_loop=counting_jobs()
     )
     make_samples(trainer)
     assert trainer.run_once() is None
@@ -434,7 +434,7 @@ def test_uploaded_trajectories_train_in_store_order_and_count_as_one_sample_each
 
 
 def upload_pipeline(context: PipelineContext) -> TrainingPipeline:
-    return TrainingPipeline(context, sample2job=UploadJobData(context, None, None))
+    return TrainingPipeline(context, sample2job=UploadJobData(context, None, 1))
 
 
 @pytest.mark.unit
@@ -463,7 +463,6 @@ def test_each_trainer_skips_only_the_samples_that_its_own_component_trained() ->
             session.records,
             pipeline_factory=upload_pipeline,
             job_loop=counting_jobs(),
-            default_job_samples=1,
             samples=TrainerSamples(session.samples, component),
         )
         consumed[component] = trainer.prepare_commit(trainer.run_once()).consumed_ids
@@ -627,14 +626,13 @@ def test_the_pipeline_keeps_the_newest_unit_even_when_it_alone_is_over_the_buffe
 
 
 @pytest.mark.unit
-def test_the_stage_sizes_are_its_own_or_else_follow_the_context_default() -> None:
-    defaulted = PairJobData(PipelineContext("s", default_job_samples=3), None, None)
-    assert (defaulted.job_samples, defaulted.buffer_size) == (3, 3), "the buffer holds the data of one job"
-    configured = PairJobData(PipelineContext("s", default_job_samples=3), 5, 2)
+def test_the_stage_sizes_are_its_own() -> None:
+    sized = PairJobData(PipelineContext("s"), None, 3)
+    assert (sized.job_samples, sized.buffer_size) == (3, 3), "the buffer holds the data of one job"
+    configured = PairJobData(PipelineContext("s"), 5, 2)
     assert (configured.job_samples, configured.buffer_size) == (2, 5)
-    assert (PairJobData(PipelineContext("s", default_job_samples=3), None, 2).buffer_size) == 2
     unsized = PairJobData(PipelineContext("s"), None, None)
-    assert (unsized.job_samples, unsized.buffer_size) == (None, None), "no default holds every sample"
+    assert (unsized.job_samples, unsized.buffer_size) == (None, None), "no job size holds every sample"
     with pytest.raises(ValueError, match="job_samples must be None or a positive int"):
         PairJobData(PipelineContext("s"), None, 0)
     with pytest.raises(ValueError, match="job_samples must be None or a positive int"):
@@ -710,7 +708,7 @@ def test_aborted_report_references_are_released_and_stay_excluded_after_replay(
     for record in (aborted, inference("other"), rejected_report, inference("valid"), report("valid-report", "valid")):
         records.append(record)
     trainer = Trainer.build(
-        "s", records, pipeline_factory=threshold_pipeline, job_loop=counting_jobs(), default_job_samples=1
+        "s", records, pipeline_factory=partial(threshold_pipeline, job_samples=1), job_loop=counting_jobs()
     )
     if replay_before_commit:
         trainer.replay_retained(up_to_sequence=5, consumed_ids=frozenset())
@@ -733,7 +731,7 @@ def test_aborted_report_references_are_released_and_stay_excluded_after_replay(
     assert not trainer.pipeline.releasable_record_ids()
 
     restored = Trainer.build(
-        "s", records, pipeline_factory=threshold_pipeline, job_loop=counting_jobs(), default_job_samples=1
+        "s", records, pipeline_factory=partial(threshold_pipeline, job_samples=1), job_loop=counting_jobs()
     )
     restored.replay_retained(up_to_sequence=5, consumed_ids=prepared.consumed_ids)
     records.append(report("later-report", "aborted"))

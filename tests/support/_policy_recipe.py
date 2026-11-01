@@ -63,11 +63,10 @@ class TestPolicyRecipe(WeightTrainingRecipe):
             scenario,
             records,
             pipeline_factory=lambda context: threshold_pipeline(
-                context, accept_multi_turn=True, max_staleness=self.max_staleness
+                context, job_samples=1, accept_multi_turn=True, max_staleness=self.max_staleness
             ),
             job_loop=JobLoop(self.training_component, scenario=scenario),
             job_parameters={kind: {"method": {"objective": "sft"}} for kind in SAMPLE_KINDS},
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
-            default_job_samples=1,
         )

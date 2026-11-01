@@ -48,7 +48,8 @@ How it works
      - The person, or a program that checks the work, scores the session with
        ``POST /reef/report``.
    * - 4
-     - When ``evolution.batch_size`` traces wait, a training step starts.
+     - When ``job_samples`` traces wait (``pipeline.sample2job.config``,
+       default 1), a training step starts.
    * - 5
      - The method edits a copy of the head, the training start: the newest
        release that a step kept or that a sync committed (``step(context)``).
@@ -287,11 +288,10 @@ The loop
 Step data
 ~~~~~~~~~
 
-A step starts when ``evolution.batch_size`` traces wait (default 1), or
-``pipeline.sample2job.config.job_samples`` when set. One trace is one scored
-report, with every model call it names. To learn from inference traffic
-without reports, name the inference stage; each call is then one unscored
-trace:
+A step starts when ``pipeline.sample2job.config.job_samples`` traces wait
+(default 1). One trace is one scored report, with every model call it names.
+To learn from inference traffic without reports, name the inference stage;
+each call is then one unscored trace:
 
 .. code-block:: yaml
 

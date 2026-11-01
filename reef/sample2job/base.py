@@ -55,8 +55,8 @@ class Sample2JobSettings(PluginSettings):
     job_samples: int | None = config_option(
         None,
         help=(
-            "The fewest samples one job trains. Required for weight training; harness evolution "
-            "defaults it to evolution.batch_size."
+            "The fewest samples one job trains. Required for weight training; a harness evolution "
+            "stage defaults it to 1."
         ),
     )
 
@@ -69,8 +69,8 @@ class Sample2Job(ABC, Plugin):
     """The sample-to-job stage: the size of each job, and the job's data and parameters from the buffer's samples.
 
     Values: ``job_samples`` is None or a positive int: the configured value,
-    or else ``context.default_job_samples``; it is None only for a trainer
-    that trains nothing. ``buffer_size`` is None
+    or else the stage's own default. ``Trainer.build`` refuses None for a
+    trainer that trains. ``buffer_size`` is None
     or a positive int: the configured size, or else ``job_samples``; None
     takes every untrained sample. ``max_job_samples`` is None or a
     positive int, the most samples one job's data may hold; None sets no limit.
@@ -123,8 +123,8 @@ class Sample2Job(ABC, Plugin):
         self.context = context
         self.scenario = context.scenario
         stage = type(self).__name__
-        #: The fewest samples one job trains; None for a trainer that trains nothing.
-        self.job_samples = context.default_job_samples if job_samples is None else job_samples
+        #: The fewest samples one job trains; None when the stage sets no job size (a trainer that trains nothing).
+        self.job_samples = job_samples
         #: The most samples that the buffer holds; None holds every sample.
         self.buffer_size = self.job_samples if buffer_size is None else buffer_size
         #: The most samples one job's data may hold; None sets no limit. A stage whose data is one fixed grid sets it,

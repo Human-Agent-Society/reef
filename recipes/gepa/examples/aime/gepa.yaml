@@ -17,9 +17,6 @@ recipe:
   config:
     evolution:
       adapter: pi
-      # The third report closes the minibatch. Both correct and incorrect
-      # transcripts contribute to reflection.
-      batch_size: 3
       # The harness binary the evaluation tasks run headless, from the environment.
       binary: ${REEF_PI_BINARY}
       # The first tree, beside this file: rules.md is the quickstart's system
@@ -69,6 +66,13 @@ recipe:
         # the served tree's. The served tree's scores come from the score cache.
         policy: compare
         statistic: mean
+
+pipeline:
+  sample2job:
+    config:
+      # The third report closes the minibatch: set it to minibatch_size. Both
+      # correct and incorrect transcripts contribute to reflection.
+      job_samples: 3
 
 inference:
   upstream-model: ${REEF_MODEL}

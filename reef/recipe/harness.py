@@ -106,8 +106,7 @@ class EvolutionSettings(Settings):
     ``models`` maps a name other than ``served`` to a model section (``url``,
     ``model``, ``api_key_env``); ``model_metadata`` maps a model name to its
     metadata. ``state_dir`` is the directory of every scenario's history
-    and step records. ``batch_size`` ≥ 1 is the traces of one
-    automatic step. Every other count is ≥ 0, where 0 turns its limit off.
+    and step records. Every count is ≥ 0, where 0 turns its limit off.
     The retired ``publish`` and ``review_kinds`` are refused: the top-level
     ``activation`` section decides whether a kept tree serves.
     ``executor`` and ``sandbox`` choose where tasks run
@@ -127,7 +126,6 @@ class EvolutionSettings(Settings):
     )
     model_metadata: Mapping[str, Any] = config_option(default_factory=dict, help="Model metadata by model name.")
     state_dir: str = config_option(".reef/harness", help="Each scenario's history and step records.")
-    batch_size: int = config_option(1, help="The traces of one automatic step.")
     max_steps: int = config_option(0, help="The most automatic steps. 0 sets no limit.")
     max_failure_streak: int = config_option(
         0, help="Skip automatic steps after this many rejections in a row. 0 sets no limit."
@@ -145,8 +143,6 @@ class EvolutionSettings(Settings):
             raise ValueError("evolution.state_dir must be a non-empty path")
         if self.seed is not None and not self.seed.strip():
             raise ValueError("evolution.seed must be the path of a tree directory when it is set")
-        if self.batch_size < 1:
-            raise ValueError("evolution.batch_size must be at least 1")
         for label, value in (
             ("max_steps", self.max_steps),
             ("max_failure_streak", self.max_failure_streak),
@@ -451,10 +447,6 @@ class HarnessEvolutionRecipe(Recipe):
     def harness_adapter(self) -> str | None:
         return self.evolution.adapter
 
-    @property
-    def batch_size(self) -> int:
-        return self.evolution.batch_size
-
     @classmethod
     def _recipe_kwargs(cls, settings: Mapping[str, Any], values: Mapping[str, str]) -> dict[str, Any]:
         section = settings.get("evolution")
@@ -666,7 +658,6 @@ class HarnessEvolutionRecipe(Recipe):
             training_mode=self.training_mode,
             task_storage=task_storage,
             samples=samples,
-            default_job_samples=self.batch_size,
         )
 
     def build_policy(self, backend: HarnessBackend) -> CandidateEvaluationPlugin:

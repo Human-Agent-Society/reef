@@ -82,7 +82,7 @@ Free disk space, change the limits, or move the extra files out of the checkpoin
 Harness evolution
 -----------------
 
-**reports are accepted but no evolve step runs.** Check the configured training mode and ``job_samples`` (by default ``evolution.batch_size``). Successful and failed outcomes both contribute samples; there is no score-window filter. Inspect training errors for missing inputs or incompatible trajectory data.
+**reports are accepted but no evolve step runs.** Check the configured training mode and ``pipeline.sample2job.config.job_samples`` (1 by default for harness evolution). Successful and failed outcomes both contribute samples; there is no score-window filter. Inspect training errors for missing inputs or incompatible trajectory data.
 
 **startup fails installing the harness binary.** With ``evolution.binary`` unset, startup installs the descriptor's pinned binary. Install the vendor tool named in the error (``npm`` for pi), fix the reported vendor failure, or set ``evolution.binary`` to an existing executable.
 

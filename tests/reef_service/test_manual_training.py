@@ -8,6 +8,7 @@ import logging
 import time
 from contextlib import closing
 from dataclasses import dataclass, replace
+from functools import partial
 from threading import Event
 
 import pytest
@@ -146,17 +147,19 @@ def file(instructions, receipt):
 
 @pytest.fixture
 def build(records, instructions):
-    """Build trainers of scenario "s" over ``records`` (or ``store``) and ``instructions``; each closes at teardown."""
+    """Build trainers of scenario "s" over ``records`` (or ``store``) and ``instructions``; each closes at teardown.
+
+    ``processor`` takes the context and the stage's ``job_samples``.
+    """
     trainers = []
 
     def build_trainer(component, processor=records_pipeline, mode="manual", job_samples=1, store=None):
         trainer = Trainer.build(
             "s",
             records if store is None else store,
-            pipeline_factory=processor,
+            pipeline_factory=partial(processor, job_samples=job_samples),
             job_loop=JobLoop(component, scenario="s"),
             training_mode=mode,
-            default_job_samples=job_samples,
         )
         trainers.append(trainer)
         return trainer
@@ -358,8 +361,8 @@ def test_manual_is_a_native_contract_for_arbitrary_batch_schemas(records, build,
         def make_job_data(self, samples, data_id):
             return ExampleJobData(data_id, values=tuple(source_record_id(task) for task in samples))
 
-    def instruction_pipeline(context):
-        return TrainingPipeline(context, sample2job=InstructionJobData(context, None, None))
+    def instruction_pipeline(context, job_samples=None):
+        return TrainingPipeline(context, sample2job=InstructionJobData(context, None, job_samples))
 
     with pytest.raises(NotImplementedError, match="training_mode='auto'"):
         instruction_pipeline(PipelineContext("s"))
@@ -498,11 +501,11 @@ def test_processor_uses_shared_data_and_one_batch_assembly_hook(records, build, 
         def make_job_data(self, samples: tuple[Sample, ...], data_id: str) -> ExampleJobData:
             return ExampleJobData(data_id, values=tuple(source_record_id(task) for task in samples))
 
-    def trajectory_pipeline(context):
+    def trajectory_pipeline(context, job_samples=None):
         return TrainingPipeline(
             context,
             record2sample=InferenceSamples(),
-            sample2job=TrajectoryJobData(context, None, None),
+            sample2job=TrajectoryJobData(context, None, job_samples),
         )
 
     backend = RecordingComponent()
@@ -541,7 +544,7 @@ def test_processor_uses_shared_data_and_one_batch_assembly_hook(records, build, 
 
 def test_factory_cannot_silently_change_the_processor_mode(build):
     with pytest.raises(ValueError, match="preserve the requested training_mode"):
-        build(RecordingComponent(), lambda ctx: TrainingPipeline(replace(ctx, training_mode="auto")))
+        build(RecordingComponent(), lambda ctx, job_samples: TrainingPipeline(replace(ctx, training_mode="auto")))
 
 
 @pytest.mark.parametrize("mode", ["auto", "manual"])
@@ -1001,13 +1004,12 @@ class _InstructionJobRecipe(WeightTrainingRecipe):
         return Trainer.build(
             scenario,
             records,
-            pipeline_factory=threshold_pipeline,
+            pipeline_factory=partial(threshold_pipeline, job_samples=1),
             job_loop=JobLoop(component, scenario=scenario),
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
             samples=samples,
             training_mode=self.training_mode,
-            default_job_samples=1,
         )
 
 
@@ -1116,10 +1118,9 @@ def test_a_job_trainer_skips_a_failed_instruction_instead_of_submitting_it_again
     trainer = Trainer.build(
         "s",
         records,
-        pipeline_factory=threshold_pipeline,
+        pipeline_factory=partial(threshold_pipeline, job_samples=1),
         job_loop=JobLoop(component, scenario="s"),
         training_mode="manual",
-        default_job_samples=1,
     )
     failure(records, "a")
     make_samples(trainer)
@@ -1307,8 +1308,8 @@ def test_manual_gives_each_instruction_the_failures_that_the_client_inserted(rec
 
 @pytest.mark.parametrize("mode", ["auto", "manual"])
 def test_every_mode_keeps_the_samples_beyond_the_buffer_for_later_jobs(caplog, mode):
-    # The default buffer holds the data of one job of one sample.
-    processor = reports_pipeline(PipelineContext("s", training_mode=mode, default_job_samples=1))
+    # A trace job takes one sample by default, and the default buffer holds the data of one job.
+    processor = reports_pipeline(PipelineContext("s", training_mode=mode))
     assert processor.buffer_size == 1
 
     def fail(index):
@@ -1356,7 +1357,7 @@ def test_manual_collects_the_failures_each_instruction_step_carries(tmp_path, op
     def method(workspace, services):
         calls.append(asked(workspace))
 
-    recipe = recipe_in("manual", tmp_path, method, batch_size=2, evaluation={"collect_failures": True})
+    recipe = recipe_in("manual", tmp_path, method, job_samples=2, evaluation={"collect_failures": True})
     dispatcher = open_dispatcher(recipe)
 
     def evaluation_rows():

@@ -1005,7 +1005,6 @@ model. Harness-evolution presets also carry ``recipe.config.evolution``:
        evolution:
          adapter: pi
          method: methods.mine:MyMethod
-         batch_size: 1
          evaluation:
            tasks: ["..."]
            scorer: methods.mine:MyScorer
@@ -1143,12 +1142,9 @@ and `Write a harness method <../developer-guide/write-a-harness-method.rst>`__
 describes the method contract. A key may use underscores or hyphens, and
 startup refuses an unknown key.
 
-.. config::
-
-   evolution.batch_size | 1 | the default ``pipeline.sample2job.config.job_samples``: the fewest traces of one evolve step; a step starts when this many traces are held
-
 The default stages train on every valid scored report as a trace, including
-successful outcomes. To train on recorded traffic alone, every ``job_samples``
+successful outcomes. A step starts when ``pipeline.sample2job.config.job_samples``
+traces are held, 1 by default. To train on recorded traffic alone, every ``job_samples``
 requests with unscored samples, set
 ``pipeline.record2sample.module: reef.record2sample.traces:InferenceSamples``.
 Reef refuses ``batch_size`` and ``batch_policy`` directly under
@@ -1410,8 +1406,8 @@ framework's own off-policy limit goes in that backend's
 Reef submits one training job for each job's data. ``job_samples`` is the
 fewest samples that one job trains. A weight recipe requires it: a
 deployment without it fails the recipe build with a ``RecipeConfigError``
-that names ``pipeline.sample2job.config.job_samples``. Harness evolution uses
-``evolution.batch_size`` when the key is absent.
+that names ``pipeline.sample2job.config.job_samples``. The harness evolution
+stages default it to 1.
 
 The training component cuts each job's data into optimizer batches by its own
 batch size: Slime's ``--global-batch-size``
@@ -1440,7 +1436,7 @@ and ``buffer_size``. A recipe's page lists the other keys of its stage.
 
 .. config::
 
-   pipeline.sample2job.config.job_samples | required for weight recipes; ``evolution.batch_size`` for harness evolution | the fewest samples of one job, a positive int; at most the stage's grid for TTTD and SDPO
+   pipeline.sample2job.config.job_samples | required for weight recipes; 1 for the harness evolution stages | the fewest samples of one job, a positive int; at most the stage's grid for TTTD and SDPO
    pipeline.sample2job.config.buffer_size | ``job_samples`` | the most samples that one job takes from the buffer, beside the rest of a group that those samples touch; at least ``job_samples``. Uploaded trajectories count toward it. Samples beyond it wait in the sample store for later jobs.
 
 Reef checks each stage when it loads the recipe config, before a scenario
