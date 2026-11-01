@@ -12,10 +12,12 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from types import MappingProxyType
 
 from reef.artifact.artifact import Artifact, ArtifactValidator
-from reef.artifact.files import ArtifactFiles
+from reef.artifact.files import ArtifactFiles, directory_content_id
+from reef.artifact.sources import SourceFiles
 from reef.core.components import validate_component_name
 from reef.core.evaluation import ARTIFACT_KINDS, ArtifactKind
 
@@ -98,8 +100,13 @@ class ArtifactLayout(ABC):
     (``REFERENCE_FILE``, RFC #995) to the revision's files; then an import from a source that keeps its files fixed
     stores the reference instead of a copy. The default is false: an import always stores a copy.
 
-    Purpose: a recipe binds it on ``ComponentSurface.layout``; the committer checks an import with it and decides
-    what the import stores.
+    ``stored(files, directory)`` checks ``files``, then stores them in the empty directory ``directory``:
+    ``files.reference`` when the source keeps the files fixed and ``resolves_references`` is true (RFC #995), else
+    a copy of the files (RFC #980). It returns the unpublished artifact in ``directory``, whose content id is
+    ``files.content_id()`` (a copy has the same bytes, so its computed content id is equal).
+
+    Purpose: a recipe binds it on ``ComponentSurface.layout``. The committer stores an import with it, and the
+    scenario factory stores the artifact item that a new scenario starts from.
     """
 
     @abstractmethod
@@ -108,6 +115,17 @@ class ArtifactLayout(ABC):
     @property
     def resolves_references(self) -> bool:
         return False
+
+    def stored(self, files: SourceFiles, directory: Path) -> Artifact:
+        self.check(files)
+        if files.reference is None or not self.resolves_references:
+            files.copy_into(directory)
+            content_id = directory_content_id(directory)
+        else:
+            for path, data in files.reference.items():
+                (directory / path).write_bytes(data)
+            content_id = files.content_id()
+        return Artifact.local(directory, content_id=content_id)
 
 
 @dataclass(frozen=True)
@@ -232,6 +250,26 @@ class Surface:
     def single(self) -> bool:
         """True when the release is flat: the whole artifact is the one component, or there is none."""
         return len(self.components) <= 1
+
+    def import_target(self, component: str | None) -> tuple[str, ArtifactLayout]:
+        """The component that an import into ``component`` lands in, and the layout that checks it.
+
+        ``component`` may be ``None`` when the surface serves one component. Raise ``ValueError`` when it is
+        ``None`` and the surface serves several, for a component that the surface does not serve, and for a
+        component without a ``layout``, which takes no import.
+        """
+        if component is None:
+            if len(self.names) > 1:
+                raise ValueError(f"the scenario serves components {list(self.names)}: name the component")
+            if not self.names:
+                raise ValueError("the scenario serves no component, so it takes no imported artifact")
+            component = self.names[0]
+        if component not in self.components:
+            raise ValueError(f"the scenario has no component {component!r}")
+        layout = self.components[component].layout
+        if layout is None:
+            raise ValueError(f"component {component!r} takes no imported artifact")
+        return component, layout
 
     @property
     def loader_component(self) -> str | None:

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import pytest
 from tests.support.harness_steps import IdleMethod, evolution_config
 
-from reef.artifact import Artifact, ArtifactNotFound, InMemoryRepositoryBackend
+from reef.artifact import Artifact, ArtifactNotFound, DefaultStart, InMemoryRepositoryBackend
 from reef.dispatcher import Dispatcher
 from reef.evaluation.harness import EvaluationSettings
 from reef.harness.adapters import get_adapter
@@ -24,21 +26,24 @@ PI_RECIPE = HarnessEvolutionRecipe(
 )
 
 
+@dataclass(frozen=True, kw_only=True)
 class _HarnessRecipe(Recipe):
-    """A pull-delivery recipe that serves the harness surface harness evolution builds."""
+    """A pull-delivery recipe that serves the harness surface harness evolution builds; a new scenario's root holds
+    ``rules.md`` with the text ``rules``, or no file when ``rules`` is ``None``."""
+
+    rules: str | None = None
 
     def build_surface(self, scenario: str) -> Surface:
         return PI_RECIPE.build_surface(scenario)
 
+    def default_start(self) -> DefaultStart:
+        return DefaultStart(files={} if self.rules is None else {"rules.md": self.rules})
 
-def _service(tmp_path, *, recipe, rules: str | None) -> RequestService:
-    bootstrap = tmp_path / "bootstrap"
-    bootstrap.mkdir()
-    if rules is not None:
-        (bootstrap / "rules.md").write_text(rules, encoding="utf-8")
+
+def _service(tmp_path, *, recipe) -> RequestService:
     dispatcher = Dispatcher(
         recipe,
-        InMemoryRepositoryBackend.factory(bootstrap, root=tmp_path / "repository"),
+        InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "local",
         scenario_storage=SQLiteScenarioStorage(None),
         coordination=memory_coordination(),
@@ -48,7 +53,7 @@ def _service(tmp_path, *, recipe, rules: str | None) -> RequestService:
 
 
 def test_the_manifest_serves_the_release_rendered_or_as_its_source_tree(tmp_path) -> None:
-    service = _service(tmp_path, recipe=_HarnessRecipe(), rules="rule")
+    service = _service(tmp_path, recipe=_HarnessRecipe(rules="rule"))
     rendered = service.harness_manifest({"x-reef-scenario": "delivery"})
     assert rendered["files"] == PI_RULES_RENDER
     assert rendered["release_id"]
@@ -59,7 +64,7 @@ def test_the_manifest_serves_the_release_rendered_or_as_its_source_tree(tmp_path
 
 
 def test_current_files_rejects_a_weights_scenario_without_materializing(tmp_path, monkeypatch) -> None:
-    service = _service(tmp_path, recipe=Recipe(), rules="x")
+    service = _service(tmp_path, recipe=Recipe())
 
     def fail_materialize(ref):
         raise AssertionError("weights artifact must not be materialized for a files read")
@@ -72,7 +77,7 @@ def test_current_files_rejects_a_weights_scenario_without_materializing(tmp_path
 
 
 def test_current_files_never_creates_a_scenario(tmp_path) -> None:
-    service = _service(tmp_path, recipe=_HarnessRecipe(), rules="x")
+    service = _service(tmp_path, recipe=_HarnessRecipe(rules="x"))
     with pytest.raises(ArtifactNotFound):
         service.harness_manifest({"x-reef-scenario": "unknown"})
 
@@ -80,7 +85,7 @@ def test_current_files_never_creates_a_scenario(tmp_path) -> None:
 def test_manifest_error_distinguishes_a_scenario_without_a_published_tree(tmp_path) -> None:
     # A scenario exists and its recipe has a harness surface, but its release holds no tree yet. The message must
     # tell the operator that nothing has been published, not that the surface is missing.
-    service = _service(tmp_path, recipe=_HarnessRecipe(), rules=None)
+    service = _service(tmp_path, recipe=_HarnessRecipe(rules=None))
     with pytest.raises(ArtifactNotFound, match="holds no harness tree"):
         service.harness_manifest({"x-reef-scenario": "delivery"})
 
@@ -114,6 +119,7 @@ def test_harness_surface_ignores_repository_bookkeeping(tmp_path) -> None:
     assert surface.files.read_files(Artifact.local(root)) == PI_RULES_RENDER
 
 
+@dataclass(frozen=True, kw_only=True)
 class ClaudeHarnessRecipe(_HarnessRecipe):
     @property
     def harness_adapter(self) -> str | None:
@@ -123,8 +129,8 @@ class ClaudeHarnessRecipe(_HarnessRecipe):
 def test_scenario_list_names_the_harness_adapter(tmp_path) -> None:
     (tmp_path / "harness").mkdir()
     (tmp_path / "weights").mkdir()
-    harness = _service(tmp_path / "harness", recipe=ClaudeHarnessRecipe(), rules="x").dispatcher
-    weights = _service(tmp_path / "weights", recipe=Recipe(), rules="x").dispatcher
+    harness = _service(tmp_path / "harness", recipe=ClaudeHarnessRecipe(rules="x")).dispatcher
+    weights = _service(tmp_path / "weights", recipe=Recipe()).dispatcher
     assert [(row["scenario"], row["adapter"]) for row in harness.list_scenarios()] == [("delivery", "claude")]
     assert all("adapter" not in row for row in weights.list_scenarios())
     # A registered scenario that is not in memory, as while it loads or after its preload failed, names it too.

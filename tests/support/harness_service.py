@@ -1,8 +1,9 @@
 """Shared pieces of the harness service and backend tests: a seeded dispatcher, one step, a stub model.
 
-``harness_dispatcher`` writes the recipe's seed into the repository's
-bootstrap directory, as the service's assembly does through
-``base_artifact_source``, so a new scenario's base release is the seed tree.
+``harness_dispatcher`` is a dispatcher over an in-memory repository, so a
+new scenario's root release is the recipe's seed tree (``default_start``).
+``seed_root`` is that root for a trainer that a test builds outside a
+scenario.
 ``run_step`` drives one step of a scenario, which is one job of its harness
 training component (``drive_job``); ``backend_step`` drives one step of a
 backend alone, through the phases the job runs. ``catalog`` is the
@@ -21,13 +22,16 @@ from weakref import WeakKeyDictionary
 from tests.support.harness_steps import head_of
 from tests.support.samples_service import make_samples
 
-from reef.artifact import CachedRepositoryBackendFactory, InMemoryRepositoryBackend
+from reef.artifact import Artifact, CachedRepositoryBackendFactory, InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
+from reef.core.artifact_ref import RootSource
 from reef.core.evaluation import CandidateEvaluationPlugin
 from reef.dispatcher import Dispatcher
 from reef.evaluation.harness import ComparePolicy
 from reef.recipe import Recipe
+from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.runtime.interfaces import InferenceHandler
+from reef.runtime.jobs import ScenarioRoot
 from reef.scenario.scenario import Scenario
 from reef.service.request_service import RequestService
 from reef.storage.sql_coordination import memory_coordination
@@ -39,15 +43,18 @@ from reef.train.trainer import Trainer
 from reef.train.types import JobData, TrainStepResult
 
 
-def harness_repository(tmp_path: Path, base_files: Mapping[str, str]) -> CachedRepositoryBackendFactory:
-    """An in-memory repository whose base release holds ``base_files``."""
-    initial = tmp_path / "initial"
-    initial.mkdir(parents=True, exist_ok=True)
-    for relative, text in base_files.items():
-        path = initial / relative
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text, encoding="utf-8")
-    return InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
+def harness_repository(tmp_path: Path) -> CachedRepositoryBackendFactory:
+    """An in-memory repository under ``tmp_path``; a new scenario's root release holds the recipe's seed tree."""
+    return InMemoryRepositoryBackend.factory(directory=tmp_path / "repository")
+
+
+def seed_root(recipe: HarnessEvolutionRecipe) -> ScenarioRoot:
+    """The root release of a scenario created from ``recipe``'s default start, as a local tree under the recipe's
+    ``evolution.state_dir``."""
+    directory = Path(recipe.evolution.state_dir).expanduser() / ".seed-root"
+    if not directory.is_dir():
+        recipe.seed.write(directory)
+    return ScenarioRoot(Artifact.local(directory), RootSource("default", inputs=recipe.default_start().inputs))
 
 
 def harness_dispatcher(tmp_path: Path, recipe: Recipe, *, hold_local_cycles: bool = False) -> Dispatcher:
@@ -58,7 +65,7 @@ def harness_dispatcher(tmp_path: Path, recipe: Recipe, *, hold_local_cycles: boo
     """
     return Dispatcher(
         recipe,
-        harness_repository(tmp_path, recipe.base_artifact_source().files),
+        harness_repository(tmp_path),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
         hold_local_cycles=hold_local_cycles,

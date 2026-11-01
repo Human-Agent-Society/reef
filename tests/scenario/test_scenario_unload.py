@@ -64,6 +64,7 @@ class StepRecipe(Recipe):
         task_storage=None,
         releases=None,
         samples=None,
+        root=None,
     ):
         return Trainer.build(
             scenario,
@@ -73,6 +74,7 @@ class StepRecipe(Recipe):
             job_loop=None if self.backend is None else JobLoop(self.backend, scenario=scenario),
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
+            root=root,
         )
 
 
@@ -89,7 +91,7 @@ def make_dispatcher(
     (initial / "model.txt").write_text("initial", encoding="utf-8")
     return Dispatcher(
         StepRecipe(backend=backend),
-        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
+        InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=storage if storage is not None else SQLiteScenarioStorage(tmp_path / "records"),
         scenario_admission=admission,

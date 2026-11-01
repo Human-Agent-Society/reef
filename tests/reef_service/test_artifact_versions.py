@@ -71,11 +71,11 @@ def restart(tmp_path: Path, backend_factory) -> tuple[Dispatcher, ImportingCompo
 
 @pytest.mark.unit
 def test_the_status_names_each_components_active_artifact_and_training_start(tmp_path) -> None:
-    """Both start at the base artifact; training moves both, activation moves only the active one, and train-from
+    """Both start at the root release; training moves both, activation moves only the active one, and train-from
     moves only the training start."""
     value, _, _ = dispatcher(tmp_path)
     scenario = value.get_or_create_scenario("math")
-    base = scenario.repository.backend.resolve_release("base").release_id
+    base = scenario.repository.start_artifact.release_id
     (component,) = scenario.artifact_status()
 
     def artifacts() -> dict:
@@ -104,12 +104,9 @@ def test_activate_serves_an_existing_release_and_writes_no_artifact(tmp_path) ->
     # Each job commits its submission, its checkpoint and its end; only the checkpoint is an artifact.
     assert [row["operation"] for row in before] == ["training", "training", "training", "creation"]
     assert [row["active"] for row in before] == [True, False, False, False]
-    # A training step's release made its artifact; the creation made none and carries the base artifact.
+    # Each release made its own artifact: a training step's, and the creation's, the scenario's root release.
     assert all(row["artifact_id"] == row["release_id"] and row["component"] for row in before[:-1])
-    assert (
-        before[-1]["artifact_id"]
-        == value.get_or_create_scenario("math").repository.backend.resolve_release("base").release_id
-    )
+    assert before[-1]["artifact_id"] == value.get_or_create_scenario("math").repository.start_artifact.release_id
     target = before[-2]
     last_training_step = value.build_training_status()["scenarios"]["math"]["last_committed_step"]
     checkpoint = scenario.repository.checkpoint_artifact
@@ -239,7 +236,7 @@ def test_train_from_starts_a_new_experiment_run_segment_and_activate_does_not(tm
     train(value, 1)
     train(value, 2)
     creation, target = value.list_artifacts("math")[:-3:-1]
-    # The creation carries the base artifact: its artifact_id is the base release's, its release is the creation.
+    # The creation is the scenario's root release, whose artifact_id is its release_id.
     created, target_version = creation["artifact_id"], target["artifact_id"]
 
     value.activate("math", target_version)
@@ -493,8 +490,8 @@ def test_experiment_events_follow_durable_commits_and_a_new_training_start(
         assert all(stored_step >= event_step for event_step, stored_step in observed)
         assert observed[-1] == (3, 3)
         observed.clear()
-        # The creation carries the base artifact, named by the repository base release.
-        value.train_from("math", scenario.repository.backend.resolve_release("base").release_id)
+        # The creation's artifact is the scenario's root release.
+        value.train_from("math", scenario.repository.start_artifact.release_id)
         value.registry.experiment_reports.flush()
         # A new start leaves serving alone: the trained release still serves.
         assert observed == [(4, 4), True]
@@ -522,7 +519,7 @@ def test_a_slow_tracker_holds_up_neither_the_training_start_nor_scenario_resolut
     try:
         train(value, 1)
         monkeypatch.setattr(tracker, "record_train_from", record)
-        start = value.train_from("math", scenario.repository.backend.resolve_release("base").release_id)
+        start = value.train_from("math", scenario.repository.start_artifact.release_id)
         assert entered.wait(5), "the tracker was not called"
         assert runtime.inference.inference_admission_status["open"]
         assert value.get_or_create_scenario("math") is scenario

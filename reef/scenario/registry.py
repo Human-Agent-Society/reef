@@ -36,7 +36,7 @@ from reef.observability import ExperimentTracker, NullExperimentTracker
 from reef.observability.commits import ExperimentReportQueue
 from reef.recipe.base import Recipe
 from reef.scenario.admission import LoadedScenario, ScenarioAdmission, ScenarioLimits
-from reef.scenario.factory import ScenarioFactory
+from reef.scenario.factory import ItemStart, ScenarioFactory
 from reef.scenario.scenario import Scenario
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage
 from reef.train.instructions import InstructionQueue
@@ -241,7 +241,7 @@ class ScenarioRegistry:
     def get_or_create(
         self,
         scenario: str,
-        release_id: str | None = None,
+        start: ItemStart | None = None,
         *,
         allow_implicit_creation: bool | None = None,
     ) -> Scenario | None:
@@ -249,16 +249,19 @@ class ScenarioRegistry:
 
         A missing scenario is created when ``allow_implicit_creation`` is true
         (defaulting to the registry's deployment flag); otherwise ``None`` is
-        returned so the caller can surface an unknown-scenario error.
+        returned so the caller can surface an unknown-scenario error. A
+        created scenario's root release holds the artifact item ``start``, or
+        the recipe's default start when ``start`` is ``None``
+        (``ScenarioFactory.load_or_create``).
         """
         if allow_implicit_creation is None:
             allow_implicit_creation = self._allow_implicit_creation
         with self.lock_for(scenario):
             if not allow_implicit_creation and not self.has(scenario):
                 return None
-            return self._resolve(scenario, release_id)
+            return self._resolve(scenario, start)
 
-    def get_loaded(self, scenario: str, release_id: str | None = None) -> Scenario | None:
+    def get_loaded(self, scenario: str) -> Scenario | None:
         """The loaded instance, or None: nothing is created or recovered, and the scenario's lock is not taken.
 
         An evaluation rollout's call resolves this way. A delete or a
@@ -268,7 +271,6 @@ class ScenarioRegistry:
         """
         current = self.get_optional(scenario)
         if current is not None:
-            self._scenario_factory.validate_existing(current, release_id)
             self.touch(scenario)
         return current
 
@@ -391,7 +393,7 @@ class ScenarioRegistry:
         for the records after their recovered progress.
         """
         with self.lock_for(scenario):
-            recovered = self._scenario_factory.load_or_create(scenario, None)
+            recovered = self._scenario_factory.load_or_create(scenario)
             self.apply_stored_settings(recovered)
             with self._lock:
                 dropped = self._scenarios.get(scenario)
@@ -482,22 +484,17 @@ class ScenarioRegistry:
                 instance.name,
             )
 
-    def _resolve(
-        self,
-        scenario: str,
-        release_id: str | None,
-    ) -> Scenario:
+    def _resolve(self, scenario: str, start: ItemStart | None) -> Scenario:
         with self._lock:
             current = self._scenarios.get(scenario)
         if current is not None:
-            self._scenario_factory.validate_existing(current, release_id)
             self.touch(scenario)
             return current
         if not self._scenario_factory.has_registration(scenario):
             self.check_creation(scenario)
         self.take_load_slot(scenario)
         try:
-            current = self._scenario_factory.load_or_create(scenario, release_id)
+            current = self._scenario_factory.load_or_create(scenario, start)
             self.apply_stored_settings(current)
         finally:
             with self._lock:

@@ -11,7 +11,7 @@ from threading import Event
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
-from tests.support.harness_service import backend_step, catalog, drive_trainer_job, harness_dispatcher
+from tests.support.harness_service import backend_step, catalog, drive_trainer_job, harness_dispatcher, seed_root
 from tests.support.harness_steps import COMPONENT, TreeReleases, changed_rules, harness_backend, harness_recipe
 from tests.support.samples_service import make_samples
 
@@ -462,7 +462,9 @@ def test_the_step_row_keeps_the_backends_training_request_and_fills_a_step_that_
         (tmp_path / str(index)).mkdir()
         recipe = manual_recipe(tmp_path / str(index), method)
         records = SQLiteRecordStore()
-        trainer = recipe.build("agents", records, releases=ComponentReleases(TreeReleases(recipe.seed), COMPONENT))
+        trainer = recipe.build(
+            "agents", records, releases=ComponentReleases(TreeReleases(recipe.seed), COMPONENT), root=seed_root(recipe)
+        )
         try:
             trainer.queue_instructions([TrainingRequest.from_dict(payload, request_id="ask-1")])
             make_samples(trainer)
@@ -476,7 +478,7 @@ def test_the_step_row_keeps_the_backends_training_request_and_fills_a_step_that_
 
 
 def test_the_manifest_carries_the_addressed_releases_requires(tmp_path: Path) -> None:
-    """The seed's base release requires nothing; the release a request with two items published carries them;
+    """The seed's root release requires nothing; the release a request with two items published carries them;
     the manifest of each carries that release's own list."""
 
     def method(workspace, services):

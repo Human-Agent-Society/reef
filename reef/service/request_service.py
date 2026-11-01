@@ -34,7 +34,7 @@ from reef.service.wire import (
     ReportPayload,
     RequestHeaders,
     parse_request_headers,
-    scenario_headers,
+    scenario_header,
     with_request_tags,
 )
 from reef.train.harness_backend.backend import StepProgress
@@ -116,8 +116,7 @@ class RequestService:
         self, headers: Mapping[str, str], payload: Mapping[str, Any], *, request_id: str | None = None
     ) -> tuple[str, str]:
         """Queue a training instruction (``Dispatcher.accept_instruction``); return its scenario and ID."""
-        scenario, release_id = scenario_headers(headers)
-        item = self._dispatcher.accept_instruction(scenario, payload, request_id=request_id, release_id=release_id)
+        item = self._dispatcher.accept_instruction(scenario_header(headers), payload, request_id=request_id)
         return item.scenario, item.id
 
     def accept(
@@ -139,8 +138,7 @@ class RequestService:
         A stable client ID makes uploads retryable. The scenario comes from
         the headers, and importing never invokes an inference handler.
         """
-        parsed, item = self.prepare_import_record(headers, body)
-        return self._dispatcher.accept_record(item, release_id=parsed.release_id)
+        return self._dispatcher.accept_record(self.prepare_import_record(headers, body))
 
     def import_records(self, headers: Mapping[str, str], body: Mapping[str, object]) -> tuple[AgentRecord, ...]:
         """Import a bounded, atomic batch using the existing record contract."""
@@ -151,13 +149,10 @@ class RequestService:
         for record in records:
             if not isinstance(record, Mapping):
                 raise ValueError("each record must be an object")
-            parsed, item = self.prepare_import_record(headers, record)
-            items.append(item)
-        return self._dispatcher.accept_records(items, release_id=parsed.release_id)
+            items.append(self.prepare_import_record(headers, record))
+        return self._dispatcher.accept_records(items)
 
-    def prepare_import_record(
-        self, headers: Mapping[str, str], body: Mapping[str, object]
-    ) -> tuple[RequestHeaders, AgentRecord]:
+    def prepare_import_record(self, headers: Mapping[str, str], body: Mapping[str, object]) -> AgentRecord:
         if body.keys() - {"agent_record_id", "request_type", "payload"}:
             raise ValueError("record fields must be agent_record_id, request_type and payload")
         record_id = body.get("agent_record_id")
@@ -171,14 +166,13 @@ class RequestService:
             raise ValueError("record payload must be an object")
         parsed = parse_request_headers(headers, RequestType(request_type))
         normalized, references = normalize_request_payload(parsed.request_type, payload)
-        item = AgentRecord.create(
+        return AgentRecord.create(
             scenario=parsed.scenario,
             request_type=parsed.request_type,
             payload=with_request_tags(normalized, parsed),
             agent_record_id=record_id,
             references=references,
         )
-        return parsed, item
 
     def harness_manifest(
         self,
@@ -375,7 +369,7 @@ class RequestService:
         if files is None:
             raise ArtifactNotFound(
                 f"scenario {scenario.name!r} serves no files: release {artifact.ref.release_id!r} holds no "
-                "harness tree. The base release holds the recipe's evolution.seed, so an empty seed serves "
+                "harness tree. A root release made from the default start holds the recipe's evolution.seed, so an empty seed serves "
                 "nothing until a step publishes a tree."
             )
         manifest = {
@@ -634,7 +628,7 @@ class RequestService:
         parsed = parse_request_headers(headers, RequestType.INFERENCE)
         if not self._dispatcher.has_scenario(parsed.scenario):
             raise ArtifactNotFound(f"unknown scenario {parsed.scenario!r}")
-        scenario = self._dispatcher.get_or_create_scenario(parsed.scenario, release_id=parsed.release_id)
+        scenario = self._dispatcher.get_or_create_scenario(parsed.scenario)
         if scenario is None:
             raise ReefError(f"scenario {parsed.scenario!r} disappeared during lookup")
         if scenario.surface.files is None:
@@ -667,10 +661,7 @@ class RequestService:
             artifact_ref=artifact_ref,
         )
         try:
-            return self._dispatcher.accept_record(
-                item,
-                release_id=parsed.release_id,
-            )
+            return self._dispatcher.accept_record(item)
         except Exception as exc:
             logger.warning(
                 "dispatcher rejected %s record for scenario %r (record %s): %s: %s",

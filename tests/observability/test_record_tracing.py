@@ -449,14 +449,11 @@ def test_observed_storage_reports_first_inserts_and_landed_commits_and_isolates_
 
 @pytest.mark.unit
 def test_dispatcher_traffic_reaches_the_observer_through_the_storage(tmp_path) -> None:
-    initial = tmp_path / "initial"
-    initial.mkdir()
-    (initial / "model.txt").write_text("w0")
     observer = _CapturingObserver()
     component = ImportingComponent(tmp_path / "checkpoints")
     dispatcher = Dispatcher(
         TestPolicyRecipe(**runtime_bindings(component, component.inference)),
-        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
+        InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=ObservedScenarioStorage(SQLiteScenarioStorage(tmp_path / "records"), observer),
         coordination=memory_coordination(),

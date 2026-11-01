@@ -27,7 +27,7 @@ from tests.support.harness_methods import (
     proposal_reply,
     served_runtime,
 )
-from tests.support.harness_service import backend_step, drive_job, harness_dispatcher, report_once
+from tests.support.harness_service import backend_step, drive_job, harness_dispatcher, report_once, seed_root
 from tests.support.harness_steps import COMPONENT, TreeReleases, build_harness_backend, harness_recipe, head_of
 
 import recipes.meta_harness
@@ -289,7 +289,9 @@ def test_a_deployment_names_the_method_for_any_adapter(tmp_path: Path, adapter: 
     assert recipe.method.settings == MetaHarnessSettings(mode="incumbent_only", components=("rules",))
     assert recipe.evolution.adapter == adapter and recipe.seed == SEED
     releases = ComponentReleases(TreeReleases(recipe.seed), COMPONENT)
-    assert isinstance(recipe.build("general-task", SQLiteRecordStore(), releases=releases), Trainer)
+    assert isinstance(
+        recipe.build("general-task", SQLiteRecordStore(), releases=releases, root=seed_root(recipe)), Trainer
+    )
 
 
 def test_terminus_extension_uses_shared_recipe_run_runner_and_publication(tmp_path, monkeypatch) -> None:

@@ -227,6 +227,14 @@ Common members
 |                                                   |                             | ``/reef/status``               |
 +---------------------------------------------------+-----------------------------+--------------------------------+
 
+``check_root_start(root)`` checks an item start before scenario registration.
+``root`` is the recipe's ``ScenarioRoot``, with its artifact and source.
+The default calls ``training_component.root_start`` when that component is
+bound. A recipe with several trainers must check each
+trainer's root view and raise ``ValueError`` if any component refuses it.
+``CompositeRecipe`` does this for each child recipe, using the same root view
+as trainer construction. A refusal leaves the scenario unregistered.
+
 Every recipe may declare ``report_type``, the ``ReportBase`` subclass its
 reports parse as (``None`` keeps ingress open), and ``harness_adapter``, the
 adapter ``GET /reef/harness`` renders the recipe's harness releases for
@@ -784,27 +792,21 @@ plugin implements one class method:
   an invalid value.
 - ``context`` is a ``RepositoryBackendContext``. ``work_dir`` and ``cache_dir``
   are ``storage.artifact_work_dir`` and ``storage.artifact_cache_dir``.
-  ``base`` is a ``BaseArtifactSource``: the content of the recipe's base
-  artifact (``files``, and ``model_files`` under ``model_component``) and
-  the configuration it comes from (``inputs``). ``model_files`` is a
-  ``BaseModelFiles``: its ``directory()`` makes the model files on its first
-  call and returns their directory.
 
-Every repository starts from its base artifact. A backend must:
+Every scenario owns its root release, which Reef writes when it creates the
+scenario (`The root release <../user-guide/operate.rst#the-root-release>`__).
+A backend shares no release between scenarios. It must:
 
-- Import ``context.base`` as the repository's base release when the
-  repository has none. The release has no parent, and its content ID is
-  ``base.content_id``. Call ``base.model_files.directory()`` only for this
-  import, so that a process that opens only repositories that have a base
-  makes no model files.
-- Refuse to open a repository whose base was imported from other
-  ``base.inputs``. Name both in the error. Refuse a repository whose base was
-  not imported.
-- Resolve ``resolve_release("base")`` to the base release. A new scenario
-  forks from it unless the request names another release.
-- Keep each component entry's ``artifact_id`` in the manifests it stores. A
-  fork keeps the selected release's entries, so creating a scenario makes no
-  artifact.
+- Implement ``register(root, *, metadata)``. ``root`` is an unpublished
+  ``Artifact`` whose ``local_path`` is a directory. When the scenario has no
+  head, store the files of ``root`` as a release with no parent, with
+  ``root.ref.content_id`` and ``metadata``, and make it the head in one atomic
+  step. When the scenario has a head, also one that another caller registered
+  first, store nothing and return that head.
+- Resolve ``resolve_release(release_id)`` to a release that the repository
+  holds, and raise ``ArtifactNotFound`` for any other ID. No ID names a
+  shared release.
+- Keep each component entry's ``artifact_id`` in the manifests it stores.
 
 The optional capabilities are separate base classes. Inherit only the ones
 that the backend supports:
@@ -1993,12 +1995,13 @@ Neither inherits from the other, and no trainer holds a serving engine.
   current one.
 * ``FullWeightServingRuntime`` serves one scenario's full Hugging Face
   weights. The engines start with the base model. Each release loads its
-  files, the base artifact's included, unless the engines serve its content
+  files, a root release's included, unless the engines serve its content
   already.
 
-The base artifact has the layout of every other release of its component, so
-no runtime treats it as a special case. An adapter runtime loads its
-untrained adapter, and the Tinker runtime samples its untrained adapter.
+A root release made from the default start has the layout of every other
+release of its component, so no runtime treats it as a special case. An
+adapter runtime loads its untrained adapter, and the Tinker runtime samples
+its untrained adapter.
 
 Two training scenarios can share a deployment only if its training component
 allows it (``shares_scenarios``) and its runtime serves each scenario its own
@@ -2086,17 +2089,22 @@ loop:
        files that an engine loads, such as Tinker's manifests. The serving
        assembly configures the engines from it and refuses a serving runtime
        that cannot load it.
-   * - ``base_artifact_source()``
-     - The component's untrained checkpoint as a ``BaseArtifactSource``, laid
-       out as one of its releases, with the ``inputs`` that decide its
-       content. Reef imports it as the base artifact. Slime gives the
-       ``hf_checkpoint`` directory, or with LoRA an adapter whose weights are
-       zero. Tinker gives the checkpoint of its untrained adapter, which it
-       makes only when a repository imports the base artifact or the
-       training process runs jobs.
-   * - ``base_start``
-     - The start of a job from the untrained checkpoint, a non-empty string.
-       The first job of every trainer starts from it.
+   * - ``default_start()``
+     - The component's untrained checkpoint as a ``DefaultStart``, laid out
+       as one of its releases, with the ``inputs`` that decide its content.
+       A scenario created without an artifact item holds it in its root
+       release. Slime gives the ``hf_checkpoint`` directory, or with LoRA an
+       adapter whose weights are zero. Tinker gives the checkpoint of its
+       untrained adapter, which it makes only when a scenario's root needs it
+       or the training process runs jobs.
+   * - ``root_start(root)``
+     - The start of the first job of a trainer without committed state, a
+       non-empty string. ``root`` is a ``ScenarioRoot``: the trainer's
+       component of the scenario's root release and the root's
+       ``RootSource``. The default is ``import_start`` of the root's files.
+       Slime, which imports no release, returns its startup weights when the
+       root's source is its default start with equal ``inputs``, and raises
+       ``ValueError`` naming both otherwise.
    * - ``submit(job)``
      - Record the job durably and return; the job runs in the background.
        Submitting a job ID again does nothing.

@@ -12,6 +12,7 @@ from tests.support._threshold_processor import ThresholdJobData, threshold_pipel
 from tests.support.chat_templates import CharTemplate
 from tests.support.conversations import conversation
 from tests.support.runtime_stubs import (
+    STUB_ROOT,
     RecordingComponent,
     StubInferenceRuntime,
     StubTrainingComponent,
@@ -24,6 +25,7 @@ from recipes.tttd import TTTDGroupedRolloutReport, TTTDJobData, TTTDSamples, TTT
 from reef.artifact import ArtifactRef, InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
 from reef.core.chat_rendering import rendered_job_data
+from reef.core.errors import TrainingStartRefused
 from reef.core.plugins import PluginConfigError
 from reef.core.reports import ReportValidationError
 from reef.core.trajectories import source_record_id, trajectory_reward
@@ -32,6 +34,7 @@ from reef.recipe import WeightTrainingRecipe, WeightTrainingSpec
 from reef.record2sample.assembly import SampleAssemblySettings
 from reef.record2sample.service import ProducedSamples
 from reef.runtime.interfaces import TrainingMethod
+from reef.runtime.jobs import ScenarioRoot
 from reef.storage.commit_history import CommitHistoryScenarioStore
 from reef.storage.commits import CommitRecord
 from reef.storage.samples import TrainerSamples
@@ -61,6 +64,7 @@ def preparing_trainer(records: SQLiteRecordStore, **options) -> Trainer:
     values = {
         "pipeline_factory": partial(threshold_pipeline, job_samples=1),
         "job_loop": JobLoop(RecordingComponent(), scenario="math"),
+        "root": STUB_ROOT,
     }
     return Trainer.build("math", records, **{**values, **options})
 
@@ -447,7 +451,33 @@ def test_a_training_trainer_without_job_samples_is_refused() -> None:
             SQLiteRecordStore(),
             pipeline_factory=threshold_pipeline,
             job_loop=JobLoop(RecordingComponent(), scenario="math"),
+            root=STUB_ROOT,
         )
+
+
+class _RefusingRoots(RecordingComponent):
+    """A component that cannot start from any scenario root."""
+
+    def root_start(self, root: ScenarioRoot) -> str:
+        raise ValueError("the root holds other weights")
+
+
+@pytest.mark.unit
+def test_a_new_trainer_starts_from_its_root_and_a_refused_root_refuses_the_trainer() -> None:
+    """A trainer without committed state starts at the component's start of its scenario's root; it needs the root,
+    and a root that the component cannot start from is a ``TrainingStartRefused`` that names the root."""
+    trainer = preparing_trainer(SQLiteRecordStore())
+    assert JobLoopState.from_dict(trainer.state).start == "recording:base"
+    with pytest.raises(ValueError, match="starts from the scenario's root: give root"):
+        preparing_trainer(SQLiteRecordStore(), root=None)
+    with pytest.raises(TrainingStartRefused, match=r"from its root release local:.*: the root holds other weights"):
+        preparing_trainer(SQLiteRecordStore(), job_loop=JobLoop(_RefusingRoots(), scenario="math"))
+    # Committed state wins: the root is not read.
+    committed = JobLoopState("committed").to_dict()
+    restored = preparing_trainer(
+        SQLiteRecordStore(), job_loop=JobLoop(_RefusingRoots(), scenario="math"), algorithm_state=committed
+    )
+    assert restored.state == committed
 
 
 @pytest.mark.unit
@@ -599,6 +629,7 @@ def test_a_grouped_recipe_trains_one_comparison_set_as_one_job(tmp_path) -> None
             task_storage=None,
             releases=None,
             samples=None,
+            root=None,
         ):
             return Trainer.build(
                 scenario,
@@ -608,11 +639,12 @@ def test_a_grouped_recipe_trains_one_comparison_set_as_one_job(tmp_path) -> None
                 job_parameters=self.parameters_by_kind(),
                 algorithm_state=algorithm_state,
                 experiment_logger=experiment_logger,
+                root=root,
             )
 
     dispatcher = Dispatcher(
         GroupedPgRecipe(**runtime_bindings(component, inference_runtime), name="grouped_pg"),
-        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
+        InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(),
         coordination=memory_coordination(),
@@ -635,7 +667,7 @@ def test_a_grouped_recipe_trains_one_comparison_set_as_one_job(tmp_path) -> None
     prepared = prepare_slime_job(job.data, TrainingMethod(_GROUPED_PG_OBJECTIVE), {}, StepScheduling(), step_size=1)
     assert prepared.payload is not None and prepared.payload["advantages"] == pytest.approx([-1.0, 1.0])
     assert scenario.repository.current_artifact == scenario.repository.checkpoint_artifact
-    # After the base release, the job's checkpoint is what the scenario serves.
+    # After the root release, the job's checkpoint is what the scenario serves.
     assert inference_runtime.activated[1:] == ["w1"]
 
 

@@ -14,9 +14,9 @@ from tests.support.runtime_stubs import StubInferenceRuntime, runtime_bindings
 
 from reef.artifact import (
     Artifact,
-    ArtifactConflict,
     ArtifactError,
     ArtifactPublicationError,
+    DefaultStart,
     InMemoryRepositoryBackend,
     Repository,
 )
@@ -50,21 +50,15 @@ class WeightRecipe(Recipe):
     def build_surface(self, scenario: str) -> Surface:
         return create_weight_surface(kind="model")
 
-
-class ForkFailingBackend(InMemoryRepositoryBackend):
-    """A repository whose scenario fork always fails."""
-
-    def fork(self, release_id: str | None = None, *, metadata=None):
-        raise ArtifactError("cannot fork math")
+    def default_start(self) -> DefaultStart:
+        return DefaultStart(files={"model.txt": "base"})
 
 
-def base_directory(tmp_path: Path, **files: str) -> Path:
-    """The base artifact directory ``tmp_path/initial`` holding ``files`` (name to text)."""
-    initial = tmp_path / "initial"
-    initial.mkdir()
-    for name, text in files.items():
-        (initial / name).write_text(text)
-    return initial
+class RegisterFailingBackend(InMemoryRepositoryBackend):
+    """A repository whose scenario registration always fails."""
+
+    def register(self, root, *, metadata):
+        raise ArtifactError("cannot register math")
 
 
 #: The model name under which the stub engine serves every scenario.
@@ -76,7 +70,7 @@ def serving_runtime() -> StubInferenceRuntime:
     return StubInferenceRuntime(model_path=SERVED_MODEL)
 
 
-def weight_dispatcher(tmp_path, initial, *, training: bool = False):
+def weight_dispatcher(tmp_path, *, training: bool = False):
     """A dispatcher of weight scenarios that a stub runtime serves; ``training`` gives them a training component.
     The commit history is durable, so a commit's activation moves the served row."""
     return Dispatcher(
@@ -85,7 +79,7 @@ def weight_dispatcher(tmp_path, initial, *, training: bool = False):
             if training
             else WeightRecipe(runtime=serving_runtime())
         ),
-        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
+        InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "local",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
         coordination=memory_coordination(),
@@ -104,9 +98,7 @@ def serving_dispatcher(tmp_path) -> Dispatcher:
     only for a scenario that exists. The commit history is durable, so a commit's activation moves the served row."""
     dispatcher = Dispatcher(
         Recipe(runtime=serving_runtime()),
-        InMemoryRepositoryBackend.factory(
-            base_directory(tmp_path, **{"model.txt": "base"}), root=tmp_path / "repository"
-        ),
+        InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "local",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
         coordination=memory_coordination(),
@@ -192,23 +184,21 @@ def test_dispatcher_isolates_agent_record_and_trainer_state_by_scenario() -> Non
 
 
 @pytest.mark.unit
-def test_scenario_release_id_is_bound_on_first_request(tmp_path) -> None:
-    backend = InMemoryRepositoryBackend.factory(base_directory(tmp_path, **{"model.txt": "base"}))
-    selected = backend("math").resolve_release().release_id
+def test_a_release_header_on_a_report_neither_selects_nor_binds_the_scenarios_start(tmp_path) -> None:
+    """A report creates its scenario from the recipe's default start; ``x-reef-release-id`` on a request names no
+    release to start from, so any value is accepted."""
+    backend = InMemoryRepositoryBackend.factory()
     dispatcher = build_default_dispatcher(
         backend_factory=backend, scenario_storage=SQLiteScenarioStorage(), coordination=memory_coordination()
     )
     service = RequestService(dispatcher)
-    headers = {
-        "x-reef-scenario": "math",
-        "x-reef-release-id": selected,
-    }
+    headers = {"x-reef-scenario": "math", "x-reef-release-id": "another-scenarios-release"}
 
     service.accept(headers, {"score": 1.0}, request_type=RequestType.REPORT)
+    service.accept({**headers, "x-reef-release-id": "other"}, {"score": 2.0}, request_type=RequestType.REPORT)
 
-    assert dispatcher.get_or_create_scenario("math").repository.base_artifact.release_id == selected
-    with pytest.raises(ArtifactConflict, match="already bound"):
-        service.accept({**headers, "x-reef-release-id": "other"}, {"score": 2.0}, request_type=RequestType.REPORT)
+    root = dispatcher.get_or_create_scenario("math").repository.start_artifact
+    assert root.parent_release_id is None and backend("math").current() == root
 
 
 @pytest.mark.unit
@@ -227,6 +217,7 @@ def test_dispatcher_uses_the_served_recipe_factory(tmp_path) -> None:
             task_storage=None,
             releases=None,
             samples=None,
+            root=None,
         ):
             selected.append(self.name)
             return super().build(
@@ -234,11 +225,12 @@ def test_dispatcher_uses_the_served_recipe_factory(tmp_path) -> None:
                 records,
                 algorithm_state=algorithm_state,
                 experiment_logger=experiment_logger,
+                root=root,
             )
 
     dispatcher = Dispatcher(
         RecordingRecipe(name="tttd"),
-        InMemoryRepositoryBackend.factory(base_directory(tmp_path)),
+        InMemoryRepositoryBackend.factory(),
         scenario_storage=SQLiteScenarioStorage(),
         coordination=memory_coordination(),
     )
@@ -249,8 +241,8 @@ def test_dispatcher_uses_the_served_recipe_factory(tmp_path) -> None:
 
 
 @pytest.mark.unit
-def test_report_first_request_forks_scenario_artifact(tmp_path) -> None:
-    backend = InMemoryRepositoryBackend.factory(base_directory(tmp_path))
+def test_report_first_request_registers_the_scenarios_root_release(tmp_path) -> None:
+    backend = InMemoryRepositoryBackend.factory()
     dispatcher = build_default_dispatcher(
         backend_factory=backend, scenario_storage=SQLiteScenarioStorage(), coordination=memory_coordination()
     )
@@ -266,7 +258,7 @@ def test_report_first_request_forks_scenario_artifact(tmp_path) -> None:
 
 @pytest.mark.unit
 def test_new_dispatcher_recovers_scenario_metadata_from_repository(tmp_path) -> None:
-    backend = InMemoryRepositoryBackend.factory(base_directory(tmp_path))
+    backend = InMemoryRepositoryBackend.factory()
 
     first = build_default_dispatcher(
         backend_factory=backend, scenario_storage=SQLiteScenarioStorage(), coordination=memory_coordination()
@@ -278,18 +270,15 @@ def test_new_dispatcher_recovers_scenario_metadata_from_repository(tmp_path) -> 
 
     recovered = second.get_or_create_scenario("math")
 
-    assert recovered.repository.base_artifact == created.repository.base_artifact
+    assert recovered.repository.start_artifact == created.repository.start_artifact
     assert recovered.repository.current_artifact == created.repository.checkpoint_artifact
     assert recovered.scenario_step == 0
 
-    with pytest.raises(ArtifactConflict, match="already bound"):
-        second.get_or_create_scenario("math", release_id="another-version")
-
 
 @pytest.mark.unit
-def test_failed_artifact_fork_returns_service_unavailable_and_does_not_leave_runtime(tmp_path) -> None:
+def test_failed_registration_returns_service_unavailable_and_does_not_leave_runtime(tmp_path) -> None:
     dispatcher = build_default_dispatcher(
-        backend_factory=ForkFailingBackend.factory(base_directory(tmp_path), root=tmp_path / "repository"),
+        backend_factory=RegisterFailingBackend.factory(directory=tmp_path / "repository"),
         scenario_storage=SQLiteScenarioStorage(),
         coordination=memory_coordination(),
     )
@@ -298,10 +287,10 @@ def test_failed_artifact_fork_returns_service_unavailable_and_does_not_leave_run
         async with serving_client(dispatcher) as client:
             response = await client.post("/reef/report", headers={"x-reef-scenario": "math"}, json={"score": 1.0})
             assert response.status == 503
-            assert await response.text() == "cannot fork math"
+            assert await response.text() == "cannot register math"
 
     asyncio.run(run())
-    with pytest.raises(ArtifactError, match="cannot fork math"):
+    with pytest.raises(ArtifactError, match="cannot register math"):
         dispatcher.get_or_create_scenario("math")
     assert dispatcher.registry.get_optional("math") is None
 
@@ -416,8 +405,11 @@ def test_artifact_proxy_backend_forwards_native_payload_unchanged(tmp_path) -> N
         received["artifact_path"] = request.headers["x-reef-artifact-path"]
         return web.json_response({"provider": "ok"})
 
-    repository_backend = InMemoryRepositoryBackend("chat", base_directory(tmp_path), root=tmp_path / "repository")
-    artifact = repository_backend.materialize(repository_backend.fork())
+    repository_backend = InMemoryRepositoryBackend("chat", directory=tmp_path / "repository")
+    (tmp_path / "root").mkdir()
+    artifact = repository_backend.materialize(
+        repository_backend.register(Artifact.local(tmp_path / "root"), metadata={})
+    )
     payload = {"model": "reef", "messages": [{"role": "user", "content": "hi"}]}
 
     async def run() -> None:
@@ -618,9 +610,7 @@ def test_published_candidate_is_used_by_next_inference(tmp_path) -> None:
         used_versions.append(artifact.ref.release_id)
         return {"version": artifact.ref.release_id}
 
-    repository_backend = InMemoryRepositoryBackend.factory(
-        base_directory(tmp_path, **{"model.txt": "base"}), root=tmp_path / "repository"
-    )
+    repository_backend = InMemoryRepositoryBackend.factory(directory=tmp_path / "repository")
     dispatcher = Dispatcher(
         Recipe(runtime=serving_runtime()),
         repository_backend,
@@ -664,7 +654,7 @@ def commit_saved_version(dispatcher, scenario: str, version: str, root: Path) ->
 
 def serving_weight_dispatcher(tmp_path, *, training: bool = False) -> Dispatcher:
     """A weight dispatcher whose scenario "chat" serves the saved version ``sglang-v1``."""
-    dispatcher = weight_dispatcher(tmp_path, base_directory(tmp_path, **{"model.txt": "base"}), training=training)
+    dispatcher = weight_dispatcher(tmp_path, training=training)
     dispatcher.get_or_create_scenario("chat")
     commit_saved_version(dispatcher, "chat", "sglang-v1", tmp_path)
     return dispatcher
@@ -892,11 +882,9 @@ def test_an_engine_that_aborts_twice_is_a_conflict_and_nothing_is_recorded(tmp_p
 def test_default_local_artifact_root_is_cleaned_up_with_repository(tmp_path) -> None:
     import gc
 
-    backend = InMemoryRepositoryBackend("chat", base_directory(tmp_path), root=tmp_path / "repository")
-    repository = Repository(
-        backend,
-        backend.resolve_release(),
-    )
+    backend = InMemoryRepositoryBackend("chat", directory=tmp_path / "repository")
+    (tmp_path / "root").mkdir()
+    repository = Repository(backend, backend.register(Artifact.local(tmp_path / "root"), metadata={}))
     local_root = repository.local_root
     assert local_root.is_dir()
 
@@ -910,7 +898,7 @@ def test_default_local_artifact_root_is_cleaned_up_with_repository(tmp_path) -> 
 def test_release_ids_are_independent_and_ignore_results_without_candidates(tmp_path) -> None:
     dispatcher = Dispatcher(
         Recipe(),
-        InMemoryRepositoryBackend.factory(base_directory(tmp_path), root=tmp_path / "repository"),
+        InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "local",
         scenario_storage=SQLiteScenarioStorage(),
         coordination=memory_coordination(),
@@ -945,7 +933,7 @@ def test_artifact_publication_failure_leaves_runtime_unchanged(tmp_path) -> None
 
     dispatcher = Dispatcher(
         Recipe(),
-        FailingBackend.factory(base_directory(tmp_path), root=tmp_path / "repository"),
+        FailingBackend.factory(directory=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "local",
         scenario_storage=SQLiteScenarioStorage(),
         coordination=memory_coordination(),
@@ -970,7 +958,7 @@ def test_artifact_publication_failure_leaves_runtime_unchanged(tmp_path) -> None
 
 def test_healthz_answers_without_token_while_other_routes_require_it(tmp_path) -> None:
     dispatcher = build_default_dispatcher(
-        backend_factory=InMemoryRepositoryBackend.factory(base_directory(tmp_path), root=tmp_path / "repository"),
+        backend_factory=InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         scenario_storage=SQLiteScenarioStorage(),
         coordination=memory_coordination(),
     )
@@ -1002,7 +990,7 @@ def test_any_accepted_token_authenticates_and_rotation_keeps_scenarios_reachable
     accepted token is equivalent, so a caller can rotate from one to another
     without losing access to the scenarios it created."""
     dispatcher = build_default_dispatcher(
-        backend_factory=InMemoryRepositoryBackend.factory(base_directory(tmp_path), root=tmp_path / "repository"),
+        backend_factory=InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         scenario_storage=SQLiteScenarioStorage(),
         coordination=memory_coordination(),
     )
@@ -1098,9 +1086,7 @@ def test_a_record_names_the_served_release_and_keeps_the_release_the_client_runs
 
     dispatcher = Dispatcher(
         recipe,
-        InMemoryRepositoryBackend.factory(
-            base_directory(tmp_path, **{"rules.md": "first"}), root=tmp_path / "repository"
-        ),
+        InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "local",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
         coordination=memory_coordination(),
