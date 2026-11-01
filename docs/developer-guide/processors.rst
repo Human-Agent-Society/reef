@@ -740,7 +740,8 @@ A generator can run rollouts of a task through the generator service, as
 SPADE does for its hint plays; those rollouts are not records, and do not
 train.
 The ``task_group`` objective centers and scales each reward within its task
-group, on Tinker's ``importance_sampling`` loss. The stage trains on no
+group, on the ``importance_sampling`` loss family (Tinker's built-in loss, or
+truncated importance sampling on Slime). The stage trains on no
 report: it holds the reports that are source sessions, and releases the others,
 such as a generator's own reports, without assembling them.
 
