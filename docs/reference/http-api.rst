@@ -566,12 +566,16 @@ scenario`_.
 Read, query, update and delete items
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-- ``GET /reef/namespaces/{owner}/data?kind=&scenario=&after=&limit=`` lists
-  the owner's items in the order they arrived, without content: ``{"owner",
-  "items", "next"}``. ``kind`` and ``scenario`` filter the items. ``after``
-  is the ``sequence`` of the last item of the previous page, 0 by default.
-  ``limit`` is 1 to 1000, 1000 by default. ``next`` is the ``after`` of the
-  next page, or null after the last item.
+- ``GET /reef/namespaces/{owner}/data?kind=&scenario=&after=&limit=&content=``
+  lists the owner's items in the order they arrived: ``{"owner", "items",
+  "next"}``. ``kind`` and ``scenario`` filter the items. ``after`` is the
+  ``sequence`` of the last item of the previous page, 0 by default. ``limit``
+  is 1 to 1000, 1000 by default. ``next`` is the ``after`` of the next page,
+  or null after the last item. With ``content=1``, each item has its
+  ``content``, as a read of the item gives it; the default ``content=0``
+  leaves it out. Use it with ``kind=artifact`` to read the artifact library's
+  kinds and sources in one page; a page of trajectories with content can be
+  large.
 - ``GET /reef/namespaces/{owner}/data/{id}`` returns one item with its
   ``content``. A task's ``content`` is null.
 - ``POST /reef/namespaces/{owner}/data/metadata`` takes ``{"ids": [...],
