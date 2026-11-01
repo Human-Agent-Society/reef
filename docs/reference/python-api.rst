@@ -734,9 +734,9 @@ load_id}``). ``kind``, ``owner`` and ``origin`` never change. A deployment
 selects the store in ``storage.data_store``; ``SQLiteDataStore`` and
 ``PostgresDataStore`` (``reef.storage.sql_data``) and ``MemoryDataStore`` are
 built in. Every operation names one owner and reads or writes only its items.
-The SQL stores link the record items of each owner into trajectories, as the
-record stores do, and keep only the messages that each item adds; reads return
-the whole content.
+Every store links the record items of each owner into trajectories, as the
+record stores do. The SQL stores keep only the messages that each item adds;
+reads return the whole content.
 
 .. list-table::
    :header-rows: 1
@@ -765,6 +765,13 @@ the whole content.
      - Removes the item; ``False`` for an unknown ID.
    * - ``task_path(item)``
      - A local directory with the files of a task item.
+   * - ``record_links(owner, item_ids)``
+     - The ``RecordLink`` of each given record item that has a message list:
+       ``parent``, the nearest ancestor in its trajectory that is still
+       stored (``None`` for a root), and ``entry_count``. A trajectory ends at
+       a call that no stored call names as parent; its calls are
+       ``reef.core.trajectory_index.trajectory_calls`` of the path from the
+       root. Reports and unknown IDs are left out.
    * - ``close()``
      - Releases the store's resources; a second call does nothing.
 
