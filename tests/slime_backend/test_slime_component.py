@@ -831,6 +831,18 @@ def test_a_recorded_trajectory_renders_with_the_models_chat_template(tmp_path, s
     assert data["tokens"][1] == [2, 213, 9, 197, 198] and data["loss_masks"][1] == [1, 1]
 
 
+@pytest.mark.unit
+def test_sft_trains_a_demonstration_that_records_no_reward(tmp_path, stacks) -> None:
+    stack = stacks(tmp_path)
+    stack.component.template = CharTemplate()
+    steps = [{"step_id": 1, "source": "user", "message": "q"}, {"step_id": 2, "source": "agent", "message": "ab"}]
+    demonstration = TrajectorySample({"schema_version": "ATIF-v1.7", "agent": {"name": "a"}, "steps": steps})
+    stack.run(TrainingMethod("sft"), step=0, batch=JobData("uploaded", (*batch_for(0).samples[:1], demonstration)))
+    (data,) = stack.processor.calls
+    # sft_loss reads no reward, so the row carries 0.
+    assert data["tokens"][1] == [2, 213, 9, 197, 198] and data["rewards"][1] == 0.0
+
+
 # -- Checkpoint storage
 
 
