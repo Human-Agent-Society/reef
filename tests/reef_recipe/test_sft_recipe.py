@@ -347,7 +347,7 @@ def test_sft_recipe_resolves_by_dotted_reference_and_builds_its_stages() -> None
     spec = SFTRecipe.training_spec()
     assert (spec.objective, spec.loss_family) == ("reef.recipe.sft:SftObjective", "sft")
     assert SftObjective.rollout_unit == "sample"
-    pipeline = recipe.build_pipeline(PipelineContext("science", TeacherContextReport, default_job_samples=16))
+    pipeline = recipe.build_pipeline(PipelineContext("science", TeacherContextReport))
     assert isinstance(pipeline.record2sample, SFTSamples)
     assert (pipeline.record2sample.target, pipeline.record2sample.max_tokens) == ("response", 8)
     assert isinstance(pipeline.sample2job, DistillJobData)

@@ -19,15 +19,16 @@ recipe:
     evolution:
       adapter: pi
       seed: seed/
-      batch_size: 3
       models: {reflection: {url: ..., model: ..., api_key_env: OPENAI_API_KEY}}
       method: {module: recipes.gepa:GEPA, config: {minibatch_size: 3, max_metric_calls: 150}}
       evaluation: {tasks: [...], scorer: ..., policy: compare, statistic: mean}
+pipeline:
+  sample2job:
+    config: {job_samples: 3}
 ```
 
 A step reads the traces of the reports that close its batch, so its minibatch
-holds at most `evolution.batch_size` traces. Set `batch_size` to
-`minibatch_size`.
+holds at most `job_samples` traces. Set `job_samples` to `minibatch_size`.
 
 The reflection prompt is upstream's prompt word for word, so it carries the
 text of each trace as it is. Other methods fence client text as untrusted

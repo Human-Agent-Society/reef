@@ -26,8 +26,7 @@ recipe:
       # release. The method adds its playbook block below them and keeps
       # them unchanged.
       seed: recipes/ace/examples/seed
-      # One reported session is one trace, and one trace is one step.
-      batch_size: 1
+      # One reported session is one trace. The default job_samples of 1 makes one trace one step.
       method:
         module: recipes.ace:ACE
         config:

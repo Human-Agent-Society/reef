@@ -3,6 +3,7 @@ from __future__ import annotations
 import time
 from contextlib import closing
 from dataclasses import replace
+from functools import partial
 
 import pytest
 from tests.support._grouped_pg import GROUPED_PG_OBJECTIVE as _GROUPED_PG_OBJECTIVE
@@ -58,9 +59,8 @@ def preparing_trainer(records: SQLiteRecordStore, **options) -> Trainer:
     """A trainer over ``records`` with the threshold pipeline, one sample a job, and a component whose jobs end in
     ``submit`` without a checkpoint."""
     values = {
-        "pipeline_factory": threshold_pipeline,
+        "pipeline_factory": partial(threshold_pipeline, job_samples=1),
         "job_loop": JobLoop(RecordingComponent(), scenario="math"),
-        "default_job_samples": 1,
     }
     return Trainer.build("math", records, **{**values, **options})
 
@@ -408,7 +408,7 @@ def test_trainer_takes_job_samples_and_buffers_one_job_only_with_a_backend() -> 
     for sequence in range(3):
         records.append(inference(f"i{sequence}"))
         records.append(report(f"r{sequence}", f"i{sequence}", 1.0))
-    trainer = preparing_trainer(records, default_job_samples=2)
+    trainer = preparing_trainer(records, pipeline_factory=partial(threshold_pipeline, job_samples=2))
     assert (trainer.job_samples, trainer.pipeline.buffer_size) == (2, 2)
     make_samples(trainer)
     assert trainer.run_once() is not None
@@ -422,20 +422,20 @@ def test_trainer_takes_job_samples_and_buffers_one_job_only_with_a_backend() -> 
         "job_samples": 2,
     }
 
-    observer = Trainer.build("math", records, pipeline_factory=threshold_pipeline, default_job_samples=2)
-    assert observer.pipeline.context.default_job_samples is None
+    # A trainer that trains nothing has no job size, so its pipeline keeps every sample.
+    observer = Trainer.build("math", records, pipeline_factory=threshold_pipeline)
     assert observer.job_samples is None
     assert observer.pipeline_status()["buffer_size"] is None
 
 
 @pytest.mark.unit
-def test_the_stage_config_sets_job_samples_over_the_default() -> None:
+def test_the_stage_config_sets_the_trainer_job_samples() -> None:
     def pipeline(context: PipelineContext) -> TrainingPipeline:
         return PipelineConfig.from_setting(
             {"sample2job": {"config": {"job_samples": 3}}}, spec=PipelineSpec(sample2job=ThresholdJobData), environ={}
         ).build(context)
 
-    trainer = preparing_trainer(SQLiteRecordStore(), pipeline_factory=pipeline, default_job_samples=2)
+    trainer = preparing_trainer(SQLiteRecordStore(), pipeline_factory=pipeline)
     assert (trainer.job_samples, trainer.pipeline.buffer_size) == (3, 3)
 
 
@@ -462,11 +462,11 @@ def test_trainer_refuses_job_samples_that_its_task_to_job_stage_cannot_hold(
     buffer_size, max_job_samples, message
 ) -> None:
     def pipeline(context: PipelineContext) -> TrainingPipeline:
-        stage = ThresholdJobData(context, buffer_size, None, max_job_samples=max_job_samples)
+        stage = ThresholdJobData(context, buffer_size, 3, max_job_samples=max_job_samples)
         return threshold_pipeline(context, sample2job=stage)
 
     with pytest.raises(PluginConfigError, match=message):
-        preparing_trainer(SQLiteRecordStore(), pipeline_factory=pipeline, default_job_samples=3)
+        preparing_trainer(SQLiteRecordStore(), pipeline_factory=pipeline)
 
 
 @pytest.mark.unit
@@ -484,12 +484,8 @@ def test_trainer_restores_algorithm_state_from_metadata() -> None:
 
     def pipeline(context: PipelineContext) -> TrainingPipeline:
         return threshold_pipeline(
-            PipelineContext(
-                context.scenario,
-                default_job_samples=context.default_job_samples,
-                samples=context.samples,
-                job_parameters=context.job_parameters,
-            )
+            PipelineContext(context.scenario, samples=context.samples, job_parameters=context.job_parameters),
+            job_samples=1,
         )
 
     first = preparing_trainer(records, pipeline_factory=pipeline, samples=samples)
@@ -607,12 +603,11 @@ def test_a_grouped_recipe_trains_one_comparison_set_as_one_job(tmp_path) -> None
             return Trainer.build(
                 scenario,
                 records,
-                pipeline_factory=grouped_policy_pipeline,
+                pipeline_factory=partial(grouped_policy_pipeline, job_samples=1),
                 job_loop=JobLoop(component, scenario=scenario),
                 job_parameters=self.parameters_by_kind(),
                 algorithm_state=algorithm_state,
                 experiment_logger=experiment_logger,
-                default_job_samples=1,
             )
 
     dispatcher = Dispatcher(

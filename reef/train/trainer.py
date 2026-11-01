@@ -109,18 +109,15 @@ class Trainer:
         task_storage: TaskStorage | None = None,
         samples: TrainerSamples | None = None,
         job_parameters: Mapping[SampleKind, Mapping[str, Any]] | None = None,
-        default_job_samples: int | None = None,
     ) -> Trainer:
         """Build a trainer and its pipeline.
 
         A trainer trains through ``job_loop`` (weight jobs, or harness steps as jobs of the harness training
         component), or without one, when it only consumes records.
-        ``default_job_samples`` is None or a positive int: ``evolution.batch_size``
-        for harness evolution, and None for a weight trainer, whose
-        deployment sets the size. The trainer's ``job_samples`` is the
-        sample-to-job stage's ``job_samples``, which is ``default_job_samples``
-        unless the stage config sets it; the stage checks its own size rules.
-        A trainer that trains with no ``job_samples`` is a ``PluginConfigError``.
+        The trainer's ``job_samples`` is the sample-to-job stage's
+        ``job_samples``: the stage config's value, or the stage's own default,
+        and the stage checks its own size rules. A trainer that trains with no
+        ``job_samples`` is a ``PluginConfigError``.
         ``job_parameters`` is the parameters of each job of ``job_loop``, by
         the kind of its samples (``PipelineContext.job_parameters``); the
         pipeline's stage gives them with each job's data. ``None`` gives
@@ -138,8 +135,6 @@ class Trainer:
                 samples=samples,
                 # None gives every kind empty parameters: the training component's own defaults.
                 job_parameters={kind: {} for kind in SAMPLE_KINDS} if job_parameters is None else job_parameters,
-                # A trainer that trains nothing has no job size, so its pipeline keeps every sample.
-                default_job_samples=default_job_samples if trains else None,
             )
         )
         if pipeline.training_mode != training_mode:

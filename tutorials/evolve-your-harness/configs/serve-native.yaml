@@ -17,8 +17,7 @@ recipe:
     evolution:
       adapter: native
       # The default pipeline stages batch every valid scored report, a passing one included.
-      # batch_size 1 makes each report one evolve step.
-      batch_size: 1
+      # The default job_samples of 1 makes each report one evolve step.
       # The native variant of the method beside this file (harness/plugins.py):
       # one call to the served model turns the failing traces into one change
       # of a skill, tool, hook, agent or the loop graph.

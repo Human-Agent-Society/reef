@@ -6,6 +6,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from threading import Event, Thread
 
@@ -68,11 +69,11 @@ class StepRecipe(Recipe):
         return Trainer.build(
             scenario,
             records,
-            pipeline_factory=threshold_pipeline,
+            # A trainer that trains nothing has no job size, so its pipeline keeps every sample.
+            pipeline_factory=partial(threshold_pipeline, job_samples=None if self.backend is None else 1),
             job_loop=None if self.backend is None else JobLoop(self.backend, scenario=scenario),
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
-            default_job_samples=1,
         )
 
 

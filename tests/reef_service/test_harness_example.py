@@ -32,6 +32,7 @@ from reef.harness.tasks.run import TaskResult
 from reef.harness.tasks.trajectory import final_assistant_text
 from reef.harness.tree import HarnessTree, validate_patch
 from reef.inference.http import InferenceProxyRuntime
+from reef.pipeline_context import PipelineContext
 from reef.recipe import load_recipe_config
 from reef.recipe.config import recipe_config_from_file_layout
 from reef.recipe.harness import HarnessEvolutionRecipe
@@ -217,7 +218,7 @@ def test_materializer_accepts_config_without_execution_sections(monkeypatch, tmp
     materializer.materialize(serve, tmp_path / "work")
     result = yaml.safe_load((tmp_path / "work/recipes/harness_evolve.yaml").read_text())
     assert set(result) == {"recipe", "inference"}
-    assert result["recipe"]["config"]["evolution"]["batch_size"] == 1
+    assert result["recipe"]["config"]["evolution"] == config["recipe"]["config"]["evolution"]
 
 
 def write_recipe_file(path: Path, config: dict, evolution: dict) -> None:
@@ -270,7 +271,7 @@ def test_the_serve_file_boots_the_recipe_through_from_environment(tmp_path, monk
     tasks = built.configured_tasks()
     assert len(tasks) == 3
     assert all(any(task.startswith(prefix) for prefix in evolution.ANSWERS) for task in tasks)
-    assert (built.batch_size, built.training_mode, built.evaluation.policy) == (1, "auto", "compare")
+    assert (built.training_mode, built.evaluation.policy) == ("auto", "compare")
     assert type(built.method).__name__ == "RulesMethod" and type(built.scorer).__name__ == "AnswerScorer"
     # The seed is the starter rules and carries no provider; the binding comes from the runtime.
     assert built.seed == PI_SEED and set(PI_SEED.files) == {"rules.md"}
@@ -285,6 +286,8 @@ def test_the_serve_file_boots_the_recipe_through_from_environment(tmp_path, monk
     assert list(built.model_bindings()) == ["served"]
     trainer = built.build("demo", SQLiteRecordStore(), releases=releases_for(built))
     assert isinstance(trainer, Trainer)
+    # serve.yaml sets no job_samples, so each report is one step.
+    assert trainer.job_samples == 1
     trainer.close()
 
 
@@ -297,7 +300,9 @@ def test_the_native_serve_file_boots_the_recipe_with_the_shipped_seed(tmp_path, 
     # The same three tasks as the pi variant, so the two runs are comparable.
     pi_tasks = load_config(EXAMPLE_DIR / "configs" / "serve.yaml")["evolution"]["evaluation"]["tasks"]
     assert built.configured_tasks() == tuple(pi_tasks)
-    assert (built.batch_size, built.training_mode) == (1, "auto")
+    assert built.training_mode == "auto"
+    with closing(built.build_pipeline(PipelineContext("demo"))) as pipeline:
+        assert pipeline.sample2job.job_samples == 1, "the file sets no job_samples, so each report is one step"
     assert built.seed == NATIVE_SEED
     assert {
         "native/tools/read_file.py",
@@ -356,7 +361,7 @@ def test_deployment_yaml_names_directories_that_exist_and_boots_its_named_recipe
     local = replace(built.evolution, binary=str(tmp_path / "fake-pi"), state_dir=str(tmp_path / "harness"))
     trainer = replace(built, evolution=local).build("demo", records, releases=releases_for(built))
     assert trainer.pipeline.training_mode == "auto"
-    # Each report is one job's data: the deployment sets evolution.batch_size 1, the default job_samples.
+    # Each report is one job's data: the deployment sets no job_samples, and the default is 1.
     assert trainer.job_samples == 1
     trainer.close()
     records.close()

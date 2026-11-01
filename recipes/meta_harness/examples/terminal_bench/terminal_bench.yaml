@@ -13,7 +13,6 @@ recipe:
           components: [extension]
           max_candidates: 4
           max_target_runs: 890  # The seed and four candidates, 89 tasks, two repeats.
-      batch_size: 1  # Each report is one trace batch.
       max_steps: 8  # Invalid or duplicate proposals also consume an attempt.
       executor: sandbox
       sandbox:
