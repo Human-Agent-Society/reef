@@ -69,7 +69,8 @@ class HarborAgent(BaseAgent):
         return None
 
     async def setup(self, environment: BaseEnvironment) -> None:
-        """Nothing to install: the agent logic runs on the host."""
+        """Create the scenario if it does not exist yet: the inference routes serve only a scenario that exists."""
+        await asyncio.to_thread(self._client.post, "/reef/scenarios", SCENARIO, {"name": SCENARIO})
 
     async def run(self, instruction: str, environment: BaseEnvironment, context: AgentContext) -> None:
         gold = next(answer for prefix, answer in GOLD_ANSWERS.items() if instruction.startswith(prefix))

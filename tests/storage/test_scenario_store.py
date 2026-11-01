@@ -140,24 +140,23 @@ def test_commit_validates_expected_step(store, expected):
         store.commit_step(expected_step=expected, commit=commit())
 
 
-def test_recover_adopts_checkpoint_and_preserves_rollback_fields(store):
+def test_recover_adopts_checkpoint_and_preserves_its_fields(store):
     store.records.append(record("record-2"))
-    checkpoint = replace(commit(2), operation="rollback", rollback_target_release_id="base", metrics={"quality": 0.5})
+    checkpoint = replace(commit(2), metrics={"quality": 0.5})
     head = store.recover(checkpoint=checkpoint)
 
     assert head is checkpoint
     assert head.step == 2
     assert head.checkpoint is True
-    assert head.operation == "rollback"
+    assert head.operation == "training"
     assert head.operation_verified is True
-    assert head.rollback_target_release_id == "base"
     assert head.metrics == {"quality": 0.5}
     assert head.consumed_ids == frozenset({"record-2"})
     assert head.consumed_ids == frozenset({"record-2"})
     assert store.records.count("math") == 1
     assert store.history() == (head,)
     store.commit_step(expected_step=2, commit=commit(3))
-    assert store.training_run_position() == (2, 1)
+    assert store.training_run_position() == (0, 2)
 
 
 def test_recover_keeps_unverified_checkpoint_operation(store):
@@ -173,22 +172,31 @@ def test_recovery_at_creation_is_empty_and_foreign_checkpoint_is_rejected(store)
         store.recover(checkpoint=commit(scenario="code"))
 
 
-@pytest.mark.parametrize("changes", [{"checkpoint": False}, {"pending": True}])
-def test_recovery_rejects_commits_that_are_not_active_checkpoints(store, changes):
-    with pytest.raises(ReefError, match="activated checkpoint"):
-        store.recover(checkpoint=replace(commit(), **changes))
+def test_recovery_rejects_a_commit_that_is_not_a_checkpoint(store):
+    with pytest.raises(ReefError, match="requires a checkpoint commit"):
+        store.recover(checkpoint=replace(commit(), checkpoint=False))
     assert store.history() == ()
 
 
-def test_training_position_ignores_promote_and_resets_on_rollback(store):
+def operation_commit(step: int, operation: str) -> CommitRecord:
+    """An activation or a new training start at ``step``: it names an artifact and carries no trainer state."""
+    return CommitRecord(
+        scenario="math",
+        step=step,
+        artifact_ref=commit().artifact_ref,
+        checkpoint=False,
+        algorithm_state=None,
+        high_water_sequence=0,
+        high_water_offset=0,
+        operation=operation,
+    )
+
+
+def test_training_position_ignores_activate_and_resets_on_train_from(store):
     store.commit_step(expected_step=0, commit=commit())
-    store.commit_step(
-        expected_step=1, commit=replace(commit(2), operation="promote", rollback_target_release_id="base")
-    )
+    store.commit_step(expected_step=1, commit=operation_commit(2, "activate"))
     assert store.training_run_position() == (0, 1)
-    store.commit_step(
-        expected_step=2, commit=replace(commit(3), operation="rollback", rollback_target_release_id="base")
-    )
+    store.commit_step(expected_step=2, commit=operation_commit(3, "train_from"))
     store.commit_step(expected_step=3, commit=commit(4))
     assert store.training_run_position() == (3, 1)
 
@@ -220,13 +228,15 @@ def test_close_is_idempotent_and_rejects_further_use(store, monkeypatch):
 
 def sqlite_session(*, database=None, initial_step=0):
     records = SQLiteRecordStore(database)
-    tasks = records.task_storage(LocalTaskFileStore(), "math")
+    files = LocalTaskFileStore()
+    tasks = records.task_storage(files, "math")
     return CommitHistoryScenarioStore(
         "math",
         records,
         records.commit_history(),
         tasks=tasks,
-        trajectories=records.trajectory_store(),
+        samples=records.sample_store(files, "math"),
+        evaluations=records.evaluation_store(),
         initial_step=initial_step,
     )
 
@@ -398,6 +408,37 @@ def test_storage_preserves_paths_archives_and_recreates_without_old_history(tmp_
     second_archive = factory.archive("math")
     assert set(first_archive).isdisjoint(second_archive)
     assert all(Path(location).exists() for location in first_archive)
+    factory.close()
+
+
+def test_an_archive_skips_a_wal_file_that_sqlite_removed_while_it_moved_the_files(tmp_path, monkeypatch):
+    """SQLite removes a WAL file only after it folded its frames into the database. When a reader of another
+    service makes it do so while the archive runs, the archive skips the file and the moved database keeps every
+    record."""
+    import sqlite3
+
+    import reef.storage.sqlite as sqlite_module
+
+    factory = SQLiteScenarioStorage(tmp_path)
+    reader = factory.open("math")
+    reader.records.append(record("record-1"))
+    database, wal, _ = factory.state_paths("math")
+    with closing(sqlite3.connect(database)) as connection:
+        connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    move = sqlite_module.shutil.move
+
+    def move_after_sqlite_removed_the_wal(source: str, target: str) -> str:
+        if source == str(wal):
+            wal.unlink()
+        return move(source, target)
+
+    monkeypatch.setattr(sqlite_module.shutil, "move", move_after_sqlite_removed_the_wal)
+    archived = factory.archive("math")
+    monkeypatch.undo()
+    reader.close()
+    assert [Path(location).name for location in archived] == [database.name, f"{database.name}-shm"]
+    with closing(SQLiteRecordStore(Path(archived[0]))) as records:
+        assert records.count("math") == 1
     factory.close()
 
 

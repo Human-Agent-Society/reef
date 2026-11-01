@@ -49,7 +49,7 @@ def add_reef_slime_arguments(parser: argparse.ArgumentParser) -> argparse.Argume
         default=None,
         help=(
             "Megatron checkpoint directory the critic starts from when its own save root holds no "
-            "checkpoint yet: a value model trained on earlier episodes instead of a cold value head. "
+            "checkpoint yet: a value model trained on earlier rollouts instead of a cold value head. "
             "Ignored once the critic has saved, and when the directory holds no checkpoint."
         ),
     )
@@ -87,15 +87,11 @@ def add_reef_slime_arguments(parser: argparse.ArgumentParser) -> argparse.Argume
         default=False,
         help=(
             "Add score centering (arXiv:2609.20807) to the loss family's policy-gradient loss. The family must "
-            "declare its policy-gradient weight; records need the sampler's top-K (capture_topk)."
+            "declare its policy-gradient weight; it trains the task rollouts of the component, which record the "
+            "sampler's top-K."
         ),
     )
-    parser.add_argument(
-        "--score-centering-top-k",
-        type=int,
-        default=defaults.top_k,
-        help=f"Sampler log-probs read per response position. Default {defaults.top_k}.",
-    )
+    # Slime registers --score-centering-top-k (its own score centering's top-K, also 128); the term reads it.
     parser.add_argument(
         "--score-centering-min-tail-mass",
         type=float,

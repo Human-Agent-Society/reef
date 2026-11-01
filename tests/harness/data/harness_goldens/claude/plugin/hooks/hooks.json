@@ -1,0 +1,14 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/extensions/tracer.mjs\"",
+            "type": "command"
+          }
+        ]
+      }
+    ]
+  }
+}

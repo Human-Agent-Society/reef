@@ -93,7 +93,7 @@ def recipe_config_from_file_layout(loaded: Any) -> dict[str, Any]:
         raise RecipeConfigError("recipe config must be a YAML object")
     config = dict(loaded)
     resolved = recipe_config_from_section(config.get("recipe"), "recipe")
-    for section in ("execution", "executors", "pipeline"):
+    for section in ("execution", "executors", "pipeline", "activation"):
         if section in config:
             resolved[section] = config[section]
     # A deployment provides its already resolved runtime. Standalone recipe

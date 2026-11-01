@@ -18,6 +18,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from recipes.beta.coral.journal import CallJournal, CallRecord
+from reef.inference.provider_protocol import response_events
 
 logger = logging.getLogger(__name__)
 
@@ -190,31 +191,7 @@ def _receipt_from_body(body: bytes) -> str | None:
     when the provider hop stripped the receipt — correlation then rests on
     the tags reef stored with the INFERENCE record.
     """
-    if not body:
-        return None
-    text = body.decode("utf-8", errors="replace")
-    if text.lstrip().startswith("{"):
-        try:
-            payload = json.loads(text)
-        except json.JSONDecodeError:
-            return None
-        reef = payload.get("reef") if isinstance(payload, dict) else None
-        if isinstance(reef, dict) and isinstance(reef.get("agent_record_id"), str):
-            return reef["agent_record_id"]
-        return None
-    for line in text.splitlines():
-        line = line.strip()
-        if not line.startswith("data:"):
-            continue
-        data = line[5:].strip()
-        if data == "[DONE]":
-            continue
-        try:
-            payload = json.loads(data)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(payload, dict):
-            continue
+    for payload in response_events(body.decode("utf-8", errors="replace")):
         reef = payload.get("reef")
         if isinstance(reef, dict) and isinstance(reef.get("agent_record_id"), str):
             return reef["agent_record_id"]
@@ -227,24 +204,9 @@ def _usage_from_body(body: bytes) -> dict:
     OpenAI-shaped ``usage`` objects only ({prompt,completion}_tokens ints);
     anything else yields {} — accounting is best-effort by design.
     """
-    if not body:
-        return {}
-    text = body.decode("utf-8", errors="replace")
-    candidates = []
-    if text.lstrip().startswith("{"):
-        candidates.append(text)
-    else:
-        for line in text.splitlines():
-            line = line.strip()
-            if line.startswith("data:") and line[5:].strip() != "[DONE]":
-                candidates.append(line[5:].strip())
     usage: dict = {}
-    for raw in candidates:
-        try:
-            payload = json.loads(raw)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(payload, dict) and isinstance(payload.get("usage"), dict):
+    for payload in response_events(body.decode("utf-8", errors="replace")):
+        if isinstance(payload.get("usage"), dict):
             found = payload["usage"]
             cleaned = {
                 key: value

@@ -4,36 +4,30 @@ import copy
 import dataclasses
 
 import pytest
-from tests.recipes.meta_harness.test_meta_harness import (
-    IMPROVED,
-    SEED,
-    QueueChat,
-    _report_once,
-    build_recipe,
-    content_id,
-    make_binary,
-    reply,
-    runtime,
-    sections,
-)
+from tests.support.git_lfs import fake_git_lfs
+from tests.support.harness_methods import IMPROVED, SEED, QueueChat, meta_harness_recipe, proposal_reply
+from tests.support.harness_service import checkpoint_result, report_once
 
 from reef.artifact import GitLFSRepositoryBackend, InMemoryRepositoryBackend
 from reef.artifact.artifact import Artifact, ArtifactConflict, ArtifactPublicationError
 from reef.dispatcher import Dispatcher
 from reef.storage.commit_history import CommitHistoryScenarioStore
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
+
+__all__ = ["fake_git_lfs"]
 
 
 @pytest.fixture(params=["memory", "git"])
 def publication_case(tmp_path, request):
-    make_binary(tmp_path)
-    config = sections(tmp_path)
-    chat = QueueChat(reply(content_id(SEED), IMPROVED))
-    recipe = build_recipe(config["implementation"], {}, config=config, runtime=runtime())
-    recipe = dataclasses.replace(recipe, models={"proposer": chat})
-    initial = tmp_path / "initial"
-    initial.mkdir()
-    memory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "memory")
+    chat = QueueChat(proposal_reply(SEED, IMPROVED))
+    recipe = meta_harness_recipe(tmp_path, chat)
+    # A new scenario's root release holds the recipe's seed, as a deployment's does.
+    memory = InMemoryRepositoryBackend.factory(directory=tmp_path / "memory")
+
+    if request.param == "git":
+        # The commit protocol, not Git LFS, is under test here; tests/artifact covers real LFS.
+        request.getfixturevalue("fake_git_lfs")
 
     def factory():
         if request.param == "memory":
@@ -50,13 +44,20 @@ def publication_case(tmp_path, request):
 @pytest.mark.parametrize("recovery", ["retry", "restart"])
 def test_failed_selected_commit_never_serves_or_recovers_staged_artifact(publication_case, monkeypatch, recovery):
     recipe, factory, chat, records = publication_case
-    dispatcher = Dispatcher(recipe, factory(), scenario_storage=SQLiteScenarioStorage(records), hold_local_cycles=True)
+    dispatcher = Dispatcher(
+        recipe,
+        factory(),
+        scenario_storage=SQLiteScenarioStorage(records),
+        hold_local_cycles=True,
+        coordination=memory_coordination(),
+    )
     try:
         scenario = dispatcher.get_or_create_scenario("selected-commit")
-        previous = copy.deepcopy(scenario.trainer.state)
         head = scenario.current_artifact_ref()
-        _report_once(scenario, "selected-commit", "1")
-        result = scenario.prepare_training_step()
+        report_once(scenario, "1")
+        result = checkpoint_result(scenario)
+        # The state after the job's submission, which the failed checkpoint commit keeps.
+        previous = copy.deepcopy(scenario.trainer.state)
         assert result.artifact is not None and len(chat.prompts) == 1
         assert isinstance(scenario.store, CommitHistoryScenarioStore)
         journal = scenario.store.commit_history
@@ -74,7 +75,7 @@ def test_failed_selected_commit_never_serves_or_recovers_staged_artifact(publica
                 scenario.commit(result)
         assert scenario.trainer.state == previous
         assert scenario.current_artifact_ref() == scenario.repository.backend.current() == head
-        assert scenario.store.history() == ()
+        assert len(scenario.store.history()) == 1
         if recovery == "retry":
 
             def durable_append(record):
@@ -83,17 +84,24 @@ def test_failed_selected_commit_never_serves_or_recovers_staged_artifact(publica
 
             monkeypatch.setattr(journal, "append", durable_append)
             scenario.commit(result)
-            assert scenario.scenario_step == 1
+            assert scenario.scenario_step == 2
             assert scenario.trainer.state == result.state
             assert scenario.current_artifact_ref() == scenario.repository.backend.current() != head
-            assert len(scenario.store.history()) == 1
+            assert len(scenario.store.history()) == 2
     finally:
         dispatcher.close()
-    restarted = Dispatcher(recipe, factory(), scenario_storage=SQLiteScenarioStorage(records), hold_local_cycles=True)
+    restarted = Dispatcher(
+        # Each process makes its own harness component, as each service process builds its recipe.
+        dataclasses.replace(recipe, harness_component=None),
+        factory(),
+        scenario_storage=SQLiteScenarioStorage(records),
+        hold_local_cycles=True,
+        coordination=memory_coordination(),
+    )
     try:
         scenario = restarted.get_or_create_scenario("selected-commit")
         assert scenario.trainer.state == (result.state if recovery == "retry" else previous)
-        assert scenario.scenario_step == (1 if recovery == "retry" else 0)
+        assert scenario.scenario_step == (2 if recovery == "retry" else 1)
         assert scenario.current_artifact_ref() == scenario.repository.backend.current()
         assert len(chat.prompts) == 1
     finally:
@@ -102,12 +110,18 @@ def test_failed_selected_commit_never_serves_or_recovers_staged_artifact(publica
 
 def test_restart_repairs_artifact_head_from_successful_journal_commit(publication_case, monkeypatch):
     recipe, factory, chat, records = publication_case
-    dispatcher = Dispatcher(recipe, factory(), scenario_storage=SQLiteScenarioStorage(records), hold_local_cycles=True)
+    dispatcher = Dispatcher(
+        recipe,
+        factory(),
+        scenario_storage=SQLiteScenarioStorage(records),
+        hold_local_cycles=True,
+        coordination=memory_coordination(),
+    )
     try:
         scenario = dispatcher.get_or_create_scenario("stale-artifact-head")
         old_head = scenario.current_artifact_ref()
-        _report_once(scenario, "stale-artifact-head", "1")
-        result = scenario.prepare_training_step()
+        report_once(scenario, "1")
+        result = checkpoint_result(scenario)
 
         def unavailable(*args, **kwargs):
             raise ArtifactPublicationError("backend pointer unavailable")
@@ -115,7 +129,7 @@ def test_restart_repairs_artifact_head_from_successful_journal_commit(publicatio
         with monkeypatch.context() as patch:
             patch.setattr(scenario.repository.backend, "commit_release", unavailable)
             scenario.commit(result)
-        assert scenario.scenario_step == 1 and scenario.trainer.state == result.state
+        assert scenario.scenario_step == 2 and scenario.trainer.state == result.state
         committed_head = scenario.current_artifact_ref()
         assert committed_head != old_head
         assert scenario.repository.backend.current() == old_head
@@ -129,19 +143,32 @@ def test_restart_repairs_artifact_head_from_successful_journal_commit(publicatio
         assert scenario.store.history()[-1].artifact_ref == committed_head
     finally:
         dispatcher.close()
-    restarted = Dispatcher(recipe, factory(), scenario_storage=SQLiteScenarioStorage(records), hold_local_cycles=True)
+    restarted = Dispatcher(
+        # Each process makes its own harness component, as each service process builds its recipe.
+        dataclasses.replace(recipe, harness_component=None),
+        factory(),
+        scenario_storage=SQLiteScenarioStorage(records),
+        hold_local_cycles=True,
+        coordination=memory_coordination(),
+    )
     try:
         scenario = restarted.get_or_create_scenario("stale-artifact-head")
-        assert scenario.scenario_step == 1 and scenario.trainer.state == result.state
+        assert scenario.scenario_step == 2 and scenario.trainer.state == result.state
         assert scenario.current_artifact_ref() == scenario.repository.backend.current() == committed_head
-        assert len(scenario.store.history()) == 1 and len(chat.prompts) == 1
+        assert len(scenario.store.history()) == 2 and len(chat.prompts) == 1
     finally:
         restarted.close()
 
 
 def test_without_a_journal_the_backend_publication_remains_the_commit(publication_case, monkeypatch):
     recipe, factory, _, _ = publication_case
-    dispatcher = Dispatcher(recipe, factory(), scenario_storage=SQLiteScenarioStorage(), hold_local_cycles=True)
+    dispatcher = Dispatcher(
+        recipe,
+        factory(),
+        scenario_storage=SQLiteScenarioStorage(),
+        hold_local_cycles=True,
+        coordination=memory_coordination(),
+    )
     try:
         scenario = dispatcher.get_or_create_scenario("no-journal")
         head = scenario.current_artifact_ref()
@@ -150,8 +177,8 @@ def test_without_a_journal_the_backend_publication_remains_the_commit(publicatio
             pytest.fail("a non-journaled publication must commit its backend head directly")
 
         monkeypatch.setattr(scenario.repository.backend, "commit_release", unexpected)
-        _report_once(scenario, "no-journal", "1")
-        result = scenario.prepare_training_step()
+        report_once(scenario, "1")
+        result = checkpoint_result(scenario)
         scenario.commit(result)
 
         assert not scenario.store.durable
@@ -168,11 +195,17 @@ def test_without_a_journal_the_backend_publication_remains_the_commit(publicatio
 
 def test_lost_journal_ack_retries_the_committed_release_without_evaluating_again(publication_case, monkeypatch):
     recipe, factory, chat, records = publication_case
-    dispatcher = Dispatcher(recipe, factory(), scenario_storage=SQLiteScenarioStorage(records), hold_local_cycles=True)
+    dispatcher = Dispatcher(
+        recipe,
+        factory(),
+        scenario_storage=SQLiteScenarioStorage(records),
+        hold_local_cycles=True,
+        coordination=memory_coordination(),
+    )
     try:
         scenario = dispatcher.get_or_create_scenario("lost-journal-ack")
-        _report_once(scenario, "lost-journal-ack", "1")
-        result = scenario.prepare_training_step()
+        report_once(scenario, "1")
+        result = checkpoint_result(scenario)
         commit_step = scenario.store.commit_step
 
         def lose_ack(**keywords):
@@ -186,17 +219,23 @@ def test_lost_journal_ack_retries_the_committed_release_without_evaluating_again
         committed = scenario.store.history()[-1]
         scenario.commit(result)
 
-        assert scenario.scenario_step == 1 and len(chat.prompts) == 1
+        assert scenario.scenario_step == 2 and len(chat.prompts) == 1
         assert scenario.current_artifact_ref() == committed.artifact_ref
         assert scenario.repository.resolve(committed.artifact_ref).local_path.is_dir()
-        assert len(scenario.store.history()) == 1
+        assert len(scenario.store.history()) == 2
     finally:
         dispatcher.close()
 
 
 def test_postcommit_conflict_keeps_durable_step_and_rejects_unrelated_head(publication_case, monkeypatch):
     recipe, factory, chat, records = publication_case
-    dispatcher = Dispatcher(recipe, factory(), scenario_storage=SQLiteScenarioStorage(records), hold_local_cycles=True)
+    dispatcher = Dispatcher(
+        recipe,
+        factory(),
+        scenario_storage=SQLiteScenarioStorage(records),
+        hold_local_cycles=True,
+        coordination=memory_coordination(),
+    )
     try:
         scenario = dispatcher.get_or_create_scenario("postcommit-head-conflict")
         backend = scenario.repository.backend
@@ -214,14 +253,14 @@ def test_postcommit_conflict_keeps_durable_step_and_rejects_unrelated_head(publi
             unrelated = backend.publish(competing, expected_parent=expected_parent)
             return commit_release(ref, expected_parent=expected_parent)
 
-        _report_once(scenario, "postcommit-head-conflict", "1")
-        result = scenario.prepare_training_step()
+        report_once(scenario, "1")
+        result = checkpoint_result(scenario)
         with monkeypatch.context() as patch:
             patch.setattr(backend, "commit_release", conflict_after_journal)
             scenario.commit(result)
 
         committed = scenario.store.history()[-1]
-        assert scenario.scenario_step == committed.step == 1
+        assert scenario.scenario_step == committed.step == 2
         assert scenario.trainer.state == committed.algorithm_state == result.state
         assert scenario.current_artifact_ref() == committed.artifact_ref
         assert backend.current() == unrelated
@@ -230,11 +269,18 @@ def test_postcommit_conflict_keeps_durable_step_and_rejects_unrelated_head(publi
         assert unrelated not in (old_head, committed.artifact_ref)
         with pytest.raises(ArtifactConflict):
             scenario.repository.synchronize_checkpoint()
-        assert backend.current() == unrelated and len(scenario.store.history()) == 1
+        assert backend.current() == unrelated and len(scenario.store.history()) == 2
     finally:
         dispatcher.close()
 
-    restarted = Dispatcher(recipe, factory(), scenario_storage=SQLiteScenarioStorage(records), hold_local_cycles=True)
+    restarted = Dispatcher(
+        # Each process makes its own harness component, as each service process builds its recipe.
+        dataclasses.replace(recipe, harness_component=None),
+        factory(),
+        scenario_storage=SQLiteScenarioStorage(records),
+        hold_local_cycles=True,
+        coordination=memory_coordination(),
+    )
     try:
         with pytest.raises(ArtifactConflict):
             restarted.get_or_create_scenario("postcommit-head-conflict")

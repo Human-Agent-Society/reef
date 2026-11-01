@@ -1,0 +1,149 @@
+# OpenAI Codex CLI, driven through its non-interactive exec mode.
+#
+# A release is a Codex plugin in plugin/, named reef, in the local marketplace
+# reef at the root: its skills and commands load as reef:<name>. A plugin
+# carries no rules and no config keys, so a tree holds neither. A run's
+# render writes the plugin into CODEX_HOME as codex plugin add would; a
+# person's machine installs it with codex plugin add. CODEX_HOME relocates the
+# configuration and the session runs into the run root. The CLI keeps
+# model-generated commands in a workspace-write sandbox and never waits for an
+# approval during a benchmark run.
+name: codex
+binary: codex
+install:
+  kind: npm
+  package: "@openai/codex"
+  version: "0.158.0"
+  binary_path: "node_modules/.bin/codex"
+renderer: reef.harness.adapters.codex.render:CodexAdapterRenderer
+# What Reef may evolve: each kind of file, at its path in the plugin.
+evolve:
+  skill: plugin/skills/{name}/SKILL.md
+  # Codex loads no custom prompts (the TUI of 0.153.4 refused /name), so a
+  # command is a skill that a person runs as $reef:name. A skill and a command
+  # of one name render to one path and are refused.
+  command:
+    renders: plugin/skills/{name}/SKILL.md
+    format: skill
+# The agent's directories under the root, each with the variable that moves it there. What the agent writes
+# in them is its state, never residue, and a sandbox keeps them writable.
+dirs:
+  codex: CODEX_HOME
+sessions: {format: codex-session-jsonl, path: codex/sessions}
+model:
+  responses:
+    - target: primary
+      data:
+        model: "{model}"
+        model_provider: reef
+        model_providers:
+          reef:
+            name: Reef
+            base_url: "{base_url}/v1"
+            wire_api: responses
+            supports_websockets: false
+            experimental_bearer_token: "{api_key}"
+    - target: models
+      data:
+        models: "{model_metadata}"
+# How the agent runs: one evaluation run in a root of its own (the command, and variables
+# beside the dirs), and on a person's machine a layer over the person's own configuration.
+run:
+  task:
+    # A run never waits for an approval and never searches the web: these
+    # overrides win over config.toml.
+    argv:
+      - exec
+      - --json
+      - --strict-config
+      - --config
+      - approval_policy="never"
+      - --config
+      - web_search="disabled"
+      - --sandbox
+      - workspace-write
+      - --skip-git-repo-check
+      - "{task}"
+  # How a person's machine runs Codex on a release: the person's own ~/.codex stays. register
+  # installs the plugin reef from the local marketplace reef at the install root, and again for
+  # each release, because Codex reads a copy in its plugin cache; the plugin then loads in every
+  # Codex session of the person. A session that Reef starts also takes -c arguments that bind the
+  # model, with the key in an environment variable rather than on the command line, and turn
+  # plugins on.
+  layer:
+    env:
+      REEF_LAYER_TOKEN: "{token}"
+    args:
+      - ["-c", 'model_provider="reef"']
+      - ["-c", 'model="{model}"']
+      - ["-c", 'model_providers.reef={name="Reef", base_url="{base_url}/v1", wire_api="responses", env_key="REEF_LAYER_TOKEN", supports_websockets=false}']
+      - ["-c", "features.plugins=true"]
+    register:
+      - ["plugin", "marketplace", "add", "{root}"]
+      - ["plugin", "add", "reef@reef"]
+    unregister:
+      - ["plugin", "remove", "reef@reef"]
+      - ["plugin", "marketplace", "remove", "reef"]
+# The config files the agent reads, with the defaults Reef merges first and the checks the merged
+# file must pass. A tree's config/<target>.json merges into one of them. The defaults and checks
+# are optional: a new adapter can start with the paths alone.
+config:
+  primary:
+    path: "codex/config.toml"
+    defaults:
+      web_search: disabled
+      check_for_update_on_startup: false
+      analytics:
+        enabled: false
+      feedback:
+        enabled: false
+      features:
+        apps: false
+        enable_request_compression: false
+        hooks: false
+        plugins: true
+        shell_snapshot: false
+        skill_mcp_dependency_install: false
+      otel:
+        exporter: none
+        log_user_prompt: false
+        metrics_exporter: none
+        trace_exporter: none
+      sandbox_workspace_write:
+        network_access: false
+    # A Codex plugin carries no config key, so the file holds the run's
+    # defaults and the keys Reef's model binding writes, which the render
+    # refuses from a tree without the binding.
+    checks:
+      - key: "."
+        match: |-
+          Each(Key(IsIn([
+            "analytics", "check_for_update_on_startup", "features", "feedback", "otel", "sandbox_workspace_write",
+            "web_search", "model", "model_provider", "model_providers"
+          ])))
+        reason: a Codex plugin carries no config keys
+      - key: [
+          web_search, check_for_update_on_startup, analytics, feedback, otel, features, sandbox_workspace_write,
+        ]
+        match: IsDefault()
+      # The provider Reef's model binding writes, with only its keys.
+      - key: model_provider
+        match: AnyOf(IsAbsent(), Eq("reef"))
+        reason: Reef's model binding chooses the model provider
+      - key: model_providers
+        match: Each(Key(Eq("reef")))
+        reason: Reef's model binding chooses the model provider
+      - key: model_providers.*
+        match: |-
+          Each(Key(IsIn(["base_url", "experimental_bearer_token", "name", "supports_websockets", "wire_api"])))
+        reason: Reef's model binding chooses the model provider
+  models:
+    path: "codex/models.json"
+    # Model metadata by model name, which the renderer turns into
+    # Codex's model catalog.
+    checks:
+      # The entire file is treated as a dict.
+      - key: "."
+        match: Each(Key(Eq("models")))
+      - key: models
+        match: AnyOf(IsAbsent(), IsObject())

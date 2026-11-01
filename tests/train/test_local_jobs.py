@@ -12,9 +12,10 @@ from typing import Any
 import pytest
 from tests.support._trajectories import policy_trajectory
 
+from reef.artifact import DefaultStart
 from reef.core.job_data import JobData
 from reef.runtime.durable_files import write_json
-from reef.runtime.jobs import ReleaseFormat, SavedCheckpoint, TrainingJob
+from reef.runtime.jobs import ReleaseFormat, SavedCheckpoint, ScenarioRoot, TrainingJob
 from reef.train import local_jobs
 from reef.train.local_jobs import CHECKPOINTS_FILE, JOB_FILE, RESULT_FILE, LocalJobComponent
 
@@ -47,7 +48,13 @@ class GatedComponent(LocalJobComponent):
     def release_format(self) -> ReleaseFormat:
         return ReleaseFormat("full")
 
-    def import_start(self, release: Path) -> str | None:
+    def default_start(self) -> DefaultStart:
+        return DefaultStart()
+
+    def root_start(self, root: ScenarioRoot) -> str:
+        return "gated:base"
+
+    def import_start(self, release: Path) -> str:
         return str(release)
 
     def check_job(self, job: TrainingJob) -> None:
@@ -72,8 +79,8 @@ class GatedComponent(LocalJobComponent):
 
 
 def training_job(job_id: str, **parameters: bool) -> TrainingJob:
-    data = JobData(job_id, (policy_trajectory(f"s-{job_id}", (1, 2, 3), (1, 1), (-0.1, -0.2), 1.0, "v1"),))
-    return TrainingJob(job_id, "gated", None, data, parameters)
+    data = JobData(job_id, (policy_trajectory(f"s-{job_id}", (1, 2, 3), (1, 1), (-0.1, -0.2), 1.0, artifact_id="v1"),))
+    return TrainingJob(job_id, "gated", "gated:base", data, parameters, scenario="s")
 
 
 def wait_until(condition: Callable[[], bool]) -> None:

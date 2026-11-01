@@ -76,7 +76,7 @@ class CampaignService:
 
     def __init__(self, failure=None):
         self.failure = failure
-        self.initialized = False
+        self.created_scenarios = []
         self.records = {}
         self.reports = {}
         self.pending = []
@@ -89,7 +89,14 @@ class CampaignService:
             raise ConnectionError(f"Injected disconnect at {point}")
 
     def post(self, path, scenario, payload):
-        self.initialized = True
+        from reef_client import ReefClientError
+
+        if path == "/reef/scenarios":
+            # Reef creates the scenario at its initial release.
+            self.created_scenarios.append(payload["name"])
+            return {"scenario": payload["name"]}, {}
+        if scenario not in self.created_scenarios:
+            raise ReefClientError(404, "No scenario")
         evaluation = payload["max_tokens"] == 4
         if evaluation and len(self.commits) == 1:
             self.fail_once("eval-1")
@@ -106,18 +113,19 @@ class CampaignService:
 
         from reef_client import ReefClientError
 
-        if path.endswith("/releases"):
-            if not self.initialized:
+        if path.endswith("/artifacts"):
+            if not self.created_scenarios:
                 raise ReefClientError(404, "No scenario")
             rows = [
                 {
+                    "artifact_id": f"r{i}",
                     "release_id": f"r{i}",
                     "operation": "training" if i else "creation",
-                    "current": i == len(self.commits),
+                    "active": i == len(self.commits),
                 }
                 for i in range(len(self.commits) + 1)
             ]
-            return {"releases": list(reversed(rows))}
+            return {"artifacts": list(reversed(rows))}
         if "/records/" in path:
             return self.records[path.rsplit("/", 1)[-1]]
         if "/commits?" in path:
@@ -141,7 +149,7 @@ class CampaignService:
                     {
                         "step": step,
                         "operation": "training",
-                        "pending": False,
+                        "activated": True,
                         "artifact_ref": {"release_id": f"r{step}"},
                         "consumed_ids": self.pending,
                     }
@@ -237,6 +245,8 @@ def test_partial_collection_recovers_only_missing_samples_and_torn_last_line(mon
 
     service = CampaignService()
     monkeypatch.setattr(run, "ReefClient", lambda *args, **kwargs: service)
+    # The inference routes answer only a scenario that exists; ``run`` creates it before the first sample.
+    service.post("/reef/scenarios", campaign_args.scenario, {"name": campaign_args.scenario})
     campaign = Campaign(campaign_args)
     questions = run.load_questions(campaign_args.eval_data)
     first = campaign.sample((questions[0], 0, True))
@@ -312,7 +322,7 @@ def test_prompt_pool_is_seeded_and_disjoint_from_evaluation_and_openthoughts3():
         select_prompts(prompts, [], 42)
 
 
-def test_baseline_eval_reuses_an_earlier_evaluation_and_opens_the_scenario_with_the_first_batch(
+def test_baseline_eval_reuses_an_earlier_evaluation_and_samples_only_for_training_and_later_steps(
     monkeypatch, campaign_args, tmp_path
 ):
     from recipes.opd.examples.math import run
@@ -339,6 +349,7 @@ def test_baseline_eval_reuses_an_earlier_evaluation_and_opens_the_scenario_with_
     campaign_args.steps = 1
     Campaign(campaign_args).run()
     # Two training samples and the step-1 evaluation; nothing for step 0.
+    assert service.created_scenarios == ["test"]
     assert service.inference_calls == 4
     assert len(service.commits) == 1
     metrics = [json.loads(line) for line in (campaign_args.output / "metrics.jsonl").read_text().splitlines()]
@@ -351,6 +362,7 @@ def test_baseline_eval_reuses_an_earlier_evaluation_and_opens_the_scenario_with_
     # Repeating the finished campaign is read-only with respect to the service.
     campaign_args.resume = True
     Campaign(campaign_args).run()
+    assert service.created_scenarios == ["test"]
     assert service.inference_calls == 4
     # A baseline for other seeds is refused before any request reaches a fresh scenario.
     fresh = CampaignService()

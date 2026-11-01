@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 import yaml
 from tests.support._training_deployment import LocalDeployment
+from tests.support.runtime_stubs import STUB_ROOT
 
 from reef.runtime.deployment import RuntimeConfigError
 from reef.service.assembly import _training_recipe, connect_training_component
@@ -42,7 +43,7 @@ def test_cli_and_yaml_select_the_same_in_process_topology_and_runtime(tmp_path):
         "training.backend": BACKEND,
         "training.options.lora-rank": "16",
         "training.options.checkpoint-layers": "false",
-        "pipeline.record2record.config.max_staleness": "2",
+        "pipeline.record2sample.config.max_staleness": "2",
     }
     file_config, _ = resolve_deployment_config(deployment(), overrides, tmp_path / "serve.yaml")
     cli_config, _ = resolve_deployment_config(command_line_config({}), overrides, tmp_path / "cli")
@@ -123,13 +124,12 @@ def test_recipe_build_submits_jobs_to_the_backend_component_and_preserves_cleanu
     from reef.storage.sqlite import SQLiteRecordStore
 
     config, _ = resolve_deployment_config(
-        {**deployment(), "pipeline": {"task2job": {"config": {"job_samples": 2}}}}, None, tmp_path / "serve.yaml"
+        {**deployment(), "pipeline": {"sample2job": {"config": {"job_samples": 2}}}}, None, tmp_path / "serve.yaml"
     )
     recipe = _training_recipe(SAORecipe, service_config_from_mapping(config), {})
     records = SQLiteRecordStore()
     try:
-        trainer = recipe.build("scenario", records)
-        assert trainer.candidate_backend is None
+        trainer = recipe.build("scenario", records, root=STUB_ROOT)
         assert trainer.job_loop.component is recipe.training_component
         assert type(recipe.training_component).__name__ == "LocalRuntime"
         # The deployment's pipeline section sets the job size.

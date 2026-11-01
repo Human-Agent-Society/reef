@@ -54,8 +54,9 @@ class _TestAlgorithm(SlimeAlgorithm):
         pass
 
 
-#: The cookbook families plus the two plain ones tests/conftest.py registers.
-_ALL_FAMILIES = ("opd", "openclawrl", "pg", "sao", "sdft", "sdpo", "sft", "tttd")
+#: The cookbook families, the built-in importance_sampling, sft and slime families, and the plain one
+#: tests/conftest.py registers.
+_ALL_FAMILIES = ("importance_sampling", "opd", "openclawrl", "pg", "sao", "sdft", "sdpo", "sft", "slime", "tttd")
 
 
 @pytest.mark.unit
@@ -63,6 +64,7 @@ def test_registry_is_the_complete_slime_loss_family_surface() -> None:
     assert LOSS_FAMILIES.names == _ALL_FAMILIES
     assert resolve_loss_family("sft").loss_type == "sft_loss"
     assert resolve_loss_family("tttd").loss_type == "custom_loss"
+    assert resolve_loss_family("importance_sampling").loss_type == "custom_loss"
     assert resolve_loss_family("openclawrl").loss_type == "custom_loss"
     assert resolve_loss_family("sdft").loss_type == "custom_loss"
     assert resolve_loss_family("sdpo").loss_type == "custom_loss"
@@ -165,12 +167,13 @@ def test_sft_spec_refuses_advantages_instead_of_silently_dropping_them() -> None
 @pytest.mark.unit
 def test_common_spec_validation_owns_loss_and_logprob_requirements() -> None:
     pg = resolve_loss_family("pg")
-    pg.validate_backend_args(SimpleNamespace(loss_type="policy_loss", use_rollout_logprobs=True))
+    pg.validate_backend_args(SimpleNamespace(loss_type="policy_loss", use_rollout_logprobs=False))
 
     with pytest.raises(RuntimeError, match="loss-type policy_loss"):
-        pg.validate_backend_args(SimpleNamespace(loss_type="sft_loss", use_rollout_logprobs=True))
-    with pytest.raises(RuntimeError, match="use-rollout-logprobs"):
-        pg.validate_backend_args(SimpleNamespace(loss_type="policy_loss", use_rollout_logprobs=False))
+        pg.validate_backend_args(SimpleNamespace(loss_type="sft_loss", use_rollout_logprobs=False))
+    # Serving returns no log-probabilities, so the actor computes the old-policy ones.
+    with pytest.raises(RuntimeError, match="remove --use-rollout-logprobs"):
+        pg.validate_backend_args(SimpleNamespace(loss_type="policy_loss", use_rollout_logprobs=True))
 
 
 @pytest.mark.unit
@@ -202,6 +205,7 @@ def test_openclawrl_knobs_travel_from_argv_onto_args() -> None:
             "--openclawrl-adv-diff-clip=0.25",
             "--openclawrl-hint-selection=shortest",
             "--openclawrl-subset-mode=teacher",
+            "--openclawrl-topk=8",
             "--loss-type",
             "custom_loss",
         ]
@@ -213,6 +217,7 @@ def test_openclawrl_knobs_travel_from_argv_onto_args() -> None:
         adv_diff_clip=0.25,
         hint_selection="shortest",
         subset_mode="teacher",
+        topk=8,
     )
     assert remaining == ["--loss-type", "custom_loss"]
 
@@ -221,6 +226,7 @@ def test_openclawrl_knobs_travel_from_argv_onto_args() -> None:
     assert args.loss_family == "openclawrl"
     assert (args.openclawrl_w_rl, args.openclawrl_w_opd, args.openclawrl_adv_diff_clip) == (0.5, 2.0, 0.25)
     assert (args.openclawrl_hint_selection, args.openclawrl_subset_mode) == ("shortest", "teacher")
+    assert args.openclawrl_topk == 8
 
     # The deprecated --openclaw-topk-* spellings still parse; an argv naming
     # none of them stamps the paper defaults rather than leaving args bare.
@@ -230,6 +236,7 @@ def test_openclawrl_knobs_travel_from_argv_onto_args() -> None:
     topk.apply_driver_options(defaults, None)
     assert defaults.openclawrl_w_rl == 1.0
     assert defaults.openclawrl_hint_selection == "sequence_optimal"
+    assert defaults.openclawrl_topk == 4
 
     # The driver forwards the parsed Settings into bind on every real boot.
     assert topk.bind(settings) is topk
@@ -255,9 +262,12 @@ def test_openclawrl_rejects_non_finite_numeric_settings(name, value) -> None:
         ("hint_selection", ""),
         ("subset_mode", "hybrid"),
         ("subset_mode", ""),
+        ("topk", 0),
+        ("topk", True),
+        ("topk", 2.0),
     ],
 )
-def test_openclawrl_rejects_unknown_enum_settings(name, value) -> None:
+def test_openclawrl_rejects_unknown_choices_and_a_bad_topk(name, value) -> None:
     from recipes.openclawrl.slime import OpenclawrlSettings
 
     with pytest.raises(ValueError, match=name):
@@ -285,6 +295,7 @@ def test_openclawrl_keeps_valid_configurations() -> None:
         adv_diff_clip=1.0,
         hint_selection="sequence_optimal",
         subset_mode="student",
+        topk=4,
     )
     disabled = OpenclawrlSettings(w_rl=0.0, w_opd=-0.5, adv_diff_clip=-1.0)
     assert disabled.adv_diff_clip == -1.0
@@ -334,19 +345,17 @@ def test_sao_schedule_supports_warmup_and_validates_configuration() -> None:
 
 
 @pytest.mark.unit
-def test_sao_rollout_metrics_measure_the_spread_to_the_newest_version_and_clamp_clock_skew() -> None:
+def test_sao_rollout_metrics_count_the_producing_artifacts_and_clamp_clock_skew() -> None:
     sao = resolve_loss_family("sao")
-    # The spread counts versions behind the newest producing version of the same serving incarnation,
-    # so a sample of another incarnation counts against its own newest version; a malformed ID does not count.
+    # A sample without a producing artifact does not count.
     rollout_data = {
-        "producing_runtime_load_ids": ["inc:3", "inc:7", "old:1", "malformed", None],
+        "producing_artifact_ids": ["artifact-3", "artifact-7", "artifact-3", None],
         "rollout_created_ats": [time.time() - 2.5, time.time() + 60.0],
         "response_lengths": [4, 4],
         "loss_masks": [[1, 1, 1, 0], [1, 1, 1, 1]],
     }
     metrics = sao.rollout_metrics(rollout_data)
-    assert metrics["sao/producing_version_spread_max"] == 4
-    assert metrics["sao/producing_version_spread_mean"] == pytest.approx(4 / 3)
+    assert metrics["sao/producing_artifacts"] == 2
     assert metrics["sao/effective_token_rate"] == 7 / 8
     assert metrics["sao/queue_age_s_max"] >= 2.0
     # A creation time ahead of this clock counts as age zero, not a negative age.
@@ -593,6 +602,8 @@ def test_objective_resolution_rejects_a_missing_required_objective_module(monkey
         assert name == module_path
         raise ModuleNotFoundError(f"No module named {name!r}", name=name)
 
+    # The family registers when its package imports; only its objective module is missing.
+    resolve_loss_family("tttd")
     monkeypatch.setattr(importlib, "import_module", missing_objective)
     with pytest.raises(RuntimeError, match="requires objective hooks"):
         resolve_objective_paths(SimpleNamespace(loss_family="tttd"))
@@ -602,6 +613,8 @@ def test_objective_resolution_rejects_a_missing_required_objective_module(monkey
 def test_objective_resolution_rejects_missing_required_hook_registrations(monkeypatch) -> None:
     from reef.train.slime_backend import algorithm as base_module
 
+    # Load the spec before import_module is patched, so only the objective module's import sees the patch.
+    resolve_loss_family("tttd")
     monkeypatch.setattr(importlib, "import_module", lambda _name: ModuleType("empty_objective"))
     monkeypatch.setattr(base_module, "_objective_registry", {})
     with pytest.raises(RuntimeError, match="custom_loss_function_path"):
@@ -645,6 +658,8 @@ def test_objective_resolution_propagates_nested_import_failures(monkeypatch, err
     def broken_objective(_name: str) -> None:
         raise error
 
+    # Load the spec before import_module is patched, so only the objective module's import sees the patch.
+    resolve_loss_family("tttd")
     monkeypatch.setattr(importlib, "import_module", broken_objective)
     with pytest.raises(type(error), match=str(error)):
         resolve_objective_paths(SimpleNamespace(loss_family="tttd"))

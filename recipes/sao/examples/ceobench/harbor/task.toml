@@ -12,8 +12,8 @@ license_note = "zlab-princeton/ceobench-src carries no license file; the image c
 timeout_sec = 600.0
 
 [agent]
-# A 500-day episode is hundreds of agent turns; the harness runs it as one
-# exec inside this container, so the whole episode fits in this window.
+# A 500-day rollout is hundreds of agent turns; the harness runs it as one
+# exec inside this container, so the whole rollout fits in this window.
 timeout_sec = 172800.0
 
 [environment]

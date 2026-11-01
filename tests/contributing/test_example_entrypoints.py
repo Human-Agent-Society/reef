@@ -29,7 +29,6 @@ EXAMPLE_DIRS = {
 }
 REEF_EVAL_EXAMPLE_DIRS = (
     *EXAMPLE_DIRS.values(),
-    ROOT / "recipes" / "skillclaw",
     ROOT / "recipes" / "openclawrl" / "examples" / "openclawrl",
     ROOT / "recipes" / "sdpo" / "examples" / "sciknoweval",
 )
@@ -196,11 +195,12 @@ def test_reef_eval_entrypoint_dispatches_the_documented_workload(
     if example == "sao":
         # The entrypoint waits for training after each mocked rollout; keep that
         # query local too, regardless of what is listening on the example port.
-        def _training_releases(request, timeout):
-            assert request.full_url.endswith("/reef/scenarios/sao-smoke/releases")
-            return io.BytesIO(json.dumps({"releases": [{"operation": "training"}] * (len(calls) * 6)}).encode())
+        def _training_steps(request, timeout):
+            assert request.full_url.endswith("/reef/status")
+            status = {"scenarios": {"sao-smoke": {"scenario_step": len(calls) * 6}}}
+            return io.BytesIO(json.dumps(status).encode())
 
-        monkeypatch.setattr(urllib.request, "urlopen", _training_releases)
+        monkeypatch.setattr(urllib.request, "urlopen", _training_steps)
 
     cached_config = ModuleType("harness.config")
     if has_cached_harness:
@@ -276,7 +276,6 @@ def test_basic_harness_runs_inference_and_preserves_its_receipt(monkeypatch) -> 
         {
             "choices": [{"message": {"content": "42"}}],
             "usage": {"prompt_tokens": 3, "completion_tokens": 1},
-            "metadata": {"runtime_load_id": "basic:0"},
         },
         "receipt-basic",
     )
@@ -286,10 +285,7 @@ def test_basic_harness_runs_inference_and_preserves_its_receipt(monkeypatch) -> 
     asyncio.run(agent.run("answer the task", environment, context))
 
     assert environment.commands and "42" in environment.commands[0]
-    assert context.metadata["reef"] == {
-        "agent_record_ids": ["receipt-basic"],
-        "runtime_load_ids": ["basic:0"],
-    }
+    assert context.metadata["reef"] == {"agent_record_ids": ["receipt-basic"]}
     assert (context.n_input_tokens, context.n_output_tokens) == (3, 1)
 
 

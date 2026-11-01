@@ -41,19 +41,17 @@ class TrainStepResult:
     for a commit outside a training step that keeps the current state; a
     training step's result needs a mapping (``Trainer.prepare_commit``
     refuses ``None``). ``metrics`` is a mapping. ``artifact`` holds the bytes to publish, or ``None`` for a
-    commit that publishes nothing, such as a job submission or a checkpoint
-    that evaluation did not select. ``training_job_id`` names the training job
-    the commit is about, if any.
+    commit that publishes nothing, such as a job submission or a job's end.
+    ``training_job_id`` names the training job the commit is about, if any.
 
-    ``pending`` asks for the publication to be minted into the catalog without
-    being served, for a person to promote later. It is a publication decision,
-    so it travels as a field rather than as a metrics key: only durable bytes
-    can be held back, and a step that publishes nothing is rejected here
-    instead of having the request silently dropped.
+    The commit does not decide whether ``artifact`` serves; the scenario's
+    activation rule does. ``changed_kinds`` holds the harness node kinds that
+    ``artifact`` changes from the tree it was trained from, and the rule reads
+    it. It is empty for weights and for a commit that publishes nothing.
 
     ``component`` names the release component ``artifact`` replaces. A scenario
     serving several components requires it; the committer carries the other
-    components forward from the previous checkpoint. A flat scenario may leave
+    components from the active release. A flat scenario may leave
     it unset.
     """
 
@@ -61,7 +59,7 @@ class TrainStepResult:
     metrics: Mapping[str, Any] = field(default_factory=dict)
     artifact: Artifact | None = None
     training_job_id: str | None = None
-    pending: bool = False
+    changed_kinds: frozenset[str] = frozenset()
     component: str | None = None
 
     def __post_init__(self) -> None:
@@ -78,10 +76,12 @@ class TrainStepResult:
             not isinstance(self.training_job_id, str) or not self.training_job_id
         ):
             raise ValueError("training_job_id must be a non-empty string or None")
-        if not isinstance(self.pending, bool):
-            raise ValueError("pending must be a boolean")
-        if self.pending and self.artifact is None:
-            raise ValueError("a pending step must carry durable bytes: set artifact")
+        if not isinstance(self.changed_kinds, frozenset) or any(
+            not isinstance(kind, str) or not kind for kind in self.changed_kinds
+        ):
+            raise ValueError("changed_kinds must be a frozenset of non-empty kind names")
+        if self.changed_kinds and self.artifact is None:
+            raise ValueError("changed_kinds describe the artifact a step publishes; set artifact")
 
     @property
     def publication(self) -> ArtifactPublication:

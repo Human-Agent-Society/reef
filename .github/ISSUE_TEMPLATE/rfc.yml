@@ -7,8 +7,8 @@ body:
     attributes:
       value: |
         This issue is the RFC and its durable decision record. Keep the proposal
-        and important trade-offs up to date here; do not create a document under
-        `docs/rfcs`. Implementation starts only after the affected maintainers
+        and important trade-offs up to date here; do not add an RFC document to
+        the repository. Implementation starts only after the affected maintainers
         explicitly accept the RFC in this issue.
 
   - type: dropdown

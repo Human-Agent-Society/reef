@@ -1,4 +1,4 @@
-"""The reward: each finished week of a CEO-Bench episode, credited and posted to Reef.
+"""The reward: each finished week of a CEO-Bench rollout, credited and posted to Reef.
 
 The harness (``harness.harbor_agent``) plays the benchmark's agent turn by
 turn and knows the engine's day at every model call, so :class:`WeekRecords`
@@ -13,7 +13,7 @@ turns reported so far.
 
 A week's opening state is valued as its cash plus its subscription run-rate
 (the engine's own monthly recurring revenue, or the dashboard's estimate
-when the books cannot be read), counted over the weeks left in the episode
+when the books cannot be read), counted over the weeks left in the rollout
 and at most ``horizon_weeks`` of them (:func:`valuation`). Cash alone made
 every purchase a loss and inaction the safest week; the run-rate term is what
 pays for growth inside the horizon.
@@ -21,7 +21,7 @@ pays for growth inside the horizon.
 A week's credit is the discounted sum of the value changes of the next
 ``credit_weeks`` weeks (:func:`week_credit`): the week that spends on
 acquisition is credited with the subscribers that arrive over the weeks
-after it. The last weeks of an episode end with the final cash the engine
+after it. The last weeks of a rollout end with the final cash the engine
 reports, valued as cash alone, and their sums are cut short there.
 
 Credits are posted through :class:`ScoreScale`, which clips one week's
@@ -80,7 +80,7 @@ def week_credit(deltas: Sequence[float], discount: float, initial_cash: float = 
     """The discounted sum of the value changes in ``deltas``, in units of the starting balance.
 
     ``deltas[0]`` is the week's own change, ``deltas[1]`` the next week's, and
-    so on; a shorter sequence is an episode that ended inside the window.
+    so on; a shorter sequence is a rollout that ended inside the window.
     """
     return sum(delta * discount**position for position, delta in enumerate(deltas)) / initial_cash
 
@@ -89,7 +89,7 @@ class ScoreScale:
     """Scale each week's credit by the running median magnitude of the credits so far.
 
     The credit is clipped to ``clip`` first, so one six-figure purchase does
-    not set the scale for the rest of the episode; the scale never drops
+    not set the scale for the rest of the rollout; the scale never drops
     below ``floor``, so a run of near-zero weeks does not blow small noise up
     to the cap. Scaling keeps the sign: a week that grew the company scores
     positive whatever the weeks around it did.
@@ -168,7 +168,7 @@ def post_week_reports(
     return posted
 
 
-#: How often the pacer re-reads the scenario's releases while it holds the game.
+#: How often the pacer re-reads the scenario's training steps while it holds the game.
 PACE_POLL_S = 10.0
 #: The weekly dashboard the engine returns: the header, then the week's
 #: opening cash, individual subscribers, and enterprise seats.
@@ -304,7 +304,7 @@ def turn_decision(turn: dict, scripts: dict[str, str]) -> str | None:
     ``scripts`` holds the files the agent has written so far (path to
     content), updated here as ``write_file``/``edit_file`` calls pass, so a
     bash command that runs one of them is judged by what it contains; a
-    script this episode did not write is taken to act.
+    script this rollout did not write is taken to act.
     """
     for name, arguments in tool_calls(turn):
         if name in ("write_file", "edit_file"):
@@ -338,7 +338,7 @@ def turn_tokens(turn: dict) -> int:
 
 
 class WeekRecords:
-    """The episode's weeks: each one's opening state and its turns, in call order."""
+    """The rollout's weeks: each one's opening state and its turns, in call order."""
 
     def __init__(
         self,
@@ -391,7 +391,7 @@ class WeekRecords:
         The week closes with the opening state of the next week seen and is
         credited with the value changes of the ``credit_weeks`` weeks from it
         on, so it stays open until that many later weeks have opened. With
-        ``final_cash`` the episode is over: the last week seen ends there,
+        ``final_cash`` the rollout is over: the last week seen ends there,
         valued as cash alone, and a window that reaches the end is cut short.
         """
         deltas: list[float] = []
@@ -409,7 +409,7 @@ class WeekRecords:
             deltas.append(value_end - value)
             closing = closing or (cash_end, value_end)
             if index + 1 >= len(ordered):
-                break  # the episode ended inside the window
+                break  # the rollout ended inside the window
         if closing is None:
             return None
         return (*closing, week_credit(deltas, self.discount))
@@ -454,51 +454,56 @@ class WeekRecords:
         return rows
 
 
-class ReleaseCount(ABC):
-    """Where the pacer reads how many training releases the scenario has committed."""
+class TrainingStepCount(ABC):
+    """Where the pacer reads how many training steps the scenario has committed."""
 
     @abstractmethod
-    def training_releases(self) -> int | None:
+    def training_steps(self) -> int | None:
         """The count so far, or ``None`` when the service could not answer just now."""
 
 
-class ScenarioReleases(ReleaseCount):
-    """The scenario's release list on the Reef service."""
+class ScenarioStatus(TrainingStepCount):
+    """The scenario's step on the Reef service status.
+
+    The run activates nothing and sets no training start, so each commit of the scenario is a training step.
+    """
 
     def __init__(self, service_url: str, scenario: str, token: str) -> None:
-        self.url = f"{service_url}/reef/scenarios/{scenario}/releases"
+        self.url = f"{service_url}/reef/status"
+        self.scenario = scenario
         self.token = token
 
-    def training_releases(self) -> int | None:
+    def training_steps(self) -> int | None:
         request = urllib.request.Request(self.url, headers={"Authorization": f"Bearer {self.token}"})
         try:
             with urllib.request.urlopen(request, timeout=30) as response:
                 payload = json.loads(response.read())
         except (urllib.error.URLError, TimeoutError, ValueError):
             return None
-        return sum(1 for row in payload.get("releases", []) if row.get("operation") == "training")
+        scenario = payload["scenarios"].get(self.scenario)
+        return 0 if scenario is None else int(scenario["scenario_step"])
 
 
 class TrainingPacer:
     """Hold the game until the trainer has consumed the turns reported so far.
 
     The reported turns fill batches of ``batch_size``; each full batch must
-    have produced one training release. ``wait`` blocks until the scenario
-    has that many releases beyond the count at episode start, or the timeout
+    have produced one training step. ``wait`` blocks until the scenario
+    has that many steps beyond the count at rollout start, or the timeout
     passes, in which case the shortfall is forgiven so later weeks do not
     wait for a batch the recipe declined.
     """
 
-    def __init__(self, batch_size: int, timeout_s: float, releases: ReleaseCount, logger: logging.Logger) -> None:
+    def __init__(self, batch_size: int, timeout_s: float, steps: TrainingStepCount, logger: logging.Logger) -> None:
         self.batch_size = int(batch_size)
         self.timeout_s = float(timeout_s)
-        self.releases = releases
+        self.steps = steps
         self.logger = logger
         self.base: int | None = None
         self.forgiven = 0
         self.lock = threading.Lock()
 
-    def expected_releases(self, posted_turns: int) -> int:
+    def expected_steps(self, posted_turns: int) -> int:
         return posted_turns // self.batch_size - self.forgiven
 
     def wait(self, week: int, posted_turns: int) -> float:
@@ -506,16 +511,16 @@ class TrainingPacer:
         started = time.time()
         with self.lock:
             if self.base is None:
-                self.base = self.releases.training_releases() or 0
-            expected = self.expected_releases(posted_turns)
+                self.base = self.steps.training_steps() or 0
+            expected = self.expected_steps(posted_turns)
             while True:
-                observed = (self.releases.training_releases() or 0) - self.base
+                observed = (self.steps.training_steps() or 0) - self.base
                 if observed >= expected:
                     break
                 if time.time() - started >= self.timeout_s:
                     self.forgiven += expected - observed
                     self.logger.warning(
-                        "week %d: trainer committed %d of %d expected releases after %.0fs; going on",
+                        "week %d: trainer committed %d of %d expected steps after %.0fs; going on",
                         week,
                         observed,
                         expected,

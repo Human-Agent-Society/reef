@@ -5,17 +5,39 @@ from __future__ import annotations
 import os
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any, Literal, get_args
 
 from reef.core.errors import DeployConfigError
 from reef.runtime.deployment import RuntimeConfigError, training_component_factory_for
 from reef.runtime.executor.arguments import normalize_native_options
+from reef.runtime.jobs import ReleaseFormat
+from reef.runtime.serving import ReleaseWeights
 
 #: The ``inference.backend`` that runs no engine: no weights leave the trainer and no request is served.
 NO_INFERENCE_BACKEND = "none"
 
 #: Who serves a deployment's checkpoints: inference engines, or the training backend itself.
 DefaultServing = Literal["engines", "trainer"]
+
+
+@dataclass(frozen=True)
+class EngineWeights:
+    """How Reef's engines serve releases that hold no weight files: what they load, and the plugin that fetches it.
+
+    Values: ``release_format`` is the format of the files that ``weights`` gives for each release. ``weights`` is a
+    ``ReleaseWeights`` plugin reference, ``package.module:ClassName`` or a module and config. Purpose: a training
+    deployment returns it from ``engine_weights``; the serving assembly writes both into the engine runtime's
+    config.
+    """
+
+    release_format: ReleaseFormat
+    weights: str | Mapping[str, Any]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.release_format, ReleaseFormat):
+            raise TypeError("EngineWeights.release_format must be a ReleaseFormat")
+        ReleaseWeights.reference(self.weights, setting="EngineWeights.weights")
 
 
 class TrainingDeployment(ABC):
@@ -67,6 +89,14 @@ class TrainingDeployment(ABC):
 
     def trainer_serving_config(self, settings: Mapping[str, Any]) -> dict[str, Any] | None:
         """The runtime config of the backend's own serving (``inference.serving: trainer``), or None without one."""
+        return None
+
+    def engine_weights(self, settings: Mapping[str, Any]) -> EngineWeights | None:
+        """How Reef's engines (``inference.serving: engines``) get weights for releases that hold none, or None.
+
+        Reef asks only when the training component's ``release_format`` is ``None``. The default is None: engines
+        cannot serve such releases.
+        """
         return None
 
 

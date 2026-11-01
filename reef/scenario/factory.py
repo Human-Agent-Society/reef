@@ -1,18 +1,21 @@
 """Create and restore scenarios from durable registration and committed state.
 
-Storage repair precedes checkpoint synchronization and activation. The trainer
+A new scenario owns its root release: the recipe's default start, or an artifact item of its owner. Storage repair
+precedes checkpoint synchronization and activation. The trainer
 is then built from committed state and retained records are replayed. Any
 failure closes the trainer and opened storage session owned by this attempt.
 """
 
 from __future__ import annotations
 
+import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from reef.artifact.artifact import Artifact, ArtifactConflict, ArtifactNotFound, ArtifactPublicationError, ArtifactRef
+from reef.artifact.artifact import Artifact, ArtifactPublicationError
+from reef.artifact.composite import compose_release
 from reef.artifact.repository import (
     RegistrationAwareRepositoryBackendFactory,
     Repository,
@@ -20,24 +23,28 @@ from reef.artifact.repository import (
     RepositoryBackendFactory,
     StagedReleaseRepositoryBackend,
 )
-from reef.core.components import (
-    COMPONENTS_METADATA_KEY,
-    RECORDS_COMPONENT,
-    ComponentEntry,
-    ReleaseComponents,
-    release_components,
-)
+from reef.artifact.sources import SourceFiles
+from reef.core.artifact_ref import RootSource
+from reef.core.components import COMPONENTS_METADATA_KEY, RECORDS_COMPONENT, ReleaseComponents, release_components
 from reef.core.errors import ReefError
-from reef.inference.model_config import ModelConfig
 from reef.observability import ExperimentTracker, NullExperimentTracker
 from reef.observability.commits import CommitExperimentObserver, ExperimentReportQueue
 from reef.recipe.base import Recipe
+from reef.runtime.jobs import ScenarioRoot
 from reef.scenario.binding import ScenarioBinding
+from reef.scenario.release_files import ScenarioReleaseFiles
 from reef.scenario.scenario import Scenario
-from reef.storage.commits import SCENARIO_METADATA_KEY, CommitRecord, parse_scenario_metadata, scenario_metadata_for
+from reef.storage.commits import (
+    SCENARIO_METADATA_KEY,
+    CommitRecord,
+    active_artifact_ref,
+    parse_scenario_metadata,
+    scenario_metadata_for,
+    served_artifact_ref,
+)
 from reef.storage.scenario import ScenarioStorage, ScenarioStore
 from reef.surface.base import Surface
-from reef.surface.files import REPOSITORY_FILES
+from reef.train.instructions import InstructionQueue
 from reef.train.trainer import ComponentTrainer
 
 
@@ -48,6 +55,32 @@ def committed_records(store: ScenarioStore, head_record: CommitRecord | None) ->
         # only committed step there is.
         records = (head_record,)
     return records
+
+
+@dataclass(frozen=True)
+class ItemStart:
+    """The artifact item that a new scenario's root release holds.
+
+    Values: ``item_id`` is the item's non-empty ID, and ``uri`` its non-empty ``source_uri``. ``files`` is the
+    ``SourceFiles`` that ``uri`` names, not yet checked. ``component`` is the component that the item fills, or
+    ``None`` for the scenario's one component.
+
+    Purpose: ``ArtifactImports.create_from_item`` makes it for ``POST /reef/scenarios`` with ``artifact_id``.
+    ``ScenarioFactory.register`` checks it and writes it as the root release.
+    """
+
+    item_id: str
+    uri: str
+    files: SourceFiles
+    component: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.item_id, str) or not self.item_id or not isinstance(self.uri, str) or not self.uri:
+            raise ValueError("an item start names a non-empty item_id and uri")
+        if not isinstance(self.files, SourceFiles):
+            raise TypeError("an item start's files are SourceFiles")
+        if self.component is not None and (not isinstance(self.component, str) or not self.component):
+            raise ValueError("an item start's component is a non-empty string or None")
 
 
 @dataclass(frozen=True)
@@ -65,8 +98,11 @@ def recovered_trainer_states(
     """What each component's trainer recovers from its own commits and its own stale drops.
 
     The only trainer of a one-component (or record-only) scenario owns every
-    commit and consumption receipt: the ones made before they carried a
-    component, and rollbacks, which carry its state. A drop is a step without
+    training commit and consumption receipt, which name no component.
+    Activations and new training starts carry no trainer state, so no
+    trainer recovers from them. The records that a trainer's stored samples
+    consumed (``SampleStore.consumed_record_ids``) count as consumed too, so a
+    replay never makes their samples again. A drop is a step without
     a commit that an earlier Reef version recorded as a consumption receipt:
     its rows count as consumed, and the state and the cursor stay the last
     commit's.
@@ -90,13 +126,19 @@ def recovered_trainer_states(
     states: dict[str, RecoveredTrainerState] = {}
     for component in components:
         own = tuple(
-            record for record in records if record.component == component or (alone and record.component is None)
+            record
+            for record in records
+            if record.operation == "training"
+            and (record.component == component or (alone and record.component is None))
         )
         last = own[-1] if own else None
+        # The records that the trainer's stored samples consumed: its sample store key is "" when it is alone.
+        stored = store.samples.consumed_record_ids("" if alone else component)
         states[component] = RecoveredTrainerState(
             algorithm_state=None if last is None else last.algorithm_state,
             high_water=None if last is None else (last.high_water_sequence, last.high_water_offset),
-            consumed_ids=(
+            consumed_ids=stored
+            | (
                 frozenset().union(*consumed_by_component.values())
                 if alone
                 else frozenset(consumed_by_component.get(component, ()))
@@ -106,7 +148,12 @@ def recovered_trainer_states(
 
 
 class ScenarioFactory:
-    """Register, assemble, and recover complete scenario instances."""
+    """Register, assemble, and recover complete scenario instances.
+
+    ``activates_runtime`` is whether a recovered scenario's active artifact is activated on the runtime. Only the
+    process that runs control activates: a process of another service that loads a scenario on demand (samples,
+    evaluation, data) must not load weights onto the engines that control manages.
+    """
 
     def __init__(
         self,
@@ -117,8 +164,13 @@ class ScenarioFactory:
         experiment_tracker: ExperimentTracker,
         scenario_storage: ScenarioStorage,
         experiment_reports: ExperimentReportQueue | None = None,
+        activates_runtime: bool = True,
+        instructions: InstructionQueue | None = None,
     ) -> None:
         self._recipe = recipe
+        #: The training instructions of every scenario; None builds scenarios that take no instruction.
+        self._instructions = instructions
+        self._activates_runtime = activates_runtime
         self._backend_factory = backend_factory
         self._local_artifact_dir = local_artifact_dir
         self._experiment_tracker = experiment_tracker
@@ -133,14 +185,12 @@ class ScenarioFactory:
             self._backend_factory, RegistrationAwareRepositoryBackendFactory
         ) and self._backend_factory.has_registration(scenario)
 
-    def load_or_create(
-        self,
-        scenario: str,
-        release_id: str | None = None,
-        *,
-        model_config: ModelConfig,
-    ) -> Scenario:
-        """Create or recover a scenario in this deployment's repository."""
+    def load_or_create(self, scenario: str, start: ItemStart | None = None) -> Scenario:
+        """Recover the scenario ``scenario``, or create it when the backend has no registration of it.
+
+        A new scenario gets its own root release (``register``): the artifact item ``start``, or the recipe's
+        default start when ``start`` is ``None``. An existing scenario ignores ``start``.
+        """
         backend = self._backend_factory(scenario)
         if self._storage.durable and not isinstance(backend, StagedReleaseRepositoryBackend):
             raise ArtifactPublicationError(
@@ -148,94 +198,88 @@ class ScenarioFactory:
             )
         metadata = backend.metadata()
         registration = None if metadata is None else metadata.get(SCENARIO_METADATA_KEY)
-        recipe = self._recipe.with_model_config(model_config)
-        surface = recipe.serving_surface(scenario)
+        surface = self._recipe.serving_surface(scenario)
         if registration is None:
-            selected = backend.resolve_release(release_id)
-            registration_metadata: dict[str, object] = {
-                SCENARIO_METADATA_KEY: scenario_metadata_for(
-                    name=scenario,
-                    base_artifact=selected,
-                )
-            }
-            if surface.names:
-                registration_metadata[COMPONENTS_METADATA_KEY] = self.base_manifest(
-                    backend, selected, surface
-                ).to_dict()
-            backend.fork(selected.release_id, metadata=registration_metadata)
-
-            # fork() is the atomic registration point. Another caller may have
-            # won it, so always rebuild from the durable registration instead of
-            # assuming this creation attempt won.
+            self.register(scenario, backend, surface, start)
+            # register() is the atomic registration point. Another caller may have won it, so always rebuild from
+            # the durable registration instead of assuming this creation attempt won.
             metadata = backend.metadata()
             registration = None if metadata is None else metadata.get(SCENARIO_METADATA_KEY)
             if registration is None:
                 raise ReefError(f"scenario backend did not persist registration metadata for {scenario!r}")
-            # Freeze moving selectors such as "head" at the release resolved
-            # for this attempt, even if another creator won registration.
-            release_id = selected.release_id
-
         return self._recover(
             scenario,
             backend,
             registration,
-            release_id=release_id,
-            model_config=model_config,
             surface=surface,
             registered_components=release_components(metadata),
         )
 
-    def base_manifest(self, backend: RepositoryBackend, selected: ArtifactRef, surface: Surface) -> ReleaseComponents:
-        """Name the base release's components, so every later step carries the unchanged ones forward.
+    def register(self, scenario: str, backend: RepositoryBackend, surface: Surface, start: ItemStart | None) -> None:
+        """Write the root release of the new scenario ``scenario`` and register it with ``backend``.
 
-        A flat release is its one component. A composed base keeps its own
-        manifest, which must bind every component the surface serves. A base
-        without one keeps one directory per component; a component the base
-        seeds nothing for starts empty. Files outside every component
-        directory, a model snapshot laid out at the root say, belong to no
-        component and would be carried forward by none: such a base is refused.
+        The root holds the artifact item ``start`` in its component, or the recipe's default start
+        (``Recipe.default_start``) when ``start`` is ``None``. A root of several components holds each other
+        component's default start; a default start with files outside the component directories raises
+        ``ReefError``. The registration metadata records the root's ``RootSource`` and, for several components, the
+        manifest of the components that the root makes. An item that the component's layout or admission check
+        refuses raises ``ValueError``, and so does an item root that any of the recipe's training components cannot
+        start from (``Recipe.check_root_start``). Nothing is registered after a refusal.
         """
+        if self._local_artifact_dir is not None:
+            self._local_artifact_dir.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="reef-root-", dir=self._local_artifact_dir) as work:
+            root, source = self.root_release(surface, start, Path(work))
+            if start is not None:
+                self._recipe.check_root_start(ScenarioRoot(root, source))
+            registration_metadata: dict[str, object] = {
+                SCENARIO_METADATA_KEY: scenario_metadata_for(name=scenario, source=source)
+            }
+            if not surface.single:
+                registration_metadata[COMPONENTS_METADATA_KEY] = root.metadata[COMPONENTS_METADATA_KEY]
+            backend.register(root, metadata=registration_metadata)
+
+    def root_release(self, surface: Surface, start: ItemStart | None, work: Path) -> tuple[Artifact, RootSource]:
+        """The unpublished root release of a new scenario that ``surface`` serves, under ``work``, and its source."""
+        item: tuple[str, Artifact] | None = None
+        if start is None:
+            default = self._recipe.default_start()
+            source = RootSource("default", inputs=default.inputs)
+        else:
+            component, layout = surface.import_target(start.component)
+            directory = work / "item"
+            directory.mkdir()
+            stored = layout.stored(start.files, directory)
+            source = RootSource("item", item=start.item_id, uri=start.uri, version=start.files.version)
+            # The admission checks of an import: the release's own with one component, else the component's here and
+            # the release's on the composed root.
+            if surface.single:
+                surface.validate(stored)
+                return stored, source
+            surface.components[component].validator.validate(stored)
+            item = (component, stored)
+            default = self._recipe.default_start()
+        tree = work / "default"
+        tree.mkdir()
+        default.write(tree)
         if surface.single:
-            return ReleaseComponents({name: ComponentEntry(selected.content_id) for name in surface.names})
-        base = backend.materialize(selected)
-        manifest = base.components
-        if manifest is not None:
-            missing = [name for name in surface.names if name not in manifest.entries]
-            if missing:
-                raise ReefError(
-                    f"base release {selected.release_id!r} binds components {list(manifest.names)}; "
-                    f"the recipe also serves {missing}"
-                )
-            return manifest
-        local_path = base.local_path
-        if local_path is None:
-            raise ReefError(f"base release {selected.release_id!r} has no local tree to name components in")
-        # A component directory, or nothing at all, is what a component may keep at the root.
-        stray = sorted(
-            entry.name
-            for entry in local_path.iterdir()
-            if (entry.name not in surface.names or not entry.is_dir())
-            and entry.name not in REPOSITORY_FILES
-            and entry.name != ".git"
-        )
+            return Artifact.local(tree, content_id=default.content_id), source
+        # Files outside every component directory, a model laid out at the root say, belong to no component.
+        stray = sorted(entry.name for entry in tree.iterdir() if entry.name not in surface.names or not entry.is_dir())
         if stray:
             raise ReefError(
-                f"base release {selected.release_id!r} keeps {stray} outside its components {list(surface.names)}: "
-                "a release serving several components keeps one directory per component"
+                f"the default start keeps {stray} outside its components {list(surface.names)}: a release serving "
+                "several components keeps one directory per component"
             )
-        return ReleaseComponents({name: ComponentEntry(f"{selected.content_id}:{name}") for name in surface.names})
-
-    def validate_existing(
-        self,
-        current: Scenario,
-        release_id: str | None,
-    ) -> None:
-        self._validate_release_selector(
-            current.name,
-            current.repository.base_artifact,
-            current.repository.backend,
-            release_id,
-        )
+        components = {
+            name: Artifact.local(tree / name, content_id=f"{default.content_id}:{name}") for name in surface.names
+        }
+        if item is None:
+            return compose_release(components, directory=work / "root"), source
+        components[item[0]] = item[1]
+        root = compose_release(components, directory=work / "root")
+        surface.validator.validate(root)
+        return root, source
 
     def _recover(
         self,
@@ -243,8 +287,6 @@ class ScenarioFactory:
         backend: RepositoryBackend,
         registration: object,
         *,
-        release_id: str | None,
-        model_config: ModelConfig,
         surface: Surface,
         registered_components: ReleaseComponents | None,
     ) -> Scenario:
@@ -282,35 +324,28 @@ class ScenarioFactory:
                 "a recipe serving one component cannot reopen it"
             )
         checkpoint_head = backend.current()
-        registered_name, base_artifact, checkpoint = parse_scenario_metadata(
+        registered_name, start_artifact, root_source, checkpoint = parse_scenario_metadata(
             registration,
             checkpoint_head=checkpoint_head,
-            components=None if surface.single or registered_components is None else registered_components.content_ids,
+            components=(
+                None
+                if surface.single or registered_components is None
+                else registered_components.artifact_ids(checkpoint_head.release_id)
+            ),
         )
         if registered_name != name:
             raise ValueError(f"scenario metadata is for {registered_name!r}, not {name!r}")
-        base_artifact = backend.resolve_release(base_artifact.release_id)
+        # What served after the artifact head's commit; the commit history's activations come after it.
+        served_at_head = served_artifact_ref(registration, checkpoint_head=checkpoint_head)
+        start_artifact = backend.resolve_release(start_artifact.release_id)
         checkpoint_step = 0 if checkpoint is None else checkpoint.step
-        self._validate_release_selector(
-            name,
-            base_artifact,
-            backend,
-            release_id,
-        )
-        recipe = self._recipe.with_model_config(model_config)
-        runtime = recipe.runtime
+        runtime = self._recipe.runtime
         store = self._storage.open(name)
         scenario: Scenario | None = None
         trainers: tuple[ComponentTrainer, ...] = ()
         try:
             head_record = store.recover(checkpoint=checkpoint)
-            committed_artifact: ArtifactRef | None
-            if head_record is None:
-                scenario_step = 0
-                committed_artifact = None
-            else:
-                scenario_step = head_record.step
-                committed_artifact = head_record.artifact_ref
+            scenario_step = 0 if head_record is None else head_record.step
             recovered_states = recovered_trainer_states(store, name, head_record, surface)
 
             # Publication stages durable bytes before the commit record is durable, while
@@ -318,18 +353,17 @@ class ScenarioFactory:
             # two leaves the commit history's checkpoint ahead of that pointer.
             if store.durable:
                 checkpoints = [
-                    record
-                    for record in store.history()
-                    if record.checkpoint and not record.pending and record.step >= checkpoint_step
+                    record for record in store.history() if record.trained_artifact and record.step >= checkpoint_step
                 ]
                 if checkpoints:
                     checkpoint_head = checkpoints[-1].artifact_ref
-
-            current_artifact = surface.recover(committed_artifact, checkpoint_head, runtime)
+            # The active artifact is the newest activation in the log; the chain tip, the parent of the next
+            # publication, stays the checkpoint. Without a durable log, the artifact head's metadata names it.
+            current_artifact = active_artifact_ref(committed_records(store, head_record), served_at_head)
 
             repository = Repository(
                 backend,
-                base_artifact,
+                start_artifact,
                 current_artifact=current_artifact,
                 checkpoint_artifact=checkpoint_head,
                 local_dir=self._local_artifact_dir,
@@ -337,28 +371,29 @@ class ScenarioFactory:
             repository.synchronize_checkpoint()
             # Traffic must not reach a recovered scenario before its committed
             # head is servable; a failed activation leaves the scenario unloaded.
-            surface.activate(Artifact(current_artifact, repository), runtime)
+            if self._activates_runtime:
+                surface.activate(Artifact(current_artifact, repository), runtime)
 
             experiment_logger = self._experiment_tracker.bind_scenario(
                 scenario=name,
-                recipe=recipe.name,
+                recipe=self._recipe.name,
                 source_artifact_ref=repository.require_current_artifact(),
-                run_segment=max(
-                    (record.step for record in store.history() if record.operation in ("rollback", "promote")),
-                    default=0,
-                ),
+                run_segment=store.training_run_position()[0] if store.durable else 0,
             )
-            trainers = recipe.build_trainers(
+            trainers = self._recipe.build_trainers(
                 name,
                 store.records,
                 surface=surface,
                 algorithm_states={component: state.algorithm_state for component, state in recovered_states.items()},
                 experiment_logger=experiment_logger,
                 task_storage=store.tasks,
+                releases=ScenarioReleaseFiles(name=name, store=store, repository=repository, surface=surface),
+                samples=store.samples,
+                root=ScenarioRoot(Artifact(start_artifact, repository), root_source),
             )
             if any(
                 component_trainer.trainer.trains
-                and component_trainer.trainer.pipeline.training_mode != recipe.training_mode
+                and component_trainer.trainer.pipeline.training_mode != self._recipe.training_mode
                 for component_trainer in trainers
             ):
                 # A trainer that runs no step keeps no mode; every stepping trainer runs the recipe's.
@@ -373,7 +408,7 @@ class ScenarioFactory:
                 experiment_observer = CommitExperimentObserver(
                     self._experiment_tracker,
                     scenario=name,
-                    recipe=recipe.name,
+                    recipe=self._recipe.name,
                     source_artifact_ref=repository.require_current_artifact(),
                     scenario_step=scenario_step,
                     store=store,
@@ -382,22 +417,23 @@ class ScenarioFactory:
                 store = experiment_observer.store
             scenario = Scenario(
                 name=name,
-                model_config=model_config,
                 binding=ScenarioBinding(
                     surface=surface,
                     runtime=runtime,
-                    training_component=recipe.training_component,
-                    inference_handler=recipe.inference_handler,
+                    training_component=self._recipe.training_component,
+                    activation_rule=self._recipe.activation_rule(),
                     # The recipe's own contract, not the first trainer's: a composite agrees
                     # one across its components, whatever order they are listed in.
-                    report_type=recipe.report_type,
+                    report_type=self._recipe.report_type,
                 ),
                 repository=repository,
+                root_source=root_source,
                 trainers=trainers,
                 scenario_step=scenario_step,
                 store=store,
                 recovered_head_record=head_record,
                 experiment_observer=experiment_observer,
+                instructions=None if self._instructions is None else self._instructions.of(name),
             )
             # Replay retained, unconsumed rows behind each trainer's watermark
             # before resuming its cursor. Retention may keep already-consumed
@@ -420,11 +456,7 @@ class ScenarioFactory:
                     scenario.replay_retained(
                         up_to_sequence=0, consumed_ids=recovered.consumed_ids, component=component_trainer.component
                     )
-                component_trainer.trainer.read_uploaded_trajectories(store.trajectories)
-            scenario.resume_rollback_start()
-            # A scenario created or last stepped by an older Reef serves that Reef's shipped content (the harness
-            # requests extension, for one) until it is republished; every later step builds on what it serves.
-            scenario.publish_shipped_content()
+            scenario.resume_training_starts()
             return scenario
         except BaseException:
             if scenario is not None:
@@ -436,33 +468,3 @@ class ScenarioFactory:
                 finally:
                     store.close()
             raise
-
-    def _artifact_selector_matches(
-        self,
-        base_artifact: ArtifactRef,
-        selector: str,
-        backend: RepositoryBackend,
-    ) -> bool:
-        if selector == base_artifact.release_id:
-            return True
-        try:
-            return backend.resolve_release(selector).release_id == base_artifact.release_id
-        except ArtifactNotFound:
-            return False
-
-    def _validate_release_selector(
-        self,
-        scenario: str,
-        base_artifact: ArtifactRef,
-        backend: RepositoryBackend,
-        release_id: str | None,
-    ) -> None:
-        """Refuse a release selector that conflicts with the existing binding."""
-        if release_id is not None and not self._artifact_selector_matches(
-            base_artifact,
-            release_id,
-            backend,
-        ):
-            raise ArtifactConflict(
-                f"scenario {scenario!r} is already bound to release {base_artifact.release_id!r}, not {release_id!r}"
-            )

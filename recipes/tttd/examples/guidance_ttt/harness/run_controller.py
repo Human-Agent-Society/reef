@@ -58,7 +58,7 @@ class GuidanceRunOutcome:
     start_step: int
     next_step: int
     step_summaries: tuple[dict[str, Any], ...]
-    runtime_load_id: str | None
+    served_artifact_id: str | None
 
 
 class SearchHarness(ABC):
@@ -125,8 +125,8 @@ class TrainingJobOutcome:
     Reef committed for the checkpoint: Slime's training metrics (for example
     ``train/grad_norm``) and the evaluation and selection result.
     ``position`` is the scenario's training after the job, with no job
-    running. ``runtime_load_id`` is the serving load ID the status reports
-    then, or ``None``. ``wait_for_training_step`` makes the value and the
+    running. ``served_artifact_id`` is the ID of the artifact that serves the
+    scenario's requests then, as the status reports it, or ``None``. ``wait_for_training_step`` makes the value and the
     controller reads it.
     """
 
@@ -134,7 +134,7 @@ class TrainingJobOutcome:
     rollout_id: int
     checkpoint_metrics: Mapping[str, Any]
     position: TrainingPosition
-    runtime_load_id: str | None
+    served_artifact_id: str | None
 
     def __post_init__(self) -> None:
         if not isinstance(self.job_id, str) or not self.job_id:
@@ -253,7 +253,7 @@ def wait_for_training_step(
                 return finished_job_outcome(
                     commits(after.scenario_step),
                     position,
-                    last_status.get("current_runtime_load_id"),
+                    last_status.get("served_artifact_id"),
                     expected_rollout_id,
                 )
         if poll_interval_s:
@@ -266,7 +266,7 @@ def wait_for_training_step(
 def finished_job_outcome(
     commits: Sequence[Mapping[str, Any]],
     position: TrainingPosition,
-    runtime_load_id: str | None,
+    served_artifact_id: str | None,
     expected_rollout_id: int,
 ) -> TrainingJobOutcome:
     """The outcome of the one job that ended in ``commits``; a failed job or a missing checkpoint raises."""
@@ -294,7 +294,7 @@ def finished_job_outcome(
         rollout_id=end_metrics.get("rollout_id"),
         checkpoint_metrics=dict(checkpoints[0]),
         position=position,
-        runtime_load_id=runtime_load_id,
+        served_artifact_id=served_artifact_id,
     )
     if outcome.rollout_id != expected_rollout_id:
         raise RuntimeError(
@@ -483,7 +483,7 @@ class GuidanceRunController:
 
         step_summaries = [dict(summary) for summary in (saved or {}).get("step_summaries", [])]
         all_results: list[Any] = []
-        runtime_load_id: str | None = None
+        served_artifact_id: str | None = None
         for step in range(start_step, total_steps):
             started_at = time.monotonic()
             self.emit({"event": "guidance_step_started", "step": step})
@@ -537,7 +537,7 @@ class GuidanceRunController:
                 step_summaries=step_summaries,
                 extra=self.resume_extra,
             )
-            runtime_load_id = outcome.runtime_load_id or runtime_load_id
+            served_artifact_id = outcome.served_artifact_id or served_artifact_id
             all_results.extend(results)
             self.emit({"event": "guidance_step_committed", **summary})
 
@@ -546,7 +546,7 @@ class GuidanceRunController:
             start_step=start_step,
             next_step=total_steps,
             step_summaries=tuple(step_summaries),
-            runtime_load_id=runtime_load_id,
+            served_artifact_id=served_artifact_id,
         )
 
 

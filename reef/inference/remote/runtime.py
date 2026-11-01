@@ -25,7 +25,13 @@ from reef.inference.vllm.chat import VLLMInferenceHandler
 from reef.runtime.deployment import RuntimeConfigError, RuntimeFactory
 from reef.runtime.interfaces import InferenceHandler, InferenceRuntime
 from reef.runtime.jobs import ReleaseFormat
-from reef.runtime.serving import AdapterServingRuntime, FullWeightServingRuntime, SavedWeightServingRuntime
+from reef.runtime.serving import (
+    AdapterServingRuntime,
+    FullWeightServingRuntime,
+    OpenedEngines,
+    ReleaseWeights,
+    ServingEngines,
+)
 
 #: The request dialect of each built-in engine the component can run.
 ENGINE_HANDLERS: dict[str, type[InferenceHandler]] = {
@@ -120,14 +126,16 @@ class RemoteServingRuntimeConfig:
     ``options`` holds the engine's native options and
     ``inference_handler_config`` the request handler's own options.
     ``executor`` and ``executor_options`` select the engines' executor (the
-    ``rollout`` role). Purpose: the serving assembly writes the value from the
-    deployment's ``inference`` settings and the training component's release
-    format; ``RemoteServingRuntimeFactory`` reads it.
+    ``rollout`` role). ``weights`` is ``None``, which reads each release's own
+    files (``ReleaseFiles``), or a ``ReleaseWeights`` plugin reference.
+    Purpose: the serving assembly writes the value from the deployment's
+    ``inference`` settings and the training backend's engine weights;
+    ``RemoteServingRuntimeFactory`` reads it.
     """
 
     remote: Mapping[str, Any] = field(metadata=config_metadata("The inference.remote section."))
     release_format: Mapping[str, Any] = field(
-        metadata=config_metadata("The training component's release format, as ReleaseFormat.to_dict writes it.")
+        metadata=config_metadata("The format of the weights the engines load, as ReleaseFormat.to_dict writes it.")
     )
     engine: str = config_option("sglang", help="Engine backend that the component starts.")
     num_gpus: int = config_option(1, help="GPUs the component's engines use.")
@@ -143,10 +151,15 @@ class RemoteServingRuntimeConfig:
     inference_handler_config: Mapping[str, Any] = field(
         default_factory=dict, metadata=config_metadata("Inference adapter-owned options.")
     )
+    weights: str | Mapping[str, Any] | None = config_option(
+        None, help="A ReleaseWeights plugin that gives each release's weight files; unset reads the release's own."
+    )
 
     def __post_init__(self) -> None:
         RemoteInferenceSettings.from_mapping(self.remote)
         ReleaseFormat.from_dict(self.release_format)
+        if self.weights is not None:
+            ReleaseWeights.reference(self.weights, setting="runtime.weights")
         if not isinstance(self.engine, str) or not self.engine.strip():
             raise ValueError("runtime.engine must be a non-empty string")
         for name, options in (
@@ -169,13 +182,42 @@ class RemoteServingRuntimeConfig:
             raise ValueError("runtime.inference_timeout_s must be positive")
 
 
+class ComponentEngines(ServingEngines):
+    """The engines of a remote inference component, which outlive control.
+
+    ``open`` attaches to the engines that the component runs, or starts them when it runs none, so a control
+    restart or a standby that takes over leaves the engines and the requests in flight alone. ``close`` stops no
+    engine: the component's engines are the inference service's, and stop with the component.
+    """
+
+    def __init__(self, service: RemoteInferenceService) -> None:
+        self.service = service
+
+    @property
+    def base_url(self) -> str:
+        return self.service.settings.url
+
+    @property
+    def watched(self) -> bool:
+        return True
+
+    def open(self) -> OpenedEngines:
+        attached = self.service.attach()
+        if attached is not None:
+            return OpenedEngines(self.service.backend(attached), attached=True)
+        return OpenedEngines(self.service.backend(self.service.start()), attached=False)
+
+    def check_health(self) -> None:
+        self.service.check_health()
+
+
 class RemoteServingRuntimeFactory(RuntimeFactory):
     """Start the component's engines and serve published releases on them, in the layout of their release format.
 
     The engine's own request handler speaks to the component, with the
     inference token as a bearer header; a ``module:factory`` engine needs an
-    explicit ``inference_handler_factory``. The runtime stops the engines when
-    it shuts down.
+    explicit ``inference_handler_factory``. The engines outlive the runtime
+    (``ComponentEngines``).
     """
 
     kind = "remote_serving"
@@ -206,6 +248,11 @@ class RemoteServingRuntimeFactory(RuntimeFactory):
         except ValueError as exc:
             raise RuntimeConfigError(str(exc)) from exc
         release_format = ReleaseFormat.from_dict(config["release_format"])
+        weights = (
+            None
+            if config.get("weights") is None
+            else ReleaseWeights.from_setting(config["weights"], setting="runtime.weights")
+        )
         try:
             engine_config = serving_engine_config(
                 engine,
@@ -229,34 +276,28 @@ class RemoteServingRuntimeFactory(RuntimeFactory):
             num_gpus=config["num_gpus"],
             control_token=control_token,
         )
-        try:
-            backend = service.backend(service.start())
-            handler = handler_factory.from_config(
-                remote.url,
+        handler = handler_factory.from_config(
+            remote.url,
+            model_path=model_path,
+            timeout_s=config["inference_timeout_s"],
+            **dict(config["inference_handler_config"]),
+            request_headers=ProviderRequestHeaders(inference_token),
+        )
+        # Building the runtime touches no engine: only control opens it, in every layout.
+        engines = ComponentEngines(service)
+        if release_format.layout == "adapter":
+            return AdapterServingRuntime(
+                engines,
+                handler,
+                adapter_capacity=config["adapter_capacity"],
                 model_path=model_path,
-                timeout_s=config["inference_timeout_s"],
-                **dict(config["inference_handler_config"]),
-                request_headers=ProviderRequestHeaders(inference_token),
+                inference_timeout_s=config["inference_timeout_s"],
+                weights=weights,
             )
-            serving: SavedWeightServingRuntime
-            if release_format.layout == "adapter":
-                serving = AdapterServingRuntime(
-                    backend,
-                    handler,
-                    adapter_capacity=config["adapter_capacity"],
-                    service=service,
-                    model_path=model_path,
-                    inference_timeout_s=config["inference_timeout_s"],
-                )
-            else:
-                serving = FullWeightServingRuntime(
-                    backend,
-                    handler,
-                    service=service,
-                    model_path=model_path,
-                    inference_timeout_s=config["inference_timeout_s"],
-                )
-            return serving
-        except BaseException:
-            service.close()
-            raise
+        return FullWeightServingRuntime(
+            engines,
+            handler,
+            model_path=model_path,
+            inference_timeout_s=config["inference_timeout_s"],
+            weights=weights,
+        )

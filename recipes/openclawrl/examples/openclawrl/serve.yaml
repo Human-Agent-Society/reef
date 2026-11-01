@@ -48,8 +48,6 @@ inference:
     reef.inference.sglang.chat.SGLangInferenceHandler
   handler-config:
     tool_call_parser: qwen25
-    # Old-policy top-K capture (S^q / ell_old) for the top-K objective.
-    capture_topk: 4
     # The native /generate path has engine sampling defaults (T=1.0), not
     # the model generation_config the chat endpoint would apply; pin the
     # upstream-effective values (Qwen3-4B-Thinking generation_config) so
@@ -63,7 +61,7 @@ recipe:
   implementation: recipes.openclawrl.recipe:OpenClawRLRecipe
 pipeline:
   # The judging stage: sessions correlated, and each turn judged by the PRM.
-  record2record:
+  record2sample:
     config:
       # The recipe consumes this external service; Reef does not launch or schedule it.
       prm_url: http://127.0.0.1:23001
@@ -78,7 +76,7 @@ pipeline:
       # tempered scale.)
       prm_timeout_s: 3600
       prm_max_hint_candidates: 3
-  task2job:
+  sample2job:
     config:
       # The fewest samples of one job: one optimizer step of Slime's global batch.
       job_samples: ${training.config.global_batch_size}
@@ -90,7 +88,7 @@ training:
   backend: slime
   ready-timeout: 900
   ray-namespace: reef
-  # A step with long assembled episodes can exceed the 300 s default; a
+  # A step with long assembled rollouts can exceed the 300 s default; a
   # timed-out worker retry then collides with the still-running job's
   # RUNNING marker (observed live as "operator recovery required").
   timeout-s: 7200

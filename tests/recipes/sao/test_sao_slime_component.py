@@ -1,7 +1,7 @@
 """Container-only tests for SAO on Slime: its wire rows and its jobs on the Slime training component.
 
 These exercise the SAO payload builder (``build_sao_rollout_data`` in
-``recipes.sao.slime``), SAO jobs on ``SlimeTrainingComponent`` over fake
+``recipes.sao.slime``), SAO jobs on ``SlimeJobRunner`` over fake
 actor and critic groups, the critic's arguments and its checkpoint storage.
 They transitively import ``ray`` and ``torch`` and touch no GPU.
 """
@@ -14,12 +14,9 @@ import pytest
 from tests.support._trajectories import policy_trajectory
 from tests.support.slime_component import FakeTrainGroup, RecordingBatchProcessor, checkpoint_storage, finished
 
-from recipes.sao.examples.servelearnbench.recipe import RetailJobPlan
-from reef.runtime.durable_files import write_json
 from reef.runtime.interfaces import TrainingMethod
 from reef.runtime.jobs import JobStatus, TrainingJob
-from reef.train.jobs import JobPlanContext
-from reef.train.slime_backend.component import ROLLOUT_FILE, SlimeStart, SlimeTrainingComponent
+from reef.train.slime_backend.component import SlimeJobRunner
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
 from reef.train.slime_backend.loss_families import resolve_loss_family
 from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
@@ -34,7 +31,7 @@ def _sao_row(
     action_mask: list[int] | None = None,
     log_probs: list[float] | None = None,
     reward: float = 0.5,
-    producing_runtime_load_id: str | None = "slime-v3",
+    producing_artifact_id: str | None = "artifact-3",
     rollout_created_at: float | None = 1234.5,
 ) -> list[object]:
     """One 8-element SAO row as emitted by Reef's remote handle."""
@@ -49,7 +46,7 @@ def _sao_row(
         log_probs,
         reward,
         action_mask,
-        producing_runtime_load_id,
+        producing_artifact_id,
         rollout_created_at,
     ]
 
@@ -68,7 +65,7 @@ def _payload(rows: list[list[object]], rollout_ids: list[int] | None = None) -> 
 @pytest.mark.unit
 def test_sao_parser_converts_rows_and_preserves_source_fields() -> None:
     converted = to_slime_rollout_data(
-        _payload([_sao_row("a"), _sao_row("b", reward=1.0, producing_runtime_load_id="slime-v4")])
+        _payload([_sao_row("a"), _sao_row("b", reward=1.0, producing_artifact_id="artifact-4")])
     )
 
     assert converted["loss"] == "sao"
@@ -78,8 +75,8 @@ def test_sao_parser_converts_rows_and_preserves_source_fields() -> None:
     assert converted["rewards"] == [0.5, 1.0]
     assert converted["response_lengths"] == [3, 3]
     assert converted["rollout_log_probs"] == [[-0.1, -0.2, -0.3], [-0.1, -0.2, -0.3]]
-    # The producing version and timestamp support policy lag / queue age.
-    assert converted["producing_runtime_load_ids"] == ["slime-v3", "slime-v4"]
+    # The producing artifact and timestamp support the producing-artifact and queue-age metrics.
+    assert converted["producing_artifact_ids"] == ["artifact-3", "artifact-4"]
     assert converted["rollout_created_ats"] == [1234.5, 1234.5]
     # No comparison-group barrier: one rollout per id, and no advantages.
     assert converted["rollout_ids"] == [0, 1]
@@ -144,51 +141,51 @@ def test_sao_parser_requires_rollout_ids_for_every_sample() -> None:
 
 @pytest.mark.unit
 def test_sao_parser_tolerates_missing_source_fields() -> None:
-    converted = to_slime_rollout_data(_payload([_sao_row(producing_runtime_load_id=None, rollout_created_at=None)]))
+    converted = to_slime_rollout_data(_payload([_sao_row(producing_artifact_id=None, rollout_created_at=None)]))
 
-    assert converted["producing_runtime_load_ids"] == [None]
+    assert converted["producing_artifact_ids"] == [None]
     assert converted["rollout_created_ats"] == [None]
 
 
 @pytest.mark.unit
-def test_sao_row_versions_must_match_the_shared_producing_versions() -> None:
+def test_sao_row_artifacts_must_match_the_shared_producing_artifacts() -> None:
     payload = {
-        **_payload([_sao_row(producing_runtime_load_id="engine:1")]),
-        "producing_runtime_load_ids": ["engine:2"],
+        **_payload([_sao_row(producing_artifact_id="artifact-1")]),
+        "producing_artifact_ids": ["artifact-2"],
     }
-    with pytest.raises(ValueError, match="row runtime load IDs do not match"):
+    with pytest.raises(ValueError, match="row artifact IDs do not match"):
         to_slime_rollout_data(payload)
 
 
 @pytest.mark.unit
-def test_sao_rollout_metrics_reports_version_spread_queue_age_and_effective_tokens() -> None:
+def test_sao_rollout_metrics_reports_producing_artifacts_queue_age_and_effective_tokens() -> None:
     sao = resolve_loss_family("sao")
     rollout_data = to_slime_rollout_data(
         _payload(
             [
-                _sao_row("a", loss_mask=[1, 1, 1], action_mask=[1, 1, 1], producing_runtime_load_id="inc:2"),
-                _sao_row("b", loss_mask=[1, 0, 1], action_mask=[1, 1, 1], producing_runtime_load_id="inc:4"),
+                _sao_row("a", loss_mask=[1, 1, 1], action_mask=[1, 1, 1], producing_artifact_id="artifact-2"),
+                _sao_row("b", loss_mask=[1, 0, 1], action_mask=[1, 1, 1], producing_artifact_id="artifact-4"),
+                _sao_row("c", loss_mask=[1, 1, 1], action_mask=[1, 1, 1], producing_artifact_id="artifact-4"),
             ]
         )
     )
 
     metrics = sao.rollout_metrics(rollout_data)
 
-    # The spread counts versions behind the newest producing version in the rollout's data.
-    assert metrics["sao/producing_version_spread_max"] == 2
-    assert metrics["sao/producing_version_spread_mean"] == 1.0
-    assert metrics["sao/effective_token_rate"] == 5 / 6
+    # Two distinct artifacts produced the rollout's three samples.
+    assert metrics["sao/producing_artifacts"] == 2
+    assert metrics["sao/effective_token_rate"] == 8 / 9
     assert metrics["sao/queue_age_s_max"] >= 0.0
 
 
 @pytest.mark.unit
-def test_sao_rollout_metrics_skip_the_spread_of_versions_without_a_sequence() -> None:
+def test_sao_rollout_metrics_skip_samples_without_a_producing_artifact() -> None:
     sao = resolve_loss_family("sao")
-    rollout_data = to_slime_rollout_data(_payload([_sao_row("a", producing_runtime_load_id="no-sequence")]))
+    rollout_data = to_slime_rollout_data(_payload([_sao_row("a", producing_artifact_id=None)]))
 
     metrics = sao.rollout_metrics(rollout_data)
 
-    assert "sao/producing_version_spread_max" not in metrics
+    assert "sao/producing_artifacts" not in metrics
     assert metrics["sao/effective_token_rate"] == 1.0
 
 
@@ -203,7 +200,6 @@ class SaoStack:
         critic_steps_per_actor: int | None = 2,
         critic_only_steps: int = 0,
         critic_save_interval: int = 1,
-        start_rollout_id: int = 0,
         rank_metrics=None,
     ) -> None:
         template = str(tmp_path / "hf" / "{rollout_id}")
@@ -213,7 +209,7 @@ class SaoStack:
             loss_family="sao",
             global_batch_size=2,
             save_hf=template,
-            start_rollout_id=start_rollout_id,
+            start_rollout_id=0,
             critic_save=None if critic_root is None else str(critic_root),
             critic_save_interval=critic_save_interval,
             critic_steps_per_actor=critic_steps_per_actor,
@@ -228,7 +224,7 @@ class SaoStack:
         if self.critic is not None:
             self.critic.train_result = [{"values": [0.25]}]
         self.critic_external_data: list[object] = []
-        self.component = SlimeTrainingComponent(
+        self.component = SlimeJobRunner(
             args,
             self.actor,
             self.critic,
@@ -237,7 +233,8 @@ class SaoStack:
             lora=False,
             loss_family="sao",
         )
-        self.start: str | None = None
+        self.component.start_jobs()
+        self.start = self.component.base_start
 
     def run(self, step: int = 0) -> JobStatus:
         batch = JobData(
@@ -249,16 +246,15 @@ class SaoStack:
                     (1, 1, 1),
                     (-0.1, -0.2, -0.3),
                     reward,
-                    producing,
                     action_mask=(1, 1, 1),
                     rollout_created_at=1234.5,
-                )
-                for index, (reward, producing) in enumerate(((0.5, "inc:4"), (1.0, "inc:3")))
+                ).with_training(artifact_id=producing)
+                for index, (reward, producing) in enumerate(((0.5, "artifact-4"), (1.0, "artifact-3")))
             ),
         )
         method = {"method": TrainingMethod("sao").to_dict()}
         job_id = f"job-{step}"
-        self.component.submit(TrainingJob(job_id, "slime", self.start, batch, method))
+        self.component.submit(TrainingJob(job_id, "slime", self.start, batch, method, scenario="s"))
         status = finished(self.component, job_id)
         if status.checkpoints:
             self.start = status.checkpoints[-1].path
@@ -311,57 +307,6 @@ def test_a_sao_critic_only_warmup_saves_without_moving_the_policy(tmp_path, sao_
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("progress", ["fresh", "warmup_saved", "warmup_recorded"])
-def test_retail_reuses_warmup_rows_and_resumes_before_the_first_actor_update(tmp_path, sao_stacks, progress):
-    data = JobData(
-        "first",
-        tuple(
-            policy_trajectory(f"task-{index}", (9, 1, 2), (1, 1), (-0.1, -0.2), 0.5, "inc:0", action_mask=(1, 1))
-            for index in range(2)
-        ),
-    )
-    request = RetailJobPlan(1).next_job(JobPlanContext(data, 0, None))
-    job = TrainingJob("first", "slime", None, data, request.parameters)
-    if progress != "fresh":
-        directory = tmp_path / "reef-jobs" / "first"
-        write_json(
-            directory / "job.json", {"start": None, "data": data.to_dict(), "parameters": dict(request.parameters)}
-        )
-        write_json(directory / ROLLOUT_FILE, {"rollout_id": 0, "step": 1})
-        for path in ("hf/0", "megatron/iter_0000000", "megatron-critic/iter_0000000"):
-            (tmp_path / path).mkdir(parents=True)
-        if progress == "warmup_recorded":
-            start = tmp_path / "reef-starts" / "rollout_0"
-            SlimeStart(0, None, {}, None).write(start)
-            checkpoint_storage(tmp_path, critic_root=tmp_path / "megatron-critic").complete("first", 0, reward=0.5)
-            write_json(
-                directory / "checkpoints.json",
-                {
-                    "checkpoints": [
-                        {"step": 1, "path": str(start), "release_path": str(tmp_path / "hf" / "0"), "metrics": {}}
-                    ]
-                },
-            )
-    stack = sao_stacks(tmp_path, critic_only_steps=1, start_rollout_id=0 if progress == "fresh" else 1)
-    stack.component.submit(job)
-    status = finished(stack.component, "first")
-    assert status.state == "finished", status.error
-    assert [checkpoint.step for checkpoint in status.checkpoints] == [1, 2]
-    assert [rollout for rollout, _ in stack.actor.train_calls] == [1]
-    assert [rollout for rollout, _ in stack.critic.train_calls] == ([0, 0, 1, 1] if progress == "fresh" else [1, 1])
-    assert status.checkpoints[-1].metrics["sao/actor_trained"] == 1
-    calls = stack.component.batch_processor.calls
-    assert all(call["external_step_sizes"] == [2] for call in calls)
-    if progress == "fresh":
-        assert calls[0] == calls[1]
-        assert status.checkpoints[0].metrics["sao/actor_trained"] == 0
-    # Retrying the original reports/job cannot produce another actor update.
-    stack.component.submit(job)
-    assert stack.component.status("first") == status
-    assert len(stack.actor.train_calls) == 1
-
-
-@pytest.mark.unit
 def test_consecutive_sao_jobs_train_and_save_consecutive_rollouts(tmp_path, sao_stacks) -> None:
     stack = sao_stacks(tmp_path)
     stack.run(0)
@@ -392,8 +337,7 @@ def test_a_sao_checkpoint_carries_the_backend_and_worker_metrics(tmp_path, sao_s
         "values",
         "sao/critic_updates",
         "sao/actor_trained",
-        "sao/producing_version_spread_max",
-        "sao/producing_version_spread_mean",
+        "sao/producing_artifacts",
         "sao/queue_age_s_max",
         "sao/queue_age_s_mean",
         "sao/effective_token_rate",
@@ -543,7 +487,7 @@ def test_prepare_critic_args_starts_the_critic_from_an_init_checkpoint_until_it_
     (critic_init / "latest_checkpointed_iteration.txt").write_text("23", encoding="utf-8")
 
     # No checkpoint of its own yet: the value model trained on an earlier
-    # episode is loaded, weights and optimizer, and saves go to the save root.
+    # rollout is loaded, weights and optimizer, and saves go to the save root.
     args = critic_prep_args(critic_save=str(critic_save), critic_init=str(critic_init))
     configure_critic_args_hook(args)
     critic_args = prepare_critic_args(args)

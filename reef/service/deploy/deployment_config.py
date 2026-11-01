@@ -100,11 +100,12 @@ def translate_layout(config: Mapping[str, Any]) -> dict[str, Any]:
         "storage",
         "execution",
         "executors",
-        "evaluation",
+        "activation",
         "pipeline",
         "generator",
         "task_import",
         "observability",
+        "harness",
     }
     # A section name, like a field name, can use a hyphen for an underscore.
     extra = {section.replace("-", "_") for section in pending} - known_sections

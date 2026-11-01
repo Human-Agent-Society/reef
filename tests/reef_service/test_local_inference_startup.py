@@ -8,6 +8,7 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from urllib.error import URLError
@@ -137,6 +138,17 @@ HTTPServer((args.host, int(args.port)), Handler).serve_forever()
 """
 
 
+def close_connections(listener: socket.socket) -> None:
+    while listener.fileno() != -1:
+        try:
+            connection, _ = listener.accept()
+        except TimeoutError:
+            continue
+        except OSError:
+            return
+        connection.close()
+
+
 def _wait_file(path, process, log):
     deadline = time.monotonic() + 20
     while not path.exists() or not path.read_text():
@@ -163,6 +175,12 @@ def test_managed_lifecycle_with_cpu_engine_standin(tmp_path, mode):
         port = reserved.getsockname()[1]
         if mode != "reef_failure":
             reserved.close()
+        else:
+            # Reef cannot bind the held port. Each readiness probe that reaches it is closed at once, so the probe
+            # fails now instead of after its own timeout, and the next probe sees that Reef exited.
+            reserved.listen()
+            reserved.settimeout(0.05)
+            threading.Thread(target=close_connections, args=(reserved,), daemon=True).start()
         log_path = tmp_path / "launch.log"
         with log_path.open("w") as log:
             process = subprocess.Popen(
@@ -196,6 +214,14 @@ def test_managed_lifecycle_with_cpu_engine_standin(tmp_path, mode):
                             time.sleep(0.1)
                     payload = {"model": str(model), "messages": [{"role": "user", "content": "hello"}]}
                     headers = {"Content-Type": "application/json", "x-reef-scenario": "local"}
+                    # An inference call never creates a scenario: create it first.
+                    with urlopen(
+                        Request(
+                            f"http://127.0.0.1:{port}/reef/scenarios", json.dumps({"name": "local"}).encode(), headers
+                        ),
+                        timeout=10,
+                    ) as response:
+                        assert response.status == 201
                     with urlopen(
                         Request(f"http://127.0.0.1:{port}/v1/chat/completions", json.dumps(payload).encode(), headers),
                         timeout=10,

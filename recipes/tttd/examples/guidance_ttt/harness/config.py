@@ -77,7 +77,7 @@ class RunConfig:
             raise ValueError(f"unknown GUIDANCE_TASK {task!r}; choose {', '.join(TASKS)}")
         config_path = Path(os.environ.get("GUIDANCE_CONFIG", EXAMPLE_DIR / "serve.yaml")).resolve()
         stack = yaml.safe_load(config_path.read_text())
-        grid = stack["pipeline"]["record2record"]["config"]
+        grid = stack["pipeline"]["record2sample"]["config"]
         training = stack["training"]["config"]
         groups, rollouts = int(grid["groups_per_step"]), int(grid["rollouts_per_group"])
         if groups < 1 or rollouts < 2:

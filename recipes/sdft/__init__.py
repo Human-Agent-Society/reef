@@ -4,7 +4,7 @@
   ``PipelineSpec``. Its report contract is the shared
   :class:`reef.core.reports.TeacherContextReport`: a rollout's receipt and
   its ``teacher_context``.
-- ``processor`` — ``SDFTTasks``, the shared ``DistillTasks`` with the
+- ``processor`` — ``SDFTSamples``, the shared ``DistillSamples`` with the
   demonstration appended to the recorded request, the reference's layout:
   one rollout with its demonstration, one record set unit.
 - ``objective`` — the backend-agnostic training objective.
@@ -16,10 +16,10 @@
 """
 
 from recipes.sdft.objective import SdftObjective
-from recipes.sdft.processor import SDFTTasks
+from recipes.sdft.processor import SDFTSamples
 from recipes.sdft.recipe import SDFTRecipe
 from reef.train.algos.registry import register_loss_family_ref
 
 register_loss_family_ref("sdft", "recipes.sdft.slime:SdftAlgorithm")
 
-__all__ = ["SDFTRecipe", "SDFTTasks", "SdftObjective"]
+__all__ = ["SDFTRecipe", "SDFTSamples", "SdftObjective"]

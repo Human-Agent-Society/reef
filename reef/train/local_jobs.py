@@ -53,7 +53,12 @@ class LocalJobComponent(TrainingComponent):
         self.job_thread: threading.Thread | None = None
 
     def start_jobs(self) -> None:
-        """Run the jobs that have not ended, in submission order: those a previous process left and those submitted."""
+        """Run the jobs that have not ended, in submission order: those a previous process left and those submitted.
+
+        A second call changes nothing.
+        """
+        if self.job_thread is not None:
+            return
         with self.jobs_lock:
             unfinished = [
                 path
@@ -139,7 +144,12 @@ class LocalJobComponent(TrainingComponent):
             self.check_job(job)
             write_json(
                 directory / JOB_FILE,
-                {"start": job.start, "data": job.data.to_dict(), "parameters": dict(job.parameters)},
+                {
+                    "scenario": job.scenario,
+                    "start": job.start,
+                    "data": job.data.to_dict(),
+                    "parameters": dict(job.parameters),
+                },
             )
             self.queue.append(job.job_id)
             self.jobs_lock.notify_all()
@@ -201,6 +211,7 @@ class LocalJobComponent(TrainingComponent):
                         submitted["start"],
                         JobData.from_dict(submitted["data"]),
                         submitted["parameters"],
+                        scenario=submitted["scenario"],
                     )
                     result = {"state": "finished", "metrics": dict(self.run(job, directory))}
                 except Exception as exc:

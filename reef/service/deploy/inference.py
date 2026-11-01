@@ -19,7 +19,6 @@ from reef.runtime.deployment import http_readiness_command
 from reef.runtime.executor.arguments import native_arguments
 from reef.service.deploy.config_utils import DeployConfigError
 from reef.service.deploy.service_config import ServiceConfig, service_config_from_mapping
-from reef.service.profiles import profile_names
 
 
 @dataclass(frozen=True)
@@ -244,7 +243,7 @@ _CONFIGURED_FIELDS = {
     "training_ready_timeout",
     "training_settings",
     "training_backend_options",
-    "evaluation_settings",
+    "activation_settings",
     "pipeline_settings",
 }
 
@@ -261,8 +260,8 @@ def command_line_config(environ: Mapping[str, str]) -> dict[str, Any]:
 def assemble_provider_services(config: dict[str, Any]) -> None:
     """Validate typed inputs and add the owned HTTP process and readiness probe."""
     unsupported = set(config.get("reef", {})) & _CONFIGURED_FIELDS
-    # The pipeline section belongs to any recipe; the recipe reads it.
-    if unsupported or "training" in config or "evaluation" in config:
+    # The pipeline and activation sections belong to any recipe; the recipe reads them.
+    if unsupported or "training" in config:
         raise DeployConfigError(
             "select a weight-training recipe for training; Reef does not start custom process stacks"
         )
@@ -294,7 +293,7 @@ def assemble_provider_services(config: dict[str, Any]) -> None:
             "(or their REEF_UPSTREAM_* variables).\n"
             "  Example: reef serve --inference.upstream-url http://localhost:8000 --inference.upstream-model my-model\n"
             "  Or start local inference: reef serve --inference.model-path Qwen/Qwen2.5-1.5B-Instruct\n"
-            f"  Alternatively pass -c <file> or --recipe <name>; recipes with a profile: {', '.join(profile_names())}"
+            "  Alternatively pass -c <file>"
         )
     try:
         upstream = urlsplit(settings.upstream_url)
@@ -385,12 +384,9 @@ def resolve_hf_snapshot(repo_id: str) -> str:
             f"  set reef.model_path to a local path or an HF repo ID like 'Qwen/Qwen2.5-1.5B-Instruct'"
         )
     try:
-        from reef.artifact.sources import HuggingFaceSource, download_huggingface_snapshot, parse_artifact_source
+        from reef.artifact.sources import download_huggingface_snapshot, parse_huggingface_source
 
-        source = parse_artifact_source(value)
-        if not isinstance(source, HuggingFaceSource):
-            raise DeployConfigError(f"model path is not a valid HF repo ID: {repo_id}")
-        snapshot = download_huggingface_snapshot(source)
+        snapshot = download_huggingface_snapshot(parse_huggingface_source(value))
         return str(snapshot.local_path)
     except Exception as exc:
         if isinstance(exc, DeployConfigError):

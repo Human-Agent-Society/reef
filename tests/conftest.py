@@ -12,8 +12,12 @@ and the driver:
 
 from __future__ import annotations
 
+import functools
 import importlib
+import socketserver
 from argparse import Namespace
+
+import pytest
 
 from reef.train.slime_backend.algorithm import SlimeAlgorithm
 from reef.train.slime_backend.loss_families import register_loss_family
@@ -21,11 +25,13 @@ from reef.train.slime_backend.loss_families import register_loss_family
 # The source suite exercises the repository cookbook as well as Reef core.
 # Load those packages explicitly: production ``import reef`` deliberately does
 # not, while importing a selected cookbook package registers its objective and
-# lazy loss-family reference in this test process. The built-in SFT recipe
-# is loaded the same way: ``import reef`` does not import it either.
+# lazy loss-family reference in this test process. The built-in SFT and
+# dataset recipes are loaded the same way: ``import reef`` does not import them either.
 for _cookbook_package in (
     "reef.recipe.sft",
-    "reef.train.cordis_backend",
+    "reef.recipe.dataset",
+    "reef.recipe.generated_tasks",
+    "reef.train.harness_backend",
     "recipes.openclawrl",
     "recipes.opd",
     "recipes.sao",
@@ -39,7 +45,6 @@ for _cookbook_package in (
 class PgAlgorithm(SlimeAlgorithm):
     loss_family = "pg"
     loss_type = "policy_loss"
-    requires_rollout_logprobs = True
     advantages = "required"
 
     def validate_specific_args(self, args: Namespace, source: str) -> None:
@@ -47,3 +52,16 @@ class PgAlgorithm(SlimeAlgorithm):
 
 
 register_loss_family(PgAlgorithm())
+
+
+@pytest.fixture(scope="session", autouse=True)
+def quick_server_shutdown():
+    """Make every in-process server check for shutdown every 10 ms instead of every 0.5 s.
+
+    ``socketserver`` servers poll for ``shutdown()`` at ``poll_interval``, so each
+    stopped server (a capture proxy, a fake Reef, a serve socket) otherwise
+    blocks its test for up to 0.5 s. Child processes keep the default."""
+    with pytest.MonkeyPatch.context() as patch:
+        quick = functools.partialmethod(socketserver.BaseServer.serve_forever, poll_interval=0.01)
+        patch.setattr(socketserver.BaseServer, "serve_forever", quick)
+        yield

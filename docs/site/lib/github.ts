@@ -85,7 +85,7 @@ export function formatStars(stars: number) {
   return compact.format(stars).toLowerCase();
 }
 
-// "feat(recipe): ship Reefine" reads as "Ship Reefine" on the home page; the type and scope stay in the PR.
+// "feat(recipe): ship GEPA" reads as "Ship GEPA" on the home page; the type and scope stay in the PR.
 export function humanizePullTitle(title: string) {
   const stripped = title.replace(/^[a-z]+(\([^)]*\))?!?:\s*/i, "").replace(/^\[[^\]]*\]\s*/, "").trim();
   return stripped.charAt(0).toUpperCase() + stripped.slice(1);

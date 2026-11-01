@@ -6,80 +6,82 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from threading import Event, Thread
 
 import pytest
 from tests.support._threshold_processor import threshold_pipeline
+from tests.support.runtime_stubs import StubTrainingComponent
 
-from reef.artifact import Artifact, InMemoryRepositoryBackend
+from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
 from reef.core.errors import ScenarioCapacityFull, ScenarioLimitReached
 from reef.dispatcher import Dispatcher
-from reef.evaluation import EvaluationResult, UpdateCandidate
 from reef.recipe import Recipe
+from reef.runtime.jobs import SavedCheckpoint, TrainingJob
 from reef.scenario import Scenario
 from reef.scenario.admission import LoadAdmission, LoadedScenario, ScenarioAdmission, ScenarioLimits
+from reef.storage.scenario import ScenarioSettings
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.train import CandidateBackend, PreparedStep, Trainer, TrainStepResult
+from reef.train import Trainer
+from reef.train.jobs import JobLoop
 
-MODEL_CONFIG = {"url": "http://127.0.0.1:9", "model": "custom-model"}
 
-
-class StepBackend(CandidateBackend):
-    """A local backend that publishes one release for each batch. With ``block``, a cycle waits in preparation."""
+class StepJobs(StubTrainingComponent):
+    """A training component whose ``n``-th job saves one checkpoint holding ``model.txt`` = ``step <n>``. With
+    ``block``, a job waits in ``submit``, so the trainer's cycle waits with it."""
 
     def __init__(self, artifact_dir: Path) -> None:
-        self.artifact_dir = artifact_dir
+        super().__init__(artifact_dir, name="steps", shares_scenarios=True)
         self.block = False
         self.started = Event()
         self.resume = Event()
-        self.result: TrainStepResult | None = None
 
-    def initial_state(self):
-        return {"steps": 0}
-
-    def prepare_step(self, batch, state, scenario_step):
+    def train(self, job: TrainingJob) -> tuple[SavedCheckpoint, ...]:
         if self.block:
             self.started.set()
             assert self.resume.wait(10), "the test did not release the cycle"
-        step = scenario_step + 1
-        artifact_path = self.artifact_dir / f"{batch.data_id.replace(':', '-')}-{step}"
-        artifact_path.mkdir(parents=True)
-        (artifact_path / "model.txt").write_text(f"step {step}", encoding="utf-8")
-        self.result = TrainStepResult({"steps": step}, metrics={}, artifact=Artifact.local(artifact_path))
-        return PreparedStep.with_candidate(UpdateCandidate(batch.data_id), state={"steps": step})
-
-    def evaluate(self, candidate):
-        return EvaluationResult("test", "1", {})
-
-    def settle_step(self, prepared, decision):
-        return self.result
-
-    def abort_step(self, prepared):
-        pass
+        step = len(self.submitted)
+        path = self.checkpoint_root / f"{job.data.data_id.replace(':', '-')}-{step}"
+        path.mkdir(parents=True)
+        (path / "model.txt").write_text(f"step {step}", encoding="utf-8")
+        return (SavedCheckpoint(0, str(path), str(path)),)
 
 
 @dataclass(frozen=True)
 class StepRecipe(Recipe):
-    backend: CandidateBackend | None = None
+    backend: StepJobs | None = None
 
-    def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None, task_storage=None):
+    def build(
+        self,
+        scenario,
+        records,
+        *,
+        algorithm_state=None,
+        experiment_logger=None,
+        task_storage=None,
+        releases=None,
+        samples=None,
+        root=None,
+    ):
         return Trainer.build(
             scenario,
             records,
-            pipeline_factory=threshold_pipeline,
-            candidate_backend=self.backend,
+            # A trainer that trains nothing has no job size, so its pipeline keeps every sample.
+            pipeline_factory=partial(threshold_pipeline, job_samples=None if self.backend is None else 1),
+            job_loop=None if self.backend is None else JobLoop(self.backend, scenario=scenario),
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
-            default_job_samples=1,
+            root=root,
         )
 
 
 def make_dispatcher(
     tmp_path: Path,
     *,
-    backend: CandidateBackend | None = None,
+    backend: StepJobs | None = None,
     admission: ScenarioAdmission | None = None,
     idle_unload_seconds: float | None = None,
     storage: SQLiteScenarioStorage | None = None,
@@ -89,11 +91,12 @@ def make_dispatcher(
     (initial / "model.txt").write_text("initial", encoding="utf-8")
     return Dispatcher(
         StepRecipe(backend=backend),
-        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
+        InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=storage if storage is not None else SQLiteScenarioStorage(tmp_path / "records"),
         scenario_admission=admission,
         scenario_idle_unload_seconds=idle_unload_seconds,
+        coordination=memory_coordination(),
     )
 
 
@@ -126,32 +129,32 @@ def wait_for(condition, timeout_seconds: float = 10.0) -> None:
 
 
 def trained(dispatcher: Dispatcher, name: str, step: int) -> Scenario:
-    """Accept one scored pair, and wait until the local worker commits ``step``."""
+    """Accept one scored pair, and wait until the local worker commits the job of ``step``: its submission, its
+    checkpoint and its end, scenario step ``3 * step``."""
     current = dispatcher.get_or_create_scenario(name)
     assert current is not None
     dispatcher.accept_records(scored_pair(name, step))
-    wait_for(lambda: current.scenario_step == step and not current.trainer.holds_untrained_records())
+    wait_for(lambda: current.scenario_step == 3 * step and not current.trainer.holds_untrained_records())
     return current
 
 
 @pytest.mark.unit
-def test_idle_scenario_unloads_and_loads_again_with_its_history_and_model(tmp_path) -> None:
-    dispatcher = make_dispatcher(tmp_path, backend=StepBackend(tmp_path / "candidates"))
+def test_idle_scenario_unloads_and_loads_again_with_its_history(tmp_path) -> None:
+    dispatcher = make_dispatcher(tmp_path, backend=StepJobs(tmp_path / "candidates"))
     try:
-        dispatcher.configure_scenario_model("math", MODEL_CONFIG, create=True)
         before = trained(dispatcher, "math", 1)
         releases = before.releases()
 
-        assert dispatcher.unload_if_idle("math")
+        # The samples of the step's records come from the samples queue, so the scenario is idle a moment later.
+        wait_for(lambda: dispatcher.unload_if_idle("math"))
         assert loaded_names(dispatcher) == []
         assert [row["scenario"] for row in dispatcher.list_scenarios()] == ["math"]
         assert dispatcher.build_training_status()["loaded_scenarios"] == 0
 
         after = dispatcher.get_or_create_scenario("math")
         assert after is not None and after is not before
-        assert after.scenario_step == 1
+        assert after.scenario_step == 3
         assert after.releases() == releases
-        assert after.model_config.view() == {**MODEL_CONFIG, "api": "openai", "has_api_key": False}
         assert [row["agent_record_id"] for row in dispatcher.read_records("math")["records"]] == ["i1", "r1"]
         # The reloaded scenario trains on, with a new local worker.
         trained(dispatcher, "math", 2)
@@ -172,7 +175,7 @@ def test_idle_unload_runs_after_the_configured_idle_time(tmp_path) -> None:
 
 @pytest.mark.unit
 def test_scenario_with_untrained_records_stays_loaded(tmp_path) -> None:
-    dispatcher = make_dispatcher(tmp_path, backend=StepBackend(tmp_path / "candidates"))
+    dispatcher = make_dispatcher(tmp_path, backend=StepJobs(tmp_path / "candidates"))
     try:
         current = dispatcher.get_or_create_scenario("math")
         assert current is not None
@@ -188,7 +191,7 @@ def test_scenario_with_untrained_records_stays_loaded(tmp_path) -> None:
 
 @pytest.mark.unit
 def test_scenario_with_a_running_cycle_stays_loaded(tmp_path) -> None:
-    backend = StepBackend(tmp_path / "candidates")
+    backend = StepJobs(tmp_path / "candidates")
     dispatcher = make_dispatcher(tmp_path, backend=backend)
     try:
         backend.block = True
@@ -207,7 +210,7 @@ def test_scenario_with_a_request_in_flight_stays_loaded(tmp_path) -> None:
     try:
         current = dispatcher.get_or_create_scenario("math")
         assert current is not None
-        measurement = current.operations.start("serve/request")
+        measurement = current.operations.start("ingest/write")
         assert not dispatcher.unload_if_idle("math")
         measurement.finish(succeeded=True)
         assert dispatcher.unload_if_idle("math")
@@ -237,7 +240,7 @@ def test_full_service_refuses_a_load_when_no_scenario_is_idle(tmp_path) -> None:
     try:
         busy = dispatcher.get_or_create_scenario("a")
         assert busy is not None
-        measurement = busy.operations.start("serve/request")
+        measurement = busy.operations.start("ingest/write")
 
         with pytest.raises(ScenarioCapacityFull) as refused:
             dispatcher.get_or_create_scenario("b")
@@ -293,10 +296,10 @@ def test_registration_limit_refuses_a_new_scenario_and_stores_nothing(tmp_path) 
         with pytest.raises(ScenarioLimitReached, match=r"reef\.max_scenarios"):
             dispatcher.get_or_create_scenario("b")
         with pytest.raises(ScenarioLimitReached):
-            dispatcher.configure_scenario_model("b", MODEL_CONFIG, create=True)
+            dispatcher.create_scenario("b")
 
         assert not dispatcher.has_scenario("b")
-        assert storage.read_settings("b").model_config is None
+        assert storage.read_settings("b") == ScenarioSettings()
     finally:
         dispatcher.close()
 

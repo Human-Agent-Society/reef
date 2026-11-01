@@ -1,0 +1,129 @@
+# opencode, driven headless per run.
+#
+# A release is an opencode plugin in plugin/. Reef's own plugin there
+# (index.ts) gives opencode the release's rules, skills, commands and config
+# through its config hook, and the hooks and tools of the release's
+# extensions. A run loads it through OPENCODE_CONFIG_CONTENT; a person's
+# machine adds it to the global plugin list with opencode plugin -g, and
+# opencode loads it in place in every session.
+#
+# OPENCODE_CONFIG_DIR points config discovery at the rendered directory and
+# suppresses global config seeding; the XDG overrides relocate data, cache,
+# and state so sessions land inside the run root, and npm_config_cache
+# moves the npm cache of opencode's boot install from the root's .npm into
+# the relocated cache. Permissions auto-reject in `opencode run` without
+# --auto, so --auto is part of the canonical invocation. The config defaults
+# pin the benchmarking traps: autoupdate off, sharing off, permissions
+# allowed (runs are isolated roots), and only provider reef, the model
+# binding's, so a model choice the render check misses cannot reach
+# opencode's own zen provider.
+name: opencode
+binary: opencode
+# The vendor's install channel at the pinned version. Harness evolution startup
+# installs it for the runs unless evolution.binary names a binary.
+install:
+  kind: npm
+  package: "opencode-ai"
+  version: "1.18.18"
+  binary_path: "node_modules/.bin/opencode"
+renderer: reef.harness.adapters.opencode.render:OpencodeAdapterRenderer
+# What Reef may evolve: each kind of file, at the path where opencode reads it. A config/<target>.json
+# of the tree merges into that config file (config, below).
+evolve:
+  rules: plugin/AGENTS.md
+  skill: plugin/skill/{name}/SKILL.md
+  command: plugin/command/{name}.md
+  extension:
+    renders: plugin/extensions/{name}.ts
+    holds: an opencode plugin module, whose exported functions return hooks and tools that Reef's plugin merges
+# The agent's directories under the root, each with the variable that moves it there. What the agent writes
+# in them is its state, never residue, and a sandbox keeps them writable.
+dirs:
+  opencode: OPENCODE_CONFIG_DIR
+  xdg-config: XDG_CONFIG_HOME
+  xdg-data: XDG_DATA_HOME
+  xdg-cache: XDG_CACHE_HOME
+  xdg-state: XDG_STATE_HOME
+  xdg-cache/npm: npm_config_cache
+# opencode keeps its sessions in opencode.db in its data directory.
+sessions: {format: opencode-session-sqlite, path: xdg-data/opencode}
+# How to point opencode at a model endpoint, per API dialect (its
+# custom-provider config shape). Reef renders the set matching its model
+# binding's api into evaluation runs; the served tree never carries a
+# provider.
+model:
+  openai:
+    - target: agent
+      data:
+        provider:
+          reef:
+            npm: "@ai-sdk/openai-compatible"
+            options:
+              baseURL: "{base_url}/v1"
+              apiKey: "{api_key}"
+            models:
+              "{model}": {}
+        model: "reef/{model}"
+  anthropic:
+    - target: agent
+      data:
+        provider:
+          reef:
+            npm: "@ai-sdk/anthropic"
+            options:
+              baseURL: "{base_url}/v1"
+              apiKey: "{api_key}"
+            models:
+              "{model}": {}
+        model: "reef/{model}"
+# How the agent runs: one evaluation run in a root of its own (the command, and variables
+# beside the dirs), and on a person's machine a layer over the person's own configuration.
+run:
+  task:
+    argv: ["run", "--format", "json", "--auto", "{task}"]
+    env:
+      OPENCODE_CONFIG_CONTENT: '{"plugin": ["{root}/plugin"]}'
+  # How a person's machine runs opencode on a release: the person's own ~/.config/opencode stays.
+  # register adds the plugin to its global plugin list, and opencode loads it in place in every
+  # session; on a key or name both define, the release's wins. opencode has no command that
+  # removes a plugin, and it skips a plugin path that no longer exists, so the entry stays after
+  # disconnect. A session that Reef starts also reads the config that binds the model.
+  layer:
+    env:
+      OPENCODE_CONFIG: "{root}/opencode/opencode.json"
+    register:
+      - ["plugin", "-g", "{root}/plugin"]
+# The config files the agent reads, with the defaults Reef merges first and the checks the merged
+# file must pass. A tree's config/<target>.json merges into one of them. The defaults and checks
+# are optional: a new adapter can start with the paths alone.
+config:
+  # The release's config, which Reef's plugin merges over opencode's own at the config hook.
+  primary:
+    path: "plugin/config.json"
+    checks:
+      # Each of these chooses a model or a provider beyond the binding, or loads another plugin.
+      - key: [
+          provider, model, small_model, enabled_providers, disabled_providers, plugin,
+          agent.*.model, mode.*.model, command.*.model,
+        ]
+        match: IsAbsent()
+        reason: Reef's model binding chooses the model
+      - key: [autoupdate, share]
+        match: IsAbsent()
+        reason: runs keep autoupdate and sharing off
+  # opencode's own opencode.json: the run's defaults and the model binding.
+  agent:
+    path: "opencode/opencode.json"
+    defaults:
+      autoupdate: false
+      share: "disabled"
+      enabled_providers: ["reef"]
+      permission:
+        "*": "allow"
+    checks:
+      - key: "."
+        match: Each(Key(IsIn(["autoupdate", "share", "enabled_providers", "permission", "provider", "model"])))
+        reason: the release's config is config/primary.json
+      # Keep a benchmark run hermetic and on the binding's provider only.
+      - key: [autoupdate, share, enabled_providers, permission]
+        match: IsDefault()

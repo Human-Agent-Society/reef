@@ -4,7 +4,7 @@ The component (``python -m reef.inference.remote``) runs in its own process
 with its own Ray session that declares two pretend GPUs, and starts the stub
 engine (``tests.support._stub_engine``). The test process is the control
 plane: it builds Tinker's training component and the serving runtime of its
-exported adapters as the HTTP service does and drives one
+adapters as the HTTP service does and drives one
 TTTD step through the Dispatcher, then restarts. The Tinker SDK and the
 cookbook converter are faked unless ``REEF_TEST_TINKER_REAL=1`` and
 ``TINKER_API_KEY`` are set, in which case the trainer, the checkpoint download
@@ -21,7 +21,7 @@ import subprocess
 import sys
 import textwrap
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 
 import pytest
@@ -40,8 +40,8 @@ SCENARIO = "erdos"
 
 FAKE_SDK = textwrap.dedent(
     '''
-    """Offline Tinker SDK: immutable checkpoints as tinker:// paths, exported adapter files as local files."""
-    import json, os, uuid
+    """Offline Tinker SDK: immutable checkpoints as tinker:// paths, checkpoint archives as local tar files."""
+    import io, json, os, tarfile, uuid
     from types import SimpleNamespace
 
     # Settings live beside the module: Ray workers share the import path, not the driver's environment.
@@ -62,12 +62,19 @@ FAKE_SDK = textwrap.dedent(
         def from_ints(tokens): return SimpleNamespace(length=len(tokens), tokens=list(tokens))
 
     class Datum(SimpleNamespace): pass
+    class TensorData(SimpleNamespace): pass
     class AdamParams(SimpleNamespace): pass
     class SamplingParams(SimpleNamespace): pass
 
     class _Trainer:
         def __init__(self, origin): self.origin = origin
-        def forward_backward(self, data, loss_fn):
+        def forward(self, data, loss_fn, loss_fn_config=None):
+            # The log probabilities of the job's start, for the rendered rows that serving recorded none for.
+            _log({"event": "forward", "rows": len(data), "loss_fn": loss_fn, "from": self.origin})
+            outputs = [{"logprobs": TensorData(data=[-0.5] * len(datum.loss_fn_inputs["target_tokens"].data))}
+                       for datum in data]
+            return _Future(SimpleNamespace(loss_fn_outputs=outputs))
+        def forward_backward(self, data, loss_fn, loss_fn_config=None):
             _log({"event": "forward_backward", "rows": len(data), "loss_fn": loss_fn, "from": self.origin})
             return _Future(SimpleNamespace(metrics={"loss:sum": -1.0}))
         def optim_step(self, params): return _Future(None)
@@ -76,12 +83,16 @@ FAKE_SDK = textwrap.dedent(
             return _Future(SimpleNamespace(path=path))
         def save_state(self, name, ttl_seconds=None): return self._save(name, "weights")
         def save_weights_for_sampler(self, name, ttl_seconds=None): return self._save(name, "sampler_weights")
-        def save_weights_external(self, name, ttl_seconds=None): return self._save(name, "external_weights")
 
     class _Tokenizer:
-        # The component's sampler holds a tokenizer for task jobs; a job of trajectories renders nothing.
-        def apply_chat_template(self, *args, **kwargs): raise AssertionError("the trainer never renders")
-        def decode(self, *args, **kwargs): raise AssertionError("the trainer never renders")
+        # A chat template: each message is its role ID and one token per character; the generation prompt is the
+        # assistant role, 9. The component renders the served trajectories, which carry no tokens.
+        ROLES = {"system": 1, "user": 2, "assistant": 9, "tool": 4}
+        def apply_chat_template(self, messages, tools=None, tokenize=True, add_generation_prompt=False, **kwargs):
+            tokens = [token for message in messages
+                      for token in [self.ROLES[message["role"]], *(100 + ord(c) for c in message["content"])]]
+            return tokens + ([9] if add_generation_prompt else [])
+        def decode(self, *args, **kwargs): raise AssertionError("a job of trajectories decodes nothing")
 
     class _Sampler:
         def get_base_model(self): return MODEL
@@ -91,16 +102,15 @@ FAKE_SDK = textwrap.dedent(
     class _Rest:
         def get_weights_info_by_tinker_path(self, path):
             return _Future(SimpleNamespace(base_model=MODEL, is_lora=True, lora_rank=32))
-        def get_external_weights_urls(self, path):
-            directory = os.path.join(ROOT, uuid.uuid4().hex)
-            os.makedirs(directory)
-            urls = {}
-            for name, body in (("adapter_config.json", json.dumps({"r": 32, "lora_alpha": 32}).encode()),
-                               ("adapter_model.safetensors", path.encode())):
-                with open(os.path.join(directory, name), "wb") as file:
-                    file.write(body)
-                urls[name] = "file://" + os.path.join(directory, name)
-            return _Future(SimpleNamespace(urls=urls))
+        def get_checkpoint_archive_url_from_tinker_path(self, path):
+            archive = os.path.join(ROOT, uuid.uuid4().hex + ".tar")
+            with tarfile.open(archive, "w") as tar:
+                for name, body in (("adapter_config.json", json.dumps({"r": 32, "lora_alpha": 32}).encode()),
+                                   ("adapter_model.safetensors", path.encode())):
+                    info = tarfile.TarInfo(name)
+                    info.size = len(body)
+                    tar.addfile(info, io.BytesIO(body))
+            return _Future(SimpleNamespace(url="file://" + archive))
 
     class ServiceClient:
         def __init__(self, **kwargs): _log({"event": "session", "keys": sorted(kwargs)})
@@ -139,35 +149,36 @@ def write_fake_sdk(root: Path, model: str) -> Path:
     return site
 
 
-def training_item(version: str, index: int):
-    from reef.core.job_data import TrajectoryItem
+def served_call(version: str, index: int):
+    """Rollout ``index``: a served call without tokens, as the inference service records it with the artifact
+    ``version`` that answered."""
+    from reef.core import AgentRecord, RequestType
 
-    return TrajectoryItem(
-        {
-            "schema_version": "ATIF-v1.6",
-            "agent": {"name": "test"},
-            "steps": [{"step_id": 1}],
-            "extra": {
-                "reef": {
-                    "training": {
-                        "tokens": [10, 11, 20 + index, 21],
-                        "loss_mask": [1, 1],
-                        "rollout_log_probs": [-0.2, -0.4],
-                        "runtime_load_id": version,
-                    }
-                }
-            },
-        }
+    return AgentRecord.create(
+        scenario=SCENARIO,
+        request_type=RequestType.INFERENCE,
+        payload={
+            "messages": [{"role": "user", "content": f"bound {index}"}],
+            "response": {"choices": [{"message": {"role": "assistant", "content": f"answer {index}"}}]},
+            "artifact_id": version,
+        },
+        agent_record_id=f"i{index}",
     )
 
 
 def stop_process(process) -> None:
-    if process is not None and process.poll() is None:
-        os.killpg(process.pid, signal.SIGTERM)
-        try:
-            process.wait(timeout=60)
-        except subprocess.TimeoutExpired:
-            os.killpg(process.pid, signal.SIGKILL)
+    """Stop the component, then anything left in its process group.
+
+    The signal goes to the component alone: its ``ray.shutdown`` stops the Ray processes it started, which takes
+    about a second. A signal to the whole group kills those processes first, and the shutdown then waits for
+    them for several seconds."""
+    if process is None or process.poll() is not None:
+        return
+    process.send_signal(signal.SIGTERM)
+    with suppress(subprocess.TimeoutExpired):
+        process.wait(timeout=60)
+    with suppress(ProcessLookupError):
+        os.killpg(process.pid, signal.SIGKILL)
 
 
 @contextmanager
@@ -199,7 +210,7 @@ def inference_component(tmp_path):
             except RuntimeError:
                 pass  # not listening yet
             assert time.monotonic() < deadline, "component did not start:\n" + log_path.read_text()[-4000:]
-            time.sleep(0.5)
+            time.sleep(0.1)
         yield url, control
     finally:
         stop_process(component)
@@ -213,6 +224,7 @@ def control_plane(tmp_path, monkeypatch, url, repository):
     """
     from recipes.tttd.recipe import TTTDRecipe
     from reef.dispatcher import Dispatcher
+    from reef.storage.sql_coordination import open_coordination
     from reef.storage.sqlite import SQLiteScenarioStorage
     from reef.train.pipeline import PipelineConfig
 
@@ -226,8 +238,8 @@ def control_plane(tmp_path, monkeypatch, url, repository):
     raw = {
         "recipe": {"implementation": "recipes.tttd.recipe:TTTDRecipe"},
         "pipeline": {
-            "record2record": {"config": {"groups_per_step": 1, "rollouts_per_group": 4}},
-            "task2job": {"config": {"job_samples": 4}},
+            "record2sample": {"config": {"groups_per_step": 1, "rollouts_per_group": 4}},
+            "sample2job": {"config": {"job_samples": 4}},
         },
         "inference": {
             "model-path": MODEL,
@@ -243,7 +255,6 @@ def control_plane(tmp_path, monkeypatch, url, repository):
                 "lora-rank": 32,
                 "batch-size": 4,
                 "kl-coef": 0.0,
-                "export-adapter": True,
             },
         },
     }
@@ -265,6 +276,10 @@ def control_plane(tmp_path, monkeypatch, url, repository):
             repository,
             local_artifact_dir=tmp_path / "staged",
             scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
+            # A file, as a deployment keeps it: a restarted control plane reads what the engines serve.
+            coordination=open_coordination(
+                "sqlite", agent_record_dir=str(tmp_path / "records"), record_database_url=None
+            ),
         )
         yield dispatcher, component, inference
     finally:
@@ -284,17 +299,10 @@ def train_one_step(dispatcher, inference) -> None:
     from reef.core import AgentRecord, RequestType
 
     scenario = dispatcher.get_or_create_scenario(SCENARIO)
-    version = inference.current_runtime_load_id()
+    # The staleness check keeps only data of the artifact that the scenario serves.
+    version = scenario.serving_artifact_id()
     for index in range(4):
-        item = training_item(version, index)
-        dispatcher.accept_record(
-            AgentRecord.create(
-                scenario=SCENARIO,
-                request_type=RequestType.INFERENCE,
-                payload={"response": {"training": dict(item.training)}},
-                agent_record_id=f"i{index}",
-            )
-        )
+        dispatcher.accept_record(served_call(version, index))
         dispatcher.accept_record(
             AgentRecord.create(
                 scenario=SCENARIO,
@@ -318,7 +326,7 @@ def train_one_step(dispatcher, inference) -> None:
         )
     deadline = time.monotonic() + (1500 if REAL else 300)
     while loop_state(scenario).finished_jobs < 1 and time.monotonic() < deadline:
-        time.sleep(1)
+        time.sleep(0.05)
     state = loop_state(scenario)
     assert state.finished_jobs == 1, json.dumps(dispatcher.build_training_status(), default=str)[:3000]
     assert state.last_job.event == "finished", state.last_job
@@ -333,15 +341,14 @@ def test_tinker_trains_in_the_control_plane_and_serves_on_an_inference_component
     from reef.artifact import InMemoryRepositoryBackend
 
     pytest.importorskip("ray")  # the component process starts its own Ray session
-    initial = tmp_path / "initial"
-    initial.mkdir()
-    repository = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
+    # The default start is the component's untrained adapter release, which the component writes when it starts.
+    repository = InMemoryRepositoryBackend.factory(directory=tmp_path / "repository")
     for key in list(os.environ):
         if key.startswith(("REEF_", "RAY_")) and key != "REEF_TEST_TINKER_REAL":
             monkeypatch.delenv(key)
     with inference_component(tmp_path) as (url, control):
         with control_plane(tmp_path, monkeypatch, url, repository) as (dispatcher, _, inference):
-            initial = inference.current_runtime_load_id()
+            initial = inference.base_version
             assert control.call("GET", "runtime-load-ids")["runtime_load_ids"] == [initial] * 2
             assert inference.base_url == url
             train_one_step(dispatcher, inference)
@@ -359,17 +366,18 @@ def test_tinker_trains_in_the_control_plane_and_serves_on_an_inference_component
                     "initialize",
                     "restore",
                 ]
-                assert events[-1]["event"] == "forward_backward" and events[-1]["rows"] == 4
-        # Closing the control plane stops the engines; the component keeps serving.
-        with pytest.raises(RuntimeError, match="409"):
-            control.call("GET", "runtime-load-ids")
-        assert served_adapters(tmp_path) == []
-        # A restarted control plane starts the engines again and loads the committed adapter before it serves.
+                # Serving downloads the adapter after training, in a session of its own.
+                assert [event["rows"] for event in events if event["event"] == "forward_backward"][-1] == 4
+                # The served rollouts carry no log probabilities: the trainer computes them at the job's start.
+                assert [event["rows"] for event in events if event["event"] == "forward"] == [4]
+        # Closing the control plane leaves the engines serving what they served, for the next control instance.
+        assert control.call("GET", "runtime-load-ids")["runtime_load_ids"] == [published] * 2
+        # A restarted control plane attaches to the engines and serves the committed adapter that they still hold,
+        # with no second load.
         with control_plane(tmp_path, monkeypatch, url, repository) as (dispatcher, _, inference):
             scenario = dispatcher.get_or_create_scenario(SCENARIO)
-            served = inference.serving_adapter_runtime_load_id(SCENARIO)
-            assert served is not None and served != published
-            assert control.call("GET", "runtime-load-ids")["runtime_load_ids"] == [served] * 2
+            assert inference.serving_adapter_runtime_load_id(SCENARIO) == published
+            assert control.call("GET", "runtime-load-ids")["runtime_load_ids"] == [published] * 2
             (adapter,) = served_adapters(tmp_path)
             assert (adapter / "adapter_config.json").is_file()
             assert loop_state(scenario).start == str(start)

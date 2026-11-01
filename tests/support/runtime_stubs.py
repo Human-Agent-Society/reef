@@ -6,16 +6,23 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from reef.artifact import Artifact
+from reef.artifact import Artifact, DefaultStart
+from reef.core.artifact_ref import RootSource
+from reef.core.evaluation import PolicyModel
+from reef.core.job_data import JobData
+from reef.core.served_models import ServedArtifact
 from reef.inference.http import InferenceProxyRuntime
-from reef.runtime.jobs import JobStatus, ReleaseFormat, SavedCheckpoint, TrainingComponent, TrainingJob
-from reef.runtime.serving import holds_weights
+from reef.runtime.interfaces import InferenceBackend
+from reef.runtime.jobs import JobStatus, ReleaseFormat, SavedCheckpoint, ScenarioRoot, TrainingComponent, TrainingJob
+from reef.runtime.serving import OpenedEngines, ServingEngines
 from reef.train.pipeline import PipelineConfig, PipelineSpec
 
 #: The release format of a stub component that does not name one.
 FULL_WEIGHTS = ReleaseFormat("full")
 #: The file a stub checkpoint holds: the version name that serving the checkpoint reports.
 VERSION_FILE = "model.txt"
+#: The root release of a trainer that a test builds outside a scenario; a stub's ``root_start`` does not read it.
+STUB_ROOT = ScenarioRoot(Artifact.local(Path("stub-root")), RootSource("default"))
 
 
 class StubTrainingComponent(TrainingComponent):
@@ -66,9 +73,21 @@ class StubTrainingComponent(TrainingComponent):
         if not isinstance(parameters.get("rollout"), Mapping):
             raise ValueError("a task job needs the rollout parameter as an object")
 
-    def import_start(self, release: Path) -> str | None:
+    def default_start(self) -> DefaultStart:
+        """An empty base: a stub checkpoint is any directory."""
+        return DefaultStart(inputs={"model": self.backend_name})
+
+    @property
+    def base_start(self) -> str:
+        return f"{self.backend_name}:base"
+
+    def root_start(self, root: ScenarioRoot) -> str:
+        """Every scenario root starts a stub's jobs at ``base_start``; a train-from goes through ``import_start``."""
+        return self.base_start
+
+    def import_start(self, release: Path) -> str:
         self.imported.append(release)
-        return str(release) if holds_weights(release) else None
+        return str(release)
 
     def train(self, job: TrainingJob) -> tuple[SavedCheckpoint, ...]:
         """The checkpoints that ``job`` saves; raising fails the job."""
@@ -101,22 +120,49 @@ class StubTrainingComponent(TrainingComponent):
         self.closed = True
 
 
+class RecordingComponent(StubTrainingComponent):
+    """A training component that keeps the data of every job it ran, in ``batches``, and saves no checkpoint, so each
+    job ends at once in ``submit``.
+
+    Purpose: a test of how a trainer reads, batches and commits records, which trains nothing worth publishing.
+    """
+
+    def __init__(self, batches: list[JobData] | None = None, *, name: str = "recording") -> None:
+        super().__init__(name=name, shares_scenarios=True)
+        self.batches: list[JobData] = [] if batches is None else batches
+
+    def train(self, job: TrainingJob) -> tuple[SavedCheckpoint, ...]:
+        self.batches.append(job.data)
+        return ()
+
+
 class StubInferenceRuntime(InferenceProxyRuntime):
     """An inference proxy that records the releases it serves.
 
     A release serves under the version its ``model.txt`` names, or under its
     release ID when it holds no such file. ``activated`` lists the versions
-    of the releases it served, at commits, rollbacks and starts, in order;
+    of the releases it served, at commits, activations and starts, in order;
     ``served`` is the last one, ``None`` before the first one.
+
+    With ``answers_each_release``, the runtime answers each call from the artifact it names, as Tinker does: each
+    artifact has its own model name, ``sampler:<artifact_id>``.
     """
 
     def __init__(self, base_url: str = "http://inference-runtime", **kwargs) -> None:
         super().__init__(base_url=base_url, **kwargs)
         self.activated: list[str] = []
         self.served: str | None = None
+        self.answers_each_release = False
 
-    def current_runtime_load_id(self) -> str | None:
-        return self.served
+    @property
+    def serves_artifacts_on_request(self) -> bool:
+        return self.answers_each_release
+
+    def artifact_model(self, artifact: Artifact) -> PolicyModel:
+        return PolicyModel("base", artifact.ref.release_id)
+
+    def served_artifact_on_request(self, artifact: Artifact) -> ServedArtifact:
+        return ServedArtifact(artifact.artifact_id, self.base_url, f"sampler:{artifact.artifact_id}")
 
     def activate_checkpoint(self, artifact: Artifact, *, scenario: str | None = None) -> str:
         version = self.serve(artifact)
@@ -146,9 +192,27 @@ def job_sized_stages(
 ) -> PipelineConfig:
     """The stages of ``spec`` configured by a deployment ``pipeline`` section, with ``job_samples`` set.
 
-    A weight recipe needs ``pipeline.task2job.config.job_samples``; a ``job_samples`` in ``section`` wins.
+    A weight recipe needs ``pipeline.sample2job.config.job_samples``; a ``job_samples`` in ``section`` wins.
     """
     stages = {key: dict(value) for key, value in (section or {}).items()}
-    task2job = stages.setdefault("task2job", {})
-    task2job["config"] = {"job_samples": job_samples, **task2job.get("config", {})}
+    sample2job = stages.setdefault("sample2job", {})
+    sample2job["config"] = {"job_samples": job_samples, **sample2job.get("config", {})}
     return PipelineConfig.from_setting(stages, spec=spec, environ={})
+
+
+class RunningEngines(ServingEngines):
+    """Engines that a test started behind ``backend`` and stops: opening returns them as new engines, and closing
+    stops nothing.
+
+    Purpose: the serving runtime tests run ``AdapterServingRuntime`` and ``FullWeightServingRuntime`` on fake engines.
+    """
+
+    def __init__(self, backend: InferenceBackend) -> None:
+        self.backend = backend
+
+    @property
+    def base_url(self) -> str:
+        return self.backend.inference_url()
+
+    def open(self) -> OpenedEngines:
+        return OpenedEngines(self.backend, attached=False)

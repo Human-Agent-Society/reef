@@ -1,8 +1,11 @@
-"""The Slime component's Ray session and its one reservation of the training GPUs."""
+"""A Slime driver's Ray session and its placement group, which Slime makes and splits."""
+
+import sys
+import types
 
 import pytest
 
-from reef.runtime.executor.placement import ModelGpuLayout
+from reef.runtime.executor.placement import GpuBundles
 from reef.train.slime_backend import resources
 from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
 
@@ -17,7 +20,7 @@ def ray_session(monkeypatch):
             self.failure = None
             self.initialized = False
             self.options = None
-            self.layout = None
+            self.args = None
 
         def event(self, name):
             self.events.append(name)
@@ -35,18 +38,17 @@ def ray_session(monkeypatch):
         session.initialized = False
         session.event("disconnect")
 
-    class Reservation:
-        training = "training-bundles"
-
-        def release(self):
-            session.event("release")
-
-    def reserve(layout):
-        session.layout = layout
+    def create_placement_groups(args):
+        session.args = args
         session.event("reserve")
-        return Reservation()
+        # Slime's split of one group: the critic shares the actor's bundles, the engines take the ones after.
+        actor = ("group", [0, 1], [0, 1])
+        return {"actor": actor, "critic": actor if args.use_critic else None, "rollout": ("group", [], [])}
 
-    monkeypatch.setattr(resources, "reserve_model_gpus", reserve)
+    placement = types.ModuleType("slime.ray.placement_group")
+    placement.create_placement_groups = create_placement_groups  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "slime.ray.placement_group", placement)
+    monkeypatch.setattr(resources.ray.util, "remove_placement_group", lambda group: session.event("release"))
     monkeypatch.setattr(resources.ray, "is_initialized", lambda: session.initialized)
     monkeypatch.setattr(resources.ray, "init", connect)
     monkeypatch.setattr(resources.ray, "shutdown", disconnect)
@@ -66,17 +68,18 @@ def component_resources(*, use_critic=False):
 
 
 @pytest.mark.parametrize("use_critic", [False, True])
-def test_the_component_connects_once_reserves_its_training_gpus_and_releases_them_before_disconnecting(
+def test_the_driver_connects_once_reserves_slimes_placement_group_and_releases_it_before_disconnecting(
     ray_session, use_critic
 ):
     owned = component_resources(use_critic=use_critic)
     owned.start()
-    # The serving engines reserve their own GPUs on the inference component: the component reserves training GPUs.
-    assert ray_session.layout == ModelGpuLayout(training_gpus=2, inference_gpus=0)
-    # The actor and the critic share the training bundles.
+    # Slime makes and splits the job's placement group from its own arguments.
+    assert ray_session.args is owned.args
+    actor = GpuBundles("group", [0, 1], [0, 1])
     assert owned.placement_groups == {
-        "actor": "training-bundles",
-        "critic": "training-bundles" if use_critic else None,
+        "actor": actor,
+        "critic": actor if use_critic else None,
+        "rollout": GpuBundles("group", [], []),
     }
     assert ray_session.options == {
         "address": "external",
@@ -134,17 +137,3 @@ def test_closing_retires_the_deployments_processes_before_disconnecting(ray_sess
         with pytest.raises(RuntimeError, match="unconfirmed"):
             owned.close()
     assert ray_session.events[-3:] == ["release", "retire-processes", "disconnect"]
-
-
-@pytest.mark.parametrize(("rollout_num_gpus", "rollout_external"), [(4, False), (0, True), (0, False)])
-def test_the_reservation_holds_only_the_training_gpus(rollout_num_gpus, rollout_external):
-    layout = resources.model_gpu_layout(
-        SlimeArguments(
-            actor_num_nodes=2,
-            actor_num_gpus_per_node=8,
-            rollout_num_gpus=rollout_num_gpus,
-            rollout_external=rollout_external,
-        )
-    )
-    assert layout == ModelGpuLayout(16, 0)
-    assert layout.total == 16

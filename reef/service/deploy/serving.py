@@ -12,6 +12,7 @@ runtime.
 from __future__ import annotations
 
 import importlib
+from collections.abc import Mapping
 from dataclasses import asdict
 from importlib.metadata import entry_points
 from typing import Any
@@ -182,11 +183,15 @@ def serving_runtime_config(
             "type": mode,
             "release_format": None if release_format is None else release_format.to_dict(),
         }
+    weights: str | Mapping[str, Any] | None = None
     if release_format is None:
-        raise DeployConfigError(
-            "the training backend's releases hold no weight files that engines load; configure it to export them "
-            "(for Tinker, training.options.export-adapter: true) or set inference.serving: trainer"
-        )
+        engine_weights = backend.engine_weights(asdict(settings))
+        if engine_weights is None:
+            raise DeployConfigError(
+                "the training backend's releases hold no weight files that engines load, and it names no way to "
+                "fetch them; set inference.serving: trainer"
+            )
+        release_format, weights = engine_weights.release_format, engine_weights.weights
     if (
         settings.inference_backend is None
         or settings.inference_num_gpus is None
@@ -210,6 +215,7 @@ def serving_runtime_config(
         "executor_options": dict(rollout.options),
         "inference_timeout_s": settings.inference_timeout_s,
         "inference_handler_config": dict(settings.inference_handler_config),
+        "weights": weights,
     }
     handler_factory = inference_handler_factory_for(settings.inference_handler_factory)
     if handler_factory is not None:

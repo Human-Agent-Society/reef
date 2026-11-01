@@ -163,10 +163,6 @@ class SlimeTrainGroup:
             for rank in range(self._world_size)
         ]
 
-    def reset_training_state(self) -> None:
-        """Clear every rank's optimizer state and restart its learning-rate scheduler; the weights stay."""
-        self.executor.collective_rpc("reset_training_state", timeout=self.train_timeout_s)
-
     def save_model(self, rollout_id, force_sync=False):
         return self.executor.collective_rpc(
             "save_model",
@@ -174,6 +170,14 @@ class SlimeTrainGroup:
             kwargs={"force_sync": force_sync},
             timeout=self.train_timeout_s,
         )
+
+    def set_rollout_manager(self, rollout_manager: Any) -> None:
+        """Hand every worker the Ray handle of the component's rollout manager, whose engines ``update_weights`` loads."""
+        self.executor.collective_rpc("set_rollout_manager", args=(rollout_manager,), timeout=self.train_timeout_s)
+
+    def update_weights(self) -> None:
+        """Load the actor's current weights into the rollout manager's engines, with Slime's own weight transfer."""
+        self.executor.collective_rpc("update_weights", timeout=self.train_timeout_s)
 
     def onload(self):
         return self.executor.collective_rpc("wake_up", timeout=self.train_timeout_s)
@@ -237,7 +241,7 @@ def apply_critic_checkpoint_roots(critic_args: SlimeArguments) -> None:
     if (Path(critic_save).expanduser() / "latest_checkpointed_iteration.txt").is_file():
         load, reason = critic_save, "resumes from its own checkpoint root"
     elif critic_init and (Path(critic_init).expanduser() / "latest_checkpointed_iteration.txt").is_file():
-        # A value model trained on earlier episodes: its weights and optimizer
+        # A value model trained on earlier rollouts: its weights and optimizer
         # come from --critic-init once, and every later start resumes from
         # what this run has saved since. The learning-rate schedule is this
         # run's, not the checkpoint's: the earlier run may have used another

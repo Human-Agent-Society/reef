@@ -21,16 +21,18 @@ import pytest
 pytest.importorskip("ray", reason="requires the optional Ray runtime")
 
 from tests.support._trajectories import policy_trajectory
+from tests.support.chat_templates import CharTemplate
 from tests.support.slime_component import FakeTrainGroup, RecordingBatchProcessor, checkpoint_storage, finished
 
-from reef.core.artifact_ref import RuntimeLoadSpan
-from reef.core.job_data import TaskItem
+from reef.artifact import Artifact, ModelDirectory
+from reef.core.artifact_ref import RootSource
+from reef.core.job_data import TaskSample, TrajectorySample
 from reef.core.trajectories import trajectory_reward
+from reef.core.weight_layout import ADAPTER_DIR
 from reef.runtime.durable_files import write_json
 from reef.runtime.executor import ExecutorFuture, base
 from reef.runtime.interfaces import LearningRateSchedule, LearningRateScheduleState, TrainingMethod
-from reef.runtime.jobs import JobStatus, ReleaseFormat, TrainingJob
-from reef.runtime.serving import ADAPTER_DIR
+from reef.runtime.jobs import JobStatus, ReleaseFormat, ScenarioRoot, TrainingJob
 from reef.train.algos import TrainingObjective, TrainingSignal
 from reef.train.algos.helpers import next_steps
 from reef.train.slime_backend import component as slime_component
@@ -38,12 +40,12 @@ from reef.train.slime_backend.algorithm import SlimeAlgorithm, TrainResult
 from reef.train.slime_backend.component import (
     ROLLOUT_FILE,
     START_STATE,
-    SlimeRollout,
+    SlimeJobRunner,
+    SlimeRound,
     SlimeSettings,
     SlimeStart,
-    SlimeTrainingComponent,
     WorkerTrainingSettings,
-    create_slime_component,
+    start_slime_runner,
 )
 from reef.train.slime_backend.loss_families import register_loss_family, resolve_loss_family, unregister_loss_family
 from reef.train.slime_backend.reef_adapters import startup
@@ -134,8 +136,8 @@ def worker_args(tmp_path: Path, **overrides: object) -> SlimeArguments:
         "loss_type": "sft_loss",
         "advantage_estimator": "grpo",
         "compute_advantages_and_returns": False,
-        "use_rollout_logprobs": True,
-        "custom_rollout_data_keys": ("producing_runtime_load_spans", "producing_runtime_load_ids"),
+        "use_rollout_logprobs": False,
+        "custom_rollout_data_keys": ("producing_artifact_ids",),
         "reef_rollout_tensor_dtypes": {},
         "reef_external_batch_keys": (),
         "reef_rollout_log_skip_keys": (),
@@ -160,7 +162,9 @@ def batch_for(step: int, *, rewards: tuple[float, ...] = (1.0, 1.0)) -> JobData:
     return JobData(
         f"batch-{step}",
         tuple(
-            policy_trajectory(f"s{step}-{index}", (1, 2, 3), (1, 1), (-0.2, -0.1), reward, f"inc:{index}")
+            policy_trajectory(
+                f"s{step}-{index}", (1, 2, 3), (1, 1), (-0.2, -0.1), reward, artifact_id=f"artifact-{index}"
+            )
             for index, reward in enumerate(rewards)
         ),
     )
@@ -188,6 +192,7 @@ class Stack:
         loss_family: str = "sft",
         rank_metrics: list[dict[str, Any]] | None = None,
         train_timeout_s: float = 600.0,
+        rollout_group: Any = None,
         **overrides: object,
     ) -> None:
         self.args = worker_args(tmp_path, **overrides)
@@ -200,7 +205,7 @@ class Stack:
         )
         self.critic = FakeTrainGroup(None, megatron_root=self.storage.critic_root) if critic else None
         self.processor = RecordingBatchProcessor()
-        self.component = SlimeTrainingComponent(
+        self.component = SlimeJobRunner(
             self.args,
             self.group,
             self.critic,
@@ -209,16 +214,20 @@ class Stack:
             lora=lora,
             loss_family=loss_family,
             train_timeout_s=train_timeout_s,
+            rollout_group=rollout_group,
         )
+        self.component.start_jobs()
         start_rollout_id = int(self.args.start_rollout_id or 0)
-        self.start: str | None = (
-            None if start_rollout_id == 0 else str(self.root / "reef-starts" / f"rollout_{start_rollout_id - 1}")
+        self.start = (
+            self.component.base_start
+            if start_rollout_id == 0
+            else str(self.root / "reef-starts" / f"rollout_{start_rollout_id - 1}")
         )
 
     def run(self, method: TrainingMethod, *, step: int, batch: JobData | None = None) -> JobStatus:
         job_id = f"job-{step}"
         data = batch_for(step) if batch is None else batch
-        self.component.submit(TrainingJob(job_id, "slime", self.start, data, parameters(method)))
+        self.component.submit(TrainingJob(job_id, "slime", self.start, data, parameters(method), scenario="s"))
         status = finished(self.component, job_id)
         if status.checkpoints:
             self.start = status.checkpoints[-1].path
@@ -267,7 +276,11 @@ def test_a_job_trains_one_rollout_and_saves_it_as_the_start_of_the_next_job(tmp_
     assert stack.group.saved == [(0, True)]
     assert stack.processor.calls[0]["rollout_ids"] == [0, 1]
     # Submitting the same job again does nothing.
-    stack.component.submit(TrainingJob("job-0", "slime", None, batch_for(0), parameters(TrainingMethod("sft"))))
+    stack.component.submit(
+        TrainingJob(
+            "job-0", "slime", stack.component.base_start, batch_for(0), parameters(TrainingMethod("sft")), scenario="s"
+        )
+    )
     assert stack.component.status("job-0") == first
 
     second = stack.run(TrainingMethod("sft"), step=1)
@@ -281,7 +294,14 @@ def test_a_job_trains_one_rollout_and_saves_it_as_the_start_of_the_next_job(tmp_
 @pytest.mark.unit
 def test_a_save_interval_trains_each_run_of_steps_as_its_own_rollout_and_checkpoint(tmp_path, stacks) -> None:
     stack = stacks(tmp_path)
-    job = TrainingJob("job-0", "slime", None, batch_for(0), {**parameters(TrainingMethod("sft")), "save_interval": 1})
+    job = TrainingJob(
+        "job-0",
+        "slime",
+        stack.component.base_start,
+        batch_for(0),
+        {**parameters(TrainingMethod("sft")), "save_interval": 1},
+        scenario="s",
+    )
     stack.component.submit(job)
     status = finished(stack.component, "job-0")
 
@@ -307,7 +327,14 @@ def test_each_rollout_of_a_job_records_the_schedule_progress_up_to_it(tmp_path, 
     stack = stacks(tmp_path)
     method = TrainingMethod("sft", WARMUP)
     stack.component.submit(
-        TrainingJob("job-0", "slime", None, batch_for(0), {**parameters(method), "save_interval": 1})
+        TrainingJob(
+            "job-0",
+            "slime",
+            stack.component.base_start,
+            batch_for(0),
+            {**parameters(method), "save_interval": 1},
+            scenario="s",
+        )
     )
     status = finished(stack.component, "job-0")
 
@@ -319,7 +346,15 @@ def test_each_rollout_of_a_job_records_the_schedule_progress_up_to_it(tmp_path, 
 def test_a_restarted_job_continues_after_its_last_saved_rollout(tmp_path, stacks) -> None:
     jobs = tmp_path / "reef-jobs" / "job-0"
     job_parameters = {**parameters(TrainingMethod("sft")), "save_interval": 1}
-    write_json(jobs / "job.json", {"start": None, "data": batch_for(0).to_dict(), "parameters": job_parameters})
+    write_json(
+        jobs / "job.json",
+        {
+            "scenario": "s",
+            "start": str(tmp_path / "reef-starts" / "base"),
+            "data": batch_for(0).to_dict(),
+            "parameters": job_parameters,
+        },
+    )
     # The job saved and recorded its first rollout before the restart; the restarted workers loaded it.
     first = tmp_path / "reef-starts" / "rollout_0"
     SlimeStart(0, None, {}, None).write(first)
@@ -330,7 +365,17 @@ def test_a_restarted_job_continues_after_its_last_saved_rollout(tmp_path, stacks
     write_json(jobs / ROLLOUT_FILE, {"rollout_id": 0, "step": 1})
     write_json(
         jobs / "checkpoints.json",
-        {"checkpoints": [{"step": 1, "path": str(first), "release_path": str(tmp_path / "hf" / "0"), "metrics": {}}]},
+        {
+            "checkpoints": [
+                {
+                    "step": 1,
+                    "path": str(first),
+                    "release_path": str(tmp_path / "hf" / "0"),
+                    "metrics": {},
+                    "changed_kinds": [],
+                }
+            ]
+        },
     )
 
     stack = stacks(tmp_path, start_rollout_id=1, storage=storage)
@@ -347,7 +392,12 @@ def test_a_packed_job_trains_global_batch_size_packs_per_step(tmp_path, stacks) 
     stack = stacks(tmp_path)
     scheduling = {"packing_length": 2 * len(trajectories(batch_for(0))[0].training["tokens"])}
     job = TrainingJob(
-        "job-0", "slime", None, batch_for(0), {**parameters(TrainingMethod("sft")), "scheduling": scheduling}
+        "job-0",
+        "slime",
+        stack.component.base_start,
+        batch_for(0),
+        {**parameters(TrainingMethod("sft")), "scheduling": scheduling},
+        scenario="s",
     )
     stack.component.submit(job)
     status = finished(stack.component, "job-0")
@@ -362,22 +412,26 @@ def test_a_job_starts_only_from_the_weights_the_workers_hold(tmp_path, stacks) -
     stack = stacks(tmp_path)
     with pytest.raises(ValueError, match="cannot load a published release"):
         stack.component.import_start(tmp_path)
-    job = TrainingJob("elsewhere", "slime", str(tmp_path / "other"), batch_for(0), parameters(TrainingMethod("sft")))
+    job = TrainingJob(
+        "elsewhere", "slime", str(tmp_path / "other"), batch_for(0), parameters(TrainingMethod("sft")), scenario="s"
+    )
     with pytest.raises(ValueError, match="other is not a Slime start"):
         stack.component.submit(job)
     other = tmp_path / "rollout_5"
     SlimeStart(5, None, {}, None).write(other)
-    job = TrainingJob("elsewhere", "slime", str(other), batch_for(0), parameters(TrainingMethod("sft")))
-    with pytest.raises(ValueError, match="hold the startup weights; a job cannot start from rollout 5"):
+    job = TrainingJob("elsewhere", "slime", str(other), batch_for(0), parameters(TrainingMethod("sft")), scenario="s")
+    with pytest.raises(ValueError, match="continues the startup weights; a job cannot start from rollout 5"):
         stack.component.submit(job)
     stack.run(TrainingMethod("sft"), step=0)
     # After a job, the workers hold its rollout: a job from any other start is refused.
-    job = TrainingJob("other", "slime", str(other), batch_for(1), parameters(TrainingMethod("sft")))
-    with pytest.raises(ValueError, match="hold the weights of rollout 0"):
+    job = TrainingJob("other", "slime", str(other), batch_for(1), parameters(TrainingMethod("sft")), scenario="s")
+    with pytest.raises(ValueError, match="continues the weights of rollout 0"):
         stack.component.submit(job)
     # A start without a rollout names the startup weights, which the workers no longer hold.
-    job = TrainingJob("again", "slime", None, batch_for(1), parameters(TrainingMethod("sft")))
-    with pytest.raises(ValueError, match="hold the weights of rollout 0; a job cannot start from the startup"):
+    job = TrainingJob(
+        "again", "slime", stack.component.base_start, batch_for(1), parameters(TrainingMethod("sft")), scenario="s"
+    )
+    with pytest.raises(ValueError, match="continues the weights of rollout 0; a job cannot start from the startup"):
         stack.component.submit(job)
     with pytest.raises(KeyError):
         stack.component.status("other")
@@ -393,9 +447,9 @@ def test_restarted_workers_continue_from_the_checkpoint_they_loaded_and_refuse_t
     assert stack.component.loaded_rollout_id == 2
     other = tmp_path / "rollout_5"
     SlimeStart(5, None, {}, None).write(other)
-    for start in (str(other), None):
-        job = TrainingJob("other", "slime", start, batch_for(0), parameters(TrainingMethod("sft")))
-        with pytest.raises(ValueError, match="hold the weights of rollout 2"):
+    for start in (str(other), stack.component.base_start):
+        job = TrainingJob("other", "slime", start, batch_for(0), parameters(TrainingMethod("sft")), scenario="s")
+        with pytest.raises(ValueError, match="continues the weights of rollout 2"):
             stack.component.submit(job)
 
     assert stack.start == str(tmp_path / "reef-starts" / "rollout_2")
@@ -412,36 +466,49 @@ def test_a_queued_job_whose_start_the_workers_left_fails_when_it_runs(tmp_path, 
     stack = stacks(tmp_path)
     # Both jobs named the startup weights when they were submitted; the first one moved the workers on.
     stack.run(TrainingMethod("sft"), step=0)
-    late = TrainingJob("late", "slime", None, batch_for(1), parameters(TrainingMethod("sft")))
-    with pytest.raises(ValueError, match="hold the weights of rollout 0; a job cannot start from the startup"):
+    late = TrainingJob(
+        "late", "slime", stack.component.base_start, batch_for(1), parameters(TrainingMethod("sft")), scenario="s"
+    )
+    with pytest.raises(ValueError, match="continues the weights of rollout 0; a job cannot start from the startup"):
         stack.component.run(late, tmp_path / "late")
     assert len(stack.group.train_calls) == 1
 
 
 @pytest.mark.unit
-def test_a_fresh_start_resets_the_workers_training_state_once_and_keeps_the_weights(tmp_path, stacks) -> None:
-    stack = stacks(tmp_path, critic=True)
-    first = stack.run(TrainingMethod("sft"), step=0)
+def test_the_default_start_is_the_startup_model_and_the_base_start_names_the_startup_weights(tmp_path, stacks) -> None:
+    model = tmp_path / "model"
+    model.mkdir()
+    stack = stacks(tmp_path, hf_checkpoint=str(model))
+    base = stack.component.default_start()
+    assert (base.model_files, base.inputs) == (ModelDirectory(model.resolve()), {"model": str(model.resolve())})
+    assert SlimeStart.read(Path(stack.component.base_start)) == SlimeStart(None, None, {}, None)
+    # The first job of a trainer starts from the startup weights, which the workers hold.
+    stack.component.submit(
+        TrainingJob(
+            "job-0", "slime", stack.component.base_start, batch_for(0), parameters(TrainingMethod("sft")), scenario="s"
+        )
+    )
+    assert finished(stack.component, "job-0").state == "finished"
 
-    fresh = stack.component.fresh_start(first.checkpoints[0].path)
 
-    assert fresh == str(tmp_path / "reef-starts" / "fresh_rollout_0")
-    assert SlimeStart.read(Path(fresh)) == SlimeStart(0, None, {}, None, fresh=True)
-    stack.start = fresh
-    second = stack.run(TrainingMethod("sft"), step=1)
-    # The workers reset before the job trained, and the objective's state started empty.
-    assert (stack.group.events, stack.critic.events) == (["reset"], ["reset"])
-    assert second.metrics["rollout_id"] == 1
-    assert SlimeStart.read(Path(second.checkpoints[0].path)) == SlimeStart(1, "sft", {"steps": 1}, None)
-    # The next job continues from the checkpoint and does not reset again.
-    stack.run(TrainingMethod("sft"), step=2)
-    assert stack.group.events == ["reset"]
-    # The same start gives the same fresh start; a job from it is refused once the workers moved on.
-    assert stack.component.fresh_start(first.checkpoints[0].path) == fresh
-    job = TrainingJob("late", "slime", fresh, batch_for(3), parameters(TrainingMethod("sft")))
-    with pytest.raises(ValueError, match="hold the weights of rollout 2"):
-        stack.component.submit(job)
-    assert stack.component.fresh_start(None) == str(tmp_path / "reef-starts" / "fresh_startup")
+@pytest.mark.unit
+def test_a_trainer_starts_from_the_startup_weights_only_for_a_root_of_the_configured_inputs(tmp_path, stacks) -> None:
+    """Slime's workers load ``hf_checkpoint`` and cannot load a release, so a scenario trains only when its root came
+    from the default start of the configured inputs; the refusal names both."""
+    model = tmp_path / "model"
+    model.mkdir()
+    stack = stacks(tmp_path, hf_checkpoint=str(model))
+    configured = {"model": str(model.resolve())}
+    root = ScenarioRoot(Artifact.local(model), RootSource("default", inputs=configured))
+    assert stack.component.root_start(root) == stack.component.base_start
+    changed = ScenarioRoot(Artifact.local(model), RootSource("default", inputs={"model": "/models/other"}))
+    with pytest.raises(
+        ValueError, match=r"from the inputs \{'model': .*\}, but .* came from the inputs \{'model': '/models/other'\}"
+    ):
+        stack.component.root_start(changed)
+    item = ScenarioRoot(Artifact.local(model), RootSource("item", item="upload-1", uri="file:///upload/", version=""))
+    with pytest.raises(ValueError, match="came from the item 'upload-1'"):
+        stack.component.root_start(item)
 
 
 @pytest.mark.unit
@@ -471,25 +538,19 @@ def test_a_job_of_another_objective_starts_with_an_empty_objective_state(tmp_pat
         ({**parameters(TrainingMethod(REWARD_OBJECTIVE)), "scheduling": {"epochs": 2}}, "does not support 2 epochs"),
         ({**parameters(TrainingMethod("sft")), "save_interval": 0}, "save_interval must be a positive int"),
         ({**parameters(TrainingMethod("sft")), "save_interval": True}, "save_interval must be a positive int"),
+        # A job of tasks, on a component without rollout engines.
+        ({**parameters(TrainingMethod("sft")), "rollout": {"rollouts_per_task": 2}}, "no rollout engines"),
+        # A job of trajectories takes no rollout parameter.
+        ({**parameters(TrainingMethod("sft")), "rollout": {"rollouts_per_task": 2}}, "only to a job of tasks"),
     ],
 )
-def test_a_job_with_parameters_slime_does_not_take_is_refused_and_records_nothing(
-    tmp_path, stacks, job_parameters, message
-) -> None:
+def test_a_job_slime_cannot_run_is_refused_and_records_nothing(tmp_path, stacks, job_parameters, message) -> None:
     stack = stacks(tmp_path)
+    data = JobData("tasks", (TaskSample(tmp_path / "task"),)) if "rollout engines" in message else batch_for(0)
     with pytest.raises(ValueError, match=message):
-        stack.component.submit(TrainingJob("job-0", "slime", None, batch_for(0), job_parameters))
-    with pytest.raises(KeyError):
-        stack.component.status("job-0")
-    assert stack.group.train_calls == []
-
-
-@pytest.mark.unit
-def test_a_job_of_tasks_is_refused_because_slime_rolls_no_task_out(tmp_path, stacks) -> None:
-    stack = stacks(tmp_path)
-    tasks = JobData("tasks", (TaskItem(tmp_path / "task"),))
-    with pytest.raises(ValueError, match="does not roll tasks out"):
-        stack.component.submit(TrainingJob("job-0", "slime", None, tasks, parameters(TrainingMethod("sft"))))
+        stack.component.submit(
+            TrainingJob("job-0", "slime", stack.component.base_start, data, job_parameters, scenario="s")
+        )
     with pytest.raises(KeyError):
         stack.component.status("job-0")
     assert stack.group.train_calls == []
@@ -550,7 +611,13 @@ def test_a_restarted_component_resumes_its_unfinished_job_without_training_a_sav
     jobs = tmp_path / "reef-jobs" / "job-0"
     data = batch_for(0)
     write_json(
-        jobs / "job.json", {"start": None, "data": data.to_dict(), "parameters": parameters(TrainingMethod("sft"))}
+        jobs / "job.json",
+        {
+            "scenario": "s",
+            "start": str(tmp_path / "reef-starts" / "base"),
+            "data": data.to_dict(),
+            "parameters": parameters(TrainingMethod("sft")),
+        },
     )
     # The job started training rollout 0 before the restart.
     write_json(jobs / ROLLOUT_FILE, {"rollout_id": 0, "step": 2})
@@ -567,7 +634,13 @@ def test_a_restarted_component_resumes_its_unfinished_job_without_training_a_sav
             jobs / "checkpoints.json",
             {
                 "checkpoints": [
-                    {"step": 2, "path": str(saved_start), "release_path": str(tmp_path / "hf" / "0"), "metrics": {}}
+                    {
+                        "step": 2,
+                        "path": str(saved_start),
+                        "release_path": str(tmp_path / "hf" / "0"),
+                        "metrics": {},
+                        "changed_kinds": [],
+                    }
                 ]
             },
         )
@@ -598,7 +671,7 @@ def test_a_restarted_component_resumes_its_unfinished_job_without_training_a_sav
 def test_a_skipped_job_saves_no_checkpoint_and_the_next_job_continues_the_start(tmp_path, stacks) -> None:
     stack = stacks(tmp_path)
     for step, data_id in ((0, "plain"), (1, "count-1")):
-        status = stack.run(TrainingMethod(SKIP_OBJECTIVE), step=step, batch=JobData(data_id, batch_for(step).items))
+        status = stack.run(TrainingMethod(SKIP_OBJECTIVE), step=step, batch=JobData(data_id, batch_for(step).samples))
         # A skip trains nothing and saves nothing, whatever state the objective proposed.
         assert (status.state, status.checkpoints, status.metrics) == ("finished", (), {"skipped": 1})
     assert (stack.group.train_calls, stack.group.saved) == ([], [])
@@ -608,20 +681,13 @@ def test_a_skipped_job_saves_no_checkpoint_and_the_next_job_continues_the_start(
 
 
 @pytest.mark.unit
-def test_a_single_method_job_leaves_the_workers_as_they_started(tmp_path, stacks) -> None:
-    stack = stacks(tmp_path)
-    stack.run(TrainingMethod("sft"), step=0)
-    stack.run(TrainingMethod("sft"), step=1)
-    assert [stack.worker_switch(job) for job in (0, 1)] == [None, None]
-    assert len(stack.group.train_calls) == 2
-
-
-@pytest.mark.unit
 def test_a_job_of_another_family_switches_the_actor_workers_and_back(tmp_path, stacks) -> None:
     stack = stacks(tmp_path)
     for step, method in enumerate(("sft", REWARD_OBJECTIVE, REWARD_OBJECTIVE, "sft")):
         assert stack.run(TrainingMethod(method), step=step).state == "finished"
 
+    # A job of the family the workers started with leaves them as they are.
+    assert stack.worker_switch(0) is None
     policy = stack.worker_switch(1)
     assert policy is not None
     assert policy["learning_rate_schedule_state"] is None
@@ -762,27 +828,40 @@ def test_worker_results_wait_for_the_configured_timeout_and_metrics_come_from_ev
 
 
 @pytest.mark.unit
-def test_the_workers_receive_each_rows_producing_versions(tmp_path, stacks) -> None:
+def test_the_workers_receive_each_rows_producing_artifact(tmp_path, stacks) -> None:
     stack = stacks(tmp_path)
-    mixed = policy_trajectory(
-        "mixed",
-        (10, 20, 21, 22),
-        (1, 1, 1),
-        (-0.1, -0.2, -0.3),
-        1.0,
-        None,
-        runtime_load_spans=(RuntimeLoadSpan(0, 1, "inc:6"), RuntimeLoadSpan(1, 3, "inc:7")),
-    )
-    batch = JobData("mixed", (*batch_for(0).items, mixed))
+    unknown = policy_trajectory("unknown", (10, 20, 21, 22), (1, 1, 1), (-0.1, -0.2, -0.3), 1.0)
+    batch = JobData("mixed", (*batch_for(0).samples, unknown))
     stack.run(TrainingMethod("sft"), step=0, batch=batch)
     (data,) = stack.processor.calls
-    # Training metadata, not a check: a sample's version, or the versions of its token spans.
-    assert data["producing_runtime_load_ids"] == ["inc:0", "inc:1", None]
-    assert data["producing_runtime_load_spans"] == [
-        [],
-        [],
-        [{"start": 0, "end": 1, "runtime_load_id": "inc:6"}, {"start": 1, "end": 3, "runtime_load_id": "inc:7"}],
-    ]
+    # Training metadata, not a check: the artifact that produced each sample, or None when it is unknown.
+    assert data["producing_artifact_ids"] == ["artifact-0", "artifact-1", None]
+
+
+@pytest.mark.unit
+def test_a_recorded_trajectory_renders_with_the_models_chat_template(tmp_path, stacks) -> None:
+    stack = stacks(tmp_path)
+    stack.component.template = CharTemplate()
+    steps = [{"step_id": 1, "source": "user", "message": "q"}, {"step_id": 2, "source": "agent", "message": "ab"}]
+    recorded = TrajectorySample(
+        {"schema_version": "ATIF-v1.7", "agent": {"name": "a"}, "steps": steps, "extra": {"reef": {"reward": 1.0}}}
+    )
+    stack.run(TrainingMethod("sft"), step=0, batch=JobData("recorded", (*batch_for(0).samples[:1], recorded)))
+    (data,) = stack.processor.calls
+    # user q | assistant ab in CharTemplate; the actor computes the log-probabilities, so the row ships none.
+    assert data["tokens"][1] == [2, 213, 9, 197, 198] and data["loss_masks"][1] == [1, 1]
+
+
+@pytest.mark.unit
+def test_sft_trains_a_demonstration_that_records_no_reward(tmp_path, stacks) -> None:
+    stack = stacks(tmp_path)
+    stack.component.template = CharTemplate()
+    steps = [{"step_id": 1, "source": "user", "message": "q"}, {"step_id": 2, "source": "agent", "message": "ab"}]
+    demonstration = TrajectorySample({"schema_version": "ATIF-v1.7", "agent": {"name": "a"}, "steps": steps})
+    stack.run(TrainingMethod("sft"), step=0, batch=JobData("uploaded", (*batch_for(0).samples[:1], demonstration)))
+    (data,) = stack.processor.calls
+    # sft_loss reads no reward, so the row carries 0.
+    assert data["tokens"][1] == [2, 213, 9, 197, 198] and data["rewards"][1] == 0.0
 
 
 # -- Checkpoint storage
@@ -856,7 +935,7 @@ def test_storage_preflight_resolves_the_paths_and_refuses_a_storage_it_cannot_fi
 def test_a_critic_group_needs_the_storages_critic_root(tmp_path) -> None:
     for critic, critic_root in ((FakeTrainGroup(None), None), (None, tmp_path / "megatron-critic")):
         with pytest.raises(ValueError, match="critic root: give both or neither"):
-            SlimeTrainingComponent(
+            SlimeJobRunner(
                 worker_args(tmp_path),
                 FakeTrainGroup(str(tmp_path / "hf" / "{rollout_id}")),
                 critic,
@@ -878,7 +957,7 @@ def test_closing_releases_the_critic_then_the_actor_then_the_resources(tmp_path)
     actor = FakeTrainGroup(str(tmp_path / "hf" / "{rollout_id}"))
     critic = FakeTrainGroup(None, release_error=RuntimeError("critic unavailable"))
     actor.events = critic.events = events
-    component = SlimeTrainingComponent(
+    component = SlimeJobRunner(
         worker_args(tmp_path),
         actor,
         critic,
@@ -893,7 +972,11 @@ def test_closing_releases_the_critic_then_the_actor_then_the_resources(tmp_path)
     component.close()
     assert events == ["release", "release", "resources"]
     with pytest.raises(RuntimeError, match="closed"):
-        component.submit(TrainingJob("late", "slime", None, batch_for(0), parameters(TrainingMethod("sft"))))
+        component.submit(
+            TrainingJob(
+                "late", "slime", component.base_start, batch_for(0), parameters(TrainingMethod("sft")), scenario="s"
+            )
+        )
 
 
 # -- Building the component
@@ -901,7 +984,7 @@ def test_closing_releases_the_critic_then_the_actor_then_the_resources(tmp_path)
 
 @pytest.fixture
 def build_calls(tmp_path, monkeypatch):
-    """Replace Slime's parser, the Ray resources and the workers; record what ``create_slime_component`` gives them."""
+    """Replace Slime's parser, the Ray resources and the workers; record what ``start_slime_runner`` gives them."""
     calls: dict[str, Any] = {"events": []}
     args = worker_args(
         tmp_path,
@@ -910,6 +993,9 @@ def build_calls(tmp_path, monkeypatch):
         debug_rollout_only=False,
         colocate=False,
         offload_rollout=False,
+        rollout_num_gpus=0,
+        actor_num_nodes=1,
+        actor_num_gpus_per_node=2,
         reef_executor_backend="ray",
         custom_megatron_init_path=None,
         custom_critic_args_hook_path=None,
@@ -930,10 +1016,14 @@ def build_calls(tmp_path, monkeypatch):
         def __init__(self, received, **options):
             assert received is args
             calls["resources"] = options
-            self.placement_groups = {"actor": "training-bundles", "critic": "training-bundles"}
+            self.placement_groups = {"actor": "training-bundles", "critic": "training-bundles", "rollout": None}
 
         def start(self):
             calls["events"].append("start")
+
+        def adopt(self, placement_groups):
+            calls["events"].append(f"adopt:{placement_groups['actor']}")
+            self.placement_groups = placement_groups
 
         def close(self):
             calls["events"].append("close")
@@ -943,6 +1033,7 @@ def build_calls(tmp_path, monkeypatch):
     def create_groups(received, placement_groups, *, actor_cls, train_timeout_s):
         assert received is args and actor_cls is worker_class
         calls["timeout"] = train_timeout_s
+        calls["placement_groups"] = placement_groups
         if calls.get("group_error"):
             raise RuntimeError("workers failed to start")
         calls["groups"] = (FakeTrainGroup(args.save_hf), FakeTrainGroup(None))
@@ -962,6 +1053,7 @@ def build_calls(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(startup, "slime_executor_class", lambda backend: None)
     monkeypatch.setattr(slime_component, "SlimeDeploymentResources", Resources)
+    calls["resources_class"] = Resources
     monkeypatch.setattr(slime_component, "create_train_groups", create_groups)
     monkeypatch.setattr(slime_component, "prepare_checkpoint_storage", storage)
     monkeypatch.setattr(slime_arguments, "configure_reef_loss_args", lambda received: None)
@@ -1015,16 +1107,10 @@ def test_a_slime_start_and_the_worker_settings_check_their_values() -> None:
         SlimeStart(0, None, {"steps": 1}, None)
     with pytest.raises(ValueError, match="objective of a non-empty state, and only of one"):
         SlimeStart(0, "sft", {}, None)
-    with pytest.raises(ValueError, match="a fresh SlimeStart has no objective state and no schedule progress"):
-        SlimeStart(0, None, {}, LearningRateScheduleState(WARMUP, 1), fresh=True)
-    with pytest.raises(ValueError, match="a fresh SlimeStart has no objective state and no schedule progress"):
-        SlimeStart(0, "sft", {"steps": 1}, None, fresh=True)
     with pytest.raises(ValueError, match="algorithm_state must encode as JSON"):
         SlimeStart(0, "sft", {"steps": float("nan")}, None)
     with pytest.raises(TypeError, match="schedule_state must be a LearningRateScheduleState"):
         SlimeStart(0, None, {}, {"completed_steps": 1})  # type: ignore[arg-type]
-    with pytest.raises(TypeError, match="fresh must be a bool"):
-        SlimeStart(0, None, {}, None, fresh=1)  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="loss_family must be a non-empty string"):
         WorkerTrainingSettings("", None)
     with pytest.raises(TypeError, match="schedule_state must be a LearningRateScheduleState"):
@@ -1039,7 +1125,6 @@ def test_a_slime_start_and_the_worker_settings_check_their_values() -> None:
         ({"step": True}, ValueError, "step must be a positive int"),
         ({"step": 0}, ValueError, "step must be a positive int"),
         ({"next_schedule": LearningRateScheduleState(WARMUP, 1)}, ValueError, "before and after the rollout"),
-        ({"fresh": None}, TypeError, "fresh must be a bool"),
         ({"objective": None, "algorithm_state": {"steps": 1}}, ValueError, "objective of a non-empty state"),
     ],
 )
@@ -1049,13 +1134,12 @@ def test_a_slime_rollout_checks_its_values(values, error, message) -> None:
         "step": 1,
         "schedule_state": None,
         "next_schedule": None,
-        "fresh": False,
         "objective": "sft",
         "algorithm_state": {"steps": 1},
     }
-    SlimeRollout(**rollout)
+    SlimeRound(**rollout)
     with pytest.raises(error, match=message):
-        SlimeRollout(**{**rollout, **values})
+        SlimeRound(**{**rollout, **values})
 
 
 @pytest.mark.unit
@@ -1074,8 +1158,8 @@ def test_the_batch_processor_registers_a_familys_keys_and_refuses_another_dtype(
 
 
 @pytest.mark.unit
-def test_the_component_starts_its_workers_on_the_training_gpus_without_serving_engines(build_calls) -> None:
-    component = create_slime_component(settings())
+def test_the_component_starts_its_workers_on_the_training_gpus_without_rollout_engines(build_calls) -> None:
+    component = start_slime_runner(settings())
     try:
         # Reef's retention options never reach Slime's parser.
         assert build_calls["arguments"] == ["--lr=1e-06"]
@@ -1086,6 +1170,7 @@ def test_the_component_starts_its_workers_on_the_training_gpus_without_serving_e
             "runtime_env": {
                 "env_vars": {"CUDA_DEVICE_MAX_CONNECTIONS": "1", "NCCL_NVLS_ENABLE": "0", "PYTHONPATH": "/repo"}
             },
+            "place": True,
         }
         # The deployment's execution sections select the training executor.
         assert build_calls["execution"] == {"execution": {"training": "ray"}}
@@ -1099,17 +1184,70 @@ def test_the_component_starts_its_workers_on_the_training_gpus_without_serving_e
 
 
 @pytest.mark.unit
+def test_the_rollout_group_starts_before_the_workers_and_they_train_on_its_gpus(build_calls, monkeypatch) -> None:
+    events = build_calls["events"]
+
+    class RolloutGroup:
+        manager = "manager"
+        placements = {"actor": "session-bundles", "critic": None, "rollout": "session-bundles"}
+
+        @classmethod
+        def start(cls, args, lease):
+            events.append(f"rollout-start:{lease}")
+            return cls()
+
+        def close(self):
+            events.append("rollout-close")
+
+    monkeypatch.setattr(slime_component, "SlimeRolloutGroup", RolloutGroup)
+    monkeypatch.setattr(slime_component, "serving_record", lambda args, root: "session-lease")
+    # The arguments give Slime's rollout engines GPUs.
+    build_calls["args"].rollout_num_gpus = 2
+    component = start_slime_runner(settings(), serving=True)
+    try:
+        # The session holds the GPUs: the driver places nothing and trains on the session's placements.
+        assert build_calls["resources"]["place"] is False
+        assert events == ["start", "rollout-start:session-lease", "adopt:session-bundles"]
+        assert build_calls["placement_groups"] == RolloutGroup.placements
+        # The engines load Reef's SGLang plugin, which opens the weight-update session Slime's transfer needs.
+        assert build_calls["resources"]["runtime_env"]["env_vars"]["SGLANG_REEF_PLUGIN"] == "1"
+        assert build_calls["groups"][0].events == ["set_rollout_manager:manager"]
+        assert isinstance(component.rollout_group, RolloutGroup)
+    finally:
+        component.close()
+    # The workers release first; the driver then detaches from the session and closes its Ray session.
+    assert events[-2:] == ["rollout-close", "close"]
+    build_calls["group_error"] = True
+    events.clear()
+    with pytest.raises(RuntimeError, match="workers failed to start"):
+        start_slime_runner(settings(), serving=True)
+    assert events == ["start", "rollout-start:session-lease", "adopt:session-bundles", "rollout-close", "close"]
+
+
+@pytest.mark.unit
+def test_a_job_without_the_serving_session_places_itself_and_starts_no_engines(build_calls, monkeypatch) -> None:
+    monkeypatch.setattr(slime_component, "SlimeRolloutGroup", None)
+    build_calls["args"].rollout_num_gpus = 2
+    component = start_slime_runner(settings())
+    try:
+        assert build_calls["resources"]["place"] is True and component.rollout_group is None
+        assert "SGLANG_REEF_PLUGIN" not in build_calls["resources"]["runtime_env"]["env_vars"]
+    finally:
+        component.close()
+
+
+@pytest.mark.unit
 def test_a_failed_worker_start_closes_the_resources(build_calls) -> None:
     build_calls["group_error"] = True
     with pytest.raises(RuntimeError, match="workers failed to start"):
-        create_slime_component(settings())
+        start_slime_runner(settings())
     assert build_calls["events"] == ["start", "close"]
 
 
 @pytest.mark.unit
 def test_a_recipe_with_an_unknown_loss_family_is_refused_before_slime_parses(build_calls) -> None:
     with pytest.raises(RuntimeError, match="declares unsupported loss family 'grpo'"):
-        create_slime_component(settings("grpo"))
+        start_slime_runner(settings("grpo"))
     assert "arguments" not in build_calls
 
 
@@ -1119,8 +1257,7 @@ def test_a_recipe_with_an_unknown_loss_family_is_refused_before_slime_parses(bui
     [
         ({"debug_train_only": True}, "debug-train-only"),
         ({"debug_rollout_only": True}, "debug-rollout-only"),
-        ({"colocate": True}, "remove --colocate"),
-        ({"offload_rollout": True}, "remove --offload-rollout"),
+        ({"rollout_num_gpus": 2, "megatron_lora_rank": 8}, "remove --megatron-lora-rank"),
         ({"num_rollout": 0}, "positive --num-rollout"),
         ({"save_hf": "/checkpoints/hf"}, "rollout_id"),
         ({"compute_advantages_and_returns": True}, "disable-compute-advantages-and-returns"),
@@ -1137,6 +1274,10 @@ def test_slime_arguments_the_training_component_cannot_run_are_refused(overrides
         "colocate": False,
         "offload_rollout": False,
         "release_train": False,
+        "rollout_num_gpus": 0,
+        "megatron_lora_rank": 0,
+        "actor_num_nodes": 1,
+        "actor_num_gpus_per_node": 4,
     }
     validate_slime_args(SlimeArguments(**values), resolve_loss_family("sft"))
     with pytest.raises(ValueError, match=message):
@@ -1193,34 +1334,30 @@ def test_the_component_stamps_a_dotted_family_reference_for_the_workers() -> Non
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
-    ("ref_load", "expected"), [("/checkpoints/initial", "/checkpoints/initial"), (None, "/models/hf")]
+    ("resumable", "ref_load", "expected_load", "expected_rollout_id"),
+    [
+        (False, "/checkpoints/initial", "/checkpoints/initial", 0),
+        (False, None, "/models/hf", 0),
+        # A restart keeps the checkpoint it can resume.
+        (True, "/checkpoints/initial", "resume", 4),
+    ],
 )
-def test_bridge_mode_first_start_falls_back_to_initial_checkpoint(tmp_path: Path, ref_load, expected) -> None:
-    args = SimpleNamespace(
-        megatron_to_hf_mode="bridge",
-        load=str(tmp_path / "empty-resume-directory"),
-        ref_load=ref_load,
-        hf_checkpoint="/models/hf",
-        start_rollout_id=9,
-    )
-    startup.use_megatron_bridge_first_start_load(args)
-    assert (args.load, args.start_rollout_id) == (expected, 0)
-
-
-@pytest.mark.unit
-def test_bridge_mode_restart_keeps_resumable_checkpoint(tmp_path: Path) -> None:
+def test_bridge_mode_first_start_falls_back_to_initial_checkpoint(
+    tmp_path: Path, resumable, ref_load, expected_load, expected_rollout_id
+) -> None:
     resume = tmp_path / "resume"
-    resume.mkdir()
-    (resume / "latest_checkpointed_iteration.txt").write_text("3")
+    if resumable:
+        resume.mkdir()
+        (resume / "latest_checkpointed_iteration.txt").write_text("3")
     args = SimpleNamespace(
         megatron_to_hf_mode="bridge",
         load=str(resume),
-        ref_load="/checkpoints/initial",
+        ref_load=ref_load,
         hf_checkpoint="/models/hf",
         start_rollout_id=4,
     )
     startup.use_megatron_bridge_first_start_load(args)
-    assert (args.load, args.start_rollout_id) == (str(resume), 4)
+    assert (args.load, args.start_rollout_id) == (str(resume) if resumable else expected_load, expected_rollout_id)
 
 
 @pytest.mark.unit
@@ -1253,36 +1390,29 @@ def test_a_restart_without_a_saved_optimizer_does_not_load_one(
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
-    ("loss_family", "loss_type", "use_rollout_logprobs"), [("sft", "sft_loss", False), ("pg", "policy_loss", True)]
-)
-def test_matching_reef_and_slime_objectives_are_accepted(loss_family, loss_type, use_rollout_logprobs) -> None:
-    resolve_loss_family(loss_family).validate_backend_args(
-        SimpleNamespace(loss_type=loss_type, use_rollout_logprobs=use_rollout_logprobs)
-    )
-
-
-@pytest.mark.parametrize(
     ("loss_family", "loss_type", "use_rollout_logprobs", "message"),
     [
+        ("sft", "sft_loss", False, None),
+        ("pg", "policy_loss", False, None),
         ("sft", "policy_loss", False, "sft_loss"),
-        ("pg", "sft_loss", True, "policy_loss"),
-        ("pg", "policy_loss", False, "use-rollout-logprobs"),
+        ("pg", "sft_loss", False, "policy_loss"),
+        ("pg", "policy_loss", True, "remove --use-rollout-logprobs"),
     ],
 )
-def test_mismatched_reef_and_slime_objectives_are_refused(
-    loss_family, loss_type, use_rollout_logprobs, message
-) -> None:
+def test_reef_and_slime_objectives_must_match(loss_family, loss_type, use_rollout_logprobs, message) -> None:
+    args = SimpleNamespace(loss_type=loss_type, use_rollout_logprobs=use_rollout_logprobs)
+    if message is None:
+        resolve_loss_family(loss_family).validate_backend_args(args)
+        return
     with pytest.raises(RuntimeError, match=message):
-        resolve_loss_family(loss_family).validate_backend_args(
-            SimpleNamespace(loss_type=loss_type, use_rollout_logprobs=use_rollout_logprobs)
-        )
+        resolve_loss_family(loss_family).validate_backend_args(args)
 
 
 @pytest.mark.unit
 def test_the_tttd_custom_objective_is_accepted() -> None:
     resolve_loss_family("tttd").validate_backend_args(
         SimpleNamespace(
-            loss_type="custom_loss", use_rollout_logprobs=True, compute_advantages_and_returns=True, kl_coef=0.1
+            loss_type="custom_loss", use_rollout_logprobs=False, compute_advantages_and_returns=True, kl_coef=0.1
         ),
     )
 
@@ -1290,7 +1420,7 @@ def test_the_tttd_custom_objective_is_accepted() -> None:
 def sao_backend_args(**overrides) -> SimpleNamespace:
     values = {
         "loss_type": "policy_loss",
-        "use_rollout_logprobs": True,
+        "use_rollout_logprobs": False,
         "custom_advantage_function_path": "recipes.sao.slime.objective.sao_advantages",
         "custom_pg_loss_function_path": "recipes.sao.slime.objective.sao_loss",
         "use_critic": True,

@@ -1,4 +1,4 @@
-"""File trees shared by harness and skill surfaces."""
+"""The file tree that serves an artifact's text files as stored."""
 
 from __future__ import annotations
 
@@ -9,6 +9,9 @@ from reef.artifact.artifact import Artifact
 from reef.surface.base import FileTree
 
 REPOSITORY_FILES = frozenset({"reef-artifact.json", ".gitattributes"})
+#: The file of every harness artifact that holds its composition entries, at the tree's root. A client's pull
+#: leaves it out: it describes the tree, and is no part of the harness.
+ENTRIES_FILE = "reef-entries.json"
 
 
 class TextFileTree(FileTree):
@@ -23,15 +26,15 @@ class TextFileTree(FileTree):
             if not path.is_file():
                 continue
             relative = str(path.relative_to(local_path))
-            if relative in REPOSITORY_FILES:
+            if relative in REPOSITORY_FILES or relative == ENTRIES_FILE:
                 continue
             try:
                 # Bytes-then-decode avoids universal-newline rewriting. The
-                # pulled tree must equal the tree measured by the gate.
+                # pulled tree must equal the tree the validator checked.
                 files[relative] = path.read_bytes().decode("utf-8")
             except UnicodeDecodeError:
                 continue
         return files or None
 
 
-__all__ = ["REPOSITORY_FILES", "TextFileTree"]
+__all__ = ["ENTRIES_FILE", "REPOSITORY_FILES", "TextFileTree"]

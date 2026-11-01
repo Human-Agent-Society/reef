@@ -53,19 +53,32 @@ The recipe's ``loss_family`` and the Slime flags in ``training.options`` must
 describe the same objective. The Slime component checks them at start and
 refuses a mismatch.
 
-+---------------------+-----------------------------+----------------------------+
-| Loss family         | ``--loss-type``             | Rollout log-probs          |
-+=====================+=============================+============================+
-| ``sao``             | ``policy_loss``             | ``--use-rollout-logprobs`` |
-+---------------------+-----------------------------+----------------------------+
-| ``sft``             | ``sft_loss``                | not required               |
-+---------------------+-----------------------------+----------------------------+
-| ``tttd``            | ``custom_loss``             | ``--use-rollout-logprobs`` |
-+---------------------+-----------------------------+----------------------------+
-| ``openclawrl``      | ``custom_loss``             | not required               |
-+---------------------+-----------------------------+----------------------------+
-| ``sdft``            | ``custom_loss``             | ``--use-rollout-logprobs`` |
-+---------------------+-----------------------------+----------------------------+
++---------------------------+-------------------+
+| Loss family               | ``--loss-type``   |
++===========================+===================+
+| ``importance_sampling``   | ``custom_loss``   |
++---------------------------+-------------------+
+| ``sao``                   | ``policy_loss``   |
++---------------------------+-------------------+
+| ``sft``                   | ``sft_loss``      |
++---------------------------+-------------------+
+| ``slime``                 | ``policy_loss``   |
++---------------------------+-------------------+
+| ``tttd``                  | ``custom_loss``   |
++---------------------------+-------------------+
+| ``openclawrl``            | ``custom_loss``   |
++---------------------------+-------------------+
+| ``sdft``                  | ``custom_loss``   |
++---------------------------+-------------------+
+
+Every family except ``slime`` refuses ``--use-rollout-logprobs``. Serving returns no
+log-probabilities, so the actor computes the old-policy log-probabilities of
+each row with the weights of the job's start. Objectives that need old-policy
+log-probabilities, such as TTTD and the distillation importance-sampling
+correction, read these values. They are exact when ``max_staleness`` is 0 and
+an approximation above it.``importance_sampling`` reads the rollout engines' own log-probabilities of
+its task rollouts (``rollout_log_probs``) as ``q`` instead, without the flag,
+and refuses a row without them.
 
 The spec
 --------
@@ -96,7 +109,11 @@ rest has defaults. The overrides, in the order the pipeline reaches them:
   stamped. SAO turns Slime's advantage pass on here.
 - ``shape_sample_row`` and ``build_rollout_data``: a custom wire row. The
   default row is ``[source_id, tokens, loss_mask, rollout_log_probs, reward]``;
-  a family appends its own columns and reads them back.
+  a family appends its own columns and reads them back. The component fills
+  ``tokens`` and ``loss_mask`` when it renders the sample with the model's
+  chat template. ``rollout_log_probs`` is empty for a rendered sample; only
+  a task rollout of the component fills it, and the payload carries the column
+  only when every row has it.
 - ``prepare_rollout``: work in the component's process before the workers
   train a job.
 - ``bind``: a per-run instance carrying state such as a critic schedule.
@@ -157,6 +174,9 @@ A family that ships more than the five policy columns declares them on the spec.
 
 Bundled families worth reading: ``reef/train/slime_backend/sft.py`` (the
 built-in SFT family: Slime's ``sft_loss`` and no hooks),
+``reef/train/slime_backend/native.py`` (the built-in ``slime`` family of dataset
+jobs, whose advantages and loss are Slime's; see `Dataset jobs on Slime
+<../reference/configuration.rst#dataset-jobs-on-slime>`__),
 ``recipes/tttd/slime/`` (two hooks, the default row), ``recipes/sao/slime/`` (critic schedule, the pg-primitive lane),
 ``recipes/openclawrl/slime/`` (a custom row, both actor lifecycle hooks, a
 frozen Megatron teacher), ``recipes/sdft/slime/`` and ``recipes/sdpo/slime/``
@@ -165,8 +185,8 @@ frozen Megatron teacher), ``recipes/sdft/slime/`` and ``recipes/sdpo/slime/``
 Per-job families
 ----------------
 
-A job can select an objective of another family (`Switch methods within a run
-<write-a-recipe.rst#switch-methods-within-a-run>`__). The workers keep their
+A job can select an objective of another family (`Train each kind of sample with its own method
+<write-a-recipe.rst#train-each-kind-of-sample-with-its-own-method>`__). The workers keep their
 startup flags. The family brings its ``--loss-type``, objective hooks,
 advantage routing, wire keys, and the defaults of its family flags. Before the
 family's first job trains, the Slime component validates the family against
@@ -190,9 +210,7 @@ Slime's before-train-step hook. Reef runs any
 keeps its configured curve, so a checkpoint still loads under the startup
 flags. The component records the schedule's progress with each saved
 checkpoint (in the start's ``start.json``), so the next job continues it. A
-job that selects a schedule fails when the run uses ``--decoupled-lr``. A job
-that restarts training (``JobRequest(restart=True)``) starts both Megatron's
-scheduler and the selected schedule at step 0.
+job that selects a schedule fails when the run uses ``--decoupled-lr``.
 
 The distillation base
 ---------------------
@@ -206,7 +224,8 @@ and each such recipe's family is a thin subclass of it:
 - ``DistillAlgorithm`` is the base that runs in the component's process: the
   seven-column wire row
   (the policy row plus ``teacher_tokens``, the teacher's prompt ids followed
-  by the student's response ids verbatim, and ``sample_weight``, the factor
+  by the student's response ids verbatim, which the component renders from
+  the sample's teacher request, and ``sample_weight``, the factor
   on that sample's mean divergence, 1 unless the recipe's stages set
   ``distill_sample_weight`` on the sample), the ``--<name>-*`` flags under
   the family's own prefix (``teacher``, ``divergence``, ``top-k``,
@@ -258,10 +277,11 @@ deadline of one scoring request, and ``options`` native SGLang options. The
 checkpoint teacher stays the default; the wire row, the loss and the report
 schema do not change.
 
-The Slime component sends each sample's recorded teacher-prefix and response ids to the
+The Slime component sends each sample's rendered teacher sequence (teacher
+prompt and response ids) to the
 engine's ``/generate`` with ``max_new_tokens=0``, sixteen requests at a time, and the log-probs requested
 from the last prompt token, checks the returned ids and row counts against the
-recorded response, and fills ``distill_teacher_sampled_log_probs``,
+student's response, and fills ``distill_teacher_sampled_log_probs``,
 ``distill_teacher_topk_ids`` and ``distill_teacher_topk_log_probs`` before the
 batch is partitioned and tensorized. Scoring completes before the batch
 reaches the workers, so a scoring failure fails the job and leaves no
@@ -275,8 +295,9 @@ SGLang Ray service, ``distill-teacher``, and adds ``--<family>-teacher-url``,
 Slime arguments. Without the section, ``training.options`` can set them for an
 engine that you run yourself. The endpoint must serve
 the model at ``teacher-model-path``, whose tokenizer is checked against the
-student's vocabulary and decoder at startup. Chat templates may differ because
-nothing is rendered or retokenized. Keep ``teacher=separate`` and drop
+student's vocabulary and decoder at startup. The chat templates may differ:
+the component renders the teacher sequence with the student's chat template,
+and the engine does not retokenize it. Keep ``teacher=separate`` and drop
 ``teacher-checkpoint``.
 
 The engine path supports the sampled reverse KL and the teacher-selected top-K
@@ -298,7 +319,8 @@ differs from the trainer's ``p`` (a quantized engine, stale weights), a
 policy gradient drifts toward ``q``; score centering subtracts that drift.
 It is off unless ``--score-centering`` is set, and only a family that
 declares the weight its loss puts on the sampled token's score accepts it.
-SAO and the distillation base's sampled reverse-KL mode support it.
+SAO, ``importance_sampling`` and the distillation base's sampled reverse-KL
+mode support it.
 
 A family declares its weight with ``policy_gradient_weight``. Its loss must
 have the form ``-A_t * sg[f(p_t / q_t)] * log p_t``, with ``q`` the rollout
@@ -309,6 +331,10 @@ engine's probability:
    def policy_gradient_weight(self, args):
        # SAO: the ratio masked to its trust region.
        return PolicyGradientWeight("masked", lower=1 - args.eps_clip, upper=1 + args.eps_clip_high)
+
+   def policy_gradient_weight(self, args):
+       # importance_sampling: the ratio truncated at Slime's --tis-clip.
+       return PolicyGradientWeight("truncated", upper=args.tis_clip)
 
 ``PolicyGradientWeight`` (``reef.train.slime_backend.algorithm``) is ``none``
 (``f = 1``, plain off-policy REINFORCE), ``truncated`` (``min(r, upper)``) or
@@ -336,15 +362,15 @@ is zero when ``q = p``. It is added inside Slime's policy loss for a stock or
 pg-primitive family. The distillation base adds it inside its own loss, using
 the teacher signal and that loss's masks; other custom losses use a wrapper.
 
-To enable it, record the sampler's top-K and set the flags in
-``training.options``:
+The term reads the sampler's top-K, so every trained sample must carry the
+top-K that its sampler recorded. Serving records no tensors: a sample that
+serving recorded cannot train with score centering. Only the task rollouts of
+a training component record the sampler's top-K (see the requirements below).
+
+To enable it, set the flags in ``training.options``:
 
 .. code:: yaml
 
-   inference:
-     handler-factory: reef.inference.sglang.chat.SGLangInferenceHandler
-     handler-config:
-       capture_topk: 128        # at least score-centering-top-k
    training:
      options:
        score-centering: true
@@ -361,7 +387,7 @@ before importance weighting, and preserves sample weights, loss masks and
 ``skip-response-tokens``. No external advantages are needed.
 
 For example, add these options to an SDFT configuration along with the
-sampler capture and score-centering options above:
+score-centering options above:
 
 .. code:: yaml
 
@@ -380,9 +406,8 @@ It refuses sequence-level importance weights, full-vocabulary KL,
 top-K-plus-tail divergences, forward KL and JSD. OpenClaw-RL's separate
 top-K OPD surrogate is not supported.
 
-The sampler's ``capture_topk`` and ``score-centering-top-k`` describe the
-correction's head; the family's ``top-k`` describes the teacher pass.
-They need not match. Teacher top-K log-probs cannot replace the sampler's
+``score-centering-top-k`` describes the correction's head; the family's
+``top-k`` describes the teacher pass. They need not match. Teacher top-K log-probs cannot replace the sampler's
 recorded head. Centering approximates the score correction with the tail
 model above; it does not correct the distribution of sampled prefixes or
 make the off-policy update an exact on-policy KL gradient.
@@ -399,18 +424,27 @@ make the off-policy update an exact on-policy KL gradient.
 
 Inputs and requirements:
 
-- Records need the sampler's top-K. Serve through a token-native handler
-  (SGLang or vLLM) with ``inference.handler-config.capture_topk`` at least
-  ``score-centering-top-k``. The recorded log-probs are the same distribution
-  as ``rollout_log_probs`` and the trainer's: after temperature and before the
-  top-k, top-p and min-p filters (see the configuration reference). With
-  those filters on, the correction centers against the unfiltered
-  distribution.
+- Samples need the sampler's top-K, at least ``score-centering-top-k`` per
+  trained position, in ``extra.reef.training`` (``topk_indices`` and
+  ``topk_log_probs``). Only the task rollouts of a training component record
+  them; a sample that serving recorded has none, and the component fails the
+  job. The Spindle full-parameter component's task rollouts record them
+  when its ``score_centering`` option is on, and the Slime component's
+  when ``--score-centering`` is on: its engines then return the top
+  ``score-centering-top-k`` log-probs of each response token. Such a
+  rollout's requests must sample at temperature 1 without top-p or top-k,
+  and a task job needs ``--rollout-temperature`` 1, ``--rollout-top-p`` 1 and
+  ``--rollout-top-k`` -1, so the trainer reads the same distribution; the
+  engines answer another request with 400. The recorded log-probs are the
+  same distribution as ``rollout_log_probs`` and the trainer's: after
+  temperature and before the top-k, top-p and min-p filters (see the
+  configuration reference). With those filters on, the correction centers
+  against the unfiltered distribution.
 - When the flag is on, the Slime component adds each wire row's recorded top-K to the
   payload as ``sampler_topk_indices`` and ``sampler_topk_log_probs``; the
-  family's wire row is unchanged. Multi-turn assembly keeps the recorded rows
-  aligned with the joined response, gives inserted context an empty row, and
-  drops top-K for the whole sample when a turn has none.
+  family's wire row is unchanged. Multi-turn assembly of a rollout keeps the
+  recorded rows aligned with the joined response, gives inserted context an
+  empty row, and drops top-K for the whole sample when a turn has none.
 - Before each job trains, the component keeps the first ``top-k`` entries of every
   trained position. It refuses a sample with missing or short rows,
   duplicate or negative ids, non-finite log-probs, or a head mass above one,
@@ -425,9 +459,9 @@ Inputs and requirements:
   ``--custom-pg-loss-reducer-function-path``: Slime reweights, masks or
   re-reduces the policy-gradient term under them, beyond the declared weight.
   The critic's value loss is left alone.
-- The recorded top-K dominates record size: at ``capture_topk`` 128 a
-  response token carries about 3.5 KB of JSON instead of about 35 bytes. A
-  smaller head shrinks records, but leaves more of the drift uncorrected
+- The recorded top-K dominates the size of a rollout's sample: at a head of
+  128 a response token carries about 3.5 KB of JSON instead of about 35
+  bytes. A smaller head shrinks samples, but leaves more of the drift uncorrected
   when the sampler's tail differs from the trainer's (the paper found 32
   effective in its settings).
 
@@ -438,7 +472,7 @@ The step reports aggregate metrics only, as sums of per-sample means:
 ``score_centering_tail_ratio`` and ``score_centering_tail_clipped`` (the
 fraction of positions where a tail fell below the floor); ``loss`` includes
 the term. ``tests/slime_backend/test_score_centering_parity.py`` checks the
-term, added to each weight's loss and to SAO's own loss, against a
-full-vocabulary reference. ``tests/slime_backend/test_distill_score_centering.py``
+term, added to each weight's loss and to SAO's and ``importance_sampling``'s
+own losses, against a full-vocabulary reference. ``tests/slime_backend/test_distill_score_centering.py``
 checks the sampled OPD loss against that gradient, including skipped tokens,
 masked positions and sample weights.

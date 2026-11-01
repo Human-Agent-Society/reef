@@ -1,8 +1,8 @@
 """Training workers: one thread per scenario component that trains.
 
 A cycle prepares the trainer's next commit outside the scenario's registry
-lock, because the preparation can take minutes (a harness step's evaluation,
-a training job's checkpoint evaluation). Then it commits under that lock. A
+lock, because the preparation can take a while (a job's submission, or the
+read of a job's checkpoints). Then it commits under that lock. A
 worker whose trainer has a training job or a pipeline background job (such
 as a judge call) running looks again every ``POLL_SECONDS``, since a job's
 checkpoints and a judgment arrive without a new record.
@@ -93,14 +93,14 @@ class LocalTrainingWorkers:
                 self.start(current.name, component_trainer.component)
 
     def resume(self, current: Scenario) -> None:
-        """Start the worker of each weight trainer of ``current`` that has a job running or records to train.
+        """Start the worker of each weight trainer of ``current``.
 
-        A loaded scenario resumes the job a restart left running, and the
-        records that arrived before it, without waiting for a new record.
+        The worker's first cycle resumes the job a restart left running, trains the records that arrived before
+        the load, and starts the pipeline's own work, such as a round of generated tasks. No record would wake
+        the worker for these.
         """
         for component_trainer in current.trainers:
-            trainer = component_trainer.trainer
-            if trainer.job_loop is not None and (trainer.job_running or trainer.holds_untrained_records()):
+            if component_trainer.trainer.job_loop is not None:
                 self.start(current.name, component_trainer.component)
 
     def remove(self, scenario: str) -> None:
@@ -120,12 +120,6 @@ class LocalTrainingWorkers:
             # A worker for a reloaded instance with the same key replaces this worker. Then this worker stops.
             worker = self.workers.get((scenario, component))
             return self.phase != "closed" and worker is not None and worker.ready is ready
-
-    def wake_all(self) -> None:
-        with self.lock:
-            workers = tuple(self.workers.values())
-        for worker in workers:
-            worker.ready.set()
 
     def open(self) -> None:
         with self.lock:
@@ -179,14 +173,14 @@ class LocalTrainingWorkers:
         """Run one local cycle of ``scenario``'s ``component``; return whether the worker should look again."""
         current = self.registry.get_optional(scenario)
         if current is None:
-            # Deleted while a harness step was in flight: the step ends without
+            # Deleted while a cycle was in flight: the cycle ends without
             # a commit and without an error, as documented in http-api.rst.
             return False
         if not current.trainer_for(component).trains:
             raise RuntimeContractError(f"scenario {scenario!r} component {component!r} does not train")
         self.errors.clear(scenario, local_error_source(component))
         # A scenario runs one cycle at a time. A cycle holds the cycle lock
-        # from preparation to commit. Thus the head does not move under a step.
+        # from preparation to commit. Thus the head does not move under a job's submission.
         with self.cycle(scenario):
             if not self.cycles_run():
                 return False
@@ -224,10 +218,11 @@ class LocalTrainingWorkers:
                     current.commit(result, component=component)
                 except Exception:
                     # A record may already have crossed the fsync commit point.
-                    # Reload before rollback or acceptance can observe the stale
+                    # Reload before an activation or acceptance can observe the stale
                     # in-memory step and append the same step number again.
                     self.reload_after_local_failure(current)
                     raise
+                self.registry.lifecycle.scenario_committed(current)
         return True
 
     def fail_instruction(self, current: Scenario, cause: Exception, component: str | None = None) -> None:

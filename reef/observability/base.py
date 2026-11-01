@@ -38,16 +38,75 @@ class TrainingExperimentEvent:
 
 
 @dataclass(frozen=True, slots=True)
-class RollbackExperimentEvent:
-    """A committed rollback that ends one training-curve segment."""
+class TrainFromExperimentEvent:
+    """A committed new training start, which ends one training-curve segment and opens the next.
+
+    ``step`` is the step of the ``"train_from"`` commit, which numbers the
+    next segment, and ``run_segment`` is the segment it ends.
+    ``start_artifact_ref`` is the new training start. ``component`` names
+    the trainer in a scenario of several components.
+    The commit observer makes the value and the tracker reads it in
+    :meth:`ExperimentTracker.record_train_from`.
+    """
 
     scenario: str
     recipe: str
     step: int
     run_segment: int
-    source_artifact_ref: ArtifactRef
-    produced_artifact_ref: ArtifactRef
-    target_release_id: str
+    start_artifact_ref: ArtifactRef
+    component: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ExperimentRun:
+    """The run of an experiment tracker that records the training of one scenario segment.
+
+    Values: ``tracker`` names the tracker, such as ``"wandb"``; ``project`` and ``run_id`` name the run in it.
+    These three are non-empty strings. ``entity`` is the tracker's account or team, and ``url`` the run's web page;
+    each is None or a non-empty string, None when the tracker does not know it.
+
+    Purpose: ``ExperimentTracker.experiment_run`` makes it. Control writes ``to_dict()`` into the work item of
+    each training job that the run records (``reef.train.job_queue.JobExperimentRecorder``), and the job listing
+    reads it back with ``from_dict``.
+    """
+
+    tracker: str
+    project: str
+    run_id: str
+    entity: str | None = None
+    url: str | None = None
+
+    def __post_init__(self) -> None:
+        for value, name in ((self.tracker, "tracker"), (self.project, "project"), (self.run_id, "run_id")):
+            if not isinstance(value, str) or not value:
+                raise ValueError(f"an experiment run's {name} is a non-empty string")
+        for optional, name in ((self.entity, "entity"), (self.url, "url")):
+            if optional is not None and (not isinstance(optional, str) or not optional):
+                raise ValueError(f"an experiment run's {name} is a non-empty string or None")
+
+    def to_dict(self) -> dict[str, str | None]:
+        """The run as ``{tracker, project, entity, run_id, url}``; ``from_dict`` of the result is an equal value."""
+        return {
+            "tracker": self.tracker,
+            "project": self.project,
+            "entity": self.entity,
+            "run_id": self.run_id,
+            "url": self.url,
+        }
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, object]) -> ExperimentRun:
+        """Read the object that ``to_dict`` wrote; ``ValueError`` for another key set or a malformed value."""
+        keys = {"tracker", "project", "entity", "run_id", "url"}
+        if set(value) != keys:
+            raise ValueError(f"an experiment run has the keys {sorted(keys)}, not {sorted(value)}")
+        tracker, project, run_id = value["tracker"], value["project"], value["run_id"]
+        entity, url = value["entity"], value["url"]
+        if not isinstance(tracker, str) or not isinstance(project, str) or not isinstance(run_id, str):
+            raise ValueError("an experiment run's tracker, project and run_id are strings")
+        if (entity is not None and not isinstance(entity, str)) or (url is not None and not isinstance(url, str)):
+            raise ValueError("an experiment run's entity and url are strings or None")
+        return cls(tracker, project, run_id, entity, url)
 
 
 class ExperimentLogger:
@@ -92,10 +151,15 @@ class ExperimentTracker:
     def correlation_metrics(self, context: TrainingExperimentContext) -> Mapping[str, Any]:
         return {}
 
+    def experiment_run(self, context: TrainingExperimentContext) -> ExperimentRun | None:
+        """The run that records the training of ``context``, when this tracker has it open in this process; None
+        otherwise. The default tracker records nothing, so it returns None."""
+        return None
+
     def record(self, event: TrainingExperimentEvent) -> None:
         return None
 
-    def record_rollback(self, event: RollbackExperimentEvent) -> None:
+    def record_train_from(self, event: TrainFromExperimentEvent) -> None:
         return None
 
     def close(self) -> None:
@@ -108,10 +172,11 @@ class NullExperimentTracker(ExperimentTracker):
 
 __all__ = [
     "ExperimentLogger",
+    "ExperimentRun",
     "ExperimentTracker",
     "NullExperimentLogger",
     "NullExperimentTracker",
-    "RollbackExperimentEvent",
+    "TrainFromExperimentEvent",
     "TrainingExperimentContext",
     "TrainingExperimentEvent",
 ]

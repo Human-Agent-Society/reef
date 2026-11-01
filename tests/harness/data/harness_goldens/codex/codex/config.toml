@@ -8,7 +8,7 @@ enabled = false
 apps = false
 enable_request_compression = false
 hooks = false
-plugins = false
+plugins = true
 shell_snapshot = false
 skill_mcp_dependency_install = false
 
@@ -23,3 +23,10 @@ trace_exporter = "none"
 
 [sandbox_workspace_write]
 network_access = false
+
+[marketplaces.reef]
+source_type = "local"
+source = "{root}"
+
+[plugins."reef@reef"]
+enabled = true

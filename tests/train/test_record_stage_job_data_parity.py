@@ -1,30 +1,30 @@
-"""Batch goldens for the record-to-record migration (RFC #765).
+"""Batch goldens of the record-to-sample and sample-to-job stages (RFC #765).
 
-Each stream appends records to a record store and drives a ``Trainer`` through
-reserve, execute, prepare-commit, and commit, as the dispatcher does. For each
+Each stream appends records to a record store, makes their samples as the
+samples service does, and drives a ``Trainer`` through reserve, execute,
+prepare-commit, and commit, as the dispatcher does. For each
 committed batch, the test saves the batch ID, a stable digest of each item, and
 the record IDs that the commit consumed and released.
 
 The goldens in ``data/record_stage_job_data_goldens.json`` come from the processor
-engines before grouping, judging, eligibility, and selection move into the
-record-to-record stage. The migration must keep them unchanged. Change a golden
+engines before grouping, judging, eligibility, and selection moved into the
+record-to-sample stage. A change of the stages must keep them unchanged. Change a golden
 only for an intended behavior change, and give the reason in the pull request.
 """
 
 from __future__ import annotations
 
 import json
-import sys
 from collections.abc import Hashable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any, Self
 
 import pytest
-from tests.recipes.sdpo.test_sdpo_pipeline import SDPOTokenizer
-from tests.support._threshold_processor import ThresholdJobData, ThresholdTasks
+from tests.support._threshold_processor import ThresholdJobData, ThresholdSamples
 from tests.support._trajectories import policy_trajectory
+from tests.support.runtime_stubs import STUB_ROOT, RecordingComponent, job_sized_stages
+from tests.support.samples_service import make_samples
 
 from recipes.beta.coral.recipe import CoralRecipe
 from recipes.sdpo import SDPOReport
@@ -32,31 +32,32 @@ from recipes.sdpo.recipe import SDPORecipe
 from recipes.tttd import TTTDGroupedRolloutReport
 from recipes.tttd.recipe import TTTDRecipe
 from reef.artifact import ArtifactRef
-from reef.background_jobs import SupportsReceipt
 from reef.core import AgentRecord, RequestType
-from reef.core.plugins import NoSettings
 from reef.core.reports import ReportBase, TeacherContextReport
-from reef.record2record import (
-    ExclusiveReportRecord2Record,
+from reef.core.training_request import normalize_training_request_payload
+from reef.execution.jobs import SupportsReceipt
+from reef.record2sample import (
     GroupDecision,
-    JudgingRecord2Record,
-    Record2Record,
-    Record2RecordSettings,
+    JudgedSamples,
+    Record2Sample,
+    Record2SampleSettings,
     RecordJudging,
     ReportContext,
     ReportGrouping,
-    ReportRecord2Record,
+    ReportSamples,
 )
-from reef.record2task import JudgedTasks, Record2Task, ReportTasks
-from reef.record2task.assembly import SampleAssembly, SampleAssemblySettings
-from reef.record2task.distill import DistillTasks
+from reef.record2sample.assembly import SampleAssembly, SampleAssemblySettings
+from reef.record2sample.distill import DistillSamples
+from reef.record2sample.traces import TraceSamples
+from reef.sample2job import DistillJobData, Sample2Job, Sample2JobSettings
+from reef.sample2job.traces import TraceJobData
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteRecordStore
-from reef.task2job import DistillJobData, Task2Job, Task2JobSettings
 from reef.train import PipelineContext, Trainer
-from reef.train.backend import CandidateBackend, PreparedStep
-from reef.train.cordis_backend.processor import TraceJobData, TraceTasks
-from reef.train.pipeline import PipelineConfig, PipelineSpec
-from reef.train.types import JobData, TaskItem, TrainDataItem, TrajectoryItem
+from reef.train.instructions import ScenarioInstructions
+from reef.train.jobs import JobLoop
+from reef.train.pipeline import PipelineSpec
+from reef.train.types import JobData, Sample, TaskSample, TrajectorySample
 
 GOLDENS_PATH = Path(__file__).parent / "data" / "record_stage_job_data_goldens.json"
 
@@ -66,34 +67,35 @@ RELOAD = "reload"
 
 @dataclass(frozen=True)
 class Serve:
-    """The scenario serves ``runtime_load_id`` from this step on; the pipeline's staleness check measures against it."""
+    """The scenario serves ``artifact_id`` from this step on; the pipeline's staleness check measures against it."""
 
-    runtime_load_id: str
+    artifact_id: str
 
 
-Step = AgentRecord | Serve | str
+@dataclass(frozen=True)
+class Insert:
+    """A client inserts the stored samples ``sample_ids`` into the trainer's manual buffer at this step."""
+
+    sample_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class Instruct:
+    """A client queues the training instruction ``request_id`` at this step (``POST /reef/train``)."""
+
+    request_id: str
+
+
+Step = AgentRecord | Serve | Insert | Instruct | str
 
 
 # ------------------------------------------------------------------- the driver
 
 
-class CountingBackend(CandidateBackend):
-    """A backend that trains nothing and counts steps, so each reserved batch commits."""
-
-    def initial_state(self) -> dict[str, Any]:
-        return {"steps": 0}
-
-    def prepare_step(self, batch: JobData, state: Mapping[str, Any], scenario_step: int) -> PreparedStep:
-        return PreparedStep.skipped(state={"steps": int(state.get("steps", 0)) + 1}, metrics={})
-
-    def evaluate(self, candidate: object) -> object:
-        raise AssertionError("the counting backend produces no candidates")
-
-    def settle_step(self, prepared: PreparedStep, decision: object) -> object:
-        raise AssertionError("the counting backend settles no candidates")
-
-    def abort_step(self, prepared: PreparedStep) -> None:
-        return None
+def counting_jobs() -> JobLoop:
+    """The job loop of scenario ``s`` over a component that trains nothing, so each reserved batch is one job that
+    ends at once: its submission commits the batch."""
+    return JobLoop(RecordingComponent(), scenario="s")
 
 
 def json_value(value: object) -> object:
@@ -101,26 +103,26 @@ def json_value(value: object) -> object:
     return json.loads(json.dumps(value, sort_keys=True, default=str))
 
 
-def describe_item(item: TrainDataItem) -> dict[str, object]:
+def describe_item(item: Sample) -> dict[str, object]:
     """The deterministic parts of one batch item."""
-    if isinstance(item, TaskItem):
+    if isinstance(item, TaskSample):
         return {"task": str(item.task_path), "sources": list(item.source_agent_record_ids)}
     training = item.training
     metadata = item.metadata
-    training_fields = (
-        "tokens",
-        "loss_mask",
-        "rollout_log_probs",
-        "runtime_load_id",
-        "teacher_tokens",
-        "distill_sample_weight",
-    )
+    training_fields = ("tokens", "loss_mask", "rollout_log_probs", "teacher_tokens", "distill_sample_weight")
+    described = {name: json_value(training[name]) for name in training_fields if name in training}
+    if item.artifact_id is not None:
+        described["artifact_id"] = item.artifact_id
     return {
         "sources": list(item.source_agent_record_ids),
         "group": item.group_id,
         "reward": json_value(metadata.get("reward")),
-        "training": {name: json_value(training[name]) for name in training_fields if name in training},
-        "recipe": {name: json_value(metadata[name]) for name in ("tttd", "coral", "sdpo", "task") if name in metadata},
+        "training": described,
+        "recipe": {
+            name: json_value(metadata[name])
+            for name in ("tttd", "coral", "sdpo", "task", "teacher")
+            if name in metadata
+        },
     }
 
 
@@ -133,31 +135,35 @@ def stage_configs(**configs: Mapping[str, object]) -> dict[str, dict[str, Mappin
 class StreamRun:
     """One stream's trainer, its record store, and what its commits recorded.
 
-    ``spec`` names the three stage classes, as a recipe does; ``pipeline`` is
-    the deployment's ``pipeline`` section over it. ``batch_size`` is the
-    trainer's samples in one step.
+    ``spec`` names the two stage classes, as a recipe does; ``pipeline`` is
+    the deployment's ``pipeline`` section over it. ``job_samples`` is the
+    trainer's samples in one step: the sample-to-job stage's config value,
+    unless ``pipeline`` sets it.
     """
 
     spec: PipelineSpec
     pipeline: Mapping[str, object] = field(default_factory=dict)
     report_type: type[ReportBase] | None = None
     training_mode: str = "auto"
-    batch_size: int = 1
-    serving_runtime_load_id: str | None = None
+    job_samples: int = 1
+    serving_artifact_id: str | None = None
     records: SQLiteRecordStore = field(default_factory=SQLiteRecordStore)
     consumed: set[str] = field(default_factory=set)
     high_water: tuple[int, int] | None = None
     commits: list[dict[str, object]] = field(default_factory=list)
+    instructions: ScenarioInstructions = field(
+        default_factory=lambda: ScenarioInstructions(memory_coordination().work_queue, "s")
+    )
 
     def build(self) -> Trainer:
         return Trainer.build(
             "s",
             self.records,
-            pipeline_factory=PipelineConfig.from_setting(self.pipeline, spec=self.spec, environ={}).build,
-            candidate_backend=CountingBackend(),
+            pipeline_factory=job_sized_stages(self.spec, self.pipeline, job_samples=self.job_samples).build,
+            job_loop=counting_jobs(),
             report_type=self.report_type,
             training_mode=self.training_mode,
-            default_job_samples=self.batch_size,
+            root=STUB_ROOT,
         )
 
     def reload(self, trainer: Trainer) -> Trainer:
@@ -173,22 +179,27 @@ class StreamRun:
         return rebuilt
 
     def drain(self, trainer: Trainer) -> None:
-        """Commit every batch the trainer can reserve now."""
-        while (
-            result := trainer.run_once(len(self.commits), serving_runtime_load_id=self.serving_runtime_load_id)
-        ) is not None:
+        """Make the samples of the new records, as the samples service does, then commit every batch the trainer can
+        reserve now."""
+        while True:
+            self.instructions.give([trainer])
+            make_samples(trainer)
+            result = trainer.run_once(serving_artifact_id=self.serving_artifact_id)
+            if result is None:
+                return
             batch = trainer.pending_job_data
-            if batch is None:
-                raise AssertionError("a commit was prepared without a reserved batch")
             prepared = trainer.prepare_commit(result)
             trainer.commit(prepared)
             self.consumed |= prepared.consumed_ids
             self.high_water = (prepared.high_water_sequence, prepared.high_water_offset)
+            if batch is None:
+                # The end of the batch's job: it consumes no batch, so the goldens list only the submissions.
+                continue
             self.commits.append(
                 {
                     "data_id": batch.data_id,
                     "request": None if batch.request is None else batch.request.id,
-                    "items": [describe_item(item) for item in batch.items],
+                    "items": [describe_item(item) for item in batch.samples],
                     "consumed": sorted(prepared.consumed_ids),
                     "released": sorted(prepared.released_ids),
                 }
@@ -201,8 +212,13 @@ class StreamRun:
                 if isinstance(step, AgentRecord):
                     self.records.append(step)
                 elif isinstance(step, Serve):
-                    self.serving_runtime_load_id = step.runtime_load_id
-                    trainer.pipeline.observe_serving_runtime_load_id(step.runtime_load_id)
+                    self.serving_artifact_id = step.artifact_id
+                    trainer.pipeline.observe_serving_artifact_id(step.artifact_id)
+                elif isinstance(step, Insert):
+                    trainer.change_buffer(step.sample_ids, insert=True)
+                elif isinstance(step, Instruct):
+                    payload = {"text": step.request_id, "session": "session-1", "release_id": "release-1"}
+                    self.instructions.file(step.request_id, normalize_training_request_payload(payload))
                 elif step == CYCLE:
                     self.drain(trainer)
                 elif step == RELOAD:
@@ -219,15 +235,18 @@ class StreamRun:
 
 
 def inference(record_id: str, *, version: str | None = None, artifact_ref: ArtifactRef | None = None) -> AgentRecord:
+    """A served call; ``version`` is the artifact that served it, which the inference service records as
+    ``payload.artifact_id``."""
     training: dict[str, object] = {"tokens": [1, 2, 3], "loss_mask": [0, 1, 1], "rollout_log_probs": [-0.1, -0.2]}
+    payload: dict[str, object] = {"response": {"training": training}}
     if version is not None:
-        training["runtime_load_id"] = version
+        payload["artifact_id"] = version
     return AgentRecord.create(
         scenario="s",
         request_type=RequestType.INFERENCE,
         agent_record_id=record_id,
         artifact_ref=artifact_ref,
-        payload={"response": {"training": training}},
+        payload=payload,
     )
 
 
@@ -244,13 +263,8 @@ def report(record_id: str, *references: str, score: float = 1.0, **metadata: obj
     )
 
 
-def instruction(record_id: str) -> AgentRecord:
-    return AgentRecord.create(
-        scenario="s",
-        request_type=RequestType.TRAIN,
-        agent_record_id=record_id,
-        payload={"text": record_id, "session": "session-1", "release_id": "release-1"},
-    )
+def instruction(record_id: str) -> Instruct:
+    return Instruct(record_id)
 
 
 def scored(prefix: str, index: int, score: float = 1.0, **metadata: object) -> list[AgentRecord]:
@@ -284,91 +298,60 @@ class AnyGroupReady(SlotGrouping):
         return GroupDecision.READY
 
 
-class AssembledTasks(ReportTasks):
-    """One report as one assembled policy sample."""
+class AssembledSamples(ReportSamples):
+    """One report as one assembled policy sample, in the groups of ``grouping``; a terminal report owns its sources."""
 
-    def __init__(self) -> None:
-        super().__init__()
+    def __init__(self, context: PipelineContext, grouping: ReportGrouping, *, max_staleness: int = 0) -> None:
+        super().__init__(context, grouping, exclusive_sources=True, max_staleness=max_staleness)
         self.assembly = SampleAssembly(SampleAssemblySettings())
 
-    @classmethod
-    def from_config(
-        cls,
-        config: Mapping[str, Any],
-        *,
-        context: PipelineContext,
-        record2record: Record2Record,
-        environ: Mapping[str, str],
-    ) -> AssembledTasks:
-        NoSettings.parse(config, plugin_class=cls)
-        return cls()
-
-    def make_sample(self, context: ReportContext) -> TrajectoryItem:
+    def make_sample(self, context: ReportContext) -> TrajectorySample:
         return self.assembly.build(context, context.require_score())
 
 
-class SlotJobData(Task2Job):
+class SlotGroupSamples(AssembledSamples):
+    """Holds the groups of ``SlotGrouping``."""
+
+    @classmethod
+    def from_config(cls, config: Mapping[str, Any], *, context: PipelineContext, environ: Mapping[str, str]) -> Self:
+        settings = Record2SampleSettings.parse(config, plugin_class=cls)
+        return cls(context, SlotGrouping(), max_staleness=settings.max_staleness)
+
+
+class OrderedMixSamples(AssembledSamples):
+    """Reports with a ``metadata.group`` form groups; job data takes their samples in store order, not key order."""
+
+    @classmethod
+    def from_config(cls, config: Mapping[str, Any], *, context: PipelineContext, environ: Mapping[str, str]) -> Self:
+        settings = Record2SampleSettings.parse(config, plugin_class=cls)
+        return cls(context, AnyGroupReady(), max_staleness=settings.max_staleness)
+
+
+class SlotJobData(Sample2Job):
     @classmethod
     def from_config(
         cls,
         config: Mapping[str, Any],
         *,
         context: PipelineContext,
-        record2record: Record2Record,
-        record2task: Record2Task,
+        record2sample: Record2Sample,
         environ: Mapping[str, str],
     ) -> Self:
-        settings = Task2JobSettings.parse(config, plugin_class=cls)
+        settings = Sample2JobSettings.parse(config, plugin_class=cls)
         return cls(context, settings.buffer_size, settings.job_samples)
 
-    def make_job_data(self, tasks: tuple[TrainDataItem, ...], data_id: str) -> JobData:
-        return JobData(data_id, tasks)
+    def make_job_data(self, samples: tuple[Sample, ...], data_id: str) -> JobData:
+        return JobData(data_id, samples)
 
 
-class SlotGroupRecord2Record(ReportRecord2Record):
-    """Holds the groups of ``SlotGrouping``; a terminal report owns its sources."""
+# Each recipe builds its two stages. These specs name the same stages, as the recipe would.
 
-    @classmethod
-    def from_config(
-        cls, config: Mapping[str, Any], *, context: PipelineContext, environ: Mapping[str, str]
-    ) -> SlotGroupRecord2Record:
-        settings = Record2RecordSettings.parse(config, plugin_class=cls)
-        return cls(context, SlotGrouping(), exclusive_sources=True, max_staleness=settings.max_staleness)
-
-
-class OrderedMixRecord2Record(ReportRecord2Record):
-    """Reports with a ``metadata.group`` form groups that batch in key order after singletons."""
-
-    @classmethod
-    def from_config(
-        cls, config: Mapping[str, Any], *, context: PipelineContext, environ: Mapping[str, str]
-    ) -> OrderedMixRecord2Record:
-        settings = Record2RecordSettings.parse(config, plugin_class=cls)
-        return cls(
-            context,
-            AnyGroupReady(),
-            exclusive_sources=True,
-            ordered_groups=True,
-            max_staleness=settings.max_staleness,
-        )
-
-
-# Each recipe builds its three stages. These specs name the same stages, as the recipe would.
-
-THRESHOLD_STAGES = PipelineSpec(
-    record2record=ReportRecord2Record, record2task=ThresholdTasks, task2job=ThresholdJobData
-)
-SLOT_GROUP_STAGES = PipelineSpec(
-    record2record=SlotGroupRecord2Record, record2task=AssembledTasks, task2job=SlotJobData
-)
-ORDERED_MIX_STAGES = PipelineSpec(
-    record2record=OrderedMixRecord2Record, record2task=AssembledTasks, task2job=SlotJobData
-)
-DISTILL_STAGES = PipelineSpec(
-    record2record=ExclusiveReportRecord2Record, record2task=DistillTasks, task2job=DistillJobData
-)
+THRESHOLD_STAGES = PipelineSpec(record2sample=ThresholdSamples, sample2job=ThresholdJobData)
+SLOT_GROUP_STAGES = PipelineSpec(record2sample=SlotGroupSamples, sample2job=SlotJobData)
+ORDERED_MIX_STAGES = PipelineSpec(record2sample=OrderedMixSamples, sample2job=SlotJobData)
+DISTILL_STAGES = PipelineSpec(record2sample=DistillSamples, sample2job=DistillJobData)
 #: The harness-evolution pipeline of reported traces.
-TRACE_STAGES = PipelineSpec(record2record=ReportRecord2Record, record2task=TraceTasks, task2job=TraceJobData)
+TRACE_STAGES = PipelineSpec(record2sample=TraceSamples, sample2job=TraceJobData)
 
 
 @dataclass(frozen=True)
@@ -402,7 +385,7 @@ class ImmediateWorker:
 class ToyJudging(RecordJudging):
     """A record tracks itself; a record whose payload names ``completes`` finishes that receipt."""
 
-    def observe(self, item: AgentRecord, now: float, stage: JudgingRecord2Record) -> None:
+    def observe(self, item: AgentRecord, now: float, stage: JudgedSamples) -> None:
         completes = item.payload.get("completes")
         if completes:
             stage.dispatch(ToyJob(completes))
@@ -415,22 +398,16 @@ class ToyJudging(RecordJudging):
         raise AssertionError("the immediate worker judges without the coroutine")
 
 
-class ToyTasks(JudgedTasks):
-    """One-token stub samples; a judgment that is not good cannot train."""
+class ToySamples(JudgedSamples):
+    """Judges the records of ``ToyJudging`` at the next poll, as one-token stub samples; a judgment that is not good
+    cannot train."""
 
     @classmethod
-    def from_config(
-        cls,
-        config: Mapping[str, Any],
-        *,
-        context: PipelineContext,
-        record2record: Record2Record,
-        environ: Mapping[str, str],
-    ) -> ToyTasks:
-        NoSettings.parse(config, plugin_class=cls)
-        return cls()
+    def from_config(cls, config: Mapping[str, Any], *, context: PipelineContext, environ: Mapping[str, str]) -> Self:
+        settings = Record2SampleSettings.parse(config, plugin_class=cls)
+        return cls(ToyJudging(), ImmediateWorker(), max_staleness=settings.max_staleness)
 
-    def make_sample(self, record: AgentRecord, judgment: SupportsReceipt) -> TrajectoryItem | None:
+    def make_sample(self, record: AgentRecord, judgment: SupportsReceipt) -> TrajectorySample | None:
         if not isinstance(judgment, ToyJudgment) or not judgment.good:
             return None
         return policy_trajectory(
@@ -439,41 +416,29 @@ class ToyTasks(JudgedTasks):
             loss_mask=(1,),
             rollout_log_probs=(-0.1,),
             reward=1.0,
-            runtime_load_id=record.payload.get("version"),
+            artifact_id=record.payload.get("version"),
         )
 
 
-class ToyJobData(Task2Job):
+class ToyJobData(Sample2Job):
     @classmethod
     def from_config(
         cls,
         config: Mapping[str, Any],
         *,
         context: PipelineContext,
-        record2record: Record2Record,
-        record2task: Record2Task,
+        record2sample: Record2Sample,
         environ: Mapping[str, str],
     ) -> Self:
-        settings = Task2JobSettings.parse(config, plugin_class=cls)
+        settings = Sample2JobSettings.parse(config, plugin_class=cls)
         return cls(context, settings.buffer_size, settings.job_samples)
 
-    def make_job_data(self, tasks: tuple[TrainDataItem, ...], data_id: str) -> JobData:
-        return JobData(data_id, tasks)
-
-
-class ToyJudgingRecord2Record(JudgingRecord2Record):
-    """Judges the records of ``ToyJudging`` at the next poll."""
-
-    @classmethod
-    def from_config(
-        cls, config: Mapping[str, Any], *, context: PipelineContext, environ: Mapping[str, str]
-    ) -> ToyJudgingRecord2Record:
-        settings = Record2RecordSettings.parse(config, plugin_class=cls)
-        return cls(ToyJudging(), ImmediateWorker(), max_staleness=settings.max_staleness)
+    def make_job_data(self, samples: tuple[Sample, ...], data_id: str) -> JobData:
+        return JobData(data_id, samples)
 
 
 #: Trains the judged records of ``ToyJudging``.
-TOY_COMPUTED_STAGES = PipelineSpec(record2record=ToyJudgingRecord2Record, record2task=ToyTasks, task2job=ToyJobData)
+TOY_COMPUTED_STAGES = PipelineSpec(record2sample=ToySamples, sample2job=ToyJobData)
 
 
 def turn(record_id: str, *, version: str, completes: str | None = None, track: bool = True) -> AgentRecord:
@@ -489,7 +454,7 @@ def turn(record_id: str, *, version: str, completes: str | None = None, track: b
 
 
 def ungrouped_stream() -> StreamRun:
-    return StreamRun(THRESHOLD_STAGES, batch_size=2)
+    return StreamRun(THRESHOLD_STAGES, job_samples=2)
 
 
 def ungrouped_steps() -> list[Step]:
@@ -627,7 +592,8 @@ def distill_steps() -> list[Step]:
     return [
         distill_inference("i0"),
         distill_report("r0", "i0", "100 degrees Celsius."),
-        # A long request: the teacher sequence overflows the window, and the report is discarded.
+        # A long request: its teacher sequence overflows the window. The stage keeps its sample with the teacher
+        # request, and the training component leaves the sample out when it renders the teacher sequence.
         distill_inference("i1", "x" * 400),
         distill_report("r1", "i1", "Water boils at 100 degrees."),
         distill_inference("i2"),
@@ -692,12 +658,22 @@ def computed_steps() -> list[Step]:
     ]
 
 
-def cordis_steps(mode_requests: bool) -> list[Step]:
+def trace_steps(mode_requests: bool) -> list[Step]:
     steps: list[Step] = []
     for index in range(6):
         steps += scored("c", index, float(index))
     if mode_requests:
-        steps += [instruction("train-1"), CYCLE, *scored("c", 6), instruction("train-2")]
+        # The samples join the manual buffer only by a client's insert; each instruction trains the one inserted
+        # sample, and the other stored samples wait.
+        steps += [
+            CYCLE,
+            Insert(("r-c-0:0",)),
+            instruction("train-1"),
+            CYCLE,
+            *scored("c", 6),
+            Insert(("r-c-1:0",)),
+            instruction("train-2"),
+        ]
     return steps
 
 
@@ -705,10 +681,13 @@ def streams() -> dict[str, tuple[StreamRun, list[Step]]]:
     """Every stream, built fresh: a run keeps its own record store and commits."""
     grid = {"groups_per_step": 2, "rollouts_per_group": 2}
     sdpo = stage_configs(
-        record2record={"groups_per_step": 1, "rollouts_per_group": 2},
-        record2task={"tokenizer_path": "/models/s", "max_teacher_tokens": 18432},
+        record2sample={
+            "groups_per_step": 1,
+            "rollouts_per_group": 2,
+            "max_teacher_tokens": 18432,
+        },
     )
-    distill = stage_configs(record2task={"tokenizer_path": "/models/s", "max_teacher_tokens": 30})
+    distill = stage_configs(record2sample={"max_teacher_tokens": 30})
     return {
         "ungrouped": (ungrouped_stream(), ungrouped_steps()),
         "ungrouped_reload": (ungrouped_stream(), [*ungrouped_steps()[:5], RELOAD, *ungrouped_steps()[5:]]),
@@ -716,42 +695,33 @@ def streams() -> dict[str, tuple[StreamRun, list[Step]]]:
             StreamRun(SLOT_GROUP_STAGES),
             slot_steps(),
         ),
-        "ordered_groups": (
-            StreamRun(ORDERED_MIX_STAGES, batch_size=3),
+        "keyed_groups": (
+            StreamRun(ORDERED_MIX_STAGES, job_samples=3),
             ordered_steps(),
         ),
         "tttd": (
-            StreamRun(TTTDRecipe.pipeline_spec(), stage_configs(record2record=grid), TTTDGroupedRolloutReport),
+            StreamRun(TTTDRecipe.pipeline_spec(), stage_configs(record2sample=grid), TTTDGroupedRolloutReport),
             tttd_steps(),
         ),
         "coral": (
-            StreamRun(CoralRecipe.pipeline_spec(), stage_configs(record2record={"group_size": 2})),
+            StreamRun(CoralRecipe.pipeline_spec(), stage_configs(record2sample={"group_size": 2})),
             coral_steps(),
         ),
         "distill_overflow": (StreamRun(DISTILL_STAGES, distill, TeacherContextReport), distill_steps()),
         "sdpo": (StreamRun(SDPORecipe.pipeline_spec(), sdpo, SDPOReport), sdpo_steps()),
-        "computed_exact_version": (StreamRun(TOY_COMPUTED_STAGES, batch_size=2), computed_steps()),
+        "computed_exact_version": (StreamRun(TOY_COMPUTED_STAGES, job_samples=2), computed_steps()),
         "computed_window": (
-            StreamRun(TOY_COMPUTED_STAGES, stage_configs(record2record={"max_staleness": 1}), batch_size=2),
+            StreamRun(TOY_COMPUTED_STAGES, stage_configs(record2sample={"max_staleness": 1}), job_samples=2),
             computed_steps(),
         ),
-        "cordis_manual_cap": (
+        "trace_manual_cap": (
             StreamRun(TRACE_STAGES, training_mode="manual"),
-            cordis_steps(True),
-        ),
-        "cordis_hybrid": (
-            StreamRun(TRACE_STAGES, training_mode="hybrid", batch_size=2),
-            cordis_steps(True),
+            trace_steps(True),
         ),
     }
 
 
 STREAM_NAMES = sorted(streams())
-
-
-@pytest.fixture(autouse=True)
-def counting_tokenizer(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setitem(sys.modules, "transformers", SimpleNamespace(AutoTokenizer=SDPOTokenizer()))
 
 
 def run_stream(name: str) -> list[dict[str, object]]:

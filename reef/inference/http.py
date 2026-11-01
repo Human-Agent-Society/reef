@@ -11,10 +11,10 @@ from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import urlparse
 
 from reef.artifact.artifact import Artifact
 from reef.core.config import config_option
+from reef.inference.provider_protocol import provider_headers
 from reef.runtime.deployment import RuntimeFactory, RuntimeRegistry, config_secret, config_string
 from reef.runtime.interfaces import InferenceHandler, InferenceRuntime, InferenceStream, UpstreamStatusError
 
@@ -33,15 +33,8 @@ HOP_BY_HOP_HEADERS = frozenset(
     }
 )
 
-#: Routes that speak the Anthropic Messages API and take its native auth headers.
-ANTHROPIC_PATHS = frozenset({"/v1/messages", "/v1/messages/count_tokens"})
-ANTHROPIC_VERSION = "2023-06-01"
-
 #: Provider API dialects the proxy can describe to the training side.
 PROVIDER_APIS = ("openai", "responses", "anthropic")
-
-#: Keys a per-scenario model override may carry.
-MODEL_CONFIG_KEYS = frozenset({"url", "model", "api", "api_key"})
 
 # -- Request headers ----------------------------------------------------------
 
@@ -70,10 +63,13 @@ class ArtifactRequestHeaders(RequestHeadersFactory):
 
 
 class ProviderRequestHeaders(RequestHeadersFactory):
-    """Attach artifact identity and provider-specific authentication.
+    """Attach artifact identity and provider authentication.
 
-    Anthropic routes take the key as ``x-api-key`` plus a version header;
-    OpenAI-compatible routes take it as a bearer token.
+    Values: the object holds ``api_key``, a non-empty provider credential.
+    Purpose: an :class:`HttpInferenceHandler` that calls a provider asks it
+    for the headers of each call. ``headers(artifact, path)`` returns the
+    identity headers of ``artifact`` followed by
+    :func:`~reef.inference.provider_protocol.provider_headers` for ``path``.
     """
 
     def __init__(self, api_key: str) -> None:
@@ -82,13 +78,7 @@ class ProviderRequestHeaders(RequestHeadersFactory):
         self._api_key = api_key
 
     def headers(self, artifact: Artifact, path: str) -> Mapping[str, str]:
-        headers = content_identity_headers(artifact)
-        if path in ANTHROPIC_PATHS:
-            headers["x-api-key"] = self._api_key
-            headers["anthropic-version"] = ANTHROPIC_VERSION
-        else:
-            headers["Authorization"] = f"Bearer {self._api_key}"
-        return headers
+        return {**content_identity_headers(artifact), **provider_headers(path, self._api_key)}
 
 
 def provider_request_headers(api_key: str) -> RequestHeadersFactory:
@@ -223,33 +213,12 @@ class InferenceProxyRuntime(InferenceRuntime):
             error_label="inference provider",
         )
 
-    @classmethod
-    def from_model_config(cls, value: object) -> InferenceProxyRuntime | None:
-        """Validate a per-scenario model override and build its proxy runtime."""
-        if value is None:
-            return None
-        if not isinstance(value, Mapping) or set(value) - MODEL_CONFIG_KEYS:
-            raise ValueError("model must be null or an object with url, model, api and api_key")
-        for name in ("url", "model"):
-            if not _clean_text(value.get(name)) or not value[name].strip():
-                raise ValueError(f"model.{name} must be a non-empty string without control characters")
-        url = value["url"].strip()
-        if not _plain_http_url(url):
-            raise ValueError("model.url must be an HTTP(S) URL without credentials, query or fragment")
-        api = value.get("api", "openai")
-        if api not in PROVIDER_APIS:
-            raise ValueError("model.api must be openai, responses or anthropic")
-        key = value.get("api_key")
-        if key is not None and not _clean_text(key):
-            raise ValueError("model.api_key must be a string without control characters")
-        return cls(base_url=url, model_path=value["model"].strip(), api=api, api_key=key)
-
     @property
     def model_path(self) -> str:
         return self._model_path
 
     @property
-    def api_key(self) -> str | None:
+    def provider_key(self) -> str | None:
         return self._api_key
 
     @property
@@ -264,28 +233,8 @@ class InferenceProxyRuntime(InferenceRuntime):
     def inference_handler(self) -> InferenceHandler:
         return self._inference_handler
 
-    def current_runtime_load_id(self) -> str | None:
-        return None
-
     def activate_checkpoint(self, artifact: Artifact, *, scenario: str | None = None) -> str:
         return artifact.ref.release_id
-
-
-def _clean_text(value: object) -> bool:
-    """A string with no control characters (which would corrupt headers or logs)."""
-    return isinstance(value, str) and not any(ord(character) < 32 for character in value)
-
-
-def _plain_http_url(url: str) -> bool:
-    parsed = urlparse(url)
-    return (
-        parsed.scheme in ("http", "https")
-        and bool(parsed.netloc)
-        and not parsed.username
-        and not parsed.password
-        and not parsed.query
-        and not parsed.fragment
-    )
 
 
 @dataclass(frozen=True)

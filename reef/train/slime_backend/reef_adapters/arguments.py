@@ -21,6 +21,8 @@ class SlimeArguments(Namespace):
     colocate: bool
     offload_train: bool
     offload_rollout: bool
+    # The GPUs of a job's rollout engines; 0 for a job that starts none.
+    rollout_num_gpus: int
     megatron_lora_rank: int
     megatron_lora_alpha: int | None
     megatron_lora_target_modules: list[str] | None
@@ -33,6 +35,8 @@ class SlimeArguments(Namespace):
     critic_lr: float | None
     lr: float
     hf_checkpoint: str
+    # The chat template arguments with which the component renders a recorded trajectory, as serving renders it.
+    apply_chat_template_kwargs: dict[str, object] | None = None
     load: str | None
     ref_load: str | None
     megatron_to_hf_mode: str

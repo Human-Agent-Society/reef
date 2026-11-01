@@ -20,12 +20,11 @@ from reef.core.artifact_ref import ArtifactRef
 class RequestType(str, Enum):
     INFERENCE = "inference"
     REPORT = "report"
-    TRAIN = "train"
 
 
-#: The request header that marks an inference call of a rollout episode that Reef runs itself. The service
+#: The request header that marks an inference call of a rollout that Reef runs itself. The service
 #: serves the call from the scenario's release as it serves any other, keeps no record of it, and returns the
-#: response with its training block. Such an episode is not user data, so it never becomes a record.
+#: response with its training block. Such a rollout is not user data, so it never becomes a record.
 ROLLOUT_HEADER = "x-reef-rollout"
 
 

@@ -22,7 +22,7 @@ from reef.train.slime_backend.loss_families import resolve_loss_family
 def _sao_backend_args(**overrides):
     values = {
         "loss_type": "policy_loss",
-        "use_rollout_logprobs": True,
+        "use_rollout_logprobs": False,
         "custom_advantage_function_path": "recipes.sao.slime.objective.sao_advantages",
         "custom_pg_loss_function_path": "recipes.sao.slime.objective.sao_loss",
         "use_critic": True,

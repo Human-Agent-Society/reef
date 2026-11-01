@@ -5,17 +5,15 @@ The modules follow these responsibilities:
 
 - ``scenario`` exposes operations on one instance; ``binding`` freezes its
   deployment-selected admission, surface, runtime, and inference backend.
-- ``registry`` owns loaded instances, per-scenario locks, model updates, and
-  scenario archival coordination. It caches concrete ``runtime.model_config.ModelConfig``
-  instances and keeps each scenario's settings through the injected storage.
-  Recipes and the factory receive only the current scenario's configuration.
-  It asks its ``admission.ScenarioAdmission`` before it creates or loads a
-  scenario; the dispatcher unloads an idle scenario to free a load slot.
-- ``factory`` registers the base artifact, validates release selectors,
-  opens storage, reconciles committed state, synchronizes and
+- ``registry`` owns loaded instances, per-scenario locks, and scenario
+  archival coordination. It keeps each scenario's settings through the
+  injected storage. It asks its ``admission.ScenarioAdmission`` before it
+  creates or loads a scenario; the dispatcher unloads an idle scenario to free a load slot.
+- ``factory`` writes a new scenario's root release (the recipe's default
+  start, or an artifact item), opens storage, reconciles committed state, synchronizes and
   activates the checkpoint, builds the trainer, and replays retained records.
   It returns a complete ``Scenario`` and closes owned resources on failure.
-- ``committer`` orders commit, rollback, retries, and artifact publication
+- ``committer`` orders commits, activations, new training starts, retries, and artifact publication
   around store settlement. Trainer state is exposed only after settlement.
 - ``releases`` queries releases, artifact content, and committed training metadata.
   It shares the committer's publication lock. Writers take the operation lock

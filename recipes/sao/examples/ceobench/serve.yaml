@@ -12,7 +12,7 @@
 # left) and the discounted changes of the weeks after it, scaled against the
 # weeks before (harness/report.py). A global batch size of 8 trains about a week of decision turns per step
 # (the SAO example trains one rollout per step; the paper trains 128), and
-# pipeline.record2record.config.max_staleness admits the turns of a week that earlier steps have aged.
+# pipeline.record2sample.config.max_staleness admits the turns of a week that earlier steps have aged.
 #
 # Context: a CEO-Bench week is one conversation whose tool outputs accumulate
 # until the agent calls next-week, and the agent reads the benchmark's docs
@@ -69,10 +69,10 @@ inference:
 recipe:
   implementation: recipes.sao.recipe:SAORecipe
 pipeline:
-  record2record:
+  record2sample:
     config:
       max_staleness: 64
-  task2job:
+  sample2job:
     config:
       # The fewest samples of one job: one optimizer step of Slime's global batch.
       job_samples: ${training.config.global_batch_size}
@@ -161,16 +161,15 @@ training:
     lr: "1e-5"
     lr-decay-style: "constant"
     loss-type: "policy_loss"
-    use-rollout-logprobs: true
     use-critic: true
     eps-clip: "0.3"
     eps-clip-high: "5.0"
     critic-steps-per-actor: "2"
     critic-lr: "5e-5"
     # Two commits of critic-only training, not the paper's ten: the value
-    # model starts from --critic-init (an earlier episode's critic, see
+    # model starts from --critic-init (an earlier rollout's critic, see
     # run.sh) and ten warm-up commits would spend the growth weeks of a
-    # single-episode run on the critic alone.
+    # single-rollout run on the critic alone.
     num-critic-only-steps: "2"
     # Uncomment only after placing a valid checkpoint in this directory.
     # An explicitly configured but missing checkpoint fails startup.

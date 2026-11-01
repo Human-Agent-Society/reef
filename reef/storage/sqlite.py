@@ -23,13 +23,29 @@ from sqlalchemy.pool import NullPool
 from reef.core.errors import ReefError
 from reef.core.plugins import NoSettings
 from reef.storage.commit_history import CommitHistoryScenarioStore
-from reef.storage.migrations import archive_imported_files, legacy_model_configs, migrate_record_storage
+from reef.storage.migrations import (
+    migrate_generated_task_marks,
+    migrate_imported_tasks,
+    migrate_record_storage,
+    migrate_record_trajectories,
+    migrate_sample_columns,
+    migrate_scenario_settings,
+    migrate_uploaded_trajectories,
+)
 from reef.storage.records import RecordRetention
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage
 from reef.storage.sql_commits import SQLCommitHistory, commit_table
-from reef.storage.sql_records import RecordTables, ScopedTable, SQLRecordRetention, SQLRecordStore
+from reef.storage.sql_evaluations import SQLEvaluationStore, evaluation_table
+from reef.storage.sql_records import (
+    RecordTables,
+    ScopedTable,
+    SQLRecordRetention,
+    SQLRecordStore,
+    sample_record_table,
+    trajectory_node_table,
+)
+from reef.storage.sql_samples import SQLSampleStore, manual_buffer_table, sample_table, sample_train_count_table
 from reef.storage.sql_tasks import SQLTaskStorage, task_tables
-from reef.storage.sql_trajectories import SQLTrajectoryStore, trajectory_table
 from reef.storage.tasks import LocalTaskFileStore, TaskFileStore
 
 _METADATA = MetaData()
@@ -45,9 +61,14 @@ _AGENT_RECORD = Table(
     Column("references_json", Text, nullable=False),
     Column("artifact_json", Text),
     Column("body_bytes", Integer, nullable=False, server_default="0"),
+    # A payload with a message list lives as ATIF in the record's node in record_node (RFC #1054).
+    Column("message_field", Text),
+    Column("payload_sha256", Text),
     # A purged sequence must never be reused by a later append.
     sqlite_autoincrement=True,
 )
+_RECORD_NODE = trajectory_node_table(_METADATA, "record_node")
+_SAMPLE_RECORD = sample_record_table(_METADATA)
 _CONSUMED_RECORD = Table(
     "consumed_agent_record",
     _METADATA,
@@ -89,11 +110,55 @@ _SCENARIO_SETTING = Table(
     Column("value_json", Text, nullable=False),
 )
 TASK_TABLES = task_tables(_METADATA)
-TRAJECTORY_TABLE = ScopedTable(trajectory_table(_METADATA))
+SAMPLE_TABLE = ScopedTable(sample_table(_METADATA))
+SAMPLE_TRAIN_COUNT_TABLE = ScopedTable(sample_train_count_table(_METADATA))
+MANUAL_BUFFER_TABLE = ScopedTable(manual_buffer_table(_METADATA))
+EVALUATION_TABLE = ScopedTable(evaluation_table(_METADATA))
 COMMIT_TABLE = ScopedTable(commit_table(_METADATA))
 logger = logging.getLogger(__name__)
 
-_TABLES = RecordTables(_AGENT_RECORD, _CONSUMED_RECORD, CONSUMPTION_RECEIPTS, RECORD_EVICTION, _SCENARIO_SETTING)
+_TABLES = RecordTables(
+    _AGENT_RECORD,
+    _CONSUMED_RECORD,
+    CONSUMPTION_RECEIPTS,
+    RECORD_EVICTION,
+    _SCENARIO_SETTING,
+    _RECORD_NODE,
+    _SAMPLE_RECORD,
+)
+
+
+def enable_wal(connection: Connection, database: str, *, timeout_seconds: float, retry_seconds: float) -> None:
+    """Switch the SQLite ``database`` of ``connection`` to WAL, waiting out a concurrent opener.
+
+    SQLite takes an exclusive lock to change the journal mode and answers
+    SQLITE_BUSY immediately instead of running the busy handler, so the
+    connection timeout does not cover this statement. Openers that race to
+    upgrade a database still in rollback mode therefore have to retry: the
+    first one converts it and the rest read back ``wal`` on a later attempt.
+    A database already in WAL answers on the first try, so the steady state
+    costs nothing. Raise ``ReefError`` when the switch does not happen within ``timeout_seconds``.
+    """
+    deadline = time.monotonic() + timeout_seconds
+    observed = None
+    while True:
+        # A contended switch shows up either way: as SQLITE_BUSY, or as the
+        # unchanged mode read back, which SQLite returns instead of raising.
+        try:
+            row = connection.exec_driver_sql("PRAGMA journal_mode = WAL").fetchone()
+        except OperationalError as exc:
+            if "locked" not in str(exc.orig) and "busy" not in str(exc.orig):
+                raise
+        else:
+            observed = None if row is None else str(row[0]).lower()
+            if observed == "wal":
+                return
+        if time.monotonic() >= deadline:
+            raise ReefError(
+                f"could not switch {database} to WAL within {timeout_seconds:g}s; "
+                f"another connection held the database (journal mode is {observed or 'unknown'})"
+            )
+        time.sleep(retry_seconds)
 
 
 class SQLiteRecordStore(SQLRecordStore):
@@ -114,14 +179,28 @@ class SQLiteRecordStore(SQLRecordStore):
     _WAL_SWITCH_TIMEOUT = 30.0
     _WAL_RETRY_INTERVAL = 0.01
 
-    def __init__(self, database: str | Path | None = None) -> None:
+    def __init__(self, database: str | Path | None = None, *, memory_name: str | None = None) -> None:
+        """``database`` is the file; without it the store is in memory. ``memory_name`` names a shared in-memory
+        database: every store of one name in this process reads and writes the same records while one of them is
+        open."""
+        if memory_name is not None and database is not None:
+            raise ValueError("a store is in a file or in a named memory database, not both")
         self._database = ":memory:" if database is None else str(database)
         if self._database != ":memory:":
             Path(self._database).parent.mkdir(parents=True, exist_ok=True)
         self._lock = RLock()
         super().__init__(_TABLES)
+        url = (
+            URL.create("sqlite+pysqlite", database=self._database)
+            if memory_name is None
+            else URL.create(
+                "sqlite+pysqlite",
+                database=f"file:{memory_name}",
+                query={"mode": "memory", "cache": "shared", "uri": "true"},
+            )
+        )
         self._engine = create_engine(
-            URL.create("sqlite+pysqlite", database=self._database),
+            url,
             connect_args={"timeout": 30, "check_same_thread": False},
             poolclass=NullPool,
             hide_parameters=True,
@@ -140,36 +219,13 @@ class SQLiteRecordStore(SQLRecordStore):
         return self._database
 
     def _enable_wal(self) -> None:
-        """Switch the database to WAL, waiting out a concurrent opener.
-
-        SQLite takes an exclusive lock to change the journal mode and answers
-        SQLITE_BUSY immediately instead of running the busy handler, so the
-        connection timeout does not cover this statement. Openers that race to
-        upgrade a database still in rollback mode therefore have to retry: the
-        first one converts it and the rest read back ``wal`` on a later attempt.
-        A database already in WAL answers on the first try, so the steady state
-        costs nothing.
-        """
-        deadline = time.monotonic() + self._WAL_SWITCH_TIMEOUT
-        observed = None
-        while True:
-            # A contended switch shows up either way: as SQLITE_BUSY, or as the
-            # unchanged mode read back, which SQLite returns instead of raising.
-            try:
-                row = self._connection.exec_driver_sql("PRAGMA journal_mode = WAL").fetchone()
-            except OperationalError as exc:
-                if "locked" not in str(exc.orig) and "busy" not in str(exc.orig):
-                    raise
-            else:
-                observed = None if row is None else str(row[0]).lower()
-                if observed == "wal":
-                    return
-            if time.monotonic() >= deadline:
-                raise ReefError(
-                    f"could not switch {self._database} to WAL within {self._WAL_SWITCH_TIMEOUT:g}s; "
-                    f"another connection held the database (journal mode is {observed or 'unknown'})"
-                )
-            time.sleep(self._WAL_RETRY_INTERVAL)
+        """Switch the database to WAL, waiting out a concurrent opener (``enable_wal``)."""
+        enable_wal(
+            self._connection,
+            self._database,
+            timeout_seconds=self._WAL_SWITCH_TIMEOUT,
+            retry_seconds=self._WAL_RETRY_INTERVAL,
+        )
 
     def _initialize(self) -> None:
         with self._lock:
@@ -183,6 +239,20 @@ class SQLiteRecordStore(SQLRecordStore):
                 self._connection.exec_driver_sql("BEGIN IMMEDIATE")
                 _METADATA.create_all(self._connection)
                 migrate_record_storage(self._connection, _AGENT_RECORD, CONSUMPTION_RECEIPTS)
+                migrate_record_trajectories(self._connection, _AGENT_RECORD, _RECORD_NODE)
+                migrate_sample_columns(self._connection, SAMPLE_TABLE.table)
+                migrate_uploaded_trajectories(
+                    self._connection, SAMPLE_TABLE.table, SAMPLE_TRAIN_COUNT_TABLE.table, COMMIT_TABLE.table
+                )
+                migrate_imported_tasks(
+                    self._connection,
+                    SAMPLE_TABLE.table,
+                    SAMPLE_TRAIN_COUNT_TABLE.table,
+                    COMMIT_TABLE.table,
+                    TASK_TABLES.published,
+                )
+                migrate_generated_task_marks(self._connection, SAMPLE_TRAIN_COUNT_TABLE.table)
+                migrate_scenario_settings(self._connection, _SCENARIO_SETTING)
                 # create_all skips indexes on tables that already existed.
                 for index in _AGENT_RECORD.indexes:
                     index.create(self._connection, checkfirst=True)
@@ -207,14 +277,23 @@ class SQLiteRecordStore(SQLRecordStore):
         """Open the task stores of ``scenario`` in this database, with their task files in ``files``."""
         return SQLTaskStorage(self, TASK_TABLES, files, scenario)
 
-    def trajectory_store(self) -> SQLTrajectoryStore:
-        """Open the uploaded trajectories in this database."""
-        return SQLTrajectoryStore(self, TRAJECTORY_TABLE)
+    def sample_store(self, files: TaskFileStore, scenario: str) -> SQLSampleStore:
+        """Open the training samples of ``scenario`` in this database, with its task files in ``files``."""
+        return SQLSampleStore(self, SAMPLE_TABLE, SAMPLE_TRAIN_COUNT_TABLE, MANUAL_BUFFER_TABLE, files, scenario)
+
+    def evaluation_store(self) -> SQLEvaluationStore:
+        """Open the artifact evaluations in this database."""
+        return SQLEvaluationStore(self, EVALUATION_TABLE)
 
     def commit_history(self) -> SQLCommitHistory:
         """Open the commit history in this database; it is durable unless the database is in memory."""
         return SQLCommitHistory(
-            self, COMMIT_TABLE, label=f"{self._database}#scenario_commit", durable=self._database != ":memory:"
+            self,
+            COMMIT_TABLE,
+            SAMPLE_TRAIN_COUNT_TABLE,
+            MANUAL_BUFFER_TABLE,
+            label=f"{self._database}#scenario_commit",
+            durable=self._database != ":memory:",
         )
 
     def close(self) -> None:
@@ -240,11 +319,14 @@ class SQLiteRecordRetention:
         self._queries = SQLRecordRetention(_TABLES)
 
     def prune(self, directory: Path) -> int:
-        """Evict oldest bodies under capacity pressure, regardless of training state.
+        """Evict oldest bodies under capacity pressure, regardless of training state, except the records that a stored
+        sample holds.
 
-        Deletes commit in bounded batches. Concurrent appends can exceed the
-        configured body budget until the next sweep. Freed database pages are
-        reusable; the budget does not measure filesystem allocation.
+        The sweep first selects the oldest records whose eviction brings the stored bodies, record rows and
+        trajectory nodes, under the budget; deletes then commit in bounded batches. A database that an older version
+        wrote gets its trajectory nodes first (``migrate_record_trajectories``). Concurrent appends can exceed the
+        configured body budget until the next sweep. Freed database pages are reusable; the budget does not measure
+        filesystem allocation.
         """
         paths = sorted((*directory.glob("*.sqlite3"), *(directory / "archived").rglob("*.sqlite3")))
         purged = 0
@@ -266,23 +348,24 @@ class SQLiteRecordRetention:
                 with connection.begin():
                     connection.exec_driver_sql("BEGIN IMMEDIATE")
                     RECORD_EVICTION.create(connection, checkfirst=True)
+                    _RECORD_NODE.create(connection, checkfirst=True)
+                    _SAMPLE_RECORD.create(connection, checkfirst=True)
+                    migrate_record_trajectories(connection, _AGENT_RECORD, _RECORD_NODE)
                 with connection.begin():
                     total += self._queries.retained_bytes(connection)
         if total <= self._retention.max_bytes:
             return purged
-        pending: dict[str, list[int]] = {path: [] for path in retained_paths}
+        # Select before deleting: the size of a record counts the nodes that the records before it release.
+        selected: dict[str, list[int]] = {path: [] for path in retained_paths}
         rows = heapq.merge(*(self._rows(path) for path in retained_paths))
         for _, path, sequence, size in rows:
-            pending[path].append(sequence)
+            selected[path].append(sequence)
             total -= size
-            if len(pending[path]) == 256:
-                purged += self._delete(path, pending[path])
-                pending[path].clear()
             if total <= self._retention.max_bytes:
                 break
-        for path, sequences in pending.items():
-            if sequences:
-                purged += self._delete(path, sequences)
+        for path, sequences in selected.items():
+            for start in range(0, len(sequences), 256):
+                purged += self._delete(path, sequences[start : start + 256])
         return purged
 
     @staticmethod
@@ -304,9 +387,10 @@ class SQLiteRecordRetention:
     def _rows(self, path: str) -> Iterator[tuple[float, str, int, int]]:
         after_time: float = -math.inf
         after_sequence = 0
+        sizes = self._queries.eviction_sizes()
         while True:
             with self._connect(path) as connection, connection.begin():
-                rows = self._queries.page(connection, after_time=after_time, after_sequence=after_sequence)
+                rows = self._queries.page(connection, sizes, after_time=after_time, after_sequence=after_sequence)
             if not rows:
                 return
             for created_at, sequence, size in rows:
@@ -334,8 +418,9 @@ class SQLiteScenarioStorage(ScenarioStorage):
     """Open hashed SQLite database paths and manage their lifecycle.
 
     Each scenario has one database file for its records, commits, settings,
-    generated tasks and uploaded trajectories. Without a directory, all state is in memory. Records, commits and task
-    states then last for one session, and settings last for the storage.
+    generated tasks, training samples and evaluations. Without a directory, all state is in memory and lasts for
+    the storage: every session of one scenario reads and writes the same memory database, as the services of one
+    process share the store.
     ``task_files`` keeps the files of published tasks.
     The default is a ``LocalTaskFileStore`` in ``directory/task-files``. If
     the storage has no directory, the default store uses a temporary directory.
@@ -346,12 +431,14 @@ class SQLiteScenarioStorage(ScenarioStorage):
         self._lock = RLock()
         self._closed = False
         self._memory_settings: dict[str, ScenarioSettings] = {}
+        #: Without a directory: per scenario, the name of its memory database and one open store that keeps the
+        #: database alive between sessions. An archive drops both, so the next session starts a new database.
+        self._memory_anchors: dict[str, tuple[str, SQLiteRecordStore]] = {}
         if task_files is None:
             task_files = LocalTaskFileStore(None if self._directory is None else self._directory / "task-files")
         self.task_files = task_files
         if self._directory is not None:
             self._directory.mkdir(parents=True, exist_ok=True)
-            self._import_model_config_files(self._directory)
 
     @classmethod
     def from_config(cls, config: Mapping[str, Any], *, directory: Path, task_files: TaskFileStore) -> Self:
@@ -387,15 +474,21 @@ class SQLiteScenarioStorage(ScenarioStorage):
         with self._lock:
             self._ensure_open()
             key = self._scenario_key(scenario)
-            database = None if self._directory is None else self._directory / f"{key}.sqlite3"
-            records = SQLiteRecordStore(database)
+            if self._directory is None:
+                if key not in self._memory_anchors:
+                    name = f"reef-{key}-{uuid.uuid4().hex}"
+                    self._memory_anchors[key] = (name, SQLiteRecordStore(memory_name=name))
+                records = SQLiteRecordStore(memory_name=self._memory_anchors[key][0])
+            else:
+                records = SQLiteRecordStore(self._directory / f"{key}.sqlite3")
             try:
                 return CommitHistoryScenarioStore(
                     scenario,
                     records,
                     records.commit_history(),
                     tasks=records.task_storage(self.task_files, scenario),
-                    trajectories=records.trajectory_store(),
+                    samples=records.sample_store(self.task_files, scenario),
+                    evaluations=records.evaluation_store(),
                 )
             except BaseException:
                 records.close()
@@ -408,16 +501,28 @@ class SQLiteScenarioStorage(ScenarioStorage):
             archived_files = self.task_files.archive(scenario)
             if self._directory is None:
                 self._memory_settings.pop(scenario, None)
+                anchor = self._memory_anchors.pop(self._scenario_key(scenario), None)
+                if anchor is not None:
+                    anchor[1].close()
                 return archived_files
             stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
             destination = self._directory / "archived" / f"{self._scenario_key(scenario)}-{stamp}-{uuid.uuid4().hex}"
             moved: list[str] = []
+            database = paths[0]
             for path in paths:
-                if path.exists():
-                    destination.mkdir(parents=True, exist_ok=True)
-                    target = destination / path.name
+                if not path.exists():
+                    continue
+                destination.mkdir(parents=True, exist_ok=True)
+                target = destination / path.name
+                try:
                     shutil.move(str(path), str(target))
-                    moved.append(str(target))
+                except FileNotFoundError:
+                    # SQLite removes a WAL file only after it folded its frames into the database, which moved
+                    # first; a reader of another service that closes meanwhile makes it do so. Nothing is lost.
+                    if path == database:
+                        raise
+                    continue
+                moved.append(str(target))
             return (*moved, *archived_files)
 
     def prune(self, *, max_bytes: int) -> int:
@@ -441,20 +546,10 @@ class SQLiteScenarioStorage(ScenarioStorage):
         with self._lock:
             if not self._closed:
                 self._closed = True
+                for _, anchor in self._memory_anchors.values():
+                    anchor.close()
+                self._memory_anchors.clear()
                 self.task_files.close()
-
-    @staticmethod
-    def _import_model_config_files(directory: Path) -> None:
-        """Move model configuration files of older versions into their scenario databases."""
-        imported = []
-        for key, (value, path) in legacy_model_configs(directory).items():
-            # Older versions stored no other setting, so the import replaces all settings.
-            SQLiteScenarioStorage._write_database_settings(
-                directory / f"{key}.sqlite3", ScenarioSettings(model_config=value)
-            )
-            imported.append(path)
-        for location in archive_imported_files(directory, imported):
-            logger.info("Imported a model configuration into its scenario database; the file moved to %s", location)
 
     def _ensure_open(self) -> None:
         if self._closed:
@@ -462,11 +557,7 @@ class SQLiteScenarioStorage(ScenarioStorage):
 
     @staticmethod
     def _write_database_settings(database: Path, settings: ScenarioSettings) -> None:
-        """Write settings into a scenario database and keep its files owner-only.
-
-        A model configuration can hold an upstream credential. Thus the database
-        and its WAL files get the owner-only mode of the old model file.
-        """
+        """Write settings into a scenario database, and give the database and its WAL files the owner-only mode."""
         with closing(SQLiteRecordStore(database)) as records:
             records.write_settings(settings)
         for path in (database, database.with_name(f"{database.name}-wal"), database.with_name(f"{database.name}-shm")):

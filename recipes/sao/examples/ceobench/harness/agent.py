@@ -18,7 +18,7 @@ the model sees what the benchmark's own runner shows it:
 
 Neither the prompt nor the tool definitions are copied here: the harness
 reads both from the pinned checkout in the task image at the start of the
-episode (``harness.harbor_agent``), so they are the benchmark's byte for
+rollout (``harness.harbor_agent``), so they are the benchmark's byte for
 byte. The tools themselves are ``harness.tools``; this module only decides
 what to call.
 """

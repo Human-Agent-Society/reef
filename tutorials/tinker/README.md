@@ -26,6 +26,6 @@ The service owns one training scenario. Run the smoke once per fresh service/sta
 
 The model name is sent to Tinker; Reef downloads only the tokenizer resources needed by the SDK, not the full model. Select a model available to your account. In a wheel-only installation, supply your own recipe package; this checkout's `recipes.tttd` is not bundled in `reef-infra`.
 
-Each version stores a `tinker-checkpoint.json` manifest in Reef's artifact repository. It points to durable Tinker training (including Adam state) and sampler checkpoints. Keep the artifact/record directories **and** the Tinker checkpoints; local artifact retention does not delete remote checkpoints. Access to the originating Tinker project remains necessary after restart or rollback.
+Each version stores a `tinker-checkpoint.json` manifest in Reef's artifact repository. It points to durable Tinker training (including Adam state) and sampler checkpoints. Keep the artifact/record directories **and** the Tinker checkpoints; local artifact retention does not delete remote checkpoints. Access to the originating Tinker project remains necessary after a restart, an activation, or a train-from.
 
 See [Tinker backend](../../docs/user-guide/tinker.rst) for supported requests, loss adapters, recovery semantics, and current limits. The existing TTTD benchmark `run.sh` configures the Slime GPU stack; this smaller smoke has its own configuration and runner.

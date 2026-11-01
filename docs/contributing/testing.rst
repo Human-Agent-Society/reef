@@ -81,18 +81,25 @@ workflow dispatches run the full matrix; use a PR workflow rerun to satisfy
 that PR's required checks. See the
 `maintenance model <https://github.com/Human-Agent-Society/reef/blob/main/.github/MAINTAINER.md#5-continuous-integration>`_.
 
-Tests in the same file stay in one worker, preserving
-module fixture reuse. The ``dev`` extra installs the same test runner plugin,
-so an activated development environment reproduces the parallel run:
+``pyproject.toml`` selects ``--dist worksteal``: the workers share single
+tests, not files, and an idle worker takes queued tests from a busy one. The
+``dev`` extra installs the same test runner plugin, so an activated
+development environment reproduces the parallel run:
 
 .. code:: bash
 
    GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
-     pytest tests/ -n 8 --dist loadfile
+     pytest tests/ -n 8
 
-Use ``-n 0`` for a serial run when diagnosing a failure. Tests in different
-files may run at the same time; use temporary directories and dynamically
-allocated ports for their external resources.
+Use ``-n 0`` for a serial run when diagnosing a failure. Any two tests,
+including two tests of the same file, may run at the same time in different
+processes, in any order. Each test must pass alone:
+
+- Keep files and other external resources in ``tmp_path`` and allocate ports
+  dynamically.
+- Do not depend on state that another test sets.
+- Use a module-scoped fixture only for read-only setup. Each worker builds
+  its own copy.
 
 CI installs dependencies with ``uv pip`` and caches downloads and built wheels
 separately for each job and Python version. It still creates a fresh installed
@@ -121,21 +128,33 @@ there, as the CI job does. Do not add the checkout root to ``PYTHONPATH``: its
 Run one area
 ------------
 
-Hosted episode acceptance is opt-in and creates paid E2B sandboxes and small
+Hosted run acceptance is opt-in and creates paid E2B sandboxes and small
 OpenRouter model requests. Set ``E2B_API_KEY`` and ``OPENROUTER_API_KEY`` in the
 test process (never commit them), then run::
 
     REEF_TEST_E2B=1 REEF_E2B_TEST_MODEL=deepseek/deepseek-v4.1-flash \
-      .venv/bin/python -m pytest tests/smoke/test_e2b_episode.py -q
+      .venv/bin/python -m pytest tests/smoke/test_e2b_run.py -q
 
 The tests exercise pi and Codex through the ordinary executor factory, model
 traffic through a localhost tunnel, trajectory and residue read-back, immutable
-inputs, timeout cleanup, and Cordis/GEPA scoring. The selected model must support
+inputs, timeout cleanup, and harness evaluation and GEPA scoring of remote
+runs. The selected model must support
 both Chat Completions and Responses through OpenRouter and be available to the
 account in its region. Provider credentials remain in a local test HTTP server;
-only a synthetic prompt and an episode token enter the sandbox. Default CI skips
+only a synthetic prompt and a run token enter the sandbox. Default CI skips
 these paid tests; ``test_e2b_executor.py`` and ``test_e2b_tunnel.py`` cover the
 contracts and failure paths without provider access.
+
+The Modal sandbox has its own opt-in acceptance, which costs a few cents of
+Modal CPU time and needs Modal credentials (``MODAL_TOKEN_ID`` and
+``MODAL_TOKEN_SECRET``, or ``~/.modal.toml``)::
+
+    REEF_TEST_MODAL=1 .venv/bin/python -m pytest tests/smoke/test_modal_sandbox.py -q
+
+It builds an image for a small npm program and checks one jailed process: the
+tunnel to this host, the workspace copy in and back, the read-only filesystem
+outside it, and the timeout. ``tests/sandbox/test_modal_executor.py`` covers the
+settings, the sandbox lifecycle and the launch without provider access.
 
 Choose a component suite or one test module. For example, artifact contracts
 need no GPU:
@@ -152,9 +171,9 @@ Markers
 <marker>``.
 
 ``sandbox`` selects tests that need real nested bubblewrap jails. Reproduce
-the two source-suite groups with ``pytest tests -m 'not sandbox' -n 8 --dist
-loadfile`` and ``REEF_REQUIRE_SANDBOX=1 pytest tests -m sandbox``. The second
-command requires a Linux host that supports nested jails.
+the two source-suite groups with ``pytest tests -m 'not sandbox' -n 8`` and
+``REEF_REQUIRE_SANDBOX=1 pytest tests -m sandbox``. The second command requires
+a Linux host that supports nested jails.
 
 Coverage
 --------
@@ -170,7 +189,7 @@ below the floor. Reproduce it the way CI does:
 
 .. code:: bash
 
-   pytest tests -n 8 --dist loadfile --cov --cov-report=term
+   pytest tests -n 8 --cov --cov-report=term
 
 ``pytest-cov`` ships in the ``dev`` extra. The floor applies to the whole
 package, so a partial run reports far less than CI does; measure against the

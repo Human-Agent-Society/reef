@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
+
+import torch
 
 from reef.train.slime_backend.reef_adapters.megatron.lora import (
     is_lora_weight_name,
@@ -100,10 +103,9 @@ class MegatronToHfWeightIterator:
         if weight_type not in {"base", "lora"}:
             raise ValueError(f"unsupported Megatron-to-HF weight type: {weight_type!r}")
 
-        from slime.backends.megatron_utils.megatron_to_hf import postprocess_hf_param
         from slime.backends.megatron_utils.megatron_to_hf.processors import quantize_params
+        from slime.backends.megatron_utils.megatron_to_hf.processors.padding_remover import remove_padding
         from slime.backends.megatron_utils.misc_utils import strip_param_name_prefix
-        from slime.utils.misc import chunk_named_params_by_size
 
         renamed = {strip_param_name_prefix(name): value for name, value in megatron_local_weights.items()}
         # Slime >= f655e13d hands over a globally-named backup; Bridge tasks
@@ -141,12 +143,7 @@ class MegatronToHfWeightIterator:
                         hf_name = hf_name.replace(".base_layer.", ".")
                         if is_lora_weight_name(hf_name) != (weight_type == "lora"):
                             continue
-                        value = postprocess_hf_param(
-                            args=self.args,
-                            megatron_param_name=megatron_name,
-                            hf_param_name=hf_name,
-                            param=weight,
-                        )
+                        value = remove_padding(megatron_name, weight, self.args.vocab_size)
                         if weight_type == "lora":
                             yield hf_name, value
                         else:
@@ -157,9 +154,26 @@ class MegatronToHfWeightIterator:
                                 quantization_config=self.quantization_config,
                             )
 
-                yield from chunk_named_params_by_size(converted(), chunk_size=self.args.update_weight_buffer_size)
+                yield from chunks_by_bytes(converted(), self.args.update_weight_buffer_size)
             finally:
                 delattr(model_bridge, "materialize_adapter_weights")
+
+
+def chunks_by_bytes(
+    named_weights: Iterable[tuple[str, torch.Tensor]], chunk_bytes: int
+) -> Iterator[list[tuple[str, torch.Tensor]]]:
+    """``named_weights`` in order, in lists of under ``chunk_bytes`` bytes each, or of one larger weight."""
+    chunk: list[tuple[str, torch.Tensor]] = []
+    size = 0
+    for named_weight in named_weights:
+        weight_bytes = named_weight[1].nbytes
+        if chunk and size + weight_bytes >= chunk_bytes:
+            yield chunk
+            chunk, size = [], 0
+        chunk.append(named_weight)
+        size += weight_bytes
+    if chunk:
+        yield chunk
 
 
 class _MegatronNameResolver:

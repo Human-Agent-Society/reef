@@ -12,7 +12,7 @@ module before adding another. Keep new test modules out of the `tests/` root.
 | `runtime/`, `inference/`, `train/` | Runtime coordination, inference integrations, and the training pipeline |
 | `sandbox/` | Shared execution, environment contracts, isolation, file transfer, and cleanup |
 | `slime_backend/`, `tinker_backend/` | Contracts specific to a training backend |
-| `record2record/`, `record2task/`, `task2job/` | The corresponding stages of the training pipeline |
+| `record2sample/`, `sample2job/` | The corresponding stages of the training pipeline |
 | `evaluation/`, `harness/`, `observability/` | Candidate evaluation, harness execution, and tracking |
 | `reef_recipe/` | Shared recipe contracts and built-in recipes from `reef/recipe/` |
 | `recipes/<recipe>/` | Cookbook methods and their examples; use the method name for beta recipes too |
@@ -39,6 +39,13 @@ its component, even when the real component needs a GPU.
   helper when adding a new consumer; avoid unrelated helper rewrites.
 - Import test helpers through `tests.<owner>`. Pytest uses importlib mode, so
   test directories do not shadow production or third-party packages.
+- Make each test pass alone and in any order. CI runs `pytest -n 8` with
+  `--dist worksteal`, so tests of one file run in different processes. Keep
+  files in `tmp_path`, allocate ports dynamically, and share a module-scoped
+  fixture only for read-only setup.
+- Merge tests that repeat an expensive setup (a subprocess, a Git
+  repository, a service start) only to check another property of the same
+  result. Parametrize tests that differ only in their input.
 - Keep test data beside its consuming suite. Harness golden trees are exact
   fixtures; their instruction files are data, not repository instructions.
 

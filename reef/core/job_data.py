@@ -2,8 +2,7 @@
 
 Reef submits one training job for each ``JobData`` value. The training
 framework cuts the value's items into its own optimizer batches. When the job
-ends, its ``JobOutcome`` is what the training pipeline and the recipe's job plan
-learn about it.
+ends, its ``JobOutcome`` is what the training pipeline learns about it.
 """
 
 from __future__ import annotations
@@ -18,19 +17,20 @@ from reef.core.training_request import TrainingRequest
 
 
 @dataclass(frozen=True)
-class TrajectoryItem:
+class TrajectorySample:
     """An ATIF document and its grouping within one job's data and record references.
 
     Values: ``trajectory`` is a mapping with an ``ATIF-v`` ``schema_version``,
     an ``agent`` object and a non-empty ``steps`` list. ``group_id`` is None or
     a string. ``source_agent_record_ids`` is a tuple of the non-empty IDs of
-    the agent records the trajectory came from. Purpose: the record-to-task
+    the agent records the trajectory came from. Purpose: the record-to-sample
     stage makes the value, and the training component reads it.
 
-    The document is the single source of trajectory data. Reef-specific feedback,
-    captured provider records, and exact training tensors live in ``extra.reef``.
-    ``training`` reads its ``training`` object without reconstructing tokens.
-    Full ATIF validation and algorithm-required fields belong to the consumer.
+    The document is the single source of trajectory data. Reef-specific feedback, captured provider records and
+    the training fields live in ``extra.reef``. A sample that a record-to-sample stage makes carries no tokens: the
+    training component renders it (``reef.core.chat_rendering``) and writes the tokens into ``training``. A task
+    rollout of a training component carries the exact tokens that its engine sampled. Full ATIF validation and
+    algorithm-required fields belong to the consumer.
     """
 
     trajectory: Mapping[str, Any]
@@ -65,30 +65,45 @@ class TrajectoryItem:
 
     @property
     def training(self) -> Mapping[str, Any]:
-        """Captured training fields; absence does not authorize re-tokenization."""
+        """The training fields: the tokens and the loss mask once the sample is rendered or rolled out, and the
+        fields that a recipe adds."""
         training = self.metadata.get("training", {})
         if not isinstance(training, Mapping):
             raise ValueError("ATIF extra.reef.training must be an object")
         return training
 
-    def with_metadata(self, **fields: Any) -> TrajectoryItem:
+    @property
+    def artifact_id(self) -> str | None:
+        """The artifact that produced the trajectory: ``training.artifact_id``, which a rollout of a training component
+        names, else the ``artifact_id`` of the last call that the trajectory recorded (``extra.reef.records``), or
+        None when it names none, as an upload does."""
+        named = self.training.get("artifact_id")
+        if isinstance(named, str) and named:
+            return named
+        records = self.metadata.get("records")
+        last = records[-1] if isinstance(records, list) and records else None
+        payload = last.get("payload") if isinstance(last, Mapping) else None
+        recorded = payload.get("artifact_id") if isinstance(payload, Mapping) else None
+        return recorded if isinstance(recorded, str) and recorded else None
+
+    def with_metadata(self, **fields: Any) -> TrajectorySample:
         """Return a new document with updated Reef metadata, preserving other extensions."""
         metadata = {**self.metadata, **fields}
         extra = {**(self.trajectory.get("extra") or {}), "reef": metadata}
         return replace(self, trajectory={**self.trajectory, "extra": extra})
 
-    def with_training(self, **fields: Any) -> TrajectoryItem:
+    def with_training(self, **fields: Any) -> TrajectorySample:
         """Return a new document with updated captured training fields."""
         return self.with_metadata(training={**self.training, **fields})
 
 
 @dataclass(frozen=True)
-class TaskItem:
+class TaskSample:
     """A Harbor task directory containing its instruction, environment and verifier.
 
     Values: ``task_path`` is a ``Path``, ``source_agent_record_ids`` a tuple of
     the non-empty IDs of the agent records the task came from, and
-    ``metadata`` a mapping. Purpose: the record-to-task stage makes the value,
+    ``metadata`` a mapping. Purpose: the record-to-sample stage makes the value,
     and a training component that runs task jobs reads it.
 
     The path is resolved in the consuming algorithm's execution environment;
@@ -108,7 +123,10 @@ class TaskItem:
             raise TypeError("task metadata must be a mapping")
 
 
-TrainDataItem = TrajectoryItem | TaskItem
+#: One sample of job data: a trajectory that trains as it is, or a Harbor task that the training component rolls
+#: out. The record-to-sample stage makes samples, ``job_samples`` and the sample buffer count them, and
+#: ``JobData.samples`` holds them.
+Sample = TrajectorySample | TaskSample
 
 
 def check_record_ids(record_ids: tuple[str, ...]) -> None:
@@ -119,23 +137,23 @@ def check_record_ids(record_ids: tuple[str, ...]) -> None:
 
 @dataclass(frozen=True)
 class JobData:
-    """The data of one training job: an ID, the items in order, and the training instruction, if any.
+    """The data of one training job: an ID, the samples in order, and the training instruction, if any.
 
     Values: ``data_id`` is the ID that the training pipeline assigns,
     ``<scenario>:data:<number>`` for automatic data and
     ``<scenario>:instruction:<request id>`` for an instruction's data.
-    ``items`` is a tuple of ``TrajectoryItem`` and ``TaskItem`` values in the
-    order of the task-to-job stage; it can be empty, for a harness step that
-    runs an instruction alone. ``request`` is the training instruction that the
-    data carries, or None. The constructor refuses other item types.
-    Purpose: ``Task2Job.make_job_data`` makes it, and the training component
+    ``samples`` is a tuple of ``TrajectorySample`` and ``TaskSample`` values in
+    the order of the sample-to-job stage; it can be empty, for a harness step
+    that runs an instruction with no held samples. ``request`` is the training instruction that
+    the data carries, or None. The constructor refuses other sample types.
+    Purpose: ``Sample2Job.make_job_data`` makes it, and the training component
     (``TrainingJob.data``) or the harness backend reads it. The consuming
-    algorithm decides which item kinds it supports and refuses the others
+    algorithm decides which sample kinds it supports and refuses the others
     explicitly.
     """
 
     data_id: str
-    items: tuple[TrainDataItem, ...] = ()
+    samples: tuple[Sample, ...] = ()
     request: TrainingRequest | None = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
@@ -143,11 +161,11 @@ class JobData:
             raise ValueError("JobData.data_id must be a non-empty string")
         if self.request is not None and not isinstance(self.request, TrainingRequest):
             raise TypeError("JobData.request must be a TrainingRequest or None")
-        if not isinstance(self.items, tuple):
-            raise TypeError("JobData.items must be a tuple")
-        for index, item in enumerate(self.items):
-            if not isinstance(item, (TrajectoryItem, TaskItem)):
-                raise TypeError(f"JobData.items[{index}] must be a TrajectoryItem or TaskItem")
+        if not isinstance(self.samples, tuple):
+            raise TypeError("JobData.samples must be a tuple")
+        for index, sample in enumerate(self.samples):
+            if not isinstance(sample, (TrajectorySample, TaskSample)):
+                raise TypeError(f"JobData.samples[{index}] must be a TrajectorySample or TaskSample")
 
     def to_dict(self) -> dict[str, Any]:
         """The value as JSON values; ``from_dict`` reads them back to an equal value.
@@ -157,50 +175,54 @@ class JobData:
         None, lists, and objects with string keys). The result holds the same
         values, so it is JSON exactly when the precondition holds.
         """
-        items: list[dict[str, Any]] = []
-        for item in self.items:
-            if isinstance(item, TrajectoryItem):
-                items.append(
+        samples: list[dict[str, Any]] = []
+        for sample in self.samples:
+            if isinstance(sample, TrajectorySample):
+                samples.append(
                     {
                         "kind": "trajectory",
-                        "trajectory": dict(item.trajectory),
-                        "group_id": item.group_id,
-                        "source_agent_record_ids": list(item.source_agent_record_ids),
+                        "trajectory": dict(sample.trajectory),
+                        "group_id": sample.group_id,
+                        "source_agent_record_ids": list(sample.source_agent_record_ids),
                     }
                 )
             else:
-                items.append(
+                samples.append(
                     {
                         "kind": "task",
-                        "task_path": str(item.task_path),
-                        "source_agent_record_ids": list(item.source_agent_record_ids),
-                        "metadata": dict(item.metadata),
+                        "task_path": str(sample.task_path),
+                        "source_agent_record_ids": list(sample.source_agent_record_ids),
+                        "metadata": dict(sample.metadata),
                     }
                 )
         request = None if self.request is None else {"id": self.request.id, **self.request.to_dict()}
-        return {"data_id": self.data_id, "items": items, "request": request}
+        return {"data_id": self.data_id, "samples": samples, "request": request}
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> JobData:
         """Read the value that ``to_dict`` wrote.
 
         Raise ``ValueError`` for a malformed value: a missing key, a value of
-        the wrong type, an unknown item kind, or an item or request that fails
+        the wrong type, an unknown sample kind, or a sample or request that fails
         its own checks.
         """
         try:
-            items: list[TrainDataItem] = []
-            for item in value["items"]:
-                if item["kind"] == "trajectory":
-                    items.append(
-                        TrajectoryItem(item["trajectory"], item["group_id"], tuple(item["source_agent_record_ids"]))
+            samples: list[Sample] = []
+            for entry in value["samples"]:
+                if entry["kind"] == "trajectory":
+                    samples.append(
+                        TrajectorySample(
+                            entry["trajectory"], entry["group_id"], tuple(entry["source_agent_record_ids"])
+                        )
                     )
-                elif item["kind"] == "task":
-                    items.append(
-                        TaskItem(Path(item["task_path"]), tuple(item["source_agent_record_ids"]), item["metadata"])
+                elif entry["kind"] == "task":
+                    samples.append(
+                        TaskSample(
+                            Path(entry["task_path"]), tuple(entry["source_agent_record_ids"]), entry["metadata"]
+                        )
                     )
                 else:
-                    raise ValueError(f"unknown job data item kind {item['kind']!r}")
+                    raise ValueError(f"unknown job data sample kind {entry['kind']!r}")
             request_value = value["request"]
             request = (
                 None
@@ -210,24 +232,26 @@ class JobData:
                     request_id=request_value["id"],
                 )
             )
-            return cls(value["data_id"], tuple(items), request=request)
+            return cls(value["data_id"], tuple(samples), request=request)
         except (KeyError, TypeError, AttributeError) as exc:
             raise ValueError(f"malformed job data: {exc!r}") from exc
 
 
-def trajectories(data: JobData) -> tuple[TrajectoryItem, ...]:
-    """Read ATIF items in the data's order; tasks require a rollout-capable algorithm."""
-    items: list[TrajectoryItem] = []
-    for index, item in enumerate(data.items):
-        if not isinstance(item, TrajectoryItem):
-            raise TypeError(f"this algorithm requires trajectories; unsupported item {index}: {type(item).__name__}")
-        items.append(item)
-    return tuple(items)
+def trajectories(data: JobData) -> tuple[TrajectorySample, ...]:
+    """Read the ATIF trajectory samples in the data's order; task samples require a rollout-capable algorithm."""
+    found: list[TrajectorySample] = []
+    for index, sample in enumerate(data.samples):
+        if not isinstance(sample, TrajectorySample):
+            raise TypeError(
+                f"this algorithm requires trajectories; unsupported sample {index}: {type(sample).__name__}"
+            )
+        found.append(sample)
+    return tuple(found)
 
 
-def trajectory_groups(data: JobData) -> tuple[tuple[TrajectoryItem, ...], ...]:
+def trajectory_groups(data: JobData) -> tuple[tuple[TrajectorySample, ...], ...]:
     """Read explicit, contiguous comparison groups without reordering trajectory rows."""
-    groups: dict[str, list[TrajectoryItem]] = {}
+    groups: dict[str, list[TrajectorySample]] = {}
     previous: str | None = None
     for item in trajectories(data):
         if item.group_id is None:
@@ -247,8 +271,8 @@ class JobOutcome:
     ``finished`` or ``failed``; ``metrics`` is the component's telemetry for the whole job, a mapping that
     encodes as JSON and that Reef records without reading, such as a task job's ``rollout_rewards``;
     ``error`` is a non-empty string exactly when ``event`` is ``failed``. Purpose: the weight trainer's job
-    loop makes it when it commits a job's end and keeps the last one in its state; the recipe's job plan
-    (``JobPlanContext.last_job``) and the task-to-job stage (``Task2Job.job_ended``) read it.
+    loop makes it when it commits a job's end and keeps the last one in its state; the record-to-sample stage
+    (``Record2Sample.job_ended``) reads it.
     """
 
     job_id: str

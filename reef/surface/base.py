@@ -2,7 +2,7 @@
 
 A surface describes how one frozen release reaches inference or a
 client pulling files. A release binds named components (``weights``,
-``harness``, ``skills``, ...), and the surface binds each component's
+``harness``, ``config``, ...), and the surface binds each component's
 capabilities explicitly: record-only surfaces have no components, while
 model, adapter, and harness surfaces compose only the pieces they use.
 """
@@ -12,12 +12,14 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from types import MappingProxyType
-from typing import Any
 
-from reef.artifact.artifact import Artifact, ArtifactRef, ArtifactValidator
+from reef.artifact.artifact import Artifact, ArtifactValidator
+from reef.artifact.files import ArtifactFiles, directory_content_id
+from reef.artifact.sources import SourceFiles
 from reef.core.components import validate_component_name
-from reef.core.model_metadata import ModelMetadata
+from reef.core.evaluation import ARTIFACT_KINDS, ArtifactKind
 
 
 @dataclass(frozen=True)
@@ -46,18 +48,11 @@ class WeightRuntime(ServingRuntime):
     """
 
     @abstractmethod
-    def current_runtime_load_id(self) -> str | None:
-        """The runtime load ID of the last release the runtime activated, of any scenario.
-
-        ``None`` when the runtime activated none, or loads nothing and names no load.
-        """
-
-    @abstractmethod
     def activate_checkpoint(self, artifact: Artifact, *, scenario: str | None = None) -> str:
         """Serve the published release ``artifact``; return the runtime load ID that serves it.
 
-        Reef calls it once a release is published, at a commit, a rollback, a
-        promote or a start, and before traffic routes to it. ``scenario`` names
+        Reef calls it at a commit that activates a release, at an activation
+        and at a start, before traffic routes to the release. ``scenario`` names
         the release's scenario exactly when the runtime serves a separate
         adapter per scenario. A raise leaves the runtime serving what it served
         before.
@@ -72,59 +67,18 @@ class AdapterWeightRuntime(WeightRuntime):
 
 
 class ArtifactLoader(ABC):
-    """Make a component's published releases servable on the runtime, and recover the serving head at a start."""
-
-    @abstractmethod
-    def recover(
-        self,
-        current: ArtifactRef | None,
-        checkpoint: ArtifactRef,
-        runtime: ServingRuntime | None,
-    ) -> ArtifactRef: ...
+    """Make a component's published releases servable on the runtime."""
 
     @abstractmethod
     def activate(self, artifact: Artifact, runtime: ServingRuntime | None, *, source: Artifact | None = None) -> str:
         """Make the published release ``artifact`` servable; return the runtime load ID that serves it.
 
-        Called once a release is final: after startup recovery has a
-        materializable head, and after a commit, rollback or promote has
-        published its release. It runs before the scenario routes traffic to
-        the release. ``source`` names the artifact whose bytes a rollback
-        republished.
+        Called once a release is final: after startup recovery has read the
+        active artifact from the commit history, after a commit has published
+        its release, and at an activation. It runs before the scenario routes
+        traffic to the release. ``source`` names the staged artifact whose
+        bytes a commit published.
         """
-
-    def served_runtime_load_id(self, artifact: Artifact, runtime: ServingRuntime | None) -> str | None:
-        """Return the runtime load ID that serves the committed ``artifact``, or None when it is unknown."""
-        return None
-
-
-class InferenceHooks(ABC):
-    """Request and response hooks around one provider inference."""
-
-    @abstractmethod
-    def prepare_request(self, artifact: Artifact, path: str, request: dict[str, Any]) -> dict[str, Any]: ...
-
-    @abstractmethod
-    def verify_response(self, artifact: Artifact, path: str, response: Mapping[str, Any]) -> None: ...
-
-
-class InferenceLease(ABC):
-    """Serving state held for one inference attempt; released exactly once."""
-
-    @abstractmethod
-    def release(self) -> None: ...
-
-
-class LeasingInferenceHooks(InferenceHooks):
-    """Optional inference capability: hold serving state for one attempt.
-
-    ``begin_request`` runs after ``prepare_request`` froze the artifact and
-    returns the lease the service releases when the attempt ends, whether it
-    completed, aborted, or failed.
-    """
-
-    @abstractmethod
-    def begin_request(self, artifact: Artifact, path: str) -> InferenceLease: ...
 
 
 class FileTree(ABC):
@@ -134,80 +88,68 @@ class FileTree(ABC):
     def read_files(self, artifact: Artifact) -> Mapping[str, str] | None: ...
 
 
-@dataclass(frozen=True)
-class HarnessInfo:
-    """What the harness routes need beyond the file tree: the seed behind the base release and the served model."""
+class ArtifactLayout(ABC):
+    """The directory layout of one component's artifacts, which an artifact import must meet (RFC #980).
 
-    seed_entries: tuple[Mapping[str, Any], ...] = ()
-    served_model: str | None = None
-    #: The served model's API dialect: Reef forwards calls unchanged, so an installed client must speak it.
-    served_api: str = "openai"
-    #: Further models the installed client may pick from; the served one stays the default.
-    client_models: tuple[str, ...] = ()
-    #: Explicit overrides by exact name; never reuse discovered metadata for a different endpoint.
-    model_metadata: Mapping[str, ModelMetadata] = field(default_factory=dict)
-    #: Discovered metadata for served_model on the default deployment endpoint.
-    served_metadata: ModelMetadata | None = None
+    ``check(files)`` returns when ``files`` are an artifact of the component, in the layout of the component's
+    releases, and every remote path they name resolves on the component's service. Otherwise it raises
+    ``ValueError`` naming what does not hold. ``files`` is the source's files, wherever the source keeps them, so a
+    check reads files through it and reads no more of them than it needs.
+
+    ``resolves_references`` is true when every reader of the component's artifacts resolves a reference
+    (``REFERENCE_FILE``, RFC #995) to the revision's files; then an import from a source that keeps its files fixed
+    stores the reference instead of a copy. The default is false: an import always stores a copy.
+
+    ``stored(files, directory)`` checks ``files``, then stores them in the empty directory ``directory``:
+    ``files.reference`` when the source keeps the files fixed and ``resolves_references`` is true (RFC #995), else
+    a copy of the files (RFC #980). It returns the unpublished artifact in ``directory``, whose content id is
+    ``files.content_id()`` (a copy has the same bytes, so its computed content id is equal).
+
+    Purpose: a recipe binds it on ``ComponentSurface.layout``. The committer stores an import with it, and the
+    scenario factory stores the artifact item that a new scenario starts from.
+    """
+
+    @abstractmethod
+    def check(self, files: ArtifactFiles) -> None: ...
+
+    @property
+    def resolves_references(self) -> bool:
+        return False
+
+    def stored(self, files: SourceFiles, directory: Path) -> Artifact:
+        self.check(files)
+        if files.reference is None or not self.resolves_references:
+            files.copy_into(directory)
+            content_id = directory_content_id(directory)
+        else:
+            for path, data in files.reference.items():
+                (directory / path).write_bytes(data)
+            content_id = files.content_id()
+        return Artifact.local(directory, content_id=content_id)
 
 
 @dataclass(frozen=True)
 class ComponentSurface:
-    """How one named component of a release is admitted, loaded, injected, and read.
+    """How one named component of a release is admitted, loaded and read, and what kind it is.
 
     ``None`` means the capability is absent. ``validator`` runs before the
     component is published or restored; it defaults to accepting anything.
+    ``kind`` is the ``ArtifactKind`` of every artifact of the component, or
+    ``None`` when the component is no side of a policy, such as the records
+    of a trainer that serves nothing, or when the surface declares no kind.
+    ``layout`` checks an imported directory; ``None`` means the component
+    takes no import.
     """
 
     validator: ArtifactValidator = field(default_factory=AcceptAnyArtifact)
     loader: ArtifactLoader | None = None
-    inference: InferenceHooks | None = None
     files: FileTree | None = None
+    kind: ArtifactKind | None = None
+    layout: ArtifactLayout | None = None
 
-
-class ChainedLease(InferenceLease):
-    """Release every component lease, last acquired first, even when one fails."""
-
-    def __init__(self, leases: tuple[InferenceLease, ...]) -> None:
-        self.leases = leases
-
-    def release(self) -> None:
-        failure: BaseException | None = None
-        for lease in reversed(self.leases):
-            try:
-                lease.release()
-            except Exception as exc:
-                failure = exc if failure is None else failure
-        if failure is not None:
-            raise failure
-
-
-class ChainedInferenceHooks(InferenceHooks):
-    """Every component's hooks, applied in component declaration order."""
-
-    def __init__(self, hooks: tuple[tuple[str, InferenceHooks], ...]) -> None:
-        self.component_hooks = hooks
-
-    def prepare_request(self, artifact: Artifact, path: str, request: dict[str, Any]) -> dict[str, Any]:
-        for name, hooks in self.component_hooks:
-            request = hooks.prepare_request(artifact.component(name), path, request)
-        return request
-
-    def verify_response(self, artifact: Artifact, path: str, response: Mapping[str, Any]) -> None:
-        for name, hooks in self.component_hooks:
-            hooks.verify_response(artifact.component(name), path, response)
-
-
-class LeasingChainedInferenceHooks(ChainedInferenceHooks, LeasingInferenceHooks):
-    def begin_request(self, artifact: Artifact, path: str) -> InferenceLease:
-        leases: list[InferenceLease] = []
-        try:
-            for name, hooks in self.component_hooks:
-                if isinstance(hooks, LeasingInferenceHooks):
-                    leases.append(hooks.begin_request(artifact.component(name), path))
-        except Exception:
-            ChainedLease(tuple(leases)).release()
-            raise
-        return ChainedLease(tuple(leases))
+    def __post_init__(self) -> None:
+        if self.kind is not None and self.kind not in ARTIFACT_KINDS:
+            raise ValueError(f"component kind must be one of {ARTIFACT_KINDS} or None, got {self.kind!r}")
 
 
 class ComponentFileTree(FileTree):
@@ -232,12 +174,13 @@ class Surface:
     A scenario with no components records traffic only. A scenario with one
     component serves a flat release, exactly as before components existed. A
     scenario with several components serves a release whose files sit in one
-    directory per component; the ``loader``, ``inference``, and ``files``
-    views then route each capability to its component's directory. At most
+    directory per component; the ``loader`` and ``files`` views then route
+    each capability to its component's directory. No surface changes a
+    request: the inference service only forwards it (RFC #1048). At most
     one component may load into a runtime, and at most one may expose a
     client-pulled file tree. Every recipe binds an instance of this same type.
 
-    The ``loader``, ``inference`` and ``files`` keywords of the surface before
+    The ``loader`` and ``files`` keywords of the surface before
     components existed still build one: a single component,
     ``FLAT_COMPONENT``, or, beside one declared component (as
     ``dataclasses.replace`` passes it), that component with those
@@ -246,9 +189,8 @@ class Surface:
     """
 
     components: Mapping[str, ComponentSurface] = field(default_factory=dict)
-    harness: HarnessInfo | None = None
     #: The whole release's own admission check, run before each component's: on the release a step publishes and
-    #: on a release a rollback or promote restores. A recipe binds its checks on ``ComponentSurface.validator``; this
+    #: on a release an activation serves. A recipe binds its checks on ``ComponentSurface.validator``; this
     #: one carries the ``build_artifact_validator`` of a recipe that serves no component, which admits the release as
     #: a whole, as every recipe's did before components existed (a composite moves it onto that recipe's component).
     validator: ArtifactValidator = field(default_factory=AcceptAnyArtifact)
@@ -256,19 +198,17 @@ class Surface:
     def __init__(
         self,
         components: Mapping[str, ComponentSurface] | None = None,
-        harness: HarnessInfo | None = None,
         validator: ArtifactValidator | None = None,
         *,
         loader: ArtifactLoader | None = None,
-        inference: InferenceHooks | None = None,
         files: FileTree | None = None,
     ) -> None:
         declared = {} if components is None else components
-        if loader is not None or inference is not None or files is not None:
+        if loader is not None or files is not None:
             if not isinstance(declared, Mapping):
                 raise ValueError("surface components must be a mapping of component name to ComponentSurface")
             if not declared:
-                declared = {FLAT_COMPONENT: ComponentSurface(loader=loader, inference=inference, files=files)}
+                declared = {FLAT_COMPONENT: ComponentSurface(loader=loader, files=files)}
             elif len(declared) == 1:
                 ((name, component),) = declared.items()
                 if not isinstance(component, ComponentSurface):
@@ -277,16 +217,12 @@ class Surface:
                     name: replace(
                         component,
                         loader=component.loader if loader is None else loader,
-                        inference=component.inference if inference is None else inference,
                         files=component.files if files is None else files,
                     )
                 }
             else:
-                raise ValueError(
-                    f"surface serves components {list(declared)}: set loader, inference and files per component"
-                )
+                raise ValueError(f"surface serves components {list(declared)}: set loader and files per component")
         object.__setattr__(self, "components", declared)
-        object.__setattr__(self, "harness", harness)
         object.__setattr__(self, "validator", AcceptAnyArtifact() if validator is None else validator)
         self.__post_init__()
 
@@ -315,6 +251,26 @@ class Surface:
         """True when the release is flat: the whole artifact is the one component, or there is none."""
         return len(self.components) <= 1
 
+    def import_target(self, component: str | None) -> tuple[str, ArtifactLayout]:
+        """The component that an import into ``component`` lands in, and the layout that checks it.
+
+        ``component`` may be ``None`` when the surface serves one component. Raise ``ValueError`` when it is
+        ``None`` and the surface serves several, for a component that the surface does not serve, and for a
+        component without a ``layout``, which takes no import.
+        """
+        if component is None:
+            if len(self.names) > 1:
+                raise ValueError(f"the scenario serves components {list(self.names)}: name the component")
+            if not self.names:
+                raise ValueError("the scenario serves no component, so it takes no imported artifact")
+            component = self.names[0]
+        if component not in self.components:
+            raise ValueError(f"the scenario has no component {component!r}")
+        layout = self.components[component].layout
+        if layout is None:
+            raise ValueError(f"component {component!r} takes no imported artifact")
+        return component, layout
+
     @property
     def loader_component(self) -> str | None:
         """The component a runtime loads, if any."""
@@ -334,40 +290,6 @@ class Surface:
         """The runtime-loaded component's loader, for inspection; lifecycle calls go through this surface."""
         name = self.loader_component
         return None if name is None else self.components[name].loader
-
-    @property
-    def inference(self) -> InferenceHooks | None:
-        """The request hooks for a release: each component's, in declaration order."""
-        if self.single:
-            return next(
-                (component.inference for component in self.components.values() if component.inference is not None),
-                None,
-            )
-        return self.inference_for_evaluation(None)
-
-    def inference_for_evaluation(self, component: str | None) -> InferenceHooks | None:
-        """The request hooks of an evaluation call that runs a candidate of ``component``: every other component's.
-
-        The episode renders its own candidate of that component, so the served
-        release's hooks for it would mix the served content into the
-        candidate's calls (a skill catalog, for one); the rest of the release
-        (weights, request defaults) is served as it is. ``None`` names the only
-        component of a flat release and no component of a composed one.
-        """
-        if component is not None and component not in self.components:
-            raise ValueError(f"the release has no component {component!r}")
-        if self.single:
-            return None
-        bound = tuple(
-            (name, hooks.inference)
-            for name, hooks in self.components.items()
-            if name != component and hooks.inference is not None
-        )
-        if not bound:
-            return None
-        if any(isinstance(hooks, LeasingInferenceHooks) for _, hooks in bound):
-            return LeasingChainedInferenceHooks(bound)
-        return ChainedInferenceHooks(bound)
 
     @property
     def files(self) -> FileTree | None:
@@ -399,26 +321,6 @@ class Surface:
         if current is None or before is None or name not in current.entries or name not in before.entries:
             return True
         return current.entries[name].content_id != before.entries[name].content_id
-
-    def recover(
-        self,
-        current: ArtifactRef | None,
-        checkpoint: ArtifactRef,
-        runtime: ServingRuntime | None,
-    ) -> ArtifactRef:
-        """The head the runtime can still serve after a restart; the checkpoint without a loader."""
-        loader = self.loader
-        return checkpoint if loader is None else loader.recover(current, checkpoint, runtime)
-
-    def served_runtime_load_id(self, artifact: Artifact, runtime: ServingRuntime | None) -> str | None:
-        """Return the runtime load ID that serves the committed release, or None when no component has a loader."""
-        name = self.loader_component
-        if name is None:
-            return None
-        loader = self.components[name].loader
-        if loader is None:
-            return None
-        return loader.served_runtime_load_id(self.component_artifact(artifact, name), runtime)
 
     def activate(
         self,
@@ -454,10 +356,6 @@ __all__ = [
     "ArtifactLoader",
     "ComponentSurface",
     "FileTree",
-    "HarnessInfo",
-    "InferenceHooks",
-    "InferenceLease",
-    "LeasingInferenceHooks",
     "ServingRuntime",
     "Surface",
     "WeightRuntime",

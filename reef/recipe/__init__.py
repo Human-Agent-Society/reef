@@ -7,25 +7,23 @@ weights or the harness*. This package holds everything a method binds to:
   ``build``, ``build_surface``) and
   ``WeightTrainingRecipe`` with its
   ``WeightTrainingSpec`` (training objective and data processor).
-- ``cordis`` — ``CordisRecipe`` assembles the harness evolution backend.
+- ``harness`` — ``HarnessEvolutionRecipe``, the recipe contract every harness
+  evolution method extends; it assembles ``reef.train.harness_backend``.
 - ``composite`` — ``CompositeRecipe`` binds one recipe per release component
   and runs their trainers side by side in one scenario.
-- ``reefine`` — ``ReefineRecipe`` supplies built-in request-driven harness refinement,
-  gated by a health floor.
 - ``registry`` — dotted class resolution (``recipe_class_for``) and
   ``build_named_recipe`` for a deployment preset.
 - ``config_fields`` — one dataclass field as the whole configuration surface
   for one setting (YAML key, env fallback, shared typed parser).
 - ``config`` — recipe-config YAML loading; ``errors`` — the error family.
 
-Candidate evaluation is part of this contract, not a separate subsystem:
-every ``Recipe`` carries ``candidate_evaluation``, built from the top-level
-``evaluation`` section of its config, and the trainer runs it between
-prepare and settle. Shared candidate contracts live in ``reef.core.evaluation``; built-in policies
-and configuration live in ``reef.evaluation``. The recipe chooses and
-configures the policy.
+The activation rule is part of this contract, not a separate subsystem:
+every ``Recipe`` carries ``activation``, built from the top-level
+``activation`` section of its config, and the scenario asks it whether an
+artifact that training makes serves. The contract lives in
+``reef.core.activation``; the built-in rules live in ``reef.evaluation``.
 
-Reefine and supervised fine-tuning (``sft``) are bundled; other learning
+Supervised fine-tuning (``sft``) is bundled; other learning
 methods live outside the core package. The repository's sibling
 ``recipes`` tree contains cookbook implementations, but Reef neither imports
 them at boot nor ships them in its wheel. Deployments select one explicitly by

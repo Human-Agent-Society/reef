@@ -1,6 +1,6 @@
 """SDPO on SciKnowEval Chemistry, through reef-eval.
 
-One episode is one training run:
+One rollout is one training run:
 
     train  — reef-eval runs the ``harbor/chemistry`` task under our agent; the
              agent runs the stage in the task container, which samples each
@@ -12,7 +12,7 @@ One episode is one training run:
 
 ``Lab.run`` is reef-eval's one primitive: task in, trusted scored row out. The
 row is keyed by the Reef scenario and the settings that shape the run, so a
-run with other settings is a new episode and a rerun of a recorded one is
+run with other settings is a new rollout and a rerun of a recorded one is
 skipped. A scenario keeps the weights it trained, so a new run gets a new
 ``REEF_SCENARIO``. The Reef stack is already serving; ``run.sh`` starts it
 from ``serve.yaml`` first.
@@ -45,4 +45,4 @@ key = ":".join(["chemistry", SCENARIO, *(f"{name}={value}" for name, value in se
 lab = Lab(Path(os.environ.get("SDPO_RUN_DIR", HERE / "work")) / "lab")
 agent = {"name": "harness:HarborAgent", "model_name": MODEL}
 row = asyncio.run(lab.run(str(HERE / "harbor" / "chemistry"), agent, tags={"scenario": SCENARIO, **settings}, key=key))
-print(f"episode {key}: {row.rewards}")
+print(f"rollout {key}: {row.rewards}")

@@ -6,20 +6,26 @@ from collections.abc import Mapping
 from typing import Any, Self
 
 from reef.pipeline_context import PipelineContext
-from reef.record2record import Record2Record, ReportContext, ReportGrouping, ReportRecord2Record
-from reef.record2task import Record2Task, ReportTasks
-from reef.record2task.assembly import SampleAssembly, SampleAssemblySettings
-from reef.task2job import Task2Job, Task2JobSettings
+from reef.record2sample import Record2Sample, ReportContext, ReportGrouping, ReportSamples
+from reef.record2sample.assembly import SampleAssembly, SampleAssemblySettings
+from reef.sample2job import Sample2Job, Sample2JobSettings
 from reef.train.pipeline import TrainingPipeline
-from reef.train.types import JobData, TrainDataItem, TrajectoryItem
+from reef.train.types import JobData, Sample, TrajectorySample
 
 
-class ThresholdTasks(ReportTasks):
-    """One report becomes one sample, with no score filtering."""
+class ThresholdSamples(ReportSamples):
+    """One report becomes one sample, with no score filtering; every report by itself, or in ``grouping``'s groups."""
 
-    def __init__(self, settings: SampleAssemblySettings | None = None) -> None:
-        super().__init__()
-        self.assembly = SampleAssembly(SampleAssemblySettings() if settings is None else settings)
+    def __init__(
+        self,
+        context: PipelineContext,
+        settings: SampleAssemblySettings | None = None,
+        *,
+        grouping: ReportGrouping | None = None,
+    ) -> None:
+        settings = SampleAssemblySettings() if settings is None else settings
+        super().__init__(context, grouping, max_staleness=settings.max_staleness)
+        self.assembly = SampleAssembly(settings)
 
     @classmethod
     def from_config(
@@ -27,17 +33,16 @@ class ThresholdTasks(ReportTasks):
         config: Mapping[str, Any],
         *,
         context: PipelineContext,
-        record2record: Record2Record,
         environ: Mapping[str, str],
     ) -> Self:
-        return cls(SampleAssemblySettings.parse(config, plugin_class=cls))
+        return cls(context, SampleAssemblySettings.parse(config, plugin_class=cls))
 
-    def make_sample(self, context: ReportContext) -> TrajectoryItem:
+    def make_sample(self, context: ReportContext) -> TrajectorySample:
         return self.assembly.build(context, context.require_score())
 
 
-class ThresholdJobData(Task2Job):
-    """Batch the tasks of ``ThresholdTasks`` as they come."""
+class ThresholdJobData(Sample2Job):
+    """Batch the tasks of ``ThresholdSamples`` as they come."""
 
     @classmethod
     def from_config(
@@ -45,37 +50,38 @@ class ThresholdJobData(Task2Job):
         config: Mapping[str, Any],
         *,
         context: PipelineContext,
-        record2record: Record2Record,
-        record2task: Record2Task,
+        record2sample: Record2Sample,
         environ: Mapping[str, str],
     ) -> Self:
-        settings = Task2JobSettings.parse(config, plugin_class=cls)
+        settings = Sample2JobSettings.parse(config, plugin_class=cls)
         return cls(context, settings.buffer_size, settings.job_samples)
 
-    def make_job_data(self, tasks: tuple[TrainDataItem, ...], data_id: str) -> JobData:
-        return JobData(data_id, tasks)
+    def make_job_data(self, samples: tuple[Sample, ...], data_id: str) -> JobData:
+        return JobData(data_id, samples)
 
 
 def threshold_pipeline(
     context: PipelineContext,
     *,
     buffer_size: int | None = None,
+    job_samples: int | None = None,
     accept_multi_turn: bool = False,
-    record2record: ReportRecord2Record | None = None,
-    task2job: Task2Job | None = None,
+    grouping: ReportGrouping | None = None,
+    record2sample: Record2Sample | None = None,
+    sample2job: Sample2Job | None = None,
     max_staleness: int = 0,
 ) -> TrainingPipeline:
-    """Every report by itself (or ``record2record``), one sample each, batched by ``ThresholdJobData`` (or ``task2job``).
+    """Every report by itself (or in ``grouping``'s groups), one sample each, batched by ``ThresholdJobData`` (or
+    ``sample2job``). ``record2sample`` replaces the ``ThresholdSamples`` stage.
 
-    ``max_staleness`` is the staleness limit of the default record stage.
+    ``job_samples`` is the job size of the default sample-to-job stage, and
+    ``max_staleness`` is the staleness limit of the default stage.
     """
+    settings = SampleAssemblySettings(accept_multi_turn_policy_samples=accept_multi_turn, max_staleness=max_staleness)
     return TrainingPipeline(
         context,
-        record2record=(
-            ReportRecord2Record(context, ReportGrouping(), max_staleness=max_staleness)
-            if record2record is None
-            else record2record
+        record2sample=(
+            ThresholdSamples(context, settings, grouping=grouping) if record2sample is None else record2sample
         ),
-        record2task=ThresholdTasks(SampleAssemblySettings(accept_multi_turn_policy_samples=accept_multi_turn)),
-        task2job=ThresholdJobData(context, buffer_size, None) if task2job is None else task2job,
+        sample2job=ThresholdJobData(context, buffer_size, job_samples) if sample2job is None else sample2job,
     )

@@ -38,7 +38,7 @@ from reef.train.slime_backend.distill.teacher_engine import (
     TeacherEngine,
     validate_teacher_tokenizer,
 )
-from reef.train.types import TrajectoryItem
+from reef.train.types import TrajectorySample
 
 #: ``self``: the student's own weights read a privileged prefix (the current
 #: weights at update rate 1, an EMA of them below 1, a frozen snapshot at 0).
@@ -178,7 +178,7 @@ def _is_finite(value: object) -> bool:
 ROW_SHAPE = "[source_id, tokens, loss_mask, rollout_log_probs, reward, teacher_tokens, sample_weight]"
 
 
-def distill_sample_row(sample: TrajectoryItem) -> list[Any]:
+def distill_sample_row(sample: TrajectorySample) -> list[Any]:
     """Shape one Reef sample into the family's 7-element wire row.
 
     A sample without a ``distill_sample_weight`` in its training data
@@ -255,9 +255,6 @@ class DistillAlgorithm(SlimeAlgorithm):
     """
 
     loss_type = "custom_loss"
-    # The truncated importance-sampling weight compares the policy against the
-    # rollout engine's log-probs; Reef ships them per row.
-    requires_rollout_logprobs = True
     advantages = "forbidden"
     forbidden_advantages_message = (
         "a distillation family distils its teacher's distribution; the Reef payload must omit advantages"
@@ -269,7 +266,7 @@ class DistillAlgorithm(SlimeAlgorithm):
         "distill_teacher_topk_log_probs": "float32",
         "distill_teacher_sampled_log_probs": "float32",
     }
-    external_batch_keys = ("rollout_log_probs", "distill_sample_weights", *TEACHER_BATCH_KEYS)
+    external_batch_keys = ("distill_sample_weights", *TEACHER_BATCH_KEYS)
     rollout_log_skip_keys = ("teacher_tokens", "distill_sample_weights", *TEACHER_BATCH_KEYS)
     required_objective_hooks = ("custom_loss_function_path", "reef_actor_pre_train_hook_path")
     #: The recipe's settings type, with its defaults.
@@ -474,7 +471,7 @@ class DistillAlgorithm(SlimeAlgorithm):
 
     # --- stage 2: shape row ---
 
-    def shape_sample_row(self, sample: TrajectoryItem) -> list[Any]:
+    def shape_sample_row(self, sample: TrajectorySample) -> list[Any]:
         return distill_sample_row(sample)
 
     # --- stage 3: build batch ---

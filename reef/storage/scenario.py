@@ -1,4 +1,4 @@
-"""Storage boundary for a scenario's records, commits, settings, tasks, uploaded trajectories, and recovery.
+"""Storage boundary for a scenario's records, commits, settings, tasks, training samples, evaluations, and recovery.
 
 Artifact publication remains the responsibility of the committer. A
 store settles record consumption and the committed scenario state together;
@@ -16,9 +16,11 @@ from typing import Any, Self
 from reef.core.errors import ReefError
 from reef.core.plugins import Plugin
 from reef.storage.commits import CommitRecord
+from reef.storage.data import check_owner
+from reef.storage.evaluations import EvaluationStore
 from reef.storage.records import RecordStore
+from reef.storage.samples import SampleStore
 from reef.storage.tasks import TaskFileStore, TaskStorage
-from reef.storage.trajectories import TrajectoryStore
 
 
 class ScenarioStoreConflict(ReefError):
@@ -27,21 +29,38 @@ class ScenarioStoreConflict(ReefError):
 
 @dataclass(frozen=True)
 class ScenarioSettings:
-    """The settings a person selects for one scenario, kept with its records and commits.
+    """The settings of one scenario, kept with its records and commits.
 
-    ``model_config`` is the validated model override as JSON (``None`` selects
-    the recipe's model). ``training_mode`` is the selected mode (``None``
-    selects the recipe's default).
+    ``training_mode`` is the selected mode (``None`` selects the recipe's
+    default). ``artifact_evaluation`` is the
+    ``ArtifactEvaluationSettings`` as JSON that Reef evaluates each new
+    artifact with (``None`` evaluates none). ``activation`` is the scenario's
+    own activation rule as JSON: ``{"module": <built-in rule>, "config": {...}}``.
+    ``None`` follows the deployment's ``activation`` section. The scenario
+    registry checks the rule before it stores it. ``owner`` is the data store
+    owner whose items the scenario uses (RFC #1028), a name that passes
+    ``check_owner``. It is ``None`` only for a scenario that the data sync has
+    not opened yet; the first open sets it. Construction checks these types.
+
+    Purpose: the scenario registry and the dispatcher write the settings
+    through ``ScenarioStorage.write_settings`` and read them back when a
+    scenario loads.
     """
 
-    model_config: Mapping[str, object] | None = None
     training_mode: str | None = None
+    artifact_evaluation: Mapping[str, object] | None = None
+    activation: Mapping[str, object] | None = None
+    owner: str | None = None
 
     def __post_init__(self) -> None:
-        if self.model_config is not None and not isinstance(self.model_config, Mapping):
-            raise ValueError("scenario settings model_config must be an object or null")
         if self.training_mode is not None and not isinstance(self.training_mode, str):
             raise ValueError("scenario settings training_mode must be a string or null")
+        if self.artifact_evaluation is not None and not isinstance(self.artifact_evaluation, Mapping):
+            raise ValueError("scenario settings artifact_evaluation must be an object or null")
+        if self.activation is not None and not isinstance(self.activation, Mapping):
+            raise ValueError("scenario settings activation must be an object or null")
+        if self.owner is not None:
+            check_owner(self.owner)
 
 
 class ScenarioStore(ABC):
@@ -67,25 +86,33 @@ class ScenarioStore(ABC):
     def tasks(self) -> TaskStorage:
         """Opens the generated task stores of this scenario.
 
-        Each record-to-task stage opens its own store name. The stores close
+        Each record-to-sample stage opens its own store name. The stores close
         with this session. They survive a restart if ``durable`` is true.
         """
 
     @property
     @abstractmethod
-    def trajectories(self) -> TrajectoryStore:
-        """The trajectories that clients uploaded to this scenario.
+    def samples(self) -> SampleStore:
+        """The training samples of this scenario, such as the trajectories that clients uploaded.
 
-        The store closes with this session. Its trajectories survive a restart if ``durable`` is true.
+        The store closes with this session. Its samples survive a restart if ``durable`` is true.
+        """
+
+    @property
+    @abstractmethod
+    def evaluations(self) -> EvaluationStore:
+        """The artifact evaluations that clients asked this scenario for.
+
+        The store closes with this session. Its evaluations survive a restart if ``durable`` is true.
         """
 
     @abstractmethod
     def history(self) -> tuple[CommitRecord, ...]:
-        """Read committed steps in increasing order, including rollbacks."""
+        """Read committed steps in increasing order: training steps, activations and new training starts."""
 
     @abstractmethod
     def training_run_position(self) -> tuple[int, int]:
-        """Return the last rollback step and subsequent training count."""
+        """Return the step of the last new training start and the training count after it."""
 
     @abstractmethod
     def commit_step(self, *, expected_step: int, commit: CommitRecord) -> CommitRecord:
@@ -123,7 +150,7 @@ class ScenarioStorage(Plugin, ABC):
     shared resources only; sessions remain owned by their scenarios.
 
     Every piece of per-scenario state that Reef owns goes through this
-    interface: records, commits, generated tasks and uploaded trajectories through sessions, settings
+    interface: records, commits, generated tasks, training samples and evaluations through sessions, settings
     through ``read_settings`` and ``write_settings``. Archiving a scenario
     retires all of it. A deployment names a subclass in ``storage.record_backend``.
     """

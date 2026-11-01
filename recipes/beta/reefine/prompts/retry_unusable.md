@@ -1,0 +1,1 @@
+An earlier answer to this request could not be used: {reason}. Write the whole answer again, design first, as the one JSON object described above; escape every double quote inside a JSON string and close every object and array.

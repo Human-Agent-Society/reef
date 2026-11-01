@@ -121,7 +121,7 @@ class OpenTelemetryRecordObserver(RecordObserver):
             attributes.update(self.inference_attributes(item.payload))
             model = attributes.get("gen_ai.request.model")
             name = f"chat {model}" if isinstance(model, str) else "chat"
-        elif item.request_type is RequestType.REPORT:
+        else:
             name = "feedback"
             attributes.update(self._report_attributes(item.payload))
             if item.references:
@@ -131,9 +131,6 @@ class OpenTelemetryRecordObserver(RecordObserver):
                     Link(record_span_context(item.scenario, reference), {"reef.agent_record_id": reference})
                     for reference in item.references[1:]
                 ]
-        else:
-            name = "training request"
-            attributes.update(self._training_request_attributes(item.payload))
         self._emit(
             name,
             planned=record_span_context(item.scenario, item.agent_record_id),
@@ -151,7 +148,6 @@ class OpenTelemetryRecordObserver(RecordObserver):
             "reef.step": commit.step,
             "reef.commit_operation": commit.operation,
             "reef.checkpoint": commit.checkpoint,
-            "reef.pending": commit.pending,
             "reef.consumed_record_count": len(commit.consumed_ids),
             **_artifact_attributes(commit.artifact_ref),
         }
@@ -159,8 +155,6 @@ class OpenTelemetryRecordObserver(RecordObserver):
             attributes["reef.training_job_id"] = commit.training_job_id
         if commit.component is not None:
             attributes["reef.component"] = commit.component
-        if commit.rollback_target_release_id is not None:
-            attributes["reef.rollback_target_release_id"] = commit.rollback_target_release_id
         for key, value in (commit.metrics or {}).items():
             metric = _attribute_value(value)
             if metric is not None:
@@ -237,9 +231,9 @@ class OpenTelemetryRecordObserver(RecordObserver):
         model = payload.get("model")
         if isinstance(model, str) and model:
             attributes["gen_ai.request.model"] = model
-        runtime_load_id = payload.get("runtime_load_id")
-        if isinstance(runtime_load_id, str) and runtime_load_id:
-            attributes["reef.runtime_load_id"] = runtime_load_id
+        artifact_id = payload.get("artifact_id")
+        if isinstance(artifact_id, str) and artifact_id:
+            attributes["reef.artifact_id"] = artifact_id
         response = payload.get("response")
         response = response if isinstance(response, Mapping) else {}
         response_model = response.get("model")
@@ -275,17 +269,6 @@ class OpenTelemetryRecordObserver(RecordObserver):
         feedback = payload.get("feedback")
         if feedback is not None:
             attributes["reef.feedback"] = feedback if isinstance(feedback, str) else _json_text(feedback)
-        return attributes
-
-    def _training_request_attributes(self, payload: Mapping[str, Any]) -> dict[str, AttributeValue]:
-        attributes: dict[str, AttributeValue] = {}
-        for key in ("session", "release_id"):
-            value = payload.get(key)
-            if isinstance(value, str) and value:
-                attributes[f"reef.{key}"] = value
-        text = payload.get("text")
-        if isinstance(text, str):
-            attributes["reef.instruction"] = text
         return attributes
 
 

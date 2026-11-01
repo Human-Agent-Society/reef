@@ -1,0 +1,181 @@
+# Hermes Agent, driven headless per run.
+#
+# HERMES_HOME relocates the whole home (config.yaml, the session snapshots,
+# SOUL.md, skills, plugins, the state store, logs and caches) under the
+# run root. `chat -Q --oneshot -q` answers one task on a non TTY and
+# exits; hermes's own approval policy runs file and terminal tools inside
+# the working directory with no prompt and refuses a command it flags as
+# dangerous with a tool error, so no bypass flag is used (the top level -z
+# one shot would bypass those approvals). The config defaults keep an
+# run hermetic and single request: no scanner download, no session
+# title call, no background review, and a plain file session snapshot the
+# reader can parse.
+name: hermes
+binary: hermes
+# The vendor's channel is a git checkout installed editable into a venv:
+# PyPI is stale and upstream refuses wheel builds. Harness evolution startup
+# installs it for the runs unless evolution.binary names a binary.
+install:
+  kind: git
+  package: hermes-agent
+  version: "0.21.0"
+  repository: "https://github.com/NousResearch/hermes-agent"
+  ref: "v2026.8.31"
+  binary_path: "venv/bin/hermes"
+renderer: reef.harness.adapters.hermes.render:HermesAdapterRenderer
+# What Reef may evolve: each kind of file, at the path where hermes reads it. A config/<target>.json
+# of the tree merges into that config file (config, below).
+evolve:
+  # hermes reads one home level rules file, SOUL.md; AGENTS.md is project
+  # scoped and read from the working directory chain, never from the home.
+  rules: hermes/SOUL.md
+  skill: hermes/skills/{name}/SKILL.md
+  # Every skill is also a /name command in the interactive CLI, and hermes has
+  # no other command surface, so a command is a skill under a second root.
+  # The renderer adds that root to skills.external_dirs, beside the home
+  # for a run and at the install root for a reef-hermes session.
+  command: hermes-commands/{name}/SKILL.md
+  # A hermes plugin: register(ctx) in the package init; the renderer adds
+  # the manifest and the config grants.
+  extension: hermes/plugins/{name}/__init__.py
+# The agent's directories under the root, each with the variable that moves it there. What the agent writes
+# in them is its state, never residue, and a sandbox keeps them writable.
+dirs:
+  hermes: HERMES_HOME
+  .cache/uv: null
+  .cache/pip: null
+  .local: null
+  .rustup: null
+sessions: {format: hermes-session-json, path: hermes/sessions}
+# How to point hermes at a model endpoint: a custom provider with its key in
+# config.yaml, and the same key as OPENAI_API_KEY in the home's .env file.
+# hermes reads the key under model for a loopback or an unknown host, and
+# takes an OpenRouter host for its OpenRouter provider, where only the
+# environment or .env supplies the key; both are written so either kind of
+# endpoint answers. Reef renders this set into evaluation runs; the
+# served tree never carries a provider or a key. Only the openai dialect is
+# bound; hermes's anthropic_messages api mode was not measured.
+model:
+  openai:
+    - target: primary
+      data:
+        model:
+          provider: custom
+          default: "{model}"
+          base_url: "{base_url}/v1"
+          api_key: "{api_key}"
+    - target: env
+      data:
+        OPENAI_API_KEY: "{api_key}"
+# How the agent runs: one evaluation run in a root of its own (the command, and variables
+# beside the dirs), and on a person's machine a layer over the person's own configuration.
+run:
+  task:
+    argv: ["chat", "-Q", "--oneshot", "-q", "{task}"]
+# The config files the agent reads, with the defaults Reef merges first and the checks the merged
+# file must pass. A tree's config/<target>.json merges into one of them. The defaults and checks
+# are optional: a new adapter can start with the paths alone.
+config:
+  primary:
+    path: "hermes/config.yaml"
+    defaults:
+      # security.tirith_enabled downloads a scanner binary from GitHub at
+      # boot, and the scanner blocks a command it cannot resolve;
+      # title_generation is one extra model call per run; the memory
+      # and skill nudges spawn a background review agent, which makes model
+      # calls and writes skills into the tree; the curator writes its state
+      # into the tree's skills at the first start and later archives and
+      # backs up skills there; the snapshot is the trajectory the reader
+      # parses.
+      auxiliary:
+        title_generation:
+          enabled: false
+      curator:
+        enabled: false
+      memory:
+        nudge_interval: 0
+      security:
+        tirith_enabled: false
+      sessions:
+        write_json_snapshots: true
+      skills:
+        creation_nudge_interval: 0
+    checks:
+      # Keep a run hermetic and single request, with its snapshot readable.
+      - key: [
+          security.tirith_enabled, auxiliary.title_generation.enabled, memory.nudge_interval,
+          skills.creation_nudge_interval, curator.enabled, sessions.write_json_snapshots,
+        ]
+        match: IsDefault()
+      # hermes reads these sections as objects, and a model that is not
+      # one names the model.
+      - key: model
+        match: AnyOf(IsAbsent(), Eq(null), IsObject())
+        reason: Reef's model binding chooses the provider, the endpoint, the credential and the model
+      - key: [moa, compression, auxiliary, delegation, cron, curator, curator.auxiliary]
+        match: AnyOf(IsAbsent(), Eq(null), IsObject())
+        reason: hermes reads it as an object
+      # Every model call stays on Reef's model binding. The binding writes
+      # model.provider, model.default, model.base_url and model.api_key,
+      # renders after the tree and wins every key it writes. The keys below name another provider, endpoint, credential,
+      # transport, model or fallback chain. These top-level keys hermes
+      # moves into model.
+      - key: [
+          api_base, base_url, model_aliases, provider, providers, custom_providers, fallback_model,
+          fallback_providers,
+        ]
+        match: IsAbsent()
+        reason: Reef's model binding chooses the provider, the endpoint, the credential and the model
+      # hermes reads an empty string, list or object as unset. model.model
+      # and model.name are the model, model.api_base the endpoint, the key
+      # names the key, and aliases the models a switch resolves; api_mode
+      # and openai_runtime leave the bound endpoint. moa names the models
+      # of its presets, and the older compression keys move into
+      # auxiliary.compression. An auxiliary task, delegation, cron and the
+      # curator's older auxiliary section each choose their own route.
+      - key: [
+          model.aliases, model.api_base, model.api_key_env, model.key_cmd, model.key_env, model.model, model.name,
+          model.api_mode, model.openai_runtime,
+          moa.aggregator, moa.presets, moa.reference_models,
+          compression.summary_base_url, compression.summary_model,
+          auxiliary.openrouter_model,
+          auxiliary.*.api_key, auxiliary.*.api_key_env, auxiliary.*.api_mode, auxiliary.*.base_url,
+          auxiliary.*.fallback_chain, auxiliary.*.key_cmd, auxiliary.*.key_env, auxiliary.*.model,
+          auxiliary.*.model_provider,
+          delegation.api_key, delegation.api_key_env, delegation.api_mode, delegation.base_url,
+          delegation.fallback_chain, delegation.key_cmd, delegation.key_env, delegation.model,
+          delegation.model_provider, delegation.provider,
+          cron.api_key, cron.api_key_env, cron.api_mode, cron.base_url, cron.fallback_chain, cron.key_cmd,
+          cron.key_env, cron.model, cron.model_provider, cron.provider,
+          curator.auxiliary.api_key, curator.auxiliary.api_key_env, curator.auxiliary.api_mode,
+          curator.auxiliary.base_url, curator.auxiliary.fallback_chain, curator.auxiliary.key_cmd,
+          curator.auxiliary.key_env, curator.auxiliary.model, curator.auxiliary.model_provider,
+          curator.auxiliary.provider,
+        ]
+        match: AnyOf(IsAbsent(), IsIn([null, "", [], {}]))
+        reason: Reef's model binding chooses the provider, the endpoint, the credential and the model
+      # auto and main run an auxiliary task on the main model.
+      - key: [compression.summary_provider, auxiliary.*.provider]
+        match: AnyOf(IsAbsent(), IsIn([null, "", [], {}, "auto", "main"]))
+        reason: Reef's model binding chooses the provider, the endpoint, the credential and the model
+      - key: [
+          auxiliary.*.prefer_fast_model, delegation.prefer_fast_model, cron.prefer_fast_model,
+          curator.auxiliary.prefer_fast_model,
+        ]
+        match: Not(Eq(true))
+        reason: Reef's model binding chooses the model
+      # A request body names no model: model replaces the bound one, and
+      # OpenRouter reads models as fallback models. Delegation sends
+      # request_overrides with each child call as call arguments.
+      - key: [
+          auxiliary.*.extra_body, delegation.extra_body, cron.extra_body, curator.auxiliary.extra_body,
+          delegation.request_overrides, delegation.request_overrides.extra_body,
+        ]
+        match: Not(Contains(Key(IsIn(["model", "models"]))))
+        reason: Reef's model binding chooses the model
+  # The env file hermes loads from its home; the model binding puts the
+  # provider key here too, since for an OpenRouter host hermes reads the
+  # key from the environment and not from config.yaml.
+  env:
+    path: "hermes/.env"
+    defaults: {}

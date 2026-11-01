@@ -15,7 +15,7 @@ async def main() -> None:
         raise RuntimeError(f"Harbor trial failed: {error}")
     if not row.rewards:
         raise RuntimeError(f"Harbor trial returned no rewards: {row.uri}")
-    print(f"episode reward: {row.rewards}")
+    print(f"rollout reward: {row.rewards}")
 
 
 if __name__ == "__main__":

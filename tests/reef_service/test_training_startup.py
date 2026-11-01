@@ -38,7 +38,7 @@ INFERENCE_TOKEN_ENV = "REEF_REMOTE_INFERENCE_TOKEN"
 def training_config():
     return {
         "recipe": {"implementation": RECIPE},
-        "pipeline": {"task2job": {"config": {"buffer_size": 4}}},
+        "pipeline": {"sample2job": {"config": {"buffer_size": 4}}},
         "inference": {"model-path": "/models/demo"},
         "training": {"options": {"lr": 0.000001, "use-critic": True, "global-batch-size": 4}},
     }
@@ -71,7 +71,7 @@ def test_cli_and_yaml_share_selected_recipe_and_native_option_parsing(tmp_path):
     overrides = {
         "recipe.implementation": RECIPE,
         "inference.model-path": "/models/demo",
-        "pipeline.task2job.config.buffer_size": "8",
+        "pipeline.sample2job.config.buffer_size": "8",
         "training.options.lr": "0.000002",
         "training.options.use-critic": "true",
         "training.options.global-batch-size": "4",
@@ -82,7 +82,7 @@ def test_cli_and_yaml_share_selected_recipe_and_native_option_parsing(tmp_path):
     cli_config, _ = resolve_deployment_config(command_line_config({}), overrides, tmp_path / "cli")
     for config in (file_config, cli_config):
         reef = config["reef"]
-        assert config["pipeline"] == {"task2job": {"config": {"buffer_size": 8}}}
+        assert config["pipeline"] == {"sample2job": {"config": {"buffer_size": 8}}}
         assert reef["training_backend_options"] == {
             "lr": "0.000002",
             "use-critic": True,
@@ -133,14 +133,8 @@ def test_cli_and_yaml_share_selected_recipe_and_native_option_parsing(tmp_path):
             "remove inference.handler-factory",
         ),
         ({"inference.backend": "none", "teacher.model-path": "/models/teacher"}, "remove teacher.model-path"),
-        ({"inference.backend": "none", "training.options.rollout-num-gpus": "1"}, "configures inference"),
         ({"inference.tensor-parallel-size": "-1"}, "must be positive"),
         ({"inference.num-gpus": "1.5"}, "valid int"),
-        ({"training.options.rollout_num_gpus": "2"}, "configures inference"),
-        ({"training.options.rollout-num": "2"}, "configures inference"),
-        ({"training.options.sglang-context-length": "1024"}, "configures inference"),
-        ({"training.options.sglang-config": "engines.yaml"}, "configures inference"),
-        ({"training.options.rollout-external": "true"}, "configures inference"),
         ({"inference.options.config": "engines.yaml"}, "managed by Reef"),
         ({"inference.options.pp-size": "2"}, "managed by Reef"),
         ({"inference.options.sglang-context-length": "1024"}, "without the sglang- prefix"),
@@ -248,7 +242,7 @@ def test_cli_only_training_downloads_once_and_transports_the_resolved_config(tmp
                 RECIPE,
                 "--inference.model-path",
                 "org/model",
-                "--pipeline.task2job.config.buffer_size",
+                "--pipeline.sample2job.config.buffer_size",
                 "8",
                 "--training.options.use-critic",
                 "true",
@@ -260,7 +254,7 @@ def test_cli_only_training_downloads_once_and_transports_the_resolved_config(tmp
     assert downloads == ["org/model"]
     reef = configs[0]["reef"]
     assert reef["model_path"] == "/downloaded/snapshot"
-    assert configs[0]["pipeline"] == {"task2job": {"config": {"buffer_size": 8}}}
+    assert configs[0]["pipeline"] == {"sample2job": {"config": {"buffer_size": 8}}}
     assert interpolate_config(configs[0], reef["training_backend_options"]["hf-checkpoint"]) == reef["model_path"]
     assert not paths[0].exists()
     assert not (tmp_path / "reef.yaml").exists()
@@ -283,7 +277,7 @@ assert config['services'][-1]['name'] == 'reef'
     raw = training_config()
     raw["recipe"]["implementation"] = recipe
     if "openclawrl" in recipe:
-        raw["pipeline"]["record2record"] = {
+        raw["pipeline"]["record2sample"] = {
             "config": {"prm_url": "http://external:23001", "prm_tokenizer_path": "/models/judge"}
         }
     result = subprocess.run(
@@ -512,7 +506,7 @@ def test_inference_cli_over_yaml_reaches_the_serving_engines_and_not_slime(tmp_p
     argv = slime_argv(config)
     assert argv == slime_argv(file_only)
     # Slime starts no engine and receives no engine flag.
-    assert "--rollout-num-gpus=0" in argv
+    assert not any(argument.startswith("--rollout-num-gpus") for argument in argv)
     assert not [argument for argument in argv if argument.startswith(("--sglang-", "--rollout-num-gpus-per-engine"))]
     assert all(not key.startswith(("rollout-num", "sglang-")) for key in config["reef"]["training_backend_options"])
     assert raw["inference"]["num-gpus"] == 2
@@ -524,12 +518,11 @@ def test_inference_cli_over_yaml_reaches_the_serving_engines_and_not_slime(tmp_p
     assert serving["options"] == {"mem-fraction-static": "0.6", "router-port": 30000, "disable-cuda-graph": False}
 
 
-@pytest.mark.parametrize("option", ["colocate", "offload-rollout"])
-def test_native_placement_flags_are_rejected_in_training_options(tmp_path, option):
+def test_slimes_own_engine_and_placement_options_reach_slime_unread(tmp_path):
     raw = training_config()
-    raw["training"]["options"][option] = True
-    with pytest.raises(DeployConfigError, match=f"training.options.{option} shares GPUs between training and serving"):
-        resolve_deployment_config(raw, None, tmp_path / "serve.yaml")
+    raw["training"]["options"].update({"colocate": True, "offload-rollout": True, "sglang-mem-fraction-static": "0.5"})
+    config, _ = resolve_deployment_config(raw, None, tmp_path / "serve.yaml")
+    assert {"--colocate", "--offload-rollout", "--sglang-mem-fraction-static=0.5"} <= set(slime_argv(config))
 
 
 @pytest.mark.parametrize("batch_size", [None, 0, "0", "1.5", "two", True])
@@ -581,7 +574,7 @@ def test_vllm_serving_engines_get_their_options_and_slime_gets_no_engine_flags(t
     component = config["services"][0]
     assert component["command"][component["command"].index("--engine") + 1] == "vllm"
     argv = slime_argv(config)
-    assert "--rollout-num-gpus=0" in argv
+    assert not any(argument.startswith("--rollout-num-gpus") for argument in argv)
     assert not any(argument.startswith("--sglang-") for argument in argv)
     serving = serving_config(config)
     assert (serving["engine"], serving["options"]) == ("vllm", {"max-model-len": "4096"})
@@ -600,7 +593,7 @@ def test_a_deployment_without_an_inference_engine_trains_on_every_gpu(tmp_path):
     assert reef["inference_backend"] == "none"
     assert not reef.get("inference_num_gpus") and not reef.get("inference_options")
     argv = slime_argv(config)
-    assert "--rollout-num-gpus=0" in argv
+    assert not any(argument.startswith("--rollout-num-gpus") for argument in argv)
     assert "--actor-num-gpus-per-node=8" in argv
     assert not any(
         argument.startswith(("--colocate", "--offload", "--sglang-", "--router-", "--rollout-num-gpus-per-engine"))

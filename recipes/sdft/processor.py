@@ -6,10 +6,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Self
 
+from reef.core.chat_rendering import normalize_messages_for_template
 from reef.core.config import config_option
 from reef.pipeline_context import PipelineContext
-from reef.record2record import Record2Record
-from reef.record2task.distill import DistillSettings, DistillTasks, normalize_messages_for_template
+from reef.record2sample.distill import DistillSamples, DistillSettings
 
 #: The reference implementation's demonstration block (idanshen/Self-Distillation, ``main.py``).
 DEFAULT_CONTEXT_TEMPLATE = (
@@ -21,7 +21,7 @@ CONTEXT_PLACEHOLDER = "{context}"
 
 @dataclass(frozen=True)
 class SDFTSettings(DistillSettings):
-    """The config of ``SDFTTasks``: the shared distillation settings and the demonstration block's template."""
+    """The config of ``SDFTSamples``: the shared distillation settings and the demonstration block's template."""
 
     context_template: str = config_option(
         DEFAULT_CONTEXT_TEMPLATE, help="The text added to the final user message; {context} marks the demonstration."
@@ -33,8 +33,8 @@ class SDFTSettings(DistillSettings):
             raise ValueError(f"context_template must contain {CONTEXT_PLACEHOLDER}")
 
 
-class SDFTTasks(DistillTasks):
-    """One rollout and its demonstration, one training task.
+class SDFTSamples(DistillSamples):
+    """One rollout and its demonstration, one training sample.
 
     The teacher reads the student's request with the demonstration block
     appended to its final user message, as ``main.py`` of the reference
@@ -44,10 +44,9 @@ class SDFTTasks(DistillTasks):
     block is ``context_template`` with ``{context}`` replaced.
     """
 
-    def __init__(self, settings: SDFTSettings) -> None:
-        # The template is read before the tokenizer loads.
+    def __init__(self, context: PipelineContext, settings: SDFTSettings) -> None:
         self.template = settings.context_template
-        super().__init__(settings)
+        super().__init__(context, settings)
 
     @classmethod
     def from_config(
@@ -55,10 +54,9 @@ class SDFTTasks(DistillTasks):
         config: Mapping[str, Any],
         *,
         context: PipelineContext,
-        record2record: Record2Record,
         environ: Mapping[str, str],
     ) -> Self:
-        return cls(SDFTSettings.parse(config, plugin_class=cls))
+        return cls(context, SDFTSettings.parse(config, plugin_class=cls))
 
     def teacher_request(
         self, messages: list[Any], tools: list[Any] | None, response: str, teacher_context: str
@@ -73,4 +71,4 @@ class SDFTTasks(DistillTasks):
         return [*rendered, {"role": "user", "content": block}], tools
 
 
-__all__ = ["CONTEXT_PLACEHOLDER", "DEFAULT_CONTEXT_TEMPLATE", "SDFTSettings", "SDFTTasks"]
+__all__ = ["CONTEXT_PLACEHOLDER", "DEFAULT_CONTEXT_TEMPLATE", "SDFTSamples", "SDFTSettings"]

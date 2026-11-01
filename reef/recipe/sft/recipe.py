@@ -9,7 +9,8 @@ from typing import Any
 from reef.core.reports import ReportBase, TeacherContextReport
 from reef.recipe.base import WeightTrainingRecipe, WeightTrainingSpec
 from reef.recipe.errors import RecipeConfigError
-from reef.recipe.sft.processor import SFTJobData, SFTRecord2Record, SFTTasks
+from reef.recipe.sft.processor import SFTJobData, SFTSamples
+from reef.storage.samples import SampleKind
 from reef.train.pipeline import PipelineSpec
 
 
@@ -22,20 +23,23 @@ class SFTRecipe(WeightTrainingRecipe):
     an imported dataset example. SDFT uses the same report contract. Thus the
     two methods can train on the same reports.
 
-    The recipe binds the objective and the report contract. Its stages are ``SFTRecord2Record``, ``SFTTasks``, and
-    ``SFTJobData``. ``SFTJobData`` also takes uploaded ATIF trajectories (``POST /reef/trajectories``); ``SFTTasks``
-    renders each one with every agent turn trained, except ``is_copied_context`` steps. The ``pipeline`` section of the deployment configures
-    the stages:
+    The recipe binds the objective and the report contract. Its stages are ``SFTSamples`` and
+    ``SFTJobData``. ``SFTJobData`` also takes trajectory items (``POST /reef/namespaces/{owner}/data``), which train
+    with every agent turn that is not an ``is_copied_context`` step. The training component renders every sample
+    with the model's chat template. The ``pipeline`` section of the deployment configures the stages:
 
-    * ``pipeline.record2task.config``: ``tokenizer_path`` (required),
-      ``target``, and ``max_tokens``.
-    * ``pipeline.task2job.config.job_samples`` (required): the fewest
+    * ``pipeline.record2sample.config``: ``target`` and ``max_tokens``.
+    * ``pipeline.sample2job.config.job_samples`` (required): the fewest
       samples of one job. Slime cuts a job's data into optimizer steps of
       ``--global-batch-size`` samples.
-    * ``pipeline.task2job.config.buffer_size``: the most samples that wait
-      for a job.
+    * ``pipeline.sample2job.config.buffer_size``: the most samples that one
+      job takes; later samples wait in the sample store.
     * ``recipe.config.job_parameters``: the parameters of every job, for
       example ``scheduling.packing_length`` to count steps in packs of tokens.
+
+    The recipe gives parameters to trajectory jobs only. An imported train task
+    trains in ``manual`` mode, for an instruction whose ``parameters`` give its
+    job's method and rollout, such as an RL step after SFT.
 
     Configure the optimizer in ``training.options``.
     """
@@ -55,7 +59,11 @@ class SFTRecipe(WeightTrainingRecipe):
 
     @classmethod
     def pipeline_spec(cls) -> PipelineSpec:
-        return PipelineSpec(record2record=SFTRecord2Record, record2task=SFTTasks, task2job=SFTJobData)
+        return PipelineSpec(record2sample=SFTSamples, sample2job=SFTJobData)
+
+    def parameters_by_kind(self) -> Mapping[SampleKind, Mapping[str, Any]]:
+        """SFT trains trajectories: a task job takes its parameters from its instruction."""
+        return {"trajectory": super().parameters_by_kind()["trajectory"]}
 
     @classmethod
     def _validate_config(cls, settings: Mapping[str, Any]) -> None:

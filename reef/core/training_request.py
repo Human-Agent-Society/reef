@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import NotRequired, TypedDict
+from typing import Any, NotRequired, TypedDict
 
 from reef.core.requirements import parse_requires
 
@@ -20,10 +21,13 @@ class TrainingRequestPayload(TypedDict):
     release_id: str
     requires: list[dict[str, str]]
     client: NotRequired[ClientReport]
+    parameters: NotRequired[dict[str, Any]]
 
 
 #: At most this many commands in one report.
 MAX_CLIENT_COMMANDS = 64
+#: At most this many bytes of JSON in an instruction's job parameters.
+MAX_PARAMETERS_BYTES = 16384
 CLIENT_WORD = re.compile(r"[A-Za-z0-9._+\- ()]{1,64}")
 COMMAND_NAME = re.compile(r"[A-Za-z0-9._+\-]{1,40}")
 
@@ -55,9 +59,11 @@ def parse_client(value: object) -> ClientReport:
 def normalize_training_request_payload(payload: Mapping[str, object]) -> TrainingRequestPayload:
     """Validate a request and return its wire fields, dropping unknown keys.
 
-    Invalid instruction fields or requirements raise ValueError. Client machine
+    Invalid instruction fields, requirements or parameters raise ValueError. Client machine
     information is advisory: malformed entries are dropped. Text is preserved,
-    absent requirements become an empty list, and an empty client is omitted.
+    absent requirements become an empty list, and an empty client or empty parameters are omitted.
+    ``parameters`` is a JSON object with string keys, at most ``MAX_PARAMETERS_BYTES`` bytes of JSON: the
+    parameters of the instruction's training job over the recipe's (``Sample2Job.job_parameters``).
     """
     fields: dict[str, str] = {}
     for key in ("text", "session", "release_id"):
@@ -79,6 +85,17 @@ def normalize_training_request_payload(payload: Mapping[str, object]) -> Trainin
     client = parse_client(payload.get("client"))
     if client:
         normalized["client"] = client
+    parameters = payload.get("parameters", {})
+    if not isinstance(parameters, Mapping) or not all(isinstance(key, str) for key in parameters):
+        raise ValueError("parameters must be a JSON object")
+    try:
+        encoded = json.dumps(parameters, allow_nan=False, separators=(",", ":"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"parameters must be JSON: {exc}") from exc
+    if len(encoded.encode()) > MAX_PARAMETERS_BYTES:
+        raise ValueError(f"parameters must not exceed {MAX_PARAMETERS_BYTES} bytes of JSON")
+    if parameters:
+        normalized["parameters"] = json.loads(encoded)
     return normalized
 
 
@@ -93,6 +110,7 @@ class TrainingRequest:
     ``reef.core.requirements.parse_requires`` admits; default none.
     ``client`` is the requesting client's report of its machine (see
     :func:`reef.core.training_request.parse_client`); empty when it sent none.
+    ``parameters`` are the parameters of the instruction's training job over the recipe's; empty when it sent none.
 
     :meth:`from_dict` validates a payload with
     :func:`normalize_training_request_payload`; the constructor takes values
@@ -106,6 +124,7 @@ class TrainingRequest:
     # Out of the hash: the items are dicts, and the frozen contract is what the other fields carry.
     requires: tuple[Mapping[str, str], ...] = field(default=(), hash=False)
     client: Mapping[str, str | dict[str, bool]] = field(default_factory=dict, hash=False)
+    parameters: Mapping[str, Any] = field(default_factory=dict, hash=False)
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, object], *, request_id: str = "") -> TrainingRequest:
@@ -118,6 +137,7 @@ class TrainingRequest:
             id=request_id,
             requires=tuple(normalized["requires"]),
             client=normalized.get("client", {}),
+            parameters=normalized.get("parameters", {}),
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -128,4 +148,5 @@ class TrainingRequest:
             "requires": [dict(item) for item in self.requires],
             # Only when the client reported one, so a request without it keeps its earlier shape.
             **({"client": dict(self.client)} if self.client else {}),
+            **({"parameters": dict(self.parameters)} if self.parameters else {}),
         }

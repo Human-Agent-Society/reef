@@ -155,13 +155,13 @@ file, including a file selected through ``GUIDANCE_CONFIG``.
    * - Configuration
      - Default
      - Meaning
-   * - ``pipeline.record2record.config.groups_per_step``
+   * - ``pipeline.record2sample.config.groups_per_step``
      - 2
      - Parents selected per update
-   * - ``pipeline.record2record.config.rollouts_per_group``
+   * - ``pipeline.record2sample.config.rollouts_per_group``
      - 4
      - Guidance samples per parent
-   * - ``pipeline.task2job.config.job_samples``
+   * - ``pipeline.sample2job.config.job_samples``
      - 8
      - Must equal groups times rollouts
    * - ``training.options.global-batch-size``

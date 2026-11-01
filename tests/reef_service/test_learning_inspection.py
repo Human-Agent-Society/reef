@@ -13,6 +13,7 @@ from reef.service.app import create_app
 from reef.storage.commit_history import CommitHistoryScenarioStore
 from reef.storage.commits import CommitRecord
 from reef.storage.records import RecordRetention
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 
 
@@ -20,6 +21,7 @@ def test_history_reads_preserve_compacted_bodies_and_isolate_scenarios(tmp_path)
     async def run():
         dispatcher = build_default_dispatcher(
             scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
+            coordination=memory_coordination(),
         )
         scenario = dispatcher.get_or_create_scenario("one")
         other = dispatcher.get_or_create_scenario("two")
@@ -138,16 +140,17 @@ def test_record_list_filters_by_request_type(tmp_path):
     async def run():
         dispatcher = build_default_dispatcher(
             scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
+            coordination=memory_coordination(),
         )
         scenario = dispatcher.get_or_create_scenario("one")
         for name, request_type in (
             ("turn-1", RequestType.INFERENCE),
-            ("ask-1", RequestType.TRAIN),
+            ("ask-1", RequestType.REPORT),
             ("turn-2", RequestType.INFERENCE),
-            ("ask-2", RequestType.TRAIN),
-            ("ask-3", RequestType.TRAIN),
+            ("ask-2", RequestType.REPORT),
+            ("ask-3", RequestType.REPORT),
         ):
-            payload = {"text": "change it"} if request_type is RequestType.TRAIN else {"messages": []}
+            payload = {"score": 1.0} if request_type is RequestType.REPORT else {"messages": []}
             scenario.records.append(
                 AgentRecord.create(scenario="one", request_type=request_type, agent_record_id=name, payload=payload)
             )
@@ -156,12 +159,12 @@ def test_record_list_filters_by_request_type(tmp_path):
         headers = {"authorization": "Bearer inspection-test-token"}
         try:
             first = await (
-                await client.get("/reef/scenarios/one/records?request_type=train&limit=2", headers=headers)
+                await client.get("/reef/scenarios/one/records?request_type=report&limit=2", headers=headers)
             ).json()
             assert [r["agent_record_id"] for r in first["records"]] == ["ask-1", "ask-2"]
             tail = await (
                 await client.get(
-                    f'/reef/scenarios/one/records?request_type=train&after_sequence={first["next_after_sequence"]}',
+                    f'/reef/scenarios/one/records?request_type=report&after_sequence={first["next_after_sequence"]}',
                     headers=headers,
                 )
             ).json()

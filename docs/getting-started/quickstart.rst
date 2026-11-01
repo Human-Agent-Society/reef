@@ -76,6 +76,16 @@ with no GPU.
 
          curl -f http://127.0.0.1:8900/healthz     # {"ok": true}
 
+   #. **Create a scenario.** Reef answers inference only for a scenario that
+      exists, and a request for an unknown scenario gets HTTP 404.
+
+      .. code:: bash
+
+         curl -sS -X POST http://127.0.0.1:8900/reef/scenarios \
+           -H "Authorization: Bearer reef-local" \
+           -H "Content-Type: application/json" \
+           -d '{"name": "hello-reef"}'
+
    #. **Send a request and report on it.** The body is the provider's;
       ``x-reef-scenario`` is the only thing Reef adds. The response header
       ``x-reef-agent-record-id`` carries the **receipt**, which names the
@@ -146,15 +156,15 @@ with no GPU.
            -d '{"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]}'
          # x-reef-agent-record-id: ee5aa401634b4567bf9dae21816abde4
 
-   #. **Read the release chain.**
+   #. **Read the artifacts.**
 
       .. code:: bash
 
          curl -sS -H "Authorization: Bearer reef-local" \
-           http://127.0.0.1:8900/reef/scenarios/hello-reef/releases
-         # {"scenario": "hello-reef", "releases": [{"release_id": "...", "operation": "creation", "current": true, ...}]}
+           http://127.0.0.1:8900/reef/scenarios/hello-reef/artifacts
+         # {"scenario": "hello-reef", "artifacts": [{"artifact_id": "...", "operation": "creation", "active": true, ...}]}
 
-      One release, and it will stay at one: this deployment's recipe is the
+      One artifact, and it will stay at one: this deployment's recipe is the
       core ``recipe``, which records and trains nothing.
 
 To make the chain advance, bind a recipe that learns. To use a weight recipe,
@@ -164,15 +174,10 @@ Slime training workers and the serving engine.
 Weight recipes need GPUs (`Evolve your model
 <../user-guide/evolve-your-model.rst>`__).
 
-The one that runs on a laptop is ``reefine``, the built-in recipe:
-``reef serve --recipe reefine --model ollama/gemma4:26b`` needs no second file,
-because its proposer and evaluator ship with the package. Ask for a change from
-the shell or from a ``reef-pi`` session and one evolve step runs for it; read
-`Reefine <../user-guide/recipes/reefine.rst>`__ for what it does with a request.
-
-To write the loop yourself, use ``evolve-your-harness``, which takes a second
-file: a **preset** naming your ``propose`` and ``evaluate`` callables and the
-tasks to evaluate on. ``tutorials/evolve-your-harness/run.sh`` wires the whole loop
+A harness recipe runs on a laptop with only a model endpoint. Bind
+``reef.recipe.harness:HarnessEvolutionRecipe`` and give it a **preset**
+naming your method (``evolution.method``), the seed tree, and the evaluation's
+tasks and scorer (``evolution.evaluation``). ``tutorials/evolve-your-harness/run.sh`` wires the whole loop
 together. Run it, then read `Evolve your harness
 <../user-guide/evolve-your-harness.rst>`__ for an explanation of each piece.
 
@@ -181,9 +186,8 @@ Choose your next step
 
 - `Compare learning recipes <../user-guide/recipes.rst>`__ to choose between
   model training and harness evolution based on the feedback you have.
-- Try `GEPA harness optimization <../user-guide/recipes/gepa.rst>`__ or
-  `SkillClaw skill evolution <../user-guide/recipes/skillclaw.rst>`__ for
-  worked harness examples, or `SAO rollout training
+- Try `GEPA harness optimization <../user-guide/recipes/gepa.rst>`__ for a
+  worked harness example, or `SAO rollout training
   <../user-guide/recipes/sao.rst>`__ for a GPU training example with results.
 - Use the `HTTP API reference <../reference/http-api.rst>`__ when connecting
   your own agent: it covers inference headers, feedback reports, and release

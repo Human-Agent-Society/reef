@@ -18,10 +18,15 @@ from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
+from reef.artifact.artifact import Artifact
+from reef.artifact.files import ArtifactFiles
+from reef.artifact.repository import DefaultStart
+from reef.core.artifact_ref import RootSource
 from reef.core.job_data import JobData
-from reef.core.weight_layout import WEIGHT_LAYOUTS, WeightLayout
+from reef.core.weight_layout import ADAPTER_DIR, WEIGHT_LAYOUTS, WeightLayout
+from reef.surface.base import ArtifactLayout
 
 JobState = Literal["running", "finished", "failed"]
 
@@ -31,10 +36,11 @@ class TrainingJob:
     """One bounded training job: a data snapshot, the weights it starts from, and the backend's parameters.
 
     A value has a non-empty ``job_id``, a non-empty ``backend`` name, ``start``
-    (the directory of the start weights as the component reads them, or
-    ``None`` for the backend's base model), ``data`` (the job data that the job trains; the component cuts it into
-    optimizer batches by its own batch size)
-    and ``parameters``, a mapping that encodes as JSON.
+    (the non-empty start that the component reads, ``TrainingComponent.root_start`` for a scenario's root release),
+    ``data`` (the job data that the job trains; the component cuts it into
+    optimizer batches by its own batch size),
+    ``parameters``, a mapping that encodes as JSON, and ``scenario``, the non-empty name of the scenario whose
+    trainer submits the job. The jobs of one scenario run one at a time, in the order of their submission.
 
     Reef makes the value and names the job with ``job_id_for``, so a retry of
     the same request has the same ID. A component reads it in ``submit``.
@@ -42,17 +48,20 @@ class TrainingJob:
 
     job_id: str
     backend: str
-    start: str | None
+    start: str
     data: JobData
     parameters: Mapping[str, Any] = field(default_factory=dict)
+    scenario: str = field(kw_only=True)
 
     def __post_init__(self) -> None:
         if not isinstance(self.job_id, str) or not self.job_id:
             raise ValueError("TrainingJob.job_id must be a non-empty string")
+        if not isinstance(self.scenario, str) or not self.scenario:
+            raise ValueError("TrainingJob.scenario must be a non-empty string")
         if not isinstance(self.backend, str) or not self.backend:
             raise ValueError("TrainingJob.backend must be a non-empty string")
-        if self.start is not None and (not isinstance(self.start, str) or not self.start):
-            raise ValueError("TrainingJob.start must be a non-empty string or None")
+        if not isinstance(self.start, str) or not self.start:
+            raise ValueError("TrainingJob.start must be a non-empty string")
         if not isinstance(self.data, JobData):
             raise TypeError("TrainingJob.data must be a JobData")
         if not isinstance(self.parameters, Mapping):
@@ -60,7 +69,7 @@ class TrainingJob:
         json.dumps(dict(self.parameters), allow_nan=False)
 
 
-def job_id_for(backend: str, start: str | None, data_identity: object, parameters: Mapping[str, Any]) -> str:
+def job_id_for(backend: str, start: str, data_identity: object, parameters: Mapping[str, Any]) -> str:
     """The ID of a job: a hash of its backend, start, data and parameters, so a retry gets the same ID.
 
     ``data_identity`` is a JSON value that names the data, not the job data's
@@ -206,6 +215,25 @@ class ReleaseFormat:
         return cls(value["layout"], value.get("adapter_rank"), tuple(modules))
 
 
+@dataclass(frozen=True)
+class ScenarioRoot:
+    """A scenario's root release, as one trainer's component sees it, and where the root came from.
+
+    Values: ``artifact`` is the trainer's component of the scenario's root release (the release itself when the
+    release is flat), which ``materialize`` makes local. ``source`` is the root's ``RootSource``.
+
+    Purpose: ``ScenarioFactory`` makes it when it builds a scenario's trainers, and ``Trainer.build`` gives it to
+    ``TrainingComponent.root_start`` for the first job of a trainer that has no committed state.
+    """
+
+    artifact: Artifact
+    source: RootSource
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.artifact, Artifact) or not isinstance(self.source, RootSource):
+            raise TypeError("a scenario root is an Artifact and a RootSource")
+
+
 class TrainingComponent(ABC):
     """A training backend that runs whole jobs with its framework's own training loop.
 
@@ -231,6 +259,39 @@ class TrainingComponent(ABC):
         example a Tinker manifest that Tinker's sampler serves).
         """
 
+    @abstractmethod
+    def default_start(self) -> DefaultStart:
+        """The component's untrained checkpoint, laid out as one of its releases, and the configuration it comes from.
+
+        A scenario that is created without an artifact item holds it in its root release, in the component that
+        this component trains. It has the layout of every other release (``release_format``), so serving and
+        training read it as they read any release. Its ``inputs`` name the model and the settings that decide its
+        content. Every service process can call this method, so a component whose model files cost a remote call
+        gives them as ``BaseModelFiles`` that make them on the first ``directory`` call.
+        """
+
+    def root_start(self, root: ScenarioRoot) -> str:
+        """The start of the first job of a trainer whose scenario has the root release ``root``.
+
+        The default is ``import_start`` of the root's files. A component that imports no release
+        (``starts_from_releases`` False) overrides it, and raises ``ValueError`` for a root that it cannot start
+        from.
+        """
+        local_path = root.artifact.materialize().local_path
+        if local_path is None:
+            raise ValueError(f"the root release {root.artifact.ref.release_id} has no local files to train from")
+        return self.import_start(local_path)
+
+    @property
+    def starts_from_releases(self) -> bool:
+        """Whether ``import_start`` can take a published release as the start of later jobs.
+
+        False exactly when the component refuses every release, so no trainer of it can train from an artifact.
+        True, the default, when it takes some releases; ``import_start`` still refuses one whose weights it cannot
+        start from.
+        """
+        return True
+
     @property
     def shares_scenarios(self) -> bool:
         """Whether jobs of several scenarios can run on this component.
@@ -244,8 +305,16 @@ class TrainingComponent(ABC):
         """
         return False
 
+    def check_job(self, job: TrainingJob) -> None:
+        """Raise ``ValueError`` for a job this component cannot train. The default accepts every job.
+
+        A queue-backed component calls it before it adds the job to the jobs queue, so a refused job never waits
+        in the queue.
+        """
+        return
+
     def check_task_jobs(self, parameters: Mapping[str, Any]) -> None:
-        """Raise ``ValueError`` unless the component can train jobs whose data are ``TaskItem`` values, with ``parameters``.
+        """Raise ``ValueError`` unless the component can train jobs whose data are ``TaskSample`` values, with ``parameters``.
 
         A recipe whose jobs train tasks calls it when it is built, so a deployment that cannot run them fails before
         any job. ``parameters`` are the recipe's job parameters without the method. The default refuses: the
@@ -253,31 +322,54 @@ class TrainingComponent(ABC):
         """
         raise ValueError(f"the {self.name} training component trains no task jobs")
 
+    def check_release(self, files: ArtifactFiles) -> None:
+        """Raise ``ValueError`` unless ``files`` are a release in the layout of this component's releases.
+
+        An artifact import calls it (RFC #980) on the directory it copied or on the revision it keeps by reference
+        (RFC #995). The default reads ``release_format``: ``"full"`` needs ``config.json`` and weight files at the
+        root; ``"adapter"`` needs a PEFT adapter in ``adapter/`` whose rank is at most ``adapter_rank`` and whose
+        target modules are within ``adapter_target_modules``. It reads only file names and
+        ``adapter/adapter_config.json``, so a revision is checked without downloading its weights. ``None``
+        refuses every release. A component whose releases name weights on a service overrides it and also checks
+        that each path resolves there.
+        """
+        release_format = self.release_format
+        if release_format is None:
+            raise ValueError(f"the {self.name} training component takes no imported releases")
+        paths = set(files.paths())
+        if release_format.layout == "full":
+            if "config.json" not in paths or not any(
+                "/" not in path and path.endswith((".safetensors", ".bin")) for path in paths
+            ):
+                raise ValueError("a full-weight release holds config.json and weight files at its root")
+            return
+        if not paths & {f"{ADAPTER_DIR}/adapter_model.safetensors", f"{ADAPTER_DIR}/adapter_model.bin"}:
+            raise ValueError(f"an adapter release holds a PEFT adapter in {ADAPTER_DIR}/")
+        try:
+            config = json.loads(files.read_bytes(f"{ADAPTER_DIR}/adapter_config.json"))
+        except (OSError, ValueError) as exc:
+            raise ValueError(f"{ADAPTER_DIR}/adapter_config.json is no readable JSON object: {exc}") from exc
+        rank = config.get("r") if isinstance(config, dict) else None
+        # ReleaseFormat's invariant: an adapter format has a rank.
+        max_rank = cast(int, release_format.adapter_rank)
+        if isinstance(rank, bool) or not isinstance(rank, int) or not 0 < rank <= max_rank:
+            raise ValueError(f"the adapter's rank must be a positive int at most {max_rank}")
+        targets = release_format.adapter_target_modules
+        modules = config.get("target_modules")
+        if targets != ("all",) and (not isinstance(modules, list) or not set(modules) <= set(targets)):
+            raise ValueError(f"the adapter's target modules must be a list within {list(targets)}, got {modules!r}")
+
     @abstractmethod
-    def import_start(self, release: Path) -> str | None:
+    def import_start(self, release: Path) -> str:
         """Take the published release in ``release`` as the start of later jobs; return that start.
 
-        Reef calls this for a rollback. The component copies what it trains
+        Reef calls this when a trainer starts training from an artifact
+        (``train-from``). The component copies what it trains
         from into its own durable directory, since ``release`` can be
-        discarded later. A release without weights is the base model, whose
-        start is ``None``. Raise ``ValueError``, and change nothing, when the
-        component cannot start from these weights; a component may refuse
-        every release.
+        discarded later. Raise ``ValueError``, and change nothing, when the
+        component cannot start from these weights. A component whose
+        ``starts_from_releases`` is False refuses every release.
         """
-
-    def fresh_start(self, start: str | None) -> str | None:
-        """A start with the weights of ``start`` and no training state; Reef calls it when a plan restarts training.
-
-        The returned start holds the same weights as ``start`` (``None``: the
-        base model, as for a job). A job from it trains with a new optimizer
-        state, its learning-rate schedule from step 0, and an empty objective
-        state. The component writes it durably. The same ``start`` always
-        gives the same result, so a resubmission after the service restarts
-        names the same job. Raise ``ValueError`` when the component cannot
-        drop the training state of these weights. The default refuses every
-        start.
-        """
-        raise ValueError(f"the {self.name} training component cannot restart training from {start!r}")
 
     @abstractmethod
     def submit(self, job: TrainingJob) -> None:
@@ -296,6 +388,34 @@ class TrainingComponent(ABC):
     def cancel(self, job_id: str) -> None:
         """Stop the job, which then reports ``failed``; nothing for an unknown or ended job."""
 
+    def start_jobs(self) -> None:
+        """Start running jobs in this process: take the component's job state and resume the jobs that have not ended.
+
+        Only the process that runs the jobs calls it: the training service's ``TrainingJobWorker``, which a
+        one-process deployment runs too. Another process, such as control, uses the component to describe jobs and
+        to import starts, and never runs a job. A component whose jobs run elsewhere does nothing, the default.
+        """
+        return
+
     def close(self) -> None:
         """Release the component's resources; safe to call repeatedly."""
         return
+
+
+@dataclass(frozen=True)
+class ReleaseLayout(ArtifactLayout):
+    """The layout of the releases of ``component``: an import of the component it trains must meet it.
+
+    ``check`` is ``component.check_release``. The releases resolve a reference when they hold weight files
+    (``release_format``), which the serving runtimes read through ``ReleaseFiles``. A weight recipe binds it on its
+    ``weights`` component.
+    """
+
+    component: TrainingComponent
+
+    def check(self, files: ArtifactFiles) -> None:
+        self.component.check_release(files)
+
+    @property
+    def resolves_references(self) -> bool:
+        return self.component.release_format is not None

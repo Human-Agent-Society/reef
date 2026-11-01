@@ -27,8 +27,8 @@ def test_training_drain_timeout(filename, monkeypatch):
     monkeypatch.setattr(module, "time", SimpleNamespace(time=lambda: next(clock), sleep=lambda _: None))
     monkeypatch.setattr(module, "TRAIN_DRAIN_TIMEOUT_S", 1)
     if filename == "stream.py":
-        monkeypatch.setattr(module, "releases", list)
+        monkeypatch.setattr(module, "training_step_count", lambda: 0)
     else:
-        monkeypatch.setattr(module, "training_release_count", lambda: 0)
+        monkeypatch.setattr(module, "training_step_count", lambda: 0)
     with pytest.raises(TimeoutError, match="0/1"):
         module.wait_for_training(1)

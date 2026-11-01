@@ -27,7 +27,7 @@ harness/              agent harness (PUCT search + Reef adapter)
   harbor_agent.py       Harbor BaseAgent (imports harbor package)
 serve.yaml            Reef + Ray + Slime/Megatron + SGLang stack config
 serve-tinker.yaml     the same method on Tinker's hosted LoRA training, no local GPU
-run.py                one reef-eval episode owning the complete TTT trajectory
+run.py                one reef-eval rollout owning the complete TTT trajectory
 run.sh                starts the reef training stack, then runs run.py
 pyproject.toml        makes the harness importable
 results/              formal result data, generated programs, and plots
@@ -95,16 +95,17 @@ The runtime flow is:
 PUCT chooses G parents
   -> harness submits G × R OpenAI-compatible chat requests
   -> the TTTD inference backend renders each prompt once and calls SGLang /generate
-  -> Reef stores exact tokens, response loss mask, and rollout log-probabilities
+  -> Reef records each provider exchange and the adapter that answered, without tokens
   -> sandbox executes each generated program; the official verifier gives rewards
   -> harness reports every reward against its exact inference receipt
-  -> TTTDRecord2Record waits for the complete G × R step; TTTDJobData removes constant groups
+  -> TTTDSamples waits for the complete G × R step; TTTDJobData removes constant groups
+  -> the training component renders each rollout with the model's chat template
   -> Slime prepares adaptive-beta entropic leave-one-out advantages from the reserved job data
   -> Slime applies frozen-base token KL and un-clipped importance sampling
   -> Megatron performs one optimizer step and synchronizes weights to SGLang
   -> valid children update the local PUCT archive
-  -> the Harbor controller waits for the durable scenario commit and new runtime load ID
-  -> the post-step PUCT archive is atomically paired with that committed version
+  -> the Harbor controller waits for the durable scenario commit and the new served artifact
+  -> the post-step PUCT archive is atomically paired with that committed artifact
 ```
 
 ## Included paper problems
@@ -183,13 +184,17 @@ and sizes the memory limits for it — the packing tasks need a longer context
 (`32768`) on the same GPUs, so they get a smaller per-GPU token budget.
 
 The step grid has one source: `groups_per_step` and `rollouts_per_group` under
-`pipeline.record2record.config` in `serve.yaml`. `harness/harbor_agent.py`
+`pipeline.record2sample.config` in `serve.yaml`. `harness/harbor_agent.py`
 reads them as `GROUPS_PER_STEP` and `ROLLOUTS_PER_GROUP`, so the harness sends
 exactly the coordinates that Reef waits for. Slime's `--global-batch-size` in
 `serve.yaml` must equal their product. A one-step plumbing smoke sets the grid
 to 2 x 2 and
 `enable_thinking: false` in the stack's `training.config`, so a short completion
-is not spent entirely in the reasoning channel before it emits a program. Two
+is not spent entirely in the reasoning channel before it emits a program.
+Give the training component the same value, so that it renders each rollout as
+the engine served it: `apply-chat-template-kwargs: '{"enable_thinking": false}'`
+in `training.options` on Slime, or `chat_template_kwargs: {enable_thinking: false}`
+on Tinker. Two
 rollouts per group are enough to exercise the path but not to train: TTTD's
 leave-one-out entropic advantages degenerate with one rewarded and one
 unrewarded rollout, so a step that should mean something needs several per group.
@@ -209,13 +214,14 @@ per grid.
 scenario records, and PUCT state; a second problem needs its own directory so
 the two cannot mix. `work/erdos_min_overlap/tttd-search-state.json` records a
 pending archive immediately after a search step and marks it committed only
-after Reef's durable training transaction advances the scenario and publishes
-a new serving runtime load ID.
+after Reef's durable training transaction advances the scenario and serves
+a new artifact.
 Restarting with the same scenario, task instruction, and sampling settings
 resumes that paired state; a missing or mismatched step fails closed instead
-of silently restarting PUCT against a later model checkpoint. Serving weight
-versions are session scoped, so a correctly restored step may rebind the saved
-archive to the new engine version.
+of silently restarting PUCT against a later model checkpoint. Reef's scenario
+step is the check: when a correctly restored step serves another artifact, for
+example after an operator activated one, the controller records that artifact.
+The controller refuses a state file of an older format; start a fresh scenario.
 
 Use a fresh scenario for each discovery problem: TTT-Discover fine-tunes on one
 test problem rather than learning a general task policy.
@@ -246,20 +252,22 @@ The integration reproduces:
   explicitly, rather than SGLang's model-specific defaults;
 - the reference Adam settings (`lr=4e-5`, betas `0.9/0.95`, `eps=1e-8`,
   zero weight decay, and no gradient clipping);
-- raw continuous rewards linked to exact inference tensors rather than
-  reconstructed from ordinary HTTP chat JSON;
+- raw continuous rewards linked to exact inference receipts;
 - Megatron Bridge LoRA with the paper configuration (`rank=32`, `alpha=32`)
   on QKV, attention output, and both MLP projections. The base parameters remain
   frozen in both runtimes. Reef synchronizes the serving-native `lora_A` and
   `lora_B` adapter tensors to SGLang.
 
-The default HTTP backend cannot manufacture training tensors from response
-text. The deployment therefore selects Reef's token-native SGLang chat
-backend. The public harness route remains `/v1/chat/completions`; inside the
-inference backend, Reef renders the prompt once, calls SGLang `/generate`, and
-records the engine's sampled token IDs and rollout log-probabilities. Reef's
-weight surface names the scenario's own adapter revision on every request;
-the harness never selects one and the backend never injects a fallback.
+The deployment selects Reef's token-native SGLang chat backend. The public
+harness route remains `/v1/chat/completions`; inside the inference backend,
+Reef renders the prompt once and calls SGLang `/generate`. Serving records no
+tokens or log-probabilities: the training component renders each rollout with
+the model's chat template, and the actor computes the old-policy
+log-probabilities with the weights of the step's start. With
+`max_staleness: 0` these are the weights that sampled the grid. Slime refuses
+`--use-rollout-logprobs`. Reef's weight surface names the scenario's own
+adapter revision on every request; the harness never selects one and the
+backend never injects a fallback.
 
 New Slime configs should use the
 `recipes.tttd.slime.objective.*` custom-function paths.

@@ -31,7 +31,7 @@ from recipes.tttd.examples.guidance_ttt.harness.prompts import (
     build_guidance_prompt,
     extract_strict_guidance,
 )
-from recipes.tttd.examples.guidance_ttt.harness.puct import archive_puct_score
+from recipes.tttd.examples.guidance_ttt.harness.puct import rank_archive_nodes
 from recipes.tttd.examples.guidance_ttt.harness.run_controller import (
     GuidanceRunIdentity,
     GuidanceRunStateError,
@@ -326,12 +326,11 @@ def test_discover_same_step_uses_independent_root_lineages(tmp_path: Path) -> No
 def test_best_child_puct_mode_matches_guidance_reference() -> None:
     root = make_root_node(problem_id="polyomino_packing", raw_score=100.0, reward=100.0)
 
-    score = archive_puct_score(
-        node=root,
-        visit_count=1,
-        best_reachable_value=50.0,
-        prior=0.0,
-        scale=1.0,
+    ((score, *_),) = rank_archive_nodes(
+        [root],
+        initial_ids={root.id},
+        visit_counts={root.id: 1},
+        best_reachable_values={root.id: 50.0},
         total_visits=1,
         puct_c=0.0,
         q_mode="best_child",
@@ -442,7 +441,7 @@ def _wait(statuses, commits=_job_commits, *, timeout_s: float = 1, expected_roll
 
 def test_training_wait_returns_the_checkpoint_once_the_job_ended() -> None:
     running = _reef_status(scenario_step=1, training_job={"job_id": "job-1"})
-    ended = _reef_status(scenario_step=3, finished_jobs=1, runtime_load_id="guidance:1")
+    ended = _reef_status(scenario_step=3, finished_jobs=1, served_artifact_id="artifact-1")
 
     outcome = _wait([_reef_status(), running, ended])
 
@@ -451,7 +450,7 @@ def test_training_wait_returns_the_checkpoint_once_the_job_ended() -> None:
         rollout_id=0,
         checkpoint_metrics=_job_commits()[1]["metrics"],
         position=TrainingPosition(3, 1, None),
-        runtime_load_id="guidance:1",
+        served_artifact_id="artifact-1",
     )
 
 
@@ -510,7 +509,7 @@ def _reef_status(
     scenario_step: int = 0,
     finished_jobs: int = 0,
     training_job: dict | None = None,
-    runtime_load_id: str | None = None,
+    served_artifact_id: str | None = None,
 ) -> dict:
     return {
         "error": error,
@@ -520,7 +519,7 @@ def _reef_status(
                 "scenario_step": scenario_step,
                 "training_job": training_job,
                 "finished_jobs": finished_jobs,
-                "current_runtime_load_id": runtime_load_id,
+                "served_artifact_id": served_artifact_id,
                 "processor": {"failed_steps": failed_steps or []},
             }
         },
@@ -661,7 +660,7 @@ def _outcome(**metrics) -> TrainingJobOutcome:
         rollout_id=0,
         checkpoint_metrics={**TRAIN_METRICS, **metrics},
         position=TrainingPosition(3, 1, None),
-        runtime_load_id="guidance:1",
+        served_artifact_id="artifact-1",
     )
 
 
@@ -794,7 +793,7 @@ def test_harbor_agent_runs_one_committed_step_and_submits_the_best_candidate(
                 rollout_id=0,
                 checkpoint_metrics={**TRAIN_METRICS, "train/grad_norm": 0.5, "train/global_batch_size": 2},
                 position=TrainingPosition(3, 1, None),
-                runtime_load_id="guidance:1",
+                served_artifact_id="artifact-1",
             )
 
     monkeypatch.setattr(agent_module, "StatusTrainingProgress", _Progress)

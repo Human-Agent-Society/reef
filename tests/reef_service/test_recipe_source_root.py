@@ -34,68 +34,57 @@ def _checkout(tmp_path: Path, package: str = "recipes") -> tuple[Path, Path]:
 
 
 @pytest.mark.unit
-def test_dotted_recipe_resolves_to_the_nearest_ancestor_holding_its_package(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "reef_section, keep_init, holds_package",
+    [
+        ({"recipe": "recipes.sao.recipe:SAORecipe"}, True, True),
+        # Bare recipe names and a missing recipe have no package.
+        ({"recipe": "recipe"}, True, False),
+        ({"recipe": "my-preset"}, True, False),
+        (None, True, False),
+        # A missing package leaves the import to the service.
+        ({"recipe": "other_pkg.method:Recipe"}, True, False),
+        # A directory without __init__.py is not the package.
+        ({"recipe": "recipes.sao.recipe:SAORecipe"}, False, False),
+    ],
+)
+def test_dotted_recipe_resolves_to_the_nearest_ancestor_holding_its_package(
+    tmp_path: Path, reef_section: dict | None, keep_init: bool, holds_package: bool
+) -> None:
     root, config_path = _checkout(tmp_path)
+    if not keep_init:
+        (root / "recipes" / "__init__.py").unlink()
+    config = {} if reef_section is None else {"reef": reef_section}
 
-    assert recipe_source_root({"reef": {"recipe": "recipes.sao.recipe:SAORecipe"}}, config_path) == root
-
-
-@pytest.mark.unit
-def test_bare_recipe_names_have_no_source_root(tmp_path: Path) -> None:
-    _, config_path = _checkout(tmp_path)
-
-    assert recipe_source_root({"reef": {"recipe": "recipe"}}, config_path) is None
-    assert recipe_source_root({"reef": {"recipe": "my-preset"}}, config_path) is None
-    assert recipe_source_root({}, config_path) is None
+    assert recipe_source_root(config, config_path) == (root if holds_package else None)
 
 
 @pytest.mark.unit
-def test_missing_package_leaves_the_import_to_the_service(tmp_path: Path) -> None:
-    _, config_path = _checkout(tmp_path)
-
-    assert recipe_source_root({"reef": {"recipe": "other_pkg.method:Recipe"}}, config_path) is None
-
-
-@pytest.mark.unit
-def test_a_directory_without_init_is_not_the_package(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "inherited, service_env, expected",
+    [
+        ("/opt/sglang/python:/root/Megatron-LM", {}, ["/opt/sglang/python", "/root/Megatron-LM", "<root>"]),
+        (None, {}, ["<root>"]),
+        # The service's env map still owns PYTHONPATH.
+        (None, {"PYTHONPATH": "/explicit"}, ["/explicit"]),
+    ],
+)
+def test_source_root_is_appended_to_pythonpath_once(
+    tmp_path: Path, monkeypatch, inherited: str | None, service_env: dict[str, str], expected: list[str]
+) -> None:
     root, config_path = _checkout(tmp_path)
-    (root / "recipes" / "__init__.py").unlink()
-
-    assert recipe_source_root({"reef": {"recipe": "recipes.sao.recipe:SAORecipe"}}, config_path) is None
-
-
-@pytest.mark.unit
-def test_source_root_is_appended_to_pythonpath_once(tmp_path: Path, monkeypatch) -> None:
-    root, config_path = _checkout(tmp_path)
-    monkeypatch.setenv("PYTHONPATH", "/opt/sglang/python:/root/Megatron-LM")
+    if inherited is None:
+        monkeypatch.delenv("PYTHONPATH", raising=False)
+    else:
+        monkeypatch.setenv("PYTHONPATH", inherited)
     stack = ProcessWorker({}, [{"name": "reef"}], tmp_path / "stack", 60, config_path, source_root=root)
+    service = {"name": "reef", "env": service_env}
 
-    env = stack._service_env({"name": "reef"})
+    env = stack._service_env(service)
 
-    assert env["PYTHONPATH"].split(os.pathsep) == ["/opt/sglang/python", "/root/Megatron-LM", str(root)]
-
+    assert env["PYTHONPATH"].split(os.pathsep) == [str(root) if path == "<root>" else path for path in expected]
     monkeypatch.setenv("PYTHONPATH", env["PYTHONPATH"])
-    assert stack._service_env({"name": "reef"})["PYTHONPATH"] == env["PYTHONPATH"]
-
-
-@pytest.mark.unit
-def test_source_root_starts_pythonpath_when_unset(tmp_path: Path, monkeypatch) -> None:
-    root, config_path = _checkout(tmp_path)
-    monkeypatch.delenv("PYTHONPATH", raising=False)
-    stack = ProcessWorker({}, [{"name": "reef"}], tmp_path / "stack", 60, config_path, source_root=root)
-
-    assert stack._service_env({"name": "reef"})["PYTHONPATH"] == str(root)
-
-
-@pytest.mark.unit
-def test_service_env_map_still_owns_pythonpath(tmp_path: Path, monkeypatch) -> None:
-    root, config_path = _checkout(tmp_path)
-    monkeypatch.delenv("PYTHONPATH", raising=False)
-    stack = ProcessWorker({}, [{"name": "reef"}], tmp_path / "stack", 60, config_path, source_root=root)
-
-    env = stack._service_env({"name": "reef", "env": {"PYTHONPATH": "/explicit"}})
-
-    assert env["PYTHONPATH"] == "/explicit"
+    assert stack._service_env(service)["PYTHONPATH"] == env["PYTHONPATH"]
 
 
 @pytest.mark.unit
@@ -126,6 +115,8 @@ def test_a_service_imports_the_recipe_package_beside_the_config(tmp_path: Path, 
     )
     probe_service = {"name": "probe", "executor": backend, "command": [sys.executable, "-c", probe, str(marker)]}
     monkeypatch.setattr(orchestrator, "validate_services", lambda config, path: [probe_service])
+    # The watchdog notices the probe's exit on its next check; a short interval ends the run at once.
+    monkeypatch.setattr(orchestrator, "_WATCHDOG_INTERVAL", 0.05)
     monkeypatch.delenv("PYTHONPATH", raising=False)
     monkeypatch.chdir(config_path.parent)
     monkeypatch.setattr(sys, "path", list(sys.path))

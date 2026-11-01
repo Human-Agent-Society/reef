@@ -34,8 +34,9 @@ log-prob gap and the same sample weights and effective loss masks.
 
 The sampler's log-probs are those at the point the trainer reads (after
 temperature, before top-k, top-p and min-p filters; see the configuration
-reference), so records must come from a token-native handler with
-``capture_topk`` at least ``--score-centering-top-k``.
+reference). Only the task rollouts of a training component record them, at
+least ``--score-centering-top-k`` per position: serving records no tensors,
+so a sample that serving recorded cannot train with score centering.
 """
 
 from __future__ import annotations
@@ -47,7 +48,7 @@ from numbers import Integral
 from typing import Any
 
 from reef.train.slime_backend.algorithm import SlimeAlgorithm, is_finite_number
-from reef.train.types import TrajectoryItem
+from reef.train.types import TrajectorySample
 
 #: Payload and rollout-data keys of the sampler's top-K: one ``[R, top_k]`` block per sample.
 TOPK_INDICES_KEY = "sampler_topk_indices"
@@ -60,8 +61,7 @@ class ScoreCenteringSettings:
     """The term's own settings.
 
     ``top_k`` is the number of sampler log-probs per position the term reads;
-    a record must carry at least that many (the inference handler's
-    ``capture_topk``). The paper's default is 128; a smaller head leaves more
+    a task rollout must record at least that many. The paper's default is 128; a smaller head leaves more
     of the drift uncorrected when the sampler's tail differs from the
     trainer's. ``min_tail_mass`` is the floor both tail masses are clipped to
     before their ratio is taken (the paper uses ``1e-6``).
@@ -124,7 +124,7 @@ def configure_score_centering(args: Namespace, spec: SlimeAlgorithm) -> None:
     args.reef_rollout_log_skip_keys = tuple(dict.fromkeys((*args.reef_rollout_log_skip_keys, *ROLLOUT_KEYS)))
 
 
-def sampler_topk_columns(samples: Sequence[TrajectoryItem], row_indices: Sequence[int]) -> dict[str, list[Any]]:
+def sampler_topk_columns(samples: Sequence[TrajectorySample], row_indices: Sequence[int]) -> dict[str, list[Any]]:
     """The payload's top-K columns: each wire row's recorded ``topk_indices`` and ``topk_log_probs``."""
     return {
         TOPK_INDICES_KEY: [list(samples[row].training.get("topk_indices", [])) for row in row_indices],

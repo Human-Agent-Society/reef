@@ -1,0 +1,5 @@
+{
+  "summarize": {
+    "template": "Summarize $1."
+  }
+}

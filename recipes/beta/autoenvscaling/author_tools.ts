@@ -60,7 +60,7 @@ export default function (pi) {
     promptGuidelines: ["Run task_check after writing the task and after every change, and fix what it reports."],
     parameters: Type.Object({}),
     async execute(_toolCallId, _params, signal) {
-      // /check starts a check, or names the one still running; /trial with "check <id>" polls it until it is done.
+      // /check starts a check, or names the one still running; /check with its check_id polls it until it is done.
       let result = await gateway("/check", {}, signal);
       const checkId = result.details.check_id;
       while (result.details.state === "running") {
@@ -69,7 +69,7 @@ export default function (pi) {
           return { content: [{ type: "text", text }], details: { state: "running", ran: false } };
         }
         await sleep(POLL_MS, signal);
-        result = await gateway("/trial", { task: `check ${checkId}` }, signal);
+        result = await gateway("/check", { check_id: checkId }, signal);
       }
       const details = result.details;
       latest = JSON.stringify({

@@ -55,13 +55,12 @@ def tttd_loss(
     """
     from slime.backends.megatron_utils.loss import get_log_probs_and_entropy, get_rollout_top_p_logprob_kwargs
 
-    if not getattr(args, "use_rollout_logprobs", False):
-        raise ValueError("TTTD importance sampling requires --use-rollout-logprobs")
-
-    rollout_log_probs_list = batch.get("rollout_log_probs")
+    # The old-policy log-probabilities that the actor computed with the weights of the job's start: serving
+    # returns none.
+    rollout_log_probs_list = batch.get("log_probs")
     advantages_list = batch.get("advantages")
     if not rollout_log_probs_list or not advantages_list:
-        raise ValueError("TTTD importance sampling requires rollout_log_probs and advantages")
+        raise ValueError("TTTD importance sampling requires the actor's old-policy log_probs and advantages")
     step_global_batch_size = batch.get("step_global_batch_size")
     if (
         not isinstance(step_global_batch_size, Integral)
@@ -118,11 +117,11 @@ def tttd_advantages(args, rollout_data) -> None:
         return
 
     advantages: list[torch.Tensor] | None = rollout_data.get("advantages")
-    rollout_log_probs: list[torch.Tensor] | None = rollout_data.get("rollout_log_probs")
+    rollout_log_probs: list[torch.Tensor] | None = rollout_data.get("log_probs")
     base_log_probs: list[torch.Tensor] | None = rollout_data.get("ref_log_probs")
     loss_masks: list[torch.Tensor] | None = rollout_data.get("loss_masks")
     if not advantages or not rollout_log_probs or not base_log_probs or not loss_masks:
-        raise ValueError("TTTD base KL requires external advantages, rollout_log_probs, ref_log_probs, and loss_masks")
+        raise ValueError("TTTD base KL requires external advantages, log_probs, ref_log_probs, and loss_masks")
     if not (len(advantages) == len(rollout_log_probs) == len(base_log_probs) == len(loss_masks)):
         raise ValueError("TTTD base KL fields must contain the same number of samples")
 

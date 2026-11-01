@@ -33,7 +33,7 @@ from pathlib import Path
 
 import chemistry
 
-# The grid MUST equal serve.yaml's pipeline.record2record.config: groups_per_step and rollouts_per_group.
+# The grid MUST equal serve.yaml's pipeline.record2sample.config: groups_per_step and rollouts_per_group.
 GROUPS_PER_STEP = int(os.environ.get("SDPO_GROUPS_PER_STEP", "32"))
 ROLLOUTS_PER_GROUP = int(os.environ.get("SDPO_ROLLOUTS_PER_GROUP", "8"))
 EPOCHS = int(os.environ.get("SDPO_EPOCHS", "30"))  # the reference's total_epochs ceiling
@@ -62,13 +62,15 @@ def main() -> None:
     if STEPS:
         schedule = schedule[:STEPS]
     client = chemistry.make_client(timeout_s=TRAIN_TIMEOUT_S)
+    # The inference routes serve only a scenario that exists: create it before the first model call.
+    client.post("/reef/scenarios", chemistry.SCENARIO, {"name": chemistry.SCENARIO})
     print(
         f"[chemistry] {len(train)} training and {len(test)} test questions; {len(schedule)} steps of "
         f"{GROUPS_PER_STEP}x{ROLLOUTS_PER_GROUP} (seed {SEED}); service {chemistry.SERVICE_URL}, "
         f"scenario {chemistry.SCENARIO}",
         flush=True,
     )
-    releases_before = chemistry.wait_for_training(0, TRAIN_TIMEOUT_S)
+    steps_before = chemistry.wait_for_training(0, TRAIN_TIMEOUT_S)
 
     record: dict = {
         "task": "sciknoweval/chemistry",
@@ -103,13 +105,13 @@ def main() -> None:
                         "metadata": {"step": step, "group": group, "rollout": rollout, "teacher_context": ""},
                     },
                 )
-        releases = chemistry.wait_for_training(releases_before + step, TRAIN_TIMEOUT_S)
+        trained = chemistry.wait_for_training(steps_before + step, TRAIN_TIMEOUT_S)
         elapsed = time.time() - started
         training_seconds += elapsed
         record["steps"].append(
             {
                 "step": step,
-                "training_releases": releases,
+                "training_steps": trained,
                 "train_accuracy": solved / (GROUPS_PER_STEP * ROLLOUTS_PER_GROUP),
                 "step_seconds": round(elapsed, 1),
                 "training_seconds": round(training_seconds, 1),

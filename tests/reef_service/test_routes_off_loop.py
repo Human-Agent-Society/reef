@@ -35,7 +35,7 @@ def test_a_catalog_read_waiting_for_the_scenario_lock_leaves_the_loop_free(tmp_p
             client = TestClient(TestServer(create_app(dispatcher)))
             await client.start_server()
             try:
-                catalog = asyncio.ensure_future(client.get("/reef/scenarios/agent/releases"))
+                catalog = asyncio.ensure_future(client.get("/reef/scenarios/agent/artifacts"))
                 await asyncio.sleep(0.2)
                 assert not catalog.done()
                 health = await asyncio.wait_for(client.get("/healthz"), 2)

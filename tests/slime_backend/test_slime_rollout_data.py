@@ -145,14 +145,10 @@ def test_to_slime_rollout_data_rejects_non_empty_log_prob_shape_mismatch() -> No
 
 
 @pytest.mark.unit
-def test_to_slime_rollout_data_rejects_mixed_empty_and_non_empty_log_probs() -> None:
-    with pytest.raises(ValueError, match="log_prob"):
-        to_slime_rollout_data(
-            wire_payload(
-                log_probs=[[], [0.3, 0.4], [0.5, 0.6]],
-                loss="sft",
-            )
-        )
+def test_a_batch_with_rows_without_log_probs_ships_none() -> None:
+    # The actor computes the old-policy log-probabilities, so a rendered row next to recorded ones is no error.
+    data = to_slime_rollout_data(wire_payload(log_probs=[[], [0.3, 0.4], [0.5, 0.6]], loss="sft"))
+    assert "rollout_log_probs" not in data
 
 
 @pytest.mark.unit

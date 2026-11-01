@@ -10,13 +10,15 @@ from pathlib import Path
 import pytest
 from sqlalchemy import Column, Float, Integer, MetaData, Table, Text, create_engine
 from sqlalchemy.engine import Connection
-
 from tests.support.consumption_receipts import write_consumption_receipt
+from tests.support.conversations import conversation
+
+from reef.core.atif_payloads import canonical_json
 from reef.core.records_types import AgentRecord, RequestType
 from reef.storage.postgres import PostgresRecordStore
 from reef.storage.records import AppendResult, RecordConflict, RecordStore
 from reef.storage.scenario import ScenarioSettings
-from reef.storage.sql_records import RecordTables, SQLRecordStore
+from reef.storage.sql_records import RecordTables, SQLRecordStore, sample_record_table, trajectory_node_table
 from reef.storage.sqlite import SQLiteRecordStore
 
 
@@ -74,6 +76,29 @@ def test_append_retry_and_scenario_reads(records: RecordStore) -> None:
     assert records.replay("code") == (other,)
 
 
+def test_payloads_that_share_messages_read_back_exactly_and_keep_retry_rules(records: RecordStore) -> None:
+    calls = [conversation(f"call-{turns}", turns) for turns in range(1, 5)]
+    calls += [conversation("responses", 2, field="input"), record("plain")]
+    for call in calls:
+        records.append(call)
+    stored = records.replay("math")
+    assert stored == tuple(calls)
+    assert [canonical_json(dict(item.payload)) for item in stored] == [
+        canonical_json(dict(call.payload)) for call in calls
+    ]
+    assert [entry.item for entry in records.audit_page("math")] == calls
+    assert records.append_result(replace(calls[2], created_at=456.0)).inserted is False
+    assert records.existing_receipt(calls[2]) == calls[2]
+    edited = conversation("call-3", 3)
+    edited.payload["messages"][-1]["content"] = "edited"
+    with pytest.raises(RecordConflict):
+        records.append(edited)
+    reordered = conversation("call-3", 3)
+    reordered.payload["messages"].reverse()
+    with pytest.raises(RecordConflict):
+        records.existing_receipt(reordered)
+
+
 class TransactionRecordStore(SQLRecordStore):
     """Exercise shared SQL behavior with caller-owned tables and transactions."""
 
@@ -113,6 +138,8 @@ def custom_record_tables(metadata: MetaData) -> RecordTables:
             Column("references_json", Text, nullable=False),
             Column("artifact_json", Text),
             Column("body_bytes", Integer, nullable=False),
+            Column("message_field", Text),
+            Column("payload_sha256", Text),
             sqlite_autoincrement=True,
         ),
         Table(
@@ -146,6 +173,8 @@ def custom_record_tables(metadata: MetaData) -> RecordTables:
             Column("name", Text, primary_key=True),
             Column("value_json", Text, nullable=False),
         ),
+        trajectory_node_table(metadata, "custom_nodes"),
+        sample_record_table(metadata),
     )
 
 
@@ -173,7 +202,7 @@ def test_shared_sql_operations_use_supplied_tables_and_join_the_outer_transactio
             committed = replace(original, payload={"value": "replacement"})
             with connection.begin():
                 assert records.read_settings() == ScenarioSettings()
-                records.write_settings(ScenarioSettings(model_config={"url": "http://model", "model": "m"}))
+                records.write_settings(ScenarioSettings(activation={"module": "always"}))
                 assert records.audit_page("math") == ()
                 assert records.consumption_receipts("math") == ()
                 assert records.existing_receipt(original) is None
@@ -188,7 +217,7 @@ def test_shared_sql_operations_use_supplied_tables_and_join_the_outer_transactio
                 assert [entry.agent_record_id for entry in records.replay("math")] == ["first", "second"]
                 assert [entry.item.agent_record_id for entry in records.audit_page("math")] == ["first", "second"]
                 assert records.consumption_receipts("math")[0]["metadata"] == {"step": 2}
-                assert records.read_settings() == ScenarioSettings(model_config={"url": "http://model", "model": "m"})
+                assert records.read_settings() == ScenarioSettings(activation={"module": "always"})
             records.close()
     finally:
         engine.dispose()

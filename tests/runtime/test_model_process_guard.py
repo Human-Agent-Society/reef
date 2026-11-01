@@ -62,15 +62,41 @@ else:
         unrelated.wait()
 
 
-def test_missing_guard_refuses_unconfirmed_process_cleanup(tmp_path, monkeypatch):
+@pytest.mark.parametrize("worker_alive", [True, False])
+def test_a_missing_guard_retires_its_group_once_the_worker_is_gone(tmp_path, monkeypatch, worker_alive):
+    from reef.runtime.executor import process_guard
+
+    pytest.importorskip("psutil")
+    retired: list[tuple[int, float | None]] = []
+    monkeypatch.setattr(process_guard, "_directory", lambda token: tmp_path)
+    monkeypatch.setattr(process_guard, "_worker_alive", lambda group: group == 12345 and worker_alive)
+    monkeypatch.setattr(process_guard, "_retire_group", lambda group, started: retired.append((group, started)))
+    # Ray kills an exiting worker's children, its guard among them, so the guard can be gone before it confirms.
+    (tmp_path / "12345.json").write_text(json.dumps({"guard_pid": 99999999, "guard_started": 0}))
+    if worker_alive:
+        with pytest.raises(RuntimeError, match="before confirming cleanup"):
+            retire("unused")
+        assert retired == []
+    else:
+        retire("unused")
+        # The worker's other processes, such as compile workers, outlive it and its guard: retire them here.
+        assert retired == [(12345, None)] and (tmp_path / "12345.done").exists()
+
+
+def test_a_group_whose_leader_exited_is_retired_whatever_its_leader_started_at(monkeypatch):
     from reef.runtime.executor import process_guard
 
     psutil = pytest.importorskip("psutil")
-    monkeypatch.setattr(process_guard, "_directory", lambda token: tmp_path)
-    (tmp_path / "worker.json").write_text(json.dumps({"guard_pid": 99999999, "guard_started": 0}))
-    assert not psutil.pid_exists(99999999)
-    with pytest.raises(RuntimeError, match="before confirming cleanup"):
-        retire("unused")
+    signals = []
+
+    def gone(pid):
+        raise psutil.NoSuchProcess(pid)
+
+    monkeypatch.setattr(psutil, "Process", gone)
+    monkeypatch.setattr(process_guard.os, "killpg", lambda group, sig: signals.append((group, sig)))
+    monkeypatch.setattr(process_guard, "_group_alive", lambda group: False)
+    process_guard._retire_group(12345, None)
+    assert signals == [(12345, signal.SIGKILL)]
 
 
 @pytest.mark.parametrize("alive", [False, True])

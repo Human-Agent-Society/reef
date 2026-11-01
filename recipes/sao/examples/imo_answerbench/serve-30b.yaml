@@ -23,10 +23,8 @@ inference:
   num-gpus: "8"
   tensor-parallel-size: "8"
   # A 61k-token thinking rollout takes many minutes; the backend timeout must
-  # cover it, and the retry deadline must cover a retry of it.
+  # cover it.
   timeout-s: 1800
-  retry-timeout-s: 7200
-  retry-max-s: 60
   options:
     router-port: "30000"
     # Required by Reef's SGLang inference backend (#432).
@@ -42,10 +40,10 @@ inference:
 recipe:
   implementation: recipes.sao.recipe:SAORecipe
 pipeline:
-  record2record:
+  record2sample:
     config:
       max_staleness: 18
-  task2job:
+  sample2job:
     config:
       # The fewest samples of one job: one optimizer step of Slime's global batch.
       job_samples: ${training.config.global_batch_size}
@@ -108,7 +106,6 @@ training:
     lr: "1e-6"
     lr-decay-style: "constant"
     loss-type: "policy_loss"
-    use-rollout-logprobs: true
     use-critic: true
     eps-clip: "0.3"
     eps-clip-high: "5.0"

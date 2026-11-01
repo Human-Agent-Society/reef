@@ -6,9 +6,9 @@ import json
 import time
 
 import pytest
-from tests.reef_service.test_skill_delivery import FakeStream
+from tests.reef_service.test_sse_streams import FakeStream
 from tests.support._policy_recipe import TestPolicyRecipe
-from tests.support.artifact_versions import RollbackComponent, finished_jobs
+from tests.support.artifact_versions import ImportingComponent, finished_jobs
 from tests.support.runtime_stubs import runtime_bindings
 
 from reef.artifact import InMemoryRepositoryBackend
@@ -20,6 +20,8 @@ from reef.service.deploy.service_config import service_config_from_mapping
 from reef.service.streaming import stream_record
 from reef.storage.commits import CommitRecord
 from reef.storage.observer import ObservedScenarioStorage, RecordObserver
+from reef.storage.samples import consumed_sample_id
+from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 
 
@@ -158,7 +160,7 @@ def test_inference_record_becomes_a_client_span_with_stable_ids() -> None:
         payload={
             "model": "qwen",
             "messages": [{"role": "user", "content": "2+2?"}],
-            "runtime_load_id": "load-3",
+            "artifact_id": "artifact-3",
             "metadata": {"tags": ["eval", "smoke"]},
             "response": {
                 "id": "chatcmpl-1",
@@ -188,7 +190,7 @@ def test_inference_record_becomes_a_client_span_with_stable_ids() -> None:
         "reef.request_type": "inference",
         "reef.release_id": "v3",
         "reef.content_id": "c1",
-        "reef.runtime_load_id": "load-3",
+        "reef.artifact_id": "artifact-3",
         "reef.tags": ("eval", "smoke"),
         "gen_ai.operation.name": "chat",
         "gen_ai.request.model": "qwen",
@@ -447,20 +449,19 @@ def test_observed_storage_reports_first_inserts_and_landed_commits_and_isolates_
 
 @pytest.mark.unit
 def test_dispatcher_traffic_reaches_the_observer_through_the_storage(tmp_path) -> None:
-    initial = tmp_path / "initial"
-    initial.mkdir()
-    (initial / "model.txt").write_text("w0")
     observer = _CapturingObserver()
-    component = RollbackComponent(tmp_path / "checkpoints")
+    component = ImportingComponent(tmp_path / "checkpoints")
     dispatcher = Dispatcher(
         TestPolicyRecipe(**runtime_bindings(component, component.inference)),
-        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
+        InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=ObservedScenarioStorage(SQLiteScenarioStorage(tmp_path / "records"), observer),
+        coordination=memory_coordination(),
     )
     try:
-        dispatcher.accept_record(_inference("i1", runtime_load_id="w0"))
-        dispatcher.accept_record(_inference("i1", runtime_load_id="w0"))
+        served = dispatcher.get_or_create_scenario("math").serving_artifact_id()
+        dispatcher.accept_record(_inference("i1", artifact_id=served))
+        dispatcher.accept_record(_inference("i1", artifact_id=served))
         dispatcher.accept_record(_report("r1", "i1"))
         for _ in range(5000):
             if finished_jobs(dispatcher):
@@ -473,7 +474,7 @@ def test_dispatcher_traffic_reaches_the_observer_through_the_storage(tmp_path) -
     assert observer.accepted == ["i1", "r1"]
     # The job's submission consumes the records; its checkpoint and its end commit after it.
     assert [(commit.scenario, commit.step, commit.consumed_ids) for commit in observer.committed] == [
-        ("math", 1, frozenset({"i1", "r1"})),
+        ("math", 1, frozenset({"i1", "r1", consumed_sample_id("r1:0")})),
         ("math", 2, frozenset()),
         ("math", 3, frozenset()),
     ]

@@ -2,10 +2,10 @@
 
 Clients use either ``/v1/chat/completions`` or ``/v1/messages`` while Reef
 normalizes the provider request, renders the prompt once, calls the selected
-engine's native generate route, and records the exact sampled token ids beside
-their rollout log probabilities and the weight version that produced each
-token. Decoded text is only the client-facing view; it is never re-tokenized
-to construct a training sample.
+engine's native generate route, and answers with the provider response. The
+response carries no training tensors: a training component renders a recorded
+call with its own chat template and computes the log probabilities that it
+needs with its own weights.
 
 The engine-specific part is a :class:`NativeGenerateClient`: it shapes the
 native request and parses the native response into a
@@ -14,7 +14,6 @@ native request and parses the native response into a
 
 from __future__ import annotations
 
-import codecs
 import copy
 import json
 import math
@@ -28,6 +27,7 @@ from typing import Any
 
 from reef.artifact.artifact import Artifact
 from reef.inference.http import HttpInferenceHandler, RequestHeadersFactory
+from reef.inference.provider_protocol import SSE_DONE, SSEFrameDecoder, frame_data, usage_of
 from reef.runtime.interfaces import InferenceStream
 
 CHAT_COMPLETIONS_PATH = "/v1/chat/completions"
@@ -49,7 +49,7 @@ TOOL_CALL_START = "<tool_call>"
 
 @dataclass(frozen=True)
 class CapturedGeneration:
-    """One request's exact engine output, in the shape training records need.
+    """One request's exact engine output.
 
     ``token_runtime_load_ids`` names the weight version that produced each
     sampled token; a request paused for a weight update and resumed spans two.
@@ -65,8 +65,6 @@ class CapturedGeneration:
     finish_reason: str
     text: str | None
     public_meta: dict[str, Any]
-    topk_indices: list[list[int]] | None = None
-    topk_log_probs: list[list[float]] | None = None
 
     def __post_init__(self) -> None:
         count = len(self.output_ids)
@@ -76,8 +74,6 @@ class CapturedGeneration:
             raise ValueError("captured response has no sampled tokens")
         if self.finish_reason not in {"stop", "length", "abort"}:
             raise ValueError(f"captured finish reason must be stop, length or abort, got {self.finish_reason!r}")
-        if (self.topk_indices is None) != (self.topk_log_probs is None):
-            raise ValueError("captured top-k indices and log-probs must be given together")
 
 
 class NativeGenerateClient(ABC):
@@ -99,13 +95,12 @@ class NativeGenerateClient(ABC):
         prompt_ids: list[int],
         sampling_params: Mapping[str, Any],
         *,
-        capture_topk: int,
         stream: bool,
     ) -> dict[str, Any]:
-        """The native request body for ``prompt_ids``, asking for log-probs and, if ``capture_topk``, top-k."""
+        """The native request body for ``prompt_ids``, asking for the sampled tokens' log-probs."""
 
     @abstractmethod
-    def parse(self, artifact: Artifact, response: Mapping[str, Any], *, capture_topk: int) -> CapturedGeneration:
+    def parse(self, artifact: Artifact, response: Mapping[str, Any]) -> CapturedGeneration:
         """Validate one buffered native response and read the exact sample out of it."""
 
     @abstractmethod
@@ -121,24 +116,11 @@ class NativeGenerateClient(ABC):
 
 
 async def sse_json_events(chunks: AsyncIterator[bytes]) -> AsyncIterator[dict[str, Any]]:
-    """Decode arbitrarily chunked SSE bytes into JSON data events."""
+    """Decode arbitrarily chunked SSE bytes into JSON data events, up to the ``[DONE]`` event.
 
-    decoder = codecs.getincrementaldecoder("utf-8")()
-    buffer = ""
-
-    def complete_events(*, final: bool = False) -> tuple[list[str], str]:
-        nonlocal buffer
-        # Engines use LF, but accepting CRLF keeps the proxy correct behind
-        # HTTP middleware that normalizes line endings.
-        buffer = buffer.replace("\r\n", "\n").replace("\r", "\n")
-        blocks = buffer.split("\n\n")
-        buffer = blocks.pop() if not final else ""
-        payloads = []
-        for block in blocks:
-            data = [line[5:].removeprefix(" ") for line in block.split("\n") if line.startswith("data:")]
-            if data:
-                payloads.append("\n".join(data))
-        return payloads, buffer
+    An event without data is skipped. An event whose data is not a JSON object,
+    or that reports an ``error``, raises :class:`ValueError`.
+    """
 
     def decode_event(payload: str) -> dict[str, Any]:
         value = json.loads(payload)
@@ -148,19 +130,17 @@ async def sse_json_events(chunks: AsyncIterator[bytes]) -> AsyncIterator[dict[st
             raise ValueError(f"native stream failed: {value['error'].get('message', value['error'])}")
         return value
 
+    decoder = SSEFrameDecoder()
     async for chunk in chunks:
-        buffer += decoder.decode(chunk)
-        payloads, _ = complete_events()
-        for payload in payloads:
-            if payload == "[DONE]":
+        for frame in decoder.feed(chunk):
+            payload = frame_data(frame)
+            if payload == SSE_DONE:
                 return
-            yield decode_event(payload)
+            if payload:
+                yield decode_event(payload)
 
-    buffer += decoder.decode(b"", final=True)
-    payloads, _ = complete_events(final=True)
-    for payload in payloads:
-        if payload == "[DONE]":
-            return
+    payload = frame_data(decoder.finish())
+    if payload and payload != SSE_DONE:
         yield decode_event(payload)
 
 
@@ -534,23 +514,23 @@ def template_kwargs_of(value: Any, label: str) -> dict[str, Any]:
     return dict(value)
 
 
-#: Episodes whose latest call the handler keeps for continuation; the oldest is forgotten first.
-EPISODE_PREFIX_LIMIT = 1024
+#: Rollouts whose latest call the handler keeps for continuation; the oldest is forgotten first.
+ROLLOUT_PREFIX_LIMIT = 1024
 #: A message content no chat template rewrites, used to find where a rendered assistant turn ends.
-EPISODE_BOUNDARY_SENTINEL = "reef-episode-boundary-7f3a9c"
+ROLLOUT_BOUNDARY_SENTINEL = "reef-rollout-boundary-7f3a9c"
 
 
 @dataclass(frozen=True)
-class EpisodePrefix:
-    """The exact tokens of an episode's latest call, for the episode's next call to extend.
+class RolloutPrefix:
+    """The exact tokens of a rollout's latest call, for the rollout's next call to extend.
 
     Values: ``tokens`` is a non-empty tuple of non-negative ints, the prompt
     ids followed by the sampled ids of the latest call; ``request`` is that
     call's validated chat request, a dict whose ``messages`` is a non-empty
     list.
     Purpose: :class:`TokenNativeChatHandler` makes one after each call of an
-    episode when ``episode_continuation`` is on, and reads it when the same
-    episode's next request extends ``request["messages"]``. The next prompt is
+    rollout when ``rollout_continuation`` is on, and reads it when the same
+    rollout's next request extends ``request["messages"]``. The next prompt is
     then ``tokens`` followed by the rendered new messages.
     """
 
@@ -561,13 +541,13 @@ class EpisodePrefix:
         if not self.tokens or any(
             not isinstance(token, int) or isinstance(token, bool) or token < 0 for token in self.tokens
         ):
-            raise ValueError("an episode prefix requires non-negative integer token ids")
+            raise ValueError("a rollout prefix requires non-negative integer token ids")
         if not isinstance(self.request.get("messages"), list) or not self.request["messages"]:
-            raise ValueError("an episode prefix requires a validated chat request with messages")
+            raise ValueError("a rollout prefix requires a validated chat request with messages")
 
 
 class TokenNativeChatHandler(HttpInferenceHandler):
-    """Serve OpenAI or Anthropic chat with engine-native policy tensors.
+    """Serve OpenAI or Anthropic chat over an engine's token-native generate API.
 
     Subclasses supply the :class:`NativeGenerateClient` for their engine and
     may override :meth:`inference_stream` with an incremental relay. The
@@ -601,26 +581,21 @@ class TokenNativeChatHandler(HttpInferenceHandler):
         timeout_s: float = 300.0,
         tokenizer: Any = None,
         tool_call_parser: str | None = None,
-        capture_topk: int = 0,
         sampling_defaults: Mapping[str, Any] | None = None,
         force_reasoning: bool | None = None,
         chat_template_kwargs: Mapping[str, Any] | None = None,
-        episode_continuation: bool = False,
+        rollout_continuation: bool = False,
         request_headers: RequestHeadersFactory | None = None,
     ) -> None:
         super().__init__(
             upstream_url, request_headers=request_headers, timeout_s=timeout_s, error_label=client.error_label
         )
         if tokenizer is None and not model_path:
-            raise ValueError("chat training inference requires model_path")
+            raise ValueError("token-native chat requires model_path")
         self._client = client
         self._model_path = model_path
         self._tokenizer = tokenizer
         self._tool_call_parser = tool_call_parser.strip() if tool_call_parser else None
-        # OpenClaw-RL top-K objective: capture the generation-time top-K
-        # vocab log-probs per sampled token (the old-policy ``ell_old`` on
-        # S^q) into ``response.training``. 0 disables the capture.
-        self._capture_topk = int(capture_topk)
         # Sampling values applied when the client omits a parameter. Native
         # generate routes have engine defaults (temperature 1.0), NOT the
         # model generation_config the chat endpoint would use — a recipe
@@ -632,13 +607,13 @@ class TokenNativeChatHandler(HttpInferenceHandler):
         # Chat template arguments for a request that omits them, for example
         # {"enable_thinking": false}. A request's own chat_template_kwargs win key by key.
         self._chat_template_kwargs = template_kwargs_of(chat_template_kwargs, "chat_template_kwargs")
-        # Multi-turn episodes served from their exact sampled tokens: the
-        # client names the episode in the OpenAI ``user`` field, and each later
+        # Multi-turn rollouts served from their exact sampled tokens: the
+        # client names the rollout in the OpenAI ``user`` field, and each later
         # request's prompt is the previous call's tokens plus the rendered new
         # messages, so a template that rewrites earlier turns cannot change
         # the trained tokens. Off, every request renders from the template.
-        self._episode_continuation = bool(episode_continuation)
-        self._episode_prefixes: OrderedDict[str, EpisodePrefix] = OrderedDict()
+        self._rollout_continuation = bool(rollout_continuation)
+        self._rollout_prefixes: OrderedDict[str, RolloutPrefix] = OrderedDict()
 
     @property
     def client(self) -> NativeGenerateClient:
@@ -648,9 +623,13 @@ class TokenNativeChatHandler(HttpInferenceHandler):
     def model_path(self) -> str:
         return self._model_path
 
-    @property
-    def capture_topk(self) -> int:
-        return self._capture_topk
+    def address_model(self, payload: Mapping[str, Any], model_name: str) -> dict[str, Any]:
+        """The engine serves the base model under its path and each adapter under its own name, which a native
+        request names in ``lora_path``."""
+        addressed = {key: value for key, value in payload.items() if key != "lora_path"}
+        if model_name == self._model_path:
+            return {**addressed, "model": model_name}
+        return {**addressed, "model": model_name, "lora_path": model_name}
 
     # -- Buffered requests ------------------------------------------------------
 
@@ -671,22 +650,20 @@ class TokenNativeChatHandler(HttpInferenceHandler):
         native = await super().inference(
             artifact,
             self._client.generate_path,
-            self._client.payload(
-                call.request, call.prompt_ids, call.sampling_params, capture_topk=self._capture_topk, stream=False
-            ),
+            self._client.payload(call.request, call.prompt_ids, call.sampling_params, stream=False),
         )
-        captured = self._client.parse(artifact, native, capture_topk=self._capture_topk)
+        captured = self._client.parse(artifact, native)
         response = self._response_from_capture(call, captured, call.tool_parser)
         if not call.anthropic:
             return response, response
-        return response, self._anthropic_response(call.payload, call.request, response)
+        return response, self._anthropic_response(call.payload, response)
 
     def _chat_call(self, path: str, payload: dict[str, Any]) -> ChatCall:
         """Normalize the provider request and render the prompt once for either endpoint."""
         anthropic = path == ANTHROPIC_MESSAGES_PATH
         request = self._anthropic_request(payload) if anthropic else dict(payload)
         if request.get("n", 1) != 1:
-            raise ValueError("exact training capture currently requires n=1")
+            raise ValueError("token-native chat requires n=1")
         return ChatCall(
             anthropic=anthropic,
             payload=payload,
@@ -697,14 +674,14 @@ class TokenNativeChatHandler(HttpInferenceHandler):
         )
 
     def _response_from_capture(self, call: ChatCall, captured: CapturedGeneration, tool_parser: Any) -> dict[str, Any]:
-        """The OpenAI-shaped response, with training tensors, for one exact sample."""
+        """The OpenAI-shaped response of one exact sample."""
         text = captured.text
         if text is None:
             text = self._require_tokenizer().decode(captured.output_ids, skip_special_tokens=True)
         message, parsed_tool_calls = self._assistant_message(
             text, tool_parser, force_reasoning=self.reasoning_is_pre_opened(call.prompt_ids)
         )
-        # Tool parsing must not hide an engine abort from receipt and training checks.
+        # Tool parsing must not hide an engine abort from the service's abort check.
         if parsed_tool_calls and captured.finish_reason != "abort":
             finish_reason = "tool_calls"
         else:
@@ -717,24 +694,9 @@ class TokenNativeChatHandler(HttpInferenceHandler):
         }
         if call.request.get("logprobs") is True:
             choice["logprobs"] = {"content": self._openai_logprobs(captured.output_ids, captured.rollout_log_probs)}
-        runtime_load_spans = self._runtime_load_spans(captured.token_runtime_load_ids)
-        versions = {span["runtime_load_id"] for span in runtime_load_spans}
-        runtime_load_id = versions.pop() if len(versions) == 1 else None
-        training: dict[str, Any] = {
-            "tokens": [*call.prompt_ids, *captured.output_ids],
-            "loss_mask": [1] * len(captured.output_ids),
-            "rollout_log_probs": list(captured.rollout_log_probs),
-            "prompt_length": len(call.prompt_ids),
-            "response_length": len(captured.output_ids),
-            "runtime_load_id": None if runtime_load_id is None else str(runtime_load_id),
-            "runtime_load_spans": runtime_load_spans,
-        }
-        if captured.topk_indices is not None and captured.topk_log_probs is not None:
-            training["topk_indices"] = captured.topk_indices
-            training["topk_log_probs"] = captured.topk_log_probs
-        episode_id = self._episode_id(call.request)
-        if episode_id is not None:
-            self._remember_episode(episode_id, training["tokens"], call.request)
+        rollout_id = self._rollout_id(call.request)
+        if rollout_id is not None:
+            self._remember_rollout(rollout_id, [*call.prompt_ids, *captured.output_ids], call.request)
         return {
             "id": f"chatcmpl-{uuid.uuid4().hex}",
             "object": "chat.completion",
@@ -746,19 +708,7 @@ class TokenNativeChatHandler(HttpInferenceHandler):
                 "completion_tokens": len(captured.output_ids),
                 "total_tokens": len(call.prompt_ids) + len(captured.output_ids),
             },
-            "training": training,
         }
-
-    @staticmethod
-    def _runtime_load_spans(token_runtime_load_ids: list[str]) -> list[dict[str, Any]]:
-        """Collapse one version per token into contiguous ``[start, end)`` spans."""
-        spans: list[dict[str, Any]] = []
-        for index, version in enumerate(token_runtime_load_ids):
-            if spans and spans[-1]["runtime_load_id"] == version:
-                spans[-1]["end"] = index + 1
-            else:
-                spans.append({"start": index, "end": index + 1, "runtime_load_id": version})
-        return spans
 
     # -- Streaming --------------------------------------------------------------
 
@@ -802,7 +752,7 @@ class TokenNativeChatHandler(HttpInferenceHandler):
         frames = relay.reconcile(response["choices"][0]["message"])
         output_tokens = response["usage"]["completion_tokens"]
         if call.anthropic:
-            provider_response = self._anthropic_response(call.payload, call.request, response)
+            provider_response = self._anthropic_response(call.payload, response)
             provider_response["id"] = message_id
         else:
             provider_response = response
@@ -843,31 +793,17 @@ class TokenNativeChatHandler(HttpInferenceHandler):
     # -- Anthropic Messages -----------------------------------------------------
 
     def _anthropic_count_tokens(self, artifact: Artifact, payload: Mapping[str, Any]) -> dict[str, Any]:
-        """Count the exact templated input without creating policy tensors."""
+        """Count the exact templated input."""
         request = self._anthropic_request({**payload, "max_tokens": 1})
-        prompt_ids = self._render_prompt(request)
-        runtime_load_id = getattr(artifact.ref, "runtime_load_id", None) or artifact.ref.release_id
-        return {
-            "input_tokens": len(prompt_ids),
-            # RequestService strips this block from the client response. It
-            # supplies the producing version required by durable-request validation, but
-            # deliberately contains no tokens/loss mask/log-probabilities, so
-            # a token-count call can never become a policy sample.
-            "training": {
-                "runtime_load_id": str(runtime_load_id),
-                "request_messages": list(request.get("messages") or []),
-                "request_tools": request.get("tools"),
-            },
-        }
+        return {"input_tokens": len(self._render_prompt(request))}
 
     @classmethod
     def _anthropic_request(cls, payload: Mapping[str, Any]) -> dict[str, Any]:
         """Normalize an Anthropic Messages request to the internal chat shape.
 
-        The normalized request is what the tokenizer sees and what the private
-        training record retains. Keeping this boundary provider-independent is
-        important for multi-turn policy assembly and OpenClaw-RL's judge, both
-        of which must render the exact same transcript as the rollout backend.
+        The normalized request is what the tokenizer sees. Keeping this
+        boundary provider-independent lets one chat template render OpenAI
+        and Anthropic traffic alike.
         """
 
         model = payload.get("model")
@@ -1091,12 +1027,7 @@ class TokenNativeChatHandler(HttpInferenceHandler):
         raise ValueError(f"unsupported Anthropic tool_choice type {kind!r}")
 
     @classmethod
-    def _anthropic_response(
-        cls,
-        original_request: Mapping[str, Any],
-        normalized_request: Mapping[str, Any],
-        response: Mapping[str, Any],
-    ) -> dict[str, Any]:
+    def _anthropic_response(cls, original_request: Mapping[str, Any], response: Mapping[str, Any]) -> dict[str, Any]:
         choice = response["choices"][0]
         message = choice["message"]
         content: list[dict[str, Any]] = []
@@ -1136,20 +1067,9 @@ class TokenNativeChatHandler(HttpInferenceHandler):
                 }
             )
 
-        usage = response.get("usage")
-        usage = usage if isinstance(usage, Mapping) else {}
-        training = dict(response.get("training") or {})
-        # Provider-neutral transcript fields are private (client responses
-        # strip the whole training block) and let processors render Anthropic
-        # traffic with the exact same chat template used for generation.
-        training.update(
-            {
-                "request_messages": list(normalized_request.get("messages") or []),
-                "request_tools": normalized_request.get("tools"),
-                "response_message": dict(message),
-                "finish_reason": choice.get("finish_reason"),
-            }
-        )
+        # Anthropic has no stop reason for an engine abort: the response names it in its meta_info, which the
+        # service reads (inference_aborted); an aborted response never reaches the client.
+        aborted = {"meta_info": {"finish_reason": "abort"}} if choice.get("finish_reason") == "abort" else {}
         return {
             "id": f"msg_{uuid.uuid4().hex}",
             "type": "message",
@@ -1158,11 +1078,8 @@ class TokenNativeChatHandler(HttpInferenceHandler):
             "content": content,
             "stop_reason": cls._anthropic_stop_reason(choice.get("finish_reason")),
             "stop_sequence": None,
-            "usage": {
-                "input_tokens": int(usage.get("prompt_tokens") or 0),
-                "output_tokens": int(usage.get("completion_tokens") or 0),
-            },
-            "training": training,
+            "usage": usage_of(response) or {"input_tokens": 0, "output_tokens": 0},
+            **aborted,
         }
 
     @staticmethod
@@ -1173,26 +1090,26 @@ class TokenNativeChatHandler(HttpInferenceHandler):
             return "max_tokens"
         return "end_turn"
 
-    # -- Episode continuation ---------------------------------------------------
+    # -- Rollout continuation ---------------------------------------------------
 
-    def _episode_id(self, request: Mapping[str, Any]) -> str | None:
-        """The episode a request belongs to: its OpenAI ``user`` field, when continuation is on."""
-        if not self._episode_continuation:
+    def _rollout_id(self, request: Mapping[str, Any]) -> str | None:
+        """The rollout a request belongs to: its OpenAI ``user`` field, when continuation is on."""
+        if not self._rollout_continuation:
             return None
-        episode_id = request.get("user")
-        if isinstance(episode_id, str) and episode_id:
-            return episode_id
+        rollout_id = request.get("user")
+        if isinstance(rollout_id, str) and rollout_id:
+            return rollout_id
         return None
 
     def _prompt_ids(self, request: dict[str, Any]) -> list[int]:
-        """Render the prompt, or extend the episode's previous call when the request continues one."""
-        episode_id = self._episode_id(request)
-        prefix = None if episode_id is None else self._episode_prefixes.get(episode_id)
+        """Render the prompt, or extend the rollout's previous call when the request continues one."""
+        rollout_id = self._rollout_id(request)
+        prefix = None if rollout_id is None else self._rollout_prefixes.get(rollout_id)
         if prefix is None:
             return self._render_prompt(request)
         return self._continuation_prompt(request, prefix)
 
-    def _continuation_prompt(self, request: Mapping[str, Any], prefix: EpisodePrefix) -> list[int]:
+    def _continuation_prompt(self, request: Mapping[str, Any], prefix: RolloutPrefix) -> list[int]:
         """The previous call's exact tokens followed by the rendered new messages.
 
         The request repeats the previous request's messages, then carries the
@@ -1215,25 +1132,25 @@ class TokenNativeChatHandler(HttpInferenceHandler):
             or messages[count].get("role") != "assistant"
         ):
             raise ValueError(
-                "episode continuation requires the previous messages, the sampled assistant turn, "
-                "and at least one new message; name a new episode in the user field to start over"
+                "rollout continuation requires the previous messages, the sampled assistant turn, "
+                "and at least one new message; name a new rollout in the user field to start over"
             )
         new_messages = messages[count + 1 :]
         if any(
             not isinstance(message, Mapping) or message.get("role") not in ("user", "tool") for message in new_messages
         ):
-            raise ValueError("episode continuation accepts only user and tool messages after the sampled turn")
+            raise ValueError("rollout continuation accepts only user and tool messages after the sampled turn")
         for key in ("model", "tools", "chat_template_kwargs"):
             if request.get(key) != prefix.request.get(key):
-                raise ValueError(f"episode continuation cannot change {key}")
+                raise ValueError(f"rollout continuation cannot change {key}")
         tokenizer = self._require_tokenizer()
         render_kwargs = {
             **self._chat_template_kwargs,
             **template_kwargs_of(request.get("chat_template_kwargs"), "chat_template_kwargs"),
         }
         boundary = [
-            {"role": "user", "content": EPISODE_BOUNDARY_SENTINEL},
-            {"role": "assistant", "content": EPISODE_BOUNDARY_SENTINEL},
+            {"role": "user", "content": ROLLOUT_BOUNDARY_SENTINEL},
+            {"role": "assistant", "content": ROLLOUT_BOUNDARY_SENTINEL},
         ]
         rendered = tokenizer.apply_chat_template(
             [*boundary, *self._template_messages(list(new_messages))],
@@ -1241,20 +1158,20 @@ class TokenNativeChatHandler(HttpInferenceHandler):
             add_generation_prompt=True,
             **render_kwargs,
         )
-        if not isinstance(rendered, str) or rendered.count(EPISODE_BOUNDARY_SENTINEL) != 2:
-            raise ValueError("the chat template cannot render an episode's new messages on their own")
-        suffix = rendered[rendered.rindex(EPISODE_BOUNDARY_SENTINEL) + len(EPISODE_BOUNDARY_SENTINEL) :]
-        suffix_ids = integer_tokens(tokenizer.encode(suffix, add_special_tokens=False), "episode continuation")
+        if not isinstance(rendered, str) or rendered.count(ROLLOUT_BOUNDARY_SENTINEL) != 2:
+            raise ValueError("the chat template cannot render a rollout's new messages on their own")
+        suffix = rendered[rendered.rindex(ROLLOUT_BOUNDARY_SENTINEL) + len(ROLLOUT_BOUNDARY_SENTINEL) :]
+        suffix_ids = integer_tokens(tokenizer.encode(suffix, add_special_tokens=False), "rollout continuation")
         if suffix_ids and suffix_ids[0] == prefix.tokens[-1]:
             suffix_ids = suffix_ids[1:]
         return [*prefix.tokens, *suffix_ids]
 
-    def _remember_episode(self, episode_id: str, tokens: list[int], request: Mapping[str, Any]) -> None:
-        """Keep the call's exact tokens as the episode's latest; forget the oldest episode past the limit."""
-        prefixes = self._episode_prefixes
-        prefixes.pop(episode_id, None)
-        prefixes[episode_id] = EpisodePrefix(tuple(tokens), copy.deepcopy(dict(request)))
-        while len(prefixes) > EPISODE_PREFIX_LIMIT:
+    def _remember_rollout(self, rollout_id: str, tokens: list[int], request: Mapping[str, Any]) -> None:
+        """Keep the call's exact tokens as the rollout's latest; forget the oldest rollout past the limit."""
+        prefixes = self._rollout_prefixes
+        prefixes.pop(rollout_id, None)
+        prefixes[rollout_id] = RolloutPrefix(tuple(tokens), copy.deepcopy(dict(request)))
+        while len(prefixes) > ROLLOUT_PREFIX_LIMIT:
             prefixes.popitem(last=False)
 
     # -- Prompt rendering and tool parsing -------------------------------------

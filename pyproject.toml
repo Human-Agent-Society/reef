@@ -25,8 +25,8 @@ dependencies = [
     "aiohttp>=3.14",  # web.RequestKey
     "alembic>=1.13,<2",
     "huggingface_hub",
-    # Harbor's environment contract backs reef.sandbox; the terminus runner, the task player and the generator
-    # service play Harbor tasks with reef-eval.
+    # Harbor's environment contract backs reef.execution.sandbox; task directory rollouts, the task player and the
+    # generator service play Harbor tasks with reef-eval.
     "harbor>=0.20,<0.25",
     "pyyaml",
     "reef-client>=0.2.0",
@@ -47,8 +47,12 @@ tinker = [
     "jinja2>=3.1.0",
 ]
 postgres = ["psycopg[binary]>=3.1,<4"]
-# E2B cloud sandboxes for evaluation episodes and the agent proposer.
-e2b = ["e2b>=2.46", "connectrpc>=0.11.1,<0.13"]
+# Reads s3:// sources of an artifact import (storage.artifact_sources).
+s3 = ["boto3"]
+# Cloud sandboxes for evaluation rollouts and the Reefine agent: E2B, and Modal. Harbor's extra of each
+# environment adds what its sandbox needs to build a task's image (dockerfile-parse).
+e2b = ["harbor[e2b]", "e2b>=2.46", "connectrpc>=0.11.1,<0.13"]
+modal = ["harbor[modal]", "modal>=1.6"]
 # Provider-neutral experiment tracking. Non-Slime training backends can opt in
 # without installing the Slime/GPU dependency stack.
 wandb = [
@@ -89,7 +93,7 @@ dev = [
     "pytest",
     # CI measures coverage against the [tool.coverage.report] floor below.
     "pytest-cov",
-    # Runs the suite in parallel, as CI does (-n 8 --dist loadfile).
+    # Runs the suite in parallel, as CI does (-n 8; addopts selects --dist worksteal).
     "pytest-xdist==3.8.0",
     "ruff==0.17.2",
 ]
@@ -99,7 +103,7 @@ dev = [
 # them out of package metadata lets GPU environments install them with
 # `--no-deps` without replacing their CUDA-matched dependency stack.
 runtime = [
-    "slime @ git+https://github.com/THUDM/slime.git@41014d1f29e201137fdffce737bb8bac65bc5219",
+    "slime @ git+https://github.com/THUDM/slime.git@540ea919e45b8b929198abce008a103be9cfc779",
 ]
 
 [project.urls]
@@ -108,7 +112,6 @@ Homepage = "https://github.com/Human-Agent-Society/reef"
 [project.scripts]
 reef = "reef.cli:main"
 reef-native = "reef.harness.runners.native.__main__:main"
-reef-terminus = "reef.harness.runners.terminus:main"
 
 [project.entry-points."sglang.srt.plugins"]
 reef = "reef.inference.sglang.plugin:install_sglang_plugin"
@@ -129,7 +132,12 @@ namespaces = true
 include = ["reef", "reef.*"]
 
 [tool.setuptools.package-data]
-reef = ["harness/adapters/*/descriptor.yaml", "harness/adapters/*/harness_facts.yaml", "harness/adapters/*/version_check.ts", "harness/adapters/*/requests.ts", "harness/adapters/*/pi_extension_api.md", "harness/adapters/codex/default_instructions.md", "harness/adapters/codex/bundled_models.json", "service/profiles/*.yaml", "recipe/reefine/agent_rules.md", "recipe/reefine/agent_tools.ts", "recipe/reefine/trial_driver.mjs", "recipe/reefine/health/instruction.md", "recipe/reefine/health/task.toml", "recipe/reefine/health/environment/Dockerfile", "recipe/reefine/health/tests/test.sh"]
+reef = [
+    "harness/adapters/*/adapter.yaml",
+    "harness/adapters/codex/default_instructions.md",
+    "harness/adapters/codex/bundled_models.json",
+    "train/harness_backend/agent/protocol.md",
+]
 
 [tool.isort]
 profile = "black"  # black-compatible
@@ -189,8 +197,6 @@ allowed-confusables = ["α", "γ", "−"]
 [tool.ruff.lint.per-file-ignores]
 # Test code: perf lint and strict class/branch shape rules add churn, not safety.
 "tests/**/*.py" = ["N806", "PERF", "RUF012", "SIM108"]
-# This function-local set is a constant used to describe a fixed protocol vocabulary.
-"reef/train/cordis_backend/strategies.py" = ["N806"]
 # The Top-K objective follows the mathematical notation used in its derivation.
 "recipes/openclawrl/slime/objective.py" = ["N802", "N803", "N806"]
 
@@ -228,9 +234,11 @@ precision = 1
 fail_under = 80
 
 [tool.pytest.ini_options]
-# durations=0 will display all tests execution time, sorted in ascending order starting from from the slowest one.
-# -vv will also display tests with duration = 0.00s
-addopts = "--verbose --pyargs --durations=0 --strict-markers --import-mode=importlib"
+# Report the 20 slowest tests; --durations=0 lists every test.
+# With -n, worksteal spreads single tests over the workers and moves queued
+# tests from a busy worker to an idle one, so one slow file cannot hold the run.
+# Every test must therefore pass alone and in any order. Without -n, --dist has no effect.
+addopts = "--verbose --pyargs --durations=20 --strict-markers --import-mode=importlib --dist worksteal"
 testpaths = ["./tests"]  # must be an explicit path to avoid importing another "tests" module
 # directories to ignore when discovering tests
 norecursedirs = [

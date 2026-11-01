@@ -204,6 +204,19 @@ def write_harbor_task(task: HarborTask, root: Path) -> Path:
     return target
 
 
+def task_instruction(path: Path) -> str:
+    """The text of ``instruction.md`` in any Harbor task directory, written by Reef or not; ``HarborTaskError``
+    when ``path`` holds no ``task.toml`` or no ``instruction.md``."""
+    path = Path(path)
+    for name in ROOT_FILES:
+        if not (path / name).is_file():
+            raise HarborTaskError(f"{path / name} is missing")
+    try:
+        return (path / "instruction.md").read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise HarborTaskError(f"cannot read {path / 'instruction.md'}: {exc}") from exc
+
+
 def read_harbor_task(path: Path) -> HarborTask:
     """Read a directory written by :func:`write_harbor_task` back, refusing one whose content no longer matches its digest."""
     path = Path(path)

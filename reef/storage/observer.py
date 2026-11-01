@@ -18,10 +18,11 @@ from typing import Any, Self
 from reef.core.plugins import PluginConfigError
 from reef.core.records_types import AgentRecord, RequestType
 from reef.storage.commits import CommitRecord
+from reef.storage.evaluations import EvaluationStore
 from reef.storage.records import AppendResult, ConsumptionReceipt, RecordLoss, RecordStore, StoredRecord
+from reef.storage.samples import SampleStore
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage, ScenarioStore
 from reef.storage.tasks import TaskFileStore, TaskStorage
-from reef.storage.trajectories import TrajectoryStore
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +39,7 @@ class RecordObserver:
         """One record the store inserted for the first time (retries are not reported)."""
 
     def record_committed(self, commit: CommitRecord) -> None:
-        """One committed step, training or rollback, with the record ids its job data consumed."""
+        """One committed step (training, activation or new training start), with the record ids its job data consumed."""
 
     def close(self) -> None:
         pass
@@ -89,6 +90,9 @@ class ObservedRecordStore(RecordStore):
     def count(self, scenario: str, *, request_type: RequestType | None = None, after_sequence: int = 0) -> int:
         return self._inner.count(scenario, request_type=request_type, after_sequence=after_sequence)
 
+    def last_sequence(self, scenario: str) -> int:
+        return self._inner.last_sequence(scenario)
+
     def get_for_audit(self, scenario: str, agent_record_id: str) -> StoredRecord | None:
         return self._inner.get_for_audit(scenario, agent_record_id)
 
@@ -128,8 +132,12 @@ class ObservedScenarioStore(ScenarioStore):
         return self._inner.tasks
 
     @property
-    def trajectories(self) -> TrajectoryStore:
-        return self._inner.trajectories
+    def samples(self) -> SampleStore:
+        return self._inner.samples
+
+    @property
+    def evaluations(self) -> EvaluationStore:
+        return self._inner.evaluations
 
     def history(self) -> tuple[CommitRecord, ...]:
         return self._inner.history()

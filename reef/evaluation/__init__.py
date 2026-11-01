@@ -1,20 +1,22 @@
-"""The recipe's candidate evaluation: contracts, built-ins, and plugin loading.
+"""Candidate evaluation and the activation rules: contracts, built-ins, and plugin loading.
 
-Every :class:`reef.recipe.Recipe` carries a ``candidate_evaluation`` plugin —
-a :class:`SelectionPlugin` that harness recipes build from ``evolution.selection``,
-or a :class:`ConfiguredEvaluationPlugin` that weight recipes build from the
-top-level ``evaluation`` config section — and :class:`reef.train.Trainer` runs it between
-prepare and settle to decide whether a produced candidate is published. The
-shared contracts live in ``reef.core.evaluation`` and are re-exported here.
-Runtimes import those contracts directly; this package owns the built-in
-evaluators, selectors, and configuration machinery.
+A harness recipe builds a publication policy from ``evolution.evaluation``, a
+:class:`CandidateEvaluationPlugin`. :class:`reef.train.Trainer` runs it between
+prepare and settle to decide which candidate tree the search keeps. The activation rule decides whether an
+artifact that training makes serves; ``activation`` holds the built-in rules
+(``always``, ``never`` and ``evaluated``). The shared contracts live in
+``reef.core.evaluation`` and ``reef.core.activation``. This package owns the
+built-in evaluators, selectors and rules.
 
-``harness`` measures harness candidates by running evaluation episodes. It
-holds ``HarnessCandidate``, its evaluator ``HarnessEpisodeEvaluator``, the
-``EpisodeScorer`` contract that a method supplies, and the ``score_comparison``
-and ``floor`` selection policies.
+``harness`` measures harness candidates by running evaluation rollouts. It
+holds ``HarnessCandidate``, its evaluator ``HarnessTaskEvaluator``, the
+``TaskScorer`` contract that a deployment names, the history that is the
+score cache, and the ``compare``, ``floor`` and ``none`` publication policies.
+``rollout_worker`` runs the rollouts of an artifact evaluation, and
+``artifact_endpoint`` answers their model calls from the evaluated artifact.
 """
 
+from reef.core.activation import ActivationRule, MadeArtifact
 from reef.core.evaluation import (
     CandidateEvaluationPlugin,
     CandidateEvaluator,
@@ -23,34 +25,21 @@ from reef.core.evaluation import (
     SelectionDecision,
     UpdateCandidate,
 )
-from reef.evaluation.config import (
-    CandidateEvaluationConfig,
-    CandidateEvaluationConfigError,
-    ConfiguredEvaluationPlugin,
-    build_candidate_evaluation,
-)
-from reef.evaluation.evaluators import (
-    AlwaysSelectMixin,
-    BackendAlwaysSelectPlugin,
-    BackendEvaluateMixin,
-    RegressionCheckMixin,
-    SelectionPlugin,
-)
+from reef.evaluation.activation import AlwaysActivate, EvaluatedActivation, NeverActivate
+from reef.evaluation.evaluators import AlwaysSelectMixin, RegressionCheckMixin
 
 __all__ = [
+    "ActivationRule",
+    "AlwaysActivate",
     "AlwaysSelectMixin",
-    "BackendAlwaysSelectPlugin",
-    "BackendEvaluateMixin",
-    "CandidateEvaluationConfig",
-    "CandidateEvaluationConfigError",
     "CandidateEvaluationPlugin",
     "CandidateEvaluator",
     "CandidateSelector",
-    "ConfiguredEvaluationPlugin",
+    "EvaluatedActivation",
     "EvaluationResult",
+    "MadeArtifact",
+    "NeverActivate",
     "RegressionCheckMixin",
     "SelectionDecision",
-    "SelectionPlugin",
     "UpdateCandidate",
-    "build_candidate_evaluation",
 ]

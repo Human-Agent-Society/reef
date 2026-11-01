@@ -1,17 +1,14 @@
 """SDK call-order tests without credentials, model downloads, or GPU dependencies."""
 
-import sys
 from dataclasses import replace
-from pathlib import Path
-from types import ModuleType, SimpleNamespace
+from types import SimpleNamespace
 
 import pytest
 
 from reef.runtime.interfaces import UpstreamStatusError
-from reef.runtime.serving import ADAPTER_DIR
 from reef.tinker.checkpoint import TinkerCheckpoint
 from reef.tinker.sampling import TinkerSDKSampler
-from reef.train.tinker_backend.client import TINKER_ADAPTER_DIR, TinkerSDKClient
+from reef.train.tinker_backend.client import TinkerSDKClient
 from reef.train.tinker_backend.config import TinkerConfig
 from reef.train.tinker_backend.losses import ImportanceSamplingLoss, TinkerCustomLoss, TokenRow
 
@@ -29,7 +26,19 @@ class Trainer:
         self.events = events
         self.fail = fail
 
-    def forward_backward(self, data, loss_fn):
+    def forward(self, data, loss_fn):
+        self.events.append(("forward", data, loss_fn))
+        # The log probability of each target token: -0.1 times its position.
+        return Future(
+            SimpleNamespace(
+                loss_fn_outputs=[
+                    {"logprobs": SimpleNamespace(data=[-0.1 * (index + 1) for index in range(len(datum.model_input))])}
+                    for datum in data
+                ]
+            )
+        )
+
+    def forward_backward(self, data, loss_fn, loss_fn_config=None):
         self.events.append(("forward_backward", data, loss_fn))
         return Future(SimpleNamespace(metrics={"loss:sum": -2.0}))
 
@@ -52,15 +61,12 @@ class Trainer:
         self.events.append(("save_weights_for_sampler", name, ttl_seconds))
         return Future(SimpleNamespace(path="tinker://next/sampler"))
 
-    def save_weights_external(self, name, ttl_seconds):
-        self.events.append(("save_weights_external", name, ttl_seconds))
-        return Future(SimpleNamespace(path="tinker://next/external_weights"))
-
 
 class Sampler:
     def __init__(self, events):
         self.events = events
         self.logprobs = [-0.25, -0.5]
+        self.topk_logprobs: list | None = None
         self.refusal: Exception | None = None
 
     def get_base_model(self):
@@ -69,13 +75,14 @@ class Sampler:
     def compute_logprobs(self, prompt):
         return Future([None, -0.1, -0.5, -0.7])
 
-    def sample(self, *, prompt, num_samples, sampling_params):
-        self.events.append(("sample", prompt, num_samples, sampling_params))
+    def sample(self, *, prompt, num_samples, sampling_params, topk_sample_logprobs):
+        self.events.append(("sample", prompt, num_samples, sampling_params, topk_sample_logprobs))
         if self.refusal is not None:
             raise self.refusal
-        return Future(
-            SimpleNamespace(sequences=[SimpleNamespace(tokens=[20, 21], logprobs=self.logprobs, stop_reason="length")])
+        sequence = SimpleNamespace(
+            tokens=[20, 21], logprobs=self.logprobs, topk_logprobs=self.topk_logprobs, stop_reason="length"
         )
+        return Future(SimpleNamespace(sequences=[sequence]))
 
 
 class Service:
@@ -85,16 +92,20 @@ class Service:
         self.events = events
         self.fail = fail
         self.sampler = Sampler(events)
+        self.weights_info_paths: list[str] = []
 
     def create_rest_client(self):
         return self
 
     def get_weights_info_by_tinker_path(self, path):
-        return Future(SimpleNamespace(base_model="Qwen/Qwen3-8B", is_lora=True, lora_rank=32))
-
-    def get_external_weights_urls(self, path):
-        self.events.append(("external_weights_urls", path))
-        return Future(SimpleNamespace(urls=self.adapter_urls))
+        self.weights_info_paths.append(path)
+        # Spindle refuses a sampler path at weights_info with a 400.
+        if "/sampler_weights/" in path:
+            raise BadRequestError(f"invalid checkpoint path: {path}")
+        if path.endswith("/missing"):
+            raise NotFoundError("checkpoint metadata not found")
+        rank = 8 if path.endswith("/rank-8") else 32
+        return Future(SimpleNamespace(base_model="Qwen/Qwen3-8B", is_lora=True, lora_rank=rank))
 
     def create_training_client_from_state_with_optimizer(self, path):
         self.events.append(("restore_with_optimizer", path))
@@ -134,6 +145,7 @@ class SDK:
     NotFoundError = NotFoundError
     ModelInput = ModelInput
     Datum = SimpleNamespace
+    TensorData = SimpleNamespace
     AdamParams = SimpleNamespace
     SamplingParams = SimpleNamespace
 
@@ -153,6 +165,8 @@ def client(tmp_path):
     value._sdk = SDK()
     value._model = "Qwen/Qwen3-8B"
     value._config = TinkerConfig(state_dir=str(tmp_path), train_timeout_s=10)
+    value._lora_rank = 32
+    value._seed = 0
     value._api_key = "test-only"
     value._service = Service(value._sdk.events)
     value.base_client = Sampler(value._sdk.events)
@@ -172,74 +186,10 @@ def sampler(client):
     return value
 
 
-def test_download_keeps_tinkers_adapter_beside_its_peft_conversion(client, tmp_path, monkeypatch):
-    exported = tmp_path / "exported"
-    exported.mkdir()
-    (exported / "adapter_config.json").write_bytes(b"{}")
-    (exported / "adapter_model.safetensors").write_bytes(b"tinker names")
-    client._service.adapter_urls = {path.name: path.as_uri() for path in exported.iterdir()}
-    conversions = []
-
-    def build_lora_adapter(*, base_model, adapter_path, output_path):
-        conversions.append((base_model, (Path(adapter_path) / "adapter_model.safetensors").read_bytes()))
-        Path(output_path).mkdir(parents=True)
-        (Path(output_path) / "adapter_model.safetensors").write_bytes(b"model names")
-
-    cookbook = ModuleType("tinker_cookbook")
-    cookbook.weights = SimpleNamespace(build_lora_adapter=build_lora_adapter)
-    monkeypatch.setitem(sys.modules, "tinker_cookbook", cookbook)
-    release = tmp_path / "jobs" / "job" / "4"
-    release.mkdir(parents=True)
-    checkpoint = TinkerCheckpoint(
-        "Qwen/Qwen3-8B", 32, "tinker://s/state", "tinker://s/sampler", adapter_path="tinker://s/external_weights/a"
-    )
-
-    client.download(checkpoint, release)
-
-    assert ("external_weights_urls", "tinker://s/external_weights/a") in client._sdk.events
-    assert conversions == [("Qwen/Qwen3-8B", b"tinker names")]
-    assert (release / ADAPTER_DIR / "adapter_model.safetensors").read_bytes() == b"model names"
-    assert (release / TINKER_ADAPTER_DIR / "adapter_model.safetensors").read_bytes() == b"tinker names"
-    assert (release / TINKER_ADAPTER_DIR / "adapter_config.json").read_bytes() == b"{}"
-    assert sorted(path.name for path in release.parent.iterdir()) == ["4"]
-
-
-def test_download_refuses_a_checkpoint_without_an_exported_adapter_or_a_file_outside_it(client, tmp_path, monkeypatch):
-    with pytest.raises(ValueError, match="without an exported adapter"):
-        client.download(TinkerCheckpoint("Qwen/Qwen3-8B", 32, "tinker://s/state", "tinker://s/sampler"), tmp_path)
-    cookbook = ModuleType("tinker_cookbook")
-    cookbook.weights = SimpleNamespace(build_lora_adapter=lambda **options: pytest.fail("converted an unsafe adapter"))
-    monkeypatch.setitem(sys.modules, "tinker_cookbook", cookbook)
-    client._service.adapter_urls = {"../escape": (tmp_path / "x").as_uri()}
-    checkpoint = TinkerCheckpoint(
-        "Qwen/Qwen3-8B", 32, "tinker://s/state", "tinker://s/sampler", adapter_path="tinker://a"
-    )
-    with pytest.raises(ValueError, match="outside its directory"):
-        client.download(checkpoint, tmp_path / "release")
-    assert not (tmp_path / "escape").exists() and not (tmp_path / ".release.download").exists()
-
-
-def test_training_exports_the_adapter_only_with_export_adapter(client):
-    base = TinkerCheckpoint(client._model, 32, "tinker://base/state", "tinker://base/sampler")
-    row = TokenRow((10, 11, 20, 21), (1, 1), (-0.25, -0.5), 2)
-    checkpoint, _ = client.train(base, [[row]], ImportanceSamplingLoss(), [1e-4], kl_coef=0.0, export_adapter=False)
-    assert checkpoint.adapter_path is None and "save_weights_external" not in [e[0] for e in client._sdk.events]
-
-    checkpoint, _ = client.train(base, [[row]], ImportanceSamplingLoss(), [1e-4], kl_coef=0.0, export_adapter=True)
-    saves = [event for event in client._sdk.events if event[0].startswith("save_")]
-    assert [event[0] for event in saves[-3:]] == ["save_state", "save_weights_for_sampler", "save_weights_external"]
-    assert saves[-1][1] == saves[-2][1] and saves[-1][2] is None
-    assert checkpoint.adapter_path == "tinker://next/external_weights"
-    assert TinkerCheckpoint.from_dict(checkpoint.to_dict()) == checkpoint
-    assert "adapter_path" not in base.to_dict()
-
-
 def test_training_restores_optimizer_then_saves_both_durable_snapshots(client):
     base = TinkerCheckpoint(client._model, 32, "tinker://base/state", "tinker://base/sampler")
     row = TokenRow((10, 11, 20, 21), (1, 1), (-0.25, -0.5), 2)
-    checkpoint, _ = client.train(
-        base, [[row], [row]], ImportanceSamplingLoss(), [1e-4, 5e-5], kl_coef=0.0, export_adapter=False
-    )
+    checkpoint, _ = client.train(base, [[row], [row]], ImportanceSamplingLoss(), [1e-4, 5e-5], kl_coef=0.0)
     events = client._sdk.events
     assert [event[0] for event in events] == [
         "session",
@@ -265,16 +215,32 @@ def test_training_restores_optimizer_then_saves_both_durable_snapshots(client):
     assert events[-1] == ("close", "success")
 
 
+def test_rows_without_log_probabilities_take_those_of_the_starts_weights(client):
+    base = TinkerCheckpoint(client._model, 32, "tinker://base/state", "tinker://base/sampler")
+    rendered = TokenRow((10, 11, 20, 21), (1, 1), (), 2)
+    recorded = TokenRow((10, 20), (1,), (-0.25,), 1)
+    client.train(base, [[rendered, recorded], [rendered]], ImportanceSamplingLoss(), [1e-4, 1e-4], kl_coef=0.0)
+    events = client._sdk.events
+    # The start's weights score every row without log probabilities before the first optimizer step.
+    assert [event[0] for event in events][1:5] == ["restore_with_optimizer", "forward", "forward", "forward_backward"]
+    (scored,) = events[2][1]
+    assert scored.loss_fn_inputs["target_tokens"].data == [11, 20, 21] and events[2][2] == "cross_entropy"
+    first_step = next(event for event in events if event[0] == "forward_backward")[1]
+    assert first_step[0].loss_fn_inputs["logprobs"] == pytest.approx([0.0, -0.2, -0.3])
+    assert first_step[1].loss_fn_inputs["logprobs"] == pytest.approx([-0.25]), "a recorded row keeps its own"
+
+
+@pytest.mark.unit
 def test_uncertain_optimizer_closes_attempt_and_retry_restores_incumbent(client):
     base = TinkerCheckpoint(client._model, 32, "tinker://base/state", "tinker://base/sampler")
     row = TokenRow((10, 20), (1,), (-0.25,), 1)
     client._sdk.fail = True
     with pytest.raises(TimeoutError):
-        client.train(base, [[row]], ImportanceSamplingLoss(), [1e-4], kl_coef=0.0, export_adapter=False)
+        client.train(base, [[row]], ImportanceSamplingLoss(), [1e-4], kl_coef=0.0)
     assert client._sdk.events[-1] == ("close", "errored")
     assert not any(event[0] == "save_state" for event in client._sdk.events)
     client._sdk.fail = False
-    client.train(base, [[row]], ImportanceSamplingLoss(), [1e-4], kl_coef=0.0, export_adapter=False)
+    client.train(base, [[row]], ImportanceSamplingLoss(), [1e-4], kl_coef=0.0)
     assert client._sdk.events[-1] == ("close", "success")
     assert [event[1] for event in client._sdk.events if event[0] == "restore_with_optimizer"] == [base.state_path] * 2
 
@@ -289,7 +255,7 @@ def test_custom_loss_routes_to_forward_backward_custom(client):
 
     base = TinkerCheckpoint(client._model, 32, "tinker://base/state", "tinker://base/sampler")
     row = TokenRow((10, 11, 20, 21), (1, 1), (-0.25, -0.5), 2)
-    _, metrics = client.train(base, [[row]], Custom(), [1e-4], kl_coef=0.0, export_adapter=False)
+    _, metrics = client.train(base, [[row]], Custom(), [1e-4], kl_coef=0.0)
     names = [event[0] for event in client._sdk.events]
     assert "forward_backward_custom" in names and "forward_backward" not in names
     assert next(event for event in client._sdk.events if event[0] == "forward_backward_custom")[2] == pytest.approx(
@@ -312,22 +278,31 @@ def test_initial_snapshot_and_sampling_use_explicit_immutable_paths(client, samp
     checkpoint = client.initialize()
     assert client._sdk.events[1] == ("initialize", client._model, 32, 0)
     assert client._sdk.events[-1] == ("close", "success")
-    result = sampler.sample(checkpoint.sampler_path, [10, 11], {"max_tokens": 2})
+    result = sampler.sample(checkpoint.sampler_path, [10, 11], {"max_tokens": 2}, topk_logprobs=0)
     assert result.tokens == (20, 21)
     assert result.logprobs == (-0.25, -0.5)
     assert client._sdk.events[-2] == ("sampler", checkpoint.sampler_path)
-    sampler.sample(None, [10, 11], {"max_tokens": 2})
+    sampler.sample(None, [10, 11], {"max_tokens": 2}, topk_logprobs=0)
     assert client._sdk.events[-1][0] == "sample"  # the base sampler needs no new client
+    client._service.sampler.topk_logprobs = [[(20, -0.25), (3, -2.0)], [(21, -0.5), (4, -1.5)]]
+    assert sampler.sample(checkpoint.sampler_path, [10, 11], {"max_tokens": 2}, topk_logprobs=2).topk == (
+        ((20, -0.25), (3, -2.0)),
+        ((21, -0.5), (4, -1.5)),
+    )
+    assert client._sdk.events[-1][-1] == 2
+    client._service.sampler.topk_logprobs = [[(20, -0.25)], None]
+    with pytest.raises(ValueError, match="no top-k log probabilities for every sampled token"):
+        sampler.sample(checkpoint.sampler_path, [10, 11], {"max_tokens": 2}, topk_logprobs=2)
     client._service.sampler.logprobs = None
     with pytest.raises(ValueError, match="exact log probabilities"):
-        sampler.sample(checkpoint.sampler_path, [10, 11], {"max_tokens": 2})
+        sampler.sample(checkpoint.sampler_path, [10, 11], {"max_tokens": 2}, topk_logprobs=0)
     client.close()
     assert client._sdk.events[-1] == ("close", "success")
 
 
 def test_a_null_seed_lets_the_service_choose(client):
     # Spindle's multi-LoRA trainer refuses a per-model seed.
-    client._config = replace(client._config, seed=None)
+    client._seed = None
     client.initialize()
     assert ("initialize", client._model, 32, None) in client._sdk.events
 
@@ -338,9 +313,7 @@ def test_a_service_without_the_session_finish_call_still_trains(client):
     try:
         base = TinkerCheckpoint(client._model, 32, "tinker://b/state", "tinker://b/sampler")
         row = TokenRow((10, 11, 20, 21), (1, 1), (-0.25, -0.5), 2)
-        checkpoint, _ = client.train(
-            base, [[row]], ImportanceSamplingLoss(), [1e-4], kl_coef=0.0, export_adapter=False
-        )
+        checkpoint, _ = client.train(base, [[row]], ImportanceSamplingLoss(), [1e-4], kl_coef=0.0)
         client.close()
     finally:
         Service.close_refusal = None
@@ -359,27 +332,26 @@ def test_base_sampling_clients_are_made_at_their_first_use(client, sampler):
         ImportanceSamplingLoss(),
         [1e-4],
         kl_coef=0.0,
-        export_adapter=False,
     )
     assert not any(event[0] == "base_sampler" for event in client._sdk.events)
 
-    sampler.sample(None, [10, 11], {"max_tokens": 2})
-    sampler.sample(None, [10, 11], {"max_tokens": 2})
+    sampler.sample(None, [10, 11], {"max_tokens": 2}, topk_logprobs=0)
+    sampler.sample(None, [10, 11], {"max_tokens": 2}, topk_logprobs=0)
     assert [event for event in client._sdk.events if event[0] == "base_sampler"] == [("base_sampler", "Qwen/Qwen3-8B")]
 
 
 def test_a_refused_sample_is_the_callers_400_and_an_overflow_names_the_context_length(sampler):
-    # Tinker's message for a Qwen3.5-4B episode whose history outgrew the 64K window.
+    # Tinker's message for a Qwen3.5-4B rollout whose history outgrew the 64K window.
     sampler.base_client.refusal = BadRequestError(
         "Error code: 400 - Prompt length plus max_tokens exceeds the model's context window: "
         "65614 prompt tokens + 4096 max_tokens > 65536"
     )
     with pytest.raises(UpstreamStatusError, match=r"maximum context length.*65614 prompt tokens") as overflow:
-        sampler.sample(None, [10, 11], {"max_tokens": 2})
+        sampler.sample(None, [10, 11], {"max_tokens": 2}, topk_logprobs=0)
     assert overflow.value.status == 400 and str(overflow.value).startswith("context_length_exceeded")
     sampler.base_client.refusal = BadRequestError("Error code: 400 - invalid sampling params")
     with pytest.raises(UpstreamStatusError, match=r"^Error code: 400 - invalid sampling params$"):
-        sampler.sample(None, [10, 11], {"max_tokens": 2})
+        sampler.sample(None, [10, 11], {"max_tokens": 2}, topk_logprobs=0)
 
 
 def test_frozen_base_logprobs_align_to_response_and_reject_missing_values(client):
@@ -397,12 +369,12 @@ def test_remote_model_mismatch_fails_before_training_or_sampling(client, sampler
         "get_weights_info_by_tinker_path",
         lambda _, path: Future(SimpleNamespace(base_model="other/model", is_lora=True, lora_rank=32)),
     )
-    with pytest.raises(ValueError, match="remote Tinker training checkpoint"):
-        client.train(base, [[row]], ImportanceSamplingLoss(), [1e-4], kl_coef=0.0, export_adapter=False)
+    with pytest.raises(ValueError, match="tinker://base/state is no rank 32 LoRA of Qwen/Qwen3-8B"):
+        client.train(base, [[row]], ImportanceSamplingLoss(), [1e-4], kl_coef=0.0)
     assert not any(event[0] == "forward_backward" for event in client._sdk.events)
     monkeypatch.setattr(Sampler, "get_base_model", lambda _: "other/model")
     with pytest.raises(ValueError, match="remote Tinker sampler checkpoint"):
-        sampler.sample(base.sampler_path, [10], {"max_tokens": 1})
+        sampler.sample(base.sampler_path, [10], {"max_tokens": 1}, topk_logprobs=0)
     assert not any(event[0] == "sample" for event in client._sdk.events)
 
 
@@ -471,3 +443,37 @@ def test_installed_sdk_call_signatures_and_datum_without_network():
     assert datum.model_input.length == 3
     assert datum.loss_fn_inputs["target_tokens"].data == [11, 20, 21]
     assert datum.loss_fn_inputs["advantages"].data == [0, 2, 0]
+
+
+def test_an_imported_manifest_is_checked_by_its_state_path_alone(client):
+    checkpoint = TinkerCheckpoint("Qwen/Qwen3-8B", 32, "tinker://run/weights/step-4", "tinker://run/sampler_weights/4")
+    client.check_remote(checkpoint)
+    # The sampler path is not looked up: Spindle refuses it at weights_info.
+    assert client._service.weights_info_paths == ["tinker://run/weights/step-4"]
+    for state_path, message in (
+        ("tinker://run/weights/missing", "does not resolve"),
+        ("tinker://run/sampler_weights/4", "refuses the Tinker path"),
+        ("tinker://run/weights/rank-8", "no rank 32 LoRA"),
+    ):
+        with pytest.raises(ValueError, match=message):
+            client.check_remote(replace(checkpoint, state_path=state_path))
+
+
+def test_the_metrics_of_several_optimizer_steps_combine_by_their_suffixes():
+    from reef.train.tinker_backend.client import combined_step_metrics
+
+    combined = combined_step_metrics(
+        [
+            {"loss:sum": -2.0, "loss:mean": -0.2, "tokens:sum": 10.0, "packing_token_capacity:max": 4.0, "seed": 1.0},
+            {"loss:sum": 0.0, "loss:mean": 0.0, "tokens:sum": 30.0, "packing_token_capacity:max": 8.0, "seed": 2.0},
+        ]
+    )
+
+    assert combined == {
+        "loss:sum": -2.0,
+        "loss:mean": pytest.approx(-0.05),
+        "tokens:sum": 40.0,
+        "packing_token_capacity:max": 8.0,
+        "seed": 2.0,
+    }
+    assert combined_step_metrics([{"loss:mean": 1.0}, {"loss:mean": 3.0}]) == {"loss:mean": 2.0}

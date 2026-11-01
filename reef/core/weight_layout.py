@@ -5,3 +5,5 @@ from typing import Literal
 #: ``"full"`` is a Hugging Face checkpoint of every model weight; ``"adapter"`` is a PEFT adapter directory.
 WeightLayout = Literal["full", "adapter"]
 WEIGHT_LAYOUTS: tuple[WeightLayout, ...] = ("full", "adapter")
+#: The directory of a release in the ``"adapter"`` layout that holds its PEFT adapter.
+ADAPTER_DIR = "adapter"

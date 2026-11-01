@@ -43,7 +43,7 @@ offline pipelines.
    Serve :: forward the request and keep the exchange
    Record :: store the release that produced the response
    Learn* :: the recipe uses records to create a candidate version
-   Publish :: an accepted candidate becomes the current version
+   Publish :: an accepted candidate becomes the active release
 
 Existing inference engines and RL frameworks cover parts of that loop, but not
 the whole thing:

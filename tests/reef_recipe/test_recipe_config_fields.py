@@ -11,18 +11,16 @@ from dataclasses import KW_ONLY, dataclass
 
 import pytest
 import yaml
-from tests.support._threshold_processor import ThresholdJobData, ThresholdTasks
-from tests.support.runtime_stubs import runtime_bindings
+from tests.support._threshold_processor import ThresholdJobData, ThresholdSamples
+from tests.support.runtime_stubs import STUB_ROOT, runtime_bindings
 
 from reef.core.config import config_arguments
-from reef.evaluation.evaluators import AlwaysSelectCheckpointPlugin
+from reef.evaluation.activation import AlwaysActivate
 from reef.recipe import RecipeConfigError, config_field
 from reef.recipe.base import WeightTrainingRecipe, WeightTrainingSpec
 from reef.recipe.config_fields import resolve_config_field_values
 from reef.storage.sqlite import SQLiteRecordStore
-from reef.train.jobs import FixedJobPlan, JobPlanContext
 from reef.train.pipeline import PipelineConfig, PipelineSpec
-from reef.train.types import JobData
 
 
 @dataclass(frozen=True)
@@ -54,7 +52,7 @@ class StagedRecipe(WeightTrainingRecipe):
 
     @classmethod
     def pipeline_spec(cls) -> PipelineSpec:
-        return PipelineSpec(record2task=ThresholdTasks, task2job=ThresholdJobData)
+        return PipelineSpec(record2sample=ThresholdSamples, sample2job=ThresholdJobData)
 
 
 @pytest.mark.unit
@@ -220,7 +218,7 @@ def test_a_stage_setting_in_the_recipe_config_is_refused_with_its_pipeline_key()
     # The stage's own range check fails when the pipeline builds.
     recipe = SAORecipe.from_environment(
         {},
-        config={"pipeline": {"task2job": {"config": {"buffer_size": -1}}}},
+        config={"pipeline": {"sample2job": {"config": {"buffer_size": -1}}}},
         **runtime_bindings(),
     )
     with pytest.raises(RecipeConfigError, match="buffer_size must be None or a positive int"):
@@ -241,43 +239,41 @@ def test_config_field_annotations_outside_the_supported_scalars_fail_at_declarat
 @pytest.mark.unit
 def test_default_build_uses_declared_stages_and_their_pipeline_config() -> None:
     stages = PipelineConfig.from_setting(
-        {"task2job": {"config": {"job_samples": 2, "buffer_size": 8}}}, spec=StagedRecipe.pipeline_spec(), environ={}
+        {"sample2job": {"config": {"job_samples": 2, "buffer_size": 8}}}, spec=StagedRecipe.pipeline_spec(), environ={}
     )
-    trainer = StagedRecipe(**runtime_bindings(), pipeline_stages=stages).build("scenario", SQLiteRecordStore())
+    recipe = StagedRecipe(**runtime_bindings(), pipeline_stages=stages)
+    trainer = recipe.build("scenario", SQLiteRecordStore(), root=STUB_ROOT)
 
-    assert isinstance(trainer.pipeline.record2task, ThresholdTasks)
-    assert isinstance(trainer.pipeline.task2job, ThresholdJobData)
+    assert isinstance(trainer.pipeline.record2sample, ThresholdSamples)
+    assert isinstance(trainer.pipeline.sample2job, ThresholdJobData)
     assert trainer.job_loop is not None
-    assert isinstance(trainer.job_loop.evaluator, AlwaysSelectCheckpointPlugin)
-    plan = trainer.job_loop.plan
-    assert isinstance(plan, FixedJobPlan)
-    request = plan.next_job(JobPlanContext(JobData("scenario:1"), 0, None))
-    assert request.parameters["method"]["objective"] == "sft"
+    # With no activation section, every artifact that training makes serves.
+    assert isinstance(recipe.activation_rule(), AlwaysActivate)
+    assert trainer.pipeline.context.job_parameters["trajectory"]["method"]["objective"] == "sft"
     # The job size and the buffer size come from the stage config.
     assert (trainer.job_samples, trainer.pipeline.buffer_size) == (2, 8)
 
 
 @pytest.mark.unit
-def test_the_default_job_plan_sends_the_configured_job_parameters_with_every_job() -> None:
+def test_the_default_recipe_sends_the_configured_job_parameters_with_every_job() -> None:
     config = {"job_parameters": {"scheduling": {"packing_length": 4096}, "save_interval": 50}}
     job_parameters = resolve_config_field_values(StagedRecipe, config, {})["job_parameters"]
     recipe = StagedRecipe(**runtime_bindings(), job_parameters=job_parameters)
 
-    request = recipe.job_plan().next_job(JobPlanContext(JobData("scenario:1"), 0, None))
-
-    assert request.parameters == {
+    expected = {
         "scheduling": {"packing_length": 4096},
         "save_interval": 50,
         "method": {"objective": "sft", "learning_rate_schedule": None},
     }
+    assert recipe.parameters_by_kind() == {"trajectory": expected, "task": expected}
     with pytest.raises(RecipeConfigError, match="job_parameters cannot set method"):
         StagedRecipe(**runtime_bindings(), job_parameters={"method": {"objective": "other"}})
 
 
 @pytest.mark.unit
 def test_a_weight_recipe_without_job_samples_fails_its_build() -> None:
-    with pytest.raises(RecipeConfigError, match=r"set pipeline\.task2job\.config\.job_samples"):
-        StagedRecipe(**runtime_bindings()).build("scenario", SQLiteRecordStore())
+    with pytest.raises(RecipeConfigError, match=r"set pipeline\.sample2job\.config\.job_samples"):
+        StagedRecipe(**runtime_bindings()).build("scenario", SQLiteRecordStore(), root=STUB_ROOT)
 
 
 @pytest.mark.unit
@@ -285,7 +281,7 @@ def test_default_build_requires_processor_and_objective_declarations() -> None:
     from reef.storage.sqlite import SQLiteRecordStore
 
     @dataclass(frozen=True)
-    class NoTask2JobRecipe(WeightTrainingRecipe):
+    class NoSample2JobRecipe(WeightTrainingRecipe):
         @classmethod
         def training_spec(cls) -> WeightTrainingSpec:
             return WeightTrainingSpec(objective="sft")
@@ -298,12 +294,12 @@ def test_default_build_requires_processor_and_objective_declarations() -> None:
 
         @classmethod
         def pipeline_spec(cls) -> PipelineSpec:
-            return PipelineSpec(task2job=ThresholdJobData)
+            return PipelineSpec(sample2job=ThresholdJobData)
 
-    with pytest.raises(TypeError, match=r"declares no task2job.*pipeline_spec\(\).*override build"):
-        NoTask2JobRecipe(**runtime_bindings()).build("scenario", SQLiteRecordStore())
+    with pytest.raises(TypeError, match=r"declares no sample2job.*pipeline_spec\(\).*override build"):
+        NoSample2JobRecipe(**runtime_bindings()).build("scenario", SQLiteRecordStore(), root=STUB_ROOT)
     with pytest.raises(TypeError, match=r"declares no objective.*registered objective name.*'module:Objective'"):
-        NoObjectiveRecipe(**runtime_bindings()).build("scenario", SQLiteRecordStore())
+        NoObjectiveRecipe(**runtime_bindings()).build("scenario", SQLiteRecordStore(), root=STUB_ROOT)
 
 
 @pytest.mark.unit

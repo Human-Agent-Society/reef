@@ -16,6 +16,7 @@ import yaml
 
 from reef.core.config import ConfigArgument
 from reef.core.errors import DeployConfigError
+from reef.execution.workers import SERVICE_COMPONENTS
 from reef.runtime.executor.arguments import normalize_native_options
 from reef.service.deploy.deployment_config import (
     RECIPE_SECTION_PATHS,
@@ -244,9 +245,9 @@ def _apply_overrides(
 def build_serve_parser(
     *, service_arguments: bool = True, config: Mapping[str, Any] | None = None
 ) -> argparse.ArgumentParser:
-    """``reef serve``'s own arguments: the service child's parser plus the profile and model flags.
+    """``reef serve``'s own arguments: the service child's parser plus the model flags.
 
-    Only the launcher takes them; ``python -m reef.service`` still refuses ``--recipe``."""
+    Only the launcher takes them. ``--recipe`` stays reserved so that a removed profile name fails clearly."""
     parser = build_parser(service_arguments=service_arguments)
     if config is not None:
         for argument in component_config_arguments(config):
@@ -258,13 +259,22 @@ def build_serve_parser(
         "--recipe",
         default=None,
         metavar="NAME",
-        help="Start a built in recipe's profile instead of a config file (reefine).",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--model",
         default=None,
         metavar="[PROVIDER/]MODEL",
         help="The upstream model; a known provider prefix (ollama, openai) fills the URL and the key.",
+    )
+    parser.add_argument(
+        "--component",
+        default=None,
+        choices=SERVICE_COMPONENTS,
+        help=(
+            "Run one service of the deployment in this process, on the shared store: control, inference, samples, "
+            "training, evaluation or data. Without it, one process runs all of them."
+        ),
     )
     parser.add_argument(
         "--print-config",

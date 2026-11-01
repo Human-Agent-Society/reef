@@ -101,10 +101,11 @@ The runtime flow is:
 reef-eval starts one Harbor trial for the next problem
   -> the agent sends one OpenAI-compatible chat request through Reef
   -> the SGLang backend renders the prompt once and calls /generate
-  -> Reef stores the sampled tokens, the loss mask, and the rollout log-probabilities
+  -> Reef records the provider exchange and the artifact that answered, without tokens
   -> the agent extracts \boxed{} and scores it against the gold answer
   -> the agent reports the score against that rollout's receipt
-  -> SAOTasks accepts the report and emits one ATIF TrajectoryItem
+  -> SAOSamples accepts the report and emits one ATIF TrajectorySample
+  -> the training component renders the sample with the model's chat template
   -> the sao training objective hands Slime a batch of one
   -> the critic computes values; skip-observation GAE builds the advantages
   -> Slime runs policy_loss with SAO's per-token DIS primitive, after two critic steps
@@ -175,8 +176,10 @@ up; `work/reef.log` has the service log if startup fails.
 
 The config omits `services`. Slime trains inside Reef's HTTP service, and
 `reef serve` starts a local inference component for the SGLang engine on the
-same Ray cluster. The engine returns the rollout log-probabilities that SAO
-needs with each response. No manual wiring is needed.
+same Ray cluster. No manual wiring is needed. Serving records no tokens or
+log-probabilities: the training component renders each rollout with the
+model's chat template, and the actor computes the old-policy log-probabilities
+that SAO needs with the weights of the job's start.
 `training.options` still holds the model and algorithm settings. CLI overrides
 use the same paths, for example `--training.options.lr 0.000002`.
 
@@ -189,7 +192,7 @@ serving never share a GPU: Reef reserves the actor's GPUs, and the inference
 component takes the engine's GPUs.
 
 `run.py` is the loop, written out. For each task in order, reef-eval's `Lab.run`
-executes one episode: the agent runs its six rollouts, reporting each one as
+executes one rollout: the agent runs its six rollouts, reporting each one as
 it is scored, then Harbor's verifier scores the last completion. The ordering
 is the experiment: task `N+1` is served by the weights task `N` produced.
 
@@ -205,15 +208,13 @@ chain:
 
 ```bash
 curl -s -H "Authorization: Bearer reef-local" \
-    http://127.0.0.1:8900/reef/scenarios/sao-smoke/releases
+    http://127.0.0.1:8900/reef/scenarios/sao-smoke/artifacts
 ```
 
 The runtime reports `pg_clipfrac` (the fraction of tokens the DIS mask
-removed), `train_rollout_logprob_abs_diff` (the mean per-token gap between the
-engine's and the trainer's log-probabilities, the quantity DIS masks on),
-`critic/explained_variance` (meaningful only with more than one sample per
+removed), `critic/explained_variance` (meaningful only with more than one sample per
 step), actor and critic `grad_norm`, and the asynchrony telemetry
-`sao/producing_version_spread_*`, `sao/queue_age_s_*`, and
+`sao/producing_artifacts`, `sao/queue_age_s_*`, and
 `sao/effective_token_rate`. Set `observability.wandb.enabled: true` in
 `serve.yaml` and export `WANDB_API_KEY` to keep them per committed step;
 `observability.wandb.directory` is where the run files go.
@@ -243,10 +244,12 @@ The integration reproduces:
 - value targets from Monte-Carlo returns (λ = 1) and policy advantages from
   the length-adaptive λ with α = 1.5, built by skip-observation GAE in the
   training backend, so the Reef payload carries no advantages;
-- the DIS per-token loss with the reasoning-domain mask bounds 0.3 and 5.0,
-  computed against the engine's rollout log-probabilities
-  (`--use-rollout-logprobs`), which is why the deployment selects Reef's
-  token-native SGLang chat backend;
+- the DIS per-token loss with the reasoning-domain mask bounds 0.3 and 5.0.
+  The ratio is computed against the old-policy log-probabilities that the
+  actor computes with the weights of the job's start, not against the
+  engine's log-probabilities: Slime refuses `--use-rollout-logprobs`. With
+  `max_staleness: 0` the two policies are the same weights; above 0 the ratio
+  does not measure the gap to the weights that sampled the rollout;
 - sampling at `temperature=1.0, top_p=1.0`, a constant policy learning rate
   of `1e-6`, and no entropy bonus.
 
@@ -445,7 +448,7 @@ Three of four runs ended in engine watchdog kills. Two followed publication paus
 
 ### Attempts that produced no result
 
-**SWE-Bench Verified.** All three arms scored 0.0 on every episode. The
+**SWE-Bench Verified.** All three arms scored 0.0 on every rollout. The
 minimal bash scaffold (at most 12 turns of at most 8192 tokens in a 32k
 window) cannot resolve the target astropy instances end to end, and the paper
 uses OpenHands with up to 300 turns and 128k context. The results were

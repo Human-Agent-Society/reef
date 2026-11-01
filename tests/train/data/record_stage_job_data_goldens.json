@@ -1,14 +1,18 @@
 {
  "computed_exact_version": [
   {
-   "data_id": "s:data:1",
    "consumed": [
     "a",
     "b",
     "bad-d",
     "c",
-    "e"
+    "closer",
+    "e",
+    "f",
+    "sample:c:0",
+    "sample:e:0"
    ],
+   "data_id": "s:data:1",
    "items": [
     {
      "group": null,
@@ -24,7 +28,7 @@
       "rollout_log_probs": [
        -0.1
       ],
-      "runtime_load_id": "e:3",
+      "artifact_id": "e:3",
       "tokens": [
        1,
        2
@@ -45,7 +49,7 @@
       "rollout_log_probs": [
        -0.1
       ],
-      "runtime_load_id": "e:3",
+      "artifact_id": "e:3",
       "tokens": [
        1,
        2
@@ -58,21 +62,27 @@
     "b",
     "bad-d",
     "c",
-    "e"
+    "closer",
+    "e",
+    "f"
    ],
    "request": null
   }
  ],
  "computed_window": [
   {
-   "data_id": "s:data:1",
    "consumed": [
     "a",
     "b",
     "bad-d",
     "c",
-    "e"
+    "closer",
+    "e",
+    "f",
+    "sample:c:0",
+    "sample:e:0"
    ],
+   "data_id": "s:data:1",
    "items": [
     {
      "group": null,
@@ -88,7 +98,7 @@
       "rollout_log_probs": [
        -0.1
       ],
-      "runtime_load_id": "e:3",
+      "artifact_id": "e:3",
       "tokens": [
        1,
        2
@@ -109,7 +119,7 @@
       "rollout_log_probs": [
        -0.1
       ],
-      "runtime_load_id": "e:3",
+      "artifact_id": "e:3",
       "tokens": [
        1,
        2
@@ -122,25 +132,33 @@
     "b",
     "bad-d",
     "c",
-    "e"
+    "closer",
+    "e",
+    "f"
    ],
    "request": null
   }
  ],
  "coral": [
   {
-   "data_id": "s:data:1",
    "consumed": [
     "i1",
     "i1-retry",
     "i2",
+    "i3",
+    "i4",
     "r1",
     "r1-retry",
-    "r2"
+    "r2",
+    "r3",
+    "r4",
+    "sample:r1:0",
+    "sample:r2:0"
    ],
+   "data_id": "s:data:1",
    "items": [
     {
-     "group": "p0",
+     "group": "r1",
      "recipe": {
       "coral": {
        "agent_id": "agent-1",
@@ -158,25 +176,11 @@
       "r1"
      ],
      "training": {
-      "loss_mask": [
-       0,
-       1,
-       1
-      ],
-      "rollout_log_probs": [
-       -0.1,
-       -0.2
-      ],
-      "runtime_load_id": "wv-1",
-      "tokens": [
-       1,
-       2,
-       3
-      ]
+      "artifact_id": "wv-1"
      }
     },
     {
-     "group": "p0",
+     "group": "r1",
      "recipe": {
       "coral": {
        "agent_id": "agent-1",
@@ -194,21 +198,7 @@
       "r2"
      ],
      "training": {
-      "loss_mask": [
-       0,
-       1,
-       1
-      ],
-      "rollout_log_probs": [
-       -0.1,
-       -0.2
-      ],
-      "runtime_load_id": "wv-1",
-      "tokens": [
-       1,
-       2,
-       3
-      ]
+      "artifact_id": "wv-1"
      }
     }
    ],
@@ -216,23 +206,25 @@
     "i1",
     "i1-retry",
     "i2",
+    "i3",
+    "i4",
     "r1",
     "r1-retry",
-    "r2"
+    "r2",
+    "r3",
+    "r4"
    ],
    "request": null
   },
   {
-   "data_id": "s:data:2",
    "consumed": [
-    "i3",
-    "i4",
-    "r3",
-    "r4"
+    "sample:r3:0",
+    "sample:r4:0"
    ],
+   "data_id": "s:data:2",
    "items": [
     {
-     "group": "__coral_root__",
+     "group": "r3",
      "recipe": {
       "coral": {
        "agent_id": "agent-1",
@@ -250,25 +242,11 @@
       "r3"
      ],
      "training": {
-      "loss_mask": [
-       0,
-       1,
-       1
-      ],
-      "rollout_log_probs": [
-       -0.1,
-       -0.2
-      ],
-      "runtime_load_id": "wv-1",
-      "tokens": [
-       1,
-       2,
-       3
-      ]
+      "artifact_id": "wv-1"
      }
     },
     {
-     "group": "__coral_root__",
+     "group": "r3",
      "recipe": {
       "coral": {
        "agent_id": "agent-1",
@@ -286,42 +264,33 @@
       "r4"
      ],
      "training": {
-      "loss_mask": [
-       0,
-       1,
-       1
-      ],
-      "rollout_log_probs": [
-       -0.1,
-       -0.2
-      ],
-      "runtime_load_id": "wv-1",
-      "tokens": [
-       1,
-       2,
-       3
-      ]
+      "artifact_id": "wv-1"
      }
     }
    ],
-   "released": [
-    "i3",
-    "i4",
-    "r3",
-    "r4"
-   ],
+   "released": [],
    "request": null
   }
  ],
- "cordis_hybrid": [
+ "trace_manual_cap": [
   {
-   "data_id": "s:data:1",
    "consumed": [
     "i-c-0",
     "i-c-1",
+    "i-c-2",
+    "i-c-3",
+    "i-c-4",
+    "i-c-5",
     "r-c-0",
-    "r-c-1"
+    "r-c-1",
+    "r-c-2",
+    "r-c-3",
+    "r-c-4",
+    "r-c-5",
+    "sample:r-c-0:0",
+    "train-1"
    ],
+   "data_id": "s:instruction:train-1",
    "items": [
     {
      "group": null,
@@ -332,7 +301,34 @@
       "r-c-0"
      ],
      "training": {}
-    },
+    }
+   ],
+   "released": [
+    "i-c-0",
+    "i-c-1",
+    "i-c-2",
+    "i-c-3",
+    "i-c-4",
+    "i-c-5",
+    "r-c-0",
+    "r-c-1",
+    "r-c-2",
+    "r-c-3",
+    "r-c-4",
+    "r-c-5",
+    "train-1"
+   ],
+   "request": "train-1"
+  },
+  {
+   "consumed": [
+    "i-c-6",
+    "r-c-6",
+    "sample:r-c-1:0",
+    "train-2"
+   ],
+   "data_id": "s:instruction:train-2",
+   "items": [
     {
      "group": null,
      "recipe": {},
@@ -345,158 +341,8 @@
     }
    ],
    "released": [
-    "i-c-0",
-    "i-c-1",
-    "r-c-0",
-    "r-c-1"
-   ],
-   "request": null
-  },
-  {
-   "data_id": "s:data:2",
-   "consumed": [
-    "i-c-2",
-    "i-c-3",
-    "r-c-2",
-    "r-c-3"
-   ],
-   "items": [
-    {
-     "group": null,
-     "recipe": {},
-     "reward": 2.0,
-     "sources": [
-      "i-c-2",
-      "r-c-2"
-     ],
-     "training": {}
-    },
-    {
-     "group": null,
-     "recipe": {},
-     "reward": 3.0,
-     "sources": [
-      "i-c-3",
-      "r-c-3"
-     ],
-     "training": {}
-    }
-   ],
-   "released": [
-    "i-c-2",
-    "i-c-3",
-    "r-c-2",
-    "r-c-3"
-   ],
-   "request": null
-  },
-  {
-   "data_id": "s:data:3",
-   "consumed": [
-    "i-c-4",
-    "i-c-5",
-    "r-c-4",
-    "r-c-5"
-   ],
-   "items": [
-    {
-     "group": null,
-     "recipe": {},
-     "reward": 4.0,
-     "sources": [
-      "i-c-4",
-      "r-c-4"
-     ],
-     "training": {}
-    },
-    {
-     "group": null,
-     "recipe": {},
-     "reward": 5.0,
-     "sources": [
-      "i-c-5",
-      "r-c-5"
-     ],
-     "training": {}
-    }
-   ],
-   "released": [
-    "i-c-4",
-    "i-c-5",
-    "r-c-4",
-    "r-c-5"
-   ],
-   "request": null
-  },
-  {
-   "data_id": "s:instruction:train-1",
-   "consumed": [
-    "train-1"
-   ],
-   "items": [],
-   "released": [
-    "train-1"
-   ],
-   "request": "train-1"
-  },
-  {
-   "data_id": "s:instruction:train-2",
-   "consumed": [
     "i-c-6",
     "r-c-6",
-    "train-2"
-   ],
-   "items": [
-    {
-     "group": null,
-     "recipe": {},
-     "reward": 1.0,
-     "sources": [
-      "i-c-6",
-      "r-c-6"
-     ],
-     "training": {}
-    }
-   ],
-   "released": [
-    "i-c-6",
-    "r-c-6",
-    "train-2"
-   ],
-   "request": "train-2"
-  }
- ],
- "cordis_manual_cap": [
-  {
-   "data_id": "s:instruction:train-1",
-   "consumed": [
-    "i-c-0",
-    "i-c-1",
-    "r-c-0",
-    "r-c-1",
-    "train-1"
-   ],
-   "items": [],
-   "released": [
-    "i-c-0",
-    "i-c-1",
-    "r-c-0",
-    "r-c-1",
-    "train-1"
-   ],
-   "request": "train-1"
-  },
-  {
-   "data_id": "s:instruction:train-2",
-   "consumed": [
-    "i-c-2",
-    "r-c-2",
-    "train-2"
-   ],
-   "items": [],
-   "released": [
-    "i-c-2",
-    "r-c-2",
     "train-2"
    ],
    "request": "train-2"
@@ -504,153 +350,160 @@
  ],
  "distill_overflow": [
   {
-   "data_id": "s:data:1",
    "consumed": [
     "i0",
-    "r0"
+    "i1",
+    "i2",
+    "r0",
+    "r1",
+    "r2",
+    "sample:r0:0"
    ],
+   "data_id": "s:data:1",
    "items": [
     {
      "group": null,
-     "recipe": {},
+     "recipe": {
+      "teacher": {
+       "max_prompt_tokens": 0,
+       "max_tokens": 30,
+       "messages": [
+        {
+         "content": "What is the boiling point of water?",
+         "role": "user"
+        }
+       ],
+       "tools": [
+        {
+         "function": {
+          "name": "lookup"
+         },
+         "type": "function"
+        }
+       ]
+      }
+     },
      "reward": 0.0,
      "sources": [
       "i0",
       "r0"
      ],
-     "training": {
-      "loss_mask": [
-       1,
-       1,
-       1
-      ],
-      "rollout_log_probs": [
-       -0.1,
-       -0.2,
-       -0.3
-      ],
-      "runtime_load_id": null,
-      "teacher_tokens": [
-       100,
-       101,
-       102,
-       103,
-       1,
-       2,
-       3
-      ],
-      "tokens": [
-       5,
-       6,
-       7,
-       1,
-       2,
-       3
-      ]
-     }
+     "training": {}
     }
    ],
    "released": [
     "i0",
-    "r0"
+    "i1",
+    "i2",
+    "r0",
+    "r1",
+    "r2"
    ],
    "request": null
   },
   {
-   "data_id": "s:data:2",
    "consumed": [
-    "i1",
-    "i2",
-    "r1",
-    "r2"
+    "sample:r1:0"
    ],
+   "data_id": "s:data:2",
    "items": [
     {
      "group": null,
-     "recipe": {},
+     "recipe": {
+      "teacher": {
+       "max_prompt_tokens": 0,
+       "max_tokens": 30,
+       "messages": [
+        {
+         "content": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+         "role": "user"
+        }
+       ],
+       "tools": [
+        {
+         "function": {
+          "name": "lookup"
+         },
+         "type": "function"
+        }
+       ]
+      }
+     },
+     "reward": 0.0,
+     "sources": [
+      "i1",
+      "r1"
+     ],
+     "training": {}
+    }
+   ],
+   "released": [],
+   "request": null
+  },
+  {
+   "consumed": [
+    "sample:r2:0"
+   ],
+   "data_id": "s:data:3",
+   "items": [
+    {
+     "group": null,
+     "recipe": {
+      "teacher": {
+       "max_prompt_tokens": 0,
+       "max_tokens": 30,
+       "messages": [
+        {
+         "content": "What is the boiling point of water?",
+         "role": "user"
+        }
+       ],
+       "tools": [
+        {
+         "function": {
+          "name": "lookup"
+         },
+         "type": "function"
+        }
+       ]
+      }
+     },
      "reward": 0.0,
      "sources": [
       "i2",
       "r2"
      ],
-     "training": {
-      "loss_mask": [
-       1,
-       1,
-       1
-      ],
-      "rollout_log_probs": [
-       -0.1,
-       -0.2,
-       -0.3
-      ],
-      "runtime_load_id": null,
-      "teacher_tokens": [
-       100,
-       101,
-       102,
-       103,
-       1,
-       2,
-       3
-      ],
-      "tokens": [
-       5,
-       6,
-       7,
-       1,
-       2,
-       3
-      ]
-     }
+     "training": {}
     }
    ],
-   "released": [
-    "i1",
-    "i2",
-    "r1",
-    "r2"
-   ],
+   "released": [],
    "request": null
   }
  ],
- "ordered_groups": [
+ "keyed_groups": [
   {
-   "data_id": "s:data:1",
    "consumed": [
     "i-a-0",
     "i-single-0",
     "i-z-0",
     "r-a-0",
     "r-single-0",
-    "r-z-0"
+    "r-z-0",
+    "sample:r-a-0:0",
+    "sample:r-single-0:0",
+    "sample:r-z-0:0"
    ],
+   "data_id": "s:data:1",
    "items": [
     {
      "group": null,
      "recipe": {},
      "reward": 1.0,
      "sources": [
-      "i-single-0",
-      "r-single-0"
+      "i-z-0",
+      "r-z-0"
      ],
-     "training": {
-      "loss_mask": [
-       0,
-       1,
-       1
-      ],
-      "rollout_log_probs": [
-       -0.1,
-       -0.2
-      ],
-      "runtime_load_id": null,
-      "tokens": [
-       1,
-       2,
-       3
-      ]
-     }
+     "training": {}
     },
     {
      "group": null,
@@ -660,49 +513,17 @@
       "i-a-0",
       "r-a-0"
      ],
-     "training": {
-      "loss_mask": [
-       0,
-       1,
-       1
-      ],
-      "rollout_log_probs": [
-       -0.1,
-       -0.2
-      ],
-      "runtime_load_id": null,
-      "tokens": [
-       1,
-       2,
-       3
-      ]
-     }
+     "training": {}
     },
     {
      "group": null,
      "recipe": {},
      "reward": 1.0,
      "sources": [
-      "i-z-0",
-      "r-z-0"
+      "i-single-0",
+      "r-single-0"
      ],
-     "training": {
-      "loss_mask": [
-       0,
-       1,
-       1
-      ],
-      "rollout_log_probs": [
-       -0.1,
-       -0.2
-      ],
-      "runtime_load_id": null,
-      "tokens": [
-       1,
-       2,
-       3
-      ]
-     }
+     "training": {}
     }
    ],
    "released": [
@@ -718,16 +539,26 @@
  ],
  "sdpo": [
   {
-   "data_id": "s:data:1",
    "consumed": [
     "report-s0r0",
     "report-s0r1",
+    "report-s1r0",
+    "report-s1r1",
+    "report-s2r0",
+    "report-s2r1",
     "s0r0",
-    "s0r1"
+    "s0r1",
+    "s1r0",
+    "s1r1",
+    "s2r0",
+    "s2r1",
+    "sample:report-s0r0:0",
+    "sample:report-s0r1:0"
    ],
+   "data_id": "s:data:1",
    "items": [
     {
-     "group": null,
+     "group": "report-s0r0",
      "recipe": {
       "sdpo": {
        "feedback": "",
@@ -750,6 +581,24 @@
          "type": "function"
         }
        ]
+      },
+      "teacher": {
+       "max_prompt_tokens": 10240,
+       "max_tokens": 18432,
+       "messages": [
+        {
+         "content": "What is 2+2?",
+         "role": "user"
+        }
+       ],
+       "tools": [
+        {
+         "function": {
+          "name": "lookup"
+         },
+         "type": "function"
+        }
+       ]
       }
      },
      "reward": 1.0,
@@ -758,37 +607,11 @@
       "report-s0r0"
      ],
      "training": {
-      "distill_sample_weight": 0.0,
-      "loss_mask": [
-       1,
-       1,
-       1
-      ],
-      "rollout_log_probs": [
-       -0.1,
-       -0.2,
-       -0.3
-      ],
-      "runtime_load_id": null,
-      "teacher_tokens": [
-       100,
-       101,
-       1,
-       2,
-       3
-      ],
-      "tokens": [
-       5,
-       6,
-       7,
-       1,
-       2,
-       3
-      ]
+      "distill_sample_weight": 0.0
      }
     },
     {
-     "group": null,
+     "group": "report-s0r0",
      "recipe": {
       "sdpo": {
        "feedback": "",
@@ -811,6 +634,24 @@
          "type": "function"
         }
        ]
+      },
+      "teacher": {
+       "max_prompt_tokens": 10240,
+       "max_tokens": 18432,
+       "messages": [
+        {
+         "content": "What is 2+2?\nCorrect solution:\n\nAnswer from s0r0\n\nCorrectly solve the original question.",
+         "role": "user"
+        }
+       ],
+       "tools": [
+        {
+         "function": {
+          "name": "lookup"
+         },
+         "type": "function"
+        }
+       ]
       }
      },
      "reward": 0.0,
@@ -819,66 +660,35 @@
       "report-s0r1"
      ],
      "training": {
-      "distill_sample_weight": 1.0,
-      "loss_mask": [
-       1,
-       1,
-       1
-      ],
-      "rollout_log_probs": [
-       -0.1,
-       -0.2,
-       -0.3
-      ],
-      "runtime_load_id": null,
-      "teacher_tokens": [
-       100,
-       101,
-       102,
-       103,
-       104,
-       105,
-       106,
-       107,
-       108,
-       1,
-       2,
-       3
-      ],
-      "tokens": [
-       5,
-       6,
-       7,
-       1,
-       2,
-       3
-      ]
+      "distill_sample_weight": 1.0
      }
     }
    ],
    "released": [
     "report-s0r0",
     "report-s0r1",
-    "s0r0",
-    "s0r1"
-   ],
-   "request": null
-  },
-  {
-   "data_id": "s:data:2",
-   "consumed": [
     "report-s1r0",
     "report-s1r1",
     "report-s2r0",
     "report-s2r1",
+    "s0r0",
+    "s0r1",
     "s1r0",
     "s1r1",
     "s2r0",
     "s2r1"
    ],
+   "request": null
+  },
+  {
+   "consumed": [
+    "sample:report-s2r0:0",
+    "sample:report-s2r1:0"
+   ],
+   "data_id": "s:data:2",
    "items": [
     {
-     "group": null,
+     "group": "report-s2r1",
      "recipe": {
       "sdpo": {
        "feedback": "",
@@ -901,6 +711,24 @@
          "type": "function"
         }
        ]
+      },
+      "teacher": {
+       "max_prompt_tokens": 10240,
+       "max_tokens": 18432,
+       "messages": [
+        {
+         "content": "What is 2+2?",
+         "role": "user"
+        }
+       ],
+       "tools": [
+        {
+         "function": {
+          "name": "lookup"
+         },
+         "type": "function"
+        }
+       ]
       }
      },
      "reward": 1.0,
@@ -909,37 +737,11 @@
       "report-s2r0"
      ],
      "training": {
-      "distill_sample_weight": 0.0,
-      "loss_mask": [
-       1,
-       1,
-       1
-      ],
-      "rollout_log_probs": [
-       -0.1,
-       -0.2,
-       -0.3
-      ],
-      "runtime_load_id": null,
-      "teacher_tokens": [
-       100,
-       101,
-       1,
-       2,
-       3
-      ],
-      "tokens": [
-       5,
-       6,
-       7,
-       1,
-       2,
-       3
-      ]
+      "distill_sample_weight": 0.0
      }
     },
     {
-     "group": null,
+     "group": "report-s2r1",
      "recipe": {
       "sdpo": {
        "feedback": "",
@@ -962,6 +764,24 @@
          "type": "function"
         }
        ]
+      },
+      "teacher": {
+       "max_prompt_tokens": 10240,
+       "max_tokens": 18432,
+       "messages": [
+        {
+         "content": "What is 2+2?\nCorrect solution:\n\nAnswer from s2r0\n\nCorrectly solve the original question.",
+         "role": "user"
+        }
+       ],
+       "tools": [
+        {
+         "function": {
+          "name": "lookup"
+         },
+         "type": "function"
+        }
+       ]
       }
      },
      "reward": 0.0,
@@ -970,217 +790,114 @@
       "report-s2r1"
      ],
      "training": {
-      "distill_sample_weight": 1.0,
-      "loss_mask": [
-       1,
-       1,
-       1
-      ],
-      "rollout_log_probs": [
-       -0.1,
-       -0.2,
-       -0.3
-      ],
-      "runtime_load_id": null,
-      "teacher_tokens": [
-       100,
-       101,
-       102,
-       103,
-       104,
-       105,
-       106,
-       107,
-       108,
-       1,
-       2,
-       3
-      ],
-      "tokens": [
-       5,
-       6,
-       7,
-       1,
-       2,
-       3
-      ]
+      "distill_sample_weight": 1.0
      }
     }
    ],
-   "released": [
-    "report-s1r0",
-    "report-s1r1",
-    "report-s2r0",
-    "report-s2r1",
-    "s1r0",
-    "s1r1",
-    "s2r0",
-    "s2r1"
-   ],
+   "released": [],
    "request": null
   }
  ],
  "slots_and_discards": [
   {
-   "data_id": "s:data:1",
    "consumed": [
     "i-g1-0",
     "i-g1-1",
     "i-g1-retry",
+    "i-g2-0",
+    "i-g2-1",
+    "i-g2-2",
     "r-g1-0",
     "r-g1-1",
-    "r-g1-retry"
+    "r-g1-retry",
+    "r-g2-0",
+    "r-g2-1",
+    "r-g2-2",
+    "sample:r-g1-0:0",
+    "sample:r-g1-1:0"
    ],
+   "data_id": "s:data:1",
    "items": [
     {
-     "group": null,
+     "group": "r-g1-0",
      "recipe": {},
      "reward": 1.0,
      "sources": [
       "i-g1-0",
       "r-g1-0"
      ],
-     "training": {
-      "loss_mask": [
-       0,
-       1,
-       1
-      ],
-      "rollout_log_probs": [
-       -0.1,
-       -0.2
-      ],
-      "runtime_load_id": null,
-      "tokens": [
-       1,
-       2,
-       3
-      ]
-     }
+     "training": {}
     },
     {
-     "group": null,
+     "group": "r-g1-0",
      "recipe": {},
      "reward": 1.0,
      "sources": [
       "i-g1-1",
       "r-g1-1"
      ],
-     "training": {
-      "loss_mask": [
-       0,
-       1,
-       1
-      ],
-      "rollout_log_probs": [
-       -0.1,
-       -0.2
-      ],
-      "runtime_load_id": null,
-      "tokens": [
-       1,
-       2,
-       3
-      ]
-     }
+     "training": {}
     }
    ],
    "released": [
     "i-g1-0",
     "i-g1-1",
     "i-g1-retry",
-    "r-g1-0",
-    "r-g1-1",
-    "r-g1-retry"
-   ],
-   "request": null
-  },
-  {
-   "data_id": "s:data:2",
-   "consumed": [
-    "i-g1-2",
-    "i-g1-3",
     "i-g2-0",
     "i-g2-1",
     "i-g2-2",
-    "r-g1-2",
-    "r-g1-3",
+    "r-g1-0",
+    "r-g1-1",
+    "r-g1-retry",
     "r-g2-0",
     "r-g2-1",
     "r-g2-2"
    ],
+   "request": null
+  },
+  {
+   "consumed": [
+    "i-g1-2",
+    "i-g1-3",
+    "r-g1-2",
+    "r-g1-3",
+    "sample:r-g1-2:0",
+    "sample:r-g1-3:0"
+   ],
+   "data_id": "s:data:2",
    "items": [
     {
-     "group": null,
+     "group": "r-g1-2",
      "recipe": {},
      "reward": 1.0,
      "sources": [
       "i-g1-2",
       "r-g1-2"
      ],
-     "training": {
-      "loss_mask": [
-       0,
-       1,
-       1
-      ],
-      "rollout_log_probs": [
-       -0.1,
-       -0.2
-      ],
-      "runtime_load_id": null,
-      "tokens": [
-       1,
-       2,
-       3
-      ]
-     }
+     "training": {}
     },
     {
-     "group": null,
+     "group": "r-g1-2",
      "recipe": {},
      "reward": 1.0,
      "sources": [
       "i-g1-3",
       "r-g1-3"
      ],
-     "training": {
-      "loss_mask": [
-       0,
-       1,
-       1
-      ],
-      "rollout_log_probs": [
-       -0.1,
-       -0.2
-      ],
-      "runtime_load_id": null,
-      "tokens": [
-       1,
-       2,
-       3
-      ]
-     }
+     "training": {}
     }
    ],
    "released": [
     "i-g1-2",
     "i-g1-3",
-    "i-g2-0",
-    "i-g2-1",
-    "i-g2-2",
     "r-g1-2",
-    "r-g1-3",
-    "r-g2-0",
-    "r-g2-1",
-    "r-g2-2"
+    "r-g1-3"
    ],
    "request": null
   }
  ],
  "tttd": [
   {
-   "data_id": "s:data:1",
    "consumed": [
     "i-0-0-0",
     "i-0-0-1",
@@ -1197,8 +914,13 @@
     "r-1-0-0",
     "r-1-0-1",
     "r-1-1-0",
-    "r-1-1-1"
+    "r-1-1-1",
+    "sample:r-1-0-0:0",
+    "sample:r-1-0-1:0",
+    "sample:r-1-1-0:0",
+    "sample:r-1-1-1:0"
    ],
+   "data_id": "s:data:1",
    "items": [
     {
      "group": "0",
@@ -1215,23 +937,7 @@
       "i-1-0-0",
       "r-1-0-0"
      ],
-     "training": {
-      "loss_mask": [
-       0,
-       1,
-       1
-      ],
-      "rollout_log_probs": [
-       -0.1,
-       -0.2
-      ],
-      "runtime_load_id": null,
-      "tokens": [
-       1,
-       2,
-       3
-      ]
-     }
+     "training": {}
     },
     {
      "group": "0",
@@ -1248,23 +954,7 @@
       "i-1-0-1",
       "r-1-0-1"
      ],
-     "training": {
-      "loss_mask": [
-       0,
-       1,
-       1
-      ],
-      "rollout_log_probs": [
-       -0.1,
-       -0.2
-      ],
-      "runtime_load_id": null,
-      "tokens": [
-       1,
-       2,
-       3
-      ]
-     }
+     "training": {}
     },
     {
      "group": "1",
@@ -1281,23 +971,7 @@
       "i-1-1-0",
       "r-1-1-0"
      ],
-     "training": {
-      "loss_mask": [
-       0,
-       1,
-       1
-      ],
-      "rollout_log_probs": [
-       -0.1,
-       -0.2
-      ],
-      "runtime_load_id": null,
-      "tokens": [
-       1,
-       2,
-       3
-      ]
-     }
+     "training": {}
     },
     {
      "group": "1",
@@ -1314,23 +988,7 @@
       "i-1-1-1",
       "r-1-1-1"
      ],
-     "training": {
-      "loss_mask": [
-       0,
-       1,
-       1
-      ],
-      "rollout_log_probs": [
-       -0.1,
-       -0.2
-      ],
-      "runtime_load_id": null,
-      "tokens": [
-       1,
-       2,
-       3
-      ]
-     }
+     "training": {}
     }
    ],
    "released": [
@@ -1356,13 +1014,15 @@
  ],
  "ungrouped": [
   {
-   "data_id": "s:data:1",
    "consumed": [
     "i-a-0",
     "i-a-1",
     "r-a-0",
-    "r-a-1"
+    "r-a-1",
+    "sample:r-a-0:0",
+    "sample:r-a-1:0"
    ],
+   "data_id": "s:data:1",
    "items": [
     {
      "group": null,
@@ -1372,23 +1032,7 @@
       "i-a-0",
       "r-a-0"
      ],
-     "training": {
-      "loss_mask": [
-       0,
-       1,
-       1
-      ],
-      "rollout_log_probs": [
-       -0.1,
-       -0.2
-      ],
-      "runtime_load_id": null,
-      "tokens": [
-       1,
-       2,
-       3
-      ]
-     }
+     "training": {}
     },
     {
      "group": null,
@@ -1398,23 +1042,7 @@
       "i-a-1",
       "r-a-1"
      ],
-     "training": {
-      "loss_mask": [
-       0,
-       1,
-       1
-      ],
-      "rollout_log_probs": [
-       -0.1,
-       -0.2
-      ],
-      "runtime_load_id": null,
-      "tokens": [
-       1,
-       2,
-       3
-      ]
-     }
+     "training": {}
     }
    ],
    "released": [
@@ -1426,13 +1054,17 @@
    "request": null
   },
   {
-   "data_id": "s:data:2",
    "consumed": [
     "i-a-2",
     "i-a-3",
+    "i-a-4",
     "r-a-2",
-    "r-a-3"
+    "r-a-3",
+    "r-a-4",
+    "sample:r-a-2:0",
+    "sample:r-a-3:0"
    ],
+   "data_id": "s:data:2",
    "items": [
     {
      "group": null,
@@ -1442,23 +1074,7 @@
       "i-a-2",
       "r-a-2"
      ],
-     "training": {
-      "loss_mask": [
-       0,
-       1,
-       1
-      ],
-      "rollout_log_probs": [
-       -0.1,
-       -0.2
-      ],
-      "runtime_load_id": null,
-      "tokens": [
-       1,
-       2,
-       3
-      ]
-     }
+     "training": {}
     },
     {
      "group": null,
@@ -1468,43 +1084,31 @@
       "i-a-3",
       "r-a-3"
      ],
-     "training": {
-      "loss_mask": [
-       0,
-       1,
-       1
-      ],
-      "rollout_log_probs": [
-       -0.1,
-       -0.2
-      ],
-      "runtime_load_id": null,
-      "tokens": [
-       1,
-       2,
-       3
-      ]
-     }
+     "training": {}
     }
    ],
    "released": [
     "i-a-2",
     "i-a-3",
+    "i-a-4",
     "r-a-2",
-    "r-a-3"
+    "r-a-3",
+    "r-a-4"
    ],
    "request": null
   }
  ],
  "ungrouped_reload": [
   {
-   "data_id": "s:data:1",
    "consumed": [
     "i-a-0",
     "i-a-1",
     "r-a-0",
-    "r-a-1"
+    "r-a-1",
+    "sample:r-a-0:0",
+    "sample:r-a-1:0"
    ],
+   "data_id": "s:data:1",
    "items": [
     {
      "group": null,
@@ -1514,23 +1118,7 @@
       "i-a-0",
       "r-a-0"
      ],
-     "training": {
-      "loss_mask": [
-       0,
-       1,
-       1
-      ],
-      "rollout_log_probs": [
-       -0.1,
-       -0.2
-      ],
-      "runtime_load_id": null,
-      "tokens": [
-       1,
-       2,
-       3
-      ]
-     }
+     "training": {}
     },
     {
      "group": null,
@@ -1540,23 +1128,7 @@
       "i-a-1",
       "r-a-1"
      ],
-     "training": {
-      "loss_mask": [
-       0,
-       1,
-       1
-      ],
-      "rollout_log_probs": [
-       -0.1,
-       -0.2
-      ],
-      "runtime_load_id": null,
-      "tokens": [
-       1,
-       2,
-       3
-      ]
-     }
+     "training": {}
     }
    ],
    "released": [
@@ -1568,13 +1140,17 @@
    "request": null
   },
   {
-   "data_id": "s:data:1",
    "consumed": [
     "i-a-2",
     "i-a-3",
+    "i-a-4",
     "r-a-2",
-    "r-a-3"
+    "r-a-3",
+    "r-a-4",
+    "sample:r-a-2:0",
+    "sample:r-a-3:0"
    ],
+   "data_id": "s:data:1",
    "items": [
     {
      "group": null,
@@ -1584,23 +1160,7 @@
       "i-a-2",
       "r-a-2"
      ],
-     "training": {
-      "loss_mask": [
-       0,
-       1,
-       1
-      ],
-      "rollout_log_probs": [
-       -0.1,
-       -0.2
-      ],
-      "runtime_load_id": null,
-      "tokens": [
-       1,
-       2,
-       3
-      ]
-     }
+     "training": {}
     },
     {
      "group": null,
@@ -1610,30 +1170,16 @@
       "i-a-3",
       "r-a-3"
      ],
-     "training": {
-      "loss_mask": [
-       0,
-       1,
-       1
-      ],
-      "rollout_log_probs": [
-       -0.1,
-       -0.2
-      ],
-      "runtime_load_id": null,
-      "tokens": [
-       1,
-       2,
-       3
-      ]
-     }
+     "training": {}
     }
    ],
    "released": [
     "i-a-2",
     "i-a-3",
+    "i-a-4",
     "r-a-2",
-    "r-a-3"
+    "r-a-3",
+    "r-a-4"
    ],
    "request": null
   }

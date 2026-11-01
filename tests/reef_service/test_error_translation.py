@@ -18,12 +18,10 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from reef.artifact.artifact import ArtifactConflict, ArtifactNotFound, ArtifactSourceError
 from reef.artifact.release_chain import ReleaseNotRestorable
-from reef.core.errors import InferenceUnavailable, ReefError, UnknownScenario
+from reef.core.errors import CommitPending, InferenceUnavailable, ReefError, TrainingStartRefused, UnknownScenario
 from reef.runtime.interfaces import UpstreamStatusError
 from reef.service.errors import translate_error, translate_errors
-from reef.service.request_service import InferenceRetryTimeout
 from reef.storage.records import RecordConflict
-from reef.surface.weights import RuntimeLoadMismatch
 
 
 @pytest.mark.unit
@@ -37,10 +35,10 @@ from reef.surface.weights import RuntimeLoadMismatch
         (ArtifactConflict("artifact moved under you"), 409),
         (ArtifactSourceError("source unreachable"), 503),
         (UnknownScenario("no such scenario"), 404),
-        (ReleaseNotRestorable("release has no durable bytes"), 409),
+        (ReleaseNotRestorable("release has no durable bytes"), 400),
+        (CommitPending("a training result waits for its commit"), 409),
+        (TrainingStartRefused("the trainer cannot start from this release"), 400),
         (RecordConflict("record id already used"), 409),
-        (RuntimeLoadMismatch("engine served other weights"), 409),
-        (InferenceRetryTimeout("retries exhausted"), 503),
         (InferenceUnavailable("this deployment serves no inference requests"), 503),
         (ReefError("generic reef failure"), 400),
         (ValueError("bad field"), 400),

@@ -16,6 +16,11 @@ class ReleaseNotRestorable(ReefError):
 class ArtifactReleaseChain:
     """Own artifact heads, parent links, staging, resolution, and publication.
 
+    ``current`` is the active artifact, the one that serves. ``checkpoint``
+    is the tip of the published chain: the parent of the next publication.
+    Publication of an activated artifact moves both; an activation moves
+    only ``current``.
+
     This layer knows nothing about scenarios, trainers, or commit histories. Its
     caller decides transaction ordering and records the outcome after each
     artifact operation.
@@ -29,8 +34,9 @@ class ArtifactReleaseChain:
         return self._repository
 
     @property
-    def base(self) -> ArtifactRef:
-        return self._repository.base_artifact
+    def start(self) -> ArtifactRef:
+        """The scenario's root release."""
+        return self._repository.start_artifact
 
     @property
     def current(self) -> ArtifactRef:
@@ -43,11 +49,16 @@ class ArtifactReleaseChain:
     def resolve(self, ref: ArtifactRef) -> Artifact:
         return self._repository.resolve(ref)
 
-    def advance(self, ref: ArtifactRef, *, expected: ArtifactRef) -> None:
-        self._repository.advance_current(ref, expected=expected)
+    def activate(self, ref: ArtifactRef, *, expected: ArtifactRef) -> None:
+        """Make ``ref`` the active artifact (``current``); the checkpoint, the chain tip, stays."""
+        self._repository.activate(ref, expected=expected)
 
-    def install_checkpoint(self, ref: ArtifactRef, *, expected: ArtifactRef, expected_checkpoint: ArtifactRef) -> None:
-        self._repository.install_checkpoint(ref, expected=expected, expected_checkpoint=expected_checkpoint)
+    def install_checkpoint(
+        self, ref: ArtifactRef, *, expected: ArtifactRef, expected_checkpoint: ArtifactRef, activate: bool
+    ) -> None:
+        self._repository.install_checkpoint(
+            ref, expected=expected, expected_checkpoint=expected_checkpoint, activate=activate
+        )
 
     def stage(self, step: int, artifact: Artifact, *, parent: ArtifactRef | None = None) -> Artifact:
         return self._repository.stage(step, artifact, parent=self.checkpoint if parent is None else parent)
@@ -64,12 +75,14 @@ class ArtifactReleaseChain:
         expected_parent: ArtifactRef | None = None,
         metadata: Mapping[str, object] | None = None,
         advance_heads: bool = True,
+        activate: bool = True,
     ) -> ArtifactRef:
         return self._repository.publish(
             artifact,
             expected_parent=self.checkpoint if expected_parent is None else expected_parent,
             metadata=metadata,
             advance_heads=advance_heads,
+            activate=activate,
         )
 
     def discard(self, artifact: Artifact) -> None:

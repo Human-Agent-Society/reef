@@ -1,18 +1,28 @@
 Train model weights from agent feedback
 =======================================
 
-With Slime, weight training runs in two processes on one Ray cluster. Reef submits each
-job's ready data to its training component as one training job. Each checkpoint
-that a job saves is a candidate. Reef publishes a selected candidate, and the
-serving engines load its weights from files.
+With Slime, weight training runs on one Ray cluster. Reef submits each job's
+ready data to its training component as one training job, and the component
+runs the job in a Slime driver process of its own. Each checkpoint that a job
+saves is a candidate. Reef publishes a selected candidate, and the serving
+engines load its weights from files.
 
 +--------------------------+-----------------------------------------------+
 | Process                  | Owns                                          |
 +==========================+===============================================+
 | Reef HTTP service        | requests, records, the release chain, and the |
-|                          | Slime training component: the training        |
-|                          | workers, their GPUs, the optimizer and the    |
-|                          | checkpoints                                   |
+|                          | Slime training component, which queues the    |
+|                          | jobs and starts their drivers                 |
++--------------------------+-----------------------------------------------+
+| Slime driver (one per    | Slime's training workers; it continues the    |
+| job, while it trains)    | latest checkpoint, with its optimizer state,  |
+|                          | and saves the job's own. Without a serving    |
+|                          | session, it also reserves the job's GPUs      |
++--------------------------+-----------------------------------------------+
+| Slime serving session    | the rollout engines of task jobs, their       |
+| (from the first task job | router and the training GPUs, across jobs     |
+| until the component      |                                               |
+| closes)                  |                                               |
 +--------------------------+-----------------------------------------------+
 | Inference component      | SGLang or vLLM engines on their own GPUs,     |
 | (service ``inference``)  | serving the published weights                 |
@@ -90,7 +100,7 @@ What to review
    recipe.implementation | the recipe this deployment serves; its fields live in ``recipe.config``
    reef.token | the bearer token the service accepts
    training.config.num_gpus | example-specific GPU count passed to Slime topology flags; some examples set the flags directly
-   pipeline.task2job.config.job_samples | the fewest samples of one job; required for a weight recipe
+   pipeline.sample2job.config.job_samples | the fewest samples of one job; required for a weight recipe
    training.config.global_batch_size | samples in one optimizer step
    training.config.checkpoint_dir | where checkpoints land, with the ``storage.artifact-*`` paths
    training.options | GPU layout, optimizer, sequence length, loss settings
@@ -99,7 +109,7 @@ Three things to get right:
 
 1. **Set the job size and the batch size.** ``training.config.global_batch_size``
    is Slime's ``--global-batch-size``, the samples of one optimizer step.
-   ``pipeline.task2job.config.job_samples`` is the samples of one job: Reef
+   ``pipeline.sample2job.config.job_samples`` is the samples of one job: Reef
    submits a job when it holds this many samples, and Slime cuts the job's
    data into optimizer steps of the batch size. Set ``job_samples:
    ${training.config.global_batch_size}``, so that one job is one optimizer
@@ -109,10 +119,14 @@ Three things to get right:
    component checks this at startup. Each recipe page names its loss family, and
    `Loss families <../developer-guide/loss-families.rst#family-to-slime-flags>`__
    maps each one to its flags.
-3. **The serving backend must capture training tensors.** Weight training needs
-   the exact token ids, loss mask, and rollout log probabilities produced during
-   inference. The bundled SGLang training backend records them in
-   ``response.training``.
+3. **Training must render as the engine serves.** Serving records the
+   provider exchange only, without tokens or log probabilities. The training
+   component renders each sample with the model's chat template and computes
+   the log probabilities with the weights of the job's start. Give Slime the
+   serving engine's chat template arguments in
+   ``training.options.apply-chat-template-kwargs``, for example
+   ``'{"enable_thinking": false}'``. A sample that cannot render does not
+   train, and the job metric ``unrenderable_samples`` counts it.
 
 Keep the ``training.options`` mapping from the closest working config and change only what
 your model or recipe needs.
@@ -153,8 +167,8 @@ publishes it, loads it into the engines, and records a new version.
    export SCENARIO=<the x-reef-scenario you sent>   # examples/imo_answerbench uses sao-smoke
 
    curl -sS -H "Authorization: Bearer reef-local" \
-     http://127.0.0.1:8900/reef/scenarios/$SCENARIO/releases
-   # {"scenario": "...", "releases": [{"operation": "training", "current": true, ...}, ...]}
+     http://127.0.0.1:8900/reef/scenarios/$SCENARIO/artifacts
+   # {"scenario": "...", "artifacts": [{"operation": "training", "active": true, ...}, ...]}
 
 You are training when a new ``training`` entry appears, which happens once
 ``global_batch_size`` eligible samples have arrived. Later requests use the current
@@ -165,19 +179,24 @@ keep it.
 
 Training is linear: each job continues from the workers' latest checkpoint,
 whether or not Reef selected it. The workers cannot load a published release,
-so Reef refuses a rollback of a Slime scenario.
+so Reef refuses a ``train-from`` on a Slime scenario. Activating an older
+artifact still works: it changes what serves, not where training continues.
+Under the default rule, Reef activates the next checkpoint again; `Go back to
+an older artifact <operate.rst#go-back-to-an-older-artifact>`__ describes how
+to keep the older one serving.
 
 A Slime stack trains one scenario for its lifetime: its workers hold one set
 of weights. To train another scenario, run another stack on different ports.
 
-Evaluate a candidate
---------------------
+Choose what serves
+------------------
 
-By default Reef publishes every saved checkpoint. To measure the exported
-checkpoint first, add an ``evaluation`` section. The fields are in
-`Configuration <../reference/configuration.rst#the-evaluation-section>`__, the plugin
-interface and a worked example in `Write a recipe
-<../developer-guide/write-a-recipe.rst#evaluate-a-candidate>`__.
+By default Reef activates every saved checkpoint, so the newest one serves.
+To serve a checkpoint only after an evaluation of it passes, or only when a
+person activates it, add an ``activation`` section. The rules and their
+settings are in `Configuration
+<../reference/configuration.rst#the-activation-section>`__. Training continues
+from the newest checkpoint either way.
 
 Train a LoRA adapter
 --------------------
@@ -265,13 +284,13 @@ Run Harbor tasks and report
 
 .. code-block:: bash
 
-   python -m reef.harness.client.tasks \
+   python -m reef.harness.tasks.rollouts \
      --reef-url http://127.0.0.1:8900 --scenario my-agent --model qwen3.8:27b \
      --manifest tasks/manifest.json --tasks-root tasks --side train
 
-Each task directory runs one episode with a Harbor agent (``terminus-2`` unless
+Each task directory runs one rollout with a Harbor agent (``terminus-2`` unless
 ``--agent-json`` names another) whose model calls go through Reef, so every
-inference is a record. When the verifier scores the episode, one report reaches
+inference is a record. When the verifier scores the rollout, one report reaches
 ``/reef/report``: the reward as the score, the receipts as the references, and
 the task's name, path and digest under ``metadata.task``. The recipe's reported
 processor turns those records into training samples like any other report.

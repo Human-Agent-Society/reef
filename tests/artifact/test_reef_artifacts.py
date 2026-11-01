@@ -10,13 +10,12 @@ from reef.artifact import (
     ArtifactRef,
     ArtifactReleaseChain,
     CachedRepositoryBackendFactory,
-    GitVersionSource,
     HuggingFaceSource,
     InMemoryRepositoryBackend,
     Repository,
     RepositoryBackend,
     download_huggingface_snapshot,
-    parse_artifact_source,
+    parse_huggingface_source,
 )
 
 
@@ -25,7 +24,7 @@ def test_artifact_ref_can_carry_ephemeral_local_path_without_changing_identity(t
     durable = ArtifactRef("artifact-1", "version-1", None)
     local = Artifact(
         durable,
-        InMemoryRepositoryBackend("math", tmp_path),
+        InMemoryRepositoryBackend("math"),
         local_path=tmp_path,
     )
 
@@ -33,36 +32,35 @@ def test_artifact_ref_can_carry_ephemeral_local_path_without_changing_identity(t
     assert local.ref == durable
 
 
+def root_tree(directory: Path, text: str = "base") -> Artifact:
+    """An unpublished root release in ``directory`` that holds ``model.txt`` = ``text``."""
+    directory.mkdir()
+    (directory / "model.txt").write_text(text)
+    return Artifact.local(directory, content_id=f"content:{text}")
+
+
 @pytest.mark.unit
 def test_artifact_is_the_process_local_artifact_coordinator(tmp_path: Path) -> None:
-    initial = tmp_path / "initial"
-    initial.mkdir()
-
-    backend = InMemoryRepositoryBackend("math", initial)
-    repository = Repository(backend, backend.resolve_release())
-    artifact = repository.materialize(repository.fork())
+    backend = InMemoryRepositoryBackend("math")
+    root = backend.register(root_tree(tmp_path / "root"), metadata={})
+    artifact = Repository(backend, root).materialize(root)
 
     assert not hasattr(artifact.ref, "scenario")
 
 
 @pytest.mark.unit
 def test_release_id_chain_owns_heads_staging_and_publication(tmp_path: Path) -> None:
-    initial = tmp_path / "initial"
-    initial.mkdir()
-    (initial / "model.txt").write_text("base")
-    backend = InMemoryRepositoryBackend("math", initial)
-    base = backend.resolve_release()
-    fork = backend.fork(base.release_id)
+    backend = InMemoryRepositoryBackend("math")
+    root = backend.register(root_tree(tmp_path / "root"), metadata={})
     repository = Repository(
         backend,
-        base,
-        current_artifact=fork,
-        checkpoint_artifact=fork,
+        root,
+        current_artifact=root,
+        checkpoint_artifact=root,
         local_dir=tmp_path / "local",
     )
     chain = ArtifactReleaseChain(repository)
-    assert chain.current == fork
-    assert chain.checkpoint == fork
+    assert chain.current == chain.checkpoint == chain.start == root
 
     candidate = tmp_path / "candidate"
     candidate.mkdir()
@@ -72,24 +70,25 @@ def test_release_id_chain_owns_heads_staging_and_publication(tmp_path: Path) -> 
 
     assert chain.current == published
     assert chain.checkpoint == published
-    assert published.parent_release_id == fork.release_id
+    assert published.parent_release_id == root.release_id
 
 
 @pytest.mark.unit
-def test_in_memory_repository_forks_materializes_and_publishes(tmp_path: Path) -> None:
-    initial = tmp_path / "initial"
-    initial.mkdir()
-    (initial / "model.txt").write_text("base")
-    backend_factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
+def test_in_memory_repository_registers_materializes_and_publishes(tmp_path: Path) -> None:
+    backend_factory = InMemoryRepositoryBackend.factory(directory=tmp_path / "repository")
     math_backend = backend_factory("math")
     code_backend = backend_factory("code")
-    code_initial_ref = code_backend.resolve_release()
+    assert math_backend.metadata() is None
 
-    math = math_backend.fork()
-    code = code_backend.fork()
+    math = math_backend.register(root_tree(tmp_path / "math-root"), metadata={"scenario": "math"})
+    code = code_backend.register(root_tree(tmp_path / "code-root"), metadata={"scenario": "code"})
 
+    # Two scenarios get distinct roots, each a release with no parent and the root's content id.
     assert math.release_id != code.release_id
-    assert math_backend.fork() == math
+    assert math.parent_release_id is None and math.content_id == "content:base"
+    assert math_backend.metadata() == {"scenario": "math"}
+    # A second registration stores nothing and gets the winner's head.
+    assert math_backend.register(root_tree(tmp_path / "late-root", "late"), metadata={}) == math
     assert math_backend.materialize(math).local_path.joinpath("model.txt").read_text() == "base"
 
     candidate_dir = tmp_path / "candidate"
@@ -102,18 +101,10 @@ def test_in_memory_repository_forks_materializes_and_publishes(tmp_path: Path) -
 
     assert published.parent_release_id == math.release_id
     assert math_backend.current() == published
+    assert math_backend.resolve_release(published.release_id) == published
     assert math_backend.materialize(published).local_path.joinpath("model.txt").read_text() == "trained"
+    # Each scenario keeps its own head; math's publish does not leak into code.
     assert code_backend.current() == code
-
-    # Each scenario keeps its own latest; math's publish does not leak into code.
-    # code has forked but not published, so its latest is still its own bootstrap.
-    assert code_backend.resolve_release() == code_initial_ref
-    assert math_backend.resolve_release() == published
-    # A fresh backend bootstraps from the same source but has its own storage.
-    from_initial_backend = backend_factory("from-initial")
-    from_initial = from_initial_backend.fork()
-    assert from_initial.parent_release_id == from_initial_backend.resolve_release().release_id
-    assert from_initial_backend.materialize(from_initial).local_path.joinpath("model.txt").read_text() == "base"
 
     with pytest.raises(ArtifactConflict):
         math_backend.publish(
@@ -154,16 +145,15 @@ def test_repository_factory_caches_registration_misses() -> None:
 
 @pytest.mark.unit
 def test_artifact_stages_serving_versions_and_publishes_checkpoints(tmp_path: Path) -> None:
-    initial = tmp_path / "initial"
-    initial.mkdir()
-    (initial / "model.txt").write_text("base")
-    backend = InMemoryRepositoryBackend("math", initial, root=tmp_path / "repository")
+    backend = InMemoryRepositoryBackend("math", directory=tmp_path / "repository")
+    checkpoint = backend.register(root_tree(tmp_path / "root"), metadata={})
     repository = Repository(
         backend,
-        backend.resolve_release(),
+        checkpoint,
+        current_artifact=checkpoint,
+        checkpoint_artifact=checkpoint,
         local_dir=tmp_path / "serving",
     )
-    checkpoint = repository.fork()
 
     candidate_dir = tmp_path / "candidate"
     candidate_dir.mkdir()
@@ -192,20 +182,24 @@ def test_artifact_stages_serving_versions_and_publishes_checkpoints(tmp_path: Pa
 
 @pytest.mark.unit
 def test_repository_keeps_older_local_versions_addressable(tmp_path: Path) -> None:
-    initial = tmp_path / "initial"
-    initial.mkdir()
-    backend = InMemoryRepositoryBackend("skills", initial, root=tmp_path / "repository")
-    repository = Repository(backend, backend.resolve_release(), local_dir=tmp_path / "serving")
-    checkpoint = repository.fork()
+    backend = InMemoryRepositoryBackend("skills", directory=tmp_path / "repository")
+    checkpoint = backend.register(root_tree(tmp_path / "root"), metadata={})
+    repository = Repository(
+        backend,
+        checkpoint,
+        current_artifact=checkpoint,
+        checkpoint_artifact=checkpoint,
+        local_dir=tmp_path / "serving",
+    )
     candidate = tmp_path / "candidate"
     candidate.mkdir()
     (candidate / "SKILL.md").write_text("v1")
 
     first = repository.stage(1, Artifact.local(candidate), parent=checkpoint)
-    repository.advance_current(first.ref, expected=checkpoint)
+    repository.activate(first.ref, expected=checkpoint)
     (candidate / "SKILL.md").write_text("v2")
     second = repository.stage(2, Artifact.local(candidate), parent=checkpoint)
-    repository.advance_current(second.ref, expected=first.ref)
+    repository.activate(second.ref, expected=first.ref)
 
     first_path = repository.resolve(first.ref).local_path
     assert first_path.joinpath("SKILL.md").read_text() == "v1"
@@ -219,11 +213,17 @@ def test_repository_keeps_older_local_versions_addressable(tmp_path: Path) -> No
         ("org/model", HuggingFaceSource("org/model", None)),
         ("hf://org/model", HuggingFaceSource("org/model", None)),
         ("hf://org/model@version", HuggingFaceSource("org/model", "version")),
-        ("git+lfs://abc123", GitVersionSource("abc123")),
     ],
 )
-def test_parse_artifact_source(value, expected) -> None:
-    assert parse_artifact_source(value) == expected
+def test_parse_huggingface_source(value, expected) -> None:
+    assert parse_huggingface_source(value) == expected
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("value", "message"), [("hf://model", "org/model syntax"), ("hf://org/model@", "non-empty")])
+def test_parse_huggingface_source_refuses_another_form(value, message) -> None:
+    with pytest.raises(ValueError, match=message):
+        parse_huggingface_source(value)
 
 
 @pytest.mark.unit

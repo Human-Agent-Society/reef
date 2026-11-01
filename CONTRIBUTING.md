@@ -132,7 +132,7 @@ need a new RFC.
 
 Open an [RFC issue](https://github.com/Human-Agent-Society/reef/issues/new?template=rfc.yml)
 and complete the full proposal in the issue body. The issue is the RFC and its
-decision record; do not add a new document under `docs/rfcs`. Keep material
+decision record; do not add an RFC document to the repository. Keep material
 design changes, the maintainer decision, and implementation links on the issue.
 An RFC must be explicitly accepted there before its implementation is treated
 as approved project direction.
@@ -169,7 +169,7 @@ The usual local checks are:
 
 ```bash
 pre-commit run --all-files
-pytest tests/ -n 8 --dist loadfile
+pytest tests/ -n 8
 ```
 
 Run the suite in parallel, as CI does; `pytest-xdist` ships in the `dev`
@@ -269,7 +269,7 @@ does with it.
 - State the one purpose of the type: which operation makes its values, which
   operation reads them, and what a value means to that reader.
 - Define each operation on the type by its inputs, its outputs, and the
-  relation between them. For example: for each item `i` that `make_tasks(X)`
+  relation between them. For example: for each item `i` that `make_samples(X)`
   returns, `sources(i) ⊆ records(X)`.
 - Make the definition complete. Each enum member, each status, and each case
   of an operation has a defined meaning and a defined result. No value can
@@ -391,7 +391,7 @@ Before requesting review for Python changes, run:
 ```bash
 pre-commit run --all-files
 python -m mypy
-pytest tests/ -n 8 --dist loadfile
+pytest tests/ -n 8
 ```
 
 ## Make a pull request

@@ -2,77 +2,179 @@
 
 from __future__ import annotations
 
+import importlib
+import logging
 import math
-import shutil
-import urllib.request
+import time
 import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
-from pathlib import Path
+from dataclasses import replace
 from typing import Any
 
-from reef.runtime.serving import ADAPTER_DIR
-from reef.tinker.checkpoint import TinkerCheckpoint
+from reef.core.chat_rendering import ChatTemplate, TokenizerChatTemplate
+from reef.tinker.checkpoint import FreshStart, TinkerCheckpoint
 from reef.tinker.service import close_service, tinker_sdk
-from reef.train.tinker_backend.config import TinkerConfig
-from reef.train.tinker_backend.losses import TinkerCustomLoss, TinkerLoss, TokenRow
+from reef.train.tinker_backend.config import TinkerServiceConfig
+from reef.train.tinker_backend.losses import MatrixInput, TinkerCustomLoss, TinkerLoss, TokenRow
 
-#: The directory of a release that holds Tinker's adapter as Tinker saved it, in Tinker's key names. The cookbook's
-#: merge into full weights (``tinker_cookbook.weights.build_hf_model``) reads this form, not the PEFT conversion.
-TINKER_ADAPTER_DIR = "tinker-adapter"
+logger = logging.getLogger(__name__)
+
+
+def combined_step_metrics(steps: Sequence[Mapping[str, float]]) -> dict[str, float]:
+    """The metrics of several optimizer steps, combined by Tinker's metric suffixes.
+
+    A ``:sum`` metric is the sum over the steps that report it, ``:max`` the maximum and ``:min`` the minimum.
+    A ``:mean`` metric is the mean over those steps, weighted by each step's ``tokens:sum`` when every one of
+    them reports a positive count, else unweighted. Any other metric is the last reporting step's value.
+    """
+    combined: dict[str, float] = {}
+    for name in dict.fromkeys(name for step in steps for name in step):
+        reporting = [step for step in steps if name in step]
+        values = [float(step[name]) for step in reporting]
+        if name.endswith(":sum"):
+            combined[name] = sum(values)
+        elif name.endswith(":max"):
+            combined[name] = max(values)
+        elif name.endswith(":min"):
+            combined[name] = min(values)
+        elif name.endswith(":mean"):
+            weights = [float(step.get("tokens:sum", 0.0)) for step in reporting]
+            if all(weight > 0 for weight in weights):
+                combined[name] = sum(v * w for v, w in zip(values, weights, strict=True)) / sum(weights)
+            else:
+                combined[name] = sum(values) / len(values)
+        else:
+            combined[name] = values[-1]
+    return combined
 
 
 class TinkerClient(ABC):
     """Remote training operations, also implementable by offline tests; sampling lives in ``reef.tinker.sampling``."""
 
     @abstractmethod
-    def initialize(self) -> TinkerCheckpoint: ...
+    def initialize(self) -> TinkerCheckpoint:
+        """Save the untrained LoRA adapter: the base checkpoint, which changes nothing.
+
+        ``ValueError`` for a client of all the parameters, whose base is the base model itself (``FreshStart``).
+        """
 
     @abstractmethod
     def train(
         self,
-        checkpoint: TinkerCheckpoint,
+        start: TinkerCheckpoint | FreshStart,
         steps: Sequence[Sequence[TokenRow]],
         loss: TinkerLoss,
         learning_rates: Sequence[float],
         *,
         kl_coef: float,
-        export_adapter: bool,
     ) -> tuple[TinkerCheckpoint, Mapping[str, Any]]:
-        """Train one optimizer step per entry of ``steps`` from ``checkpoint``, step ``i`` at ``learning_rates[i]``.
+        """Train one optimizer step per entry of ``steps`` from ``start``, step ``i`` at ``learning_rates[i]``.
 
-        ``loss`` weighs its KL term by ``kl_coef``. Return the checkpoint after the last step, whose
-        ``adapter_path`` names its exported adapter exactly when ``export_adapter`` is set, and Tinker's
-        metrics of the steps. ``ValueError``: ``steps`` and ``learning_rates`` differ in length, or ``loss``
-        refuses ``kl_coef``.
+        A ``TinkerCheckpoint`` start restores its weights and optimizer state; a ``FreshStart`` creates a new
+        model of all the parameters of its base model. ``loss`` weighs its KL term by ``kl_coef``. Return the
+        checkpoint after the last step and Tinker's metrics of the steps. ``ValueError``: ``steps`` and
+        ``learning_rates`` differ in length, ``loss`` refuses ``kl_coef``, or ``start`` is of another model or
+        parameterization than the client's.
         """
 
     @abstractmethod
-    def download(self, checkpoint: TinkerCheckpoint, release: Path) -> None:
-        """Write the adapter that training exported for ``checkpoint`` into the release directory ``release``.
+    def chat_template(self, template_kwargs: Mapping[str, Any]) -> ChatTemplate:
+        """The chat template of the configured base model with ``template_kwargs``, which renders a trajectory
+        that carries no tokens (``reef.core.chat_rendering``)."""
 
-        ``release / TINKER_ADAPTER_DIR`` gets the adapter as Tinker exported it, and ``release / ADAPTER_DIR`` its
-        conversion into a PEFT adapter in the base model's parameter names, which inference engines load. Neither
-        directory exists before the call. ``ValueError``: ``checkpoint.adapter_path`` is ``None``.
+    @abstractmethod
+    def check_remote(self, checkpoint: TinkerCheckpoint) -> None:
+        """Raise ``ValueError`` unless ``checkpoint.state_path`` resolves on the service as a checkpoint of the
+        configured model with the configured parameterization: a LoRA of the configured rank, or all parameters.
+
+        An artifact import calls it before it publishes a Tinker manifest that came from outside Reef. Only the
+        state path is looked up: the Tinker API describes a saved state (``weights_info``) but no sampler path,
+        and Spindle refuses sampler paths there.
         """
 
     @abstractmethod
     def close(self) -> None: ...
 
 
+def post_request(sdk: Any, holder: Any, path: str, body: Mapping[str, Any], response_type: Any) -> Any:
+    """Post ``body`` to the service at ``path`` through the SDK's session ``holder``; return the request's result.
+
+    The Tinker SDK has no call for Spindle's full-parameter requests, so they go through the SDK's own connection
+    pool and request future, as ``spindle.client.create_full_training_client`` sends them. ``response_type`` is
+    the SDK type of the future's result.
+    """
+    futures = importlib.import_module("tinker.lib.api_future_impl")
+    pools = importlib.import_module("tinker.lib.client_connection_pool_type")
+
+    async def send() -> Any:
+        started = time.time()
+        with holder.aclient(pools.ClientConnectionPoolType.TRAIN) as client:
+            future = await client.post(path, body=dict(body), cast_to=sdk.types.UntypedAPIFuture)
+        return await futures._APIFuture(
+            response_type, holder, future, request_start_time=started, request_type=path.rsplit("/", 1)[-1]
+        ).result_async()
+
+    return holder.run_coroutine_threadsafe(send()).result()
+
+
+def create_full_training_client(sdk: Any, service: Any, base_model: str) -> Any:
+    """A new training client of all the parameters of ``base_model`` on the Spindle service of ``service``.
+
+    Spindle extends Tinker's ``create_model`` with ``parameterization: {"type": "full"}``, which the Tinker SDK
+    cannot send.
+    """
+    holder = service.holder
+    model_seq_id = holder.get_training_client_id()
+    request = sdk.types.CreateModelRequest(
+        session_id=holder.get_session_id(), model_seq_id=model_seq_id, base_model=base_model
+    )
+    body = {**request.model_dump(exclude_none=True, mode="json"), "parameterization": {"type": "full"}}
+    response = post_request(sdk, holder, "/api/v1/create_model", body, sdk.types.CreateModelResponse)
+    return sdk.TrainingClient(holder, model_seq_id=model_seq_id, model_id=response.model_id)
+
+
+def unload_model(sdk: Any, trainer: Any) -> None:
+    """Unload ``trainer``'s model from the service, which frees the engine that a full-parameter model holds alone.
+
+    Spindle keeps a model until it is unloaded or, on a deployment, until its session is idle for a while; a
+    scoped run never reclaims it, so its next model would wait for the engine.
+    """
+    request = sdk.types.UnloadModelRequest(model_id=trainer.model_id)
+    post_request(
+        sdk, trainer.holder, "/api/v1/unload_model", request.model_dump(mode="json"), sdk.types.UnloadModelResponse
+    )
+
+
 class TinkerSDKClient(TinkerClient):
+    """The remote training operations through Tinker's SDK, on a LoRA of rank ``lora_rank`` or on all parameters.
+
+    ``lora_rank`` is a positive int for a LoRA, which starts with ``seed``, or ``None`` for all the parameters,
+    which only Spindle trains (``create_full_training_client``).
+    """
+
     _sdk: Any
     _model: str
-    _config: TinkerConfig
+    _config: TinkerServiceConfig
     _api_key: str
     _service: Any
     #: The frozen base model's sampling client, made at the first KL term.
     base_client: Any | None
 
-    def __init__(self, base_model: str, config: TinkerConfig, api_key: str) -> None:
+    def __init__(
+        self,
+        base_model: str,
+        config: TinkerServiceConfig,
+        api_key: str,
+        *,
+        lora_rank: int | None,
+        seed: int | None = None,
+    ) -> None:
         self._sdk = tinker_sdk()
         self._model = base_model
         self._config = config
+        self._lora_rank = lora_rank
+        self._seed = seed
         self._api_key = api_key
         self._service = self._new_service()
         # On a service such as Spindle, a sampling client starts a sampler pool, so the frozen base's client is
@@ -85,35 +187,37 @@ class TinkerSDKClient(TinkerClient):
             api_key=self._api_key, project_id=self._config.project_id, base_url=self._config.base_url
         )
 
-    def _save(self, trainer: Any, *, export_adapter: bool) -> TinkerCheckpoint:
-        """Save ``trainer``'s weights durably, and with ``export_adapter`` also its adapter for ``download``."""
+    def _save(self, trainer: Any) -> TinkerCheckpoint:
+        """Save ``trainer``'s state and its sampler weights durably."""
         name = f"reef-{uuid.uuid4().hex}"
         # Explicit names create durable snapshots. Ephemeral sampler exports
         # cannot back Reef's versioned artifacts. None disables TTL expiry.
         timeout = self._config.train_timeout_s
         state = trainer.save_state(name, ttl_seconds=None).result(timeout=timeout)
         sampler = trainer.save_weights_for_sampler(name, ttl_seconds=None).result(timeout=timeout)
-        adapter = (
-            trainer.save_weights_external(name, ttl_seconds=None).result(timeout=timeout) if export_adapter else None
-        )
-        return TinkerCheckpoint(
-            self._model,
-            self._config.lora_rank,
-            state.path,
-            sampler.path,
-            adapter_path=None if adapter is None else adapter.path,
-            service=self._config.base_url,
-        )
+        return TinkerCheckpoint(self._model, self._lora_rank, state.path, sampler.path, service=self._config.base_url)
+
+    def _new_model(self, service: Any) -> Any:
+        """A new training client of the base model: an untrained LoRA, or all the parameters with their own weights."""
+        if self._lora_rank is None:
+            return create_full_training_client(self._sdk, service, self._model)
+        return service.create_lora_training_client(base_model=self._model, rank=self._lora_rank, seed=self._seed)
+
+    def _check_info(self, info: Any, path: str) -> None:
+        """Raise ``ValueError`` unless the service's ``weights_info`` of ``path`` is of the configured model and parameterization."""
+        lora = self._lora_rank is not None
+        if info.base_model != self._model or info.is_lora is not lora or (lora and info.lora_rank != self._lora_rank):
+            expected = f"rank {self._lora_rank} LoRA" if lora else "full-parameter checkpoint"
+            raise ValueError(f"the Tinker path {path} is no {expected} of {self._model}")
 
     def initialize(self) -> TinkerCheckpoint:
+        if self._lora_rank is None:
+            raise ValueError("a full-parameter client starts from the base model itself; it saves no base checkpoint")
         service = self._new_service()
         status = "errored"
         try:
-            trainer = service.create_lora_training_client(
-                base_model=self._model, rank=self._config.lora_rank, seed=self._config.seed
-            )
-            # The base checkpoint is the untrained adapter: no release serves it.
-            checkpoint = self._save(trainer, export_adapter=False)
+            trainer = self._new_model(service)
+            checkpoint = self._save(trainer)
             status = "success"
             return checkpoint
         finally:
@@ -121,31 +225,37 @@ class TinkerSDKClient(TinkerClient):
 
     def train(
         self,
-        checkpoint: TinkerCheckpoint,
+        start: TinkerCheckpoint | FreshStart,
         steps: Sequence[Sequence[TokenRow]],
         loss: TinkerLoss,
         learning_rates: Sequence[float],
         *,
         kl_coef: float,
-        export_adapter: bool,
     ) -> tuple[TinkerCheckpoint, Mapping[str, Any]]:
         if len(learning_rates) != len(steps):
             raise ValueError("Tinker training needs one learning rate per optimizer step")
         loss.check_kl_coef(kl_coef)
         service = self._new_service()
         status = "errored"
+        trainer = None
         try:
             # Every attempt owns a new model, restored WITH optimizer state.
             # An uncertain remote result can never mutate the incumbent model.
-            info = (
-                service.create_rest_client()
-                .get_weights_info_by_tinker_path(checkpoint.state_path)
-                .result(timeout=self._config.train_timeout_s)
-            )
-            if info.base_model != self._model or info.is_lora is not True or info.lora_rank != self._config.lora_rank:
-                raise ValueError("remote Tinker training checkpoint does not match the configured model/rank")
-            trainer = service.create_training_client_from_state_with_optimizer(checkpoint.state_path)
-            metrics: dict[str, Any] = {}
+            if isinstance(start, FreshStart):
+                if start.base_model != self._model:
+                    raise ValueError(f"a fresh start of {start.base_model} is no start of {self._model}")
+                trainer = self._new_model(service)
+            else:
+                info = (
+                    service.create_rest_client()
+                    .get_weights_info_by_tinker_path(start.state_path)
+                    .result(timeout=self._config.train_timeout_s)
+                )
+                self._check_info(info, start.state_path)
+                trainer = service.create_training_client_from_state_with_optimizer(start.state_path)
+            if loss.uses_rollout_log_probs and any(not row.logprobs for rows in steps for row in rows):
+                steps = self._with_start_logprobs(trainer, steps)
+            step_metrics: list[Mapping[str, float]] = []
             for rows, learning_rate in zip(steps, learning_rates, strict=True):
                 base = self._base_logprobs(rows) if loss.needs_base_logprobs and kl_coef else []
                 inputs = loss.inputs(rows, base, kl_coef=kl_coef)
@@ -153,7 +263,19 @@ class TinkerSDKClient(TinkerClient):
                     raise ValueError("Tinker loss adapter must return one input per training row")
                 data = [
                     self._sdk.Datum(
-                        model_input=self._sdk.ModelInput.from_ints(list(row.tokens[:-1])), loss_fn_inputs=value
+                        model_input=self._sdk.ModelInput.from_ints(list(row.tokens[:-1])),
+                        loss_fn_inputs={
+                            key: (
+                                self._sdk.TensorData(
+                                    data=[number for row_values in item.rows for number in row_values],
+                                    dtype=item.dtype,
+                                    shape=[len(item.rows), len(item.rows[0])],
+                                )
+                                if isinstance(item, MatrixInput)
+                                else item
+                            )
+                            for key, item in value.items()
+                        },
                     )
                     for row, value in zip(rows, inputs, strict=True)
                 ]
@@ -161,17 +283,63 @@ class TinkerSDKClient(TinkerClient):
                     # Tinker returns logprobs; the family computes the loss here and Tinker runs backward.
                     future = trainer.forward_backward_custom(data, loss.loss)
                 else:
-                    future = trainer.forward_backward(data, loss_fn=loss.loss_fn)
+                    future = trainer.forward_backward(
+                        data, loss_fn=loss.loss_fn, loss_fn_config=dict(loss.loss_fn_config) or None
+                    )
                 result = future.result(timeout=self._config.train_timeout_s)
-                metrics.update(result.metrics)
+                step_metrics.append(result.metrics)
                 trainer.optim_step(self._sdk.AdamParams(learning_rate=learning_rate)).result(
                     timeout=self._config.train_timeout_s
                 )
-            result_checkpoint = self._save(trainer, export_adapter=export_adapter)
+            result_checkpoint = self._save(trainer)
             status = "success"
-            return result_checkpoint, metrics
+            return result_checkpoint, combined_step_metrics(step_metrics)
         finally:
+            if trainer is not None and self._lora_rank is None:
+                try:
+                    unload_model(self._sdk, trainer)
+                except (self._sdk.APIError, TimeoutError) as exc:
+                    # The checkpoint is saved; a deployment reclaims the idle model later, so the job stands.
+                    logger.warning("could not unload full-parameter model %s: %s", trainer.model_id, exc)
             close_service(self._sdk, service, status, timeout_s=self._config.train_timeout_s)
+
+    def _with_start_logprobs(self, trainer: Any, steps: Sequence[Sequence[TokenRow]]) -> list[tuple[TokenRow, ...]]:
+        """``steps`` with the log probabilities of each row that has none, from ``trainer``'s weights before the first
+        step: the old-policy log probabilities of the job's start, as serving returns none."""
+        result: list[tuple[TokenRow, ...]] = []
+        for rows in steps:
+            missing = [row for row in rows if not row.logprobs]
+            computed: dict[int, tuple[float, ...]] = {}
+            if missing:
+                data = [
+                    self._sdk.Datum(
+                        model_input=self._sdk.ModelInput.from_ints(list(row.tokens[:-1])),
+                        loss_fn_inputs={
+                            "target_tokens": self._sdk.TensorData(
+                                data=list(row.tokens[1:]), dtype="int64", shape=[len(row.tokens) - 1]
+                            ),
+                            "weights": self._sdk.TensorData(
+                                data=[1.0] * (len(row.tokens) - 1), dtype="float32", shape=[len(row.tokens) - 1]
+                            ),
+                        },
+                    )
+                    for row in missing
+                ]
+                output = trainer.forward(data, loss_fn="cross_entropy").result(timeout=self._config.train_timeout_s)
+                for row, values in zip(missing, output.loss_fn_outputs, strict=True):
+                    logprobs = [float(value) for value in values["logprobs"].data][-len(row.mask) :]
+                    if len(logprobs) != len(row.mask) or not all(math.isfinite(value) for value in logprobs):
+                        raise ValueError("Tinker log probabilities must be finite for every response token")
+                    computed[id(row)] = tuple(logprobs)
+            result.append(
+                tuple(replace(row, logprobs=computed[id(row)]) if id(row) in computed else row for row in rows)
+            )
+        return result
+
+    def chat_template(self, template_kwargs: Mapping[str, Any]) -> ChatTemplate:
+        if self.base_client is None:
+            self.base_client = self._service.create_sampling_client(base_model=self._model)
+        return TokenizerChatTemplate(self.base_client.get_tokenizer(), template_kwargs)
 
     def _base_logprobs(self, rows: Sequence[TokenRow]) -> list[list[float]]:
         if self.base_client is None:
@@ -189,50 +357,16 @@ class TinkerSDKClient(TinkerClient):
             result.append([float(value) for value in response])
         return result
 
-    def download(self, checkpoint: TinkerCheckpoint, release: Path) -> None:
-        """Fetch the checkpoint's exported adapter into ``TINKER_ADAPTER_DIR``, then convert it into ``ADAPTER_DIR``.
-
-        ``checkpoint.adapter_path`` names the adapter that training exported
-        (``save_weights_external``) in Tinker's key names; Tinker signs one
-        download URL per file. The cookbook's converter renames the tensors to
-        the base model's parameter names, which is what SGLang and vLLM load.
-        It keeps projections that the engines fuse at load time, such as
-        Qwen3.5's ``in_proj_q/k/v``, apart, so a merge into full weights reads
-        ``TINKER_ADAPTER_DIR`` instead. ``ValueError``: the checkpoint has no
-        exported adapter, or a file path leaves the adapter's directory.
-        """
-        if checkpoint.adapter_path is None:
-            raise ValueError("the Tinker checkpoint was saved without an exported adapter (training.export_adapter)")
+    def check_remote(self, checkpoint: TinkerCheckpoint) -> None:
+        path = checkpoint.state_path
+        rest = self._service.create_rest_client()
         try:
-            from tinker_cookbook import weights
-        except ImportError as exc:
-            raise RuntimeError(
-                "serving Tinker checkpoints on a local engine needs tinker-cookbook: "
-                "uv pip install 'reef-infra[tinker]'"
-            ) from exc
-        urls = (
-            self._service.create_rest_client()
-            .get_external_weights_urls(checkpoint.adapter_path)
-            .result(timeout=self._config.train_timeout_s)
-            .urls
-        )
-        staging = release.parent / f".{release.name}.download"
-        shutil.rmtree(staging, ignore_errors=True)
-        raw = staging / "tinker"
-        raw.mkdir(parents=True)
-        try:
-            for name, url in urls.items():
-                target = (raw / name).resolve()
-                if not target.is_relative_to(raw.resolve()):
-                    raise ValueError(f"the exported Tinker adapter has a file outside its directory: {name}")
-                target.parent.mkdir(parents=True, exist_ok=True)
-                urllib.request.urlretrieve(url, target)
-            weights.build_lora_adapter(
-                base_model=self._model, adapter_path=str(raw), output_path=str(release / ADAPTER_DIR)
-            )
-            shutil.move(raw, release / TINKER_ADAPTER_DIR)
-        finally:
-            shutil.rmtree(staging, ignore_errors=True)
+            info = rest.get_weights_info_by_tinker_path(path).result(timeout=self._config.train_timeout_s)
+        except self._sdk.NotFoundError as exc:
+            raise ValueError(f"the Tinker path {path} does not resolve on the configured service") from exc
+        except self._sdk.BadRequestError as exc:
+            raise ValueError(f"the configured service refuses the Tinker path {path}: {exc}") from exc
+        self._check_info(info, path)
 
     def close(self) -> None:
         close_service(self._sdk, self._service, "success", timeout_s=self._config.train_timeout_s)

@@ -14,11 +14,11 @@ recipe:
   implementation: recipes.tttd.recipe:TTTDRecipe
 # TTTD's step grid: one group of four rollouts.
 pipeline:
-  record2record:
+  record2sample:
     config:
       groups_per_step: 1
       rollouts_per_group: 4
-  task2job:
+  sample2job:
     config:
       # One job is the whole grid, groups_per_step x rollouts_per_group samples: the same value as batch-size.
       job_samples: 4
