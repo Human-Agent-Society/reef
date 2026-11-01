@@ -223,13 +223,15 @@ class ScenarioFactory:
         component's default start; a default start with files outside the component directories raises
         ``ReefError``. The registration metadata records the root's ``RootSource`` and, for several components, the
         manifest of the components that the root makes. An item that the component's layout or admission check
-        refuses raises ``ValueError``, and so does an item of one component that the recipe's training component
-        cannot start from (``TrainingComponent.root_start``). Nothing is registered after a refusal.
+        refuses raises ``ValueError``, and so does an item root that any of the recipe's training components cannot
+        start from (``Recipe.check_root_start``). Nothing is registered after a refusal.
         """
         if self._local_artifact_dir is not None:
             self._local_artifact_dir.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix="reef-root-", dir=self._local_artifact_dir) as work:
             root, source = self.root_release(surface, start, Path(work))
+            if start is not None:
+                self._recipe.check_root_start(ScenarioRoot(root, source))
             registration_metadata: dict[str, object] = {
                 SCENARIO_METADATA_KEY: scenario_metadata_for(name=scenario, source=source)
             }
@@ -253,11 +255,6 @@ class ScenarioFactory:
             # the release's on the composed root.
             if surface.single:
                 surface.validate(stored)
-                training = self._recipe.training_component
-                if training is not None:
-                    # The trainer starts from the root, so a training component that cannot start from the item, such
-                    # as Slime, refuses it before anything is registered.
-                    training.root_start(ScenarioRoot(stored, source))
                 return stored, source
             surface.components[component].validator.validate(stored)
             item = (component, stored)

@@ -227,6 +227,14 @@ Common members
 |                                                   |                             | ``/reef/status``               |
 +---------------------------------------------------+-----------------------------+--------------------------------+
 
+``check_root_start(root)`` checks an item start before scenario registration.
+``root`` is the recipe's ``ScenarioRoot``, with its artifact and source.
+The default calls ``training_component.root_start`` when that component is
+bound. A recipe with several trainers must check each
+trainer's root view and raise ``ValueError`` if any component refuses it.
+``CompositeRecipe`` does this for each child recipe, using the same root view
+as trainer construction. A refusal leaves the scenario unregistered.
+
 Every recipe may declare ``report_type``, the ``ReportBase`` subclass its
 reports parse as (``None`` keeps ingress open), and ``harness_adapter``, the
 adapter ``GET /reef/harness`` renders the recipe's harness releases for

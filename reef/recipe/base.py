@@ -378,6 +378,15 @@ class Recipe:
         checks = every_check(component.validator, self.build_artifact_validator())
         return replace(surface, components={name: replace(component, validator=checks)})
 
+    def check_root_start(self, root: ScenarioRoot) -> None:
+        """Check that training can start from ``root`` before an item start is registered.
+
+        The default calls ``training_component.root_start`` when a training component is bound. A recipe with
+        several trainers checks each trainer's component and root view. Raise ``ValueError`` on refusal.
+        """
+        if self.training_component is not None:
+            self.training_component.root_start(root)
+
     def default_start(self) -> DefaultStart:
         """The content of a new scenario's root release when no artifact item starts the scenario; empty by
         default."""

@@ -125,7 +125,7 @@ class ComponentTaskStorage(TaskStorage):
         return self.storage.open(f"{self.component}/{name}")
 
 
-def component_root(root: ScenarioRoot, surface: Surface, component: str) -> ScenarioRoot:
+def component_root(root: ScenarioRoot, component: str) -> ScenarioRoot:
     """``component``'s view of the composite's root ``root``: the component's directory of the root release, and,
     for a default start, the inputs of that component's own default start (``CompositeRecipe.default_start`` names
     them ``<component>.<input>``)."""
@@ -138,7 +138,7 @@ def component_root(root: ScenarioRoot, surface: Surface, component: str) -> Scen
                 name.removeprefix(prefix): value for name, value in source.inputs.items() if name.startswith(prefix)
             },
         )
-    return ScenarioRoot(surface.component_artifact(root.artifact, component), source)
+    return ScenarioRoot(root.artifact.component(component), source)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -367,12 +367,17 @@ class CompositeRecipe(Recipe):
                 task_storage=None if task_storage is None else ComponentTaskStorage(task_storage, component),
                 releases=None if releases is None else ComponentReleases(releases, component),
                 samples=None if samples is None else TrainerSamples(samples, component),
-                root=None if root is None else component_root(root, surface, component),
+                root=None if root is None else component_root(root, component),
             )
             # Ingress admits what any component accepts; each trainer then releases the reports shaped for another.
             trainer.admit_reports_of(self.report_type)
             trainers.append(ComponentTrainer(component, trainer))
         return tuple(trainers)
+
+    def check_root_start(self, root: ScenarioRoot) -> None:
+        """Check every component's view of ``root`` with its recipe; propagate any ``ValueError`` refusal."""
+        for component, recipe in self.components.items():
+            recipe.check_root_start(component_root(root, component))
 
     def default_start(self) -> DefaultStart:
         """Each component's default start under that component's directory.

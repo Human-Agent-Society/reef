@@ -13,12 +13,17 @@ from reef.artifact import Artifact, DefaultStart, DirectorySource, InMemoryRepos
 from reef.core import AgentRecord, RequestType
 from reef.core.artifact_ref import RootSource
 from reef.dispatcher import Dispatcher, build_default_dispatcher
+from reef.harness.adapters import get_adapter
+from reef.harness.sync import create_harness_surface
+from reef.recipe import CompositeRecipe, Recipe
+from reef.recipe.harness import HarnessLayout
 from reef.runtime.jobs import ScenarioRoot, TrainingComponent
 from reef.scenario.factory import ItemStart
 from reef.scenario.registry import InstanceState
 from reef.storage.commits import SCENARIO_METADATA_KEY
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
+from reef.surface import Surface
 from reef.train.jobs import JobLoopState
 
 
@@ -528,6 +533,66 @@ class _NoReleaseStarts(_RootImportingComponent):
         if root.source.kind != "default":
             raise ValueError("this component trains only its configured weights")
         return self.base_start
+
+
+class ItemTreeRecipe(Recipe):
+    """A recipe with Recipe's fields that serves an importable pi harness and runs no training jobs.
+
+    Scenario creation tests use its fixed default tree and harness layout as a composite's second component.
+    """
+
+    def build_surface(self, scenario: str) -> Surface:
+        descriptor = get_adapter("pi")
+        return create_harness_surface(descriptor, layout=HarnessLayout(descriptor))
+
+    def default_start(self) -> DefaultStart:
+        return DefaultStart(files={"rules.md": "default rules"})
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("component", ["weights", "harness"])
+@pytest.mark.parametrize("accepts_item", [False, True])
+def test_composite_item_roots_are_checked_before_registration(
+    tmp_path: Path, component: str, accepts_item: bool
+) -> None:
+    training = _RootImportingComponent("base-model") if accepts_item else _NoReleaseStarts("base-model")
+    weights = TestPolicyRecipe(**runtime_bindings(training, _SharedRuntime()))
+    recipe = CompositeRecipe(components={"weights": weights, "harness": ItemTreeRecipe()})
+    backend_factory = InMemoryRepositoryBackend.factory()
+    directory = tmp_path / "item"
+    directory.mkdir()
+    if component == "weights":
+        (directory / "config.json").write_text("{}")
+        (directory / "model.safetensors").write_text("imported weights")
+    else:
+        (directory / "rules.md").write_text("imported rules")
+    item = ItemStart(
+        "upload-1", directory.as_uri(), DirectorySource(directory, source_version="v1", link=False), component
+    )
+    dispatcher = Dispatcher(
+        recipe,
+        backend_factory,
+        scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
+        coordination=memory_coordination(),
+    )
+    try:
+        if accepts_item:
+            scenario, created = dispatcher.create_scenario("retry", item)
+            root = scenario.repository.materialize(scenario.repository.start_artifact)
+            expected_file = "model.safetensors" if component == "weights" else "rules.md"
+            assert root.local_path is not None
+            expected_text = "imported weights" if component == "weights" else "imported rules"
+            assert (root.local_path / component / expected_file).read_text() == expected_text
+        else:
+            with pytest.raises(ValueError, match="trains only its configured weights"):
+                dispatcher.create_scenario("retry", item)
+            assert backend_factory("retry").metadata() is None
+            assert not dispatcher.has_scenario("retry")
+            scenario, created = dispatcher.create_scenario("retry")
+        assert created
+        assert scenario.repository.start_artifact.parent_release_id is None
+    finally:
+        dispatcher.close()
 
 
 @pytest.mark.unit

@@ -88,7 +88,9 @@ A new scenario's root holds the default start. To start it from another artifact
 
 The owner's artifact library holds the item ``<scenario>/<artifact_id>`` for each artifact that a scenario of the owner lists. It also holds the artifact items that you stored, such as an upload to S3 or a Hugging Face snapshot (`Data items <../reference/http-api.rst#data-items>`__). Reef reads the item's files and checks them as `Import an artifact`_ describes. Then it writes them, by reference or as a copy, as the scenario's root release. The item is thus the active artifact and the training start of its component. Add ``component`` when the scenario has several components; each other component holds its default start. The answer's ``artifact_id`` names the item's artifact in the root.
 
-When Reef cannot read the item, or the layout check refuses it, Reef registers no scenario. It answers with the status of the import, such as HTTP 400 for a directory without the release layout, or HTTP 404 for an item that the owner does not store. A scenario that already exists ignores ``artifact_id`` and ``component``.
+Before registration, Reef checks that every training component accepts its part of the root as a training start. A composite with Slime refuses an item start even when the item fills another component. Use the default start for that composite.
+
+When Reef cannot read the item, or a layout or training-start check refuses it, Reef registers no scenario. It answers with the status of the import, such as HTTP 400 for a directory without the release layout, or HTTP 404 for an item that the owner does not store. The scenario name remains available for a valid creation request. A scenario that already exists ignores ``artifact_id`` and ``component``.
 
 A report or a record import creates a missing scenario from the default start. Its ``x-reef-release-id`` header selects no start: only an inference answer carries that header. An inference request never creates a scenario.
 
