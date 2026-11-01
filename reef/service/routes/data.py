@@ -136,6 +136,9 @@ def register_data_routes(app: web.Application, *, request_service: RequestServic
         return web.json_response(receipt, status=201)
 
     async def query(request: web.Request) -> web.Response:
+        content = query_int(request, "content", 0)
+        if content not in (0, 1):
+            raise web.HTTPBadRequest(text="content must be 0 or 1")
         listing = await asyncio.to_thread(
             query_items,
             data,
@@ -144,6 +147,7 @@ def register_data_routes(app: web.Application, *, request_service: RequestServic
             scenario=request.query.get("scenario") or None,
             after=query_int(request, "after", 0),
             limit=query_int(request, "limit", MAX_QUERY_LIMIT),
+            content=content == 1,
         )
         return web.json_response(listing)
 
