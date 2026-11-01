@@ -97,7 +97,7 @@ def test_an_instruction_needs_an_instruction_mode_and_commits_through_the_train_
         return MARKER
 
     # A large auto batch must not keep an explicit manual request waiting.
-    recipe = harness_recipe(tmp_path, method, batch_size=100)
+    recipe = harness_recipe(tmp_path, method, job_samples=100)
     dispatcher = harness_dispatcher(tmp_path, recipe)
     scenario = dispatcher.get_or_create_scenario("agents")
 

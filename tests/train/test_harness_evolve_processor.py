@@ -59,29 +59,37 @@ INFERENCE_STAGES = {
 }
 
 
-def harness_stages(*, inference: bool = False, buffer_size: int | None = None) -> PipelineConfig:
+def harness_stages(
+    *, inference: bool = False, buffer_size: int | None = None, job_samples: int | None = None
+) -> PipelineConfig:
     """The harness evolution stages as a deployment's ``pipeline`` section configures them."""
     section: dict = dict(INFERENCE_STAGES) if inference else {}
-    if buffer_size is not None:
-        section["sample2job"] = {"config": {"buffer_size": buffer_size}}
+    sizes = {"buffer_size": buffer_size, "job_samples": job_samples}
+    stage_config = {key: value for key, value in sizes.items() if value is not None}
+    if stage_config:
+        section["sample2job"] = {"config": stage_config}
     return PipelineConfig.from_setting(section, spec=HarnessEvolutionRecipe.pipeline_spec(), environ={})
 
 
-def reports_pipeline(context: PipelineContext, buffer_size: int | None = None) -> TrainingPipeline:
+def reports_pipeline(
+    context: PipelineContext, buffer_size: int | None = None, job_samples: int | None = None
+) -> TrainingPipeline:
     """Harness traces from reported scores: the default stages, built directly."""
     return TrainingPipeline(
         context,
         record2sample=TraceSamples(context),
-        sample2job=TraceJobData(context, buffer_size, None),
+        sample2job=TraceJobData(context, buffer_size, job_samples),
     )
 
 
-def records_pipeline(context: PipelineContext, buffer_size: int | None = None) -> TrainingPipeline:
+def records_pipeline(
+    context: PipelineContext, buffer_size: int | None = None, job_samples: int | None = None
+) -> TrainingPipeline:
     """Harness traces from recorded inference traffic, unscored: the inference stages, built directly."""
     return TrainingPipeline(
         context,
         record2sample=InferenceSamples(),
-        sample2job=TraceJobData(context, buffer_size, None),
+        sample2job=TraceJobData(context, buffer_size, job_samples),
     )
 
 
@@ -90,12 +98,20 @@ def _processor() -> TrainingPipeline:
 
 
 def test_the_default_stages_train_reports_and_the_inference_stages_train_records() -> None:
-    reported = harness_stages(buffer_size=6).build(PipelineContext("s", default_job_samples=2))
+    reported = harness_stages(buffer_size=6, job_samples=2).build(PipelineContext("s"))
     assert (type(reported.record2sample), type(reported.sample2job)) == (TraceSamples, TraceJobData)
     assert reported.buffer_size == 6
-    recorded = harness_stages(inference=True).build(PipelineContext("s", default_job_samples=2))
+    recorded = harness_stages(inference=True, job_samples=2).build(PipelineContext("s"))
     assert (type(recorded.record2sample), type(recorded.sample2job)) == (InferenceSamples, TraceJobData)
     assert recorded.buffer_size == 2, "the buffer takes one job's data"
+
+
+@pytest.mark.parametrize("stage", [TraceJobData, TrainTaskJobData])
+def test_a_trace_job_takes_one_sample_unless_job_samples_is_set(stage: type[TraceJobData]) -> None:
+    defaulted = stage(PipelineContext("s"), None, None)
+    assert (defaulted.job_samples, defaulted.buffer_size) == (1, 1), "each trace starts a step"
+    configured = stage(PipelineContext("s"), 6, 3)
+    assert (configured.job_samples, configured.buffer_size) == (3, 6)
 
 
 def test_trace_processor_batches_a_failed_trace() -> None:
@@ -207,7 +223,7 @@ def _record_processor() -> TrainingPipeline:
 def test_record_driven_processor_batches_every_n_inferences_unscored() -> None:
     """The report-free policy: recorded traffic alone forms the batch, in
     arrival order, with score None on every sample."""
-    processor = _record_processor()
+    processor = harness_stages(inference=True, job_samples=2).build(PipelineContext("s"))
     first = {"messages": [{"role": "user", "content": "first"}]}
     second = {"messages": [{"role": "user", "content": "second"}]}
     processor.push(_inference("inf-1", first))
@@ -245,7 +261,7 @@ def test_record_driven_processor_releases_reports_untouched() -> None:
 
 
 def test_record_driven_processor_overflow_stays_pending_for_the_next_batch() -> None:
-    processor = harness_stages(inference=True).build(PipelineContext("s", default_job_samples=2))
+    processor = harness_stages(inference=True, job_samples=2).build(PipelineContext("s"))
     for index in range(3):
         processor.push(_inference(f"inf-{index}", {"messages": []}))
     batch = processor.build_job_data(2)
@@ -268,7 +284,7 @@ def add_tasks(samples: SampleStore, root: Path, split: str, *names: str) -> None
 
 def offline_pipeline(samples: SampleStore, *, job_samples: int, buffer_size: int | None = None) -> TrainingPipeline:
     """An offline pipeline of the scenario whose sample store is ``samples``, in ``auto``."""
-    context = PipelineContext("offline", samples=TrainerSamples(samples), default_job_samples=1)
+    context = PipelineContext("offline", samples=TrainerSamples(samples))
     return TrainingPipeline(context, sample2job=TrainTaskJobData(context, buffer_size, job_samples))
 
 
@@ -303,7 +319,7 @@ def test_imported_train_tasks_reach_the_job_data_through_the_buffer_and_each_tra
 
 def test_one_job_holds_traces_or_train_tasks_never_both(tmp_path: Path) -> None:
     session = SQLiteScenarioStorage(tmp_path / "records").open("s")
-    context = PipelineContext("s", samples=TrainerSamples(session.samples), default_job_samples=1)
+    context = PipelineContext("s", samples=TrainerSamples(session.samples))
     pipeline = TrainingPipeline(
         context,
         record2sample=TraceSamples(context),

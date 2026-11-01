@@ -290,7 +290,7 @@ class BackgroundStepRecipe(TestPolicyRecipe):
         return TrainingPipeline(
             context,
             record2sample=BackgroundStep(self.step_finished),
-            sample2job=ThresholdJobData(context, None, None),
+            sample2job=ThresholdJobData(context, None, 1),
         )
 
     def build(
@@ -311,7 +311,6 @@ class BackgroundStepRecipe(TestPolicyRecipe):
             job_loop=JobLoop(self.training_component, scenario=scenario),
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
-            default_job_samples=1,
         )
 
 

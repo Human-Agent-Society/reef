@@ -23,7 +23,7 @@ from typing import Any, Self
 import pytest
 from tests.support._threshold_processor import ThresholdJobData, ThresholdSamples
 from tests.support._trajectories import policy_trajectory
-from tests.support.runtime_stubs import RecordingComponent
+from tests.support.runtime_stubs import RecordingComponent, job_sized_stages
 from tests.support.samples_service import make_samples
 
 from recipes.beta.coral.recipe import CoralRecipe
@@ -56,7 +56,7 @@ from reef.storage.sqlite import SQLiteRecordStore
 from reef.train import PipelineContext, Trainer
 from reef.train.instructions import ScenarioInstructions
 from reef.train.jobs import JobLoop
-from reef.train.pipeline import PipelineConfig, PipelineSpec
+from reef.train.pipeline import PipelineSpec
 from reef.train.types import JobData, Sample, TaskSample, TrajectorySample
 
 GOLDENS_PATH = Path(__file__).parent / "data" / "record_stage_job_data_goldens.json"
@@ -136,15 +136,16 @@ class StreamRun:
     """One stream's trainer, its record store, and what its commits recorded.
 
     ``spec`` names the two stage classes, as a recipe does; ``pipeline`` is
-    the deployment's ``pipeline`` section over it. ``batch_size`` is the
-    trainer's samples in one step.
+    the deployment's ``pipeline`` section over it. ``job_samples`` is the
+    trainer's samples in one step: the sample-to-job stage's config value,
+    unless ``pipeline`` sets it.
     """
 
     spec: PipelineSpec
     pipeline: Mapping[str, object] = field(default_factory=dict)
     report_type: type[ReportBase] | None = None
     training_mode: str = "auto"
-    batch_size: int = 1
+    job_samples: int = 1
     serving_artifact_id: str | None = None
     records: SQLiteRecordStore = field(default_factory=SQLiteRecordStore)
     consumed: set[str] = field(default_factory=set)
@@ -158,11 +159,10 @@ class StreamRun:
         return Trainer.build(
             "s",
             self.records,
-            pipeline_factory=PipelineConfig.from_setting(self.pipeline, spec=self.spec, environ={}).build,
+            pipeline_factory=job_sized_stages(self.spec, self.pipeline, job_samples=self.job_samples).build,
             job_loop=counting_jobs(),
             report_type=self.report_type,
             training_mode=self.training_mode,
-            default_job_samples=self.batch_size,
         )
 
     def reload(self, trainer: Trainer) -> Trainer:
@@ -453,7 +453,7 @@ def turn(record_id: str, *, version: str, completes: str | None = None, track: b
 
 
 def ungrouped_stream() -> StreamRun:
-    return StreamRun(THRESHOLD_STAGES, batch_size=2)
+    return StreamRun(THRESHOLD_STAGES, job_samples=2)
 
 
 def ungrouped_steps() -> list[Step]:
@@ -695,7 +695,7 @@ def streams() -> dict[str, tuple[StreamRun, list[Step]]]:
             slot_steps(),
         ),
         "keyed_groups": (
-            StreamRun(ORDERED_MIX_STAGES, batch_size=3),
+            StreamRun(ORDERED_MIX_STAGES, job_samples=3),
             ordered_steps(),
         ),
         "tttd": (
@@ -708,9 +708,9 @@ def streams() -> dict[str, tuple[StreamRun, list[Step]]]:
         ),
         "distill_overflow": (StreamRun(DISTILL_STAGES, distill, TeacherContextReport), distill_steps()),
         "sdpo": (StreamRun(SDPORecipe.pipeline_spec(), sdpo, SDPOReport), sdpo_steps()),
-        "computed_exact_version": (StreamRun(TOY_COMPUTED_STAGES, batch_size=2), computed_steps()),
+        "computed_exact_version": (StreamRun(TOY_COMPUTED_STAGES, job_samples=2), computed_steps()),
         "computed_window": (
-            StreamRun(TOY_COMPUTED_STAGES, stage_configs(record2sample={"max_staleness": 1}), batch_size=2),
+            StreamRun(TOY_COMPUTED_STAGES, stage_configs(record2sample={"max_staleness": 1}), job_samples=2),
             computed_steps(),
         ),
         "trace_manual_cap": (

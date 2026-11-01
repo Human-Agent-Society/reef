@@ -104,13 +104,13 @@ Configuration
 ``recipes/gepa/examples/aime/gepa.yaml`` is the recipe config the driver boots.
 It names ``reef.recipe.harness:HarnessEvolutionRecipe`` as its
 ``implementation``, GEPA as ``evolution.method`` with GEPA's own settings, and
-GEPA's validation pass as ``evolution.evaluation``:
+GEPA's validation pass as ``evolution.evaluation``. Its ``pipeline`` section
+sets the step's traces to GEPA's minibatch:
 
 .. code:: yaml
 
    evolution:
      seed: seed                          # the first tree, a directory
-     batch_size: 3                       # the third report closes the minibatch
      models:
        reflection: {url: ..., model: ..., api_key_env: OPENAI_API_KEY}
      method:
@@ -129,6 +129,10 @@ GEPA's validation pass as ``evolution.evaluation``:
        scorer: harness.aime:AIMEAnswerScorer
        policy: compare
        statistic: mean                   # GEPA's rule: a strictly better mean
+   pipeline:
+     sample2job:
+       config:
+         job_samples: 3                  # the third report closes the minibatch
 
 Four of these deserve a note. ``feedback`` names a ``Feedback`` class whose
 sentence the reflection model reads about each example, and it is the entire

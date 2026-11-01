@@ -217,8 +217,8 @@ def test_the_dataset_stage_makes_an_instructions_job_with_its_parameters() -> No
 def test_the_dataset_stage_has_the_job_size_a_weight_trainer_requires() -> None:
     from reef.recipe.dataset import DatasetJobData
 
-    # A weight trainer's deployment has no default job size; the stage needs none set in its config.
-    stage = DatasetJobData(SimpleNamespace(scenario="s", default_job_samples=None))
+    # The stage sets its own job size, so its config needs none.
+    stage = DatasetJobData(SimpleNamespace(scenario="s"))
     assert stage.job_samples == 1
 
 

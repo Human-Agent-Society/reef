@@ -170,7 +170,6 @@ def test_the_sections_parse_into_their_settings_over_the_defaults() -> None:
     evolution = {
         "adapter": "pi",
         "state_dir": "state",
-        "batch_size": 2,
         "max_steps": 3,
         "max_failure_streak": 2,
         "max_model_calls_per_step": 4,
@@ -192,15 +191,14 @@ def test_the_sections_parse_into_their_settings_over_the_defaults() -> None:
         **evolution,
     )
     assert built.evaluation == dataclasses.replace(defaults.evaluation, **{**evaluation, "task_timeout_s": 5.0})
-    assert built.batch_size == 2
 
 
 #: Settings that refuse boot, by what is wrong, each with the words of its refusal.
 INVALID_SETTINGS = {
     "unknown-field": ({"adaptor": "pi"}, "unknown config fields: adaptor"),
     "no-method": ({"method": None}, r"evolution\.method must name the Method"),
-    "batch-size": ({"batch_size": 0}, r"evolution\.batch_size must be at least 1"),
-    "batch-size-type": ({"batch_size": True}, r"evolution\.batch_size must be a valid int"),
+    # The sample-to-job stage's job_samples sets the size of a step; the evolution section has no batch_size.
+    "batch-size": ({"batch_size": 2}, "evolution: unknown config fields: batch_size"),
     "run-budget": ({"max_runs_per_step": -1}, r"evolution\.max_runs_per_step must be at least 0"),
     "state-dir": ({"state_dir": " "}, r"evolution\.state_dir must be a non-empty path"),
     # The activation section decides whether a kept tree serves; these evolution settings are gone.
@@ -492,27 +490,23 @@ def test_recipe_builds_the_stages_its_pipeline_section_names(tmp_path: Path) -> 
             settings(
                 pipeline={
                     "record2sample": {"module": "reef.record2sample.traces:InferenceSamples"},
-                    "sample2job": {"config": {"buffer_size": 6}},
+                    "sample2job": {"config": {"buffer_size": 6, "job_samples": 2}},
                 },
-                batch_size=2,
             ),
             runtime=proxy,
         )
     )
     stages = (records.pipeline.record2sample, records.pipeline.sample2job)
     assert [type(stage).__name__ for stage in stages] == ["InferenceSamples", "TraceJobData"]
-    # evolution.batch_size is the default job_samples.
+    # The stage config sets job_samples and the buffer.
     assert (records.job_samples, records.pipeline.buffer_size) == (2, 6)
 
     reported = trainer_of(from_config(settings(), runtime=proxy))
     stages = (reported.pipeline.record2sample, reported.pipeline.sample2job)
     assert [type(stage).__name__ for stage in stages] == ["TraceSamples", "TraceJobData"]
-    # The default buffer holds the data of one job.
+    # A job takes one sample by default, and the default buffer holds the data of one job.
     assert (reported.job_samples, reported.pipeline.buffer_size) == (1, 1)
-    # The stage config sets job_samples over evolution.batch_size.
-    sized = trainer_of(
-        from_config(settings(pipeline={"sample2job": {"config": {"job_samples": 3}}}, batch_size=2), runtime=proxy)
-    )
+    sized = trainer_of(from_config(settings(pipeline={"sample2job": {"config": {"job_samples": 3}}}), runtime=proxy))
     assert (sized.job_samples, sized.pipeline.buffer_size) == (3, 3)
 
     with pytest.raises(RecipeConfigError, match="does not consume"):
@@ -527,12 +521,10 @@ def test_recipe_builds_the_stages_its_pipeline_section_names(tmp_path: Path) -> 
         ({"batch_size": 2}, "unknown config fields: batch_size"),
         ({"buffer_size": 0}, "buffer_size must be None or a positive int"),
         # The stage refuses a buffer that cannot hold one job's data.
-        ({"buffer_size": 1}, "buffer_size 1 is smaller than job_samples 2"),
+        ({"buffer_size": 1, "job_samples": 2}, "buffer_size 1 is smaller than job_samples 2"),
     ):
         with pytest.raises(RecipeConfigError, match=message):
-            trainer_of(
-                from_config(settings(pipeline={"sample2job": {"config": stage_config}}, batch_size=2), runtime=proxy)
-            )
+            trainer_of(from_config(settings(pipeline={"sample2job": {"config": stage_config}}), runtime=proxy))
     with pytest.raises(RecipeConfigError, match="batch_policy"):
         trainer_of(
             from_config(settings(pipeline={"sample2job": {"config": {"batch_policy": "records"}}}), runtime=proxy)
