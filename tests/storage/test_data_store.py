@@ -9,9 +9,11 @@ from sqlalchemy import func, select
 from tests.support.conversations import conversation
 
 from reef.core.atif_payloads import canonical_json
+from reef.core.records_types import AgentRecord, RequestType
+from reef.core.trajectory_index import call_key, trajectory_calls
 from reef.service.assembly import build_dispatcher
 from reef.service.deploy.service_config import ServiceConfig
-from reef.storage.data import ItemConflict, ItemNotFound, MemoryDataStore, NewItem
+from reef.storage.data import ItemConflict, ItemNotFound, MemoryDataStore, NewItem, RecordLink
 from reef.storage.item_kinds import json_digest
 from reef.storage.record_items import record_item
 from reef.storage.sql_data import PostgresDataStore, SQLiteDataStore
@@ -219,6 +221,56 @@ def test_record_items_that_share_messages_read_back_exactly(store):
     assert store.delete("acme", "coding/call-2")
     assert [item.content for item in store.query("acme")] == [items[0].content, items[2].content]
     assert store.create("acme", [items[1]])[0].content == items[1].content
+
+
+def test_record_links_place_each_call_in_its_trajectory_and_skip_deleted_ancestors(store):
+    retry = conversation("retry-2", 2, scenario="coding")
+    review = conversation("call-3", 3, scenario="review")
+    report = AgentRecord.create(
+        scenario="coding",
+        request_type=RequestType.REPORT,
+        payload={"score": 1.0, "references": ["call-3"]},
+        agent_record_id="report-1",
+        references=("call-3",),
+    )
+    store.create("acme", [*calls(1, 2, 3), record_item(retry), record_item(review), record_item(report)])
+    entries = {turns: call_key(conversation("c", turns).payload).entry_count for turns in (1, 2, 3)}
+    ids = [
+        "coding/call-1",
+        "coding/call-2",
+        "coding/call-3",
+        "coding/retry-2",
+        "review/call-3",
+        "coding/report-1",
+        "x",
+    ]
+    links = store.record_links("acme", ids)
+    # A retry has its parent's entries; another scenario starts its own tree; a report and an unknown ID have none.
+    assert links == {
+        "coding/call-1": RecordLink(None, entries[1]),
+        "coding/call-2": RecordLink("coding/call-1", entries[2]),
+        "coding/call-3": RecordLink("coding/call-2", entries[3]),
+        "coding/retry-2": RecordLink("coding/call-2", entries[2]),
+        "review/call-3": RecordLink(None, entries[3]),
+    }
+    path = ["coding/call-1", "coding/call-2", "coding/retry-2"]
+    assert trajectory_calls([(item_id, links[item_id].entry_count) for item_id in path]) == (
+        "coding/call-1",
+        "coding/retry-2",
+    )
+    assert store.record_links("globex", ids) == {}
+    # A deleted ancestor is skipped: the link names the nearest ancestor whose item is stored.
+    assert store.delete("acme", "coding/call-2")
+    assert store.record_links("acme", ["coding/call-3", "coding/retry-2", "coding/call-2"]) == {
+        "coding/call-3": RecordLink("coding/call-1", entries[3]),
+        "coding/retry-2": RecordLink("coding/call-1", entries[2]),
+    }
+
+
+def test_a_record_link_is_checked_at_construction():
+    for parent, entry_count in (("", 1), ("a", -1), ("a", True), (3, 1)):
+        with pytest.raises(ValueError, match="record link"):
+            RecordLink(parent, entry_count)
 
 
 def node_counts(store) -> tuple[int, int]:

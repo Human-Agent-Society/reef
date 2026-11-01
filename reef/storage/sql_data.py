@@ -59,6 +59,7 @@ from reef.storage.data import (
     ItemKind,
     ItemNotFound,
     NewItem,
+    RecordLink,
     StoredItem,
     check_owner,
     check_query,
@@ -68,7 +69,7 @@ from reef.storage.data import (
 from reef.storage.item_kinds import task_partition
 from reef.storage.migrations import migrate_data_trajectories
 from reef.storage.postgres import postgres_url, validate_postgres_schema
-from reef.storage.sql_records import ScopedTable, TrajectoryNodes, trajectory_node_table
+from reef.storage.sql_records import ScopedTable, TrajectoryNodes, batches, trajectory_node_table
 from reef.storage.sqlite import enable_wal
 from reef.storage.tasks import TaskFileStore
 
@@ -320,6 +321,37 @@ class SQLDataStore(DataStore):
         if item.kind != "task":
             raise ValueError(f"item {item.item_id!r} is a {item.kind}, not a task")
         return self.task_files.path(task_partition(item.owner), item.digest)
+
+    def record_links(self, owner: str, item_ids: Sequence[str]) -> dict[str, RecordLink]:
+        check_owner(owner)
+        items = self.items_table
+        with self.transaction() as connection:
+            linked: dict[int, str] = {}
+            for batch in batches(dict.fromkeys(item_ids)):
+                for item_id, row in self.rows(connection, owner, batch).items():
+                    if row["kind"] == "record" and row["message_field"] is not None:
+                        linked[int(row["sequence"])] = item_id
+            nodes = {
+                int(row["node_sequence"]): row
+                for row in self.trajectory_nodes(owner).paths(connection, linked, "agent_record_id", "entry_count")
+            }
+            # A node stays while a child needs it, after its item is deleted; the link skips such ancestors.
+            stored = set(linked)
+            for ancestors in batches(sorted(set(nodes) - stored)):
+                stored.update(
+                    int(sequence)
+                    for sequence in connection.scalars(
+                        select(items.c.sequence).where(items.c.owner == owner, items.c.sequence.in_(ancestors))
+                    )
+                )
+        links: dict[str, RecordLink] = {}
+        for sequence, item_id in linked.items():
+            parent = nodes[sequence]["parent_sequence"]
+            while parent is not None and int(parent) not in stored:
+                parent = nodes[int(parent)]["parent_sequence"]
+            parent_id = None if parent is None else nodes[int(parent)]["agent_record_id"]
+            links[item_id] = RecordLink(parent_id, int(nodes[sequence]["entry_count"]))
+        return links
 
 
 class SQLiteDataStore(SQLDataStore):
