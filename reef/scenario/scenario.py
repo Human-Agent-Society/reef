@@ -16,7 +16,6 @@ from reef.core.activation import ActivationRule
 from reef.core.components import RECORDS_COMPONENT
 from reef.core.errors import ReefError
 from reef.core.reports import ReportBase
-from reef.inference.model_config import ModelConfig
 from reef.observability.commits import CommitExperimentObserver
 from reef.observability.operations import OperationMetrics
 from reef.runtime.interfaces import InferenceRuntime
@@ -88,7 +87,6 @@ class Scenario:
         repository: Repository,
         store: ScenarioStore,
         trainers: tuple[ComponentTrainer, ...],
-        model_config: ModelConfig | None = None,
         scenario_step: int = 0,
         recovered_head_record: CommitRecord | None = None,
         experiment_observer: CommitExperimentObserver | None = None,
@@ -109,7 +107,6 @@ class Scenario:
         )
         self._name = name
         self._binding = binding
-        self.model_config = model_config or ModelConfig()
         self._surface = binding.surface
         self._store = store
         self._closed = False
@@ -141,7 +138,7 @@ class Scenario:
     @property
     def runtime(self) -> InferenceRuntime | None:
         """The inference runtime that serves this scenario, if any."""
-        return self.model_config.runtime or self._binding.runtime
+        return self._binding.runtime
 
     @property
     def activation_rule(self) -> ActivationRule:

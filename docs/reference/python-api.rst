@@ -434,27 +434,11 @@ directory, each scenario has one SQLite database file for its records,
 commits, settings, tasks and uploaded trajectories.
 
 The storage service keeps all per-scenario state. This includes the
-``ScenarioSettings`` of each scenario: the model configuration and the
-selected training mode. The scenario registry uses ``read_settings`` and
-``write_settings``. The per-scenario state also includes the published
+``ScenarioSettings`` of each scenario: the selected training mode, the
+artifact evaluation, the activation rule and the owner. The scenario
+registry uses ``read_settings`` and ``write_settings``. The per-scenario state also includes the published
 Harbor tasks of its task stores (see `Task stores`_). ``archive``
 retires the settings and tasks with the records and commits.
-
-``Recipe.with_model_config(config)`` accepts the concrete ``ModelConfig`` from
-``reef.inference.model_config``. ``ModelConfig.from_value(value, api_key=...)``
-validates the model override (``url``, ``model`` and ``api``); ``api_key`` is
-the deployment's provider key, which the override's engine is called with. Its
-``runtime`` field holds an ``InferenceProxyRuntime``, or ``None`` for the
-recipe default. ``view()`` returns the API representation without the key. The type holds no file path and performs no file I/O.
-It replaces ``ScenarioModelConfig`` and the former read-only configuration
-protocol; there is no separate configuration collection class.
-
-The scenario registry caches one configuration object per scenario and passes
-it to the factory during creation and recovery. Recipes retain that object so
-new work observes updates while already resolved runtime snapshots remain
-unchanged. Use ``Dispatcher.configure_scenario_model`` to persist updates;
-it validates the value and recipe compatibility and writes the scenario
-settings through the storage service before replacing the active runtime.
 
 Direct ``Scenario`` construction requires ``store=...``. Replace the former
 ``records=...`` and ``commit_log=...`` arguments with one store opened by a
