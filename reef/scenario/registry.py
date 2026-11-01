@@ -32,7 +32,6 @@ from reef.artifact.repository import (
 from reef.core.activation import ActivationRule
 from reef.core.errors import ReefError, ScenarioCapacityFull, UnknownScenario
 from reef.evaluation.activation import EvaluatedActivation, activation_setting, scenario_activation_reference
-from reef.inference.model_config import ModelConfig
 from reef.observability import ExperimentTracker, NullExperimentTracker
 from reef.observability.commits import ExperimentReportQueue
 from reef.recipe.base import Recipe
@@ -135,7 +134,6 @@ class ScenarioRegistry:
         activates_runtime: bool = True,
         instructions: InstructionQueue | None = None,
     ) -> None:
-        self._model_configs: dict[str, ModelConfig] = {}
         self._storage = scenario_storage
         tracker = experiment_tracker if experiment_tracker is not None else NullExperimentTracker()
         #: Delivers the experiment events of every scenario in this registry.
@@ -384,28 +382,6 @@ class ScenarioRegistry:
         deployment's ``activation`` section."""
         return activation_setting(self._recipe.activation) if settings.activation is None else settings.activation
 
-    def configure_model(
-        self, scenario: str, value: object, *, create: bool = False, release_id: str | None = None
-    ) -> Scenario:
-        with self.lock_for(scenario):
-            exists = self.has(scenario)
-            if not create and not exists:
-                raise UnknownScenario(f"unknown scenario {scenario!r}")
-            if not exists:
-                # Check before the settings are stored, so that a refused scenario leaves nothing behind.
-                self.check_creation(scenario)
-            # Creating an existing scenario never overwrites its configuration.
-            if not create or not exists:
-                candidate = ModelConfig.from_value(value, api_key=self.provider_key())
-                self._recipe.with_model_config(candidate)
-                current = self._model_config(scenario)
-                # A validated value is an object or null.
-                stored = value if isinstance(value, Mapping) else None
-                settings = self._storage.read_settings(scenario)
-                self._storage.write_settings(scenario, replace(settings, model_config=stored))
-                current.runtime = candidate.runtime
-            return self._resolve(scenario, release_id)
-
     def reload(self, scenario: str) -> Scenario:
         """Rebuild a scenario from durable state after a training failure.
 
@@ -415,9 +391,7 @@ class ScenarioRegistry:
         for the records after their recovered progress.
         """
         with self.lock_for(scenario):
-            recovered = self._scenario_factory.load_or_create(
-                scenario, None, model_config=self._model_config(scenario)
-            )
+            recovered = self._scenario_factory.load_or_create(scenario, None)
             self.apply_stored_settings(recovered)
             with self._lock:
                 dropped = self._scenarios.get(scenario)
@@ -441,7 +415,6 @@ class ScenarioRegistry:
             dropped = self._scenarios.pop(scenario, None)
             self.last_used_at.pop(scenario, None)
             self._training_scenarios = [name for name in self._training_scenarios if name != scenario]
-            self._model_configs.pop(scenario, None)
             self._preload_errors.pop(scenario, None)
         return dropped
 
@@ -449,8 +422,7 @@ class ScenarioRegistry:
         """Remove the loaded instance from the table and return it. The caller closes it.
 
         All durable state stays, and the next request loads the scenario
-        again. The cached model configuration also stays, so the scenario
-        keeps its runtime. Call this method under ``lock_for(scenario)``.
+        again. Call this method under ``lock_for(scenario)``.
         """
         with self._lock:
             dropped = self._scenarios.pop(scenario, None)
@@ -475,18 +447,6 @@ class ScenarioRegistry:
         """Return the currently loaded scenario instances as a tuple."""
         with self._lock:
             return tuple(self._scenarios.values())
-
-    def _model_config(self, scenario: str) -> ModelConfig:
-        if scenario not in self._model_configs:
-            value = self._storage.read_settings(scenario).model_config
-            self._model_configs[scenario] = ModelConfig.from_value(value, api_key=self.provider_key())
-        return self._model_configs[scenario]
-
-    def provider_key(self) -> str | None:
-        """The deployment's provider key, which a scenario's own model is called with: the key of the recipe's
-        runtime (``InferenceRuntime.provider_key``), or None without a runtime."""
-        runtime = self._recipe.runtime
-        return None if runtime is None else runtime.provider_key
 
     def apply_stored_settings(self, instance: Scenario) -> None:
         """Select the training mode and the activation rule a person stored for the scenario on a newly built
@@ -537,9 +497,7 @@ class ScenarioRegistry:
             self.check_creation(scenario)
         self.take_load_slot(scenario)
         try:
-            current = self._scenario_factory.load_or_create(
-                scenario, release_id, model_config=self._model_config(scenario)
-            )
+            current = self._scenario_factory.load_or_create(scenario, release_id)
             self.apply_stored_settings(current)
         finally:
             with self._lock:

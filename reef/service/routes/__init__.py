@@ -30,7 +30,7 @@ def register_routes(
     """The routes of control's app. It serves the data routes too when its process runs the data service."""
     add_inference_routes(app, replica)
     register_scenario_reads(app, request_service=request_service)
-    register_scenario_writes(app, request_service=request_service, evaluations=evaluations)
+    register_scenario_writes(app, request_service=request_service, evaluations=evaluations, imports=imports)
     register_system_routes(app, request_service=request_service)
     # Control commits a harness import itself.
     register_harness_routes(app, request_service=request_service, imports=DirectImports(request_service))

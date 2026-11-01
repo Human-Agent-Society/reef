@@ -28,10 +28,10 @@ def test_each_url_that_the_runtime_serves_uses_its_handler_and_other_urls_a_prox
     served = ServedArtifact("a1", "https://engine.example/release-1", "model")
     assert clients.handler(served) is runtime.handlers["https://engine.example/release-1"]
 
-    own_model = ServedArtifact("a2", "https://provider.example/v1", "model")
-    proxy = clients.handler(own_model)
+    elsewhere = ServedArtifact("a2", "https://provider.example/v1", "model")
+    proxy = clients.handler(elsewhere)
     assert proxy not in runtime.handlers.values()
-    assert clients.handler(own_model) is proxy
+    assert clients.handler(elsewhere) is proxy
 
 
 def test_by_default_only_the_base_url_uses_the_runtime_handler() -> None:

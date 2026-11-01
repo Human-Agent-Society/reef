@@ -176,7 +176,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
                     for component in job_components
                 }
             )
-        #: The deployment's recipe, before any scenario's own model settings; its trainers submit to the jobs queue.
+        #: The deployment's recipe; its trainers submit to the jobs queue.
         self.recipe = recipe
         self.storage = scenario_storage
         self.record_storage = scenario_storage if record_storage is None else record_storage
@@ -292,10 +292,19 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
             allow_implicit_creation=allow_implicit_creation,
         )
 
-    def configure_scenario_model(
-        self, scenario: str, model: object, *, create: bool = False, release_id: str | None = None
-    ) -> Scenario:
-        return self.registry.configure_model(scenario, model, create=create, release_id=release_id)
+    def create_scenario(self, scenario: str) -> tuple[Scenario, bool]:
+        """The scenario ``scenario``, created from the deployment's base when it does not exist, and True exactly
+        when this call created it.
+
+        The check and the creation hold the scenario's lock, so of several calls for one new name only one gets
+        True. Raise as ``get_or_create_scenario`` does when the creation is refused.
+        """
+        with self.registry.lock_for(scenario):
+            created = not self.registry.has(scenario)
+            current = self.registry.get_or_create(scenario, allow_implicit_creation=True)
+        if current is None:
+            raise RuntimeError("scenario creation returned no scenario")
+        return current, created
 
     def set_training_mode(self, scenario: str, training_mode: str) -> dict[str, Any]:
         with self.registry.lock_for(scenario):
@@ -796,7 +805,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
     def scenario_settings(self, scenario: str) -> dict[str, Any]:
         """The settings of an existing scenario as JSON, for ``GET /reef/scenarios/{scenario}/settings``.
 
-        ``training_mode`` and ``model`` are what the loaded scenario runs. ``artifact_evaluation`` and
+        ``training_mode`` is what the loaded scenario runs. ``artifact_evaluation`` and
         ``activation`` are the stored settings, or None. ``effective_activation`` is the rule that applies: the
         scenario's ``activation``, else the deployment's. Raise ``UnknownScenario`` for an unknown scenario.
         """
@@ -805,7 +814,6 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
             return {
                 "scenario": scenario,
                 "training_mode": current.training_mode,
-                "model": current.model_config.view(),
                 "artifact_evaluation": settings.artifact_evaluation,
                 "activation": settings.activation,
                 "effective_activation": self.registry.effective_activation(settings),

@@ -42,7 +42,6 @@ from reef.core.plugins import PluginConfigError
 from reef.core.reports import ReportBase, ReportValidationError
 from reef.evaluation.activation import activation_reference
 from reef.harness.tasks.model_binding import ModelBinding
-from reef.inference.model_config import ModelConfig
 from reef.observability import ExperimentLogger
 from reef.recipe.base import Recipe, ServedEndpoint, WeightTrainingRecipe, check_job_components, every_check
 from reef.recipe.config import recipe_config_from_mapping, recipe_config_from_section
@@ -254,9 +253,9 @@ class CompositeRecipe(Recipe):
         """The adapter of the component recipe that serves a harness tree; a composite serves at most one."""
         return next((recipe.harness_adapter for recipe in self.components.values() if recipe.harness_adapter), None)
 
-    def harness_served_model(self, scenario: str, component: str, model: ModelConfig) -> ModelBinding | None:
+    def harness_served_model(self, scenario: str, component: str) -> ModelBinding | None:
         recipe = self.components.get(component)
-        return None if recipe is None else recipe.harness_served_model(scenario, component, model)
+        return None if recipe is None else recipe.harness_served_model(scenario, component)
 
     def harness_state_dir(self, scenario: str, component: str) -> Path | None:
         recipe = self.components.get(component)
@@ -284,12 +283,6 @@ class CompositeRecipe(Recipe):
                 )
                 for name, recipe in self.components.items()
             },
-        )
-
-    def with_model_config(self, config: ModelConfig) -> CompositeRecipe:
-        super().with_model_config(config)
-        return replace(
-            self, components={name: recipe.with_model_config(config) for name, recipe in self.components.items()}
         )
 
     @property

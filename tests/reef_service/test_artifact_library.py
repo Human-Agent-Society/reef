@@ -141,21 +141,7 @@ def test_a_scenarios_artifacts_enter_the_library_and_a_scenario_in_another_cell_
             await library_item(client, f"other/{receipt['artifact_id']}")
 
             # A client adds files that it stored as an item of its own, imports it, and deletes it.
-            upload = weights(tmp_path / "upload", b"w10")
-            body = {
-                "items": [
-                    {
-                        "id": "upload-1",
-                        "content": {
-                            "source_uri": upload.as_uri(),
-                            "kind": "model",
-                            "component": None,
-                            "content_id": None,
-                        },
-                        "metadata": {"kind": "artifact"},
-                    }
-                ]
-            }
+            body = upload_item("upload-1", weights(tmp_path / "upload", b"w10"))
             assert (await client.post(DATA, json=body)).status == 201
             assert (await other_cell.post("/reef/scenarios/other/artifacts", json={"item": "upload-1"})).status == 201
             assert (await client.delete(f"{DATA}/upload-1")).status == 200
@@ -173,6 +159,99 @@ def test_a_scenarios_artifacts_enter_the_library_and_a_scenario_in_another_cell_
     finally:
         first.close()
         second.close()
+
+
+def upload_item(item_id: str, directory: Path) -> dict[str, Any]:
+    """The body that stores ``directory`` as the client's artifact item ``item_id``."""
+    content = {"source_uri": directory.as_uri(), "kind": "model", "component": None, "content_id": None}
+    return {"items": [{"id": item_id, "content": content, "metadata": {"kind": "artifact"}}]}
+
+
+@pytest.mark.integration
+def test_a_new_scenario_starts_from_an_artifact_item_of_its_owner(tmp_path: Path) -> None:
+    """RFC #1062: the item is imported, and the import is the scenario's active artifact and its training start.
+
+    A process trains one scenario, so each new scenario has a Cell of its own; the Cells share the data store.
+    """
+    cells = {name: cell(tmp_path, name) for name in ("math", "from-scenario", "from-upload")}
+
+    async def run() -> None:
+        async with client_of(cells["math"], tmp_path) as client:
+            assert (await client.post("/reef/scenarios", json={"name": "math", "owner": "acme"})).status == 201
+            source = weights(tmp_path / "source", b"w9")
+            imported = await (
+                await client.post("/reef/scenarios/math/artifacts", json={"source": source.as_uri()})
+            ).json()
+            item_id = f"math/{imported['artifact_id']}"
+            await library_item(client, item_id)
+            upload = weights(tmp_path / "upload", b"w10")
+            assert (await client.post(DATA, json=upload_item("upload-1", upload))).status == 201
+        for name, item, content_id in (
+            ("from-scenario", item_id, directory_content_id(source)),
+            ("from-upload", "upload-1", directory_content_id(upload)),
+        ):
+            async with client_of(cells[name], tmp_path) as client:
+                created = await client.post(
+                    "/reef/scenarios", json={"name": name, "owner": "acme", "artifact_id": item}
+                )
+                assert created.status == 201, await created.text()
+                answer = await created.json()
+                started = answer["artifact_id"]
+                assert answer == {
+                    "scenario": name,
+                    "owner": "acme",
+                    "release_id": started,
+                    "content_id": content_id,
+                    "artifact_id": started,
+                }
+                scenario = cells[name].get_or_create_scenario(name)
+                assert scenario is not None
+                assert scenario.artifact_status() == {
+                    imported["component"]: {"active": started, "training_start": started}
+                }
+                listed = (await (await client.get(f"/reef/scenarios/{name}/artifacts")).json())["artifacts"]
+                assert [row["source"]["item"] for row in listed if row["artifact_id"] == started] == [item]
+
+                # An existing scenario keeps its start: creation is idempotent, and artifact_id is not read.
+                again = await client.post(
+                    "/reef/scenarios", json={"name": name, "owner": "acme", "artifact_id": "missing"}
+                )
+                assert again.status == 200, await again.text()
+                assert await again.json() == {key: value for key, value in answer.items() if key != "artifact_id"}
+
+    try:
+        asyncio.run(run())
+    finally:
+        for dispatcher in cells.values():
+            dispatcher.close()
+
+
+@pytest.mark.integration
+def test_a_refused_start_leaves_no_scenario(tmp_path: Path) -> None:
+    """A start that the import refuses answers as the import route does, and deletes the scenario it made."""
+    dispatcher = cell(tmp_path, "cell-a")
+
+    async def run() -> None:
+        async with client_of(dispatcher, tmp_path) as client:
+            notes = tmp_path / "notes"
+            notes.mkdir()
+            (notes / "notes.txt").write_text("no weights")
+            assert (await client.post(DATA, json=upload_item("notes", notes))).status == 201
+            # The component's layout refuses a directory without weights, and the owner stores no item "missing".
+            for item, status in (("notes", 400), ("missing", 404)):
+                refused = await client.post(
+                    "/reef/scenarios", json={"name": "refused", "owner": "acme", "artifact_id": item}
+                )
+                assert refused.status == status, await refused.text()
+                assert not dispatcher.has_scenario("refused")
+                assert (await (await client.get("/reef/scenarios")).json())["scenarios"] == []
+            # The name is free again.
+            assert (await client.post("/reef/scenarios", json={"name": "refused", "owner": "acme"})).status == 201
+
+    try:
+        asyncio.run(run())
+    finally:
+        dispatcher.close()
 
 
 @pytest.mark.integration
