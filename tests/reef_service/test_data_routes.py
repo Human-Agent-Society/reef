@@ -70,13 +70,18 @@ def test_a_query_pages_by_sequence_and_a_task_item_reads_without_content(tmp_pat
         assert response.status == 201, await response.text()
         first = await (await client.get(f"{base}?limit=2", headers=AUTH)).json()
         assert [item["id"] for item in first["items"]] == ["t1", "t2"]
+        assert all("content" not in item for item in first["items"])
+        # content=1 gives each item's content, as reading the item does.
+        with_content = await (await client.get(f"{base}?limit=2&content=1", headers=AUTH)).json()
+        t1 = await (await client.get(f"{base}/t1", headers=AUTH)).json()
+        assert with_content["items"][0]["content"] == t1["content"] and t1["content"] is not None
         rest = await (await client.get(f"{base}?after={first['next']}", headers=AUTH)).json()
         assert ([item["id"] for item in rest["items"]], rest["next"]) == (["t3", "task-a"], None)
         tasks = await (await client.get(f"{base}?kind=task", headers=AUTH)).json()
         assert [item["id"] for item in tasks["items"]] == ["task-a"]
         task = await (await client.get(f"{base}/task-a", headers=AUTH)).json()
         assert (task["content"], task["metadata"]["kind"]) == (None, "task")
-        for query in ("?kind=dataset", "?after=x", "?limit=0"):
+        for query in ("?kind=dataset", "?after=x", "?limit=0", "?content=2", "?content=yes"):
             assert (await client.get(base + query, headers=AUTH)).status == 400, query
         assert (await client.delete(f"{base}/missing", headers=AUTH)).status == 404
 
