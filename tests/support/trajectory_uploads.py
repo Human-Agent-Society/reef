@@ -115,8 +115,9 @@ class UploadRecipe(Recipe):
         return Trainer.build(
             scenario,
             records,
+            # An uploaded trajectory is one sample, so two uploads make one job's data.
             pipeline_factory=lambda context: TrainingPipeline(
-                context, record2sample=self.task_stage(), sample2job=self.batch_stage(context, None, None)
+                context, record2sample=self.task_stage(), sample2job=self.batch_stage(context, None, 2)
             ),
             job_loop=JobLoop(RecordingComponent(self.batches), scenario=scenario),
             algorithm_state=algorithm_state,
@@ -124,8 +125,6 @@ class UploadRecipe(Recipe):
             training_mode=self.training_mode,
             task_storage=task_storage,
             samples=samples,
-            # An uploaded trajectory is one sample, so two uploads make one job's data.
-            default_job_samples=2,
         )
 
 

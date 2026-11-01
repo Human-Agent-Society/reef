@@ -10,18 +10,34 @@ needs no traffic, so uploaded train tasks start a run.
 from __future__ import annotations
 
 from reef.core import RequestType
+from reef.pipeline_context import PipelineContext
 from reef.sample2job.distill import DistillJobData
 
 
 class TraceJobData(DistillJobData):
     """Put trace samples into job data unmodified; the backends consume them without more processing.
 
+    Values: as ``DistillJobData``, except that ``job_samples`` defaults to 1,
+    so each trace starts a step unless the deployment sets
+    ``pipeline.sample2job.config.job_samples``.
     In ``manual`` a queued instruction takes the samples of the manual
     buffer, possibly none, so the method reads the request beside them.
     """
 
     reads_instructions = True
     required_request_types = frozenset(RequestType)
+
+    def __init__(
+        self,
+        context: PipelineContext,
+        buffer_size: int | None,
+        job_samples: int | None,
+        *,
+        max_job_samples: int | None = None,
+    ) -> None:
+        super().__init__(
+            context, buffer_size, 1 if job_samples is None else job_samples, max_job_samples=max_job_samples
+        )
 
 
 class TrainTaskJobData(TraceJobData):

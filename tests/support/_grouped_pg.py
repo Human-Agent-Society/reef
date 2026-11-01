@@ -85,10 +85,12 @@ class GroupedPolicyJobData(Sample2Job):
         return JobData(data_id, samples)
 
 
-def grouped_policy_pipeline(context: PipelineContext, buffer_size: int | None = None) -> TrainingPipeline:
+def grouped_policy_pipeline(
+    context: PipelineContext, buffer_size: int | None = None, job_samples: int | None = None
+) -> TrainingPipeline:
     """Reports grouped by ``metadata.comparison_set``, two to a group."""
     return TrainingPipeline(
         context,
         record2sample=ComparisonSetSamples(context),
-        sample2job=GroupedPolicyJobData(context, buffer_size, None),
+        sample2job=GroupedPolicyJobData(context, buffer_size, job_samples),
     )

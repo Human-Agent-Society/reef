@@ -61,7 +61,7 @@ def feedback_pipeline(context):
     return TrainingPipeline(
         context,
         record2sample=FeedbackSamples(context),
-        sample2job=FeedbackJobData(context, None, None),
+        sample2job=FeedbackJobData(context, None, 2),
     )
 
 
@@ -93,7 +93,6 @@ class LearningRecipe(Recipe):
             experiment_logger=experiment_logger,
             report_type=self.report_type,
             training_mode=self.training_mode,
-            default_job_samples=2,
         )
 
 

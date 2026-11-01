@@ -119,7 +119,7 @@ the iteration's plan as the method will (its parent choice and its three
 training problems), render the tree with a model binding pointed back at the
 embedded service, run each problem as a Pi run, score it, find its
 recorded request by problem text, and report the score against it. The third
-report fills the step's job data (`evolution.batch_size: 3`) and schedules the
+report fills the step's job data (`pipeline.sample2job.config.job_samples: 3`) and schedules the
 training step, which is where the method proposes, the evaluation validates,
 and a win publishes. Rounds stop when the archive reaches the metric-call
 budget.

@@ -78,7 +78,7 @@ class _TreeRecipe(Recipe):
         return BaseArtifactSource(files=self.seed or {})
 
     def step_pipeline(self, context: PipelineContext) -> TrainingPipeline:
-        return threshold_pipeline(context)
+        return threshold_pipeline(context, job_samples=1)
 
     def step_jobs(self) -> _FileJobs:
         return _FileJobs(self.label, self.artifact_dir)
@@ -103,7 +103,6 @@ class _TreeRecipe(Recipe):
             report_type=self.report_type,
             experiment_logger=experiment_logger,
             training_mode=self.training_mode,
-            default_job_samples=1,
             samples=samples,
         )
 
@@ -663,7 +662,7 @@ class _ClosingJobData(ThresholdJobData):
     batch: the trainer closes its pipeline when the scenario is deleted."""
 
     def __init__(self, context: PipelineContext, closing: threading.Event, rollout_done: threading.Event) -> None:
-        super().__init__(context, None, None)
+        super().__init__(context, None, 1)
         self.closing = closing
         self.rollout_done = rollout_done
 

@@ -384,7 +384,7 @@ def test_the_pipeline_section_configures_the_stages() -> None:
 
 @pytest.mark.unit
 def test_the_default_stages_are_correlate_only_and_buffer_one_job() -> None:
-    built = openclawrl_recipe().build_pipeline(PipelineContext("s", default_job_samples=16))
+    built = openclawrl_recipe({"sample2job": {"config": {"job_samples": 16}}}).build_pipeline(PipelineContext("s"))
     assert isinstance(built.record2sample, OpenClawRLSamples)
     assert built.record2sample.openclawrl_judging.prm is None and built.record2sample.worker is None
     assert built.buffer_size == 16

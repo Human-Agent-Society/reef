@@ -117,7 +117,7 @@ Point pi at this Reef as the client section of
 [Evolve your harness](../../docs/user-guide/evolve-your-harness.rst) describes. After each session, post one
 report with `POST /reef/report`: a `score`, optional `feedback`, and the receipts of the session's model calls in
 `references`. The score does not have to be a correct answer; a plain 1 for done and 0 for not done is enough.
-With `batch_size: 1`, each report starts one step. The step's record is under
+With the default `pipeline.sample2job.config.job_samples` of 1, each report starts one step. The step's record is under
 `recipes/ace/work/harness/<scenario>/harness/steps/<step>/`: the new tree in `harness/`, the playbook in
 `state/playbook.json`, each model call in `calls.json`, and the summary and notes in `output/`.
 

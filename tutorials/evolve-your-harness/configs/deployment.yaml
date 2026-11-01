@@ -18,8 +18,7 @@ recipe:
     evolution:
       adapter: pi
       # The default pipeline stages batch every valid scored report, a passing one included.
-      # batch_size 1 makes each report one evolve step.
-      batch_size: 1
+      # The default job_samples of 1 makes each report one evolve step.
       # One call to the served model rewrites rules.md from the failing traces.
       method: tutorials.evolve-your-harness.harness.plugins:RulesMethod
       # No binary: at startup reef installs the pi version that the adapter's adapter.yaml pins under

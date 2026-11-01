@@ -22,8 +22,6 @@ recipe:
   config:
     evolution:
       adapter: pi
-      # One step reads eight model calls. Most of them are calls in the middle of a run, which cost nothing.
-      batch_size: 8
       method:
         module: recipes.reasoning_bank:ReasoningBank
         config:
@@ -41,6 +39,10 @@ recipe:
 pipeline:
   record2sample:
     module: reef.record2sample.traces:InferenceSamples
+  sample2job:
+    config:
+      # One step reads eight model calls. Most of them are calls in the middle of a run, which cost nothing.
+      job_samples: 8
 
 inference:
   upstream-url: http://127.0.0.1:8000

@@ -51,25 +51,25 @@ def channel_dispatcher(
     *,
     seed: HarnessTree = EMPTY_SEED,
     inference_stages: bool = False,
-    batch_size: int = 1,
+    job_samples: int = 1,
 ) -> Dispatcher:
     """A ``delivery`` scenario whose method makes ``patches`` in order, then nothing; its base release is
-    ``seed``."""
+    ``seed``, and each step takes ``job_samples`` traces."""
     candidates = iter(patches)
-    stages = (
+    stages: dict = (
         {
             "record2sample": {"module": "reef.record2sample.traces:InferenceSamples"},
         }
         if inference_stages
         else {}
     )
+    stages["sample2job"] = {"config": {"job_samples": job_samples}}
     recipe = replace(
         harness_recipe(
             tmp_path,
             lambda workspace, services: next(candidates, None),
             seed=seed,
             score=evaluate,
-            batch_size=batch_size,
         ),
         pipeline_stages=PipelineConfig.from_setting(stages, spec=HarnessEvolutionRecipe.pipeline_spec(), environ={}),
     )
@@ -363,7 +363,7 @@ def test_record_only_traffic_fires_a_step_and_publishes(tmp_path) -> None:
     batch, one step runs on the unscored samples, and the read channel serves the winner."""
 
     async def run() -> None:
-        async with served(channel_dispatcher(tmp_path, PATCHES[:1], inference_stages=True, batch_size=2)) as client:
+        async with served(channel_dispatcher(tmp_path, PATCHES[:1], inference_stages=True, job_samples=2)) as client:
             for prompt in ("first", "second"):
                 response = await client.post(
                     "/v1/chat/completions", headers=HEADERS, json={"messages": [{"role": "user", "content": prompt}]}

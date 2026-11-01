@@ -13,6 +13,7 @@ import sqlite3
 import time
 from contextlib import closing
 from dataclasses import dataclass, replace
+from functools import partial
 from pathlib import Path
 from threading import Event, Thread
 
@@ -469,10 +470,9 @@ class _SavedArtifactRecipe(Recipe):
         return Trainer.build(
             scenario,
             records,
-            pipeline_factory=threshold_pipeline,
+            pipeline_factory=partial(threshold_pipeline, job_samples=1),
             job_loop=JobLoop(self.backend, scenario=scenario),
             algorithm_state=algorithm_state,
-            default_job_samples=1,
         )
 
 
@@ -551,7 +551,7 @@ class ProtectAllPipeline(TrainingPipeline):
         super().__init__(
             context,
             record2sample=ThresholdSamples(context),
-            sample2job=ThresholdJobData(context, None, None),
+            sample2job=ThresholdJobData(context, None, 1),
         )
         self._seen: set[str] = set()
 
@@ -585,7 +585,6 @@ class ProtectAllPolicyRecipe(TestPolicyRecipe):
             job_parameters={kind: {"method": {"objective": "sft"}} for kind in SAMPLE_KINDS},
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
-            default_job_samples=1,
         )
 
 

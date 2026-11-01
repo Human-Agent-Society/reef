@@ -24,8 +24,7 @@ recipe:
     evolution:
       adapter: pi
       # The default pipeline stages batch every valid scored report, a passing one included.
-      # batch_size 1 makes each report one evolve step.
-      batch_size: 1
+      # The default job_samples of 1 makes each report one evolve step.
       # The method beside this file (harness/plugins.py): one call to the served
       # model reads the step's failing traces and rewrites rules.md. The reef
       # service resolves the dotted reference because run.sh starts it with

@@ -38,6 +38,7 @@ from reef.train.harness_backend.agent.settings import AgentSettings
 from reef.train.harness_backend.backend import HarnessBackend
 from reef.train.harness_backend.calls import StepCalls
 from reef.train.harness_backend.services import StepServices
+from reef.train.pipeline import PipelineConfig
 
 #: The fake pi scores itself: its session event carries the rendered rules text, so a scorer can prefer a tree whose
 #: rules hold the marker.
@@ -124,6 +125,7 @@ def harness_recipe(
     agent: AgentSettings | None = None,
     models: Mapping[str, ModelBinding] | None = None,
     activation: PluginReference | None = None,
+    job_samples: int | None = None,
     **evolution: Any,
 ) -> HarnessEvolutionRecipe:
     """A pi recipe over the fake binary, its state under ``tmp_path``.
@@ -131,7 +133,8 @@ def harness_recipe(
     ``evaluation`` sets ``EvaluationSettings`` fields beside ``tasks``, and ``evolution`` sets
     ``EvolutionSettings`` fields. ``worker_executor`` places the run workers (``execution.evolution``),
     ``agent`` is the method's coding agent, ``models`` the method's named models, and ``activation`` the
-    scenario's activation rule (the ``activation`` section; none is ``always``).
+    scenario's activation rule (the ``activation`` section; none is ``always``). ``job_samples`` is the
+    traces of one step (``pipeline.sample2job.config.job_samples``); None keeps the stage's default of 1.
     """
     return HarnessEvolutionRecipe(
         method=resolve_method(method),
@@ -146,6 +149,15 @@ def harness_recipe(
         agent=agent,
         models=dict(models or {}),
         activation=activation,
+        pipeline_stages=(
+            None
+            if job_samples is None
+            else PipelineConfig.from_setting(
+                {"sample2job": {"config": {"job_samples": job_samples}}},
+                spec=HarnessEvolutionRecipe.pipeline_spec(),
+                environ={},
+            )
+        ),
     )
 
 

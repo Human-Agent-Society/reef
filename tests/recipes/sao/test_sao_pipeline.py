@@ -51,11 +51,11 @@ from reef.train.types import JobData
 EXAMPLES = Path(__file__).resolve().parents[3] / "recipes" / "sao" / "examples"
 
 
-def sao_processor(context: PipelineContext) -> TrainingPipeline:
+def sao_processor(context: PipelineContext, job_samples: int | None = None) -> TrainingPipeline:
     return TrainingPipeline(
         context,
         record2sample=SAOSamples(context, SampleAssemblySettings()),
-        sample2job=SAOJobData(context, None, None),
+        sample2job=SAOJobData(context, None, job_samples),
     )
 
 
@@ -122,7 +122,10 @@ def test_sao_recipe_defaults_are_reef_side_only() -> None:
     stages = recipe.stages()
     assert (stages.record2sample.plugin_class, stages.sample2job.plugin_class) == (SAOSamples, SAOJobData)
     # Without a configured buffer_size the buffer holds the data of one job.
-    assert recipe.build_pipeline(PipelineContext("math", default_job_samples=128)).buffer_size == 128
+    sized = SAORecipe(
+        **runtime_bindings(), pipeline_stages=job_sized_stages(SAORecipe.pipeline_spec(), job_samples=128)
+    )
+    assert sized.build_pipeline(PipelineContext("math")).buffer_size == 128
 
 
 @pytest.mark.unit
@@ -589,11 +592,10 @@ def test_sao_train_step_recovers_across_a_restart(tmp_path) -> None:
         return Trainer.build(
             "math",
             session.records,
-            pipeline_factory=lambda context: sao_processor(context),
+            pipeline_factory=lambda context: sao_processor(context, job_samples=1),
             job_loop=JobLoop(component, scenario="math"),
             job_parameters=SAORecipe(**runtime_bindings(component)).parameters_by_kind(),
             algorithm_state=algorithm_state,
-            default_job_samples=1,
             samples=TrainerSamples(session.samples),
         )
 
