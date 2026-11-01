@@ -4,8 +4,10 @@ A client imports one artifact into one component of a scenario by naming its dir
 artifact item of the scenario's owner, whose ``source_uri`` names the directory (``reef.storage.artifact_items``). A source reader
 (``ArtifactSources``) opens the files there, and the dispatcher checks them against the component's layout and
 stores a copy, or a reference to a revision that cannot change, in a temporary directory under
-``ArtifactImports.work_dir`` before it publishes it (``Dispatcher.import_artifact``). No aiohttp types appear here.
-``reef.service.routes.artifact_imports`` adapts it to HTTP.
+``ArtifactImports.work_dir`` before it publishes it (``Dispatcher.import_artifact``). A new scenario can also start
+from an artifact item (RFC #1062): ``ArtifactImports.start_scenario`` imports the item and makes the import the
+scenario's active artifact and training start. No aiohttp types appear here. ``reef.service.routes.artifact_imports``
+and the create route of ``reef.service.routes.scenarios`` adapt it to HTTP.
 """
 
 from __future__ import annotations
@@ -30,8 +32,8 @@ class ArtifactImports:
     when the first import runs; each import stores into its own temporary directory under it and removes that
     directory when it ends. A copied import of a full model needs its size there, and again in the artifact store;
     an import by reference needs neither.
-    Purpose: the service builds it from ``storage.artifact_sources`` and ``storage.artifact_cache_dir``, and the
-    import route calls ``import_source``.
+    Purpose: the service builds it from ``storage.artifact_sources`` and ``storage.artifact_cache_dir``. The
+    import route calls ``import_source`` and ``import_item``, and the create route calls ``start_scenario``.
     """
 
     sources: ArtifactSources
@@ -88,6 +90,34 @@ class ArtifactImports:
                 f"artifact item {item_id!r} has no source_uri: its repository gives no URI to import from"
             )
         return self.import_source(dispatcher, scenario, component, uri, item_id=item_id)
+
+    def start_scenario(
+        self, dispatcher: Dispatcher, scenario: str, component: str | None, item_id: str
+    ) -> dict[str, Any]:
+        """Start the scenario ``scenario``, which the caller just created, from the artifact item ``item_id`` of
+        its owner.
+
+        Import the item into ``component`` as ``import_item`` does. Then make the import the component's active
+        artifact (``Dispatcher.activate``). Then make it the component's training start (``Dispatcher.train_from``)
+        when the component's trainer can start from an artifact (``ScenarioCapabilities.train_from``); a component
+        that trains nothing has no training start. Return the import's receipt, as ``import_item`` does.
+
+        When a step raises, delete ``scenario`` (``Dispatcher.delete_scenario``) and raise the step's error, so a
+        refused start leaves no scenario. Each step takes the scenario's lock itself, and the delete runs after the
+        step released it.
+        """
+        try:
+            imported = self.import_item(dispatcher, scenario, component, item_id)
+            artifact_id, target = imported["artifact_id"], imported["component"]
+            dispatcher.activate(scenario, artifact_id, target)
+            with dispatcher.locked_scenario(scenario) as current:
+                trains = target in current.capabilities().train_from
+            if trains:
+                dispatcher.train_from(scenario, artifact_id, target)
+        except Exception:
+            dispatcher.delete_scenario(scenario)
+            raise
+        return imported
 
 
 __all__ = ["ArtifactImports"]
