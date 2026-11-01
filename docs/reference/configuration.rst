@@ -1456,8 +1456,9 @@ Generated tasks
 
 The built-in generated-task recipe,
 ``reef.recipe.generated_tasks:GeneratedTaskRecipe``, binds the ``task_group``
-objective on Tinker's ``importance_sampling`` loss, so it requires the
-``tinker`` training backend. Its stages are ``GeneratedTaskSamples`` and
+objective on the ``importance_sampling`` loss family: Tinker's built-in loss,
+or on Slime truncated importance sampling at ``--tis-clip`` (`Task jobs on
+Slime`_). Its stages are ``GeneratedTaskSamples`` and
 ``GeneratedTaskJobData``. Without
 ``pipeline.record2sample.config.rounds`` no round runs, and the recipe trains
 only the train tasks that earlier generations saved in the scenario. Each
@@ -1542,7 +1543,7 @@ job's start weights, and the Slime component on its own rollout engines (see
 .. config::
 
    rollout.rollouts_per_task | required | training rollouts of each task, at least 2; the samples of one task form its group
-   rollout.agent | terminus-2 | the Harbor agent config, with ``{model}``, ``{base_url}`` and ``{api_key}`` placeholders. Its requests must fit Tinker's text chat: system, user and assistant text messages, no tools.
+   rollout.agent | terminus-2 | the Harbor agent config, with ``{model}``, ``{base_url}`` and ``{api_key}`` placeholders. Its requests must fit the training component's text chat: system, user and assistant text messages, no tools.
    rollout.environment | docker | the Harbor environment type of the rollouts, such as ``docker``, ``e2b`` or ``modal``
    rollout.agent_host | none | the host at which an agent inside the sandbox reaches the component's host; none for an agent on this host
    rollout.concurrency | 2 | rollouts in flight
@@ -1583,6 +1584,34 @@ engines answer OpenAI text chat: system, user and assistant text messages, no
 tools. A task job whose options give the engines no GPUs fails. A LoRA actor
 cannot have rollout engines, since Reef's adapters do not reach Slime's weight
 transfer.
+
+The job's objective must have a loss family that Slime trains; the component
+checks it when the job is submitted, before any rollout. The generated-task
+objective, ``task_group``, trains on the ``importance_sampling`` family: the
+loss of a response token is ``-A * sg[min(p / q, c)] * log p``, with ``q`` the
+engines' log-probability of the sampled token, ``c`` Slime's ``--tis-clip``
+(default 2) and Slime's per-sample mean as the reduction. Tinker's loss of
+that name takes the untruncated ratio and sums the tokens. Reef computes the
+advantages, so set ``disable-compute-advantages-and-returns``.
+
+With ``score-centering: true`` in ``training.options``, the engines also
+record the top ``score-centering-top-k`` log-probabilities of each response
+token, and the job trains with score centering (`Loss families
+<../developer-guide/loss-families.rst>`__). The recorded distribution must be
+the one the trainer reads, so the job needs ``rollout-temperature`` 1,
+``rollout-top-p`` 1 and ``rollout-top-k`` -1, and the engines answer a request
+that sets another temperature, top-p or top-k with 400.
+
+.. code:: yaml
+
+   training:
+     backend: slime
+     options:
+       colocate: true
+       disable-compute-advantages-and-returns: true
+       tis-clip: 2.0
+       score-centering: true
+       score-centering-top-k: 128
 
 Dataset jobs on Slime
 ~~~~~~~~~~~~~~~~~~~~~

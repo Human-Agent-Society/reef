@@ -30,6 +30,7 @@ from reef.train.slime_backend.loss_families import register_loss_family
 for _cookbook_package in (
     "reef.recipe.sft",
     "reef.recipe.dataset",
+    "reef.recipe.generated_tasks",
     "reef.train.harness_backend",
     "recipes.openclawrl",
     "recipes.opd",

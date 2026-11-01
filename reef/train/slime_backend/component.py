@@ -64,13 +64,13 @@ from reef.runtime.interfaces import (
     resolve_learning_rate_schedule_state,
 )
 from reef.runtime.jobs import ReleaseFormat, SavedCheckpoint, TrainingJob
-from reef.train.algos.registry import job_training
+from reef.train.algos.registry import job_training, resolve_objective
 from reef.train.local_jobs import LocalJobComponent
 from reef.train.slime_backend.algorithm import SlimeAlgorithm
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
 from reef.train.slime_backend.dataset import DATASET_FILE, DatasetSettings, save_root
 from reef.train.slime_backend.distill import DistillAlgorithm
-from reef.train.slime_backend.loss_families import resolve_loss_family
+from reef.train.slime_backend.loss_families import UnknownLossFamilyError, resolve_loss_family
 from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
 from reef.train.slime_backend.reef_adapters.batches import WORKER_SWITCH_KEY, TrainingBatchProcessor
 from reef.train.slime_backend.reef_adapters.preflight import prepare_checkpoint_storage
@@ -372,7 +372,12 @@ class SlimeJobs(LocalJobComponent):
         interval = job.parameters.get("save_interval")
         if interval is not None and (isinstance(interval, bool) or not isinstance(interval, int) or interval <= 0):
             raise ValueError("save_interval must be a positive int")
-        job_training(job.parameters)
+        method, _ = job_training(job.parameters)
+        loss_family = resolve_objective(method.objective).loss_family
+        try:
+            resolve_loss_family(loss_family)
+        except UnknownLossFamilyError as exc:
+            raise ValueError(f"Slime has no loss family {loss_family!r} for the job's objective: {exc}") from exc
         self.check_held_weights(SlimeStart.read(Path(job.start)).rollout_id, job.start)
 
     def check_held_weights(self, rollout_id: int | None, start: str) -> None:
@@ -387,8 +392,20 @@ class SlimeJobs(LocalJobComponent):
             raise ValueError(f"Slime continues {held}; a job cannot start from {wanted} ({start})")
 
     def check_task_jobs(self, parameters: Mapping[str, Any]) -> None:
-        """A task job rolls its tasks out on Slime's own engines, as the ``rollout`` parameter says."""
+        """A task job rolls its tasks out on Slime's own engines, as the ``rollout`` parameter says.
+
+        With score centering, the engines record the heads of the untruncated distribution at temperature 1, so the
+        trainer must read that distribution too: ``--rollout-temperature`` 1, ``--rollout-top-p`` 1 and
+        ``--rollout-top-k`` -1.
+        """
         RolloutSettings.from_parameters(parameters)
+        if settings_from_args(self.args) is not None and (
+            self.args.rollout_temperature != 1 or self.args.rollout_top_p != 1 or self.args.rollout_top_k != -1
+        ):
+            raise ValueError(
+                "a task job with --score-centering trains the untruncated distribution at temperature 1, which its "
+                "engines record: set --rollout-temperature 1, --rollout-top-p 1 and --rollout-top-k -1"
+            )
 
 
 class SlimeJobRunner(SlimeJobs):
@@ -511,6 +528,7 @@ class SlimeJobRunner(SlimeJobs):
             model_path=self.args.hf_checkpoint,
             timeout_s=self.train_timeout_s,
             runtime_load_id=f"slime:{held}",
+            topk_logprobs=0 if self.score_centering is None else self.score_centering.top_k,
         )
         tasks = tuple(item for item in job.data.samples if isinstance(item, TaskSample))
         self.rollout_group.sync(self.group)

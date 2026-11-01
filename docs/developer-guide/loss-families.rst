@@ -53,28 +53,32 @@ The recipe's ``loss_family`` and the Slime flags in ``training.options`` must
 describe the same objective. The Slime component checks them at start and
 refuses a mismatch.
 
-+---------------------+-----------------------------+
-| Loss family         | ``--loss-type``             |
-+=====================+=============================+
-| ``sao``             | ``policy_loss``             |
-+---------------------+-----------------------------+
-| ``sft``             | ``sft_loss``                |
-+---------------------+-----------------------------+
-| ``slime``           | ``policy_loss``             |
-+---------------------+-----------------------------+
-| ``tttd``            | ``custom_loss``             |
-+---------------------+-----------------------------+
-| ``openclawrl``      | ``custom_loss``             |
-+---------------------+-----------------------------+
-| ``sdft``            | ``custom_loss``             |
-+---------------------+-----------------------------+
++---------------------------+-------------------+
+| Loss family               | ``--loss-type``   |
++===========================+===================+
+| ``importance_sampling``   | ``custom_loss``   |
++---------------------------+-------------------+
+| ``sao``                   | ``policy_loss``   |
++---------------------------+-------------------+
+| ``sft``                   | ``sft_loss``      |
++---------------------------+-------------------+
+| ``slime``                 | ``policy_loss``   |
++---------------------------+-------------------+
+| ``tttd``                  | ``custom_loss``   |
++---------------------------+-------------------+
+| ``openclawrl``            | ``custom_loss``   |
++---------------------------+-------------------+
+| ``sdft``                  | ``custom_loss``   |
++---------------------------+-------------------+
 
-Every family refuses ``--use-rollout-logprobs``. Serving returns no
+Every family except ``slime`` refuses ``--use-rollout-logprobs``. Serving returns no
 log-probabilities, so the actor computes the old-policy log-probabilities of
 each row with the weights of the job's start. Objectives that need old-policy
 log-probabilities, such as TTTD and the distillation importance-sampling
 correction, read these values. They are exact when ``max_staleness`` is 0 and
-an approximation above it.
+an approximation above it.``importance_sampling`` reads the rollout engines' own log-probabilities of
+its task rollouts (``rollout_log_probs``) as ``q`` instead, without the flag,
+and refuses a row without them.
 
 The spec
 --------
@@ -315,7 +319,8 @@ differs from the trainer's ``p`` (a quantized engine, stale weights), a
 policy gradient drifts toward ``q``; score centering subtracts that drift.
 It is off unless ``--score-centering`` is set, and only a family that
 declares the weight its loss puts on the sampled token's score accepts it.
-SAO and the distillation base's sampled reverse-KL mode support it.
+SAO, ``importance_sampling`` and the distillation base's sampled reverse-KL
+mode support it.
 
 A family declares its weight with ``policy_gradient_weight``. Its loss must
 have the form ``-A_t * sg[f(p_t / q_t)] * log p_t``, with ``q`` the rollout
@@ -326,6 +331,10 @@ engine's probability:
    def policy_gradient_weight(self, args):
        # SAO: the ratio masked to its trust region.
        return PolicyGradientWeight("masked", lower=1 - args.eps_clip, upper=1 + args.eps_clip_high)
+
+   def policy_gradient_weight(self, args):
+       # importance_sampling: the ratio truncated at Slime's --tis-clip.
+       return PolicyGradientWeight("truncated", upper=args.tis_clip)
 
 ``PolicyGradientWeight`` (``reef.train.slime_backend.algorithm``) is ``none``
 (``f = 1``, plain off-policy REINFORCE), ``truncated`` (``min(r, upper)``) or
@@ -420,9 +429,13 @@ Inputs and requirements:
   ``topk_log_probs``). Only the task rollouts of a training component record
   them; a sample that serving recorded has none, and the component fails the
   job. The Spindle full-parameter component's task rollouts record them
-  when its ``score_centering`` option is on. The Slime component's task
-  rollouts record only the sampled log-probs, so on Slime no sample can
-  train with score centering at this time. The recorded log-probs are the
+  when its ``score_centering`` option is on, and the Slime component's
+  when ``--score-centering`` is on: its engines then return the top
+  ``score-centering-top-k`` log-probs of each response token. Such a
+  rollout's requests must sample at temperature 1 without top-p or top-k,
+  and a task job needs ``--rollout-temperature`` 1, ``--rollout-top-p`` 1 and
+  ``--rollout-top-k`` -1, so the trainer reads the same distribution; the
+  engines answer another request with 400. The recorded log-probs are the
   same distribution as ``rollout_log_probs`` and the trainer's: after
   temperature and before the top-k, top-p and min-p filters (see the
   configuration reference). With those filters on, the correction centers
@@ -459,7 +472,7 @@ The step reports aggregate metrics only, as sums of per-sample means:
 ``score_centering_tail_ratio`` and ``score_centering_tail_clipped`` (the
 fraction of positions where a tail fell below the floor); ``loss`` includes
 the term. ``tests/slime_backend/test_score_centering_parity.py`` checks the
-term, added to each weight's loss and to SAO's own loss, against a
-full-vocabulary reference. ``tests/slime_backend/test_distill_score_centering.py``
+term, added to each weight's loss and to SAO's and ``importance_sampling``'s
+own losses, against a full-vocabulary reference. ``tests/slime_backend/test_distill_score_centering.py``
 checks the sampled OPD loss against that gradient, including skipped tokens,
 masked positions and sample weights.

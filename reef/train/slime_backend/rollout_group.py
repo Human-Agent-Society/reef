@@ -184,17 +184,27 @@ class EngineChat(RolloutChat):
 
     ``router_url`` is the engines' router. ``model_path`` is the model directory whose tokenizer and chat template
     render each request; the tokenizer loads at the first call. ``timeout_s`` is a positive bound on one call,
-    in seconds. Each answer is a chat completion whose ``training`` block holds the prompt and response token
-    IDs, the response's loss mask and sampled log-probs, and ``runtime_load_id``, the weights the engines hold
-    for the job. Another path gets 404, a request outside text system, user and assistant messages (or with
-    ``n`` other than 1) 400, an engine error status its own status, and an unusable engine answer 502.
+    in seconds. ``topk_logprobs`` is 0, or the positive number of the engines' top log-probs to record at each
+    response token, for score centering. Each answer is a chat completion whose ``training`` block holds the
+    prompt and response token IDs, the response's loss mask and sampled log-probs, ``runtime_load_id``, the weights
+    the engines hold for the job, and with ``topk_logprobs`` the heads ``topk_indices`` and ``topk_log_probs``, one
+    list of ``topk_logprobs`` per response token. A recorded head must be of the distribution that the trainer
+    reads, the untruncated one at temperature 1, so with ``topk_logprobs`` a request may set ``temperature`` only to
+    1, ``top_p`` only to 1 and ``top_k`` only to -1. Another path gets 404, a request outside text system, user and
+    assistant messages (or with ``n`` other than 1, or with another sampling setting than those) 400, an engine
+    error status its own status, and an unusable engine answer 502.
     """
 
-    def __init__(self, router_url: str, *, model_path: str, timeout_s: float, runtime_load_id: str) -> None:
+    def __init__(
+        self, router_url: str, *, model_path: str, timeout_s: float, runtime_load_id: str, topk_logprobs: int = 0
+    ) -> None:
         if not router_url or not model_path or not runtime_load_id:
             raise ValueError("EngineChat needs a router URL, a model path and a runtime load ID")
         if not timeout_s > 0:
             raise ValueError("EngineChat.timeout_s must be positive")
+        if isinstance(topk_logprobs, bool) or not isinstance(topk_logprobs, int) or topk_logprobs < 0:
+            raise ValueError("EngineChat.topk_logprobs must be a non-negative int")
+        self.topk_logprobs = topk_logprobs
         self.router_url = router_url.rstrip("/")
         self.model_path = model_path
         self.timeout_s = timeout_s
@@ -241,18 +251,30 @@ class EngineChat(RolloutChat):
             messages, sampling, template_kwargs = chat_request(payload)
         except ValueError as exc:
             return 400, {"error": {"message": str(exc)}}
+        if self.topk_logprobs and (
+            sampling.get("temperature", 1.0) != 1 or sampling.get("top_p", 1.0) != 1 or sampling.get("top_k", -1) != -1
+        ):
+            refusal = (
+                "these engines record the top-k log probabilities of the untruncated distribution at temperature 1: "
+                "send temperature 1, top_p 1 and top_k -1, or leave them unset"
+            )
+            return 400, {"error": {"message": refusal}}
+        request: dict[str, Any] = {"sampling_params": sampling, "return_logprob": True}
+        if self.topk_logprobs:
+            request["top_logprobs_num"] = self.topk_logprobs
         try:
             prompt = self.render(messages, template_kwargs)
         except (ValueError, TypeError) as exc:
             return 400, {"error": {"message": f"the chat template cannot render the request: {exc}"}}
         try:
-            status, answer = self.generate({"input_ids": prompt, "sampling_params": sampling, "return_logprob": True})
+            status, answer = self.generate({**request, "input_ids": prompt})
         except (OSError, ValueError) as exc:
             return 502, {"error": {"message": f"the rollout engines failed: {exc}"}}
         if status != 200:
             return status, {"error": {"message": f"the rollout engines answered {status}: {answer}"}}
         try:
             tokens, log_probs, finish = generated(answer)
+            heads = recorded_heads(answer, len(tokens), self.topk_logprobs) if self.topk_logprobs else None
         except ValueError as exc:
             return 502, {"error": {"message": f"the rollout engines failed: {exc}"}}
         message = {"role": "assistant", "content": answer["text"]}
@@ -277,6 +299,7 @@ class EngineChat(RolloutChat):
                 "request_messages": messages,
                 "response_message": message,
                 "finish_reason": finish,
+                **({} if heads is None else {"topk_indices": heads[0], "topk_log_probs": heads[1]}),
             },
         }
 
@@ -339,3 +362,34 @@ def generated(answer: Any) -> tuple[list[int], list[float], str]:
     reason = meta.get("finish_reason")
     finish = "length" if isinstance(reason, dict) and reason.get("type") == "length" else "stop"
     return tokens, log_probs, finish
+
+
+def recorded_heads(answer: dict[str, Any], length: int, top_k: int) -> tuple[list[list[int]], list[list[float]]]:
+    """The top ``top_k`` token IDs and finite log-probs at each of the ``length`` response tokens of an answer.
+
+    SGLang gives them in ``meta_info.output_top_logprobs`` as one list of ``[log-prob, token ID, ...]`` entries
+    per response token. Raise ``ValueError`` for an answer without one list of ``top_k`` such entries per token.
+    """
+    rows = answer["meta_info"].get("output_top_logprobs")
+    if not isinstance(rows, list) or len(rows) != length:
+        raise ValueError(f"the answer has no output_top_logprobs for each of its {length} tokens")
+    indices: list[list[int]] = []
+    log_probs: list[list[float]] = []
+    for row in rows:
+        if not isinstance(row, list) or len(row) != top_k:
+            raise ValueError(f"the answer has an output_top_logprobs entry without {top_k} log-probs")
+        ids, values = [], []
+        for entry in row:
+            if (
+                not isinstance(entry, list)
+                or len(entry) < 2
+                or not isinstance(entry[1], int)
+                or not isinstance(entry[0], int | float)
+                or not math.isfinite(entry[0])
+            ):
+                raise ValueError("the answer has a malformed output_top_logprobs entry")
+            values.append(float(entry[0]))
+            ids.append(entry[1])
+        indices.append(ids)
+        log_probs.append(values)
+    return indices, log_probs
