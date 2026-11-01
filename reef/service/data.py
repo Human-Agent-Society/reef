@@ -289,9 +289,10 @@ def create_task_directories(
 
 
 def query_items(
-    data: DataAccess, owner: str, *, kind: str | None, scenario: str | None, after: int, limit: int
+    data: DataAccess, owner: str, *, kind: str | None, scenario: str | None, after: int, limit: int, content: bool
 ) -> dict[str, Any]:
-    """The items of ``owner`` after ``after``, at most ``limit``: ``{owner, items, next}``, without content.
+    """The items of ``owner`` after ``after``, at most ``limit``: ``{owner, items, next}``, each item with its
+    content when ``content`` (``item_json``), else without.
 
     ``next`` is the ``after`` of the next page, or null after the last item.
     """
@@ -301,7 +302,7 @@ def query_items(
     found = data.require_store().query(owner, kind=checked_kind, scenario=scenario, after=after, limit=limit)
     return {
         "owner": owner,
-        "items": [item_json(item, content=False) for item in found],
+        "items": [item_json(item, content=content) for item in found],
         "next": found[-1].sequence if len(found) == limit else None,
     }
 
