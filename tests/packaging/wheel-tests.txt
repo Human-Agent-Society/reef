@@ -122,7 +122,6 @@ tests/reef_service/test_request_page.py
 tests/reef_service/test_routes_off_loop.py
 tests/reef_service/test_runtime_registry.py
 tests/reef_service/test_scenario_api.py
-tests/reef_service/test_scenario_models.py
 tests/reef_service/test_served_url.py
 tests/reef_service/test_service_config_arguments.py
 tests/reef_service/test_service_executor_ray.py

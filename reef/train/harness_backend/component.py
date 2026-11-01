@@ -9,8 +9,7 @@ its ``JobLoop``; a training worker runs it here, and control commits the selecte
 - ``data``: the step's material: the traces of traffic, the train tasks of an offline step, and the instruction.
 - ``parameters``: ``component``, the scenario component that the step evolves; ``head_release_id``, the release
   of the start; ``evaluation_tasks``, the eval split of the scenario's imported tasks, or ``None`` for the
-  configured tasks; ``scenario_model``, the scenario's model override without its key, or ``None``;
-  ``previous_job``, the last job whose end the trainer committed, or ``None`` before the first.
+  configured tasks; ``previous_job``, the last job whose end the trainer committed, or ``None`` before the first.
 
 A job's directory keeps ``outcome.json``: the settled step, with the steps that ended and the ``HarnessState``
 after it; and ``tree/``, its selected tree. A job continues the state after ``previous_job``, so the harness state
@@ -21,7 +20,6 @@ backend, and ``progress.json`` while a step runs.
 
 from __future__ import annotations
 
-import json
 import shutil
 import threading
 from abc import ABC, abstractmethod
@@ -60,9 +58,9 @@ class HarnessSteps(ABC):
     """What the harness training component reads from its recipe to run the steps of a scenario component.
 
     Values: ``seed`` is the tree of a new scenario. ``state_root(scenario, component)`` is the directory of the
-    component's state. ``backend(scenario, component, scenario_model)`` makes the backend of its steps, which reads
-    no releases (each job names its head), on the scenario's model override ``scenario_model``
-    (``InferenceProxyRuntime.model_config``), or on the recipe's models when it is ``None``. ``policy(backend)`` is the selection policy that measures through ``backend``.
+    component's state. ``backend(scenario, component)`` makes the backend of its steps on the recipe's models; it
+    reads no releases (each job names its head). ``policy(backend)`` is the selection policy that measures through
+    ``backend``.
     ``check_tree(tree)`` raises ``ValueError`` for a tree that fails validation for the recipe's adapter.
 
     Purpose: ``HarnessEvolutionRecipe`` makes one for its ``HarnessTrainingComponent``.
@@ -76,7 +74,7 @@ class HarnessSteps(ABC):
     def state_root(self, scenario: str, component: str) -> Path: ...
 
     @abstractmethod
-    def backend(self, scenario: str, component: str, scenario_model: Mapping[str, Any] | None) -> HarnessBackend: ...
+    def backend(self, scenario: str, component: str) -> HarnessBackend: ...
 
     @abstractmethod
     def policy(self, backend: HarnessBackend) -> CandidateEvaluationPlugin: ...
@@ -159,8 +157,8 @@ class HarnessTrainingComponent(LocalJobComponent):
         super().__init__(root / "jobs")
         self.steps = steps
         self.starts_root = root / "starts"
-        #: Each scenario component's backend, with the model override that it was made for.
-        self.backends: dict[tuple[str, str], tuple[str, HarnessBackend]] = {}
+        #: Each scenario component's backend, made at its first job.
+        self.backends: dict[tuple[str, str], HarnessBackend] = {}
 
     @property
     def name(self) -> str:
@@ -238,19 +236,12 @@ class HarnessTrainingComponent(LocalJobComponent):
             return status
         return JobStatus(job_id, "failed", status.checkpoints, metrics=outcome["metrics"], error=outcome["error"])
 
-    def backend_for(self, scenario: str, component: str, scenario_model: Mapping[str, Any] | None) -> HarnessBackend:
-        """The backend of ``component``'s steps in ``scenario`` on ``scenario_model``: made at the first job, and
-        made again, after the old one is closed, when the scenario's model override changed."""
+    def backend_for(self, scenario: str, component: str) -> HarnessBackend:
+        """The backend of ``component``'s steps in ``scenario``: made at the first job, then kept."""
         key = (scenario, component)
-        model_key = json.dumps(scenario_model, sort_keys=True)
-        known = self.backends.get(key)
-        if known is not None and known[0] == model_key:
-            return known[1]
-        if known is not None:
-            known[1].close()
-        backend = self.steps.backend(scenario, component, scenario_model)
-        self.backends[key] = (model_key, backend)
-        return backend
+        if key not in self.backends:
+            self.backends[key] = self.steps.backend(scenario, component)
+        return self.backends[key]
 
     def state_after(self, job_id: str | None) -> tuple[int, HarnessState]:
         """The steps that ended and the ``HarnessState`` after the job ``job_id``, as its outcome keeps them; the
@@ -303,7 +294,7 @@ class HarnessTrainingComponent(LocalJobComponent):
         # The row of an instruction's step names the instruction, so its request page settles on that row.
         named = {} if request is None else {"training_request": {"id": request.id, **request.to_dict()}}
         component = str(parameters["component"])
-        backend = self.backend_for(job.scenario, component, parameters.get("scenario_model"))
+        backend = self.backend_for(job.scenario, component)
         steps, state = self.state_after(parameters.get("previous_job"))
         head = ReleaseFiles(str(parameters["head_release_id"]), dict(self.start_tree(job.start).files))
         tasks = parameters.get("evaluation_tasks")
@@ -358,7 +349,7 @@ class HarnessTrainingComponent(LocalJobComponent):
         }
 
     def close_resources(self) -> None:
-        for _, backend in self.backends.values():
+        for backend in self.backends.values():
             backend.close()
         self.backends.clear()
 

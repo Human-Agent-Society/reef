@@ -357,14 +357,6 @@ def test_slime_training_component_import_does_not_load_megatron_stack() -> None:
     )
 
 
-def test_model_config_does_not_depend_on_scenario() -> None:
-    module_name = "reef.inference.model_config"
-    module = importlib.import_module(module_name)
-    imported = _imported_modules(ast.parse(inspect.getsource(module)), package=module_name.rpartition(".")[0])
-    for dependency in ("reef.scenario", "reef.recipe", "reef.train", "reef.storage"):
-        assert _imports_of(imported, dependency) == [], module_name
-
-
 def test_reef_package_dependencies_are_acyclic() -> None:
     # Collapse submodules into their owning top-level Reef package. Walk all
     # imports, including local and relative ones: delaying an import cannot

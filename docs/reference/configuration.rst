@@ -755,11 +755,6 @@ can be overridden in the environment. Use it when a service must share Reef's
 Python environment. A literal ``python`` keeps its normal meaning and is
 resolved from that service's ``PATH``; Reef never rewrites command names.
 
-Scenario-specific model settings are supplied through the existing scenario
-create/update API. See `Scenario model configuration <../user-guide/scenario-models.rst>`__
-for model selection, persistence and platform upgrades. Omitting the model
-setting preserves deployment-wide configuration.
-
 Start from a cookbook stack
 ---------------------------
 
@@ -807,7 +802,7 @@ The HTTP service reads these fields from the ``recipe``, ``reef``,
    reef.allow-implicit-scenario-creation | true | when false, a report, a record import or a harness install for an unknown scenario is HTTP 404. An inference request never creates a scenario, whatever this setting says
    inference.model-path | a local HF model directory or a repo id, downloaded on start
    inference.upstream-url | the OpenAI-compatible provider, with no ``/v1`` suffix
-   inference.upstream-api-key | its credential. Reef is the only party that sees it. It is the only credential that Reef sends to an engine, also to the endpoint of a scenario's own model
+   inference.upstream-api-key | its credential. Reef is the only party that sees it. It is the only credential that Reef sends to an engine
    inference.upstream-model | the model to request upstream
    inference.upstream-api | openai | the provider dialect: ``openai`` for Chat Completions, ``responses`` for OpenAI Responses, or ``anthropic`` for an Anthropic-style endpoint
    inference.url | reserved: every built-in deployment refuses it, because Reef starts or names its engines itself (``inference.model-path``, ``inference.upstream-url`` or ``inference.remote``)
