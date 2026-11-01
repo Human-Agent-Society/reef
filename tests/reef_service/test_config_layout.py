@@ -69,7 +69,7 @@ def test_request_handler_configuration_is_independent_of_native_backend_selectio
             "--inference.handler-factory",
             "example.handlers.SelectedHandler",
             "--inference.handler-config",
-            '{"capture_topk": 5}',
+            '{"tool_call_parser": "qwen3"}',
         ]
     )
     normalized = normalize_service_config(_apply_overrides(config, overrides))
@@ -78,7 +78,7 @@ def test_request_handler_configuration_is_independent_of_native_backend_selectio
     assert settings.inference_backend == "sglang"
     assert settings.inference_options == {"mem-fraction-static": 0.8}
     assert settings.inference_handler_factory == "example.handlers.SelectedHandler"
-    assert settings.inference_handler_config == {"capture_topk": 5}
+    assert settings.inference_handler_config == {"tool_call_parser": "qwen3"}
 
 
 @pytest.mark.parametrize(

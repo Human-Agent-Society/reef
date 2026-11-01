@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.support.chat_templates import CharTemplate
+
 from reef.core.evaluation import RolloutScore, RolloutScores
 from reef.core.job_data import JobData, TaskSample, TrajectorySample
 from reef.core.trajectories import trajectory_reward
@@ -172,6 +174,9 @@ class Client(TinkerClient):
     def train(self, checkpoint, batches, loss, learning_rates, *, kl_coef):
         self.trained.append(sum(len(batch) for batch in batches))
         return TinkerCheckpoint(MODEL, 32, "tinker://update/state", "tinker://update/sampler"), {"loss": 0.5}
+
+    def chat_template(self, template_kwargs):
+        return CharTemplate()
 
     def check_remote(self, checkpoint):
         raise AssertionError("no import")

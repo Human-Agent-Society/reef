@@ -30,7 +30,6 @@ from reef.core.errors import ReefError
 from reef.core.trajectories import source_record_id
 from reef.dispatcher import Dispatcher, local_workers
 from reef.recipe.base import Recipe
-from reef.record2record import ReportGrouping, ReportRecord2Record
 from reef.runtime.jobs import SavedCheckpoint, TrainingJob
 from reef.storage.commit_history import CommitHistoryError, CommitHistoryScenarioStore
 from reef.storage.commits import CommitRecord, active_artifact_ref
@@ -551,8 +550,7 @@ class ProtectAllPipeline(TrainingPipeline):
     def __init__(self, context) -> None:
         super().__init__(
             context,
-            record2record=ReportRecord2Record(context, ReportGrouping()),
-            record2sample=ThresholdSamples(),
+            record2sample=ThresholdSamples(context),
             sample2job=ThresholdJobData(context, None, None),
         )
         self._seen: set[str] = set()

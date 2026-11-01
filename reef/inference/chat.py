@@ -2,10 +2,10 @@
 
 Clients use either ``/v1/chat/completions`` or ``/v1/messages`` while Reef
 normalizes the provider request, renders the prompt once, calls the selected
-engine's native generate route, and records the exact sampled token ids beside
-their rollout log probabilities and the weight version that produced each
-token. Decoded text is only the client-facing view; it is never re-tokenized
-to construct a training sample.
+engine's native generate route, and answers with the provider response. The
+response carries no training tensors: a training component renders a recorded
+call with its own chat template and computes the log probabilities that it
+needs with its own weights.
 
 The engine-specific part is a :class:`NativeGenerateClient`: it shapes the
 native request and parses the native response into a
@@ -49,7 +49,7 @@ TOOL_CALL_START = "<tool_call>"
 
 @dataclass(frozen=True)
 class CapturedGeneration:
-    """One request's exact engine output, in the shape training records need.
+    """One request's exact engine output.
 
     ``token_runtime_load_ids`` names the weight version that produced each
     sampled token; a request paused for a weight update and resumed spans two.
@@ -65,8 +65,6 @@ class CapturedGeneration:
     finish_reason: str
     text: str | None
     public_meta: dict[str, Any]
-    topk_indices: list[list[int]] | None = None
-    topk_log_probs: list[list[float]] | None = None
 
     def __post_init__(self) -> None:
         count = len(self.output_ids)
@@ -76,8 +74,6 @@ class CapturedGeneration:
             raise ValueError("captured response has no sampled tokens")
         if self.finish_reason not in {"stop", "length", "abort"}:
             raise ValueError(f"captured finish reason must be stop, length or abort, got {self.finish_reason!r}")
-        if (self.topk_indices is None) != (self.topk_log_probs is None):
-            raise ValueError("captured top-k indices and log-probs must be given together")
 
 
 class NativeGenerateClient(ABC):
@@ -99,13 +95,12 @@ class NativeGenerateClient(ABC):
         prompt_ids: list[int],
         sampling_params: Mapping[str, Any],
         *,
-        capture_topk: int,
         stream: bool,
     ) -> dict[str, Any]:
-        """The native request body for ``prompt_ids``, asking for log-probs and, if ``capture_topk``, top-k."""
+        """The native request body for ``prompt_ids``, asking for the sampled tokens' log-probs."""
 
     @abstractmethod
-    def parse(self, artifact: Artifact, response: Mapping[str, Any], *, capture_topk: int) -> CapturedGeneration:
+    def parse(self, artifact: Artifact, response: Mapping[str, Any]) -> CapturedGeneration:
         """Validate one buffered native response and read the exact sample out of it."""
 
     @abstractmethod
@@ -552,7 +547,7 @@ class RolloutPrefix:
 
 
 class TokenNativeChatHandler(HttpInferenceHandler):
-    """Serve OpenAI or Anthropic chat with engine-native policy tensors.
+    """Serve OpenAI or Anthropic chat over an engine's token-native generate API.
 
     Subclasses supply the :class:`NativeGenerateClient` for their engine and
     may override :meth:`inference_stream` with an incremental relay. The
@@ -586,7 +581,6 @@ class TokenNativeChatHandler(HttpInferenceHandler):
         timeout_s: float = 300.0,
         tokenizer: Any = None,
         tool_call_parser: str | None = None,
-        capture_topk: int = 0,
         sampling_defaults: Mapping[str, Any] | None = None,
         force_reasoning: bool | None = None,
         chat_template_kwargs: Mapping[str, Any] | None = None,
@@ -597,15 +591,11 @@ class TokenNativeChatHandler(HttpInferenceHandler):
             upstream_url, request_headers=request_headers, timeout_s=timeout_s, error_label=client.error_label
         )
         if tokenizer is None and not model_path:
-            raise ValueError("chat training inference requires model_path")
+            raise ValueError("token-native chat requires model_path")
         self._client = client
         self._model_path = model_path
         self._tokenizer = tokenizer
         self._tool_call_parser = tool_call_parser.strip() if tool_call_parser else None
-        # OpenClaw-RL top-K objective: capture the generation-time top-K
-        # vocab log-probs per sampled token (the old-policy ``ell_old`` on
-        # S^q) into ``response.training``. 0 disables the capture.
-        self._capture_topk = int(capture_topk)
         # Sampling values applied when the client omits a parameter. Native
         # generate routes have engine defaults (temperature 1.0), NOT the
         # model generation_config the chat endpoint would use — a recipe
@@ -641,10 +631,6 @@ class TokenNativeChatHandler(HttpInferenceHandler):
             return {**addressed, "model": model_name}
         return {**addressed, "model": model_name, "lora_path": model_name}
 
-    @property
-    def capture_topk(self) -> int:
-        return self._capture_topk
-
     # -- Buffered requests ------------------------------------------------------
 
     async def inference(self, artifact: Artifact, path: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -664,22 +650,20 @@ class TokenNativeChatHandler(HttpInferenceHandler):
         native = await super().inference(
             artifact,
             self._client.generate_path,
-            self._client.payload(
-                call.request, call.prompt_ids, call.sampling_params, capture_topk=self._capture_topk, stream=False
-            ),
+            self._client.payload(call.request, call.prompt_ids, call.sampling_params, stream=False),
         )
-        captured = self._client.parse(artifact, native, capture_topk=self._capture_topk)
+        captured = self._client.parse(artifact, native)
         response = self._response_from_capture(call, captured, call.tool_parser)
         if not call.anthropic:
             return response, response
-        return response, self._anthropic_response(call.payload, call.request, response)
+        return response, self._anthropic_response(call.payload, response)
 
     def _chat_call(self, path: str, payload: dict[str, Any]) -> ChatCall:
         """Normalize the provider request and render the prompt once for either endpoint."""
         anthropic = path == ANTHROPIC_MESSAGES_PATH
         request = self._anthropic_request(payload) if anthropic else dict(payload)
         if request.get("n", 1) != 1:
-            raise ValueError("exact training capture currently requires n=1")
+            raise ValueError("token-native chat requires n=1")
         return ChatCall(
             anthropic=anthropic,
             payload=payload,
@@ -690,14 +674,14 @@ class TokenNativeChatHandler(HttpInferenceHandler):
         )
 
     def _response_from_capture(self, call: ChatCall, captured: CapturedGeneration, tool_parser: Any) -> dict[str, Any]:
-        """The OpenAI-shaped response, with training tensors, for one exact sample."""
+        """The OpenAI-shaped response of one exact sample."""
         text = captured.text
         if text is None:
             text = self._require_tokenizer().decode(captured.output_ids, skip_special_tokens=True)
         message, parsed_tool_calls = self._assistant_message(
             text, tool_parser, force_reasoning=self.reasoning_is_pre_opened(call.prompt_ids)
         )
-        # Tool parsing must not hide an engine abort from receipt and training checks.
+        # Tool parsing must not hide an engine abort from the service's abort check.
         if parsed_tool_calls and captured.finish_reason != "abort":
             finish_reason = "tool_calls"
         else:
@@ -710,24 +694,9 @@ class TokenNativeChatHandler(HttpInferenceHandler):
         }
         if call.request.get("logprobs") is True:
             choice["logprobs"] = {"content": self._openai_logprobs(captured.output_ids, captured.rollout_log_probs)}
-        runtime_load_spans = self._runtime_load_spans(captured.token_runtime_load_ids)
-        versions = {span["runtime_load_id"] for span in runtime_load_spans}
-        runtime_load_id = versions.pop() if len(versions) == 1 else None
-        training: dict[str, Any] = {
-            "tokens": [*call.prompt_ids, *captured.output_ids],
-            "loss_mask": [1] * len(captured.output_ids),
-            "rollout_log_probs": list(captured.rollout_log_probs),
-            "prompt_length": len(call.prompt_ids),
-            "response_length": len(captured.output_ids),
-            "runtime_load_id": None if runtime_load_id is None else str(runtime_load_id),
-            "runtime_load_spans": runtime_load_spans,
-        }
-        if captured.topk_indices is not None and captured.topk_log_probs is not None:
-            training["topk_indices"] = captured.topk_indices
-            training["topk_log_probs"] = captured.topk_log_probs
         rollout_id = self._rollout_id(call.request)
         if rollout_id is not None:
-            self._remember_rollout(rollout_id, training["tokens"], call.request)
+            self._remember_rollout(rollout_id, [*call.prompt_ids, *captured.output_ids], call.request)
         return {
             "id": f"chatcmpl-{uuid.uuid4().hex}",
             "object": "chat.completion",
@@ -739,19 +708,7 @@ class TokenNativeChatHandler(HttpInferenceHandler):
                 "completion_tokens": len(captured.output_ids),
                 "total_tokens": len(call.prompt_ids) + len(captured.output_ids),
             },
-            "training": training,
         }
-
-    @staticmethod
-    def _runtime_load_spans(token_runtime_load_ids: list[str]) -> list[dict[str, Any]]:
-        """Collapse one version per token into contiguous ``[start, end)`` spans."""
-        spans: list[dict[str, Any]] = []
-        for index, version in enumerate(token_runtime_load_ids):
-            if spans and spans[-1]["runtime_load_id"] == version:
-                spans[-1]["end"] = index + 1
-            else:
-                spans.append({"start": index, "end": index + 1, "runtime_load_id": version})
-        return spans
 
     # -- Streaming --------------------------------------------------------------
 
@@ -795,7 +752,7 @@ class TokenNativeChatHandler(HttpInferenceHandler):
         frames = relay.reconcile(response["choices"][0]["message"])
         output_tokens = response["usage"]["completion_tokens"]
         if call.anthropic:
-            provider_response = self._anthropic_response(call.payload, call.request, response)
+            provider_response = self._anthropic_response(call.payload, response)
             provider_response["id"] = message_id
         else:
             provider_response = response
@@ -836,31 +793,17 @@ class TokenNativeChatHandler(HttpInferenceHandler):
     # -- Anthropic Messages -----------------------------------------------------
 
     def _anthropic_count_tokens(self, artifact: Artifact, payload: Mapping[str, Any]) -> dict[str, Any]:
-        """Count the exact templated input without creating policy tensors."""
+        """Count the exact templated input."""
         request = self._anthropic_request({**payload, "max_tokens": 1})
-        prompt_ids = self._render_prompt(request)
-        runtime_load_id = getattr(artifact.ref, "runtime_load_id", None) or artifact.ref.release_id
-        return {
-            "input_tokens": len(prompt_ids),
-            # RequestService strips this block from the client response. It
-            # supplies the producing version required by durable-request validation, but
-            # deliberately contains no tokens/loss mask/log-probabilities, so
-            # a token-count call can never become a policy sample.
-            "training": {
-                "runtime_load_id": str(runtime_load_id),
-                "request_messages": list(request.get("messages") or []),
-                "request_tools": request.get("tools"),
-            },
-        }
+        return {"input_tokens": len(self._render_prompt(request))}
 
     @classmethod
     def _anthropic_request(cls, payload: Mapping[str, Any]) -> dict[str, Any]:
         """Normalize an Anthropic Messages request to the internal chat shape.
 
-        The normalized request is what the tokenizer sees and what the private
-        training record retains. Keeping this boundary provider-independent is
-        important for multi-turn policy assembly and OpenClaw-RL's judge, both
-        of which must render the exact same transcript as the rollout backend.
+        The normalized request is what the tokenizer sees. Keeping this
+        boundary provider-independent lets one chat template render OpenAI
+        and Anthropic traffic alike.
         """
 
         model = payload.get("model")
@@ -1084,12 +1027,7 @@ class TokenNativeChatHandler(HttpInferenceHandler):
         raise ValueError(f"unsupported Anthropic tool_choice type {kind!r}")
 
     @classmethod
-    def _anthropic_response(
-        cls,
-        original_request: Mapping[str, Any],
-        normalized_request: Mapping[str, Any],
-        response: Mapping[str, Any],
-    ) -> dict[str, Any]:
+    def _anthropic_response(cls, original_request: Mapping[str, Any], response: Mapping[str, Any]) -> dict[str, Any]:
         choice = response["choices"][0]
         message = choice["message"]
         content: list[dict[str, Any]] = []
@@ -1129,18 +1067,9 @@ class TokenNativeChatHandler(HttpInferenceHandler):
                 }
             )
 
-        training = dict(response.get("training") or {})
-        # Provider-neutral transcript fields are private (client responses
-        # strip the whole training block) and let processors render Anthropic
-        # traffic with the exact same chat template used for generation.
-        training.update(
-            {
-                "request_messages": list(normalized_request.get("messages") or []),
-                "request_tools": normalized_request.get("tools"),
-                "response_message": dict(message),
-                "finish_reason": choice.get("finish_reason"),
-            }
-        )
+        # Anthropic has no stop reason for an engine abort: the response names it in its meta_info, which the
+        # service reads (inference_aborted); an aborted response never reaches the client.
+        aborted = {"meta_info": {"finish_reason": "abort"}} if choice.get("finish_reason") == "abort" else {}
         return {
             "id": f"msg_{uuid.uuid4().hex}",
             "type": "message",
@@ -1150,7 +1079,7 @@ class TokenNativeChatHandler(HttpInferenceHandler):
             "stop_reason": cls._anthropic_stop_reason(choice.get("finish_reason")),
             "stop_sequence": None,
             "usage": usage_of(response) or {"input_tokens": 0, "output_tokens": 0},
-            "training": training,
+            **aborted,
         }
 
     @staticmethod

@@ -34,8 +34,9 @@ results/                        the learning curve of the recorded run
   The setup below replaces it with the teacher's Qwen3 template, which renders
   a single-turn prompt identically, so student and teacher read the same ids.
 - Teacher: [`Qwen/Qwen3-32B`](https://huggingface.co/Qwen/Qwen3-32B), frozen on
-  its own TP2 SGLang engine. It scores the student's exact recorded prompt and
-  response ids. No template is rendered and nothing is retokenized.
+  its own TP2 SGLang engine. It scores the student's prompt and response ids,
+  which the training component renders with the student's chat template. The
+  teacher engine renders no template of its own and retokenizes nothing.
 - Prompts: DeepMath-103K questions truncated to 1024 tokens, in a seeded order,
   excluding exact-match AIME'24 questions and ten questions that also appear in
   OpenThoughts3 math. That gives 3840 prompts, 64 per update, each used once.

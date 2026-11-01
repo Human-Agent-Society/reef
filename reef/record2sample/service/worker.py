@@ -2,9 +2,8 @@
 
 Control does not make samples on the training path. When a scenario accepts records, control adds a
 ``record_selection`` item for each trainer that trains to the ``samples`` queue. A ``SamplesWorker`` takes the
-item and has a ``SampleProducers`` make the samples: the trainer's record-to-record stage selects and groups the
-records, its record-to-sample stage makes samples of the formed record sets, and the samples land in the sample
-store. Control's trainer reads the sample store and builds jobs from it. Slow stages (judges, generated tasks and
+item and has a ``SampleProducers`` make the samples: the trainer's record-to-sample stage selects and groups the
+records and makes samples of the record sets that it forms, and the samples land in the sample store. Control's trainer reads the sample store and builds jobs from it. Slow stages (judges, generated tasks and
 their rollouts) never hold the training path.
 
 A ``record_selection`` item:

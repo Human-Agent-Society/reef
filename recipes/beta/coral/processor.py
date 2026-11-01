@@ -3,9 +3,9 @@
 CORAL's attempt tree already has the shape reef's grouped relative-reward
 training wants: every attempt names its ``parent_hash``, so the siblings of
 one parent form one comparison group — attempts that started from the same
-code and diverged. The record stage (``CoralRecord2Record`` in
-:mod:`recipes.beta.coral.recipe`) groups reports by parent commit and releases
-a group as one training unit once ``group_size`` scored siblings accrued.
+code and diverged. ``CoralSamples`` groups reports by parent commit
+(``CoralGrouping``) and releases a group as one training unit once
+``group_size`` scored siblings accrued.
 
 The stages consume exactly the reports that :mod:`recipes.beta.coral.reporter` emits:
 ``score``, ordered inference ``references``, and ``metadata.coral`` with
@@ -21,15 +21,14 @@ referenced INFERENCE records; a CORAL attempt is a multi-call trajectory, so
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
+from collections.abc import Hashable, Mapping
 from dataclasses import dataclass, replace
 from typing import Any, Self
 
 from reef.core.config import config_option
 from reef.core.trajectories import trajectory_reward
 from reef.pipeline_context import PipelineContext
-from reef.record2record import Record2Record, ReportContext
-from reef.record2sample import Record2Sample, ReportSamples
+from reef.record2sample import GroupDecision, Record2Sample, ReportContext, ReportGrouping, ReportSamples
 from reef.record2sample.assembly import SampleAssembly, SampleAssemblySettings
 from reef.sample2job import Sample2Job, Sample2JobSettings
 from reef.train.types import JobData, Sample, TrajectorySample, trajectories
@@ -70,23 +69,83 @@ def attempt_release_ids(context: ReportContext) -> set[str]:
     }
 
 
-@dataclass(frozen=True)
-class CoralAssemblySettings(SampleAssemblySettings):
-    """The config of ``CoralSamples``: the sample-assembly keys, with multi-turn samples on by default."""
+class CoralGrouping(ReportGrouping):
+    """The siblings of one parent commit form one group, and each attempt's commit hash is its slot.
 
+    A group is ready once ``group_size`` siblings are present. A group whose
+    attempts span releases is discarded and listed in ``discarded_groups``.
+    """
+
+    def __init__(self, group_size: int) -> None:
+        self.group_size = group_size
+        self.mixed_release_groups: dict[str, tuple[str, ...]] = {}
+
+    def placement(self, context: ReportContext) -> tuple[Hashable | None, Hashable | None]:
+        return sibling_group(context)
+
+    def decide(self, key: Hashable, members: tuple[ReportContext, ...]) -> GroupDecision:
+        if len(members) < self.group_size:
+            return GroupDecision.INCOMPLETE
+        versions = {release_id for member in members for release_id in attempt_release_ids(member)}
+        if len(versions) <= 1:
+            return GroupDecision.READY
+        ordered = tuple(sorted(versions))
+        self.mixed_release_groups[str(key)] = ordered
+        logger.error(
+            "CORAL sibling group %s discarded: %d attempts span releases %s",
+            key,
+            len(members),
+            list(ordered),
+        )
+        return GroupDecision.DISCARD
+
+    def status(self) -> Mapping[str, Any]:
+        return {
+            "discarded_groups": [
+                {"parent": parent, "reason": "mixed_release_ids", "release_ids": list(versions)}
+                for parent, versions in sorted(self.mixed_release_groups.items())
+            ],
+        }
+
+
+@dataclass(frozen=True)
+class CoralSettings(SampleAssemblySettings):
+    """The config of ``CoralSamples``: the size of a sibling group, the sample assembly, and the staleness limit.
+
+    Values: ``group_size`` is an int of at least two; the other keys are as in ``SampleAssemblySettings``, with
+    multi-turn samples on by default. The constructor refuses other values.
+    Purpose: ``CoralSamples.from_config`` parses it from ``pipeline.record2sample.config``.
+    """
+
+    group_size: int = config_option(
+        4,
+        help=(
+            "The scored siblings of one parent commit that complete its group. "
+            "A parent with fewer scored children never trains."
+        ),
+    )
     accept_multi_turn_policy_samples: bool = config_option(
         True, help="Train on an attempt that references several model calls as one multi-turn sample."
     )
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if self.group_size < 2:
+            raise ValueError("group_size must be at least two (relative rewards need contrast)")
 
 
 class CoralSamples(ReportSamples):
     """One scored attempt as one sample, with its CORAL metadata, sibling group, and release.
 
-    Config: the sample-assembly keys of ``CoralAssemblySettings``.
+    Sibling groups train in the order that they close (``CoralGrouping``); a terminal report owns its sources.
+    CORAL sibling counts are dynamic, so the barrier ``group_size`` is a recipe setting, not a CORAL invariant.
+    Config: ``CoralSettings``.
     """
 
-    def __init__(self, settings: CoralAssemblySettings) -> None:
-        super().__init__()
+    def __init__(self, context: PipelineContext, settings: CoralSettings) -> None:
+        super().__init__(
+            context, CoralGrouping(settings.group_size), exclusive_sources=True, max_staleness=settings.max_staleness
+        )
         self.assembly = SampleAssembly(settings)
 
     @classmethod
@@ -95,10 +154,9 @@ class CoralSamples(ReportSamples):
         config: Mapping[str, Any],
         *,
         context: PipelineContext,
-        record2record: Record2Record,
         environ: Mapping[str, str],
     ) -> Self:
-        return cls(CoralAssemblySettings.parse(config, plugin_class=cls))
+        return cls(context, CoralSettings.parse(config, plugin_class=cls))
 
     def make_sample(self, context: ReportContext) -> TrajectorySample:
         coral = coral_metadata(context)
@@ -116,8 +174,8 @@ class CoralSamples(ReportSamples):
 class CoralJobData(Sample2Job):
     """Complete CORAL sibling groups, one job's data: the siblings of one parent are one relative-reward group.
 
-    The record stage decides when a group is complete (``group_size`` in
-    ``pipeline.record2record.config``); a group is fixed when it is first ready, and later siblings form a new
+    ``CoralSamples`` decides when a group is complete (``group_size`` in
+    ``pipeline.record2sample.config``); a group is fixed when it is first ready, and later siblings form a new
     group. Job data takes up to ``buffer_size`` samples and the rest of each group that those touch. Config:
     ``buffer_size`` and ``job_samples``.
     """
@@ -128,7 +186,6 @@ class CoralJobData(Sample2Job):
         config: Mapping[str, Any],
         *,
         context: PipelineContext,
-        record2record: Record2Record,
         record2sample: Record2Sample,
         environ: Mapping[str, str],
     ) -> Self:

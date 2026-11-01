@@ -31,7 +31,6 @@ from reef.dispatcher.local_workers import POLL_SECONDS, LocalBackendWorker, Loca
 from reef.observability import ExperimentLogger
 from reef.pipeline_context import PipelineContext
 from reef.recipe import Recipe
-from reef.record2record import InferenceRecord2Record
 from reef.record2sample import NoSamples
 from reef.storage.records import RecordStore
 from reef.storage.samples import TrainerSamples
@@ -251,17 +250,18 @@ def test_a_worker_with_running_background_jobs_polls_on_a_bounded_interval() -> 
     assert timeout is not None and timeout > 0
 
 
-class BackgroundStep(InferenceRecord2Record):
-    """Run one step from no record, as the rounds of generated tasks do.
+class BackgroundStep(NoSamples):
+    """Run one step from no record, as the rounds of generated tasks do, and make the step's one task.
 
     The first look starts the step. The step runs until a look after ``finished`` is set; that look ends it, and
-    ``StepSamples`` makes the step's one task.
+    the stage then makes the step's one task from no record set.
     """
 
     def __init__(self, finished: Event) -> None:
         super().__init__()
         self.finished = finished
         self.step: Literal["not started", "running", "ended"] = "not started"
+        self.made = False
 
     def advance(self, now: float) -> None:
         super().advance(now)
@@ -273,16 +273,8 @@ class BackgroundStep(InferenceRecord2Record):
     def background_jobs_running(self) -> bool:
         return self.step == "running"
 
-
-class StepSamples(NoSamples):
-    """Make the task of the ``BackgroundStep`` once it ended, from no record set."""
-
-    def __init__(self, step: BackgroundStep) -> None:
-        self.background_step = step
-        self.made = False
-
     def made_samples(self) -> tuple[tuple[str, Sample], ...]:
-        if self.made or self.background_step.step != "ended":
+        if self.made or self.step != "ended":
             return ()
         self.made = True
         return (("generated-task", TaskSample(Path("generated-task"))),)
@@ -295,11 +287,9 @@ class BackgroundStepRecipe(TestPolicyRecipe):
     step_finished: Event = field(default_factory=Event, compare=False)
 
     def background_pipeline(self, context: PipelineContext) -> TrainingPipeline:
-        step = BackgroundStep(self.step_finished)
         return TrainingPipeline(
             context,
-            record2record=step,
-            record2sample=StepSamples(step),
+            record2sample=BackgroundStep(self.step_finished),
             sample2job=ThresholdJobData(context, None, None),
         )
 

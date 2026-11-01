@@ -1,7 +1,7 @@
 """Focused unit tests for the computed-feedback pipeline's state machine.
 
 tests.recipes.openclawrl.test_openclawrl_contracts pins the real recipe's behavior; these tests pin the
-mechanics of a pipeline with a ``JudgingRecord2Record`` and ``JudgedSamples`` with a
+mechanics of a pipeline with a ``JudgedSamples`` stage of a
 toy recipe, where recipe policy cannot blur the state machine.
 """
 
@@ -26,8 +26,7 @@ from reef.core.trajectories import source_record_id
 from reef.execution.jobs import BackgroundJobRunner, BackgroundJobWorker, Failed, JobContext, SupportsReceipt
 from reef.execution.sandbox.process import LocalExecutor, ProgramLaunchError
 from reef.pipeline_context import PipelineContext
-from reef.record2record import JudgingRecord2Record, RecordJudging
-from reef.record2sample import JudgedSamples
+from reef.record2sample import JudgedSamples, RecordJudging
 from reef.sample2job import Sample2Job
 from reef.train.pipeline import TrainingPipeline
 from reef.train.types import JobData, Sample, TrajectorySample
@@ -70,7 +69,7 @@ class _FakeWorker:
 class _ToyJudging(RecordJudging):
     """A record tracks itself; a record whose payload names ``completes`` finishes that receipt."""
 
-    def observe(self, item: AgentRecord, now: float, stage: JudgingRecord2Record) -> None:
+    def observe(self, item: AgentRecord, now: float, stage: JudgedSamples) -> None:
         completes = item.payload.get("completes")
         if completes:
             stage.dispatch(_Job(completes))
@@ -112,8 +111,7 @@ class _ToyProcessor(TrainingPipeline):
     def __init__(self, context: PipelineContext, *, worker: Any, max_staleness: int = 0) -> None:
         super().__init__(
             context,
-            record2record=JudgingRecord2Record(_ToyJudging(), worker, max_staleness=max_staleness),
-            record2sample=_ToySamples(),
+            record2sample=_ToySamples(_ToyJudging(), worker, max_staleness=max_staleness),
             sample2job=ToyJobData(context, None, None),
         )
 

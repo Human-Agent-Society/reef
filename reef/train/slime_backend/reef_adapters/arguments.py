@@ -35,6 +35,8 @@ class SlimeArguments(Namespace):
     critic_lr: float | None
     lr: float
     hf_checkpoint: str
+    # The chat template arguments with which the component renders a recorded trajectory, as serving renders it.
+    apply_chat_template_kwargs: dict[str, object] | None = None
     load: str | None
     ref_load: str | None
     megatron_to_hf_mode: str

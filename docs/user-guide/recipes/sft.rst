@@ -37,27 +37,35 @@ the response that the sample trains:
   target for imported examples, where the recorded response is the dataset's
   answer.
 
-The recipe renders the recorded request with the served model's chat
-template. It then adds the target as the assistant turn. The loss mask
-selects the target tokens. All samples have the same weight. A reported
-``score`` is only metadata.
+The sample is the recorded request with the target as the final assistant
+turn. The training component renders it with the model's chat template, and
+the loss mask selects the target tokens. All samples have the same weight. A
+reported ``score`` is only metadata.
 
 How Reef implements it
 ----------------------
 
-SFT has three pipeline stages
+SFT has two pipeline stages
 (`Training pipeline <../../developer-guide/processors.rst>`__):
 
-- ``SFTRecord2Record`` makes each report its own record set. It never finds a
-  sample stale. An SFT target is fixed text, not tokens that an older model
-  version sampled. Thus the stage takes no ``max_staleness`` and refuses the key.
-- ``SFTSamples`` makes one ``TrajectorySample`` from each report. The item has the
-  rendered tokens and an empty ``rollout_log_probs``.
+- ``SFTSamples`` makes each report its own record set and makes one
+  ``TrajectorySample`` from it: the report's last call as an ATIF trajectory,
+  with the target as the final agent turn, the only turn that trains. The
+  sample holds no tokens. ``max_tokens`` travels with it as
+  ``extra.reef.max_tokens``. The stage never finds a sample stale. An SFT target
+  is fixed text, not tokens that an older model version sampled. Thus the
+  stage takes no ``max_staleness`` and refuses the key.
 - ``SFTJobData`` puts the samples into job data in store order: reports in
   arrival order, and uploaded ATIF trajectories in upload order, interleaved
   by arrival (see `Train on whole conversations`_). With the default
   ``buffer_size``, one job's data holds
   ``pipeline.sample2job.config.job_samples`` samples.
+
+The training component renders each sample with the model's chat template
+(`Chat template arguments
+<../../reference/configuration.rst#chat-template-arguments>`__). It leaves out
+a sample that cannot render or that is longer than ``max_tokens``, and counts
+it in the job metric ``unrenderable_samples``.
 
 The ``sft`` objective (``SftObjective``) sends no advantages. On Slime, the
 ``sft`` loss family in ``reef/train/slime_backend/sft.py`` selects Slime's
@@ -113,15 +121,16 @@ Train on whole conversations
 A complete conversation, such as an agent rollout with tool calls, can train
 every agent turn at once. Create it as a trajectory item that the scenario uses
 (`Create trajectory items <../../reference/http-api.rst#create-trajectory-items>`__).
-``SFTSamples`` renders each uploaded trajectory into one sample:
+Each uploaded trajectory is one sample. The training component renders it:
 
 - The steps become chat messages: an ``agent`` step is an assistant turn with
   its tool calls, and each observation result is a tool message.
 - An agent step with ``is_copied_context: true``, ATIF's mark for a step
   copied from earlier context, is context only: it renders, and it trains
   nothing. Every other agent turn trains.
-- The tokens are the conversation, rendered with the chat template, up to the
-  last trained agent turn. Steps after it are left out.
+- The tokens are the conversation, rendered with the chat template and the
+  agent's ``tool_definitions`` as the tools, up to the last trained agent
+  turn. Steps after it are left out.
 - The loss mask selects the tokens of every trained agent turn. System, user,
   tool and copied context tokens get no loss.
 
@@ -136,27 +145,30 @@ For example, to keep an earlier answer as context and train only the last one:
      {"step_id": 4, "source": "agent", "message": "37 + 45 = 82."}
    ]}
 
-Reef renders each trajectory when it accepts the upload. It refuses the whole
-upload with 400, naming the trajectory, when one cannot train:
+Reef checks the structure of each trajectory when it accepts the upload. It
+refuses the whole upload with 400, naming the trajectory, when one cannot
+train:
 
 - it has no agent step that trains (all its agent steps are copied context),
   or its first trained agent step has no step before it;
 - ``is_copied_context`` is not a boolean;
 - a step's ``observation`` is not empty and is not an object; a content part
   of a message or an observation result is not an object, a text part has a
-  ``text`` that is not a string, or an image part has no ``source.path``;
-- the chat template does not render each turn as a prefix of the whole
-  conversation. A template that removes the reasoning of earlier turns, for
-  example, does not; set ``chat_template_kwargs`` so that it keeps them, or
-  upload each turn as its own report;
+  ``text`` that is not a string, or an image part has no ``source.path``.
+
+The training component leaves a trajectory out of its job when:
+
+- the chat template does not render each trained turn as a prefix of the
+  whole conversation. A template that removes the reasoning of earlier
+  turns, for example, does not. Set the component's chat template arguments
+  so that it keeps them, or upload each turn as its own trajectory;
 - the sample is longer than ``max_tokens``.
 
 Configuration
 -------------
 
 The top-level ``pipeline`` section of the deployment configures the stages.
-Each stage reads only its own ``config``. ``SFTRecord2Record`` takes no
-config.
+Each stage reads only its own ``config``.
 
 .. code:: yaml
 
@@ -165,7 +177,6 @@ config.
    pipeline:
      record2sample:
        config:
-         tokenizer_path: /models/Qwen3-8B
          target: response
          max_tokens: 8192
      sample2job:
@@ -182,10 +193,8 @@ config.
 
 .. config::
 
-   pipeline.record2sample.config.tokenizer_path | required | the served model's tokenizer directory. It renders the request and the target with the engine's chat template.
    pipeline.record2sample.config.target | demonstration | ``demonstration`` trains the report's ``teacher_context``. ``response`` trains the recorded response message.
-   pipeline.record2sample.config.max_tokens | 0 | the maximum tokens in a sample, prompt and target together. The recipe skips a longer report and counts it in ``sft_overflow_reports``. 0 disables the limit. Set it to the trainer's sequence length.
-   pipeline.record2sample.config.chat_template_kwargs | {} | the chat template arguments of every render, for example ``{enable_thinking: false}``. Set ``inference.handler-config.chat_template_kwargs`` to the same value, so the samples render as the engine serves.
+   pipeline.record2sample.config.max_tokens | 0 | the maximum tokens in a sample, prompt and target together. The training component leaves a longer sample out and counts it in ``unrenderable_samples``. 0 disables the limit. Set it to the trainer's sequence length.
    pipeline.sample2job.config.job_samples | required | the samples of one job. The example sets it to ``training.config.global_batch_size``, so one job is one optimizer step.
    pipeline.sample2job.config.buffer_size | ``job_samples`` | the most samples that one job takes. Later samples wait in the sample store for the next jobs.
    training.config.global_batch_size | none | the samples in one optimizer step. The example passes it to Slime as ``--global-batch-size``.
@@ -193,9 +202,8 @@ config.
 A hybrid-thinking template such as Qwen3.5's or Qwen3.8's renders thinking
 mode unless ``enable_thinking`` is false: Qwen3.8 opens the system prompt with
 a reasoning-effort instruction, and the generation prompt opens a think block.
-Targets without reasoning belong in non-thinking mode. Set the same
-``chat_template_kwargs`` in both places. A ``${...}`` reference resolves to a
-string, so write the mapping in each:
+Targets without reasoning belong in non-thinking mode. Give serving and
+the training component the same chat template arguments:
 
 .. code:: yaml
 
@@ -203,16 +211,17 @@ string, so write the mapping in each:
      handler-config:
        chat_template_kwargs:
          enable_thinking: false
-   pipeline:
-     record2sample:
-       config:
-         chat_template_kwargs:
-           enable_thinking: false
+   training:
+     options:
+       apply-chat-template-kwargs: '{"enable_thinking": false}'   # Slime
+
+On Tinker, set ``training.options.chat_template_kwargs`` to the mapping
+instead.
 
 Configure the optimizer, its learning rate, and its schedule in
 ``training.options``. The recipe refuses an ``optimization`` section.
 
-Slime requires ``--loss-type sft_loss``. It does not require
+Slime requires ``--loss-type sft_loss`` and refuses
 ``--use-rollout-logprobs``. If SFT is the only method of the run, also set
 ``--disable-compute-advantages-and-returns``. ``sft_loss`` reads no log probs
 and no advantages. The flag removes the forward pass that calculates them.
@@ -221,8 +230,6 @@ These reports raise an error:
 
 - With ``target: demonstration``, a report without ``teacher_context``.
 - With ``target: response``, a recorded inference without a response message.
-- With either target, a chat template that does not render the generation
-  prompt as the start of the assistant turn.
 
 Pack samples into steps
 -----------------------
@@ -307,8 +314,6 @@ Limitations
   references more than one request raises an error. To train each turn of an
   agent rollout, report each request separately, or upload the rollout as an
   ATIF trajectory (`Train on whole conversations`_).
-- An uploaded trajectory renders no tool definitions; only its messages and
-  tool calls reach the chat template.
 - The recipe does not filter reports by score. To train only on accepted
   responses, report only those responses.
 

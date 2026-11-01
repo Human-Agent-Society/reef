@@ -12,10 +12,8 @@ from aiohttp import web
 from aiohttp.test_utils import TestServer
 
 from reef.artifact import Artifact
-from reef.core import AgentRecord, RequestType
 from reef.inference import chat as chat_module
 from reef.inference.sglang.chat import SGLangInferenceHandler
-from reef.record2sample.samples import make_multi_turn_policy_trajectory
 from reef.service.streaming import stream_record
 
 IM_START, IM_END, NEWLINE = 998, 999, ord("\n")
@@ -128,23 +126,12 @@ def artifact(tmp_path) -> Artifact:
     return Artifact.local(checkpoint)
 
 
-def assemble(responses: list[dict]):
-    """The sample of ``responses``, recorded as the answers of one artifact."""
-    records = [
-        AgentRecord.create(
-            scenario="rollout", request_type=RequestType.INFERENCE, payload={"artifact_id": "a1", "response": response}
-        )
-        for response in responses
-    ]
-    return make_multi_turn_policy_trajectory(records, 1.0, source_agent_record_id="report", realign_threshold=0)
-
-
 def run(coroutine):
     return asyncio.run(coroutine)
 
 
 @pytest.mark.unit
-def test_a_continuation_extends_the_sampled_tokens_and_masks_only_the_new_messages(tmp_path) -> None:
+def test_a_continuation_extends_the_sampled_tokens_with_only_the_new_messages(tmp_path) -> None:
     async def scenario():
         async with ScriptedEngine([([ord("a"), ord("b"), IM_END], "stop"), ([ord("c"), IM_END], "stop")]) as engine:
             handler = engine.handler()
@@ -154,23 +141,16 @@ def test_a_continuation_extends_the_sampled_tokens_and_masks_only_the_new_messag
         return engine, first, second
 
     engine, first, second = run(scenario())
-    first_tokens = first["training"]["tokens"]
+    first_tokens = [*engine.prompts[0], ord("a"), ord("b"), IM_END]
     # The second prompt is the first call's prompt and sampled ids, then only the new context: the
     # end-of-turn was sampled, so the suffix starts after it.
     assert engine.prompts[1] == [
         *first_tokens,
         *TOKENIZER.encode("\n<|im_start|>tool\norder A<|im_end|>\n<|im_start|>assistant\n"),
     ]
-    assert second["training"]["tokens"][: len(first_tokens)] == first_tokens
-    assert second["training"]["prompt_length"] == len(engine.prompts[1])
-    sample = assemble([first, second])
-    assert sample is not None
-    assert sample.training["tokens"] == second["training"]["tokens"]
-    # The mask covers the tokens after the leading prompt: the first turn's three
-    # sampled ids, the masked new context, then the second turn's two.
-    assert sum(sample.training["loss_mask"]) == 5
-    assert sample.training["loss_mask"][:3] == [1, 1, 1]
-    assert sample.training["loss_mask"][-2:] == [1, 1]
+    assert second["usage"]["prompt_tokens"] == len(engine.prompts[1])
+    # The handler keeps the sampled ids to itself: serving returns no training tensors.
+    assert "training" not in first and "training" not in second
 
 
 @pytest.mark.unit
@@ -180,18 +160,15 @@ def test_a_length_limited_turn_keeps_the_end_of_turn_as_masked_context(tmp_path)
             handler = engine.handler()
             first = await handler.inference(artifact(tmp_path), "/v1/chat/completions", first_request())
             later = continued(first_request(), {"role": "user", "content": "Your reply was cut off."})
-            second = await handler.inference(artifact(tmp_path), "/v1/chat/completions", later)
-        return engine, first, second
+            await handler.inference(artifact(tmp_path), "/v1/chat/completions", later)
+        return engine, first
 
-    engine, first, second = run(scenario())
-    first_tokens = first["training"]["tokens"]
-    assert first_tokens[-1] != IM_END
+    engine, first = run(scenario())
+    first_tokens = [*engine.prompts[0], ord("a"), ord("b")]
+    assert first["choices"][0]["finish_reason"] == "length"
+    # The handler supplies the end-of-turn that the engine did not sample, then the new context.
     assert engine.prompts[1][: len(first_tokens)] == first_tokens
     assert engine.prompts[1][len(first_tokens)] == IM_END
-    sample = assemble([first, second])
-    assert sample is not None
-    # The two sampled ids train; the end-of-turn the handler supplied is context.
-    assert sample.training["loss_mask"][:3] == [1, 1, 0]
 
 
 @pytest.mark.unit
@@ -287,20 +264,20 @@ def test_a_streamed_continuation_uses_the_same_prefix(tmp_path) -> None:
     async def scenario():
         async with ScriptedEngine([([ord("a"), IM_END], "stop"), ([ord("c"), IM_END], "stop")]) as engine:
             handler = engine.handler()
-            first = await handler.inference(artifact(tmp_path), "/v1/chat/completions", first_request())
+            await handler.inference(artifact(tmp_path), "/v1/chat/completions", first_request())
             later = continued(first_request(), {"role": "user", "content": "next"})
             stream = await handler.inference_stream(
                 artifact(tmp_path), "/v1/chat/completions", {**later, "stream": True}
             )
             body = b"".join([chunk async for chunk in stream.chunks])
             recorded = stream_record(stream, body, complete=True)
-        return engine, first, recorded
+        return engine, recorded
 
-    engine, first, recorded = run(scenario())
-    first_tokens = first["training"]["tokens"]
+    engine, recorded = run(scenario())
+    first_tokens = [*engine.prompts[0], ord("a"), IM_END]
     assert engine.prompts[1][: len(first_tokens)] == first_tokens
-    assert recorded["training"]["tokens"][: len(first_tokens)] == first_tokens
-    assert recorded["training"]["loss_mask"] == [1, 1]
+    assert recorded["usage"]["prompt_tokens"] == len(engine.prompts[1])
+    assert "training" not in recorded
 
 
 @pytest.mark.integration
@@ -360,16 +337,14 @@ def test_a_real_qwen3_template_keeps_every_sampled_token(tmp_path, truncated) ->
             handler = SGLangInferenceHandler(
                 str(server.make_url("")).rstrip("/"), model_path=path, tokenizer=tokenizer, rollout_continuation=True
             )
-            first = await handler.inference(artifact(tmp_path), "/v1/chat/completions", first_request())
+            await handler.inference(artifact(tmp_path), "/v1/chat/completions", first_request())
             later = copy.deepcopy(first_request())
             later["messages"] += new_messages
-            second = await handler.inference(artifact(tmp_path), "/v1/chat/completions", later)
+            await handler.inference(artifact(tmp_path), "/v1/chat/completions", later)
         finally:
             await server.close()
-        return first, second
 
-    first, second = run(scenario())
-    sample = assemble([first, second])
-    assert sample is not None
-    assert sum(sample.training["loss_mask"]) == sum(map(len, outputs))
-    assert sample.training["tokens"][: len(first["training"]["tokens"])] == first["training"]["tokens"]
+    run(scenario())
+    # The second prompt keeps every token the first call sampled, so no sampled token is re-rendered.
+    first_tokens = [*prompts[0], *outputs[0]]
+    assert prompts[1][: len(first_tokens)] == first_tokens

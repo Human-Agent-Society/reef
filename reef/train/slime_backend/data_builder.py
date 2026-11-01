@@ -46,11 +46,6 @@ def to_slime_rollout_data(payload: Mapping[str, Any]) -> dict:
     data = spec.build_rollout_data(payload, samples)
     _attach_producing_artifact_ids(data, payload, samples)
     _enforce_spec_advantages(spec, payload)
-    if spec.requires_rollout_logprobs and not data.get("rollout_log_probs"):
-        raise ValueError(
-            f"{spec.loss_family} requires one rollout_log_prob per response token; "
-            "the inference harness did not return complete policy training tensors"
-        )
     return data
 
 
@@ -191,9 +186,9 @@ def build_policy_rollout_data(
         rewards.append(reward)
         sample_indices.append(sample_index)
 
+    # The actor computes the old-policy log-probabilities of every row; recorded ones ride along only when every
+    # row has them, such as the rows of a task job's own rollouts.
     has_log_probs = [bool(values) for values in rollout_log_probs]
-    if any(has_log_probs) and not all(has_log_probs):
-        raise ValueError("rollout_log_probs must be present for every sample or omitted for the whole batch")
 
     data: dict[str, Any] = {
         "tokens": tokens,

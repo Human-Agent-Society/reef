@@ -466,36 +466,39 @@ The factory path must name an ``InferenceHandler`` subclass with a
 It does not configure the managed SGLang process. Executor ``options`` and
 recipe-owned option objects likewise stay with their selected components.
 
-Two token-native handlers record exact samples: the sampled token ids, their
-rollout log probabilities and the weight version that produced each token.
+Two token-native handlers render the prompt with the model's chat template
+and call the engine's native generate route.
 ``reef.inference.sglang.chat.SGLangInferenceHandler`` calls SGLang
 ``/generate`` and relays its incremental stream.
 ``reef.inference.vllm.chat.VLLMInferenceHandler`` calls vLLM
 ``/inference/v1/generate``; it serves buffered responses and answers a
 streaming request with the completed turn as one burst of protocol frames.
-Both accept ``tool_call_parser`` (the engine's parser name), ``capture_topk``,
+The answer is the provider response without training tensors. The handler
+returns token log probabilities only to a client that sends the OpenAI
+``logprobs: true``. Training renders each recorded call itself (see
+`Chat template arguments`_).
+
+Both handlers accept ``tool_call_parser`` (the engine's parser name),
 ``sampling_defaults``, ``force_reasoning``, ``chat_template_kwargs`` and
-``rollout_continuation``; per-request sampling extras pass
-through ``sglang_sampling_params`` or ``vllm_sampling_params``.
+``rollout_continuation``. Any other option, such as ``capture_topk``, is
+unknown and fails the handler's start. Per-request sampling extras pass through
+``sglang_sampling_params`` or ``vllm_sampling_params``.
+
+``chat_template_kwargs`` renders a request that omits them, for example
+``{enable_thinking: false}`` for a hybrid-thinking model served without
+reasoning; a request's own ``chat_template_kwargs`` win key by key.
+
 ``rollout_continuation: true`` serves a multi-turn rollout from its exact
 sampled tokens. The client names the rollout in the OpenAI ``user`` field and
 sends each later request as the previous messages, the sampled assistant turn
 and the new user or tool messages. The handler renders only the new messages
 and appends them to the previous call's tokens, so a template that rewrites
-earlier turns, as Qwen3's drops their reasoning, cannot change the trained
-tokens, and the multi-turn sample assembles with ``realign_threshold: 0``. A
-request without ``user`` renders as usual. A request that names a rollout
-but does not extend it is refused.
-``chat_template_kwargs`` renders a request that omits them, for example
-``{enable_thinking: false}`` for a hybrid-thinking model served without
-reasoning; a request's own ``chat_template_kwargs`` win key by key. A recipe
-that renders its own samples, such as SFT's
-``pipeline.record2sample.config.chat_template_kwargs``, must use the same value. A positive
-``capture_topk`` also records the sampler's top-K ids and log-probs for every
-response token. Score centering (``training.options.score-centering``) needs
-at least ``score-centering-top-k`` of them (see the loss families guide). A vLLM engine
-serving a training stack also needs Reef's connector, which stamps every
-sampled token with the weight version that produced it::
+earlier turns, as Qwen3's drops their reasoning, cannot change the prompt that
+the engine continues. A request without ``user`` renders as usual. A request
+that names a rollout but does not extend it is refused.
+
+A vLLM engine serving a training stack also needs Reef's connector, which
+stamps every sampled token with the weight version that produced it::
 
    --kv-transfer-config '{"kv_connector": "ReefConnector", "kv_connector_module_path": "reef.inference.vllm.connector", "kv_role": "kv_both"}'
 
@@ -508,18 +511,18 @@ connector the engine reports no runtime load ID: a scenario that trains rejects
 the response, and a scenario that does not train serves it under its release
 id.
 
-``rollout_log_probs`` must mean the same thing on every engine as in the
-trainer. Sampling runs through::
+``rollout_log_probs`` are the sampled tokens' log probabilities that a
+training component's own task rollouts record; serving records none. They
+must mean the same thing as the trainer's. Sampling runs through::
 
    raw logits -> penalties, logit_bias -> / temperature -> [A] -> top-k, top-p, min-p -> [B] -> sample
 
 SGLang and Slime's trainer both read at [A] (full vocabulary, trainer with
 ``rollout_temperature``, no penalties), so they agree as long as a recipe uses
 no penalties or ``logit_bias``. vLLM ``--logprobs-mode processed_logprobs``
-reads at [B], so it matches only with top-k, top-p and min-p off, and Reef's
-vLLM client rejects a request whose effective ``top_p`` is below 1, ``top_k``
-above 0 or ``min_p`` above 0; replaying vLLM's sampling mask in the trainer
-would lift that restriction. Verify with Slime's
+reads at [B], so it matches only with top-k, top-p and min-p off. Reef's vLLM
+client rejects a request whose effective ``top_p`` is below 1, ``top_k``
+above 0 or ``min_p`` above 0. Verify with Slime's
 ``train_rollout_logprob_abs_diff`` on identical weights before training.
 
 Both handlers split each reply into ``content`` and ``reasoning_content`` with
@@ -534,6 +537,36 @@ The check follows the request's ``chat_template_kwargs``: a Qwen3.5 template
 pre-opens ``<think>`` by default but closes it for ``enable_thinking: false``,
 so such a request keeps its reply in ``content``. An explicit value bypasses
 this check.
+
+Chat template arguments
+~~~~~~~~~~~~~~~~~~~~~~~
+
+Serving records the provider exchange only. The training component renders
+each recorded call with the model's chat template, and must render it as the
+serving engine did. Give the training component the same chat template
+arguments that the engine renders with: the handler's
+``chat_template_kwargs``, or the arguments that the clients send.
+
+- Slime renders with the tokenizer of ``--hf-checkpoint`` and
+  ``training.options.apply-chat-template-kwargs``, a JSON object.
+- Tinker renders with the base model's tokenizer and
+  ``training.options.chat_template_kwargs``, a mapping.
+
+.. code:: yaml
+
+   inference:
+     handler-config:
+       chat_template_kwargs: {enable_thinking: false}
+   training:
+     backend: slime
+     options:
+       apply-chat-template-kwargs: '{"enable_thinking": false}'
+
+A sample that cannot render, or that is longer than a limit of its stage,
+does not train. The job metric ``unrenderable_samples`` counts these samples.
+A chat template that drops the reasoning of earlier turns, as Qwen3's does,
+cannot render a multi-turn sample whose earlier trained turns carry
+reasoning.
 
 Explicit file selection
 ~~~~~~~~~~~~~~~~~~~~~~~
@@ -811,13 +844,22 @@ Training completion updates consumption progress without retiring stored bodies.
 Storage manages cleanup independently: the HTTP service runs a sweep at startup
 and every 60 seconds. When the total record-body size exceeds the configured
 budget, storage evicts the oldest records by stored creation time, breaking ties
-by append sequence. Both consumed and unconsumed data are eligible; processors
-cannot protect disk records from capacity eviction. Records do not expire by age.
+by append sequence. Both consumed and unconsumed data are eligible, with one
+exception: storage keeps the model calls that a stored training sample holds. A
+sample that a recipe made from model calls stores their IDs and its own fields,
+such as its reward and training tokens, and renders the calls when it is read.
+Records do not expire by age.
 
-The budget measures UTF-8 JSON payloads, references and artifact references
-across active and archived scenarios. SQLite shares it across the record
-directory; PostgreSQL shares it across the deployment schema. Each eviction
-logs a warning with the scenario, record count, sequence range and body bytes.
+The budget measures the stored UTF-8 JSON of payloads, references and artifact
+references across active and archived scenarios. A scenario's store keeps
+each model call as ATIF and links it to the earlier call with the same tools
+whose messages are the longest prefix of its own. It keeps only the messages that the call adds, and
+the tools once per trajectory. Thus the history and the tools that an agent
+resends in every call count once. Evicting a record frees its own
+JSON, and its messages once no remaining call continues from them. SQLite shares the budget across
+the record directory; PostgreSQL shares it across the deployment schema. Each
+eviction logs a warning with the scenario, record count, sequence range and the
+body bytes that it freed.
 Per-scenario loss totals survive restart. The pipeline status exposes
 ``record_data_incomplete``, ``evicted_record_count`` and ``evicted_body_bytes``
 after a loss; metrics also expose ``records/evicted_count`` and
@@ -1108,7 +1150,6 @@ startup refuses an unknown key.
 The default stages train on every valid scored report as a trace, including
 successful outcomes. To train on recorded traffic alone, every ``job_samples``
 requests with unscored samples, set
-``pipeline.record2record.module: reef.record2record:InferenceRecord2Record`` and
 ``pipeline.record2sample.module: reef.record2sample.traces:InferenceSamples``.
 Reef refuses ``batch_size`` and ``batch_policy`` directly under
 ``recipe.config``.
@@ -1317,7 +1358,7 @@ classes and structural lookalikes.
 The ``pipeline`` section
 ------------------------
 
-A recipe's pipeline has three stages (see `Training pipeline
+A recipe's pipeline has two stages (see `Training pipeline
 <../developer-guide/processors.rst>`__). The recipe names a default class for
 each stage. This section gives each stage its config, and it can name another
 class for a stage. Every stage reads only its own ``config``; the recipe's
@@ -1325,8 +1366,7 @@ class for a stage. Every stage reads only its own ``config``; the recipe's
 
 .. config::
 
-   pipeline.record2record | the record-to-record stage: ``config``, and optionally ``module``, a ``Record2Record`` subclass
-   pipeline.record2sample | the record-to-sample stage: ``config``, and optionally ``module``, a ``Record2Sample`` subclass
+   pipeline.record2sample | the record-to-sample stage, which decides which records train, in which groups, and makes their samples: ``config``, and optionally ``module``, a ``Record2Sample`` subclass
    pipeline.sample2job | the sample-to-job stage: ``config``, and optionally ``module``, a ``Sample2Job`` subclass
 
 .. code:: yaml
@@ -1334,34 +1374,35 @@ class for a stage. Every stage reads only its own ``config``; the recipe's
    recipe:
      implementation: recipes.tttd.recipe:TTTDRecipe
    pipeline:
-     record2record:
+     record2sample:
        config:
          groups_per_step: 8
          rollouts_per_group: 64
 
-A stage without a key is the recipe's class with no config. Each recipe's page
+A stage without a key is the recipe's class with no config. Any other key
+under ``pipeline`` fails the startup. Each recipe's page
 lists the keys of its stages. Keys are written as the stage reads them; a
 hyphen spelling is also accepted.
 
-Every built-in record-to-record stage that holds units reads
+Every built-in record-to-sample stage that holds units reads
 ``max_staleness``, Reef's staleness filter. Reef drops held training data
 whose producing artifact is more than this many served artifacts behind the
-artifact that the scenario serves. The limit is a record-to-record setting, not a recipe setting:
-``recipe.config.max_staleness`` is an error.
+artifact that the scenario serves. The limit is a record-to-sample setting,
+not a recipe setting: ``recipe.config.max_staleness`` is an error.
 
 .. config::
 
-   pipeline.record2record.config.max_staleness | 0 | the artifacts that training data may lag behind the served artifact and still train, a non-negative int; 0 trains only data of the served artifact
+   pipeline.record2sample.config.max_staleness | 0 | the artifacts that training data may lag behind the served artifact and still train, a non-negative int; 0 trains only data of the served artifact
 
 .. code:: yaml
 
    pipeline:
-     record2record:
+     record2sample:
        config:
          max_staleness: 2
 
-``NoRecordSets`` and ``SFTRecord2Record`` refuse the key: the first holds no
-unit, and the second never drops an SFT target as stale. A training
+``NoSamples`` and ``SFTSamples`` refuse the key: the first holds no unit, and
+the second never drops an SFT target as stale. A training
 framework's own off-policy limit goes in that backend's
 ``training.options``. No built-in backend has one now. See `Staleness
 <../developer-guide/processors.rst#staleness>`__.
@@ -1405,15 +1446,14 @@ and ``buffer_size``. A recipe's page lists the other keys of its stage.
 Reef checks each stage when it loads the recipe config, before a scenario
 starts: it imports a named class, rejects functions and abstract classes, and
 parses the stage's ``config``. An unknown key or a value out of range fails
-the startup. A setting that moved from ``recipe.config`` to a stage fails
-with the key's new place, for example ``move groups_per_step to
-pipeline.record2record.config.groups_per_step``.
+the startup. A stage key under ``recipe.config``, such as
+``groups_per_step``, is an unknown recipe key and also fails the startup.
 
 For each scenario, Reef builds the stages in pipeline order with the class
-method ``from_config``. A later stage receives the stages built before it, and
-it reads a value that an earlier stage owns from that stage. For example, the
-TTTD step grid is set once, in the record stage. A stage class without
-``from_config`` cannot be named here.
+method ``from_config``. The sample-to-job stage receives the record-to-sample
+stage, and it reads a value that the record-to-sample stage owns from it. For
+example, the TTTD step grid is set once, in ``pipeline.record2sample.config``.
+A stage class without ``from_config`` cannot be named here.
 
 Generated tasks
 ~~~~~~~~~~~~~~~
@@ -1421,8 +1461,8 @@ Generated tasks
 The built-in generated-task recipe,
 ``reef.recipe.generated_tasks:GeneratedTaskRecipe``, binds the ``task_group``
 objective on Tinker's ``importance_sampling`` loss, so it requires the
-``tinker`` training backend. Its stages are ``GeneratedTaskRecord2Record``,
-``GeneratedTaskSamples``, and ``GeneratedTaskJobData``. Without
+``tinker`` training backend. Its stages are ``GeneratedTaskSamples`` and
+``GeneratedTaskJobData``. Without
 ``pipeline.record2sample.config.rounds`` no round runs, and the recipe trains
 only the train tasks that earlier generations saved in the scenario. Each
 job is a task job: the training component rolls the job's tasks out on its own
@@ -1440,11 +1480,9 @@ parameter.
            rollouts_per_task: 4
            environment: docker
    pipeline:
-     record2record:
-       config:
-         jobs_per_round: 2
      record2sample:
        config:
+         jobs_per_round: 2
          generator_url: ${endpoints.generator}
          rounds: 20
          description: shell tasks with hidden state under /var and /etc
@@ -1458,22 +1496,17 @@ parameter.
        config:
          buffer_size: 2
 
-``GeneratedTaskRecord2Record`` paces the rounds and holds their source
-sessions. It trains on no report: the recipe trains on the rollouts that the
-training component runs, which are not records.
+``GeneratedTaskSamples`` paces the rounds, holds their source sessions, runs
+the generations, and sends their results to the generator. It trains on no
+report: the recipe trains on the rollouts that the training component runs,
+which are not records.
 
 .. config::
 
-   pipeline.record2record.config.jobs_per_round | 1 | trained jobs after which the next round starts
-   pipeline.record2record.config.source_records_per_round | 0 | recorded sessions that each round gives the generator, at most; 0 generates from the description only
-   pipeline.record2record.config.source_tag | the ``name=value`` tag that marks a source session: each of its model calls carries the header ``x-reef-tag-<name>: <value>``. Required when ``source_records_per_round`` is above 0.
-   pipeline.record2record.config.refill_tasks | 1 | the next round starts only while fewer saved tasks than this wait to train; a task in a running job does not wait
-
-``GeneratedTaskSamples`` runs the generations and sends their results to the
-generator:
-
-.. config::
-
+   pipeline.record2sample.config.jobs_per_round | 1 | trained jobs after which the next round starts
+   pipeline.record2sample.config.source_records_per_round | 0 | recorded sessions that each round gives the generator, at most; 0 generates from the description only
+   pipeline.record2sample.config.source_tag | the ``name=value`` tag that marks a source session: each of its model calls carries the header ``x-reef-tag-<name>: <value>``. Required when ``source_records_per_round`` is above 0.
+   pipeline.record2sample.config.refill_tasks | 1 | the next round starts only while fewer saved tasks than this wait to train; a task in a running job does not wait
    pipeline.record2sample.config.rounds | 0 | rounds of task generation; 0 generates nothing. A round counts when it finishes a generation or runs out of its attempts; a round of replayed sessions does not count. After a restart, only complete generations count.
    pipeline.record2sample.config.generator | the ``TaskGenerator`` class (``module``) and its ``config``. Required with rounds.
    pipeline.record2sample.config.description | what the tasks are about; every generation request carries it. Required with rounds.

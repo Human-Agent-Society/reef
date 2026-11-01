@@ -1,110 +1,73 @@
 """The SFT stages: each report becomes one sample of a recorded request and its target response.
 
-``SFTRecord2Record`` makes each report its own record set. ``SFTSamples``
-renders the request and the target with the served model's chat template.
-The loss mask selects the target tokens. ``SFTJobData`` puts the tasks into
-job data, together with uploaded ATIF trajectories, which ``SFTSamples``
-renders with every agent turn trained.
+``SFTSamples`` makes each report its own record set, and its sample the recorded request with the target as the final
+agent turn, an ATIF trajectory: the training component renders it with the model's chat template, and the loss mask
+selects the target tokens. ``SFTJobData`` puts the samples into job data, together with uploaded ATIF trajectories,
+which train with every agent turn that is not copied context.
 """
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Self, cast
+from typing import Any, Self
 
+from reef.core.chat_rendering import trained_turns
 from reef.core.config import config_option
 from reef.core.job_data import Sample, TrajectorySample
-from reef.core.plugins import NoSettings, PluginSettings
+from reef.core.plugins import PluginSettings
 from reef.core.reports import TeacherContextReport
-from reef.core.trajectories import atif_messages, make_trajectory
-from reef.inference.chat import template_kwargs_of
+from reef.core.trajectories import make_trajectory
 from reef.pipeline_context import PipelineContext
-from reef.record2record import ExclusiveReportRecord2Record, Record2Record, ReportContext
-from reef.record2sample import ReportSamples, SkippedReport
-from reef.record2sample.distill import normalize_messages_for_template
-from reef.record2sample.samples import recorded_request, recorded_response_message
+from reef.record2sample import ReportContext, ReportSamples
 from reef.sample2job import DistillJobData
-
-logger = logging.getLogger(__name__)
 
 #: ``demonstration`` trains the report's ``teacher_context``. ``response`` trains the recorded response.
 SFT_TARGETS = ("demonstration", "response")
 
 
-class SFTRecord2Record(ExclusiveReportRecord2Record):
-    """Make each valid report its own record set, and never drop a unit as stale. No config.
-
-    The staleness check drops tokens that an older model version sampled. An
-    SFT target is fixed text, not sampled tokens. Thus the stage keeps each
-    held unit until job data uses it, and it refuses ``max_staleness``.
-    """
-
-    @classmethod
-    def from_config(cls, config: Mapping[str, Any], *, context: PipelineContext, environ: Mapping[str, str]) -> Self:
-        NoSettings.parse(config, plugin_class=cls)
-        return cls(context)
-
-    def is_stale(self, samples: Sequence[Sample]) -> bool:
-        return False
-
-
 @dataclass(frozen=True)
 class SFTSettings(PluginSettings):
-    """The config of ``SFTSamples``: the tokenizer, the target, and the maximum sample length."""
+    """The config of ``SFTSamples``: the target, and the maximum sample length.
 
-    tokenizer_path: str = config_option(
-        "", help="The served model's tokenizer. It renders the request and the target."
-    )
+    Values: ``target`` is one of ``SFT_TARGETS``; ``max_tokens`` is a non-negative int, 0 for no limit. The
+    constructor refuses other values.
+    Purpose: ``SFTSamples.from_config`` parses it from ``pipeline.record2sample.config``.
+    """
+
     target: str = config_option(
         "demonstration",
         help="The response to train: demonstration (the report's teacher_context) or response (the recorded response).",
     )
     max_tokens: int = config_option(
-        0, help="The maximum tokens in a sample. Reef skips a longer report. 0 disables the limit."
-    )
-    chat_template_kwargs: Mapping[str, Any] | None = config_option(
-        None,
-        help=(
-            "Chat template arguments for the render, for example {enable_thinking: false}. "
-            "Set the inference handler's chat_template_kwargs to the same value."
-        ),
+        0, help="The maximum tokens in a sample; a longer sample does not train. 0 disables the limit."
     )
 
     def __post_init__(self) -> None:
-        if not self.tokenizer_path.strip():
-            raise ValueError("tokenizer_path is required: the served model's tokenizer renders the sample")
         if self.target not in SFT_TARGETS:
             raise ValueError(f"target must be one of: {', '.join(SFT_TARGETS)}")
         if self.max_tokens < 0:
             raise ValueError("max_tokens must be non-negative (0 disables the limit)")
-        template_kwargs_of(self.chat_template_kwargs, "chat_template_kwargs")
 
 
 class SFTSamples(ReportSamples):
     """Make one supervised sample from one report and its recorded request.
 
-    The sample tokens are the recorded request with the generation prompt,
-    then the target as the assistant turn. The loss mask selects the target
-    tokens. With ``target: demonstration``, the target is the report's
-    ``teacher_context`` and the stage ignores the recorded response. With
-    ``target: response``, the target is the recorded response message with
-    its tool calls, for example an imported dataset example. The stage skips
-    a sample longer than ``max_tokens`` and counts it in ``sft_overflow_reports``.
+    The sample is the report's last call as an ATIF trajectory: its request, then the target as the final agent turn,
+    the only turn that trains. With ``target: demonstration``, the target is the report's ``teacher_context`` and the
+    stage ignores the recorded response. With ``target: response``, the target is the recorded response with its tool
+    calls, for example an imported dataset example. The training component renders the sample with the model's chat
+    template; a sample longer than ``max_tokens`` does not train (``extra.reef.max_tokens``).
+
+    Each valid report trains by itself and owns its inference records. The stage never drops a sample as stale:
+    the staleness check drops tokens that an older model version sampled, and an SFT target is fixed text, not
+    sampled tokens. Thus ``SFTSettings`` has no ``max_staleness``.
     """
 
-    def __init__(self, settings: SFTSettings) -> None:
-        # transformers is part of the training environment. The service never renders a sample.
-        super().__init__()
-        from transformers import AutoTokenizer
-
+    def __init__(self, context: PipelineContext, settings: SFTSettings) -> None:
+        super().__init__(context, exclusive_sources=True)
         self.target = settings.target
         self.max_tokens = settings.max_tokens
-        self.tokenizer = AutoTokenizer.from_pretrained(settings.tokenizer_path, trust_remote_code=True)
-        #: The chat template arguments of every render; a sample-to-job stage that renders reuses them.
-        self.chat_template_kwargs = template_kwargs_of(settings.chat_template_kwargs, "chat_template_kwargs")
-        self.overflow_count = 0
 
     @classmethod
     def from_config(
@@ -112,135 +75,58 @@ class SFTSamples(ReportSamples):
         config: Mapping[str, Any],
         *,
         context: PipelineContext,
-        record2record: Record2Record,
         environ: Mapping[str, str],
     ) -> Self:
-        return cls(SFTSettings.parse(config, plugin_class=cls))
+        return cls(context, SFTSettings.parse(config, plugin_class=cls))
 
-    def operational_metrics(self) -> Mapping[str, float | int]:
-        return {"sft_overflow_reports": self.overflow_count}
+    def is_stale(self, samples: Sequence[Sample]) -> bool:
+        return False
 
-    def target_message(self, payload: Mapping[str, Any], report: TeacherContextReport) -> Mapping[str, Any]:
-        """Return the assistant message that the sample trains."""
-        if self.target == "demonstration":
-            if not report.teacher_context:
-                raise ValueError("target demonstration requires the report's teacher_context")
-            return {"role": "assistant", "content": report.teacher_context}
-        message = recorded_response_message(payload)
-        if message is None:
-            raise ValueError("target response requires the recorded response message of the inference")
-        return {**message, "role": "assistant"}
-
-    def render(
-        self, conversation: Sequence[Mapping[str, Any]], tools: Sequence[Any] | None, *, add_generation_prompt: bool
-    ) -> list[int]:
-        """The token IDs of ``conversation`` in the chat template, with the stage's template arguments."""
-        # tokenize=True and return_dict=False return a flat list of token IDs.
-        ids = self.tokenizer.apply_chat_template(
-            list(conversation),
-            tools=list(tools) if tools else None,
-            tokenize=True,
-            add_generation_prompt=add_generation_prompt,
-            return_dict=False,
-            **self.chat_template_kwargs,
-        )
-        return [int(token) for token in cast(list[int], ids)]
-
-    def sequence_ids(
-        self, conversation: Sequence[Mapping[str, Any]], tools: Sequence[Any] | None
-    ) -> tuple[list[int], int]:
-        """Render a conversation that ends with the target turn. Return its token IDs and the target token count."""
-        prompt_ids = self.render(conversation[:-1], tools, add_generation_prompt=True)
-        sequence_ids = self.render(conversation, tools, add_generation_prompt=False)
-        if sequence_ids[: len(prompt_ids)] != prompt_ids:
-            raise ValueError(
-                "the chat template does not render the generation prompt as a prefix of the assistant turn"
-            )
-        if len(sequence_ids) == len(prompt_ids):
-            raise ValueError("the target response renders to no tokens")
-        return sequence_ids, len(sequence_ids) - len(prompt_ids)
+    def limited(self, sample: TrajectorySample) -> TrajectorySample:
+        """``sample`` with the stage's ``max_tokens``, which the training component applies, when it sets one."""
+        return sample.with_metadata(max_tokens=self.max_tokens) if self.max_tokens else sample
 
     def uploaded_sample(self, trajectory: TrajectorySample) -> TrajectorySample:
-        """Render an uploaded ATIF conversation with the chat template, with every generated agent turn trained.
+        """An uploaded ATIF conversation, which trains with every agent turn that is not copied context.
 
-        An agent step with ``is_copied_context: true`` (ATIF's mark for a step copied from earlier context) is
-        context: it renders, and it trains nothing. Every other agent step trains. The tokens are the conversation
-        up to its last trained turn; the steps after it train nothing and are left out. The loss mask covers the
-        tokens after the first trained turn's generation prompt: 1 on each trained turn's tokens, 0 on everything
-        between them. ``ValueError``: ``is_copied_context`` is not a boolean; the trajectory has no agent step
-        that trains, or its first trained step has no step before it; the chat template does not render each
-        trained turn as a prefix of the whole conversation (a template that drops earlier turns' reasoning does
-        not); or the sample is longer than ``max_tokens``.
+        ``ValueError``: the trajectory has no turn that trains (``trained_turns``).
         """
-        steps = trajectory.trajectory.get("steps") or []
-        conversation = normalize_messages_for_template(atif_messages(trajectory.trajectory))
-        # atif_messages turns each agent step into exactly one assistant message, in step order.
-        copied = [step.get("is_copied_context", False) for step in steps if step["source"] == "agent"]
-        if any(not isinstance(value, bool) for value in copied):
-            raise ValueError("ATIF is_copied_context must be a boolean")
-        agent_turns = [index for index, message in enumerate(conversation) if message["role"] == "assistant"]
-        trained = [index for index, is_copied in zip(agent_turns, copied, strict=True) if not is_copied]
-        if not trained:
-            raise ValueError(
-                "an uploaded trajectory needs one or more agent steps to train; copied context steps train nothing"
-            )
-        if trained[0] == 0:
-            raise ValueError("an uploaded trajectory needs a system or user step before its first agent step")
-        conversation = conversation[: trained[-1] + 1]
-        tokens = self.render(conversation, None, add_generation_prompt=False)
-        spans: list[tuple[int, int]] = []
-        for index in trained:
-            # The turn's tokens are those between its generation prompt and its end, both prefixes of the whole.
-            prompt_ids = self.render(conversation[:index], None, add_generation_prompt=True)
-            turn_ids = self.render(conversation[: index + 1], None, add_generation_prompt=False)
-            prefixes = tokens[: len(prompt_ids)] == prompt_ids and tokens[: len(turn_ids)] == turn_ids
-            if not prefixes or len(turn_ids) <= len(prompt_ids):
-                raise ValueError(
-                    "the chat template does not render each turn as a prefix of the whole conversation, "
-                    "so its agent turns cannot all train"
-                )
-            spans.append((len(prompt_ids), len(turn_ids)))
-        if self.max_tokens and len(tokens) > self.max_tokens:
-            raise ValueError(f"the sample has {len(tokens)} tokens, more than max_tokens {self.max_tokens}")
-        prompt_length = spans[0][0]
-        loss_mask = [0] * (len(tokens) - prompt_length)
-        for start, end in spans:
-            loss_mask[start - prompt_length : end - prompt_length] = [1] * (end - start)
-        return trajectory.with_training(tokens=tokens, loss_mask=loss_mask, rollout_log_probs=[])
+        trained_turns(trajectory.trajectory)
+        return self.limited(trajectory)
 
-    def make_sample(self, context: ReportContext) -> TrajectorySample | SkippedReport:
+    def make_sample(self, context: ReportContext) -> TrajectorySample:
         parsed = context.parsed_report
         if not isinstance(parsed, TeacherContextReport):
             raise ValueError(f"{type(self).__name__} requires the TeacherContextReport schema")
-        if len(context.inferences) != 1:
+        if len(context.ends) != 1:
             raise ValueError(
                 f"an SFT report must reference one recorded request; report "
-                f"{context.report.agent_record_id} references {len(context.inferences)}"
+                f"{context.report.agent_record_id} references {len(context.ends)}"
             )
-        inference = context.inferences[0]
-        messages, tools = recorded_request(inference.payload)
-        conversation = normalize_messages_for_template([*messages, self.target_message(inference.payload, parsed)])
-        tokens, target_length = self.sequence_ids(conversation, tools)
-        if self.max_tokens and len(tokens) > self.max_tokens:
-            logger.warning(
-                "report %s skipped: its SFT sample has %d tokens, more than max_tokens %d",
-                context.report.agent_record_id,
-                len(tokens),
-                self.max_tokens,
-            )
-            self.overflow_count += 1
-            return SkippedReport("sft_overflow")
         # A reported score is only metadata. All samples train with the same weight.
-        sample = make_trajectory((inference,), 0.0 if context.score is None else context.score)
-        return sample.with_training(tokens=tokens, loss_mask=[1] * target_length, rollout_log_probs=[])
+        sample = make_trajectory(context.ends, 0.0 if context.score is None else context.score)
+        steps = list(sample.trajectory["steps"])
+        if steps[-1]["source"] != "agent" or steps[-1].get("is_copied_context"):
+            raise ValueError("target response requires the recorded response message of the inference")
+        if self.target == "demonstration":
+            if not parsed.teacher_context:
+                raise ValueError("target demonstration requires the report's teacher_context")
+            # The demonstration replaces the recorded reply as the turn that trains.
+            steps[-1] = {"step_id": steps[-1]["step_id"], "source": "agent", "message": parsed.teacher_context}
+            sample = TrajectorySample(
+                {**sample.trajectory, "steps": steps},
+                group_id=sample.group_id,
+                source_agent_record_ids=sample.source_agent_record_ids,
+            )
+        return self.limited(sample)
 
 
 class SFTJobData(DistillJobData):
-    """``DistillJobData`` that also takes uploaded ATIF trajectories, which ``SFTSamples.uploaded_sample`` renders,
-    and imported train tasks, which train only for an instruction that gives their job's parameters."""
+    """``DistillJobData`` that also takes uploaded ATIF trajectories, which the training component renders, and
+    imported train tasks, which train only for an instruction that gives their job's parameters."""
 
     accepts_trajectories = True
     accepts_imported_tasks = True
 
 
-__all__ = ["SFT_TARGETS", "SFTJobData", "SFTRecord2Record", "SFTSamples", "SFTSettings"]
+__all__ = ["SFT_TARGETS", "SFTJobData", "SFTSamples", "SFTSettings"]

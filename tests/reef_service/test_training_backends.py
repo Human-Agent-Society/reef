@@ -42,7 +42,7 @@ def test_cli_and_yaml_select_the_same_in_process_topology_and_runtime(tmp_path):
         "training.backend": BACKEND,
         "training.options.lora-rank": "16",
         "training.options.checkpoint-layers": "false",
-        "pipeline.record2record.config.max_staleness": "2",
+        "pipeline.record2sample.config.max_staleness": "2",
     }
     file_config, _ = resolve_deployment_config(deployment(), overrides, tmp_path / "serve.yaml")
     cli_config, _ = resolve_deployment_config(command_line_config({}), overrides, tmp_path / "cli")

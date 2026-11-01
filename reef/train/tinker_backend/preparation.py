@@ -53,7 +53,7 @@ def prepare_tinker_job(
     The job trains ``method``'s objective with that objective's Tinker loss, which must be registered in this
     process and accept ``kl_coef``. With ``score_centering``, a policy loss trains as ``ScoreCenteredLoss``, which
     only ``importance_sampling`` may; a loss without advantages, such as ``sft``, trains as it is. The
-    record-to-record stage already dropped stale samples. ``ValueError``: the loss refuses ``kl_coef``, score
+    record-to-sample stage already dropped stale samples. ``ValueError``: the loss refuses ``kl_coef``, score
     centering meets another policy loss, the objective gives no advantage for each trajectory of a policy loss,
     or a row is not trainable.
     """

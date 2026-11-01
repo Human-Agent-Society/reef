@@ -240,13 +240,10 @@ def test_report_processor_reserves_and_acknowledges_mixed_data_one_kind_per_job(
         def make_job_data(self, samples, data_id):
             return JobData(data_id, samples)
 
-    from reef.record2record import ReportGrouping, ReportRecord2Record
-
     context = PipelineContext("mixed")
     processor = TrainingPipeline(
         context,
-        record2record=ReportRecord2Record(context, ReportGrouping(), exclusive_sources=True),
-        record2sample=MixedTasks(),
+        record2sample=MixedTasks(context, exclusive_sources=True),
         sample2job=MixedJobData(context, None, None),
     )
     for index, payload in enumerate(

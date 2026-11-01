@@ -22,8 +22,7 @@ from typing import Any
 from reef.core.records_types import AgentRecord
 from reef.core.trajectories import trajectory_reward
 from reef.pipeline_context import PipelineContext
-from reef.record2record import GroupDecision, ReportContext, ReportGrouping, ReportRecord2Record
-from reef.record2sample import ReportSamples
+from reef.record2sample import GroupDecision, ReportContext, ReportGrouping, ReportSamples
 from reef.record2sample.assembly import SampleAssembly, SampleAssemblySettings
 from reef.sample2job import Sample2Job
 from reef.train.algos import TrainingObjective, TrainingSignal
@@ -68,10 +67,10 @@ class ComparisonSetGrouping(ReportGrouping):
 
 
 class ComparisonSetSamples(ReportSamples):
-    """One report as one sample in its comparison set."""
+    """One report as one sample in its comparison set (``ComparisonSetGrouping``)."""
 
-    def __init__(self, settings: SampleAssemblySettings | None = None) -> None:
-        super().__init__()
+    def __init__(self, context: PipelineContext, settings: SampleAssemblySettings | None = None) -> None:
+        super().__init__(context, ComparisonSetGrouping())
         self.assembly = SampleAssembly(SampleAssemblySettings() if settings is None else settings)
 
     def make_sample(self, context: ReportContext) -> TrajectorySample:
@@ -90,7 +89,6 @@ def grouped_policy_pipeline(context: PipelineContext, buffer_size: int | None = 
     """Reports grouped by ``metadata.comparison_set``, two to a group."""
     return TrainingPipeline(
         context,
-        record2record=ReportRecord2Record(context, ComparisonSetGrouping()),
-        record2sample=ComparisonSetSamples(),
+        record2sample=ComparisonSetSamples(context),
         sample2job=GroupedPolicyJobData(context, buffer_size, None),
     )

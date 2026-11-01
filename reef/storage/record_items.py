@@ -10,8 +10,7 @@ item ``record_item(r)`` is the item of ``o`` with:
   where ``release_id`` is the release that ``r`` names and ``artifact_id`` the artifact that answered it, each
   null when ``r`` names none.
 
-A training instruction is a record but not data, so it has no record item. ``copy_records`` makes the record items
-of one page of a record store, in record order. The data service copies each scenario (``copy_scenario_records``)
+``copy_records`` makes the record items of one page of a record store, in record order. The data service copies each scenario (``copy_scenario_records``)
 when it takes a ``record_copy`` item from the ``data`` queue, which control adds when records arrive
 (``request_record_copy``). The mark ``record_copy:<s>`` keeps how far the records of ``s`` are copied: each record
 of ``s`` with a sequence at most the mark that ``record_item`` gives an item has that item in the store of ``o``.
@@ -29,7 +28,7 @@ from __future__ import annotations
 import logging
 
 from reef.core.artifact_ref import encode_artifact_ref
-from reef.core.records_types import AgentRecord, RequestType
+from reef.core.records_types import AgentRecord
 from reef.storage.data import DataStore, NewItem, StoredItem
 from reef.storage.data_queue import DATA_QUEUE, RECORD_COPY_KIND
 from reef.storage.item_kinds import copied_record
@@ -47,8 +46,6 @@ RECORD_PAGE_SIZE = 256
 
 def record_item(record: AgentRecord) -> NewItem:
     """The record item of ``record``, an inference or a report, as the module docstring defines it."""
-    if record.request_type is RequestType.TRAIN:
-        raise ValueError(f"record {record.agent_record_id!r} is a training instruction, which is not data")
     artifact_id = record.payload.get("artifact_id")
     return NewItem(
         f"{record.scenario}/{record.agent_record_id}",
@@ -97,11 +94,7 @@ def copy_records(records: RecordStore, data: DataStore, owner: str, scenario: st
         return after_sequence
     data.create(
         owner,
-        [
-            record_item(record)
-            for _, record in page
-            if record.request_type is not RequestType.TRAIN and not is_record_copy(data, owner, scenario, record)
-        ],
+        [record_item(record) for _, record in page if not is_record_copy(data, owner, scenario, record)],
     )
     return page[-1][0]
 

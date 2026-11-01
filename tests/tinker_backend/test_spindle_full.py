@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from tests.support.chat_templates import CharTemplate
 from tests.support.hugging_face_hub import COMMIT, MemoryHub
 
 from reef.artifact import REFERENCE_FILE, Artifact, DirectoryFiles, HuggingFaceRevision, read_reference
@@ -73,6 +74,9 @@ class SpindleClient(TinkerClient, TinkerSampler):
             ),
             {},
         )
+
+    def chat_template(self, template_kwargs):
+        return CharTemplate()
 
     def check_remote(self, checkpoint):
         self.checked.append(checkpoint)

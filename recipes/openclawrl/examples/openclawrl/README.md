@@ -119,11 +119,12 @@ The runtime flow is:
 reef-eval starts the task container and the judge service for the next session
   -> the harness reads the student's message from the student service
   -> hermes runs one turn; its model calls go through the shim to Reef
-  -> the SGLang backend records the sampled tokens, loss mask, log-probabilities, and top-K capture
+  -> Reef records the provider exchange and the artifact that answered, without tokens
   -> the harness posts hermes's reply to the student service, and the student reacts
   -> on the next model call, the processor uses the session tag to bind the preceding call to its following tool result or user reaction
   -> the PRM judges that next state and may propose a hindsight hint
-  -> global_batch_size judged turns form one batch; the top-K select loss trains the policy
+  -> global_batch_size judged turns form one batch; the training component renders each turn and its hint candidates
+  -> the actor computes the student's top-K at the step's start; the top-K select loss trains the policy
   -> Megatron performs one optimizer step and synchronizes weights to SGLang
   -> the next session runs on the updated weights
 ```
@@ -269,14 +270,14 @@ the first reply passes directly.
 The Reef YAML contains no `service` or `services` sections. HTTP settings use
 `reef.*`; Reef assembles inference and training. OpenClawRL's judging stage
 consumes an independently deployed PRM through
-`pipeline.record2record.config.prm_url` and
-`pipeline.record2record.config.prm_tokenizer_path`. The tokenizer must match
+`pipeline.record2sample.config.prm_url` and
+`pipeline.record2sample.config.prm_tokenizer_path`. The tokenizer must match
 the served PRM. CLI overrides use the same paths, for example:
 
 ```bash
 reef serve -c recipes/openclawrl/examples/openclawrl/serve.yaml \
-  --pipeline.record2record.config.prm_url http://prm-host:23001 \
-  --pipeline.record2record.config.prm_tokenizer_path /models/prm-tokenizer
+  --pipeline.record2sample.config.prm_url http://prm-host:23001 \
+  --pipeline.record2sample.config.prm_tokenizer_path /models/prm-tokenizer
 ```
 
 The example's Compose file owns PRM and student-model launch arguments, health
@@ -284,5 +285,5 @@ checks and GPU assignments. Configure native SGLang options in those containers'
 commands. The student-model endpoint belongs to the user-simulation harness;
 Reef does not receive it. To use an existing PRM in the Compose example, remove
 the `prm` container and Reef's Compose `depends_on: prm` entry, then update the
-two PRM fields under `pipeline.record2record.config`. PRM request timeouts and
+two PRM fields under `pipeline.record2sample.config`. PRM request timeouts and
 scoring errors remain the OpenClawRL recipe's responsibility.

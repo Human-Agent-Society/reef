@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 import shutil
 import time
@@ -17,9 +18,14 @@ from alembic.operations import Operations
 from sqlalchemy import Column, LargeBinary, MetaData, Table, cast, func, inspect, select, update
 from sqlalchemy.engine import Connection
 
+from reef.core.atif_payloads import call_shape, canonical_json
 from reef.core.errors import ReefError
+from reef.core.trajectory_index import call_key, sha256_text
 from reef.storage.commits import read_consumed_ids
+from reef.storage.sql_records import ScopedTable, SQLRecordStore, TrajectoryNodes
 from reef.storage.work_queue import FINAL_STATES
+
+logger = logging.getLogger(__name__)
 
 
 def migrate_record_storage(connection: Connection, records: Table, consumption: Table) -> None:
@@ -131,6 +137,127 @@ def migrate_record_storage(connection: Connection, records: Table, consumption: 
             ):
                 operations.drop_index(index_name, table_name=records.name, schema=schema)
         operations.drop_column(records.name, "compacted_at", schema=schema)
+
+
+def migrate_record_trajectories(connection: Connection, records: Table, nodes: Table) -> None:
+    """Give each stored record with a message list its trajectory node, in ``nodes`` (RFC #1054).
+
+    Run in the caller's schema transaction, after ``migrate_record_storage`` and after ``create_all`` made ``nodes``.
+    A record table that has ``message_field`` is left unchanged. Otherwise add ``message_field`` and
+    ``payload_sha256``, then rewrite each record whose payload has a message list, oldest first and 256 at a time,
+    as an append writes it: the record's node keeps the payload as ATIF, with the entries after its parent's, and
+    the row keeps the payload's hash. Its ``body_bytes`` counts the new row. Each node goes into the namespace of its
+    record's store generation (``storage_id``), or of the database when the table has no such column.
+
+    Training instructions are no longer records (``reef.train.instructions``): the migration deletes the rows of
+    request type ``train``. A commit that consumed one records it in ``metrics["training_request"]``; an instruction
+    that no commit consumed is gone, and its client files it again.
+    """
+    columns = {column["name"] for column in inspect(connection).get_columns(records.name, schema=records.schema)}
+    if "message_field" in columns:
+        return
+    deleted = connection.execute(records.delete().where(records.c.request_type == "train")).rowcount
+    if deleted:
+        logger.warning(
+            "deleted %d training instruction record(s) of %s: instructions now live in the instructions queue",
+            deleted,
+            records.fullname,
+        )
+    operations = Operations(MigrationContext.configure(connection))
+    for name in ("message_field", "payload_sha256"):
+        operations.add_column(records.name, Column(name, records.c[name].type, nullable=True), schema=records.schema)
+    scope_names = ("storage_id",) if "storage_id" in records.c else ()
+    after_sequence = 0
+    while True:
+        rows = (
+            connection.execute(
+                select(records).where(records.c.sequence > after_sequence).order_by(records.c.sequence).limit(256)
+            )
+            .mappings()
+            .all()
+        )
+        if not rows:
+            return
+        after_sequence = rows[-1]["sequence"]
+        for row in rows:
+            payload = json.loads(row["payload_json"])
+            key = call_key(payload)
+            shape = call_shape(payload)
+            if key is None or shape is None:
+                continue
+            encoded = SQLRecordStore.row_content(row)._replace(
+                payload_json="{}",
+                message_field=shape.message_field,
+                payload_sha256=sha256_text(canonical_json(payload)),
+            )
+            connection.execute(
+                update(records)
+                .where(records.c.sequence == row["sequence"])
+                .values(
+                    payload_json=encoded.payload_json,
+                    message_field=encoded.message_field,
+                    payload_sha256=encoded.payload_sha256,
+                    body_bytes=encoded.body_bytes,
+                )
+            )
+            scope = {name: str(row[name]) for name in scope_names}
+            TrajectoryNodes(ScopedTable(nodes, scope)).add(
+                connection, int(row["sequence"]), row["scenario"], row["agent_record_id"], payload, key
+            )
+
+
+def migrate_data_trajectories(connection: Connection, items: Table, nodes: Table) -> None:
+    """Give each stored record item with a message list its trajectory node, in ``nodes`` (RFC #1054).
+
+    Run in the caller's schema transaction, after ``create_all`` made ``nodes``. An item table that has
+    ``message_field`` is left unchanged. Otherwise add ``message_field``, then rewrite each record item whose
+    payload has a message list, in arrival order and 256 at a time, as ``create`` writes it: its content keeps an
+    empty payload, and the item's node, in the namespace of its owner, keeps the payload as ATIF, with the entries
+    after its parent's.
+    """
+    columns = {column["name"] for column in inspect(connection).get_columns(items.name, schema=items.schema)}
+    if "message_field" in columns:
+        return
+    operations = Operations(MigrationContext.configure(connection))
+    operations.add_column(
+        items.name, Column("message_field", items.c.message_field.type, nullable=True), schema=items.schema
+    )
+    after_sequence = 0
+    while True:
+        rows = (
+            connection.execute(
+                select(items.c.sequence, items.c.owner, items.c.item_id, items.c.metadata_json, items.c.content_json)
+                .where(items.c.kind == "record", items.c.sequence > after_sequence)
+                .order_by(items.c.sequence)
+                .limit(256)
+            )
+            .mappings()
+            .all()
+        )
+        if not rows:
+            return
+        after_sequence = rows[-1]["sequence"]
+        for row in rows:
+            content = json.loads(row["content_json"])
+            payload = content["payload"]
+            key = call_key(payload)
+            shape = call_shape(payload)
+            if key is None or shape is None:
+                continue
+            content["payload"] = {}
+            connection.execute(
+                update(items)
+                .where(items.c.sequence == row["sequence"])
+                .values(content_json=canonical_json(content), message_field=shape.message_field)
+            )
+            TrajectoryNodes(ScopedTable(nodes, {"owner": row["owner"]})).add(
+                connection,
+                int(row["sequence"]),
+                json.loads(row["metadata_json"])["origin"]["scenario"],
+                row["item_id"],
+                payload,
+                key,
+            )
 
 
 def migrate_sample_columns(connection: Connection, samples: Table) -> None:

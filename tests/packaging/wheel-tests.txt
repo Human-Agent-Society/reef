@@ -70,10 +70,10 @@ tests/recipes/sdft/test_sdft_pipeline.py
 tests/recipes/sdpo/test_sdpo_parity.py
 tests/recipes/sdpo/test_sdpo_pipeline.py
 tests/recipes/tttd/test_tttd.py
-tests/record2record/test_record_sets.py
 tests/record2sample/test_generator_designer.py
 tests/record2sample/test_generator_harbor.py
 tests/record2sample/test_generator_service.py
+tests/record2sample/test_record_sets.py
 tests/reef_recipe/test_composite_recipe.py
 tests/reef_recipe/test_generated_tasks.py
 tests/reef_recipe/test_recipe_config_fields.py

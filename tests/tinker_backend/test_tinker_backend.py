@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from tests.support.chat_templates import CharTemplate
 
 from recipes.tttd.tinker import TttdTinkerLoss
 from reef.artifact.artifact import Artifact
@@ -91,6 +92,9 @@ class RemoteClient(TinkerClient, TinkerSampler):
     def sample(self, sampler_path, prompt, params, *, topk_logprobs):
         self.sampled.append((sampler_path, prompt, params))
         return SampleResult((201, 202), (-0.2, -0.3), "stop")
+
+    def chat_template(self, template_kwargs):
+        return CharTemplate()
 
     def check_remote(self, checkpoint):
         if checkpoint.state_path in self.missing:
@@ -239,7 +243,7 @@ def empty_artifact(tmp_path):
 
 
 def test_a_job_saves_one_checkpoint_and_the_next_job_continues_from_it(component, client, objective):
-    # The record-to-record stage decides which samples are too stale; the component trains what it receives.
+    # The record-to-sample stage decides which samples are too stale; the component trains what it receives.
     first = train(component, JobData("older", (item("old:0"),)), objective.name)
     assert first.state == "finished" and first.metrics["optimizer_steps"] == 1
     (checkpoint,) = first.checkpoints
@@ -829,7 +833,6 @@ def test_scenario_commits_recovers_activates_and_trains_from_remote_checkpoint(t
     from reef.core import AgentRecord, RequestType
     from reef.dispatcher import Dispatcher
     from reef.recipe.base import WeightTrainingRecipe, WeightTrainingSpec
-    from reef.record2record import ReportRecord2Record
     from reef.storage.sqlite import SQLiteScenarioStorage
     from reef.train.pipeline import PipelineSpec
 
@@ -841,9 +844,7 @@ def test_scenario_commits_recovers_activates_and_trains_from_remote_checkpoint(t
 
         @classmethod
         def pipeline_spec(cls):
-            return PipelineSpec(
-                record2record=ReportRecord2Record, record2sample=ThresholdSamples, sample2job=ThresholdJobData
-            )
+            return PipelineSpec(record2sample=ThresholdSamples, sample2job=ThresholdJobData)
 
     initial = tmp_path / "initial"
     initial.mkdir()
@@ -960,7 +961,7 @@ def test_documented_smoke_runs_through_http_and_ttdd_recipe(tmp_path, monkeypatc
     inference = TinkerInferenceRuntime(remote, base_model=MODEL)
     step_grid = PipelineConfig.from_setting(
         {
-            "record2record": {"config": {"groups_per_step": 1, "rollouts_per_group": 4}},
+            "record2sample": {"config": {"groups_per_step": 1, "rollouts_per_group": 4}},
             "sample2job": {"config": {"job_samples": 4}},
         },
         spec=TTTDRecipe.pipeline_spec(),
@@ -1039,3 +1040,27 @@ def test_an_sft_job_trains_cross_entropy_on_the_component_and_saves_its_checkpoi
     assert status.state == "finished" and len(status.checkpoints) == 1, status.error
     ((_, batches, loss),) = client.calls
     assert loss.loss_fn == "cross_entropy" and sum(len(rows) for rows in batches) == 2
+
+
+def recorded_trajectory(answer: str, group: str = "g") -> TrajectorySample:
+    """A trajectory as serving records it: steps and a reward, no tokens."""
+    steps = [{"step_id": 1, "source": "user", "message": "q"}, {"step_id": 2, "source": "agent", "message": answer}]
+    return TrajectorySample(
+        {"schema_version": "ATIF-v1.7", "agent": {"name": "a"}, "steps": steps, "extra": {"reef": {"reward": 1.0}}},
+        group_id=group,
+    )
+
+
+def test_a_recorded_trajectory_renders_with_the_models_chat_template(component, client, objective):
+    unrenderable = TrajectorySample(
+        {
+            "schema_version": "ATIF-v1.7",
+            "agent": {"name": "a"},
+            "steps": [{"step_id": 1, "source": "agent", "message": "x"}],
+        }
+    )
+    status = train(component, JobData("recorded", (recorded_trajectory("ab"), unrenderable)), objective.name)
+    assert status.state == "finished" and status.metrics["unrenderable_samples"] == 1
+    ((row,),) = client.calls[0][1]
+    # user q | assistant ab in CharTemplate; the client computes the log probabilities from the start's weights.
+    assert (row.tokens, row.mask, row.logprobs) == ((2, 213, 9, 197, 198), (1, 1), ())

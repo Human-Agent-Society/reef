@@ -38,7 +38,7 @@ inference:
 recipe:
   implementation: recipes.sao.recipe:SAORecipe
 pipeline:
-  record2record:
+  record2sample:
     config:
       max_staleness: 18
   sample2job:
@@ -98,7 +98,6 @@ training:
     lr: "1e-6"
     lr-decay-style: "constant"
     loss-type: "policy_loss"
-    use-rollout-logprobs: true
     use-critic: true
     eps-clip: "0.3"
     eps-clip-high: "5.0"

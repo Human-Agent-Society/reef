@@ -40,6 +40,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
+from functools import partial
 from typing import Any
 
 import torch
@@ -255,14 +256,16 @@ def gather_teacher_topk(
     response_lengths: list[int],
     with_entropy: bool = False,
     topk_indices: list[torch.Tensor] | None = None,
+    top_k: int | None = None,
 ) -> tuple[torch.Tensor, dict[str, list[torch.Tensor]]]:
-    """Score teacher-selected or supplied top-K ids and the sampled response token."""
+    """Score teacher-selected or supplied top-K ids and the sampled response token; ``top_k`` is K, or
+    ``--distill-top-k`` when None."""
     from megatron.core import mpu
 
     tp_group = mpu.get_tensor_model_parallel_group()
     tp_world = dist.get_world_size(group=tp_group) if dist.is_initialized() else 1
     tp_rank = dist.get_rank(group=tp_group) if dist.is_initialized() else 0
-    top_k = int(args.distill_top_k)
+    top_k = int(args.distill_top_k) if top_k is None else top_k
     topk_ids: list[torch.Tensor] = []
     topk_log_probs: list[torch.Tensor] = []
     sampled_log_probs: list[torch.Tensor] = []
@@ -340,7 +343,16 @@ class TeacherTopKAtSelectedIds:
 
 
 def student_topk_ids(actor: Any, rollout_data: dict[str, Any], budget: int) -> list[torch.Tensor]:
-    """The current student's top-K ids at every response position of every sample, ``[R, K]`` each.
+    """The current student's top-K ids at every response position of every sample, ``[R, K]`` each, with K
+    ``--distill-top-k`` (``student_topk``)."""
+    return student_topk(actor, rollout_data, budget)[0]
+
+
+def student_topk(
+    actor: Any, rollout_data: dict[str, Any], budget: int, top_k: int | None = None
+) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
+    """The current student's top-K ids at every response position of every sample, ``[R, K]`` each, and their
+    log-probabilities; K is ``top_k``, or ``--distill-top-k`` when None.
 
     One forward-only pass over the students' own sequences on the weights the
     step starts from, packed under ``budget`` tokens per microbatch. Empty on
@@ -363,15 +375,15 @@ def student_topk_ids(actor: Any, rollout_data: dict[str, Any], budget: int) -> l
         "micro_batch_indices": schedule,
     }
     result = forward_only(
-        gather_teacher_topk,
+        gather_teacher_topk if top_k is None else partial(gather_teacher_topk, top_k=top_k),
         actor.args,
         actor.model,
         [DataIterator(view, schedule) for _ in range(vpp)],
         [len(schedule)],
     )
     if not result:
-        return []
-    return list(result["distill_teacher_topk_ids"])
+        return [], []
+    return list(result["distill_teacher_topk_ids"]), list(result["distill_teacher_topk_log_probs"])
 
 
 def compute_teacher_rows(actor: Any, rollout_data: dict[str, Any], settings: DistillSettings | None = None) -> None:
@@ -401,7 +413,7 @@ def compute_teacher_rows(actor: Any, rollout_data: dict[str, Any], settings: Dis
         if length > capacity:
             raise ValueError(
                 f"distill sample {index} teacher sequence is {length} tokens, over the trainer's --seq-length "
-                f"{capacity}; set the recipe's max_teacher_tokens so such reports are skipped"
+                f"{capacity}; set the recipe's max_teacher_tokens so the component leaves such samples out"
             )
     budget = int(args.max_tokens_per_gpu or capacity)
     device = torch.cuda.current_device()

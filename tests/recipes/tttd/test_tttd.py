@@ -9,14 +9,7 @@ import pytest
 from tests.support._trajectories import policy_trajectory
 from tests.support.runtime_stubs import runtime_bindings
 
-from recipes.tttd import (
-    TTTDGridSettings,
-    TTTDGroupedRolloutReport,
-    TTTDJobData,
-    TTTDRecipe,
-    TTTDRecord2Record,
-    TTTDSamples,
-)
+from recipes.tttd import TTTDGroupedRolloutReport, TTTDJobData, TTTDRecipe, TTTDSamples, TTTDSettings
 from recipes.tttd.objective import TttdObjective
 from reef.artifact import ArtifactRef
 from reef.core import AgentRecord, RequestType
@@ -24,8 +17,7 @@ from reef.core.plugins import PluginConfigError
 from reef.core.reports import ReportValidationError
 from reef.core.trajectories import trajectory_reward
 from reef.recipe.config import RecipeConfigError
-from reef.record2record import NoRecordSets
-from reef.record2sample.assembly import SampleAssemblySettings
+from reef.record2sample import NoSamples
 from reef.runtime.interfaces import TrainingMethod
 from reef.storage.sqlite import SQLiteRecordStore
 from reef.train import PipelineContext, Trainer
@@ -98,12 +90,11 @@ def _processor(experiment_logger=None, job_samples=None) -> TrainingPipeline:
         report_type=TTTDGroupedRolloutReport,
         experiment_logger=experiment_logger or _ExperimentLogger(),
     )
-    record2record = TTTDRecord2Record(context, TTTDGridSettings(groups_per_step=2, rollouts_per_group=3))
+    record2sample = TTTDSamples(context, TTTDSettings(groups_per_step=2, rollouts_per_group=3))
     return TrainingPipeline(
         context,
-        record2record=record2record,
-        record2sample=TTTDSamples(SampleAssemblySettings(), record2record),
-        sample2job=TTTDJobData(context, record2record, None, job_samples),
+        record2sample=record2sample,
+        sample2job=TTTDJobData(context, record2sample, None, job_samples),
     )
 
 
@@ -121,15 +112,15 @@ def test_tttd_pipeline_section_sets_the_grid_once_for_every_stage() -> None:
         {
             "data": {},
             "pipeline": {
-                "record2record": {"config": {"groups_per_step": 2, "rollouts_per_group": 3}},
-                "record2sample": {"config": {"accept_multi_turn_policy_samples": True}},
+                "record2sample": {
+                    "config": {"groups_per_step": 2, "rollouts_per_group": 3, "accept_multi_turn_policy_samples": True}
+                },
             },
         }
     )
 
     pipeline = recipe.build_pipeline(PipelineContext("discovery", report_type=recipe.report_type))
 
-    assert isinstance(pipeline.record2record, TTTDRecord2Record)
     assert isinstance(pipeline.record2sample, TTTDSamples)
     assert isinstance(pipeline.sample2job, TTTDJobData)
     assert (pipeline.record2sample.groups_per_step, pipeline.record2sample.rollouts_per_group) == (2, 3)
@@ -157,9 +148,9 @@ def test_tttd_refuses_the_grid_in_the_recipe_config(key: str) -> None:
 @pytest.mark.parametrize(
     ("pipeline", "message"),
     [
-        ({"record2record": {"config": {"groups_per_step": 0}}}, "groups_per_step must be positive"),
-        ({"record2record": {"config": {"rollouts_per_group": 1}}}, "rollouts_per_group must be at least two"),
-        ({"record2sample": {"config": {"groups_per_step": 2}}}, "groups_per_step"),
+        ({"record2sample": {"config": {"groups_per_step": 0}}}, "groups_per_step must be positive"),
+        ({"record2sample": {"config": {"rollouts_per_group": 1}}}, "rollouts_per_group must be at least two"),
+        ({"sample2job": {"config": {"groups_per_step": 2}}}, "groups_per_step"),
         ({"sample2job": {"config": {"batch_size": 2}}}, "TTTDJobData: unknown config fields: batch_size"),
     ],
 )
@@ -184,14 +175,9 @@ def test_the_trainer_refuses_tttd_job_samples_above_one_grid() -> None:
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("stage", [TTTDSamples, TTTDJobData])
-def test_tttd_later_stages_need_the_tttd_record_stage(stage: type) -> None:
-    context = PipelineContext("discovery")
-    stages = {"record2record": NoRecordSets()}
-    if stage is TTTDJobData:
-        stages["record2sample"] = TTTDSamples(SampleAssemblySettings(), TTTDRecord2Record(context, TTTDGridSettings()))
-    with pytest.raises(PluginConfigError, match=f"{stage.__name__} needs TTTDRecord2Record"):
-        stage.from_config({}, context=context, environ={}, **stages)
+def test_tttd_job_data_needs_the_tttd_sample_stage() -> None:
+    with pytest.raises(PluginConfigError, match="TTTDJobData needs TTTDSamples"):
+        TTTDJobData.from_config({}, context=PipelineContext("discovery"), record2sample=NoSamples(), environ={})
 
 
 @pytest.mark.unit
@@ -337,14 +323,14 @@ def test_tttd_caches_policy_samples_at_push(monkeypatch) -> None:
     from reef.record2sample import assembly as reported_module
 
     calls = 0
-    make_sample = reported_module.make_policy_trajectory
+    make_trajectory = reported_module.make_trajectory
 
-    def counted_make_sample(*args, **kwargs):
+    def counted_make_trajectory(*args, **kwargs):
         nonlocal calls
         calls += 1
-        return make_sample(*args, **kwargs)
+        return make_trajectory(*args, **kwargs)
 
-    monkeypatch.setattr(reported_module, "make_policy_trajectory", counted_make_sample)
+    monkeypatch.setattr(reported_module, "make_trajectory", counted_make_trajectory)
     processor = _processor()
     for group in range(2):
         for rollout in range(3):
@@ -515,7 +501,7 @@ def test_tttd_custom_loss_uses_rollout_log_probs_without_clipping(monkeypatch) -
 
     logits = torch.tensor([0.0, math.log(4.0)], requires_grad=True)
     batch = {
-        "rollout_log_probs": [torch.zeros(2)],
+        "log_probs": [torch.zeros(2)],
         "advantages": [torch.tensor([2.0, -3.0])],
         "unconcat_tokens": [torch.tensor([1, 2, 3])],
         "total_lengths": [3],
@@ -527,7 +513,7 @@ def test_tttd_custom_loss_uses_rollout_log_probs_without_clipping(monkeypatch) -
     }
 
     loss, metrics = tttd_loss(
-        SimpleNamespace(use_rollout_logprobs=True),
+        SimpleNamespace(use_rollout_logprobs=False),
         batch,
         logits,
         torch.mean,
@@ -557,7 +543,7 @@ def test_tttd_custom_loss_cancels_slime_dynamic_batch_normalization(monkeypatch)
 
     logits = torch.zeros(2, requires_grad=True)
     batch = {
-        "rollout_log_probs": [torch.zeros(2)],
+        "log_probs": [torch.zeros(2)],
         "advantages": [torch.tensor([1.0, 1.0])],
         "unconcat_tokens": [torch.tensor([1, 2, 3])],
         "total_lengths": [3],
@@ -566,7 +552,7 @@ def test_tttd_custom_loss_cancels_slime_dynamic_batch_normalization(monkeypatch)
     }
 
     scaled_loss, _ = tttd_loss(
-        SimpleNamespace(use_rollout_logprobs=True),
+        SimpleNamespace(use_rollout_logprobs=False),
         batch,
         logits,
         torch.mean,
@@ -596,7 +582,7 @@ def test_tttd_frozen_base_kl_executes_and_centers_masked_tokens(monkeypatch) -> 
 
     rollout_data = {
         "advantages": [torch.tensor([1.0, 2.0]), torch.tensor([3.0])],
-        "rollout_log_probs": [torch.tensor([-0.2, -0.5]), torch.tensor([-0.3])],
+        "log_probs": [torch.tensor([-0.2, -0.5]), torch.tensor([-0.3])],
         "ref_log_probs": [torch.tensor([-0.4, -0.1]), torch.tensor([-0.2])],
         "loss_masks": [torch.tensor([1.0, 0.0]), torch.tensor([1.0])],
     }

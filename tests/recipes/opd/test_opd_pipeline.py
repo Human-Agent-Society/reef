@@ -1,19 +1,19 @@
 """Same-prefix OPD contracts from captured inference through Slime settings."""
 
-import sys
 from types import SimpleNamespace
 
 import pytest
+from tests.support.chat_templates import CharTemplate
 from tests.support.runtime_stubs import runtime_bindings
 
 from recipes.opd import OpdObjective, OPDRecipe, OPDSamples, OPDSettings
 from recipes.opd.slime import OpdSettings
 from reef.artifact.artifact import ArtifactRef
 from reef.core import AgentRecord, RequestType
+from reef.core.chat_rendering import TeacherRequest, rendered_job_data
 from reef.core.reports import TeacherContextReport
 from reef.pipeline_context import PipelineContext
 from reef.recipe.registry import build_recipe
-from reef.record2record import ExclusiveReportRecord2Record
 from reef.runtime.interfaces import TrainingMethod
 from reef.sample2job import DistillJobData
 from reef.train.algos.schedule import StepScheduling
@@ -24,38 +24,35 @@ from reef.train.slime_backend.loss_families import resolve_loss_family
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
 from reef.train.types import JobData
 
-TOKENS = [5, 6, 7, 1, 2, 3]
+QUESTION = [{"role": "user", "content": "Compute 1 + 1."}]
+REPLY = "2"
 
 
 def opd_pipeline(max_teacher_tokens: int = 0) -> TrainingPipeline:
     context = PipelineContext("math", TeacherContextReport)
     return TrainingPipeline(
         context,
-        record2record=ExclusiveReportRecord2Record(context),
-        record2sample=OPDSamples(OPDSettings(max_teacher_tokens=max_teacher_tokens)),
+        record2sample=OPDSamples(context, OPDSettings(max_teacher_tokens=max_teacher_tokens)),
         sample2job=DistillJobData(context, 1, None),
     )
 
 
 @pytest.fixture
-def processor(monkeypatch: pytest.MonkeyPatch) -> TrainingPipeline:
-    # OPD reads the recorded ids: loading any tokenizer would fail on this stand-in module.
-    monkeypatch.setitem(sys.modules, "transformers", SimpleNamespace())
+def processor() -> TrainingPipeline:
     return opd_pipeline()
 
 
 def inference() -> AgentRecord:
+    """A served call: the request and the reply, with no training tensors."""
     return AgentRecord.create(
         scenario="math",
         request_type=RequestType.INFERENCE,
         agent_record_id="i1",
         artifact_ref=ArtifactRef(content_id="math", release_id="slime-v3", parent_release_id=None),
         payload={
-            "messages": [{"role": "user", "content": "Compute 1 + 1."}],
+            "messages": QUESTION,
             "chat_template_kwargs": {"enable_thinking": False},
-            "tokens": list(TOKENS),
-            "loss_mask": [1, 1, 1],
-            "rollout_log_probs": [-0.1, -0.2, -0.3],
+            "response": {"choices": [{"message": {"role": "assistant", "content": REPLY}}]},
         },
     )
 
@@ -78,14 +75,23 @@ def test_exact_student_tokens_and_no_scalar_reward_reach_slime(processor: Traini
     batch = processor.build_job_data(1)
     assert isinstance(batch, JobData)
     assert batch.data_id == "math:data:1"
-    prepared = prepare_slime_job(batch, TrainingMethod("opd"), {}, StepScheduling(), step_size=1)
+    # The teacher reads the student's own sequence: its request names no messages.
+    (sample,) = batch.samples
+    assert sample.metadata["teacher"] == TeacherRequest().as_json()
+    # The training component renders the student, and the teacher sequence is that same sequence.
+    template = CharTemplate()
+    rendered, left_out = rendered_job_data(batch, template)
+    assert left_out == ()
+    tokens = template.render([*QUESTION, {"role": "assistant", "content": REPLY}], None, prompt=False)
+    prepared = prepare_slime_job(rendered, TrainingMethod("opd"), {}, StepScheduling(), step_size=1)
     payload = prepared.payload
     assert payload is not None
     assert "advantages" not in payload
-    assert payload["samples"] == [["i1", TOKENS, [1, 1, 1], [-0.1, -0.2, -0.3], 0.0, TOKENS, 1.0]]
+    # No rollout log-probabilities: Slime recomputes them with the training weights.
+    assert payload["samples"] == [["i1", tokens, [1], [], 0.0, tokens, 1.0]]
     data = to_slime_rollout_data(payload)
-    assert data["teacher_tokens"] == data["tokens"] == [TOKENS]
-    assert data["response_lengths"] == [3]
+    assert data["teacher_tokens"] == data["tokens"] == [tokens]
+    assert data["response_lengths"] == [1]
     assert data["distill_sample_weights"] == [1.0]
 
 
@@ -109,8 +115,8 @@ def test_recipe_resolves_and_rejects_multiple_epochs() -> None:
     spec = recipe.training_spec()
     assert (spec.objective, spec.loss_family) == ("opd", "opd")
     pipeline = recipe.build_pipeline(PipelineContext("math", TeacherContextReport))
-    assert isinstance(pipeline.record2record, ExclusiveReportRecord2Record)
     assert isinstance(pipeline.record2sample, OPDSamples)
+    assert pipeline.record2sample.exclusive_sources, "each report owns its inference records"
     assert isinstance(pipeline.sample2job, DistillJobData)
     assert OpdObjective.rollout_unit == "sample"
     with pytest.raises(ValueError, match="epochs"):
@@ -147,11 +153,13 @@ def test_driver_parses_required_checkpoint_before_validating_defaults() -> None:
 
 
 @pytest.mark.unit
-def test_overflow_report_does_not_fill_the_batch() -> None:
-    limited = opd_pipeline(max_teacher_tokens=5)
+def test_a_sequence_over_the_teacher_window_is_left_out_when_the_component_renders() -> None:
+    limited = opd_pipeline(max_teacher_tokens=3)
     limited.push(inference())
     limited.push(report())
-    assert not limited.ready(1)
-    assert limited.operational_metrics()["teacher_overflow_reports"] == 1
-    # The skipped report and its inference are released.
-    assert {"r1", "i1"} <= limited.releasable_record_ids()
+    batch = limited.build_job_data(1)
+    assert batch.samples[0].metadata["teacher"] == TeacherRequest(max_tokens=3).as_json()
+    # The student's sequence renders to more than three tokens, so the component leaves the sample out.
+    rendered, left_out = rendered_job_data(batch, CharTemplate())
+    assert left_out == (0,)
+    assert rendered.samples == ()

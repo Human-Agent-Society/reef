@@ -42,21 +42,17 @@ inference:
       repetition_penalty: 1.0
 recipe:
   implementation: recipes.sdpo.recipe:SDPORecipe
-# The sdpo recipe's three stages. Each config is the stage's own, keyed as the stage reads it.
+# The sdpo recipe's two stages. Each config is the stage's own, keyed as the stage reads it.
 pipeline:
-  # The staleness limit, and the sampling grid: one step is groups_per_step questions by rollouts_per_group attempts.
-  record2record:
+  # The staleness limit, the sampling grid (one step is groups_per_step questions by rollouts_per_group attempts),
+  # and the teacher's windows.
+  record2sample:
     config:
       max_staleness: 0               # on-policy: the stage waits for each step's release before sampling again
       groups_per_step: 32            # MUST equal the stage's SDPO_GROUPS_PER_STEP
       rollouts_per_group: 8          # MUST equal the stage's SDPO_ROLLOUTS_PER_GROUP
-  # The teacher's tokenizer and windows.
-  record2sample:
-    config:
-      tokenizer_path: ${SDPO_MODEL_PATH}
       max_teacher_prompt_tokens: 10240  # the reference's max_reprompt_len
-      max_teacher_tokens: 18944         # the trainer's seq-length; a longer teacher sequence fails the step
-      enable_thinking: false
+      max_teacher_tokens: 18944         # the trainer's seq-length; a longer teacher sequence does not train
   # What the teacher reads: a correct sibling's response, and the feedback when enabled.
   sample2job:
     config:
@@ -85,6 +81,8 @@ training:
     reef-checkpoint-policy: "${training.config.checkpoint_retention.policy}"
     megatron-to-hf-mode: bridge
     hf-checkpoint: "${inference.model-path}"
+    # The chat template's arguments, as the serving engine renders: the component renders each sample with them.
+    apply-chat-template-kwargs: '{"enable_thinking": false}'
     load: "${training.config.checkpoint_dir}/megatron"
     save: "${training.config.checkpoint_dir}/megatron"
     save-interval: "1"
@@ -134,7 +132,6 @@ training:
     # The sdpo loss family: the backend's distillation loss against an EMA
     # teacher that rereads the question with a successful sibling's response.
     loss-type: custom_loss
-    use-rollout-logprobs: true
     disable-compute-advantages-and-returns: true
     num-steps-per-rollout: "1"
     n-samples-per-prompt: "1"

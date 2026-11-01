@@ -100,8 +100,9 @@ def sao_sample_row(sample: TrajectorySample) -> list[Any]:
         list(sample.training.get("loss_mask", [])),
         list(sample.training.get("rollout_log_probs", [])),
         trajectory_reward(sample),
-        list(sample.training.get("action_mask", [])),
-        sample.training.get("artifact_id", None),
+        # A rendered sample's actions are the tokens that it trains.
+        list(sample.training.get("action_mask") or sample.training.get("loss_mask", [])),
+        sample.artifact_id,
         sample.training.get("rollout_created_at", None),
     ]
 
@@ -149,7 +150,6 @@ def build_sao_rollout_data(
             row_log_probs,
             reward,
             action_mask=row_action_mask,
-            require_log_probs=True,
         )
         if row_action_mask is None:
             raise RuntimeError("validated SAO sample has no action mask")
@@ -170,7 +170,6 @@ def build_sao_rollout_data(
 class SaoAlgorithm(SlimeAlgorithm):
     loss_family = "sao"
     loss_type = "policy_loss"
-    requires_rollout_logprobs = True
     advantages = "forbidden"
     # SAO deliberately runs Slime's pre-train pass: the critic supplies
     # values, then the registered skip-observation GAE hook constructs the

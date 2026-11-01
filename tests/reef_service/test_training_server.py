@@ -369,7 +369,6 @@ def test_build_dispatcher_refuses_an_activation_section_for_a_preset(stub_reposi
 def test_build_dispatcher_hands_the_pipeline_section_to_the_recipe(stub_repository, tmp_path) -> None:
     generator = {"module": "tests.reef_recipe.test_generated_tasks:ScriptedGenerator", "config": {"count": 1}}
     pipeline = {
-        "record2record": {"module": "reef.recipe.generated_tasks:GeneratedTaskRecord2Record", "config": {}},
         "record2sample": {
             "module": "reef.recipe.generated_tasks:GeneratedTaskSamples",
             "config": {"generator": generator},
@@ -386,9 +385,6 @@ def test_build_dispatcher_hands_the_pipeline_section_to_the_recipe(stub_reposito
     # A stage the section leaves out is the recipe's own, with no config.
     assert stages is not None and stages.sample2job.plugin_class.__name__ == "GeneratedTaskJobData"
     assert stages.sample2job.config == {}
-    assert (
-        stages.record2record is not None and stages.record2record.plugin_class.__name__ == "GeneratedTaskRecord2Record"
-    )
     assert stages.record2sample is not None and stages.record2sample.plugin_class.__name__ == "GeneratedTaskSamples"
     assert stages.record2sample.config == {"generator": generator}
 
@@ -464,13 +460,13 @@ def test_build_dispatcher_treats_sao_as_training_recipe(stub_repository, tmp_pat
 
 
 @pytest.mark.unit
-def test_build_dispatcher_gives_max_staleness_to_the_record_stage_only(stub_repository, tmp_path) -> None:
-    pipeline = {"record2record": {"config": {"max_staleness": 2}}}
+def test_build_dispatcher_gives_max_staleness_to_the_record_to_sample_stage_only(stub_repository, tmp_path) -> None:
+    pipeline = {"record2sample": {"config": {"max_staleness": 2}}}
     dispatcher = build(tmp_path, recipe=OPENCLAWRL_RECIPE, pipeline_settings=pipeline)
 
-    # The window belongs to the record-to-record stage; the training component never receives it.
+    # The window belongs to the record-to-sample stage; the training component never receives it.
     assert "max_staleness" not in dispatcher.recipe.training_component.component.config
-    assert dispatcher.recipe.build_pipeline(PipelineContext("s")).record2record.max_staleness == 2
+    assert dispatcher.recipe.build_pipeline(PipelineContext("s")).record2sample.max_staleness == 2
 
 
 @pytest.mark.unit
