@@ -550,7 +550,8 @@ class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
             self._manifest.write(
                 content_id=root.ref.content_id, parent_release_id=None, source={"kind": "root"}, metadata=metadata
             )
-            commit = self._workspace.commit("register scenario")
+            # Identical roots registered in the same second still need distinct release IDs.
+            commit = self._workspace.commit(f"register scenario {uuid.uuid4().hex}")
             try:
                 self._workspace.push(f"{commit}:{self.ref_name}")
             except ArtifactPublicationError:

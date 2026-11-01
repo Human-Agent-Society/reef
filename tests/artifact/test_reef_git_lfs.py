@@ -342,13 +342,19 @@ def test_a_fresh_workspace_publishes_with_real_lfs_over_objects_it_never_fetched
 
 
 @pytest.mark.integration
-def test_archiving_a_scenario_renames_its_ref_and_drops_its_work_clone(tmp_path: Path, fake_git_lfs: None) -> None:
+def test_archiving_a_scenario_renames_its_ref_and_drops_its_work_clone(
+    tmp_path: Path, fake_git_lfs: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The factory's archive moves ``refs/reef/scenarios/<name>`` under ``refs/reef/archived`` and removes
     the scenario's work clone; other scenarios stay, and the name is free again."""
+    # Fix both Git timestamps so identical roots cannot differ only because time passed.
+    monkeypatch.setenv("GIT_AUTHOR_DATE", "2026-01-01T00:00:00Z")
+    monkeypatch.setenv("GIT_COMMITTER_DATE", "2026-01-01T00:00:00Z")
     remote = tmp_path / "artifacts.git"
     factory = GitLFSRepositoryBackend.factory(remote, work_dir=tmp_path / "work", cache_dir=tmp_path / "cache")
-    factory("kept").register(root_tree(tmp_path / "kept-root"), metadata={})
+    kept_ref = factory("kept").register(root_tree(tmp_path / "kept-root"), metadata={})
     doomed_ref = factory("doomed").register(root_tree(tmp_path / "doomed-root"), metadata={})
+    assert kept_ref.release_id != doomed_ref.release_id
     assert set(factory.list_registrations()) == {"doomed", "kept"}
     encoded = base64.urlsafe_b64encode(b"doomed").decode().rstrip("=")
     assert (tmp_path / "work" / encoded).is_dir()
