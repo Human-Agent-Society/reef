@@ -113,7 +113,7 @@ def test_an_unknown_scenario_is_404_and_creates_nothing(tmp_path: Path) -> None:
 
 def test_requests_beyond_eight_are_accepted_and_pending_status_tracks_consumption(tmp_path: Path) -> None:
     method, entered, release = blocking_method()
-    dispatcher = harness_dispatcher(tmp_path, manual_recipe(tmp_path, method, batch_size=3))
+    dispatcher = harness_dispatcher(tmp_path, manual_recipe(tmp_path, method, job_samples=3))
 
     async def run() -> None:
         scenario = dispatcher.get_or_create_scenario("agents")
@@ -137,7 +137,7 @@ def test_requests_beyond_eight_are_accepted_and_pending_status_tracks_consumptio
             assert status.status == 200, await status.text()
             processor = (await status.json())["scenarios"]["agents"]["processor"]
             assert processor["pending_instructions"] == 9
-            # job_samples defaults to evolution.batch_size; the default buffer holds the data of one job.
+            # The recipe sets job_samples 3; the default buffer holds the data of one job.
             assert (processor["ready_samples"], processor["job_samples"], processor["buffer_size"]) == (0, 3, 3)
             assert len(scenario.instructions.queued()) == 9
             # Retrying an accepted instruction does not add another pending request.

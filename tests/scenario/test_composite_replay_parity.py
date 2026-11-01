@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from collections.abc import Hashable
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -100,7 +101,7 @@ def session_pipeline(context: PipelineContext) -> TrainingPipeline:
     return TrainingPipeline(
         context,
         record2sample=_SessionSamples(_SessionJudging(), JudgedAtOnce()),
-        sample2job=SessionJobData(context, None, None),
+        sample2job=SessionJobData(context, None, 1),
     )
 
 
@@ -133,7 +134,7 @@ class _StepSamples(ThresholdSamples):
 def step_pipeline(context: PipelineContext) -> TrainingPipeline:
     """TTTD's shape: a step is one group of two (step, slot) reports, sources are exclusive, a step with a report
     marked mixed is discarded once complete, and a report that names no step is another role's and released."""
-    return threshold_pipeline(context, record2sample=_StepSamples(context))
+    return threshold_pipeline(context, job_samples=1, record2sample=_StepSamples(context))
 
 
 def tttd_pipeline(context: PipelineContext) -> TrainingPipeline:
@@ -142,7 +143,7 @@ def tttd_pipeline(context: PipelineContext) -> TrainingPipeline:
     return TrainingPipeline(
         context,
         record2sample=record2sample,
-        sample2job=TTTDJobData(context, record2sample, None, None),
+        sample2job=TTTDJobData(context, record2sample, None, 1),
     )
 
 
@@ -175,7 +176,6 @@ class _Recipe(_TwoTrainerRecipe):
                     algorithm_state=algorithm_states.get(component),
                     experiment_logger=experiment_logger,
                     report_type=TTTDGroupedRolloutReport if pipelines[component] is tttd_pipeline else None,
-                    default_job_samples=1,
                     samples=None if samples is None else TrainerSamples(samples, component),
                 ),
             )
@@ -263,7 +263,9 @@ def _stored(scenario) -> list[str]:
 
 
 def _retry_after_a_sibling_commit(tmp_path: Path, reload: bool) -> tuple[Any, ...]:
-    dispatcher = _dispatcher(tmp_path, {WEIGHTS: threshold_pipeline, HARNESS: session_pipeline})
+    dispatcher = _dispatcher(
+        tmp_path, {WEIGHTS: partial(threshold_pipeline, job_samples=1), HARNESS: session_pipeline}
+    )
     try:
         scenario = dispatcher.get_or_create_scenario("agent")
         for record in (_turn("X", "u", 1), _turn("X2", "u", 2), _turn("A", "s", 1, declined=True), _report("rA", "A")):
@@ -291,7 +293,7 @@ def test_a_retry_a_session_processor_retired_stays_retired_after_a_reload(tmp_pa
 
 
 def _discarded_step(tmp_path: Path, reload: bool) -> tuple[Any, ...]:
-    dispatcher = _dispatcher(tmp_path, {WEIGHTS: threshold_pipeline, HARNESS: step_pipeline})
+    dispatcher = _dispatcher(tmp_path, {WEIGHTS: partial(threshold_pipeline, job_samples=1), HARNESS: step_pipeline})
     try:
         scenario = dispatcher.get_or_create_scenario("agent")
         _append(scenario, _step_nine())
@@ -362,7 +364,7 @@ def test_an_inference_released_with_another_roles_report_stays_released_after_a_
 
 
 def _retry_at_a_discarded_step(tmp_path: Path, point: str, reload: bool) -> tuple[Any, ...]:
-    dispatcher = _dispatcher(tmp_path, {WEIGHTS: threshold_pipeline, HARNESS: step_pipeline})
+    dispatcher = _dispatcher(tmp_path, {WEIGHTS: partial(threshold_pipeline, job_samples=1), HARNESS: step_pipeline})
     try:
         scenario = dispatcher.get_or_create_scenario("agent")
         records = [
@@ -436,7 +438,7 @@ def _tttd_report(record_id: str, reference: str, rollout: int, score: float) -> 
 
 
 def _tttd_failed_step(tmp_path: Path, reload: bool) -> tuple[Any, ...]:
-    dispatcher = _dispatcher(tmp_path, {WEIGHTS: threshold_pipeline, HARNESS: tttd_pipeline})
+    dispatcher = _dispatcher(tmp_path, {WEIGHTS: partial(threshold_pipeline, job_samples=1), HARNESS: tttd_pipeline})
     try:
         scenario = dispatcher.get_or_create_scenario("agent")
         # Step 0 spans two releases: TTTD fails it.

@@ -89,7 +89,6 @@ def meta_harness_sections(tmp_path: Path, *, adapter: str = "pi", **method: Any)
             "seed": str(seed),
             "state_dir": str(tmp_path / "harness"),
             "method": {"module": "recipes.meta_harness:MetaHarness", "config": dict(method)},
-            "batch_size": 1,
             "evaluation": {
                 "tasks": [TASK],
                 "scorer": "tests.support.harness_methods:MarkerScorer",

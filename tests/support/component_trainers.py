@@ -196,9 +196,9 @@ class _TwoTrainerRecipe(Recipe):
     def pipeline_for(self, component: str, context: PipelineContext) -> TrainingPipeline:
         if component in self.auto_only_components:
             return threshold_pipeline(
-                context, sample2job=AutoOnlyThresholdJobData(context, None, None), max_staleness=MAX_STALENESS
+                context, sample2job=AutoOnlyThresholdJobData(context, None, 1), max_staleness=MAX_STALENESS
             )
-        return threshold_pipeline(context, max_staleness=MAX_STALENESS)
+        return threshold_pipeline(context, job_samples=1, max_staleness=MAX_STALENESS)
 
     def build_trainers(
         self,
@@ -231,7 +231,6 @@ class _TwoTrainerRecipe(Recipe):
                     job_loop=HeldJobLoop(backend, scenario=scenario),
                     algorithm_state=algorithm_states.get(component),
                     experiment_logger=experiment_logger,
-                    default_job_samples=1,
                     samples=samples_for(component),
                 ),
             )
@@ -248,7 +247,6 @@ class _TwoTrainerRecipe(Recipe):
             job_loop=JobLoop(training, scenario=scenario),
             algorithm_state=algorithm_states.get(WEIGHTS),
             experiment_logger=experiment_logger,
-            default_job_samples=1,
             samples=samples_for(WEIGHTS),
         )
         return (ComponentTrainer(WEIGHTS, weights), *trainers)

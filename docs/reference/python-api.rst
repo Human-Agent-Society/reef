@@ -94,10 +94,7 @@ Two other extension points have separate names and purposes:
   training component; the harness recipe's ``HarnessTrainingComponent``
   (``reef.train.harness_backend.component``) runs each harness step's
   ``HarnessBackend`` as one job, in the training service.
-  ``Trainer.build(..., default_job_samples=...)`` takes the default
-  ``job_samples`` of the sample-to-job stage: a harness recipe passes
-  ``evolution.batch_size``, and a weight recipe passes none, so its
-  deployment sets ``pipeline.sample2job.config.job_samples``.
+  The trainer's job size is its sample-to-job stage's ``job_samples``.
 - ``reef.runtime.interfaces.InferenceHandler`` executes one buffered or streaming
   request. Runtime and recipe objects expose it as ``inference_handler``;
   ``create_app`` and ``build_app`` accept the same keyword for an injected
@@ -1180,9 +1177,9 @@ sample2job=...)``):
   job data of one pipeline. It is not a training step.
   ``Sample2Job.__init__(context, buffer_size, job_samples, *, max_job_samples=None)``
   sets the most samples that one job takes from the buffer and the fewest
-  samples of one job. A ``job_samples`` of ``None`` takes
-  ``context.default_job_samples``; a ``buffer_size`` of ``None`` takes
-  ``job_samples``. The constructor raises ``PluginConfigError`` for
+  samples of one job. A ``job_samples`` of ``None`` is a stage that sets no
+  job size, which ``Trainer.build`` refuses for a trainer that trains; a
+  ``buffer_size`` of ``None`` takes ``job_samples``. The constructor raises ``PluginConfigError`` for
   a buffer smaller than ``job_samples`` and for a ``job_samples`` above
   ``max_job_samples`` (an SDPO or TTTD grid).
   ``Trainer.build`` raises ``PluginConfigError`` for a training trainer whose

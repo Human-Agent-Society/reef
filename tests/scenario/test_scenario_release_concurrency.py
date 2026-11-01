@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from threading import Event
 
@@ -66,11 +67,10 @@ class _LocalRecipe(Recipe):
         return Trainer.build(
             scenario,
             records,
-            pipeline_factory=threshold_pipeline,
+            pipeline_factory=partial(threshold_pipeline, job_samples=1),
             job_loop=JobLoop(self.backend, scenario=scenario),
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
-            default_job_samples=1,
         )
 
 

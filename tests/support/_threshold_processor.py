@@ -64,6 +64,7 @@ def threshold_pipeline(
     context: PipelineContext,
     *,
     buffer_size: int | None = None,
+    job_samples: int | None = None,
     accept_multi_turn: bool = False,
     grouping: ReportGrouping | None = None,
     record2sample: Record2Sample | None = None,
@@ -73,6 +74,7 @@ def threshold_pipeline(
     """Every report by itself (or in ``grouping``'s groups), one sample each, batched by ``ThresholdJobData`` (or
     ``sample2job``). ``record2sample`` replaces the ``ThresholdSamples`` stage.
 
+    ``job_samples`` is the job size of the default sample-to-job stage, and
     ``max_staleness`` is the staleness limit of the default stage.
     """
     settings = SampleAssemblySettings(accept_multi_turn_policy_samples=accept_multi_turn, max_staleness=max_staleness)
@@ -81,5 +83,5 @@ def threshold_pipeline(
         record2sample=(
             ThresholdSamples(context, settings, grouping=grouping) if record2sample is None else record2sample
         ),
-        sample2job=ThresholdJobData(context, buffer_size, None) if sample2job is None else sample2job,
+        sample2job=ThresholdJobData(context, buffer_size, job_samples) if sample2job is None else sample2job,
     )
