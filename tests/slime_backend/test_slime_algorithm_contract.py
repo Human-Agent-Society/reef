@@ -54,8 +54,9 @@ class _TestAlgorithm(SlimeAlgorithm):
         pass
 
 
-#: The cookbook families plus the built-in sft and slime families and the plain one tests/conftest.py registers.
-_ALL_FAMILIES = ("opd", "openclawrl", "pg", "sao", "sdft", "sdpo", "sft", "slime", "tttd")
+#: The cookbook families, the built-in importance_sampling, sft and slime families, and the plain one
+#: tests/conftest.py registers.
+_ALL_FAMILIES = ("importance_sampling", "opd", "openclawrl", "pg", "sao", "sdft", "sdpo", "sft", "slime", "tttd")
 
 
 @pytest.mark.unit
@@ -63,6 +64,7 @@ def test_registry_is_the_complete_slime_loss_family_surface() -> None:
     assert LOSS_FAMILIES.names == _ALL_FAMILIES
     assert resolve_loss_family("sft").loss_type == "sft_loss"
     assert resolve_loss_family("tttd").loss_type == "custom_loss"
+    assert resolve_loss_family("importance_sampling").loss_type == "custom_loss"
     assert resolve_loss_family("openclawrl").loss_type == "custom_loss"
     assert resolve_loss_family("sdft").loss_type == "custom_loss"
     assert resolve_loss_family("sdpo").loss_type == "custom_loss"

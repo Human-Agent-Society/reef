@@ -23,6 +23,8 @@ torch = pytest.importorskip("torch")
 from recipes.sao.slime import SaoAlgorithm
 from recipes.sao.slime.objective import compute_sao_loss
 from reef.train.slime_backend.algorithm import PolicyGradientWeight
+from reef.train.slime_backend.importance_sampling import ImportanceSamplingAlgorithm
+from reef.train.slime_backend.importance_sampling.objective import truncated_importance_sampling
 from reef.train.slime_backend.score_centering import ScoreCenteringSettings
 from reef.train.slime_backend.score_centering.heads import PADDING_LOG_PROB
 from reef.train.slime_backend.score_centering.term import centering_term, importance_weight
@@ -211,6 +213,34 @@ def test_sao_loss_plus_its_declared_weight_centers_its_own_score() -> None:
         trainer_at[:, :-1], torch.gather(sampler_log_probs, -1, head_ids), advantages, weight, MIN_TAIL_MASS
     )
     (sao_losses + result.term).sum().backward()
+
+    torch.testing.assert_close(
+        logits.grad, reference_gradient(trainer_logits, sampler_log_probs, sampled, advantages, weight)
+    )
+
+
+@pytest.mark.unit
+def test_importance_sampling_loss_plus_its_declared_weight_centers_its_own_score() -> None:
+    # The importance_sampling family truncates the ratio at --tis-clip; the weight it declares must be that
+    # truncation, so its loss plus the term is the paper's TIS + SC gradient with that cap.
+    weight = ImportanceSamplingAlgorithm().policy_gradient_weight(SimpleNamespace(tis_clip=1.2))
+    assert weight == PolicyGradientWeight("truncated", upper=1.2)
+    trainer_logits, sampler_log_probs = distributions(11, rows=6, mismatch=0.4)
+    rows = trainer_logits.size(0)
+    head_ids = torch.arange(VOCAB).expand(rows, VOCAB).contiguous()
+    sampled = torch.tensor([0, 1, 2, 3, 4, 5])
+    advantages = torch.tensor([1.0, -1.0, 0.5, 2.0, -0.3, 1.5], dtype=torch.float64)
+    ratios = (torch.softmax(trainer_logits, -1) / sampler_log_probs.exp()).gather(-1, sampled[:, None])[:, 0]
+    assert bool((ratios > 1.2).any()) and bool((ratios < 1.2).any())
+
+    logits = trainer_logits.detach().clone().requires_grad_(True)
+    trainer_at = gather_log_probs_at_ids(logits, torch.cat([head_ids, sampled[:, None]], -1), None, 1, 0)
+    sampled_rollout = sampler_log_probs.gather(-1, sampled[:, None])[:, 0]
+    losses, _ = truncated_importance_sampling(trainer_at[:, -1], sampled_rollout, advantages, 1.2)
+    result = centering_term(
+        trainer_at[:, :-1], torch.gather(sampler_log_probs, -1, head_ids), advantages, weight, MIN_TAIL_MASS
+    )
+    (losses + result.term).sum().backward()
 
     torch.testing.assert_close(
         logits.grad, reference_gradient(trainer_logits, sampler_log_probs, sampled, advantages, weight)
