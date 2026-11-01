@@ -86,9 +86,10 @@ def local_scenario(tmp_path):
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
         coordination=memory_coordination(),
-        # No samples worker: the test makes the samples and commits each step itself, so no worker that the store
-        # watcher wakes commits the same result.
+        # The test makes the samples and commits each step itself. No samples worker makes them, and control's local
+        # training workers run no cycle: a woken worker would prepare and commit the same result as the test.
         components=frozenset(SERVICE_COMPONENTS) - {"samples"},
+        hold_local_cycles=True,
     )
     scenario = dispatcher.get_or_create_scenario("math")
     assert scenario is not None
