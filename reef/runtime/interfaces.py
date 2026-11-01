@@ -445,6 +445,13 @@ class InferenceHandler(ABC):
         (``ServedArtifact.model_name``). The default names it as the request's ``model``."""
         return {**payload, "model": model_name}
 
+    def request_payload(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        """The provider request body that the engine receives for the client's body ``payload``, before
+        ``address_model``: a new dict, with the values that the handler sets itself, such as fixed sampling values.
+        The inference service sends it and records it. ``ValueError`` for a body that the handler refuses. The
+        default is ``payload`` unchanged."""
+        return dict(payload)
+
     async def inference_stream(self, artifact: Artifact, path: str, payload: dict[str, Any]) -> InferenceStream:
         """Return a stream for one native request payload.
 
