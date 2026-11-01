@@ -22,12 +22,11 @@ from reef.recipe import Recipe
 from reef.runtime.jobs import SavedCheckpoint, TrainingJob
 from reef.scenario import Scenario
 from reef.scenario.admission import LoadAdmission, LoadedScenario, ScenarioAdmission, ScenarioLimits
+from reef.storage.scenario import ScenarioSettings
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train import Trainer
 from reef.train.jobs import JobLoop
-
-MODEL_CONFIG = {"url": "http://127.0.0.1:9", "model": "custom-model"}
 
 
 class StepJobs(StubTrainingComponent):
@@ -138,10 +137,9 @@ def trained(dispatcher: Dispatcher, name: str, step: int) -> Scenario:
 
 
 @pytest.mark.unit
-def test_idle_scenario_unloads_and_loads_again_with_its_history_and_model(tmp_path) -> None:
+def test_idle_scenario_unloads_and_loads_again_with_its_history(tmp_path) -> None:
     dispatcher = make_dispatcher(tmp_path, backend=StepJobs(tmp_path / "candidates"))
     try:
-        dispatcher.configure_scenario_model("math", MODEL_CONFIG, create=True)
         before = trained(dispatcher, "math", 1)
         releases = before.releases()
 
@@ -155,7 +153,6 @@ def test_idle_scenario_unloads_and_loads_again_with_its_history_and_model(tmp_pa
         assert after is not None and after is not before
         assert after.scenario_step == 3
         assert after.releases() == releases
-        assert after.model_config.view() == {**MODEL_CONFIG, "api": "openai"}
         assert [row["agent_record_id"] for row in dispatcher.read_records("math")["records"]] == ["i1", "r1"]
         # The reloaded scenario trains on, with a new local worker.
         trained(dispatcher, "math", 2)
@@ -297,10 +294,10 @@ def test_registration_limit_refuses_a_new_scenario_and_stores_nothing(tmp_path) 
         with pytest.raises(ScenarioLimitReached, match=r"reef\.max_scenarios"):
             dispatcher.get_or_create_scenario("b")
         with pytest.raises(ScenarioLimitReached):
-            dispatcher.configure_scenario_model("b", MODEL_CONFIG, create=True)
+            dispatcher.create_scenario("b")
 
         assert not dispatcher.has_scenario("b")
-        assert storage.read_settings("b").model_config is None
+        assert storage.read_settings("b") == ScenarioSettings()
     finally:
         dispatcher.close()
 

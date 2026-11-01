@@ -67,12 +67,25 @@ The base artifact's ``artifact_id`` is the ID of the repository's base release. 
 
 Reef reads the model and the seed only to make the base artifact. When a restart configures another model path or another seed, Reef refuses to start and names both values. To change the base, restore the configuration, or start a new deployment with a new artifact repository. Reef also refuses an artifact repository that an older Reef made, because its base was not imported. Start such a deployment with a new artifact repository.
 
-Choose a starting release
+Choose a scenario's start
 -------------------------
 
 The default inference routes answer from the scenario's active release. No request header keeps a client on an older release. To keep an older artifact answering, serve it beside the active release (`Serve an artifact beside the active release`_).
 
-A new scenario starts from the base artifact. To start it from another release, create it with ``POST /reef/scenarios`` and ``{"name": "<scenario>", "release_id": "<id>"}``. A report or a record import that creates the scenario can carry ``x-reef-release-id: <id>`` instead. On a scenario that already exists, the header must name the bound starting release. Otherwise, Reef refuses the request with HTTP 409. `Headers <../reference/http-api.rst#headers>`__ in the HTTP API lists this header. An inference request never creates a scenario.
+A new scenario starts from the base artifact. To start it from another artifact, name an artifact item of the scenario's owner in ``artifact_id`` when you create the scenario:
+
+.. code:: bash
+
+   curl -sS -X POST -H "Authorization: Bearer $REEF_TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{"name": "code-repair-2", "owner": "acme", "artifact_id": "code-repair/<artifact_id>"}' \
+     "$REEF_URL/reef/scenarios"
+
+The owner's artifact library holds the item ``<scenario>/<artifact_id>`` for each artifact that a scenario of the owner lists. It also holds the artifact items that you stored, such as an upload to S3 or a Hugging Face snapshot (`Data items <../reference/http-api.rst#data-items>`__). Reef imports the item as `Import an artifact`_ describes. Then it makes the import the active artifact of its component, and the training start of that component when its trainer can start from an artifact. Add ``component`` when the scenario has several components. The answer's ``artifact_id`` names the imported artifact.
+
+When Reef refuses the import, it deletes the new scenario and answers with the status of the import, such as HTTP 400 for a directory without the release layout. The name is then free again. A scenario that already exists ignores ``artifact_id`` and ``component``.
+
+A report or a record import that creates the scenario can carry ``x-reef-release-id: <id>``: the new scenario then starts from that release of the deployment's repository. On a scenario that already exists, the header must name the bound starting release. Otherwise, Reef refuses the request with HTTP 409. `Headers <../reference/http-api.rst#headers>`__ in the HTTP API lists this header. An inference request never creates a scenario.
 
 To pull a specific harness release, add ``?release_id=<id>`` to the harness manifest route. To serve an earlier artifact again, activate it as `Activate an artifact`_ describes.
 

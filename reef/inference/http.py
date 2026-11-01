@@ -11,7 +11,6 @@ from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
-from urllib.parse import urlparse
 
 from reef.artifact.artifact import Artifact
 from reef.core.config import config_option
@@ -36,9 +35,6 @@ HOP_BY_HOP_HEADERS = frozenset(
 
 #: Provider API dialects the proxy can describe to the training side.
 PROVIDER_APIS = ("openai", "responses", "anthropic")
-
-#: Keys a per-scenario model override may carry.
-MODEL_CONFIG_KEYS = frozenset({"url", "model", "api"})
 
 # -- Request headers ----------------------------------------------------------
 
@@ -217,29 +213,6 @@ class InferenceProxyRuntime(InferenceRuntime):
             error_label="inference provider",
         )
 
-    @classmethod
-    def from_model_config(cls, value: object, *, api_key: str | None = None) -> InferenceProxyRuntime | None:
-        """Validate a per-scenario model override and build its proxy runtime. A scenario names the engine only;
-        ``api_key`` is the deployment's provider key, the one credential that reaches an engine."""
-        if value is None:
-            return None
-        if not isinstance(value, Mapping) or set(value) - MODEL_CONFIG_KEYS:
-            raise ValueError("model must be null or an object with url, model and api")
-        for name in ("url", "model"):
-            if not _clean_text(value.get(name)) or not value[name].strip():
-                raise ValueError(f"model.{name} must be a non-empty string without control characters")
-        url = value["url"].strip()
-        if not _plain_http_url(url):
-            raise ValueError("model.url must be an HTTP(S) URL without credentials, query or fragment")
-        api = value.get("api", "openai")
-        if api not in PROVIDER_APIS:
-            raise ValueError("model.api must be openai, responses or anthropic")
-        return cls(base_url=url, model_path=value["model"].strip(), api=api, api_key=api_key)
-
-    def model_config(self) -> dict[str, str]:
-        """The per-scenario model override that ``from_model_config`` builds this runtime from, without its key."""
-        return {"url": self.base_url, "model": self._model_path, "api": self._api}
-
     @property
     def model_path(self) -> str:
         return self._model_path
@@ -262,23 +235,6 @@ class InferenceProxyRuntime(InferenceRuntime):
 
     def activate_checkpoint(self, artifact: Artifact, *, scenario: str | None = None) -> str:
         return artifact.ref.release_id
-
-
-def _clean_text(value: object) -> bool:
-    """A string with no control characters (which would corrupt headers or logs)."""
-    return isinstance(value, str) and not any(ord(character) < 32 for character in value)
-
-
-def _plain_http_url(url: str) -> bool:
-    parsed = urlparse(url)
-    return (
-        parsed.scheme in ("http", "https")
-        and bool(parsed.netloc)
-        and not parsed.username
-        and not parsed.password
-        and not parsed.query
-        and not parsed.fragment
-    )
 
 
 @dataclass(frozen=True)

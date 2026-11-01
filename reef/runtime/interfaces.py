@@ -619,8 +619,8 @@ class InferenceRuntime(AdapterWeightRuntime):
 
     @property
     def provider_key(self) -> str | None:
-        """The key with which the runtime calls a provider, which a scenario's own model is called with too; the
-        default is None, for a runtime that calls no provider."""
+        """The key with which the runtime calls a provider; the default is None, for a runtime that calls no
+        provider."""
         return None
 
     @property

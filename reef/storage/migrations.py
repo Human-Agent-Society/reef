@@ -5,13 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import re
-import shutil
 import time
-import uuid
 from collections import defaultdict
-from collections.abc import Mapping, Sequence
-from pathlib import Path
 
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
@@ -464,33 +459,10 @@ def migrate_generated_task_marks(connection: Connection, train_counts: Table) ->
     trained.drop(connection)
 
 
-def legacy_model_configs(directory: Path) -> dict[str, tuple[Mapping[str, object] | None, Path]]:
-    """Read the model configuration files that older versions kept beside the records.
+def migrate_scenario_settings(connection: Connection, settings: Table) -> None:
+    """Delete the ``model_config`` rows of ``settings``, the ``scenario_setting`` table: the per-scenario model
+    override that Reef no longer has (RFC #1062). A scenario that had one calls the deployment's model after this.
 
-    The result maps each scenario key (the SHA-256 of the scenario name) to the
-    stored value and its file. A ``null`` value selected the recipe's model.
+    Run in the caller's schema transaction, after ``create_all``. The other settings stay as they are.
     """
-    configs: dict[str, tuple[Mapping[str, object] | None, Path]] = {}
-    for path in sorted(directory.glob("*-model.json")):
-        if re.fullmatch(r"[0-9a-f]{64}-model\.json", path.name) is None:
-            continue
-        value = json.loads(path.read_text())
-        if value is not None and not isinstance(value, dict):
-            raise ValueError(f"model configuration file {path} must hold an object or null")
-        configs[path.name.removesuffix("-model.json")] = (value, path)
-    return configs
-
-
-def archive_imported_files(directory: Path, paths: Sequence[Path]) -> tuple[str, ...]:
-    """Move files whose content is now in the storage backend under ``archived/``; return the new locations."""
-    if not paths:
-        return ()
-    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-    destination = directory / "archived" / f"imported-{stamp}-{uuid.uuid4().hex}"
-    destination.mkdir(parents=True, exist_ok=True)
-    moved = []
-    for path in paths:
-        target = destination / path.name
-        shutil.move(str(path), str(target))
-        moved.append(str(target))
-    return tuple(moved)
+    connection.execute(settings.delete().where(settings.c.name == "model_config"))

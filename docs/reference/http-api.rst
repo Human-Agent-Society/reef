@@ -226,28 +226,6 @@ serves inference, and it does not change the record's ``artifact_ref``: the
 record names the release of the artifact that answered. This tag is separate
 from ``x-reef-release-id``, which binds a scenario to its starting release.
 
-Scenario model settings
------------------------
-
-``POST /reef/scenarios`` accepts an optional ``model`` object with ``url``,
-``model`` and ``api``. Reef calls that endpoint with the deployment's provider
-key (``inference.upstream-api-key``); a model object holds no key, and an
-``api_key`` field is HTTP 400. It applies only when creating a new
-scenario. Existing scenarios retain their settings on repeated creation.
-The creation response carries the scenario's ``model`` view.
-``POST /reef/scenarios/{scenario}/update`` accepts ``model`` alongside the
-other `scenario settings <#scenario-updates>`__. Send ``model: null`` to restore deployment
-defaults.
-
-See `Scenario model configuration <../user-guide/scenario-models.rst>`__ for
-protocols, persistence and model bindings used throughout evolution.
-
-``POST /reef/scenarios`` also accepts ``owner``: the owner whose `data items
-<#data-items>`__ the scenario uses. Without it, the owner is the scenario's
-name. A scenario gets its owner when Reef creates it. A later call with
-another ``owner`` returns 400 for a scenario that already uses data items.
-The creation response carries the scenario's ``owner``.
-
 Import records for cold-start learning
 --------------------------------------
 
@@ -582,7 +560,8 @@ To use an artifact item in a scenario, import it:
 scenario must belong to the item's owner. Reef reads the item's
 ``source_uri`` and imports the files as a new artifact of the scenario; the
 import's ``source`` names the item. An item without a ``source_uri`` returns
-400.
+400. A new scenario can also start from an artifact item: see `Create a
+scenario`_.
 
 Read, query, update and delete items
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1090,6 +1069,52 @@ A request can also need to load a scenario when the service already holds
 ``reef.max_loaded_scenarios`` loaded scenarios. If none of them is idle, the
 request returns HTTP 503 with a ``Retry-After`` header.
 
+Create a scenario
+~~~~~~~~~~~~~~~~~
+
+``POST /reef/scenarios`` takes the object ``{"name", "owner"?,
+"artifact_id"?, "component"?}``. Any other key is HTTP 400, and the message
+names the keys that the route takes:
+
+- ``name``: the scenario's name, a non-empty string.
+- ``owner``: the owner whose `data items <#data-items>`__ the scenario uses.
+  Without it, the owner is the scenario's name. A scenario gets its owner when
+  Reef creates it. A later call with another ``owner`` returns 400 for a
+  scenario that already uses data items.
+- ``artifact_id``: an `artifact item <#artifact-items>`__ of the owner that
+  the new scenario starts from. Without it, the scenario starts from the
+  deployment's base artifact.
+- ``component``: the component that the item is imported into. Leave it out
+  when the scenario has one component. It needs ``artifact_id``.
+
+With ``artifact_id``, Reef creates the scenario and imports the item as
+``POST /reef/scenarios/{scenario}/artifacts`` with ``{"item": "<id>"}`` does
+(`Import an artifact`_). Then it makes the import the active artifact of its
+component (`Activate an artifact`_). When the component's trainer can start
+from an artifact (``capabilities.train_from``), the import also becomes its
+training start (`Train from an artifact`_). When the import, the activation or
+the training start is refused, Reef deletes the scenario that the call made
+and answers with the status of that refusal, such as 400 for a directory
+without the component's layout or 404 for an item that the owner does not
+store. Then no scenario of that name exists.
+
+The answer is ``{scenario, owner, release_id, content_id}``: the active
+release after the start, and its content ID. With ``artifact_id``, it also
+holds ``artifact_id``, the scenario's ID of the imported artifact. The status
+is 201 when the call created the scenario. A scenario that exists already
+answers 200 with its active release, and Reef ignores ``artifact_id`` and
+``component``.
+
+.. code:: bash
+
+   curl -sS -X POST http://127.0.0.1:8900/reef/scenarios \
+     -H "Authorization: Bearer $REEF_TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{"name": "hello-reef-2", "owner": "acme", "artifact_id": "hello-reef/<artifact_id>"}'
+
+Scenario routes
+~~~~~~~~~~~~~~~
+
 If the deployment sets ``reef.allow_implicit_scenario_creation: false``, a
 report, a record import or a harness install for an unknown scenario also
 returns HTTP 404, and you create the scenario first:
@@ -1097,10 +1122,10 @@ returns HTTP 404, and you create the scenario first:
 +---------------------------------------------+---------------------------------------------+
 | Route                                       | Body and response                           |
 +=============================================+=============================================+
-| ``POST /reef/scenarios``                    | ``{"name", "release_id"?}``                 |
-|                                             | → ``{scenario, release_id,                  |
-|                                             | content_id}``; 201 created, 200 already     |
-|                                             | existed                                     |
+| ``POST /reef/scenarios``                    | ``{"name", "owner"?, "artifact_id"?,        |
+|                                             | "component"?}`` → ``{scenario, owner,       |
+|                                             | release_id, content_id, artifact_id?}``;    |
+|                                             | 201 created, 200 already existed            |
 +---------------------------------------------+---------------------------------------------+
 | ``GET /reef/scenarios``                     | every known scenario, its active release    |
 |                                             | once loaded and, for a harness recipe, the  |
@@ -1244,7 +1269,6 @@ Scenario updates
 body holds one or more of these settings. Reef rejects other fields:
 
 - ``training_mode``: the mode of the data processor, below.
-- ``model``: the scenario's model (`Scenario model settings`_).
 - ``artifact_evaluation``: the settings that Reef evaluates each new artifact
   with (`Automatic evaluation`_).
 - ``activation``: the scenario's activation rule, below.
@@ -1325,15 +1349,12 @@ scenario:
    {
      "scenario": "agents",
      "training_mode": "auto",
-     "model": null,
      "artifact_evaluation": {"harness": {"name": "terminus-2"}, "rollouts_per_task": 2},
      "activation": {"module": "evaluated", "config": {"min_mean_score": 0.8}},
      "effective_activation": {"module": "evaluated", "config": {"min_mean_score": 0.8}}
    }
 
-- ``training_mode`` and ``model`` are what the scenario runs. ``model`` is the
-  redacted view of `Scenario model settings`_, or null for the deployment's
-  model.
+- ``training_mode`` is what the scenario runs.
 - ``artifact_evaluation`` and ``activation`` are the stored settings, or null.
 - ``effective_activation`` is the rule that applies: the scenario's
   ``activation``, else the deployment's. When the deployment names a rule

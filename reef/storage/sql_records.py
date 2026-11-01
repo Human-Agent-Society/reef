@@ -1139,7 +1139,6 @@ class SQLRecordStore(RecordStore):
             rows = connection.execute(select(table.c.name, table.c.value_json).where(self._tables.condition(table)))
             values = {name: json.loads(value_json) for name, value_json in rows}
         return ScenarioSettings(
-            model_config=values.get("model_config"),
             training_mode=values.get("training_mode"),
             artifact_evaluation=values.get("artifact_evaluation"),
             activation=values.get("activation"),
@@ -1150,7 +1149,6 @@ class SQLRecordStore(RecordStore):
         """Replace the stored settings in one transaction; a ``None`` setting is not stored."""
         table = self._tables.settings
         values = {
-            "model_config": None if settings.model_config is None else dict(settings.model_config),
             "training_mode": settings.training_mode,
             "artifact_evaluation": (
                 None if settings.artifact_evaluation is None else dict(settings.artifact_evaluation)
