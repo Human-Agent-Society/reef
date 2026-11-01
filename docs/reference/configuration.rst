@@ -1027,10 +1027,10 @@ whose recipe component trains weights is deployed the way that recipe is.
 inference runtime serve every recipe component. A top-level ``pipeline`` or
 ``evaluation`` section goes to the recipe component that trains weights.
 
-The repository base keeps one directory per recipe component. Reef writes
-the recipes' seeds there. A bootstrap model snapshot goes under the directory
-of the recipe component that trains weights. A recipe component whose recipe
-seeds nothing starts empty. Each recipe component's trainer runs as its own
+A scenario's root release keeps one directory per recipe component. Reef
+writes each recipe component's default start there: its seed, and the model
+snapshot under the directory of the recipe component that trains weights. A
+recipe component whose recipe seeds nothing starts empty. Each recipe component's trainer runs as its own
 worker and commits into the same release chain. Every step therefore
 checkpoints, and the recipe components share one ``training_mode``. Reef
 admits a report when the contract of any recipe component accepts it. Each
@@ -1159,7 +1159,7 @@ that plays task directories (an npm ``install``) and
 
    evolution.method | required: the ``Method`` that evolves the tree, as ``package.module:ClassName`` or a mapping with ``module`` and ``config`` that the class method ``from_config`` receives; its ``step(context)`` makes each step's candidate
    evolution.adapter | pi | ``opencode``, ``claude``, ``codex``, ``dsh`` (DeepSeek Harness), ``hermes`` (Hermes Agent), ``native`` (Reef's own agent, whose tools, hook listeners, control flow graphs, delegate agents and loop code are tree files of the ``native_tool``, ``native_hook``, ``native_graph``, ``native_agent`` and ``native_loop`` parts), or an entry-point adapter, such as ``terminus`` from the Meta-Harness Terminal-Bench campaign
-   evolution.seed | the directory of the first tree: every regular file under it, at its relative path as its tree path; it becomes the base release of a new scenario, and an existing scenario keeps its head. Startup refuses a seed that fails validation for ``evolution.adapter``, holds a symbolic link, or holds a file that is not UTF-8 text. A relative path resolves against the Reef process's working directory. Unset, the empty tree, unless a recipe subclass sets its own (for example Reefine's starter skill)
+   evolution.seed | the directory of the first tree: every regular file under it, at its relative path as its tree path; a new scenario's root release holds it, and an existing scenario keeps its own root and head. Startup refuses a seed that fails validation for ``evolution.adapter``, holds a symbolic link, or holds a file that is not UTF-8 text. A relative path resolves against the Reef process's working directory. Unset, the empty tree, unless a recipe subclass sets its own (for example Reefine's starter skill)
    evolution.binary | a path to the harness binary; unset, backend construction installs the adapter's pinned version through the vendor's channel under ``$REEF_HARNESS_PREFIX`` (default ``~/.local/share/reef-harness``)
    evolution.models | {} | the method's own models by name, which it calls as ``services.models[name]``: ``url``, ``model``, optional ``api`` (default ``openai``) and ``timeout_s``, with the credential as a literal ``api_key`` or an ``api_key_env`` variable name; the name ``served`` is refused, since it is the model under test
    evolution.model_metadata | {} | optional map of exact model names to ``{context_window: <positive token count>, reasoning: <boolean>}``; Codex uses these values before provider discovery

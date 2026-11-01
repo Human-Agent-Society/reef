@@ -110,6 +110,7 @@ class WeightRecipe(Recipe):
         task_storage=None,
         releases=None,
         samples=None,
+        root=None,
     ):
         return tuple(
             ComponentTrainer(
@@ -120,6 +121,7 @@ class WeightRecipe(Recipe):
                     algorithm_state=algorithm_states.get(name),
                     task_storage=task_storage,
                     samples=samples,
+                    root=root,
                 ),
             )
             for name in surface.names
@@ -408,7 +410,7 @@ def test_a_scenario_activation_overrides_the_deployment_rule_and_applies_again_a
     recipe = WeightRecipe(runtime=ReleaseRuntime(), activation=activation_reference({"module": "never"}))
     (tmp_path / "initial").mkdir()
     # The in-memory repository keeps its registrations in its factory: a restart reuses it.
-    factory = InMemoryRepositoryBackend.factory(tmp_path / "initial", root=tmp_path / "repository")
+    factory = InMemoryRepositoryBackend.factory(directory=tmp_path / "repository")
     dispatcher = dispatcher_for(tmp_path, recipe, factory)
 
     async def run() -> None:

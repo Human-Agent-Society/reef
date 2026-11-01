@@ -22,10 +22,8 @@ __all__ = ["fake_git_lfs"]
 def publication_case(tmp_path, request):
     chat = QueueChat(proposal_reply(SEED, IMPROVED))
     recipe = meta_harness_recipe(tmp_path, chat)
-    # The base release holds the seed, as a deployment's does.
-    initial = tmp_path / "initial"
-    recipe.seed.write(initial)
-    memory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "memory")
+    # A new scenario's root release holds the recipe's seed, as a deployment's does.
+    memory = InMemoryRepositoryBackend.factory(directory=tmp_path / "memory")
 
     if request.param == "git":
         # The commit protocol, not Git LFS, is under test here; tests/artifact covers real LFS.
@@ -38,7 +36,6 @@ def publication_case(tmp_path, request):
             tmp_path / "artifacts.git",
             work_dir=tmp_path / "work",
             cache_dir=tmp_path / "cache",
-            base=recipe.base_artifact_source(),
         )
 
     return recipe, factory, chat, tmp_path / "records"

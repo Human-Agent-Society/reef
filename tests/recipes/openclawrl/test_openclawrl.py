@@ -8,7 +8,7 @@ import time
 import pytest
 from tests.support._trajectories import policy_trajectory
 from tests.support.chat_templates import CharTemplate
-from tests.support.runtime_stubs import job_sized_stages, runtime_bindings
+from tests.support.runtime_stubs import STUB_ROOT, job_sized_stages, runtime_bindings
 
 from recipes.openclawrl import OpenClawRLJobData, OpenClawRLRecipe
 from recipes.openclawrl.judging import OpenClawRLJudgingSettings
@@ -328,7 +328,7 @@ def test_recipe_uses_weight_surface_and_builds_a_trainer() -> None:
     surface = recipe.build_surface("s")
     assert type(surface) is Surface
     assert isinstance(surface.loader, WeightLoader)
-    trainer = recipe.build("s", SQLiteRecordStore())
+    trainer = recipe.build("s", SQLiteRecordStore(), root=STUB_ROOT)
     assert trainer.job_loop is not None
     assert trainer.pipeline.context.job_parameters["trajectory"]["method"]["objective"] == "openclawrl"
     trainer.close()

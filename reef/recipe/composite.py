@@ -1,7 +1,7 @@
 """One scenario served and evolved by several recipes, one per release component.
 
 A composite recipe binds a recipe to each component name. Its surface
-serves every component's capabilities, its base artifact keeps each
+serves every component's capabilities, its default start keeps each
 component's seed under that component's directory, and its trainers are
 the components' trainers, run as independent workers that meet at the
 scenario's commit boundary (see ``docs/advanced_topics/state-model.rst``).
@@ -36,7 +36,8 @@ from functools import cached_property
 from pathlib import Path
 from typing import Any, ClassVar
 
-from reef.artifact.repository import BaseArtifactSource
+from reef.artifact.repository import DefaultStart
+from reef.core.artifact_ref import RootSource
 from reef.core.components import validate_component_name
 from reef.core.plugins import PluginConfigError
 from reef.core.reports import ReportBase, ReportValidationError
@@ -48,7 +49,7 @@ from reef.recipe.config import recipe_config_from_mapping, recipe_config_from_se
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.registry import build_recipe, recipe_class_for
 from reef.runtime.interfaces import InferenceRuntime
-from reef.runtime.jobs import TrainingComponent
+from reef.runtime.jobs import ScenarioRoot, TrainingComponent
 from reef.storage.records import RecordStore
 from reef.storage.samples import SampleStore, TrainerSamples
 from reef.storage.tasks import TaskStorage, TaskStore
@@ -122,6 +123,22 @@ class ComponentTaskStorage(TaskStorage):
 
     def open(self, name: str) -> TaskStore:
         return self.storage.open(f"{self.component}/{name}")
+
+
+def component_root(root: ScenarioRoot, component: str) -> ScenarioRoot:
+    """``component``'s view of the composite's root ``root``: the component's directory of the root release, and,
+    for a default start, the inputs of that component's own default start (``CompositeRecipe.default_start`` names
+    them ``<component>.<input>``)."""
+    source = root.source
+    if source.kind == "default":
+        prefix = f"{component}."
+        source = RootSource(
+            "default",
+            inputs={
+                name.removeprefix(prefix): value for name, value in source.inputs.items() if name.startswith(prefix)
+            },
+        )
+    return ScenarioRoot(root.artifact.component(component), source)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -335,6 +352,7 @@ class CompositeRecipe(Recipe):
         task_storage: TaskStorage | None = None,
         releases: CommittedReleases | None = None,
         samples: SampleStore | None = None,
+        root: ScenarioRoot | None = None,
     ) -> tuple[ComponentTrainer, ...]:
         trainers = []
         for component, recipe in self.components.items():
@@ -349,23 +367,29 @@ class CompositeRecipe(Recipe):
                 task_storage=None if task_storage is None else ComponentTaskStorage(task_storage, component),
                 releases=None if releases is None else ComponentReleases(releases, component),
                 samples=None if samples is None else TrainerSamples(samples, component),
+                root=None if root is None else component_root(root, component),
             )
             # Ingress admits what any component accepts; each trainer then releases the reports shaped for another.
             trainer.admit_reports_of(self.report_type)
             trainers.append(ComponentTrainer(component, trainer))
         return tuple(trainers)
 
-    def base_artifact_source(self) -> BaseArtifactSource:
-        """Each component's base under that component's directory.
+    def check_root_start(self, root: ScenarioRoot) -> None:
+        """Check every component's view of ``root`` with its recipe; propagate any ``ValueError`` refusal."""
+        for component, recipe in self.components.items():
+            recipe.check_root_start(component_root(root, component))
+
+    def default_start(self) -> DefaultStart:
+        """Each component's default start under that component's directory.
 
         The files and the model files of a component go under its name; each input is named ``<component>.<input>``.
         Raise ``RecipeConfigError`` when two components hold model files.
         """
-        sources = {component: recipe.base_artifact_source() for component, recipe in self.components.items()}
+        sources = {component: recipe.default_start() for component, recipe in self.components.items()}
         models = [component for component, source in sources.items() if source.model_files is not None]
         if len(models) > 1:
             raise RecipeConfigError(f"components {models} each hold a base model; a composite trains one model")
-        return BaseArtifactSource(
+        return DefaultStart(
             files={
                 f"{component}/{path}": text
                 for component, source in sources.items()

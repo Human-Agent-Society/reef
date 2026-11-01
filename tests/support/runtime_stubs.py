@@ -6,13 +6,14 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from reef.artifact import Artifact, BaseArtifactSource
+from reef.artifact import Artifact, DefaultStart
+from reef.core.artifact_ref import RootSource
 from reef.core.evaluation import PolicyModel
 from reef.core.job_data import JobData
 from reef.core.served_models import ServedArtifact
 from reef.inference.http import InferenceProxyRuntime
 from reef.runtime.interfaces import InferenceBackend
-from reef.runtime.jobs import JobStatus, ReleaseFormat, SavedCheckpoint, TrainingComponent, TrainingJob
+from reef.runtime.jobs import JobStatus, ReleaseFormat, SavedCheckpoint, ScenarioRoot, TrainingComponent, TrainingJob
 from reef.runtime.serving import OpenedEngines, ServingEngines
 from reef.train.pipeline import PipelineConfig, PipelineSpec
 
@@ -20,6 +21,8 @@ from reef.train.pipeline import PipelineConfig, PipelineSpec
 FULL_WEIGHTS = ReleaseFormat("full")
 #: The file a stub checkpoint holds: the version name that serving the checkpoint reports.
 VERSION_FILE = "model.txt"
+#: The root release of a trainer that a test builds outside a scenario; a stub's ``root_start`` does not read it.
+STUB_ROOT = ScenarioRoot(Artifact.local(Path("stub-root")), RootSource("default"))
 
 
 class StubTrainingComponent(TrainingComponent):
@@ -70,13 +73,17 @@ class StubTrainingComponent(TrainingComponent):
         if not isinstance(parameters.get("rollout"), Mapping):
             raise ValueError("a task job needs the rollout parameter as an object")
 
-    def base_artifact_source(self) -> BaseArtifactSource:
+    def default_start(self) -> DefaultStart:
         """An empty base: a stub checkpoint is any directory."""
-        return BaseArtifactSource(inputs={"model": self.backend_name})
+        return DefaultStart(inputs={"model": self.backend_name})
 
     @property
     def base_start(self) -> str:
         return f"{self.backend_name}:base"
+
+    def root_start(self, root: ScenarioRoot) -> str:
+        """Every scenario root starts a stub's jobs at ``base_start``; a train-from goes through ``import_start``."""
+        return self.base_start
 
     def import_start(self, release: Path) -> str:
         self.imported.append(release)

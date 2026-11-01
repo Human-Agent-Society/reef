@@ -4,6 +4,7 @@ import asyncio
 
 from aiohttp import web
 
+from reef.core.components import made_artifact_id
 from reef.core.errors import UnknownScenario
 from reef.core.records_types import RequestType
 from reef.service.artifact_evaluations import ArtifactEvaluations
@@ -87,8 +88,8 @@ def register_scenario_writes(
     evaluations: ArtifactEvaluations,
     imports: ArtifactImports,
 ) -> None:
-    """The changes of scenarios, which only control makes: create (from the base, or from an artifact item through
-    ``imports``), update, delete, activate, serve, train from an artifact, and cancel a job."""
+    """The changes of scenarios, which only control makes: create (from the default start, or from an artifact item
+    through ``imports``), update, delete, activate, serve, train from an artifact, and cancel a job."""
 
     async def create_scenario(request: web.Request) -> web.Response:
         payload = await read_object(request)
@@ -112,15 +113,19 @@ def register_scenario_writes(
         if component is not None and artifact_id is None:
             raise web.HTTPBadRequest(text="component names where artifact_id lands: give artifact_id too")
         dispatcher = request_service.dispatcher
-        scenario, created = await asyncio.to_thread(dispatcher.create_scenario, name)
+        target = None if component is None else component.strip()
+        # An existing scenario keeps its root: creation is idempotent.
+        item_id = artifact_id.strip() if isinstance(artifact_id, str) and not dispatcher.has_scenario(name) else None
+        if item_id is not None:
+            # The root release holds the item, read from the owner whose data items the scenario uses (RFC #1028).
+            scenario, created = await asyncio.to_thread(
+                imports.create_from_item, dispatcher, name, owner or name, target, item_id
+            )
+        else:
+            scenario, created = await asyncio.to_thread(dispatcher.create_scenario, name)
         if owner is not None:
-            # The owner whose data items the scenario uses (RFC #1028); the default is the scenario's own name.
+            # The default owner is the scenario's own name.
             await asyncio.to_thread(dispatcher.set_scenario_owner, name, owner)
-        started: dict[str, object] | None = None
-        if created and artifact_id is not None:
-            # An existing scenario keeps its start: creation is idempotent.
-            target = None if component is None else component.strip()
-            started = await asyncio.to_thread(imports.start_scenario, dispatcher, name, target, artifact_id.strip())
         current = scenario.repository.require_current_artifact()
         answer: dict[str, object] = {
             "scenario": scenario.name,
@@ -128,8 +133,9 @@ def register_scenario_writes(
             "release_id": current.release_id,
             "content_id": current.content_id,
         }
-        if started is not None:
-            answer["artifact_id"] = started["artifact_id"]
+        if item_id is not None and created:
+            landed, _ = scenario.surface.import_target(target)
+            answer["artifact_id"] = made_artifact_id(current.release_id, landed, single=scenario.surface.single)
         return web.json_response(answer, status=201 if created else 200)
 
     async def update_scenario(request: web.Request) -> web.Response:

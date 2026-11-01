@@ -45,7 +45,7 @@ def open_service(tmp_path: Path, repository, components: frozenset[str]) -> Disp
 
 @pytest.mark.unit
 def test_the_harness_service_serves_the_tree_and_control_commits_its_imports(tmp_path: Path) -> None:
-    repository = harness_repository(tmp_path, PI_SEED.files)
+    repository = harness_repository(tmp_path)
     control = open_service(tmp_path, repository, frozenset(SERVICE_COMPONENTS) - {"harness"})
     control.get_or_create_scenario("demo")
     # The assembly of a control process without the harness service starts this worker.
@@ -110,7 +110,7 @@ def test_the_harness_service_serves_the_tree_and_control_commits_its_imports(tmp
 @pytest.mark.unit
 def test_an_import_that_control_does_not_take_answers_503_and_stays_queued(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(harness_imports, "SYNC_WAIT_SECONDS", 0.2)
-    repository = harness_repository(tmp_path, PI_SEED.files)
+    repository = harness_repository(tmp_path)
     control = open_service(tmp_path, repository, frozenset(SERVICE_COMPONENTS) - {"harness"})
     control.get_or_create_scenario("demo")
     control.close()
@@ -132,7 +132,7 @@ def test_an_import_that_control_does_not_take_answers_503_and_stays_queued(tmp_p
 
 @pytest.mark.unit
 def test_the_harness_app_runs_the_harness_service_without_control(tmp_path: Path) -> None:
-    control = open_service(tmp_path, harness_repository(tmp_path, PI_SEED.files), frozenset(SERVICE_COMPONENTS))
+    control = open_service(tmp_path, harness_repository(tmp_path), frozenset(SERVICE_COMPONENTS))
     try:
         with pytest.raises(ValueError, match="without control"):
             create_harness_app(control)

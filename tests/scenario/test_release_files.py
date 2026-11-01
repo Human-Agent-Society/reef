@@ -31,7 +31,7 @@ MARKED = PI_SEED.apply(MARKER)
 def harness_scenario(tmp_path: Path, method, *, durable: bool = True, **fields) -> tuple[Dispatcher, Scenario]:
     dispatcher = Dispatcher(
         harness_recipe(tmp_path, method, **fields),
-        harness_repository(tmp_path, PI_SEED.files),
+        harness_repository(tmp_path),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record" if durable else None),
         # The tests commit each step themselves (``run_step``), so no local cycle commits the same job.
@@ -53,21 +53,22 @@ def test_the_head_is_the_latest_publish_and_a_step_that_published_nothing_keeps_
     answers = iter((MARKER, None))
     dispatcher, scenario = harness_scenario(tmp_path, lambda workspace, services: next(answers))
     releases = release_files(scenario)
-    base = scenario.repository.base_artifact.release_id
     created = scenario.current_artifact_ref().release_id
     try:
+        # The release the scenario was created on is its root release.
+        assert scenario.repository.start_artifact.release_id == created
         assert isinstance(scenario.trainer.job_loop_required().releases.releases, ScenarioReleaseFiles)
         # Before a publish the head is the release the scenario was created on, the one the catalog lists.
         assert releases.head(COMPONENT) == ReleaseFiles(created, dict(PI_SEED.files))
         assert releases.release(created, COMPONENT).files == PI_SEED.files
         run_step(scenario, "1")
         published = scenario.current_artifact_ref().release_id
-        assert published != base
+        assert published != created
         assert releases.head(COMPONENT) == ReleaseFiles(published, dict(MARKED.files))
         assert run_step(scenario, "2").metrics["skipped"] == "the method left the head tree unchanged"
         assert releases.head(COMPONENT).release_id == published
-        # Every committed release reads by id, the base included; an id the scenario never committed is not found.
-        assert releases.release(base, COMPONENT).files == PI_SEED.files
+        # Every committed release reads by id, the root included; an id the scenario never committed is not found.
+        assert releases.release(created, COMPONENT).files == PI_SEED.files
         assert releases.release(published, COMPONENT).files == MARKED.files
         with pytest.raises(ArtifactNotFound, match="has no release 'nope'"):
             releases.release("nope", COMPONENT)

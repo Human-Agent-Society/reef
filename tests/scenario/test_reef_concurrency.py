@@ -117,10 +117,9 @@ def poll_jobs_quickly(dispatcher: Dispatcher) -> None:
 def test_activate_requires_the_observed_head(tmp_path) -> None:
     initial = tmp_path / "initial"
     initial.mkdir()
-    backend = InMemoryRepositoryBackend("math", initial, root=tmp_path / "repository")
-    repository = Repository(backend, backend.resolve_release())
-    repository.fork()
-    head = repository.require_current_artifact()
+    backend = InMemoryRepositoryBackend("math", directory=tmp_path / "repository")
+    head = backend.register(Artifact.local(initial), metadata={})
+    repository = Repository(backend, head, current_artifact=head, checkpoint_artifact=head)
 
     stale = ArtifactRef(content_id="artifact:stale", release_id="stale", parent_release_id=None)
     advanced = ArtifactRef(content_id="live:1", release_id="live:proc:w1:1", parent_release_id=head.release_id)
@@ -136,8 +135,6 @@ def test_activate_requires_the_observed_head(tmp_path) -> None:
 @pytest.mark.unit
 def test_concurrent_accepts_train_and_commit_exactly_once_per_batch(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr("reef.dispatcher.local_workers.POLL_SECONDS", 0.01)
-    initial = tmp_path / "initial"
-    initial.mkdir()
     component = CountingComponent(tmp_path / "checkpoints")
     pairs_per_thread = 4
     thread_count = 4
@@ -146,7 +143,7 @@ def test_concurrent_accepts_train_and_commit_exactly_once_per_batch(tmp_path, mo
             **runtime_bindings(component),
             max_staleness=pairs_per_thread * thread_count,
         ),
-        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
+        InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(),
         coordination=memory_coordination(),
@@ -184,12 +181,10 @@ def test_async_worker_serializes_slow_trainer_commits(tmp_path, monkeypatch) -> 
     another batch; otherwise P could be recorded as two scenario steps.
     """
     monkeypatch.setattr("reef.dispatcher.local_workers.POLL_SECONDS", 0.01)
-    initial = tmp_path / "initial"
-    initial.mkdir()
     component = CountingComponent(tmp_path / "checkpoints")
     dispatcher = Dispatcher(
         TestPolicyRecipe(**runtime_bindings(component), max_staleness=4),
-        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
+        InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(),
         coordination=memory_coordination(),
@@ -219,10 +214,8 @@ def test_async_worker_serializes_slow_trainer_commits(tmp_path, monkeypatch) -> 
 
 @pytest.mark.unit
 def test_concurrent_checkpoint_commits_form_one_linear_chain(tmp_path) -> None:
-    initial = tmp_path / "initial"
-    initial.mkdir()
     dispatcher = build_default_dispatcher(
-        backend_factory=InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
+        backend_factory=InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(),
         coordination=memory_coordination(),
@@ -249,8 +242,8 @@ def test_concurrent_checkpoint_commits_form_one_linear_chain(tmp_path) -> None:
     backend = scenario.repository.backend
     assert backend.current() == scenario.repository.current_artifact
     # Walk the durable release chain: every publish linked exactly one parent, so
-    # the chain from the tip reaches the bootstrap ref in total + fork + base
-    # hops, with no forks or skipped links.
+    # the chain from the tip reaches the root release in total + 1 hops, with no
+    # forks or skipped links.
     node = backend.current()
     nodes = 0
     while True:
@@ -258,4 +251,4 @@ def test_concurrent_checkpoint_commits_form_one_linear_chain(tmp_path) -> None:
         if node.parent_release_id is None:
             break
         node = backend.resolve_release(node.parent_release_id)
-    assert nodes == total + 2
+    assert nodes == total + 1

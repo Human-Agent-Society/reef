@@ -95,12 +95,10 @@ async def _post_through(mw, scope, body: bytes):
 
 @pytest.mark.unit
 def test_full_loop_against_real_reef_service(tmp_path):
-    initial = tmp_path / "initial"
-    initial.mkdir()
     # The runtime's engine has an HTTP address, so the scenario has a served model; the stub answers for it.
     dispatcher = Dispatcher(
         Recipe(runtime=InferenceProxyRuntime(base_url="http://engine.test", model_path="reef")),
-        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
+        InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         scenario_storage=SQLiteScenarioStorage(),
         coordination=memory_coordination(),
     )

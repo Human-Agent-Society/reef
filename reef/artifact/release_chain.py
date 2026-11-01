@@ -34,8 +34,9 @@ class ArtifactReleaseChain:
         return self._repository
 
     @property
-    def base(self) -> ArtifactRef:
-        return self._repository.base_artifact
+    def start(self) -> ArtifactRef:
+        """The scenario's root release."""
+        return self._repository.start_artifact
 
     @property
     def current(self) -> ArtifactRef:

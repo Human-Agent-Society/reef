@@ -9,7 +9,13 @@ import pytest
 import tests
 from tests.support._threshold_processor import ThresholdJobData, ThresholdSamples
 from tests.support._trajectories import policy_trajectory
-from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, job_sized_stages, runtime_bindings
+from tests.support.runtime_stubs import (
+    STUB_ROOT,
+    StubInferenceRuntime,
+    StubTrainingComponent,
+    job_sized_stages,
+    runtime_bindings,
+)
 
 from recipes.openclawrl import OpenClawRLJobData, OpenClawRLRecipe
 from recipes.sao import SAOJobData, SAORecipe
@@ -43,14 +49,14 @@ def tttd_grid(groups_per_step: int, rollouts_per_group: int) -> PipelineConfig:
 @pytest.mark.parametrize("recipe_type", [OpenClawRLRecipe, SAORecipe, TTTDRecipe])
 def test_training_recipes_take_max_staleness_in_their_record2sample_config(recipe_type) -> None:
     default = recipe_type(**runtime_bindings(), pipeline_stages=pipeline_stages(recipe_type, {}))
-    assert default.build("scenario", SQLiteRecordStore()).pipeline.record2sample.max_staleness == 0
+    assert default.build("scenario", SQLiteRecordStore(), root=STUB_ROOT).pipeline.record2sample.max_staleness == 0
     section = {"record2sample": {"config": {"max_staleness": 2}}}
     recipe = recipe_type(**runtime_bindings(), pipeline_stages=pipeline_stages(recipe_type, section))
-    assert recipe.build("scenario", SQLiteRecordStore()).pipeline.record2sample.max_staleness == 2
+    assert recipe.build("scenario", SQLiteRecordStore(), root=STUB_ROOT).pipeline.record2sample.max_staleness == 2
     negative = {"record2sample": {"config": {"max_staleness": -1}}}
     refused = recipe_type(**runtime_bindings(), pipeline_stages=pipeline_stages(recipe_type, negative))
     with pytest.raises(RecipeConfigError, match="max_staleness must be a non-negative int"):
-        refused.build("scenario", SQLiteRecordStore())
+        refused.build("scenario", SQLiteRecordStore(), root=STUB_ROOT)
 
 
 def test_recipe_class_resolver_has_no_method_short_names() -> None:
@@ -129,7 +135,7 @@ def test_dotted_recipe_rejects_bad_references(reference: str, match: str) -> Non
 def test_concrete_recipe_builds_its_processor_objective_and_report_type(
     recipe, name, sample2job_type, objective, report_type
 ) -> None:
-    trainer = recipe.build("math", SQLiteRecordStore())
+    trainer = recipe.build("math", SQLiteRecordStore(), root=STUB_ROOT)
 
     assert recipe.name == name
     assert recipe.report_type is report_type
@@ -162,7 +168,7 @@ def test_build_rejects_an_unknown_objective_before_any_training_step() -> None:
             return PipelineSpec(record2sample=ThresholdSamples, sample2job=ThresholdJobData)
 
     with pytest.raises(ValueError, match=r"unknown objective 'online_grpo'.*available objectives"):
-        StaleObjectiveRecipe(**runtime_bindings()).build("math", SQLiteRecordStore())
+        StaleObjectiveRecipe(**runtime_bindings()).build("math", SQLiteRecordStore(), root=STUB_ROOT)
 
 
 def test_tttd_build_resolves_its_backend_registered_objective_in_a_fresh_process() -> None:
@@ -180,12 +186,12 @@ def test_tttd_build_resolves_its_backend_registered_objective_in_a_fresh_process
                 "from recipes.tttd import TTTDRecipe\n"
                 "from reef.storage.sqlite import SQLiteRecordStore\n"
                 "from reef.train.pipeline import PipelineConfig\n"
-                "from tests.support.runtime_stubs import runtime_bindings\n"
+                "from tests.support.runtime_stubs import STUB_ROOT, runtime_bindings\n"
                 "grid = {'record2sample': {'config': {'groups_per_step': 1, 'rollouts_per_group': 2}},"
                 " 'sample2job': {'config': {'job_samples': 2}}}\n"
                 "stages = PipelineConfig.from_setting(grid, spec=TTTDRecipe.pipeline_spec(), environ={})\n"
                 "trainer = TTTDRecipe(**runtime_bindings(), pipeline_stages=stages)"
-                ".build('math', SQLiteRecordStore())\n"
+                ".build('math', SQLiteRecordStore(), root=STUB_ROOT)\n"
                 "assert trainer.pipeline.context.job_parameters['trajectory']['method']['objective'] == 'tttd'\n"
             ),
         ],
@@ -233,7 +239,7 @@ def _turn_inference(agent_record_id: str, tokens: list[int], log_prob: float) ->
 )
 def test_cookbook_recipes_reject_multi_turn_policy_samples(recipe, metadata) -> None:
     # Unsupported multi-turn training fails explicitly and preserves its inputs.
-    trainer = recipe.build("math", SQLiteRecordStore())
+    trainer = recipe.build("math", SQLiteRecordStore(), root=STUB_ROOT)
     pipeline = trainer.pipeline
     pipeline.push(_turn_inference("i1", [10, 20], -0.1))
     pipeline.push(_turn_inference("i2", [10, 20, 11, 21], -0.2))
@@ -256,7 +262,9 @@ def test_openclawrl_recipe_never_trains_on_reports() -> None:
     # The judging lives inside the pipeline's record2sample stage: a report is consumed
     # held for retention only — terminal on sight, releasable, never a candidate.
     trainer = OpenClawRLRecipe(**runtime_bindings(), pipeline_stages=pipeline_stages(OpenClawRLRecipe, {})).build(
-        "math", SQLiteRecordStore()
+        "math",
+        SQLiteRecordStore(),
+        root=STUB_ROOT,
     )
     pipeline = trainer.pipeline
     pipeline.push(

@@ -13,6 +13,7 @@ from reef.artifact.release_chain import ArtifactReleaseChain, ReleaseNotRestorab
 from reef.artifact.repository import Repository
 from reef.artifact.sources import SourceFiles
 from reef.core.activation import ActivationRule
+from reef.core.artifact_ref import RootSource
 from reef.core.components import RECORDS_COMPONENT
 from reef.core.errors import ReefError
 from reef.core.reports import ReportBase
@@ -85,6 +86,7 @@ class Scenario:
         name: str,
         binding: ScenarioBinding,
         repository: Repository,
+        root_source: RootSource,
         store: ScenarioStore,
         trainers: tuple[ComponentTrainer, ...],
         scenario_step: int = 0,
@@ -118,6 +120,7 @@ class Scenario:
             binding=binding,
             artifacts=self._artifact_chain,
             trainers=self.trainers,
+            root_source=root_source,
             scenario_step=scenario_step,
             store=store,
             recovered_head_record=recovered_head_record,
@@ -161,10 +164,9 @@ class Scenario:
     def repository(self) -> Repository:
         """The release chain's scenario-scoped artifact repository.
 
-        The public read path to the repository base, the active release (``current``) and the chain tip
-        (``checkpoint``);
-        mutation goes through Scenario methods so it stays serialized with
-        activation and commit.
+        The public read path to the root release (``start_artifact``), the active release (``current``) and the
+        chain tip (``checkpoint``); mutation goes through Scenario methods so it stays serialized with activation
+        and commit.
         """
         return self._artifact_chain.repository
 

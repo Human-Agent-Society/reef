@@ -93,7 +93,7 @@ def marker_score(task: str, result: TaskResult) -> float:
 class TreeReleases(CommittedReleases):
     """An in-memory commit history of one component: its releases by id, the head the latest one.
 
-    ``base`` is the base release; ``publish`` appends one, as a commit that publishes for the component does.
+    ``base`` is the root release; ``publish`` appends one, as a commit that publishes for the component does.
     """
 
     def __init__(self, base: HarnessTree) -> None:

@@ -48,7 +48,7 @@ def checkpoint_sampler_path(
 ) -> str | None:
     """The sampler that a release's checkpoint manifest names; ``None`` for the base model's own weights.
 
-    A LoRA's base artifact holds the untrained adapter's manifest, so its sampler serves the base model's outputs.
+    A LoRA's default start holds the untrained adapter's manifest, so its sampler serves the base model's outputs.
     Under full-parameter training (``full``), a release without a manifest has the base model's weights: the
     component's base, a reference to the base revision, or an import of the base's files (RFC #996).
     ``ValueError``: the release is not materialized; it has no manifest and is not full-parameter, or refers to

@@ -9,8 +9,9 @@ from typing import Any
 
 import pytest
 from tests.support._trajectories import policy_trajectory
+from tests.support.runtime_stubs import STUB_ROOT
 
-from reef.artifact import BaseArtifactSource
+from reef.artifact import DefaultStart
 from reef.core.artifact_ref import ArtifactRef
 from reef.core.job_data import JobData, TaskSample
 from reef.core.training_request import TrainingRequest
@@ -20,7 +21,7 @@ from reef.observability.base import (
     TrainingExperimentContext,
     TrainingExperimentEvent,
 )
-from reef.runtime.jobs import JobStatus, ReleaseFormat, SavedCheckpoint, TrainingJob
+from reef.runtime.jobs import JobStatus, ReleaseFormat, SavedCheckpoint, ScenarioRoot, TrainingJob
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.work_queue import NewWork
 from reef.train.job_queue import (
@@ -56,11 +57,10 @@ class StepComponent(LocalJobComponent):
     def release_format(self) -> ReleaseFormat:
         return ReleaseFormat("full")
 
-    def base_artifact_source(self) -> BaseArtifactSource:
-        return BaseArtifactSource()
+    def default_start(self) -> DefaultStart:
+        return DefaultStart()
 
-    @property
-    def base_start(self) -> str:
+    def root_start(self, root: ScenarioRoot) -> str:
         return "steps:base"
 
     def import_start(self, release: Path) -> str:
@@ -117,7 +117,11 @@ def worked(tmp_path):
 def test_a_queued_job_runs_on_the_worker_and_reports_its_checkpoints_through_the_queue(worked):
     queue, component, _worker = worked
     view = JobQueueComponent(component, queue)
-    assert (view.name, view.base_start, view.release_format) == ("steps", "steps:base", ReleaseFormat("full"))
+    assert (view.name, view.root_start(STUB_ROOT), view.release_format) == (
+        "steps",
+        "steps:base",
+        ReleaseFormat("full"),
+    )
 
     view.submit(job("j1"))
     view.submit(job("j1"))  # a second submit of one ID does nothing

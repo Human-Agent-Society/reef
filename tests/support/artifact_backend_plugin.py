@@ -15,25 +15,19 @@ from reef.artifact import (
 
 
 class MemoryArtifactBackend(CachedRepositoryBackendFactory, ConfigurableRepositoryBackendFactory):
-    """In-memory scenario backends whose base artifact holds the context's bootstrap files."""
+    """In-memory scenario backends whose releases live under the context's cache directory."""
 
     def __init__(self, context: RepositoryBackendContext, *, label: str) -> None:
         super().__init__()
         self.context = context
         self.label = label
-        self.base_directory = context.work_dir / "base"
-        self.base_directory.mkdir(parents=True, exist_ok=True)
-        for name, text in context.base.files.items():
-            path = self.base_directory / name
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(text, encoding="utf-8")
 
     @classmethod
     def from_config(cls, config: Mapping[str, Any], *, context: RepositoryBackendContext) -> Self:
         return cls(context, label=str(config["label"]))
 
     def _build_backend(self, scenario: str) -> InMemoryRepositoryBackend:
-        return InMemoryRepositoryBackend(scenario, self.base_directory, root=self.context.cache_dir / "releases")
+        return InMemoryRepositoryBackend(scenario, directory=self.context.cache_dir / "releases")
 
 
 class UnreachableArtifactBackend(CachedRepositoryBackendFactory, ConfigurableRepositoryBackendFactory):

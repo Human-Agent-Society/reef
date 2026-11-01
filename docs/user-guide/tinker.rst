@@ -364,9 +364,9 @@ Prerequisites:
        modal-environment: spindle            # where the deployment runs
        learning-rate: 1.0e-6
 
-The base artifact is a reference to the base revision (`Import an artifact
-<operate.rst#import-an-artifact>`__); a job from it starts a new model with
-the base's own weights.
+The default start is a reference to the base revision (`Import an artifact
+<operate.rst#import-an-artifact>`__), which a new scenario's root release
+holds; a job from it starts a new model with the base's own weights.
 
 Every release refers to its weights on Hugging Face. When Spindle saves a
 checkpoint, it writes the checkpoint's Hugging Face weights to its checkpoint

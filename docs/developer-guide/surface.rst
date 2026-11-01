@@ -186,7 +186,7 @@ committer carries the other forward from the previous checkpoint:
                }
            )
 
-The base artifact of such a scenario keeps one directory per component
+The root release of such a scenario keeps one directory per component
 (``weights/``, ``harness/``). ``CompositeRecipe`` (``reef.recipe.composite``)
 builds exactly this from existing flat recipes, one per component, and runs
 each one's trainer as its own worker; see `configuration
