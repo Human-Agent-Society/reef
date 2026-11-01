@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from functools import partial
 from pathlib import Path
 
 import pytest
@@ -257,10 +258,9 @@ def job_trainer(state: JobLoopState, component: TrainingComponent) -> Trainer:
     return Trainer.build(
         "math",
         scored_records(),
-        pipeline_factory=threshold_pipeline,
+        pipeline_factory=partial(threshold_pipeline, job_samples=1),
         job_loop=loop_with(component),
         algorithm_state=state.to_dict(),
-        default_job_samples=1,
     )
 
 
@@ -375,12 +375,10 @@ def test_the_pipeline_learns_a_jobs_outcome_exactly_when_the_commit_of_its_end_s
         return TrainingPipeline(
             context,
             record2sample=stages[-1],
-            sample2job=ThresholdJobData(context, None, None),
+            sample2job=ThresholdJobData(context, None, 1),
         )
 
-    trainer = Trainer.build(
-        "math", scored_records(), pipeline_factory=pipeline, job_loop=loop_with(component), default_job_samples=1
-    )
+    trainer = Trainer.build("math", scored_records(), pipeline_factory=pipeline, job_loop=loop_with(component))
     [ended] = stages
     make_samples(trainer)
     submitted = trainer.run_once()
@@ -409,7 +407,6 @@ def test_the_pipeline_learns_a_jobs_outcome_exactly_when_the_commit_of_its_end_s
         pipeline_factory=pipeline,
         job_loop=loop_with(component),
         algorithm_state=trainer.algorithm_state_dict(),
-        default_job_samples=1,
     )
     assert stages[-1].outcomes == ended.outcomes
 
@@ -446,7 +443,6 @@ def test_an_sft_job_and_then_an_rl_job_each_take_the_parameters_of_their_instruc
         samples=TrainerSamples(session.samples),
         # The recipe gives trajectory jobs SFT; task jobs take their parameters from their instruction.
         job_parameters={"trajectory": {"method": "sft", "learning_rate": 1e-5}},
-        default_job_samples=1,
     )
     pipeline = trainer.pipeline
 

@@ -222,8 +222,8 @@ job's data into optimizer batches by its own batch size: Slime's
 - A weight recipe has no default ``job_samples``. A deployment without it
   fails the recipe build with ``RecipeConfigError``. Usually, set it to the
   component's batch size, so that one job is one optimizer step.
-- Harness evolution uses ``evolution.batch_size`` when the stage config sets
-  no ``job_samples``.
+- The harness evolution stages (``TraceJobData``, ``TrainTaskJobData``)
+  default ``job_samples`` to 1 when the stage config sets none.
 - A stage whose job data is one fixed unit, such as the TTTD and SDPO grid,
   passes ``max_job_samples`` to ``Sample2Job.__init__``. The stage refuses a
   larger ``job_samples`` with ``PluginConfigError``.

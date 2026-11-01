@@ -9,6 +9,7 @@ import time
 from collections.abc import Callable, Hashable, Iterator, Mapping
 from contextlib import nullcontext
 from dataclasses import dataclass, replace
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -670,11 +671,10 @@ class _NamedComponentsRecipe(Recipe):
                 Trainer.build(
                     scenario,
                     records,
-                    pipeline_factory=threshold_pipeline,
+                    pipeline_factory=partial(threshold_pipeline, job_samples=1),
                     job_loop=JobLoop(ComponentJobs(name, self.artifact_dir), scenario=scenario),
                     algorithm_state=algorithm_states.get(name),
                     experiment_logger=experiment_logger,
-                    default_job_samples=1,
                 ),
             )
             for name in self.names
@@ -804,8 +804,8 @@ class _SlottedRecipe(_TwoTrainerRecipe):
     def pipeline_for(self, component: str, context: PipelineContext) -> TrainingPipeline:
         if component == HARNESS:
             # The threshold pipeline with ``_SlotGrouping``.
-            return threshold_pipeline(context, grouping=_SlotGrouping())
-        return threshold_pipeline(context)
+            return threshold_pipeline(context, job_samples=1, grouping=_SlotGrouping())
+        return threshold_pipeline(context, job_samples=1)
 
 
 def _slotted_report(record_id: str, reference: str, group: str, slot: int) -> AgentRecord:
@@ -961,9 +961,9 @@ class _ComputedWeightsRecipe(_TwoTrainerRecipe):
             return TrainingPipeline(
                 context,
                 record2sample=_RetiringRetriesSamples(_RetiringRetriesJudging(), JudgedAtOnce()),
-                sample2job=RetiringRetriesJobData(context, None, None),
+                sample2job=RetiringRetriesJobData(context, None, 1),
             )
-        return threshold_pipeline(context)
+        return threshold_pipeline(context, job_samples=1)
 
 
 def _turn(record_id: str, turn: str, completes: str | None = None) -> AgentRecord:

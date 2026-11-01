@@ -60,10 +60,9 @@ def test_a_trainer_gets_the_queued_instructions_and_a_commit_settles_the_one_it_
     trainer = Trainer.build(
         "s",
         records,
-        pipeline_factory=lambda context: TrainingPipeline(context, sample2job=InstructionJobData(context, None, None)),
+        pipeline_factory=lambda context: TrainingPipeline(context, sample2job=InstructionJobData(context, None, 1)),
         job_loop=JobLoop(component, scenario="s"),
         training_mode="manual",
-        default_job_samples=1,
     )
     instructions = InstructionQueue(memory_coordination().work_queue).of("s")
     try:
