@@ -106,15 +106,15 @@ and are grouped together: they all diverged from the task seed.
 
 From a report to a gradient:
 
-1. **Grouping.** The record stage, `CoralRecord2Record`, files each report
-   under its `parent_hash` with `CoralGrouping`. A group is ready once
+1. **Grouping.** The record-to-sample stage, `CoralSamples`, files each
+   report under its `parent_hash` with `CoralGrouping`. A group is ready once
    `group_size` scored siblings accrue. Reef then stores the group's samples,
    and the group is fixed: later siblings of the same parent form a new
    group. The default is 4; the demo's `serve.yaml` sets 2:
 
    ```yaml
    pipeline:
-     record2record:
+     record2sample:
        config:
          group_size: 2
    ```
@@ -122,14 +122,15 @@ From a report to a gradient:
    Parents that never accrue enough scored children never train. The barrier
    is a recipe setting, not a CORAL invariant. Reef refuses `group-size` in
    `recipe.config` and names its new place.
-2. **Sample assembly.** The report's ordered inference references are
-   materialized back into tokens, loss mask, and the rollout-time log
-   probabilities reef stored with each INFERENCE record. An attempt is a
+2. **Sample assembly.** The report's ordered inference references become
+   one ATIF trajectory. The training component renders it with the model's
+   chat template into tokens and a loss mask, and the actor computes the
+   old-policy log probabilities at the step's start. An attempt is a
    multi-call trajectory, so `CoralSamples` turns multi-turn assembly on by
    default (`pipeline.record2sample.config.accept_multi_turn_policy_samples`).
 3. **Version guards.** An attempt whose calls span a weight update is
-   rejected: its rollout log probs belong to two policies and cannot support
-   one importance ratio. A group whose members trained on different
+   rejected: its calls were sampled by two policies, so one importance ratio
+   cannot describe them. A group whose members trained on different
    revisions is discarded whole, because relative rewards only compare
    fairly within one policy version. A malformed attempt raises an explicit training data error; discarded
    groups are visible in the processor's `status()` (`discarded_groups`).
@@ -141,13 +142,13 @@ From a report to a gradient:
    zero-gradient step rather than starving the barrier.
 5. **The loop closes.** The step updates the served LoRA (the demo:
    Qwen3-8B, rank-32 LoRA on `linear_qkv`/`linear_proj`, trained with the
-   rollout log probs and a KL term against the base model, see
+   old-policy log probs and a KL term against the base model, see
    `examples/coral_demo/serve.yaml`). Reef serves the new revision, and
    later attempts both run on it and are attributed to it.
 
-The design rationale lives next to the code: `processor.py` (grouping and
-guards), `recipe.py` (the record stage, and why `tttd` is reused), `serve.yaml`
-(deployment knobs).
+The design rationale lives next to the code: `processor.py` (the stages,
+grouping, and guards), `recipe.py` (the stage binding, and why `tttd` is
+reused), `serve.yaml` (deployment knobs).
 
 ## The task
 

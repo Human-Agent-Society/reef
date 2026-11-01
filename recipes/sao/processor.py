@@ -5,45 +5,24 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any, Self
 
-from reef.core.records_types import AgentRecord
 from reef.pipeline_context import PipelineContext
-from reef.record2record import Record2Record, ReportContext
-from reef.record2sample import Record2Sample, ReportSamples
+from reef.record2sample import Record2Sample, ReportContext, ReportSamples
 from reef.record2sample.assembly import SampleAssembly, SampleAssemblySettings
-from reef.record2sample.samples import make_policy_trajectory, recorded_training
 from reef.sample2job import Sample2Job, Sample2JobSettings
 from reef.train.types import JobData, Sample, TrajectorySample
 
 
-class SAOSampleAssembly(SampleAssembly):
-    """The shared assembly with SAO's two extra fields on each single-call sample.
-
-    ``make_policy_trajectory`` reads the shared training fields, so SAO and
-    the group-relative recipes resolve every shared field identically,
-    including the producing ``artifact_id`` that the staleness check and the
-    backend's telemetry read. SAO then fills the two fields that path leaves
-    at their defaults: ``action_mask`` (read from ``response.training`` first,
-    the top-level payload second) and ``rollout_created_at``, for the
-    backend's queue-age metric.
-    """
-
-    def single_sample(self, record: AgentRecord, score: float) -> TrajectorySample:
-        base = make_policy_trajectory(record, score)
-        action_mask = recorded_training(record.payload).get("action_mask", record.payload.get("action_mask", ()))
-        return base.with_training(
-            action_mask=[int(value) for value in action_mask], rollout_created_at=record.created_at
-        )
-
-
 class SAOSamples(ReportSamples):
-    """One scored rollout as one SAO sample, with ``action_mask`` and ``rollout_created_at``.
+    """One scored rollout as one SAO sample: its trajectory with the score, and ``rollout_created_at``, the time of
+    its last call, for the backend's queue-age metric.
 
-    Config: the sample-assembly keys of ``SampleAssemblySettings``.
+    Every rollout trains by itself and owns its inference records. The training component renders the sample, and
+    its action mask is the loss mask of the rendered tokens. Config: ``SampleAssemblySettings``.
     """
 
-    def __init__(self, settings: SampleAssemblySettings) -> None:
-        super().__init__()
-        self.assembly = SAOSampleAssembly(settings)
+    def __init__(self, context: PipelineContext, settings: SampleAssemblySettings) -> None:
+        super().__init__(context, exclusive_sources=True, max_staleness=settings.max_staleness)
+        self.assembly = SampleAssembly(settings)
 
     @classmethod
     def from_config(
@@ -51,16 +30,13 @@ class SAOSamples(ReportSamples):
         config: Mapping[str, Any],
         *,
         context: PipelineContext,
-        record2record: Record2Record,
         environ: Mapping[str, str],
     ) -> Self:
-        return cls(SampleAssemblySettings.parse(config, plugin_class=cls))
+        return cls(context, SampleAssemblySettings.parse(config, plugin_class=cls))
 
     def make_sample(self, context: ReportContext) -> TrajectorySample:
         sample = self.assembly.build(context, context.require_score())
-        if not sample.training.get("action_mask", []):
-            sample = sample.with_training(action_mask=sample.training.get("loss_mask", []))
-        return sample
+        return sample.with_training(rollout_created_at=context.ends[-1].created_at)
 
 
 class SAOJobData(Sample2Job):
@@ -73,8 +49,9 @@ class SAOJobData(Sample2Job):
     the job is one optimizer step; the paper uses 128 (arXiv:2607.07508,
     §4.1), and 1 trains once per accepted rollout for smoke runs.
 
-    SAO reuses ``TrajectorySample`` / ``JobData`` and fills ``action_mask``
-    and ``rollout_created_at``. The training backend validates required
+    SAO reuses ``TrajectorySample`` / ``JobData``: a sample carries
+    ``rollout_created_at``, and the training component renders it, with the
+    loss mask as its action mask. The training backend validates the rendered
     tensors; malformed training input fails explicitly.
 
     Config: ``buffer_size`` and ``job_samples`` (``Sample2JobSettings``).
@@ -86,7 +63,6 @@ class SAOJobData(Sample2Job):
         config: Mapping[str, Any],
         *,
         context: PipelineContext,
-        record2record: Record2Record,
         record2sample: Record2Sample,
         environ: Mapping[str, str],
     ) -> Self:

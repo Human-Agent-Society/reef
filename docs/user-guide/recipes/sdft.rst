@@ -47,18 +47,21 @@ model. It reports the demonstration against the request's receipt. With a
 How Reef implements it
 ----------------------
 
-SDFT has three pipeline stages
+SDFT has two pipeline stages
 (`Training pipeline <../../developer-guide/processors.rst>`__).
-``ExclusiveReportRecord2Record`` makes each report its own record set. ``SDFTSamples``
-turns each report into a task. The shared ``DistillJobData`` stage puts
-the tasks into job data in arrival order. One job's data holds
-``pipeline.sample2job.config.job_samples`` tasks.
+``SDFTSamples`` makes each report its own record set and turns it into one
+sample. The shared ``DistillJobData`` stage puts the samples into job data in
+arrival order. One job's data holds ``pipeline.sample2job.config.job_samples``
+samples.
 
 ``SDFTSamples`` extends the shared ``DistillSamples``. ``DistillSamples`` turns every
-``TeacherContextReport`` into one ``TrajectorySample``. The item carries the
-student's recorded tokens and ``teacher_tokens``. ``teacher_tokens`` is the
-teacher's request rendered with the served model's chat template and
-followed by the student's response ids.
+``TeacherContextReport`` into one ``TrajectorySample``: the student's call as
+an ATIF trajectory, with the teacher's request in ``extra.reef.teacher``. The
+training component renders both with the model's chat template. The teacher
+sequence is the teacher's request rendered with the generation prompt and
+followed by the student's response tokens. A teacher sequence longer than
+``max_teacher_tokens`` does not train: the component leaves the sample out
+and counts it in the job metric ``unrenderable_samples``.
 
 ``SDFTSamples`` adds the demonstration block to the request's final user
 message. It adds the block as a new user message when the request ends in a
@@ -88,11 +91,14 @@ KL is the default and the reverse KL and the generalized JSD are switches. A
 top-K representation of the teacher is another switch. Each sample
 contributes the mean over its trained response tokens. That mean is weighted
 by the truncated importance-sampling ratio between the policy and the
-rollout engine's log-probs.
+old-policy log-probs. The actor computes those with the weights of the job's
+start, so the ratio is exact for ``max_staleness: 0`` and an approximation
+above it.
 
 The sampled reverse-KL mode also accepts score centering for training/inference
-mismatch. See `Score centering <../../developer-guide/loss-families.rst#score-centering>`__
-for the required loss options and sampler top-K capture. The default
+mismatch. Score centering needs the sampler's recorded top-K, which samples
+that serving recorded do not carry. See `Score centering
+<../../developer-guide/loss-families.rst#score-centering>`__. The default
 full-vocabulary forward KL does not support it.
 
 The report contract
@@ -113,20 +119,16 @@ Configuration
 -------------
 
 The deployment's top-level ``pipeline`` section configures the stages. Each
-stage reads only its own ``config``. ``ExclusiveReportRecord2Record`` takes
-no config.
+stage reads only its own ``config``.
 
 .. code:: yaml
 
    recipe:
      implementation: recipes.sdft.recipe:SDFTRecipe
    pipeline:
-     record2record:
-       config:
-         max_staleness: 0
      record2sample:
        config:
-         tokenizer_path: /models/Qwen2.5-7B-Instruct
+         max_staleness: 0
          max_teacher_tokens: 8192
      sample2job:
        config:
@@ -136,26 +138,28 @@ no config.
        global_batch_size: 32
 
 Reef checks each stage's config when it loads the recipe. A bad
-``context_template`` or a missing ``tokenizer_path`` fails the deployment. A
+``context_template`` or an unknown key fails the deployment. A
 stage key under ``recipe.config`` also fails it, and the error names the
 key's place in ``pipeline``.
 
 .. config::
 
-   pipeline.record2sample.config.tokenizer_path | required | the served model's tokenizer directory. It renders the teacher prompt with the engine's chat template.
-   pipeline.record2sample.config.max_teacher_tokens | 0 | a report with a longer teacher sequence is skipped and counted in ``teacher_overflow_reports``. 0 disables the check. Set it to the trainer's window.
+   pipeline.record2sample.config.max_teacher_tokens | 0 | the training component leaves out a sample with a longer teacher sequence and counts it in ``unrenderable_samples``. 0 disables the check. Set it to the trainer's window.
    pipeline.record2sample.config.context_template | the reference's block | the text added to the final user message. ``{context}`` marks where the demonstration goes.
    pipeline.sample2job.config.job_samples | required | rollouts in one job. Set it to ``training.config.global_batch_size`` so that one job is one optimizer step.
    training.config.global_batch_size | rollouts in one optimizer step. Reef passes it to Slime as ``--global-batch-size``. Each sample is its own data-parallel unit.
-   pipeline.record2record.config.max_staleness | 0 | accepted lag, in artifacts that the scenario served, between the producing and served artifact.
+   pipeline.record2sample.config.max_staleness | 0 | accepted lag, in artifacts that the scenario served, between the producing and served artifact.
 
 ``SDFTSamples`` also takes the sample assembly's keys
 (``accept_multi_turn_policy_samples``, ``realign_threshold`` and
 ``scaffold_tolerance``).
 
 Slime takes ``--loss-type custom_loss`` and
-``--use-rollout-logprobs`` and ``--disable-compute-advantages-and-returns``.
-The family adds its own flags:
+``--disable-compute-advantages-and-returns``, and refuses
+``--use-rollout-logprobs``. Set ``--apply-chat-template-kwargs`` to the
+serving engine's chat template arguments (`Chat template arguments
+<../../reference/configuration.rst#chat-template-arguments>`__). The family
+adds its own flags:
 
 .. config::
 

@@ -62,7 +62,7 @@ The last step of every task's Dockerfile keeps the solver from reading the chang
 
 ### The session cursor
 
-The generator chooses its own sessions. It does not use the request's description, and it refuses a request that carries source records. Leave the record stage's `source_records_per_round` at 0, its default.
+The generator chooses its own sessions. It does not use the request's description, and it refuses a request that carries source records. Leave the record-to-sample stage's `source_records_per_round` at 0, its default.
 
 `cursor.json` in the state directory keeps the next generation number and the next position in the sources file. The generations walk the whole file and then start again. A session counts as taken when its author finishes, whatever the result, so a restart continues with the next session. A run that a reload cancels takes no session. Task names hold the generation number and the session's index, not the scenario, so give each scenario its own generator service and tasks root: two scenarios on one service write tasks with the same names, and the service refuses the second one.
 
@@ -319,8 +319,8 @@ The built-in generated-task recipe trains a generation's tasks only after the wh
 
    from recipes.beta.autoenvscaling import AutoEnvScalingGenerator
    from reef.pipeline_context import PipelineContext
-   from reef.recipe.generated_tasks import GeneratedTaskRecord2Record, GeneratedTaskSamples
-   from reef.recipe.generated_tasks.processor import GenerationJob, RoundSettings, TaskGroupSettings, next_generation
+   from reef.recipe.generated_tasks import GeneratedTaskSamples, GeneratedTaskSettings
+   from reef.recipe.generated_tasks.processor import GenerationJob, next_generation
    from reef.storage.samples import TrainerSamples
    from reef.storage.sqlite import SQLiteScenarioStorage
    from reef.storage.tasks import LocalTaskFileStore
@@ -333,13 +333,12 @@ The built-in generated-task recipe trains a generation's tasks only after the wh
        session = storage.open("autoenvscaling")
        context = PipelineContext("autoenvscaling", task_storage=session.tasks, samples=TrainerSamples(session.samples))
        generator = AutoEnvScalingGenerator.from_config(generator_config, scenario=context.scenario, environ=os.environ)
-       settings = RoundSettings(
+       settings = GeneratedTaskSettings(
            rounds=rounds,
            description="coding tasks rebuilt from recorded coding-agent sessions",
            generator_url=str(generator_config["generator_url"]),
        )
-       record_stage = GeneratedTaskRecord2Record(context, TaskGroupSettings())
-       tasks = GeneratedTaskSamples(context, settings, record_stage, task_generator=generator)
+       tasks = GeneratedTaskSamples(context, settings, task_generator=generator)
        try:
            for number in range(next_generation(tasks.task_store), rounds):
                await tasks.run(GenerationJob(receipt=f"generation-{number:05d}", generation=number))
@@ -364,4 +363,4 @@ The built-in generated-task recipe trains a generation's tasks only after the wh
 - For the agent, `git` on the Reef host, for the repository snapshots.
 - Docker and the `harbor` command line on the generator service's host, as for SPADE.
 
-Known limits: with `agent_reef_url` on the training deployment itself, the agent's calls share the training scenario, and the recipe's record stage keeps the ones no report references in memory. A long run should record them on a separate Designer's Reef, as the example does. No run has used the Claude Code image on E2B or Modal yet, so start `author_harness: claude-code` with one session.
+Known limits: with `agent_reef_url` on the training deployment itself, the agent's calls share the training scenario, and the recipe's record-to-sample stage keeps the ones no report references in memory. A long run should record them on a separate Designer's Reef, as the example does. No run has used the Claude Code image on E2B or Modal yet, so start `author_harness: claude-code` with one session.

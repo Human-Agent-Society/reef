@@ -62,11 +62,18 @@ FAKE_SDK = textwrap.dedent(
         def from_ints(tokens): return SimpleNamespace(length=len(tokens), tokens=list(tokens))
 
     class Datum(SimpleNamespace): pass
+    class TensorData(SimpleNamespace): pass
     class AdamParams(SimpleNamespace): pass
     class SamplingParams(SimpleNamespace): pass
 
     class _Trainer:
         def __init__(self, origin): self.origin = origin
+        def forward(self, data, loss_fn, loss_fn_config=None):
+            # The log probabilities of the job's start, for the rendered rows that serving recorded none for.
+            _log({"event": "forward", "rows": len(data), "loss_fn": loss_fn, "from": self.origin})
+            outputs = [{"logprobs": TensorData(data=[-0.5] * len(datum.loss_fn_inputs["target_tokens"].data))}
+                       for datum in data]
+            return _Future(SimpleNamespace(loss_fn_outputs=outputs))
         def forward_backward(self, data, loss_fn, loss_fn_config=None):
             _log({"event": "forward_backward", "rows": len(data), "loss_fn": loss_fn, "from": self.origin})
             return _Future(SimpleNamespace(metrics={"loss:sum": -1.0}))
@@ -78,9 +85,14 @@ FAKE_SDK = textwrap.dedent(
         def save_weights_for_sampler(self, name, ttl_seconds=None): return self._save(name, "sampler_weights")
 
     class _Tokenizer:
-        # The component's sampler holds a tokenizer for task jobs; a job of trajectories renders nothing.
-        def apply_chat_template(self, *args, **kwargs): raise AssertionError("the trainer never renders")
-        def decode(self, *args, **kwargs): raise AssertionError("the trainer never renders")
+        # A chat template: each message is its role ID and one token per character; the generation prompt is the
+        # assistant role, 9. The component renders the served trajectories, which carry no tokens.
+        ROLES = {"system": 1, "user": 2, "assistant": 9, "tool": 4}
+        def apply_chat_template(self, messages, tools=None, tokenize=True, add_generation_prompt=False, **kwargs):
+            tokens = [token for message in messages
+                      for token in [self.ROLES[message["role"]], *(100 + ord(c) for c in message["content"])]]
+            return tokens + ([9] if add_generation_prompt else [])
+        def decode(self, *args, **kwargs): raise AssertionError("a job of trajectories decodes nothing")
 
     class _Sampler:
         def get_base_model(self): return MODEL
@@ -137,25 +149,20 @@ def write_fake_sdk(root: Path, model: str) -> Path:
     return site
 
 
-def training_item(version: str, index: int):
-    from reef.core.job_data import TrajectorySample
+def served_call(version: str, index: int):
+    """Rollout ``index``: a served call without tokens, as the inference service records it with the artifact
+    ``version`` that answered."""
+    from reef.core import AgentRecord, RequestType
 
-    return TrajectorySample(
-        {
-            "schema_version": "ATIF-v1.6",
-            "agent": {"name": "test"},
-            "steps": [{"step_id": 1}],
-            "extra": {
-                "reef": {
-                    "training": {
-                        "tokens": [10, 11, 20 + index, 21],
-                        "loss_mask": [1, 1],
-                        "rollout_log_probs": [-0.2, -0.4],
-                        "artifact_id": version,
-                    }
-                }
-            },
-        }
+    return AgentRecord.create(
+        scenario=SCENARIO,
+        request_type=RequestType.INFERENCE,
+        payload={
+            "messages": [{"role": "user", "content": f"bound {index}"}],
+            "response": {"choices": [{"message": {"role": "assistant", "content": f"answer {index}"}}]},
+            "artifact_id": version,
+        },
+        agent_record_id=f"i{index}",
     )
 
 
@@ -231,7 +238,7 @@ def control_plane(tmp_path, monkeypatch, url, repository):
     raw = {
         "recipe": {"implementation": "recipes.tttd.recipe:TTTDRecipe"},
         "pipeline": {
-            "record2record": {"config": {"groups_per_step": 1, "rollouts_per_group": 4}},
+            "record2sample": {"config": {"groups_per_step": 1, "rollouts_per_group": 4}},
             "sample2job": {"config": {"job_samples": 4}},
         },
         "inference": {
@@ -295,15 +302,7 @@ def train_one_step(dispatcher, inference) -> None:
     # The staleness check keeps only data of the artifact that the scenario serves.
     version = scenario.serving_artifact_id()
     for index in range(4):
-        item = training_item(version, index)
-        dispatcher.accept_record(
-            AgentRecord.create(
-                scenario=SCENARIO,
-                request_type=RequestType.INFERENCE,
-                payload={"response": {"training": dict(item.training)}},
-                agent_record_id=f"i{index}",
-            )
-        )
+        dispatcher.accept_record(served_call(version, index))
         dispatcher.accept_record(
             AgentRecord.create(
                 scenario=SCENARIO,
@@ -369,6 +368,8 @@ def test_tinker_trains_in_the_control_plane_and_serves_on_an_inference_component
                 ]
                 # Serving downloads the adapter after training, in a session of its own.
                 assert [event["rows"] for event in events if event["event"] == "forward_backward"][-1] == 4
+                # The served rollouts carry no log probabilities: the trainer computes them at the job's start.
+                assert [event["rows"] for event in events if event["event"] == "forward"] == [4]
         # Closing the control plane leaves the engines serving what they served, for the next control instance.
         assert control.call("GET", "runtime-load-ids")["runtime_load_ids"] == [published] * 2
         # A restarted control plane attaches to the engines and serves the committed adapter that they still hold,

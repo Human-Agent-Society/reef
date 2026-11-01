@@ -91,16 +91,13 @@ class VLLMGenerateClient(NativeGenerateClient):
         prompt_ids: list[int],
         sampling_params: Mapping[str, Any],
         *,
-        capture_topk: int,
         stream: bool,
     ) -> dict[str, Any]:
-        # ``logprobs: N`` returns the sampled token's log-prob plus the top N;
-        # 0 keeps only the sampled token, which is all a training record needs.
+        # ``logprobs: N`` returns the sampled token's log-prob plus the top N; 0 keeps only the sampled token.
         logprobs = 0
         top_logprobs = request.get("top_logprobs")
         if isinstance(top_logprobs, int) and not isinstance(top_logprobs, bool) and top_logprobs > 0:
             logprobs = top_logprobs
-        logprobs = max(logprobs, capture_topk)
         native_payload: dict[str, Any] = {
             "token_ids": prompt_ids,
             "sampling_params": {**sampling_params, "logprobs": logprobs},
@@ -113,7 +110,7 @@ class VLLMGenerateClient(NativeGenerateClient):
             native_payload["request_id"] = request["rid"]
         return native_payload
 
-    def parse(self, artifact: Artifact, response: Mapping[str, Any], *, capture_topk: int) -> CapturedGeneration:
+    def parse(self, artifact: Artifact, response: Mapping[str, Any]) -> CapturedGeneration:
         choices = response.get("choices")
         if not isinstance(choices, list) or len(choices) != 1 or not isinstance(choices[0], Mapping):
             raise ValueError("vLLM generate response must carry exactly one choice")
@@ -135,7 +132,6 @@ class VLLMGenerateClient(NativeGenerateClient):
             for index, entry in enumerate(entries)
         ]
         stamped = self._token_runtime_load_ids(artifact, response, len(output_ids))
-        topk_indices, topk_log_probs = self._captured_topk(entries, capture_topk)
         public_meta = {
             key: value
             for key, value in (
@@ -152,8 +148,6 @@ class VLLMGenerateClient(NativeGenerateClient):
             finish_reason=finish_reason,
             text=None,
             public_meta=public_meta,
-            topk_indices=topk_indices,
-            topk_log_probs=topk_log_probs,
         )
 
     @staticmethod
@@ -179,31 +173,6 @@ class VLLMGenerateClient(NativeGenerateClient):
         ):
             raise ValueError("vLLM generate response has incomplete token runtime load IDs")
         return list(stamped)
-
-    @staticmethod
-    def _captured_topk(
-        entries: list[Any], capture_topk: int
-    ) -> tuple[list[list[int]] | None, list[list[float]] | None]:
-        """Top-K capture from vLLM's per-token ``top_logprobs``; partial rows disable the channel."""
-        if capture_topk <= 0:
-            return None, None
-        indices: list[list[int]] = []
-        log_probs: list[list[float]] = []
-        for entry in entries:
-            candidates = entry.get("top_logprobs") if isinstance(entry, Mapping) else None
-            if not isinstance(candidates, list) or len(candidates) < capture_topk:
-                return None, None
-            row_idx: list[int] = []
-            row_lp: list[float] = []
-            for candidate in candidates[:capture_topk]:
-                token = candidate.get("token") if isinstance(candidate, Mapping) else None
-                if not isinstance(token, str) or not token.startswith(TOKEN_ID_PREFIX):
-                    return None, None
-                row_idx.append(int(token[len(TOKEN_ID_PREFIX) :]))
-                row_lp.append(finite_log_prob(candidate.get("logprob"), "vLLM top_logprobs entry"))
-            indices.append(row_idx)
-            log_probs.append(row_lp)
-        return indices, log_probs
 
     def tool_parser(self, tools: list[dict[str, Any]], parser_name: str, tokenizer: Any) -> Any:
         """Build the parser vLLM registers under ``--tool-call-parser``'s name, for buffered parsing."""
@@ -259,7 +228,6 @@ class VLLMInferenceHandler(TokenNativeChatHandler):
         timeout_s: float = 300.0,
         tokenizer: Any = None,
         tool_call_parser: str | None = None,
-        capture_topk: int = 0,
         sampling_defaults: Mapping[str, Any] | None = None,
         force_reasoning: bool | None = None,
         chat_template_kwargs: Mapping[str, Any] | None = None,
@@ -274,7 +242,6 @@ class VLLMInferenceHandler(TokenNativeChatHandler):
             timeout_s=timeout_s,
             tokenizer=tokenizer,
             tool_call_parser=tool_call_parser,
-            capture_topk=capture_topk,
             sampling_defaults=sampling_defaults,
             force_reasoning=force_reasoning,
             chat_template_kwargs=chat_template_kwargs,

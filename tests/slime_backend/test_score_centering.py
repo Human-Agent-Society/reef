@@ -272,7 +272,7 @@ def test_bridge_keeps_the_first_top_k_entries_and_pads_untrained_positions() -> 
 @pytest.mark.parametrize(
     ("row", "top_k", "message"),
     [
-        (wire_data(indices=[], log_probs=[]), 3, "capture_topk >= 3"),
+        (wire_data(indices=[], log_probs=[]), 3, "carries no sampler top-k log-probs"),
         (
             wire_data(indices=[[5, 7, 8]], log_probs=[log_probs_fixture(0.5, 0.2, 0.1)]),
             3,

@@ -91,12 +91,12 @@ import a concrete integration.
 | ``reef/train/``         | the trainer, the training job loop, the training         | HTTP endpoints, deployment                 |
 |                         | pipeline, job data types, training components            | configuration parsing                      |
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
-| ``reef/record2record/`` | which records Reef uses and which train together: report | sample and job data assembly, record       |
-|                         | grouping, judging, eligibility checks, staleness check   | storage, task generation                   |
-+-------------------------+----------------------------------------------------------+--------------------------------------------+
-| ``reef/record2sample/`` | turning a record set into samples (``Record2Sample``,    | which records train, job data shape,       |
-|                         | ``ReportSamples``, ``JudgedSamples``), and the generator | training loops                             |
-|                         | service that writes, checks, and runs Harbor tasks       |                                            |
+| ``reef/record2sample/`` | which records Reef uses, which train together, and their | job data shape, record storage,            |
+|                         | samples (``Record2Sample``, ``ReportSamples``,           | training loops                             |
+|                         | ``JudgedSamples``): report grouping, judging,            |                                            |
+|                         | eligibility checks, the staleness check; the samples     |                                            |
+|                         | service; and the generator service that writes, checks,  |                                            |
+|                         | and runs Harbor tasks                                    |                                            |
 +-------------------------+----------------------------------------------------------+--------------------------------------------+
 | ``reef/evaluation/``    | candidate evaluation: running and scoring evaluation     | making candidates, training loops,         |
 |                         | runs, the harness history and its score cache, the       | artifact publication                       |
@@ -244,7 +244,10 @@ definitions; and ``backend.py`` holds ``PreparedStep`` and the committed
 releases that a harness step reads its head from. ``train/slime_backend/component.py`` and
 ``train/tinker_backend/component.py`` supply the Slime and Tinker training
 components, and each ``launch.py`` supplies its deployment definition and
-runtime factory. No training backend builds serving:
+runtime factory. Both components render each sample that has no tokens with
+``core/chat_rendering.py``, which turns an ATIF trajectory and its teacher
+requests into token IDs with the model's chat template. It is in
+``reef/core/`` because ``train/`` must not import ``inference/``. No training backend builds serving:
 ``service/deploy/serving.py`` selects and configures it from the
 ``inference`` section and the component's release format.
 
@@ -253,14 +256,15 @@ HTTP provider handling lives in ``inference/http.py``.
 the model clients and the recorders share: authentication headers, Server-Sent
 Events, stream folding and token usage.
 ``inference/chat.py`` holds the engine-neutral OpenAI and Anthropic chat facade
-over a token-native generate route: it renders the prompt, builds the training
-record from a ``CapturedGeneration`` and streams protocol frames. Each engine
+over a token-native generate route: it renders the prompt, builds the provider
+response from a ``CapturedGeneration`` and streams protocol frames. The
+response carries no training tensors. Each engine
 supplies a ``NativeGenerateClient`` that shapes its request, parses its response
 and builds its tool-call parser. ``inference/engine_control.py`` holds the
 control classes that SGLang and vLLM share: the inference backend, the
 inference service, the control actor and its default serving executor.
-``inference/sglang/`` owns SGLang engine launch, capture and control
-independently of training; ``inference/vllm/`` owns vLLM capture,
+``inference/sglang/`` owns SGLang engine launch, response parsing and control
+independently of training; ``inference/vllm/`` owns vLLM response parsing,
 the KV connector that stamps tokens with their weight version, and engine launch and
 control over vLLM's HTTP control routes. ``inference/remote/`` is the inference
 component: ``python -m reef.inference.remote`` runs the engines and serves
@@ -271,8 +275,8 @@ supplies the ``remote_serving`` runtime kind and builds the engines' input
 runtime of ``inference.backend: none``: it runs no engine and refuses every
 request. ``inference/tinker.py`` serves Tinker's sampler. ``tinker/`` holds
 the Tinker SDK pieces that the Tinker training component and the Tinker
-serving runtime share: ``tinker/sampling.py`` renders and samples text chat
-with Reef's training capture, for serving and for the component's own
+serving runtime share: ``tinker/sampling.py`` renders and samples text chat,
+for serving and, with the training capture, for the component's own
 rollouts.
 
 The extension points those packages expose are in `Python API
@@ -383,12 +387,12 @@ The extension points those packages expose are in `Python API
     own configuration (``run.layer`` of the adapter's ``adapter.yaml``),
     and the person's changes merged back (the ``merge`` of each part in its
     ``parts``). The client half is ``reef_client.harness``.
-- Does it decide which records train, or in which groups? Put it in
-  ``reef/record2record/``. Does it turn one record set into samples? Put the
-  shared contract in ``reef/record2sample/``. Does it shape samples into job data?
-  Put it in ``reef/sample2job/``. Does it turn job data into a step signal? Put
-  it in ``reef/train/algos/``. ``reef/train/pipeline.py`` drives the three
-  stages. A recipe selects and binds that machinery; it should
+- Does it decide which records train, in which groups, or how a record set
+  becomes samples? Put the shared contract in ``reef/record2sample/``. Does it
+  shape samples into job data? Put it in ``reef/sample2job/``. Does it turn job
+  data into a step signal? Put it in ``reef/train/algos/``.
+  ``reef/train/pipeline.py`` drives the two stages. A recipe selects and binds
+  that machinery; it should
   not reimplement it.
 - Does one service tell another what to do? Do it through the shared store,
   not a call. ``reef/storage/work_queue.py`` defines the ``WorkQueue`` contract

@@ -11,19 +11,18 @@ from tests.support._trajectories import policy_trajectory
 from reef.core import AgentRecord, RequestType
 from reef.core.job_data import TaskSample
 from reef.core.plugins import PluginConfigError
-from reef.record2record import (
-    InferenceRecord2Record,
-    Record2RecordSettings,
+from reef.record2sample import (
+    InferenceRecordSamples,
+    Record2SampleSettings,
     RecordSet,
     RecordSetUnit,
-    ReportGrouping,
-    ReportRecord2Record,
+    ReportSamples,
+    SampleResult,
     SampleStatus,
     SingleRecordSet,
     SingleSetUnit,
 )
-from reef.record2record.staleness import is_stale, producing_artifact_ids
-from reef.record2sample import SampleResult
+from reef.record2sample.staleness import is_stale, producing_artifact_ids
 from reef.train import PipelineContext
 
 
@@ -53,6 +52,21 @@ class ManySetUnit(RecordSetUnit):
         return self.held
 
 
+class EachInference(InferenceRecordSamples):
+    """Each inference record as one set with one task sample."""
+
+    @classmethod
+    def from_config(cls, config, *, context, environ):
+        return cls(max_staleness=Record2SampleSettings.parse(config, plugin_class=cls).max_staleness)
+
+    def make_samples(self, record_set: RecordSet) -> SampleResult:
+        return SampleResult.ready((TaskSample(Path(str(record_set.set_id))),))
+
+
+def ready_set_ids(stage) -> list[object]:
+    return [set_id for unit in stage.take_ready_units() for set_id in unit.set_ids()]
+
+
 def single(record_id: str) -> SingleRecordSet:
     return SingleRecordSet(set_id=record_id, record=inference(record_id))
 
@@ -76,7 +90,7 @@ def test_a_record_set_unit_holds_one_or_more_record_sets_and_consumes_all_their_
 
 
 def test_a_stage_puts_a_record_in_one_record_set_only() -> None:
-    stage = InferenceRecord2Record()
+    stage = EachInference()
     stage.form(RecordsSet(set_id="first", held=(inference("i"), report("r1", "i"))))
     # A retry of a set takes its records again.
     stage.form(RecordsSet(set_id="first", held=(inference("i"), report("r1", "i"))))
@@ -95,10 +109,12 @@ def test_a_ready_result_holds_one_or_more_samples_and_a_skipped_result_none() ->
 
 
 def test_a_stage_hands_out_each_ready_unit_once_in_the_order_it_first_became_ready() -> None:
-    stage = InferenceRecord2Record()
+    stage = EachInference()
     for name in ("a", "b", "a"):
-        stage.settle(single(name), SampleStatus.READY)
-    assert [unit.unit_id for unit in stage.take_ready_units()] == ["a", "b"]
+        stage.settle(single(name), SampleResult.ready((TaskSample(Path(name)),)))
+    units = stage.take_ready_units()
+    assert [unit.unit_id for unit in units] == ["a", "b"]
+    assert stage.unit_samples(units[0]) == (("a", (TaskSample(Path("a")),)),)
     assert stage.take_ready_units() == ()
 
 
@@ -133,7 +149,7 @@ def test_producing_artifact_ids_come_from_every_sample() -> None:
 
 
 def test_the_stage_finds_samples_behind_the_served_artifact_stale() -> None:
-    stage = InferenceRecord2Record()
+    stage = EachInference()
     old = policy_trajectory("old", (1, 2), (1,), (-0.1,), 1.0, artifact_id="a1")
     new = policy_trajectory("new", (1, 2), (1,), (-0.1,), 1.0, artifact_id="a2")
     unnamed = policy_trajectory("unnamed", (1, 2), (1,), (-0.1,), 1.0)
@@ -147,17 +163,17 @@ def test_the_stage_finds_samples_behind_the_served_artifact_stale() -> None:
     assert not stage.is_stale((TaskSample(Path("task")),)), "a task rolls out with the weights it trains"
 
 
-def test_record_stage_settings_default_to_zero_and_refuse_a_negative_limit() -> None:
-    assert Record2RecordSettings().max_staleness == 0
-    assert InferenceRecord2Record.from_config({}, context=PipelineContext("s"), environ={}).max_staleness == 0
+def test_stage_settings_default_to_zero_and_refuse_a_negative_limit() -> None:
+    assert Record2SampleSettings().max_staleness == 0
+    assert EachInference.from_config({}, context=PipelineContext("s"), environ={}).max_staleness == 0
     with pytest.raises(ValueError, match="max_staleness must be a non-negative int"):
-        Record2RecordSettings(max_staleness=-1)
+        Record2SampleSettings(max_staleness=-1)
     with pytest.raises(PluginConfigError, match="max_staleness must be a non-negative int"):
-        InferenceRecord2Record.from_config({"max_staleness": -1}, context=PipelineContext("s"), environ={})
+        EachInference.from_config({"max_staleness": -1}, context=PipelineContext("s"), environ={})
 
 
 def test_a_stage_finds_only_the_samples_more_than_its_configured_limit_behind_stale() -> None:
-    stage = InferenceRecord2Record.from_config({"max-staleness": 1}, context=PipelineContext("s"), environ={})
+    stage = EachInference.from_config({"max-staleness": 1}, context=PipelineContext("s"), environ={})
     for artifact_id in ("a1", "a2", "a3"):
         stage.observe_serving_artifact_id(artifact_id)
     stale = {
@@ -168,7 +184,7 @@ def test_a_stage_finds_only_the_samples_more_than_its_configured_limit_behind_st
 
 
 def test_an_artifact_that_serves_again_is_the_newest_and_its_data_is_fresh() -> None:
-    stage = InferenceRecord2Record()
+    stage = EachInference()
     for artifact_id in ("a1", "a2", "a2", "a1"):
         stage.observe_serving_artifact_id(artifact_id)
     assert stage.served_artifacts.artifact_ids == ["a1", "a2", "a1"]
@@ -192,14 +208,14 @@ def test_an_artifact_that_serves_again_is_the_newest_and_its_data_is_fresh() -> 
     ],
     ids=["native", "sglang", "openai", "tool-call", "anthropic", "legacy-stripped-anthropic"],
 )
-def test_aborted_inference_ends_before_task_creation(response: dict[str, object]) -> None:
-    stage = InferenceRecord2Record()
+def test_aborted_inference_ends_before_sample_creation(response: dict[str, object]) -> None:
+    stage = EachInference()
     aborted = AgentRecord.create(
         scenario="s", request_type=RequestType.INFERENCE, payload={"response": response}, agent_record_id="aborted"
     )
     stage.push(aborted)
     stage.push(inference("valid-without-tensors"))
-    assert [record_set.record_ids() for record_set in stage.pull()] == [("valid-without-tensors",)]
+    assert ready_set_ids(stage) == ["valid-without-tensors"]
     assert stage.releasable_record_ids() == {"aborted"}
     assert aborted.payload["response"] == response
     stage.release_records(frozenset({"aborted"}))
@@ -215,27 +231,27 @@ def test_a_rejected_set_formed_twice_frees_its_records_on_release_for_a_retry(re
         payload={"response": {"choices": [{"finish_reason": "abort"}]}},
         agent_record_id="aborted",
     )
-    stage: InferenceRecord2Record | ReportRecord2Record
+    stage: EachInference | ReportSamples
     if report_stage:
-        stage = ReportRecord2Record(PipelineContext("s"), ReportGrouping())
+        stage = ReportSamples(PipelineContext("s"))
         stage.push(aborted)
         rejected, retry = report("set", "aborted"), report("set", "clean")
     else:
-        stage = InferenceRecord2Record()
+        stage = EachInference()
         rejected, retry = aborted, inference("aborted")
     set_id = rejected.agent_record_id
     record_ids = {"aborted", set_id}
     stage.push(rejected)
     stage.push(rejected)
-    assert stage.pull() == ()
+    assert stage.take_ready_units() == ()
     # The rejected set keeps its records until release, so another set cannot take them first.
     assert stage.set_of_record == dict.fromkeys(record_ids, set_id)
     assert stage.releasable_record_ids() == record_ids
-    assert stage.take_ended() == {set_id}
+    assert set_id not in stage.set_samples
     stage.release_records(stage.releasable_record_ids())
     assert stage.set_of_record == {}
     assert not stage.releasable_record_ids()
     if report_stage:
         stage.push(inference("clean"))
     stage.push(retry)
-    assert [record_set.set_id for record_set in stage.pull()] == [set_id]
+    assert ready_set_ids(stage) == [set_id]

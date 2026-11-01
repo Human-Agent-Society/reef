@@ -40,12 +40,18 @@ class RequestHeaders:
     tags: Mapping[str, str] = field(default_factory=dict)
 
 
-def parse_request_headers(headers: Mapping[str, str], request_type: RequestType) -> RequestHeaders:
+def scenario_headers(headers: Mapping[str, str]) -> tuple[str, str | None]:
+    """The scenario and the release that a request's headers name; ``HeaderError`` without a scenario."""
     normalized = {key.lower(): value for key, value in headers.items()}
     scenario = normalized.get(SCENARIO_HEADER, "").strip()
     if not scenario:
         raise HeaderError(f"missing or empty {SCENARIO_HEADER}")
-    release_id = normalized.get(RELEASE_ID_HEADER, "").strip() or None
+    return scenario, normalized.get(RELEASE_ID_HEADER, "").strip() or None
+
+
+def parse_request_headers(headers: Mapping[str, str], request_type: RequestType) -> RequestHeaders:
+    normalized = {key.lower(): value for key, value in headers.items()}
+    scenario, release_id = scenario_headers(headers)
 
     tags = {
         key[len(TAG_HEADER_PREFIX) :]: value.strip()

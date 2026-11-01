@@ -44,7 +44,6 @@ for _cookbook_package in (
 class PgAlgorithm(SlimeAlgorithm):
     loss_family = "pg"
     loss_type = "policy_loss"
-    requires_rollout_logprobs = True
     advantages = "required"
 
     def validate_specific_args(self, args: Namespace, source: str) -> None:

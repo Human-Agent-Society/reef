@@ -100,7 +100,6 @@ class SGLangGenerateClient(NativeGenerateClient):
         prompt_ids: list[int],
         sampling_params: Mapping[str, Any],
         *,
-        capture_topk: int,
         stream: bool,
     ) -> dict[str, Any]:
         native_payload: dict[str, Any] = {
@@ -112,14 +111,12 @@ class SGLangGenerateClient(NativeGenerateClient):
         top_logprobs = request.get("top_logprobs")
         if isinstance(top_logprobs, int) and not isinstance(top_logprobs, bool) and top_logprobs >= 0:
             native_payload["top_logprobs_num"] = top_logprobs
-        if capture_topk > 0:
-            native_payload["top_logprobs_num"] = max(capture_topk, int(native_payload.get("top_logprobs_num") or 0))
         for key in ("lora_path", "rid"):
             if key in request:
                 native_payload[key] = request[key]
         return native_payload
 
-    def parse(self, artifact: Artifact, response: Mapping[str, Any], *, capture_topk: int) -> CapturedGeneration:
+    def parse(self, artifact: Artifact, response: Mapping[str, Any]) -> CapturedGeneration:
         normalized = normalize_native_response(artifact, dict(response))
         meta = normalized["meta_info"]
         text = normalized.get("text")
@@ -129,7 +126,6 @@ class SGLangGenerateClient(NativeGenerateClient):
         stamped = normalized["_reef_token_runtime_load_ids"]
         if len(stamped) != len(output_ids):
             raise ValueError("SGLang response has incomplete token runtime load IDs")
-        topk = captured_topk(meta, len(output_ids), capture_topk)
         return CapturedGeneration(
             output_ids=output_ids,
             rollout_log_probs=rollout_log_probs,
@@ -137,8 +133,6 @@ class SGLangGenerateClient(NativeGenerateClient):
             finish_reason=normalize_finish_reason(meta.get("finish_reason")),
             text=text,
             public_meta={key: value for key, value in meta.items() if key not in PRIVATE_META_KEYS},
-            topk_indices=topk[0],
-            topk_log_probs=topk[1],
         )
 
     def tool_parser(self, tools: list[dict[str, Any]], parser_name: str, tokenizer: Any) -> Any:
@@ -176,39 +170,6 @@ def normalize_native_response(artifact: Artifact, response: dict[str, Any]) -> d
     response["meta_info"] = normalized_meta
     response["_reef_token_runtime_load_ids"] = stamped
     return response
-
-
-def captured_topk(
-    meta: Mapping[str, Any], response_length: int, capture_topk: int
-) -> tuple[list[list[int]] | None, list[list[float]] | None]:
-    """Generation-time top-K capture for the OpenClaw-RL top-K objective.
-
-    SGLang's ``output_top_logprobs`` lists, per generated position, the
-    top-N ``[logprob, token_id, ...]`` entries. Rows are truncated or
-    absent when the engine cannot provide them; a partial capture
-    disables the channel for the whole response (all-or-nothing keeps
-    the training contract rectangular).
-    """
-    if capture_topk <= 0:
-        return None, None
-    entries = meta.get("output_top_logprobs")
-    if not isinstance(entries, list) or len(entries) < response_length:
-        return None, None
-    indices: list[list[int]] = []
-    log_probs: list[list[float]] = []
-    for position in entries[:response_length]:
-        if not isinstance(position, list) or len(position) < capture_topk:
-            return None, None
-        row_idx: list[int] = []
-        row_lp: list[float] = []
-        for entry in position[:capture_topk]:
-            if not isinstance(entry, (list, tuple)) or len(entry) < 2 or entry[0] is None:
-                return None, None
-            row_lp.append(float(entry[0]))
-            row_idx.append(int(entry[1]))
-        indices.append(row_idx)
-        log_probs.append(row_lp)
-    return indices, log_probs
 
 
 class NativeStreamCapture:
@@ -296,7 +257,6 @@ class SGLangInferenceHandler(TokenNativeChatHandler):
         timeout_s: float = 300.0,
         tokenizer: Any = None,
         tool_call_parser: str | None = None,
-        capture_topk: int = 0,
         sampling_defaults: Mapping[str, Any] | None = None,
         force_reasoning: bool | None = None,
         chat_template_kwargs: Mapping[str, Any] | None = None,
@@ -311,7 +271,6 @@ class SGLangInferenceHandler(TokenNativeChatHandler):
             timeout_s=timeout_s,
             tokenizer=tokenizer,
             tool_call_parser=tool_call_parser,
-            capture_topk=capture_topk,
             sampling_defaults=sampling_defaults,
             force_reasoning=force_reasoning,
             chat_template_kwargs=chat_template_kwargs,
@@ -326,9 +285,7 @@ class SGLangInferenceHandler(TokenNativeChatHandler):
         # request-local knob; deployments using SGLang's disjoint incremental
         # output mode are supported by NativeStreamCapture as well.
         call.sampling_params.setdefault("stream_interval", 1)
-        native_payload = self.client.payload(
-            call.request, call.prompt_ids, call.sampling_params, capture_topk=self.capture_topk, stream=True
-        )
+        native_payload = self.client.payload(call.request, call.prompt_ids, call.sampling_params, stream=True)
         upstream = await HttpInferenceHandler.inference_stream(self, artifact, SGLANG_GENERATE_PATH, native_payload)
         chat_id, message_id, created = stream_ids()
         relay = ChatStreamRelay(self._stream_writer(call, chat_id, message_id, created), call.tool_parser)
@@ -382,9 +339,9 @@ class SGLangInferenceHandler(TokenNativeChatHandler):
                 for frame in relay.piece(kind, value):
                     yield frame
 
-            captured = self.client.parse(artifact, capture.response(), capture_topk=self.capture_topk)
+            captured = self.client.parse(artifact, capture.response())
             # Streaming parsers are stateful. Parse the complete sample with a
-            # fresh instance for the canonical training response.
+            # fresh instance for the canonical response that the record keeps.
             response = self._response_from_capture(call, captured, self._configured_tool_parser(call.request))
             provider_response, frames = self._finish_frames(call, relay, response, chat_id, message_id, created)
             stream.record_response = provider_response

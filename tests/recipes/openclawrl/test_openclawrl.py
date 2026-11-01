@@ -1,4 +1,4 @@
-"""OpenClaw-RL pipeline (judging in the record stage), backend preparation, and recipe."""
+"""OpenClaw-RL pipeline (judging in the record-to-sample stage), backend preparation, and recipe."""
 
 from __future__ import annotations
 
@@ -7,15 +7,17 @@ import time
 
 import pytest
 from tests.support._trajectories import policy_trajectory
+from tests.support.chat_templates import CharTemplate
 from tests.support.runtime_stubs import job_sized_stages, runtime_bindings
 
 from recipes.openclawrl import OpenClawRLJobData, OpenClawRLRecipe
-from recipes.openclawrl.judging import OpenClawRLJudgingSettings, OpenClawRLRecord2Record
+from recipes.openclawrl.judging import OpenClawRLJudgingSettings
 from recipes.openclawrl.prm import PRMJudge
 from recipes.openclawrl.processor import OpenClawRLJobSettings, OpenClawRLSamples
 from recipes.openclawrl.sessions import SessionIndex
 from recipes.openclawrl.turns import TurnJudgment
 from reef.core import AgentRecord, RequestType
+from reef.core.chat_rendering import rendered_job_data
 from reef.core.trajectories import source_record_id, trajectory_reward
 from reef.execution.jobs import BackgroundJobRunner, BackgroundJobWorker, SupportsReceipt
 from reef.pipeline_context import PipelineContext
@@ -57,36 +59,20 @@ def _turn(
     messages,
     *,
     tools=({"type": "function", "function": {"name": "write"}},),
-    tokens=(1, 2, 3, 4),
-    loss_mask=(1, 1),
-    logprobs=(-0.1, -0.2),
     artifact_id="v1",
-    topk_rows=None,
     session=None,
 ):
-    training = {
-        "tokens": list(tokens),
-        "loss_mask": list(loss_mask),
-        "rollout_log_probs": list(logprobs),
-        # The paper objective requires the generation-time top-K capture on
-        # every response token.
-        "topk_indices": [[1, 2] for _ in loss_mask] if topk_rows is None else topk_rows,
-        "topk_log_probs": [[-0.1, -2.0] for _ in loss_mask],
-        "artifact_id": artifact_id,
-        "response_length": len(loss_mask),
-    }
+    """A main turn as the inference service records it: no training tensors, and the answering artifact's ID."""
     return AgentRecord.create(
         scenario="s",
         request_type=RequestType.INFERENCE,
         payload={
             "messages": list(messages),
             "tools": list(tools),
+            "artifact_id": artifact_id,
             # What the request plane stores for x-reef-tag-session.
             **({"metadata": {"tags": {"session": session}}} if session else {}),
-            "response": {
-                "choices": [{"message": {"role": "assistant", "content": "a"}}],
-                "training": training,
-            },
+            "response": {"choices": [{"message": {"role": "assistant", "content": "a"}}]},
         },
         agent_record_id=agent_record_id,
     )
@@ -99,20 +85,19 @@ def _successor(prior_messages, next_state: str):
 def _processor(*, worker=None, ttl_s: float = 900.0, clients=None, **judging):
     context = PipelineContext("s")
     settings = OpenClawRLJudgingSettings(session_ttl_s=ttl_s, **judging)
-    stage = OpenClawRLRecord2Record(settings, worker=worker, clients=clients)
+    stage = OpenClawRLSamples(settings, worker=worker, clients=clients)
     return TrainingPipeline(
         context,
-        record2record=stage,
-        record2sample=OpenClawRLSamples(),
+        record2sample=stage,
         sample2job=OpenClawRLJobData(context, OpenClawRLJobSettings(), stage),
     )
 
 
 Q1 = [{"role": "user", "content": "q1"}]
 Q2 = [{"role": "user", "content": "q2"}]
-#: The un-enhanced anchor for ``_turn``'s native ids — every trained sample
-#: carries at least one candidate, so scoring judgments ship this.
-ANCHOR = ({"hint": "", "teacher_tokens": [1, 2, 3, 4]},)
+#: The un-enhanced anchor, whose teacher reads the student's own sequence — every trained sample carries at least
+#: one candidate, so scoring judgments ship this.
+ANCHOR = ({"hint": "", "messages": None},)
 
 
 @pytest.mark.unit
@@ -194,7 +179,7 @@ def test_session_ttl_flushes_the_final_turn_terminal() -> None:
 
 
 @pytest.mark.unit
-def test_untrainable_verdicts_and_bad_tensors_are_terminal() -> None:
+def test_untrainable_verdicts_are_terminal() -> None:
     worker = FakeWorker()
     processor = _processor(worker=worker)
     processor.push(_turn("declined", Q1))
@@ -204,13 +189,13 @@ def test_untrainable_verdicts_and_bad_tensors_are_terminal() -> None:
     assert not processor.ready(1)
     assert "declined" in processor.releasable_record_ids()
 
-    # ragged top-K capture: one row missing → the select loss cannot run
-    processor.push(_turn("ragged", Q2, topk_rows=[[1, 2]]))
+    # A scored judgment without a teacher candidate: candidate construction failed, so the turn never trains.
+    processor.push(_turn("no-candidates", Q2))
     processor.push(_turn("cont2", _successor(Q2, "ok")))
-    worker.push(TurnJudgment("ragged", score=-1.0, teacher_cands=ANCHOR))
+    worker.push(TurnJudgment("no-candidates", score=-1.0))
     processor.produce()
     assert not processor.ready(1)
-    assert "ragged" in processor.releasable_record_ids()
+    assert "no-candidates" in processor.releasable_record_ids()
 
 
 @pytest.mark.unit
@@ -287,18 +272,9 @@ def test_scoring_worker_threads_the_combine_dispatch() -> None:
         async def evaluate_hint_votes(self, response_text, next_state, role):
             return []  # no hints accepted → RL-only → un-enhanced anchor
 
-    class ScriptedTeacher:
-        def __init__(self) -> None:
-            self.calls = []
-
-        async def candidate_tokens(self, enhanced_messages, *, tools=None, native_tokens, response_token_count):
-            self.calls.append(enhanced_messages)
-            return [101] + [int(v) for v in native_tokens[-response_token_count:]]
-
-    teacher = ScriptedTeacher()
     # clients (not a scripted worker): the REAL worker thread runs the
-    # processor's own judge against the scripted PRM clients.
-    processor = _processor(clients=(ScriptedJudge(), teacher, None))
+    # processor's own judge against the scripted PRM judge, without a renderer.
+    processor = _processor(clients=(ScriptedJudge(), None))
     processor.push(_turn("t1", Q1))
     processor.push(_turn("t2", _successor(Q1, "Great, that works!")))
 
@@ -311,10 +287,16 @@ def test_scoring_worker_threads_the_combine_dispatch() -> None:
     batch = processor.build_job_data(1)
     sample = batch.samples[0]
     assert trajectory_reward(sample) == 1.0
-    # The RL-only anchor is the native ids verbatim, built without the
-    # teacher (its construction cannot fail), for the Megatron teacher pass.
-    assert teacher.calls == []
-    assert sample.training.get("extras", {})["teacher_cands"] == [{"hint": "", "teacher_tokens": [1, 2, 3, 4]}]
+    # The RL-only anchor is a request without messages: its teacher reads the student's own sequence.
+    tools = [{"type": "function", "function": {"name": "write"}}]
+    assert sample.metadata["teacher_candidates"] == [
+        {"hint": "", "messages": None, "tools": tools, "max_prompt_tokens": 0, "max_tokens": 0}
+    ]
+    # The training component renders the sample, and the anchor becomes the student's tokens verbatim.
+    rendered, left_out = rendered_job_data(batch, CharTemplate())
+    assert left_out == ()
+    training = rendered.samples[0].training
+    assert training["teacher_candidates"] == [{"hint": "", "teacher_tokens": training["tokens"]}]
     processor.close()
 
 
@@ -366,7 +348,7 @@ def openclawrl_recipe(pipeline: dict | None = None, **data) -> OpenClawRLRecipe:
 def test_the_pipeline_section_configures_the_stages() -> None:
     recipe = openclawrl_recipe(
         {
-            "record2record": {
+            "record2sample": {
                 "config": {
                     "prm_url": "http://prm:23001",
                     "prm_tokenizer_path": "/models/prm",
@@ -384,18 +366,17 @@ def test_the_pipeline_section_configures_the_stages() -> None:
     )
     built = recipe.build_pipeline(PipelineContext("s"))
     try:
-        assert isinstance(built.record2record, OpenClawRLRecord2Record)
         assert isinstance(built.record2sample, OpenClawRLSamples)
         assert isinstance(built.sample2job, OpenClawRLJobData)
-        judging = built.record2record.openclawrl_judging
+        judging = built.record2sample.openclawrl_judging
         assert isinstance(judging.prm, PRMJudge)
         assert judging.prm.generate_url == "http://prm:23001/generate"
         assert judging.prm.timeout_s == 3600.0
         assert judging.max_hint_candidates == 2
         assert judging.index.ttl_s == 60.0 and judging.index.max_sessions == 16
-        assert isinstance(built.record2record.worker, BackgroundJobWorker), "a PRM judge starts the judging worker"
+        assert isinstance(built.record2sample.worker, BackgroundJobWorker), "a PRM judge starts the judging worker"
         assert (built.sample2job.job_samples, built.buffer_size) == (2, 8)
-        assert built.sample2job.openclawrl_judging is judging, "the job data reports what the record stage judged"
+        assert built.sample2job.openclawrl_judging is judging, "the job data reports what the sample stage judged"
         assert str(built.sample2job.record_path) == "/tmp/prm-records.jsonl"
     finally:
         built.close()
@@ -404,8 +385,8 @@ def test_the_pipeline_section_configures_the_stages() -> None:
 @pytest.mark.unit
 def test_the_default_stages_are_correlate_only_and_buffer_one_job() -> None:
     built = openclawrl_recipe().build_pipeline(PipelineContext("s", default_job_samples=16))
-    assert isinstance(built.record2record, OpenClawRLRecord2Record)
-    assert built.record2record.openclawrl_judging.prm is None and built.record2record.worker is None
+    assert isinstance(built.record2sample, OpenClawRLSamples)
+    assert built.record2sample.openclawrl_judging.prm is None and built.record2sample.worker is None
     assert built.buffer_size == 16
     assert isinstance(built.sample2job, OpenClawRLJobData) and built.sample2job.record_path is None
     built.close()
@@ -414,7 +395,7 @@ def test_the_default_stages_are_correlate_only_and_buffer_one_job() -> None:
 @pytest.mark.unit
 @pytest.mark.parametrize(
     ("key", "stage"),
-    [("batch_size", "sample2job"), ("prm_timeout_s", "record2record"), ("prm-url", "record2record")],
+    [("batch_size", "sample2job"), ("prm_timeout_s", "record2sample"), ("prm-url", "record2sample")],
 )
 def test_a_stage_setting_in_the_recipe_config_is_refused(key: str, stage: str) -> None:
     with pytest.raises(RecipeConfigError, match="does not consume"):
@@ -431,9 +412,9 @@ def test_the_retired_teacher_settings_are_refused() -> None:
 @pytest.mark.parametrize(
     ("pipeline", "match"),
     [
-        ({"record2record": {"config": {"prm_url": "http://prm:23001"}}}, "prm_tokenizer_path"),
-        ({"record2record": {"config": {"prm_concurrency": 0}}}, "prm_concurrency must be positive"),
-        ({"record2record": {"config": {"batch_size": 2}}}, "batch_size"),
+        ({"record2sample": {"config": {"prm_url": "http://prm:23001"}}}, "prm_tokenizer_path"),
+        ({"record2sample": {"config": {"prm_concurrency": 0}}}, "prm_concurrency must be positive"),
+        ({"record2sample": {"config": {"batch_size": 2}}}, "batch_size"),
         ({"sample2job": {"config": {"batch_size": 16}}}, "OpenClawRLJobData: unknown config fields: batch_size"),
         ({"sample2job": {"config": {"buffer_size": 0}}}, "buffer_size must be None or a positive int"),
         ({"sample2job": {"config": {"prm_url": "http://prm:23001"}}}, "prm_url"),
@@ -446,9 +427,9 @@ def test_the_recipe_refuses_a_bad_stage_config_when_the_pipeline_builds(pipeline
 
 
 @pytest.mark.unit
-def test_the_batches_need_the_openclawrl_record_stage() -> None:
-    recipe = openclawrl_recipe({"record2record": {"module": "reef.record2record:NoRecordSets"}})
-    with pytest.raises(RecipeConfigError, match="OpenClawRLJobData needs OpenClawRLRecord2Record"):
+def test_the_batches_need_the_openclawrl_sample_stage() -> None:
+    recipe = openclawrl_recipe({"record2sample": {"module": "reef.record2sample:NoSamples"}})
+    with pytest.raises(RecipeConfigError, match="OpenClawRLJobData needs OpenClawRLSamples"):
         recipe.build_pipeline(PipelineContext("s"))
 
 
@@ -565,11 +546,10 @@ def test_the_prm_record_file_reports_the_judged_population(tmp_path) -> None:
     record = tmp_path / "prm-records.jsonl"
     worker = FakeWorker()
     context = PipelineContext("s")
-    stage = OpenClawRLRecord2Record(OpenClawRLJudgingSettings(), worker=worker)
+    stage = OpenClawRLSamples(OpenClawRLJudgingSettings(), worker=worker)
     processor = TrainingPipeline(
         context,
-        record2record=stage,
-        record2sample=OpenClawRLSamples(),
+        record2sample=stage,
         sample2job=OpenClawRLJobData(context, OpenClawRLJobSettings(prm_record_file=str(record)), stage),
     )
     processor.push(_turn("t1", Q1))
@@ -698,7 +678,7 @@ def test_traffic_without_a_session_tag_says_so_instead_of_training_on_nothing(ca
             processor.push(_turn(f"t{i}", [{"role": "user", "content": f"homework {i}"}]))
         assert "x-reef-tag-session" in caplog.text  # the fallback announced itself
         caplog.clear()
-        processor.record2record.judging.expire(time.monotonic() + 10_000.0)  # every session times out unbound
+        processor.record2sample.judging.expire(time.monotonic() + 10_000.0)  # every session times out unbound
     assert "without ever binding" in caplog.text
     assert "x-reef-tag-session" in caplog.text
 
@@ -709,7 +689,7 @@ def test_a_tagged_run_stays_quiet(caplog) -> None:
     with caplog.at_level("WARNING"):
         processor.push(_turn("t1", Q1, session="hw-1"))
         processor.push(_turn("t2", Q2, session="hw-1"))
-        processor.record2record.judging.expire(time.monotonic() + 10_000.0)
+        processor.record2sample.judging.expire(time.monotonic() + 10_000.0)
     assert caplog.text == ""
 
 

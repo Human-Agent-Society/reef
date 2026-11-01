@@ -7,14 +7,14 @@ otherwise so the adapter suite stays standalone.
 from __future__ import annotations
 
 import pytest
+from tests.support.conversations import conversation
 
 from reef.core.trajectories import trajectory_reward
 from reef.train.types import trajectory_groups
 
 reef_types = pytest.importorskip("reef.train.types", reason="requires a reef checkout")
 
-from recipes.beta.coral.processor import ROOT_GROUP, CoralAssemblySettings, CoralJobData, CoralSamples
-from recipes.beta.coral.recipe import CoralGroupSettings, CoralRecord2Record
+from recipes.beta.coral.processor import ROOT_GROUP, CoralJobData, CoralSamples, CoralSettings
 from reef.core import AgentRecord, RequestType
 from reef.pipeline_context import PipelineContext
 from reef.train.pipeline import TrainingPipeline
@@ -27,8 +27,7 @@ def _processor(group_size=2):
     context = PipelineContext(SCENARIO)
     return TrainingPipeline(
         context,
-        record2record=CoralRecord2Record(context, CoralGroupSettings(group_size=group_size)),
-        record2sample=CoralSamples(CoralAssemblySettings()),
+        record2sample=CoralSamples(context, CoralSettings(group_size=group_size)),
         sample2job=CoralJobData(context, None, None),
     )
 
@@ -148,15 +147,19 @@ def test_regrade_retry_at_same_commit_is_terminal_not_double_counted():
 
 def test_multi_call_attempt_assembles_multi_turn():
     processor = _processor(group_size=2)
-    processor.push(_inference("i1", [1, 2], [1], [-0.1]))
-    processor.push(_inference("i2", [1, 2, 3, 4], [1], [-0.2]))  # extends i1
-    processor.push(_inference("i3", [5, 6], [1], [-0.3]))
-    processor.push(_attempt_report("r1", ("i1", "i2"), 0.5, commit="c-a", parent="p0"))
+    processor.push(conversation("i1", 1, scenario=SCENARIO))
+    processor.push(conversation("i2", 3, scenario=SCENARIO))  # extends i1
+    processor.push(conversation("i3", 1, scenario=SCENARIO, filler=" other"))
+    # A report references the last call of the attempt's trajectory.
+    processor.push(_attempt_report("r1", "i2", 0.5, commit="c-a", parent="p0"))
     processor.push(_attempt_report("r2", "i3", 0.8, commit="c-b", parent="p0"))
     assert processor.ready(2)
     (group,) = trajectory_groups(processor.build_job_data(2))
     multi = next(s for s in group if trajectory_reward(s) == 0.5)
-    assert multi.training["turn_count"] == 2
+    # The sample holds both calls of the attempt, and both replies train.
+    assert [record["agent_record_id"] for record in multi.metadata["records"]] == ["i1", "i2"]
+    agent_steps = [step for step in multi.trajectory["steps"] if step["source"] == "agent"]
+    assert [step.get("is_copied_context", False) for step in agent_steps] == [False, False]
 
 
 def test_report_without_coral_metadata_fails_explicitly():

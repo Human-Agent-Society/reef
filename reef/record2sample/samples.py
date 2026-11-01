@@ -1,6 +1,6 @@
 """Readers of recorded inferences, and the sample builders that record-to-sample stages use.
 
-The report reader ``report_score`` lives in ``reef.record2record.reports``.
+The report reader ``report_score`` lives in ``reef.record2sample.reports``.
 ``recorded_request`` and ``recorded_response`` read the messages, tools and
 answer text of a recorded inference; the sample builders turn one inference
 record — or an ordered multi-call rollout — into a ``TrajectorySample`` with the
@@ -13,6 +13,7 @@ import math
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from reef.core.chat_rendering import flatten_content
 from reef.core.job_data import TrajectorySample
 from reef.core.records_types import AgentRecord
 from reef.core.trajectories import make_trajectory
@@ -22,10 +23,11 @@ TopkRow = tuple[list[int], list[float]]
 
 
 def recorded_training(payload: Mapping[str, Any]) -> Mapping[str, Any]:
-    """The ``response.training`` section of a recorded inference: what the backend attached for training.
+    """The ``response.training`` section of an inference: what a training component's own rollout engine attached
+    for training, such as the calls of a task rollout.
 
-    Empty for a record without one, such as a harness that ships its policy
-    tensors at the top level of the payload.
+    Empty for a record that serving made, which carries no training tensors, and for a harness that ships its
+    policy tensors at the top level of the payload.
     """
     response = payload.get("response")
     training = response.get("training") if isinstance(response, Mapping) else None
@@ -35,8 +37,8 @@ def recorded_training(payload: Mapping[str, Any]) -> Mapping[str, Any]:
 def recorded_request(payload: Mapping[str, Any]) -> tuple[list[Any], list[Any] | None]:
     """The messages and tools of a recorded inference request.
 
-    The rollout backend retains its provider-neutral copy under
-    ``response.training``; a record without it carries the request body.
+    A training component's rollout engine retains its provider-neutral copy under ``response.training``; a record
+    without it, such as every record that serving made, carries the request body.
     """
     training = recorded_training(payload)
     if isinstance(training.get("request_messages"), list):
@@ -72,16 +74,6 @@ def recorded_response(payload: Mapping[str, Any]) -> str:
     """The text of a recorded inference's response: the final assistant message, or empty when it has none."""
     message = recorded_response_message(payload)
     return "" if message is None else flatten_content(message.get("content"))
-
-
-def flatten_content(content: Any) -> str:
-    """The plain text of an OpenAI-style message content field."""
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts = [item.get("text", "") for item in content if isinstance(item, Mapping) and item.get("type") == "text"]
-        return " ".join(parts) if parts else ""
-    return str(content) if content is not None else ""
 
 
 def common_prefix_length(left: list[int], right: list[int]) -> int:

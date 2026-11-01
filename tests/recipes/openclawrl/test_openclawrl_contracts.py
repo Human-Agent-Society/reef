@@ -9,9 +9,10 @@ from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
 import pytest
-from tests.support._trajectories import policy_trajectory
+from tests.support._trajectories import policy_trajectory, recorded_trajectory
+from tests.support.chat_templates import CharTemplate
 
-from recipes.openclawrl.judging import OpenClawRLJudgingSettings, OpenClawRLRecord2Record
+from recipes.openclawrl.judging import OpenClawRLJudgingSettings
 from recipes.openclawrl.prm import (
     append_hint_to_messages,
     build_hint_judge_messages,
@@ -20,6 +21,7 @@ from recipes.openclawrl.prm import (
 )
 from recipes.openclawrl.processor import OpenClawRLJobData, OpenClawRLJobSettings, OpenClawRLSamples
 from recipes.openclawrl.turns import TurnJob
+from reef.core.chat_rendering import rendered_job_data
 from reef.core.trajectories import source_record_id
 from reef.runtime.interfaces import TrainingMethod
 from reef.train.algos.schedule import StepScheduling
@@ -74,12 +76,13 @@ def topk_objective(monkeypatch):
 
 
 def _anchor(tokens: tuple) -> tuple:
-    """The un-enhanced anchor candidate for ``tokens`` (upstream ships one
-    per RL-only sample; every trained sample carries at least one)."""
+    """The rendered un-enhanced anchor candidate for ``tokens``: its teacher reads the student's own sequence
+    (upstream ships one per RL-only sample; every trained sample carries at least one)."""
     return ({"hint": "", "teacher_tokens": [int(v) for v in tokens]},)
 
 
 def _sample(reward: float, cands: tuple | None = None, n: int = 3) -> TrajectorySample:
+    """A sample as the training component renders it: tokens, loss mask, and rendered teacher candidates."""
     tokens = tuple(range(10, 10 + n + 2))
     if cands is None:
         cands = _anchor(tokens)
@@ -89,10 +92,7 @@ def _sample(reward: float, cands: tuple | None = None, n: int = 3) -> Trajectory
         loss_mask=(1,) * n,
         rollout_log_probs=(-1.0,) * n,
         reward=reward,
-        topk_indices=tuple((1, 2, 3, 4) for _ in range(n)),
-        topk_log_probs=tuple((-0.5, -1.0, -1.5, -2.0) for _ in range(n)),
-        extras={"teacher_cands": cands},
-    )
+    ).with_training(teacher_candidates=[dict(cand) for cand in cands])
 
 
 class _FakeBackuper:
@@ -253,8 +253,8 @@ class TestHintJudging:
         assert "[role: tool]" in messages[1]["content"]
 
 
-class TestTopkTestObjective:
-    def test_signals_ride_topk_channels(self):
+class TestOpenclawrlWireRow:
+    def test_the_row_carries_the_rendered_teacher_candidates(self):
         cand = {"hint": "h", "teacher_tokens": [7, 8, 12, 13, 14]}
         batch = JobData(
             "s:openclawrl:0",
@@ -266,21 +266,19 @@ class TestTopkTestObjective:
         step = prepare_slime_job(batch, TrainingMethod("openclawrl"), {}, StepScheduling(), step_size=2)
         assert step.payload["loss"] == "openclawrl"
         assert step.payload["advantages"] == [1.0, -1.0]
-        # The family's wire row: policy 5-tuple + the three top-K channels.
+        # The family's wire row: policy 5-tuple + the teacher candidates; the actor computes the student's top-K.
         rows = step.payload["samples"]
-        assert rows[0][5] == [[1, 2, 3, 4]] * 3
-        assert rows[0][6] == [[-0.5, -1.0, -1.5, -2.0]] * 3
-        assert rows[0][7][0]["hint"] == "h"
+        assert [len(row) for row in rows] == [6, 6]
+        assert rows[0][5] == [cand]
         # The RL-only row carries the anchor: every sample ships >= 1 candidate.
-        assert rows[1][7] == [{"hint": "", "teacher_tokens": [10, 11, 12, 13, 14]}]
+        assert rows[1][5] == [{"hint": "", "teacher_tokens": [10, 11, 12, 13, 14]}]
 
-    def test_missing_topk_rejected(self):
+    def test_a_row_of_another_shape_is_refused(self):
         from recipes.openclawrl.slime import build_openclawrl_rollout_data
         from reef.train.slime_backend.loss_families import resolve_loss_family
 
         spec = resolve_loss_family("openclawrl")
-        # A sample whose top-K capture is absent cannot train on the paper
-        # objective; the builder refuses it at the wire boundary.
+        # The retired 8-column row that carried the sampler's top-K: the builder refuses it at the wire boundary.
         payload = {
             "samples": [["a", [1, 2, 3, 4, 5], [1, 1, 1], [-1.0, -1.5, -2.0], 1.0, [], [], []]],
             "rollout_ids": [0],
@@ -288,10 +286,10 @@ class TestTopkTestObjective:
             "advantages": [1.0],
             "external_step_sizes": [1],
         }
-        with pytest.raises(ValueError, match="top-K"):
+        with pytest.raises(ValueError, match=r"teacher_cands\]"):
             build_openclawrl_rollout_data(payload, payload["samples"], spec)
 
-    def test_topk_payload_builder_ships_candidate_sequences(self):
+    def test_the_payload_builder_ships_candidate_sequences(self):
         from recipes.openclawrl.slime import build_openclawrl_rollout_data
         from reef.train.slime_backend.loss_families import resolve_loss_family
 
@@ -299,18 +297,7 @@ class TestTopkTestObjective:
 
         def payload(cands):
             return {
-                "samples": [
-                    [
-                        "a",
-                        [1, 2, 3, 4, 5],
-                        [1, 1, 1],
-                        [-1.0, -1.5, -2.0],
-                        1.0,
-                        [[1, 2, 3, 4]] * 3,
-                        [[-0.5, -1.0, -1.5, -2.0]] * 3,
-                        cands,
-                    ]
-                ],
+                "samples": [["a", [1, 2, 3, 4, 5], [1, 1, 1], [-1.0, -1.5, -2.0], 1.0, cands]],
                 "rollout_ids": [0],
                 "loss": "openclawrl",
                 "advantages": [1.0],
@@ -319,14 +306,19 @@ class TestTopkTestObjective:
 
         good = payload([{"hint": "h", "teacher_tokens": [9, 9, 3, 4, 5]}])
         data = build_openclawrl_rollout_data(good, good["samples"], spec)
-        # The wire carries only the sequences; the Megatron teacher pass
-        # computes the prm_teacher_*_cand tensors trainer-side.
+        # The wire carries only the sequences; the actor computes the student's top-K and the Megatron teacher
+        # pass computes the prm_teacher_*_cand tensors trainer-side.
         assert data["teacher_tokens_cand"] == [[[9, 9, 3, 4, 5]]]
+        assert "topk_indices" not in data
         assert "prm_teacher_topk_log_probs_cand" not in data
 
         empty = payload([])
         with pytest.raises(ValueError, match="no teacher candidate"):
             build_openclawrl_rollout_data(empty, empty["samples"], spec)
+
+        short = payload([{"hint": "h", "teacher_tokens": [3, 4, 5]}])
+        with pytest.raises(ValueError, match="longer than its 3-token response"):
+            build_openclawrl_rollout_data(short, short["samples"], spec)
 
 
 @pytest.mark.parametrize("hint_selection", ["shortest", "token_optimal", "sequence_optimal"])
@@ -456,40 +448,27 @@ class _FakeJudge:
         return [{"score": 1, "hint": self._hint}]
 
 
-class _FakeTeacher:
-    def __init__(self, result):
-        self._fail = result is None
-        self.calls: list = []
-
-    async def candidate_tokens(self, enhanced_messages, *, tools=None, native_tokens, response_token_count):
-        self.calls.append(enhanced_messages)
-        if self._fail:
-            return None
-        return [101, 102] + [int(v) for v in native_tokens[-response_token_count:]]
+REQUEST = ({"role": "user", "content": "do my homework"},)
 
 
-def _judge_one_turn(judge, teacher):
+def _judge_one_turn(judge):
     from reef.pipeline_context import PipelineContext
 
     context = PipelineContext("s")
 
-    stage = OpenClawRLRecord2Record(OpenClawRLJudgingSettings(), clients=(judge, teacher, None))
+    stage = OpenClawRLSamples(OpenClawRLJudgingSettings(), clients=(judge, None))
     processor = TrainingPipeline(
         context,
-        record2record=stage,
-        record2sample=OpenClawRLSamples(),
+        record2sample=stage,
         sample2job=OpenClawRLJobData(context, OpenClawRLJobSettings(), stage),
     )
     job = TurnJob(
         receipt="r1",
-        request_messages=({"role": "user", "content": "do my homework"},),
+        request_messages=REQUEST,
         request_tools=None,
         response_message={"role": "assistant", "content": "the answer is 5"},
         next_state_text="too robotic, redo it",
         next_state_role="user",
-        topk_indices=[[1, 2, 3, 4]],
-        native_tokens=[7, 8, 9],
-        response_token_count=1,
     )
     try:
         return asyncio.run(stage.openclawrl_judging.judge(job))
@@ -499,44 +478,31 @@ def _judge_one_turn(judge, teacher):
 
 class TestHybridDispatch:
     def test_combined_sample(self):
-        teacher = _FakeTeacher([[-0.1], [-0.2]])
-        judgment = _judge_one_turn(_FakeJudge(-1.0, "write casually, keep every step"), teacher)
+        judgment = _judge_one_turn(_FakeJudge(-1.0, "write casually, keep every step"))
         assert judgment.score == -1.0
-        # The candidate is a TOKEN SEQUENCE ending in the native response ids;
-        # the Megatron teacher pass scores it trainer-side.
-        assert judgment.teacher_cands[0]["teacher_tokens"] == [101, 102, 9]
-        assert judgment.teacher_cands[0]["hint"] == "write casually, keep every step"
-        assert "[user's hint / instruction]" in teacher.calls[0][-1]["content"]
+        # The candidate is the hint-enhanced REQUEST; the training component renders it into a token sequence.
+        hint = "write casually, keep every step"
+        assert judgment.teacher_cands == ({"hint": hint, "messages": append_hint_to_messages(list(REQUEST), hint)},)
+        assert "[user's hint / instruction]" in judgment.teacher_cands[0]["messages"][-1]["content"]
 
     def test_directive_only_sample_scores_zero(self):
-        judgment = _judge_one_turn(_FakeJudge(0.0, "add the full derivation"), _FakeTeacher([[-0.3]]))
+        judgment = _judge_one_turn(_FakeJudge(0.0, "add the full derivation"))
         assert judgment.score == 0.0
         assert judgment.teacher_cands[0]["hint"] == "add the full derivation"
 
     def test_rl_only_sample_ships_unenhanced_anchor(self):
-        teacher = _FakeTeacher([[-0.3]])
-        judgment = _judge_one_turn(_FakeJudge(1.0, None), teacher)
+        judgment = _judge_one_turn(_FakeJudge(1.0, None))
         assert judgment.score == 1.0
-        # Upstream RL-only convention: one un-enhanced candidate — the native
-        # ids verbatim, built without the teacher (its construction cannot fail).
-        assert judgment.teacher_cands[0]["hint"] == ""
-        assert judgment.teacher_cands[0]["teacher_tokens"] == [7, 8, 9]
-        assert teacher.calls == []
+        # Upstream RL-only convention: one un-enhanced candidate, whose teacher reads the student's own sequence.
+        assert judgment.teacher_cands == ({"hint": "", "messages": None},)
 
     def test_neither_signal_drops_turn(self):
-        judgment = _judge_one_turn(_FakeJudge(0.0, None), _FakeTeacher(None))
+        judgment = _judge_one_turn(_FakeJudge(0.0, None))
         assert judgment.score is None
-
-    def test_teacher_failure_degrades_to_rl_only(self):
-        judgment = _judge_one_turn(_FakeJudge(1.0, "a substantive hint here"), _FakeTeacher(None))
-        assert judgment.score == 1.0
-        # Hint templating failed, so the turn falls back to the anchor —
-        # whose construction is id concatenation and cannot fail.
-        assert judgment.teacher_cands == ({"hint": "", "teacher_tokens": [7, 8, 9]},)
 
 
 @pytest.mark.unit
-def test_processor_attaches_topk_and_candidates() -> None:
+def test_processor_attaches_teacher_candidates_that_the_component_renders() -> None:
     from recipes.openclawrl import OpenClawRLJobData
     from recipes.openclawrl.turns import TurnJudgment
     from reef.core.records_types import AgentRecord, RequestType
@@ -561,35 +527,27 @@ def test_processor_attaches_topk_and_candidates() -> None:
         def push(self, judgment) -> None:
             self._verdicts.append(judgment)
 
+    tools = [{"type": "function", "function": {"name": "noop"}}]
+
     def turn(index: int, messages: list) -> AgentRecord:
         return AgentRecord.create(
             scenario="s",
             request_type=RequestType.INFERENCE,
             payload={
                 "messages": messages,
-                "tools": [{"type": "function", "function": {"name": "noop"}}],
-                "response": {
-                    "choices": [{"message": {"role": "assistant", "content": "a"}}],
-                    "training": {
-                        "tokens": [1, 2, 3, 4],
-                        "loss_mask": [0, 1, 1],
-                        "rollout_log_probs": [0.0, -0.3, -0.2],
-                        "topk_indices": [[1, 2], [3, 4], [5, 6]],
-                        "topk_log_probs": [[-0.1, -0.2], [-0.3, -0.4], [-0.5, -0.6]],
-                        "artifact_id": "v1",
-                    },
-                },
+                "tools": tools,
+                "artifact_id": "v1",
+                "response": {"choices": [{"message": {"role": "assistant", "content": "a"}}]},
             },
             agent_record_id=f"i{index}",
         )
 
     worker = FakeWorker()
     context = PipelineContext("s")
-    stage = OpenClawRLRecord2Record(OpenClawRLJudgingSettings(), worker=worker)
+    stage = OpenClawRLSamples(OpenClawRLJudgingSettings(), worker=worker)
     processor = TrainingPipeline(
         context,
-        record2record=stage,
-        record2sample=OpenClawRLSamples(),
+        record2sample=stage,
         sample2job=OpenClawRLJobData(context, OpenClawRLJobSettings(), stage),
     )
     # Two sessions with distinct prefixes; each first turn gets a successor.
@@ -602,45 +560,57 @@ def test_processor_attaches_topk_and_candidates() -> None:
                 [*first, {"role": "assistant", "content": "a"}, {"role": "user", "content": "next"}],
             )
         )
-    # A hint candidate re-tokenizes only the PROMPT; the native response ids
-    # (tokens[-3:] here) ride verbatim, so validation checks that tail.
-    cand = {"hint": "h", "teacher_tokens": [99, 2, 3, 4]}
-    worker.push(TurnJudgment("i0", score=1.0, teacher_cands=(cand,)))
-    # The RL-only turn ships the un-enhanced anchor: the native ids verbatim.
-    worker.push(TurnJudgment("i1", score=1.0, teacher_cands=({"hint": "", "teacher_tokens": [1, 2, 3, 4]},)))
+    enhanced = [{"role": "user", "content": "q-alpha hint"}]
+    worker.push(TurnJudgment("i0", score=1.0, teacher_cands=({"hint": "h", "messages": enhanced},)))
+    # The RL-only turn ships the un-enhanced anchor.
+    worker.push(TurnJudgment("i1", score=1.0, teacher_cands=({"hint": "", "messages": None},)))
 
     processor.produce()
     batch = processor.build_job_data(2)
     by_source = {source_record_id(sample): sample for sample in batch.samples}
-    sample = by_source["i0"]
-    assert tuple(tuple(row) for row in sample.training.get("topk_indices", [])) == ((1, 2), (3, 4), (5, 6))
-    assert sample.training.get("extras", {})["teacher_cands"] == [{"hint": "h", "teacher_tokens": [99, 2, 3, 4]}]
-    assert by_source["i1"].training.get("extras", {})["teacher_cands"] == [
-        {"hint": "", "teacher_tokens": [1, 2, 3, 4]},
-    ]
+    request = {"tools": tools, "max_prompt_tokens": 0, "max_tokens": 0}
+    assert by_source["i0"].metadata["teacher_candidates"] == [{"hint": "h", "messages": enhanced, **request}]
+    assert by_source["i1"].metadata["teacher_candidates"] == [{"hint": "", "messages": None, **request}]
+    assert not by_source["i0"].training.get("tokens"), "a sample from a record carries no tensors"
+
+    # The training component renders each candidate: the enhanced prompt, then the student's reply tokens verbatim.
+    template = CharTemplate()
+    rendered, left_out = rendered_job_data(batch, template)
+    assert left_out == ()
+    by_source = {source_record_id(sample): sample.training for sample in rendered.samples}
+    student = by_source["i0"]
+    reply = student["tokens"][-len(student["loss_mask"]) :]
+    prompt = template.render(enhanced, tools, prompt=True)
+    assert student["teacher_candidates"] == [{"hint": "h", "teacher_tokens": [*prompt, *reply]}]
+    assert by_source["i1"]["teacher_candidates"] == [{"hint": "", "teacher_tokens": by_source["i1"]["tokens"]}]
 
 
 @pytest.mark.unit
-def test_candidate_validation_checks_the_native_tail_not_widths() -> None:
-    # Alignment is exact by construction — a candidate ends with the native
-    # response ids verbatim — so validation checks that construction and
-    # nothing about capture widths (the Megatron teacher gathers at whatever
-    # width S^q has).
-    from recipes.openclawrl.turns import validate_teacher_cands
+def test_a_hint_candidate_whose_prompt_cannot_render_drops() -> None:
+    class HintRefusingTemplate(CharTemplate):
+        def render(self, messages, tools, *, prompt):
+            if any("unrenderable" in message["content"] for message in messages):
+                raise ValueError("the template cannot render this prompt")
+            return super().render(messages, tools, prompt=prompt)
 
-    capture = 8
-    sample = policy_trajectory(
-        source_agent_record_id="t1",
-        tokens=(1, 2, 3),
-        loss_mask=(1, 1),
-        rollout_log_probs=(-0.1, -0.2),
-        reward=1.0,
-        topk_indices=tuple(tuple(range(capture)) for _ in range(2)),
-        topk_log_probs=tuple(tuple(-0.1 * i for i in range(capture)) for _ in range(2)),
+    payload = {
+        "messages": [{"role": "user", "content": "q"}],
+        "response": {"choices": [{"message": {"role": "assistant", "content": "a"}}]},
+    }
+    anchor = {"hint": "", "messages": None}
+    broken = {"hint": "h", "messages": [{"role": "user", "content": "unrenderable"}]}
+    fine = {"hint": "g", "messages": [{"role": "user", "content": "q g"}]}
+    samples = (
+        recorded_trajectory("s1", payload, 1.0).with_metadata(teacher_candidates=[broken, fine]),
+        recorded_trajectory("s2", payload, 1.0).with_metadata(teacher_candidates=[broken]),
+        recorded_trajectory("s3", payload, 1.0).with_metadata(teacher_candidates=[anchor]),
     )
-    good = {"hint": "h", "teacher_tokens": [9, 9, 2, 3]}
-    assert validate_teacher_cands((good,), sample) == ({"hint": "h", "teacher_tokens": [9, 9, 2, 3]},)
-    wrong_tail = {"hint": "h", "teacher_tokens": [9, 9, 3, 2]}
-    assert validate_teacher_cands((wrong_tail,), sample) is None
-    no_prompt = {"hint": "h", "teacher_tokens": [2, 3]}
-    assert validate_teacher_cands((no_prompt,), sample) is None
+
+    rendered, left_out = rendered_job_data(JobData("d", samples), HintRefusingTemplate())
+
+    # The broken candidate drops; a sample whose candidates all drop is left out.
+    assert left_out == (1,)
+    assert [[cand["hint"] for cand in sample.training["teacher_candidates"]] for sample in rendered.samples] == [
+        ["g"],
+        [""],
+    ]

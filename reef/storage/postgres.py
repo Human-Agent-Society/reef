@@ -51,6 +51,7 @@ from reef.storage.migrations import (
     migrate_generated_task_marks,
     migrate_imported_tasks,
     migrate_record_storage,
+    migrate_record_trajectories,
     migrate_sample_columns,
     migrate_uploaded_trajectories,
 )
@@ -58,7 +59,14 @@ from reef.storage.records import RecordLoss, RecordRetention
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage
 from reef.storage.sql_commits import SQLCommitHistory, commit_table
 from reef.storage.sql_evaluations import SQLEvaluationStore, evaluation_table
-from reef.storage.sql_records import RecordTables, ScopedTable, SQLRecordRetention, SQLRecordStore
+from reef.storage.sql_records import (
+    RecordTables,
+    ScopedTable,
+    SQLRecordRetention,
+    SQLRecordStore,
+    sample_record_table,
+    trajectory_node_table,
+)
 from reef.storage.sql_samples import SQLSampleStore, manual_buffer_table, sample_table, sample_train_count_table
 from reef.storage.sql_tasks import SQLTaskStorage, task_tables
 from reef.storage.tasks import LocalTaskFileStore, TaskFileStore
@@ -66,7 +74,7 @@ from reef.storage.tasks import LocalTaskFileStore, TaskFileStore
 logger = logging.getLogger(__name__)
 
 #: The version of the record schema that this adapter writes; it upgrades every older version.
-POSTGRES_SCHEMA_VERSION = 13
+POSTGRES_SCHEMA_VERSION = 15
 
 
 def postgres_url(database_url: str) -> URL:
@@ -105,7 +113,15 @@ def _record_tables(metadata: MetaData) -> RecordTables:
         Column("references_json", Text, nullable=False),
         Column("artifact_json", Text),
         Column("body_bytes", BigInteger, nullable=False),
+        # A payload with a message list lives as ATIF in the record's node in record_node (RFC #1054).
+        Column("message_field", Text),
+        Column("payload_sha256", String(64)),
         UniqueConstraint("storage_id", "agent_record_id"),
+    )
+    nodes = trajectory_node_table(
+        metadata,
+        "record_node",
+        Column("storage_id", String(32), ForeignKey("record_store.storage_id"), primary_key=True),
     )
     consumed = Table(
         "consumed_agent_record",
@@ -153,7 +169,10 @@ def _record_tables(metadata: MetaData) -> RecordTables:
         Column("name", Text, primary_key=True),
         Column("value_json", Text, nullable=False),
     )
-    return RecordTables(records, consumed, receipts, eviction, settings)
+    sample_records = sample_record_table(
+        metadata, Column("storage_id", String(32), ForeignKey("record_store.storage_id"), primary_key=True)
+    )
+    return RecordTables(records, consumed, receipts, eviction, settings, nodes, sample_records)
 
 
 class PostgresRecordDatabase:
@@ -210,11 +229,15 @@ class PostgresRecordDatabase:
                 # sample_train_count, which counts the committed jobs of each trainer that trained a sample. create_all adds them to an older
                 # schema, migrate_uploaded_trajectories moves the uploaded trajectories, and migrate_imported_tasks
                 # moves the tasks of the imported-tasks task store. Version 11 adds component, group_key and
-                # record_ids_json to training_sample (migrate_sample_columns): the samples that the record stages make.
+                # record_ids_json to training_sample (migrate_sample_columns): the samples that the record-to-sample stages make.
                 # Version 12 adds manual_buffer, the samples of each trainer's manual buffer. Version 13 drops
                 # task_trained (migrate_generated_task_marks): the sample store counts the trained generated tasks.
+                # Version 14 adds record_node, the trajectory node of each record with a message list: the record's
+                # payload as ATIF, with only the entries after its parent's (migrate_record_trajectories).
+                # Version 15 adds sample_record, the records whose trajectory nodes a stored sample renders from.
                 metadata.create_all(connection)
                 migrate_record_storage(connection, self.tables.records, self.tables.consumption)
+                migrate_record_trajectories(connection, self.tables.records, self.tables.nodes)
                 migrate_sample_columns(connection, self.sample_table)
                 migrate_uploaded_trajectories(
                     connection, self.sample_table, self.sample_train_count_table, self.commit_table
@@ -325,19 +348,22 @@ class PostgresRecordDatabase:
                 select(self._stores.c.storage_id).order_by(self._stores.c.storage_id).with_for_update()
             ).all()
             retained = queries.retained_bytes(connection)
+            # Select before deleting: the size of a record counts the nodes that the records before it release.
+            sizes = queries.eviction_sizes()
+            selected: list[int] = []
             after_time, after_sequence = float("-inf"), 0
             while retained > retention.max_bytes:
-                page = queries.page(connection, after_time=after_time, after_sequence=after_sequence)
+                page = queries.page(connection, sizes, after_time=after_time, after_sequence=after_sequence)
                 if not page:
                     break
-                selected: list[int] = []
                 for created_at, sequence, size in page:
                     selected.append(sequence)
                     retained -= size
                     after_time, after_sequence = created_at, sequence
                     if retained <= retention.max_bytes:
                         break
-                batch_losses = queries.evict(connection, selected)
+            for start in range(0, len(selected), 256):
+                batch_losses = queries.evict(connection, selected[start : start + 256])
                 losses.extend(batch_losses)
                 removed += sum(loss.record_count for _, loss in batch_losses)
         for scenario, loss in losses:

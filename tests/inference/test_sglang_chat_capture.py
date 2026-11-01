@@ -13,7 +13,6 @@ from reef.artifact import Artifact, ArtifactRef
 from reef.inference.chat import ReasoningStreamSplitter
 from reef.inference.sglang.chat import NativeStreamCapture, SGLangGenerateClient, SGLangInferenceHandler
 from reef.runtime.interfaces import inference_aborted
-from reef.service.inference_service import client_response
 from reef.service.streaming import stream_record
 
 
@@ -275,15 +274,15 @@ def test_chat_facade_forwards_only_an_explicit_lora_path() -> None:
         tokenizer=FakeTokenizer(),
     )
 
-    without_adapter = backend.client.payload({}, [10, 11], {}, capture_topk=0, stream=False)
-    with_adapter = backend.client.payload({"lora_path": "reef_lora"}, [10, 11], {}, capture_topk=0, stream=False)
+    without_adapter = backend.client.payload({}, [10, 11], {}, stream=False)
+    with_adapter = backend.client.payload({"lora_path": "reef_lora"}, [10, 11], {}, stream=False)
 
     assert "lora_path" not in without_adapter
     assert with_adapter["lora_path"] == "reef_lora"
 
 
 @pytest.mark.unit
-def test_chat_facade_records_engine_native_ids_without_retokenizing(tmp_path) -> None:
+def test_chat_facade_answers_from_engine_native_ids_without_retokenizing(tmp_path) -> None:
     async def run() -> None:
         async def generate(request):
             assert request.path == "/generate"
@@ -339,43 +338,35 @@ def test_chat_facade_records_engine_native_ids_without_retokenizing(tmp_path) ->
         assert tokenizer.rendered_messages == ([{"role": "user", "content": "hello"}], {})
         assert response["choices"][0]["message"]["content"] == "decoded answer"
         assert "output_token_logprobs" not in response["choices"][0]["meta_info"]
-        assert [item["token"] for item in response["choices"][0]["logprobs"]["content"]] == ["<20>", "<21>"]
-        assert response["training"] == {
-            "tokens": [10, 11, 20, 21],
-            "loss_mask": [1, 1],
-            "rollout_log_probs": [-0.25, -0.5],
-            "prompt_length": 2,
-            "response_length": 2,
-            "runtime_load_id": "wv-7",
-            "runtime_load_spans": [
-                {"start": 0, "end": 2, "runtime_load_id": "wv-7"},
-            ],
-        }
+        logprobs = response["choices"][0]["logprobs"]["content"]
+        assert [(item["token"], item["logprob"]) for item in logprobs] == [("<20>", -0.25), ("<21>", -0.5)]
+        assert "training" not in response, "serving returns no training tensors"
 
     asyncio.run(run())
 
 
 @pytest.mark.unit
 def test_chat_facade_records_exact_versions_across_an_in_place_update(tmp_path) -> None:
+    body = {
+        "text": "answer",
+        "meta_info": {
+            "finish_reason": {"type": "stop"},
+            "completion_tokens": 3,
+            "output_token_logprobs": [[-0.1, 20], [-0.2, 21], [-0.3, 22]],
+            # Tokenizer metadata can move after the final decode;
+            # the scheduler-owned list remains exact.
+            "weight_version": "engine:8",
+            "_reef_token_runtime_load_ids": ["engine:6", "engine:7", "engine:7"],
+        },
+    }
+    artifact = _artifact(tmp_path)
+
     async def run() -> None:
         async def generate(request):
             native = await request.json()
             assert native["stream"] is False
             assert "stream_interval" not in native["sampling_params"]
-            return web.json_response(
-                {
-                    "text": "answer",
-                    "meta_info": {
-                        "finish_reason": {"type": "stop"},
-                        "completion_tokens": 3,
-                        "output_token_logprobs": [[-0.1, 20], [-0.2, 21], [-0.3, 22]],
-                        # Tokenizer metadata can move after the final decode;
-                        # the scheduler-owned list remains exact.
-                        "weight_version": "engine:8",
-                        "_reef_token_runtime_load_ids": ["engine:6", "engine:7", "engine:7"],
-                    },
-                }
-            )
+            return web.json_response(body)
 
         app = web.Application()
         app.router.add_post("/generate", generate)
@@ -388,7 +379,7 @@ def test_chat_facade_records_exact_versions_across_an_in_place_update(tmp_path) 
                 tokenizer=FakeTokenizer(),
             )
             response = await backend.inference(
-                _artifact(tmp_path),
+                artifact,
                 "/v1/chat/completions",
                 {
                     "messages": [{"role": "user", "content": "hello"}],
@@ -398,15 +389,13 @@ def test_chat_facade_records_exact_versions_across_an_in_place_update(tmp_path) 
         finally:
             await server.close()
 
-        assert response["training"]["rollout_log_probs"] == [-0.1, -0.2, -0.3]
-        assert response["training"]["runtime_load_id"] is None
-        assert response["training"]["runtime_load_spans"] == [
-            {"start": 0, "end": 1, "runtime_load_id": "engine:6"},
-            {"start": 1, "end": 3, "runtime_load_id": "engine:7"},
-        ]
+        assert "training" not in response
         assert response["choices"][0]["meta_info"]["runtime_load_id"] == "engine:7"
 
     asyncio.run(run())
+    captured = SGLangGenerateClient().parse(artifact, body)
+    assert captured.rollout_log_probs == [-0.1, -0.2, -0.3]
+    assert captured.token_runtime_load_ids == ["engine:6", "engine:7", "engine:7"]
 
 
 @pytest.mark.unit
@@ -448,7 +437,7 @@ def test_nonstream_fallback_uses_the_scheduler_stamped_final_version() -> None:
             await server.close()
 
         assert response["choices"][0]["meta_info"]["runtime_load_id"] == "engine:6"
-        assert response["training"]["runtime_load_spans"] == [{"start": 0, "end": 1, "runtime_load_id": "engine:6"}]
+        assert "training" not in response
 
     asyncio.run(run())
 
@@ -495,7 +484,7 @@ def test_live_chat_rejects_tokenizer_only_runtime_load_ids() -> None:
 
 
 @pytest.mark.unit
-def test_chat_facade_parses_tool_calls_without_changing_training_tokens(tmp_path) -> None:
+def test_chat_facade_parses_tool_calls(tmp_path) -> None:
     async def run() -> None:
         async def generate(request):
             assert (await request.json())["input_ids"] == [10, 11]
@@ -582,14 +571,13 @@ def test_chat_facade_parses_tool_calls_without_changing_training_tokens(tmp_path
             "name": "read_file",
             "arguments": '{"path":"README.md"}',
         }
-        assert response["training"]["tokens"] == [10, 11, 20, 21]
-        assert response["training"]["rollout_log_probs"] == [-0.1, -0.2]
+        assert "training" not in response
 
     asyncio.run(run())
 
 
 @pytest.mark.unit
-def test_anthropic_facade_normalizes_messages_and_keeps_private_training_transcript(tmp_path) -> None:
+def test_anthropic_facade_normalizes_messages_and_returns_no_training_block(tmp_path) -> None:
     async def run() -> None:
         async def generate(request):
             native = await request.json()
@@ -661,14 +649,8 @@ def test_anthropic_facade_normalizes_messages_and_keeps_private_training_transcr
             {"type": "thinking", "thinking": "working", "signature": ""},
             {"type": "text", "text": "Finished."},
         ]
-        assert response["training"]["tokens"] == [10, 11, 20, 21]
-        assert response["training"]["request_messages"] == canonical_messages
-        assert response["training"]["response_message"] == {
-            "role": "assistant",
-            "content": "Finished.",
-            "reasoning_content": "working",
-        }
-        assert response["training"]["finish_reason"] == "stop"
+        assert "training" not in response
+        assert "meta_info" not in response, "only an engine abort adds meta_info"
 
     asyncio.run(run())
 
@@ -701,9 +683,7 @@ def test_anthropic_count_tokens_uses_the_exact_template_without_exposing_trainin
         ],
         {},
     )
-    assert response["input_tokens"] == 2
-    assert response["training"]["runtime_load_id"].startswith("local:")
-    assert client_response(response) == {"input_tokens": 2}
+    assert response == {"input_tokens": 2}
 
 
 @pytest.mark.unit
@@ -819,13 +799,13 @@ def test_anthropic_facade_converts_tool_history_and_sampled_tool_use(tmp_path) -
         assert response["content"][0]["type"] == "tool_use"
         assert response["content"][0]["name"] == "write_file"
         assert response["content"][0]["input"] == {"path": "out.txt"}
-        assert response["training"]["request_tools"] == openai_tools
+        assert "training" not in response
 
     asyncio.run(run())
 
 
 @pytest.mark.unit
-def test_streaming_chat_keeps_exact_training_response_for_recording(tmp_path) -> None:
+def test_streaming_chat_keeps_the_exact_response_for_recording(tmp_path) -> None:
     async def run() -> None:
         async def generate(request):
             native = await request.json()
@@ -876,15 +856,16 @@ def test_streaming_chat_keeps_exact_training_response_for_recording(tmp_path) ->
         assert b'"logprobs": {"content":' in body
         assert body.endswith(b"data: [DONE]\n\n")
         recorded = stream_record(stream, body, complete=True)
-        assert recorded["training"]["tokens"] == [10, 11, 20]
-        assert recorded["training"]["rollout_log_probs"] == [-0.5]
+        assert recorded["choices"][0]["message"]["content"] == "answer"
+        assert [item["logprob"] for item in recorded["choices"][0]["logprobs"]["content"]] == [-0.5]
+        assert "training" not in recorded
         assert recorded["stream_delivery"]["complete"] is True
 
     asyncio.run(run())
 
 
 @pytest.mark.unit
-def test_streaming_anthropic_messages_emits_native_sse_and_records_training(tmp_path) -> None:
+def test_streaming_anthropic_messages_emits_native_sse_and_records_the_message(tmp_path) -> None:
     async def run() -> None:
         release_final = asyncio.Event()
 
@@ -962,11 +943,8 @@ def test_streaming_anthropic_messages_emits_native_sse_and_records_training(tmp_
         assert "[DONE]" not in text
         recorded = stream_record(stream, body, complete=True)
         assert recorded["type"] == "message"
-        assert recorded["training"]["tokens"] == [10, 11, 20, 21]
-        assert recorded["training"]["runtime_load_spans"] == [
-            {"start": 0, "end": 1, "runtime_load_id": "engine:6"},
-            {"start": 1, "end": 2, "runtime_load_id": "engine:7"},
-        ]
+        assert recorded["content"] == [{"type": "text", "text": "answer"}]
+        assert "training" not in recorded
         assert recorded["stream_delivery"]["complete"] is True
 
     asyncio.run(run())
@@ -1084,12 +1062,11 @@ def test_streaming_anthropic_reassembles_incremental_sglang_thinking_chunks() ->
         assert '"type": "text_delta", "text": "answer"' in text
         assert "</think>" not in text
         recorded = stream_record(stream, body, complete=True)
-        assert recorded["training"]["tokens"] == [10, 11, 20, 21]
-        assert recorded["training"]["response_message"] == {
-            "role": "assistant",
-            "content": "answer",
-            "reasoning_content": "work",
-        }
+        assert recorded["content"] == [
+            {"type": "thinking", "thinking": "work", "signature": ""},
+            {"type": "text", "text": "answer"},
+        ]
+        assert "training" not in recorded
 
     asyncio.run(run())
 
@@ -1186,7 +1163,7 @@ def test_streaming_anthropic_emits_incremental_tool_use_without_raw_markers(tmp_
                 "input": {"path": "out.txt"},
             }
         ]
-        assert recorded["training"]["tokens"] == [10, 11, 20]
+        assert "training" not in recorded
 
     asyncio.run(run())
 
@@ -1252,8 +1229,7 @@ def test_chat_facade_splits_reasoning_out_of_visible_content(tmp_path, split_rea
     closing tag; everything before the LAST </think> is chain-of-thought.
     OpenAI-shaped consumers (agents, judges, user simulators) read content
     verbatim — leaking reasoning there made every downstream judgment grade
-    the monologue instead of the reply. A subclass can preserve raw tags;
-    training tokens stay untouched in either mode.
+    the monologue instead of the reply. A subclass can preserve raw tags.
     """
 
     class ConfiguredHandler(SGLangInferenceHandler):
@@ -1303,8 +1279,7 @@ def test_chat_facade_splits_reasoning_out_of_visible_content(tmp_path, split_rea
                 "role": "assistant",
                 "content": "Okay, let me think. 2+3 is 5.\n</think>\n\nThe answer is 5.",
             }
-        # The exact sampled ids still train, reasoning included.
-        assert response["training"]["tokens"] == [10, 11, 20, 21, 22]
-        assert response["training"]["response_length"] == 3
+        assert response["usage"]["completion_tokens"] == 3
+        assert "training" not in response
 
     asyncio.run(run())

@@ -5,11 +5,15 @@ from __future__ import annotations
 from contextlib import closing
 
 import pytest
+from sqlalchemy import func, select
+from tests.support.conversations import conversation
 
+from reef.core.atif_payloads import canonical_json
 from reef.service.assembly import build_dispatcher
 from reef.service.deploy.service_config import ServiceConfig
 from reef.storage.data import ItemConflict, ItemNotFound, MemoryDataStore, NewItem
 from reef.storage.item_kinds import json_digest
+from reef.storage.record_items import record_item
 from reef.storage.sql_data import PostgresDataStore, SQLiteDataStore
 from reef.storage.tasks import LocalTaskFileStore, files_digest
 
@@ -199,6 +203,64 @@ def test_query_arguments_are_checked(store):
     for arguments, reason in [({"kind": "dataset"}, "kind"), ({"after": -1}, "after"), ({"limit": 0}, "limit")]:
         with pytest.raises(ValueError, match=reason):
             store.query("acme", **arguments)
+
+
+def calls(*turns: int) -> list[NewItem]:
+    """The record items of calls of one conversation of the scenario ``coding``, with ``turns`` turns each."""
+    return [record_item(conversation(f"call-{count}", count, scenario="coding")) for count in turns]
+
+
+def test_record_items_that_share_messages_read_back_exactly(store):
+    items = calls(1, 2, 3)
+    created = store.create("acme", items)
+    assert [canonical_json(item.content) for item in created] == [canonical_json(item.content) for item in items]
+    assert [item.content for item in store.query("acme", kind="record")] == [item.content for item in items]
+    assert store.read("acme", "coding/call-2").content == items[1].content
+    assert store.delete("acme", "coding/call-2")
+    assert [item.content for item in store.query("acme")] == [items[0].content, items[2].content]
+    assert store.create("acme", [items[1]])[0].content == items[1].content
+
+
+def node_counts(store) -> tuple[int, int]:
+    """The number of trajectory nodes that the SQL data store ``store`` keeps, and the sum of their counts."""
+    nodes = store.nodes_table
+    with store.transaction() as connection:
+        count, uses = connection.execute(select(func.count(), func.sum(nodes.c.record_count))).one()
+    return count, uses or 0
+
+
+def test_an_owner_keeps_a_node_while_a_record_item_needs_its_messages(open_durable_store):
+    with closing(open_durable_store()) as store:
+        store.create("acme", calls(1, 2, 3))
+        store.create("other", calls(1))
+        assert node_counts(store) == (3 + 1, 2 + 2 + 1 + 1)
+        store.delete("acme", "coding/call-3")
+        assert node_counts(store) == (2 + 1, 2 + 1 + 1)
+        # call-2 continues call-1, so call-1's node stays while call-2 is stored.
+        store.delete("acme", "coding/call-1")
+        assert store.read("acme", "coding/call-2").content == calls(2)[0].content
+        store.delete("acme", "coding/call-2")
+        assert node_counts(store) == (1, 1)
+
+
+def test_an_upgrade_links_the_stored_record_items(open_durable_store):
+    items = calls(1, 2, 3)
+    with closing(open_durable_store()) as store:
+        store.create("acme", [*items, trajectory("t1")])
+        table = store.items_table
+        with store.transaction() as connection:
+            # Write the rows back as the earlier version kept them: the whole content, and no node table.
+            for item in items:
+                connection.execute(
+                    table.update()
+                    .where(table.c.item_id == item.item_id)
+                    .values(content_json=canonical_json(item.content))
+                )
+            connection.exec_driver_sql(f"ALTER TABLE {table.fullname} DROP COLUMN message_field")
+            store.nodes_table.drop(connection)
+    with closing(open_durable_store()) as store:
+        assert [item.content for item in store.query("acme", kind="record")] == [item.content for item in items]
+        assert node_counts(store) == (3, 5)
 
 
 def test_items_survive_a_restart(open_durable_store):

@@ -31,11 +31,13 @@ from reef.service.deploy.service_config import ServiceConfig
 from reef.storage.sql_coordination import memory_coordination, open_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.work_queue import NewWork
+from reef.train.instructions import InstructionQueue
 from reef.train.job_queue import JOBS_QUEUE
 
 MEMORY_BACKEND = "tests.support.artifact_backend_plugin:MemoryArtifactBackend"
 TOKEN = "service-token"
 import signal
+
 from reef.core.errors import ReefError
 from reef.dispatcher.dispatcher import build_default_dispatcher
 
@@ -98,6 +100,7 @@ class Changes(StoreChanges):
         self.records: list[str] = []
         self.samples: list[str] = []
         self.jobs: list[str] = []
+        self.instructions: list[str] = []
 
     def records_added(self, current) -> None:
         self.records.append(current.name)
@@ -107,6 +110,9 @@ class Changes(StoreChanges):
 
     def job_changed(self, scenario: str) -> None:
         self.jobs.append(scenario)
+
+    def instructions_added(self, scenario: str) -> None:
+        self.instructions.append(scenario)
 
 
 @pytest.mark.unit
@@ -128,6 +134,11 @@ def test_control_learns_of_records_samples_and_jobs_that_other_processes_add() -
     assert changes.records == ["math"] and changes.samples == ["math"]
     watcher.run_once()
     assert changes.records == ["math"] and changes.samples == ["math"]
+    # A training instruction that another process queued wakes control once.
+    InstructionQueue(queue).of("math").file("one", {"text": "train"})
+    watcher.run_once()
+    watcher.run_once()
+    assert changes.instructions == ["math"]
 
     # A job that a worker takes changes nothing to commit; its checkpoint and its end each wake control.
     queue.add(NewWork(JOBS_QUEUE, "job-1", "math", "job:stub"))

@@ -16,7 +16,7 @@ from recipes.openclawrl.examples.openclawrl.user_sim.personas import (
     student_style_violations,
     student_violations,
 )
-from recipes.openclawrl.judging import OpenClawRLJudgingSettings, OpenClawRLRecord2Record
+from recipes.openclawrl.judging import OpenClawRLJudgingSettings
 from recipes.openclawrl.processor import OpenClawRLJobSettings, OpenClawRLSamples
 from reef.train.pipeline import TrainingPipeline
 
@@ -112,17 +112,9 @@ def _judged_turns(processor, worker, artifact_ids: list[str], score: float = 1.0
                     payload={
                         "messages": messages,
                         "tools": [{"type": "function", "function": {"name": "noop"}}],
-                        "response": {
-                            "choices": [{"message": {"role": "assistant", "content": "a"}}],
-                            "training": {
-                                "tokens": [1, 2, 3],
-                                "loss_mask": [0, 1],
-                                "rollout_log_probs": [-0.3, -0.2],
-                                "topk_indices": [[1, 2], [3, 4]],
-                                "topk_log_probs": [[-0.1, -0.2], [-0.3, -0.4]],
-                                "artifact_id": artifact_id,
-                            },
-                        },
+                        # The inference service names the answering artifact; the record has no tensors.
+                        "artifact_id": artifact_id,
+                        "response": {"choices": [{"message": {"role": "assistant", "content": "a"}}]},
                     },
                     agent_record_id=receipt,
                 )
@@ -131,8 +123,8 @@ def _judged_turns(processor, worker, artifact_ids: list[str], score: float = 1.0
             TurnJudgment(
                 f"i{index}",
                 score=score,
-                # The un-enhanced anchor: native ids verbatim.
-                teacher_cands=({"hint": "", "teacher_tokens": [1, 2, 3]},),
+                # The un-enhanced anchor: its teacher reads the student's own sequence.
+                teacher_cands=({"hint": "", "messages": None},),
             )
         )
 
@@ -144,11 +136,10 @@ def test_openclawrl_processor_drops_unfillable_stale_artifact_candidates() -> No
 
     worker = _FakeWorker()
     context = PipelineContext("s")
-    stage = OpenClawRLRecord2Record(OpenClawRLJudgingSettings(), worker=worker)
+    stage = OpenClawRLSamples(OpenClawRLJudgingSettings(), worker=worker)
     processor = TrainingPipeline(
         context,
-        record2record=stage,
-        record2sample=OpenClawRLSamples(),
+        record2sample=stage,
         sample2job=OpenClawRLJobData(context, OpenClawRLJobSettings(), stage),
     )
     # Two stale leftovers from before a weight swap, then a fresh generation.
@@ -158,7 +149,7 @@ def test_openclawrl_processor_drops_unfillable_stale_artifact_candidates() -> No
 
     processor.produce()
     batch = processor.build_job_data(3)
-    artifact_ids = {sample.training.get("artifact_id", None) for sample in batch.samples}
+    artifact_ids = {sample.artifact_id for sample in batch.samples}
     assert artifact_ids == {"v2"}
     assert len(batch.samples) == 3
 
@@ -170,11 +161,10 @@ def test_openclawrl_processor_keeps_single_artifact_queue_intact() -> None:
 
     worker = _FakeWorker()
     context = PipelineContext("s")
-    stage = OpenClawRLRecord2Record(OpenClawRLJudgingSettings(), worker=worker)
+    stage = OpenClawRLSamples(OpenClawRLJudgingSettings(), worker=worker)
     processor = TrainingPipeline(
         context,
-        record2record=stage,
-        record2sample=OpenClawRLSamples(),
+        record2sample=stage,
         sample2job=OpenClawRLJobData(context, OpenClawRLJobSettings(), stage),
     )
     _judged_turns(processor, worker, ["v1", "v1"])

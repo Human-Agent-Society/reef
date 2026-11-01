@@ -429,12 +429,6 @@ def distill_loss(
     scaled = per_sample_divergence
     metrics: dict[str, torch.Tensor] = {}
     if settings.importance_sampling_cap > 0:
-        rollout_log_probs = batch.get("rollout_log_probs")
-        if rollout_log_probs is None:
-            raise ValueError(
-                "the distill importance-sampling correction needs rollout_log_probs: serve through a backend that "
-                "captures them, or set the family's importance-sampling cap to 0"
-            )
         with torch.no_grad():
             _, outputs = get_log_probs_and_entropy(
                 logits,
@@ -444,6 +438,9 @@ def distill_loss(
                 response_lengths=response_lengths,
                 with_entropy=False,
             )
+            # The old-policy log-probabilities of the weights of the job's start: the actor's when it computed them,
+            # else this step's own, which are the same, as a distill family trains one optimizer step per rollout.
+            rollout_log_probs = batch.get("log_probs") or [values.detach() for values in outputs["log_probs"]]
             if settings.importance_sampling_level == "token":
                 # This is the correction's own f(p / q) = min(p / q, cap); the clamp on the log ratio only
                 # moves ratios below about 2e-9, where the weight is negligible and exp would underflow.
@@ -466,8 +463,7 @@ def distill_loss(
             metrics["distill_is_weight"] = sum_of_sample_mean(torch.cat(weights))
         else:
             metrics["distill_is_weight"] = torch.stack(weights).sum()
-        # How far the trainer's forward sits from the rollout engine on the
-        # sampled tokens: a large gap means a mismatch to fix, not to weight.
+        # How far the policy moved from the job's start on the trained tokens.
         metrics["distill_student_log_prob"] = sum_of_sample_mean(student_log_probs)
         metrics["distill_rollout_log_prob"] = sum_of_sample_mean(engine_log_probs)
         metrics["distill_log_prob_abs_diff"] = sum_of_sample_mean((student_log_probs - engine_log_probs).abs())

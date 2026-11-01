@@ -2,8 +2,10 @@
 
 ``data_item`` holds one row per item: its owner, ID, kind, digest, metadata as JSON, and the JSON content of a
 trajectory or a record. ``data_item_scenario`` repeats the ``scenarios`` metadata, one row per scenario that uses
-an item, so that a query by scenario uses an index. Both are written in one transaction. Task directories are in
-the task file store, in each owner's partition.
+an item, so that a query by scenario uses an index. ``data_record_node`` keeps the trajectory node of each record
+item with a message list, per owner (RFC #1054): the node keeps the payload as ATIF, with only the entries after
+its parent's, and the item's content keeps an empty payload. The tables are written in one transaction. Task directories are
+in the task file store, in each owner's partition.
 """
 
 from __future__ import annotations
@@ -45,9 +47,11 @@ from sqlalchemy.engine import Connection, Engine, RowMapping
 from sqlalchemy.pool import NullPool
 from sqlalchemy.schema import CreateSchema
 
+from reef.core.atif_payloads import call_shape, provider_payload
 from reef.core.config import config_metadata, config_option
 from reef.core.errors import ReefError
 from reef.core.plugins import PluginConfigError, PluginSettings
+from reef.core.trajectory_index import call_key
 from reef.storage.data import (
     MAX_QUERY_LIMIT,
     DataStore,
@@ -62,16 +66,21 @@ from reef.storage.data import (
     prepared_items,
 )
 from reef.storage.item_kinds import task_partition
+from reef.storage.migrations import migrate_data_trajectories
 from reef.storage.postgres import postgres_url, validate_postgres_schema
+from reef.storage.sql_records import ScopedTable, TrajectoryNodes, trajectory_node_table
 from reef.storage.sqlite import enable_wal
 from reef.storage.tasks import TaskFileStore
 
 
-def data_tables(metadata: MetaData, *, sqlite: bool) -> tuple[Table, Table]:
-    """Define ``data_item`` and ``data_item_scenario`` in ``metadata``.
+def data_tables(metadata: MetaData, *, sqlite: bool) -> tuple[Table, Table, Table]:
+    """Define ``data_item``, ``data_item_scenario`` and ``data_record_node`` in ``metadata``.
 
     ``sequence`` orders the items as they arrived. ``content_json`` is the canonical JSON of a trajectory's or a
-    record's content, and NULL for a task. ``metadata_json`` is the item's metadata.
+    record's content, and NULL for a task. ``message_field`` names the message list of a record payload that the
+    item's trajectory node keeps (``call_shape``); the content then holds an empty payload. It is NULL for an
+    item without one. ``metadata_json`` is the item's metadata. ``data_record_node`` is the node table of ``TrajectoryNodes``,
+    scoped by ``owner``; a node's sequence is its item's, and its scenario the item's origin.
     """
     sequence = (
         Column("sequence", Integer, primary_key=True)
@@ -88,6 +97,7 @@ def data_tables(metadata: MetaData, *, sqlite: bool) -> tuple[Table, Table]:
         Column("digest", String(64), nullable=False),
         Column("metadata_json", Text, nullable=False),
         Column("content_json", Text, nullable=True),
+        Column("message_field", Text, nullable=True),
         UniqueConstraint("owner", "item_id"),
         # SQLite reuses the largest rowid after a delete without it; other dialects ignore the option.
         sqlite_autoincrement=sqlite,
@@ -101,7 +111,8 @@ def data_tables(metadata: MetaData, *, sqlite: bool) -> tuple[Table, Table]:
         PrimaryKeyConstraint("owner", "item_id", "scenario"),
         Index("data_item_scenario_by_scenario", "owner", "scenario"),
     )
-    return items, scenarios
+    nodes = trajectory_node_table(metadata, "data_record_node", Column("owner", Text, primary_key=True))
+    return items, scenarios, nodes
 
 
 def canonical_json(value: Mapping[str, Any]) -> str:
@@ -115,12 +126,14 @@ class SQLDataStore(DataStore):
     (an insert that leaves an existing ID alone) and, where transactions run at once, ``lock_creates``. Every
     operation runs in one transaction, so an operation that refuses changes nothing in the database. ``create``
     inserts first and compares digests after, so two creates of one ID at once end in a no-op or an
-    ``ItemConflict``, never in a failed insert.
+    ``ItemConflict``, never in a failed insert. ``create`` and ``delete`` both take ``lock_creates``, since they
+    change the trajectory nodes of an owner.
     """
 
-    def __init__(self, items: Table, scenarios: Table, task_files: TaskFileStore) -> None:
+    def __init__(self, items: Table, scenarios: Table, nodes: Table, task_files: TaskFileStore) -> None:
         self.items_table = items
         self.scenarios_table = scenarios
+        self.nodes_table = nodes
         self.task_files = task_files
 
     @abstractmethod
@@ -143,11 +156,32 @@ class SQLDataStore(DataStore):
         does nothing, for a store whose transactions already run one at a time.
         """
 
-    def stored_item(self, row: RowMapping) -> StoredItem:
-        content = None if row["content_json"] is None else json.loads(row["content_json"])
-        return StoredItem(
-            row["sequence"], row["owner"], row["item_id"], json.loads(row["metadata_json"]), row["digest"], content
+    def trajectory_nodes(self, owner: str) -> TrajectoryNodes:
+        """The trajectory nodes of the record items of ``owner``."""
+        return TrajectoryNodes(ScopedTable(self.nodes_table, {"owner": owner}))
+
+    def stored_items(self, connection: Connection, owner: str, rows: Sequence[RowMapping]) -> tuple[StoredItem, ...]:
+        """The items of the ``data_item`` rows ``rows`` of ``owner``, with their record payloads rendered from their
+        trajectory nodes."""
+        contents = self.trajectory_nodes(owner).contents(
+            connection, (int(row["sequence"]) for row in rows if row["message_field"] is not None)
         )
+        items: list[StoredItem] = []
+        for row in rows:
+            content = None if row["content_json"] is None else json.loads(row["content_json"])
+            if content is not None and row["message_field"] is not None:
+                content["payload"] = provider_payload(contents[int(row["sequence"])].atif_call())
+            items.append(
+                StoredItem(
+                    row["sequence"],
+                    row["owner"],
+                    row["item_id"],
+                    json.loads(row["metadata_json"]),
+                    row["digest"],
+                    content,
+                )
+            )
+        return tuple(items)
 
     def rows(self, connection: Connection, owner: str, item_ids: Sequence[str]) -> dict[str, RowMapping]:
         found = connection.execute(
@@ -177,6 +211,12 @@ class SQLDataStore(DataStore):
         with self.transaction() as connection:
             self.lock_creates(connection)
             for item, metadata, digest in prepared:
+                content = dict(item.content) if isinstance(item.content, Mapping) else None
+                payload = content["payload"] if content is not None and metadata["kind"] == "record" else None
+                key = None if payload is None else call_key(payload)
+                shape = None if payload is None else call_shape(payload)
+                if content is not None and shape is not None:
+                    content["payload"] = {}
                 inserted = self.insert_new_item(
                     connection,
                     {
@@ -185,24 +225,30 @@ class SQLDataStore(DataStore):
                         "kind": metadata["kind"],
                         "digest": digest,
                         "metadata_json": canonical_json(metadata),
-                        "content_json": canonical_json(item.content) if isinstance(item.content, Mapping) else None,
+                        "content_json": None if content is None else canonical_json(content),
+                        "message_field": None if shape is None else shape.message_field,
                     },
                 )
                 if inserted:
                     self.write_scenarios(connection, owner, item.item_id, metadata["scenarios"])
+                    if payload is not None and key is not None:
+                        sequence = self.rows(connection, owner, [item.item_id])[item.item_id]["sequence"]
+                        self.trajectory_nodes(owner).add(
+                            connection, int(sequence), metadata["origin"]["scenario"], item.item_id, payload, key
+                        )
             # An ID that was stored before, or that a concurrent create stored first, keeps its row; another
             # digest there is a conflict, and the rollback removes the rows that this call inserted.
             stored = self.rows(connection, owner, item_ids)
             for entry in prepared:
                 if stored[entry[0].item_id]["digest"] != entry[2]:
                     raise ItemConflict(f"item {entry[0].item_id!r} of {owner!r} is stored with other content")
-        return tuple(self.stored_item(stored[item_id]) for item_id in item_ids)
+            return self.stored_items(connection, owner, [stored[item_id] for item_id in item_ids])
 
     def read(self, owner: str, item_id: str) -> StoredItem | None:
         check_owner(owner)
         with self.transaction() as connection:
             row = self.rows(connection, owner, [item_id]).get(item_id)
-        return None if row is None else self.stored_item(row)
+            return None if row is None else self.stored_items(connection, owner, [row])[0]
 
     def query(
         self,
@@ -225,7 +271,7 @@ class SQLDataStore(DataStore):
             )
         with self.transaction() as connection:
             found = connection.execute(statement.order_by(items.c.sequence).limit(limit)).mappings().all()
-        return tuple(self.stored_item(row) for row in found)
+            return self.stored_items(connection, owner, found)
 
     def update(self, owner: str, item_ids: Sequence[str], patch: Mapping[str, Any]) -> tuple[StoredItem, ...]:
         check_owner(owner)
@@ -247,22 +293,28 @@ class SQLDataStore(DataStore):
                 )
                 self.write_scenarios(connection, owner, item_id, metadata["scenarios"])
             stored = self.rows(connection, owner, unique_ids)
-        return tuple(self.stored_item(stored[item_id]) for item_id in unique_ids)
+            return self.stored_items(connection, owner, [stored[item_id] for item_id in unique_ids])
 
     def delete(self, owner: str, item_id: str) -> bool:
         check_owner(owner)
         with self.transaction() as connection:
+            self.lock_creates(connection)
+            row = self.rows(connection, owner, [item_id]).get(item_id)
+            if row is None:
+                return False
             connection.execute(
                 delete(self.scenarios_table).where(
                     self.scenarios_table.c.owner == owner, self.scenarios_table.c.item_id == item_id
                 )
             )
-            removed = connection.execute(
+            connection.execute(
                 delete(self.items_table).where(
                     self.items_table.c.owner == owner, self.items_table.c.item_id == item_id
                 )
             )
-        return removed.rowcount > 0
+            if row["message_field"] is not None:
+                self.trajectory_nodes(owner).release(connection, [int(row["sequence"])])
+        return True
 
     def task_path(self, item: StoredItem) -> Path:
         if item.kind != "task":
@@ -278,8 +330,8 @@ class SQLiteDataStore(SQLDataStore):
 
     def __init__(self, directory: Path | None, task_files: TaskFileStore) -> None:
         metadata = MetaData()
-        items, scenarios = data_tables(metadata, sqlite=True)
-        super().__init__(items, scenarios, task_files)
+        items, scenarios, nodes = data_tables(metadata, sqlite=True)
+        super().__init__(items, scenarios, nodes, task_files)
         if directory is None:
             database = ":memory:"
         else:
@@ -301,6 +353,7 @@ class SQLiteDataStore(SQLDataStore):
             # Serialize the table creation of concurrent openers.
             self.connection.exec_driver_sql("BEGIN IMMEDIATE")
             metadata.create_all(self.connection)
+            migrate_data_trajectories(self.connection, items, nodes)
 
     @classmethod
     def from_config(cls, config: Mapping[str, Any], *, directory: Path, task_files: TaskFileStore) -> Self:
@@ -353,8 +406,8 @@ class PostgresDataStore(SQLDataStore):
     def __init__(self, database_url: str, task_files: TaskFileStore, *, schema: str = "reef_data") -> None:
         validate_postgres_schema(schema)
         metadata = MetaData(schema=schema)
-        items, scenarios = data_tables(metadata, sqlite=False)
-        super().__init__(items, scenarios, task_files)
+        items, scenarios, nodes = data_tables(metadata, sqlite=False)
+        super().__init__(items, scenarios, nodes, task_files)
         try:
             self.engine: Engine | None = create_engine(
                 postgres_url(database_url), pool_pre_ping=True, hide_parameters=True
@@ -370,6 +423,7 @@ class PostgresDataStore(SQLDataStore):
             connection.execute(select(func.pg_advisory_xact_lock(key)))
             connection.execute(CreateSchema(schema, if_not_exists=True))
             metadata.create_all(connection)
+            migrate_data_trajectories(connection, items, nodes)
 
     @classmethod
     def from_config(cls, config: Mapping[str, Any], *, directory: Path, task_files: TaskFileStore) -> Self:

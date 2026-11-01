@@ -47,15 +47,7 @@ from reef.dispatcher import Dispatcher
 from reef.execution.jobs import SupportsReceipt
 from reef.pipeline_context import PipelineContext
 from reef.recipe import Recipe
-from reef.record2record import (
-    GroupDecision,
-    JudgingRecord2Record,
-    RecordJudging,
-    ReportContext,
-    ReportGrouping,
-    ReportRecord2Record,
-)
-from reef.record2sample import JudgedSamples
+from reef.record2sample import GroupDecision, JudgedSamples, RecordJudging, ReportContext, ReportGrouping
 from reef.record2sample.service import SAMPLES_QUEUE
 from reef.runtime.jobs import JobStatus, TrainingJob
 from reef.sample2job import Sample2Job
@@ -812,7 +804,7 @@ class _SlottedRecipe(_TwoTrainerRecipe):
     def pipeline_for(self, component: str, context: PipelineContext) -> TrainingPipeline:
         if component == HARNESS:
             # The threshold pipeline with ``_SlotGrouping``.
-            return threshold_pipeline(context, record2record=ReportRecord2Record(context, _SlotGrouping()))
+            return threshold_pipeline(context, grouping=_SlotGrouping())
         return threshold_pipeline(context)
 
 
@@ -926,7 +918,7 @@ class _RetiringRetriesJudging(RecordJudging):
     def __init__(self) -> None:
         self.seen: set[str] = set()
 
-    def observe(self, item: AgentRecord, now: float, stage: JudgingRecord2Record) -> None:
+    def observe(self, item: AgentRecord, now: float, stage: JudgedSamples) -> None:
         if item.payload.get("completes"):
             stage.dispatch(Judgment(item.payload["completes"]))
         if item.payload["turn"] in self.seen:
@@ -968,8 +960,7 @@ class _ComputedWeightsRecipe(_TwoTrainerRecipe):
             # Trains the judged turns of ``_RetiringRetriesJudging``.
             return TrainingPipeline(
                 context,
-                record2record=JudgingRecord2Record(_RetiringRetriesJudging(), JudgedAtOnce()),
-                record2sample=_RetiringRetriesSamples(),
+                record2sample=_RetiringRetriesSamples(_RetiringRetriesJudging(), JudgedAtOnce()),
                 sample2job=RetiringRetriesJobData(context, None, None),
             )
         return threshold_pipeline(context)
@@ -1634,13 +1625,8 @@ def test_a_manual_weights_trainer_waits_for_inserted_samples_and_submits_them_wi
     dispatcher, _ = dispatchers.open(training=training, hold_local_cycles=True)
     scenario = _loaded(dispatcher)
     scenario.set_training_mode("manual")
-    scenario.records.append(
-        AgentRecord.create(
-            scenario="agent",
-            request_type=RequestType.TRAIN,
-            agent_record_id="t1",
-            payload={"text": "learn the tool", "session": "session-1", "release_id": "release-1"},
-        )
+    dispatcher.accept_instruction(
+        "agent", {"text": "learn the tool", "session": "session-1", "release_id": "release-1"}, request_id="t1"
     )
     assert scenario.prepare_training_step(WEIGHTS) is None
     _append_records(scenario, 1)

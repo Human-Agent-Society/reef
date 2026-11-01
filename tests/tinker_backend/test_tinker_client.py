@@ -26,6 +26,18 @@ class Trainer:
         self.events = events
         self.fail = fail
 
+    def forward(self, data, loss_fn):
+        self.events.append(("forward", data, loss_fn))
+        # The log probability of each target token: -0.1 times its position.
+        return Future(
+            SimpleNamespace(
+                loss_fn_outputs=[
+                    {"logprobs": SimpleNamespace(data=[-0.1 * (index + 1) for index in range(len(datum.model_input))])}
+                    for datum in data
+                ]
+            )
+        )
+
     def forward_backward(self, data, loss_fn, loss_fn_config=None):
         self.events.append(("forward_backward", data, loss_fn))
         return Future(SimpleNamespace(metrics={"loss:sum": -2.0}))
@@ -133,6 +145,7 @@ class SDK:
     NotFoundError = NotFoundError
     ModelInput = ModelInput
     Datum = SimpleNamespace
+    TensorData = SimpleNamespace
     AdamParams = SimpleNamespace
     SamplingParams = SimpleNamespace
 
@@ -202,6 +215,22 @@ def test_training_restores_optimizer_then_saves_both_durable_snapshots(client):
     assert events[-1] == ("close", "success")
 
 
+def test_rows_without_log_probabilities_take_those_of_the_starts_weights(client):
+    base = TinkerCheckpoint(client._model, 32, "tinker://base/state", "tinker://base/sampler")
+    rendered = TokenRow((10, 11, 20, 21), (1, 1), (), 2)
+    recorded = TokenRow((10, 20), (1,), (-0.25,), 1)
+    client.train(base, [[rendered, recorded], [rendered]], ImportanceSamplingLoss(), [1e-4, 1e-4], kl_coef=0.0)
+    events = client._sdk.events
+    # The start's weights score every row without log probabilities before the first optimizer step.
+    assert [event[0] for event in events][1:5] == ["restore_with_optimizer", "forward", "forward", "forward_backward"]
+    (scored,) = events[2][1]
+    assert scored.loss_fn_inputs["target_tokens"].data == [11, 20, 21] and events[2][2] == "cross_entropy"
+    first_step = next(event for event in events if event[0] == "forward_backward")[1]
+    assert first_step[0].loss_fn_inputs["logprobs"] == pytest.approx([0.0, -0.2, -0.3])
+    assert first_step[1].loss_fn_inputs["logprobs"] == pytest.approx([-0.25]), "a recorded row keeps its own"
+
+
+@pytest.mark.unit
 def test_uncertain_optimizer_closes_attempt_and_retry_restores_incumbent(client):
     base = TinkerCheckpoint(client._model, 32, "tinker://base/state", "tinker://base/sampler")
     row = TokenRow((10, 20), (1,), (-0.25,), 1)

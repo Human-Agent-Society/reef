@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Any
 
 from reef.artifact.sources import HuggingFaceRevision
 from reef.core.config import config_option
@@ -16,7 +18,7 @@ class TinkerServiceConfig:
     Values: ``state_dir`` and ``api_key_env`` are non-empty; ``batch_size`` is positive; ``learning_rate`` is finite
     and positive and ``kl_coef`` finite and non-negative, the defaults of each job's parameters
     (``TinkerJobParameters``); ``base_url`` is an http(s) URL or None for hosted Tinker; ``inference_timeout_s`` is
-    positive and ``train_timeout_s`` positive or None. Purpose: the base of ``TinkerConfig`` and
+    positive and ``train_timeout_s`` positive or None; ``chat_template_kwargs`` is None or an object. Purpose: the base of ``TinkerConfig`` and
     ``SpindleFullConfig``; the components, their SDK client and their sampler read these fields.
     """
 
@@ -41,6 +43,13 @@ class TinkerServiceConfig:
     train_timeout_s: float | None = config_option(
         None, help="Seconds that one training call to Tinker may take; unset waits as long as the SDK does."
     )
+    chat_template_kwargs: Mapping[str, Any] | None = config_option(
+        None,
+        help=(
+            "Chat template arguments with which the component renders a recorded trajectory, such as "
+            "{enable_thinking: false}; set the serving engine's chat_template_kwargs to the same value."
+        ),
+    )
 
     def __post_init__(self) -> None:
         if not self.state_dir.strip() or not self.api_key_env.strip():
@@ -55,6 +64,8 @@ class TinkerServiceConfig:
             raise ValueError("Tinker kl_coef must be finite and non-negative")
         if self.inference_timeout_s <= 0 or (self.train_timeout_s is not None and self.train_timeout_s <= 0):
             raise ValueError("Tinker timeouts must be positive")
+        if self.chat_template_kwargs is not None and not isinstance(self.chat_template_kwargs, Mapping):
+            raise ValueError("Tinker chat_template_kwargs must be an object")
 
 
 @dataclass(frozen=True)

@@ -174,7 +174,7 @@ def test_advantage_clipping_requires_sampled_reverse_kl(divergence: str, top_k: 
 
 @pytest.mark.unit
 def test_backend_validation_pins_the_loss_type_rollout_logprobs_and_one_step_per_rollout(toy_family) -> None:
-    accepted = {"loss_type": "custom_loss", "use_rollout_logprobs": True, "num_steps_per_rollout": 1}
+    accepted = {"loss_type": "custom_loss", "use_rollout_logprobs": False, "num_steps_per_rollout": 1}
 
     def _args(**changes: Any) -> SimpleNamespace:
         # The driver stamps the family's settings on args before it validates them.
@@ -187,8 +187,8 @@ def test_backend_validation_pins_the_loss_type_rollout_logprobs_and_one_step_per
 
     with pytest.raises(RuntimeError, match="loss-type custom_loss"):
         toy_family.validate_backend_args(_args(loss_type="policy_loss"))
-    with pytest.raises(RuntimeError, match="use-rollout-logprobs"):
-        toy_family.validate_backend_args(_args(use_rollout_logprobs=False))
+    with pytest.raises(RuntimeError, match="remove --use-rollout-logprobs"):
+        toy_family.validate_backend_args(_args(use_rollout_logprobs=True))
     with pytest.raises(RuntimeError, match="num-steps-per-rollout"):
         toy_family.validate_backend_args(_args(num_steps_per_rollout=2))
 
@@ -197,7 +197,7 @@ def test_backend_validation_pins_the_loss_type_rollout_logprobs_and_one_step_per
 def test_selecting_the_support_with_the_student_needs_zero_dropout(toy_family) -> None:
     args = SimpleNamespace(
         loss_type="custom_loss",
-        use_rollout_logprobs=True,
+        use_rollout_logprobs=False,
         num_steps_per_rollout=1,
         attention_dropout=0.0,
         hidden_dropout=0.0,
@@ -230,8 +230,8 @@ def test_the_wire_row_is_the_policy_row_plus_the_teacher_sequence(toy_family) ->
     assert data["teacher_tokens"] == [TEACHER_TOKENS]
     assert data["distill_sample_weights"] == [1.0]
     assert toy_family.rollout_data_keys[:2] == ("teacher_tokens", "distill_sample_weights")
+    assert "rollout_log_probs" not in toy_family.external_batch_keys
     assert set(toy_family.external_batch_keys) >= {
-        "rollout_log_probs",
         "distill_sample_weights",
         "distill_teacher_log_probs",
     }

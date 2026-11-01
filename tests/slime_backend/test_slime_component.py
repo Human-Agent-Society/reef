@@ -21,10 +21,11 @@ import pytest
 pytest.importorskip("ray", reason="requires the optional Ray runtime")
 
 from tests.support._trajectories import policy_trajectory
+from tests.support.chat_templates import CharTemplate
 from tests.support.slime_component import FakeTrainGroup, RecordingBatchProcessor, checkpoint_storage, finished
 
 from reef.artifact import ModelDirectory
-from reef.core.job_data import TaskSample
+from reef.core.job_data import TaskSample, TrajectorySample
 from reef.core.trajectories import trajectory_reward
 from reef.core.weight_layout import ADAPTER_DIR
 from reef.runtime.durable_files import write_json
@@ -134,7 +135,7 @@ def worker_args(tmp_path: Path, **overrides: object) -> SlimeArguments:
         "loss_type": "sft_loss",
         "advantage_estimator": "grpo",
         "compute_advantages_and_returns": False,
-        "use_rollout_logprobs": True,
+        "use_rollout_logprobs": False,
         "custom_rollout_data_keys": ("producing_artifact_ids",),
         "reef_rollout_tensor_dtypes": {},
         "reef_external_batch_keys": (),
@@ -816,6 +817,20 @@ def test_the_workers_receive_each_rows_producing_artifact(tmp_path, stacks) -> N
     assert data["producing_artifact_ids"] == ["artifact-0", "artifact-1", None]
 
 
+@pytest.mark.unit
+def test_a_recorded_trajectory_renders_with_the_models_chat_template(tmp_path, stacks) -> None:
+    stack = stacks(tmp_path)
+    stack.component.template = CharTemplate()
+    steps = [{"step_id": 1, "source": "user", "message": "q"}, {"step_id": 2, "source": "agent", "message": "ab"}]
+    recorded = TrajectorySample(
+        {"schema_version": "ATIF-v1.7", "agent": {"name": "a"}, "steps": steps, "extra": {"reef": {"reward": 1.0}}}
+    )
+    stack.run(TrainingMethod("sft"), step=0, batch=JobData("recorded", (*batch_for(0).samples[:1], recorded)))
+    (data,) = stack.processor.calls
+    # user q | assistant ab in CharTemplate; the actor computes the log-probabilities, so the row ships none.
+    assert data["tokens"][1] == [2, 213, 9, 197, 198] and data["loss_masks"][1] == [1, 1]
+
+
 # -- Checkpoint storage
 
 
@@ -1345,10 +1360,10 @@ def test_a_restart_without_a_saved_optimizer_does_not_load_one(
     ("loss_family", "loss_type", "use_rollout_logprobs", "message"),
     [
         ("sft", "sft_loss", False, None),
-        ("pg", "policy_loss", True, None),
+        ("pg", "policy_loss", False, None),
         ("sft", "policy_loss", False, "sft_loss"),
-        ("pg", "sft_loss", True, "policy_loss"),
-        ("pg", "policy_loss", False, "use-rollout-logprobs"),
+        ("pg", "sft_loss", False, "policy_loss"),
+        ("pg", "policy_loss", True, "remove --use-rollout-logprobs"),
     ],
 )
 def test_reef_and_slime_objectives_must_match(loss_family, loss_type, use_rollout_logprobs, message) -> None:
@@ -1364,7 +1379,7 @@ def test_reef_and_slime_objectives_must_match(loss_family, loss_type, use_rollou
 def test_the_tttd_custom_objective_is_accepted() -> None:
     resolve_loss_family("tttd").validate_backend_args(
         SimpleNamespace(
-            loss_type="custom_loss", use_rollout_logprobs=True, compute_advantages_and_returns=True, kl_coef=0.1
+            loss_type="custom_loss", use_rollout_logprobs=False, compute_advantages_and_returns=True, kl_coef=0.1
         ),
     )
 
@@ -1372,7 +1387,7 @@ def test_the_tttd_custom_objective_is_accepted() -> None:
 def sao_backend_args(**overrides) -> SimpleNamespace:
     values = {
         "loss_type": "policy_loss",
-        "use_rollout_logprobs": True,
+        "use_rollout_logprobs": False,
         "custom_advantage_function_path": "recipes.sao.slime.objective.sao_advantages",
         "custom_pg_loss_function_path": "recipes.sao.slime.objective.sao_loss",
         "use_critic": True,

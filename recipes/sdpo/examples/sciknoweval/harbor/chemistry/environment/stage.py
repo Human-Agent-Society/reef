@@ -33,7 +33,7 @@ from pathlib import Path
 
 import chemistry
 
-# The grid MUST equal serve.yaml's pipeline.record2record.config: groups_per_step and rollouts_per_group.
+# The grid MUST equal serve.yaml's pipeline.record2sample.config: groups_per_step and rollouts_per_group.
 GROUPS_PER_STEP = int(os.environ.get("SDPO_GROUPS_PER_STEP", "32"))
 ROLLOUTS_PER_GROUP = int(os.environ.get("SDPO_ROLLOUTS_PER_GROUP", "8"))
 EPOCHS = int(os.environ.get("SDPO_EPOCHS", "30"))  # the reference's total_epochs ceiling

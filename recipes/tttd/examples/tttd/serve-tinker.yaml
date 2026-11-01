@@ -18,10 +18,10 @@ inference:
   timeout-s: 7200
 recipe:
   implementation: recipes.tttd.recipe:TTTDRecipe
-# TTTD's stages. The record stage owns the step grid; the later stages read it from there.
+# TTTD's stages. The record-to-sample stage owns the step grid; the job stage reads it from there.
 # harness/harbor_agent.py reads this grid, so the harness and the stack cannot disagree about the step.
 pipeline:
-  record2record:
+  record2sample:
     config:
       groups_per_step: 2
       rollouts_per_group: 2

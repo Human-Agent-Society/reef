@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from tests.support._threshold_processor import threshold_pipeline
+from tests.support._threshold_processor import ThresholdSamples, threshold_pipeline
 from tests.support._trajectories import policy_trajectory
 from tests.support.component_trainers import (
     HARNESS,
@@ -31,22 +31,13 @@ from tests.support.component_trainers import (
 )
 from tests.support.samples_service import make_samples
 
-from recipes.tttd import TTTDGridSettings, TTTDGroupedRolloutReport, TTTDJobData, TTTDRecord2Record, TTTDSamples
+from recipes.tttd import TTTDGroupedRolloutReport, TTTDJobData, TTTDSamples, TTTDSettings
 from reef.artifact import ArtifactRef, InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher
 from reef.execution.jobs import SupportsReceipt
 from reef.pipeline_context import PipelineContext
-from reef.record2record import (
-    GroupDecision,
-    JudgingRecord2Record,
-    RecordJudging,
-    ReportContext,
-    ReportGrouping,
-    ReportRecord2Record,
-)
-from reef.record2sample import JudgedSamples
-from reef.record2sample.assembly import SampleAssemblySettings
+from reef.record2sample import GroupDecision, JudgedSamples, RecordJudging, ReportContext, ReportGrouping
 from reef.sample2job import Sample2Job
 from reef.storage.samples import TrainerSamples
 from reef.storage.sql_coordination import memory_coordination
@@ -64,7 +55,7 @@ class _SessionJudging(RecordJudging):
     def __init__(self) -> None:
         self.sessions: dict[str, tuple[str, int]] = {}
 
-    def observe(self, item: AgentRecord, now: float, stage: JudgingRecord2Record) -> None:
+    def observe(self, item: AgentRecord, now: float, stage: JudgedSamples) -> None:
         if item.request_type is not RequestType.INFERENCE or "session" not in item.payload:
             stage.retire(item.agent_record_id)
             return
@@ -108,8 +99,7 @@ def session_pipeline(context: PipelineContext) -> TrainingPipeline:
     """Trains the judged turns of ``_SessionJudging``; a turn marked declined is unusable."""
     return TrainingPipeline(
         context,
-        record2record=JudgingRecord2Record(_SessionJudging(), JudgedAtOnce()),
-        record2sample=_SessionSamples(),
+        record2sample=_SessionSamples(_SessionJudging(), JudgedAtOnce()),
         sample2job=SessionJobData(context, None, None),
     )
 
@@ -132,21 +122,27 @@ class _StepGrouping(ReportGrouping):
         return GroupDecision.READY
 
 
+class _StepSamples(ThresholdSamples):
+    """``ThresholdSamples`` in ``_StepGrouping``'s groups, with exclusive sources."""
+
+    def __init__(self, context: PipelineContext) -> None:
+        super().__init__(context, grouping=_StepGrouping())
+        self.exclusive_sources = True
+
+
 def step_pipeline(context: PipelineContext) -> TrainingPipeline:
     """TTTD's shape: a step is one group of two (step, slot) reports, sources are exclusive, a step with a report
     marked mixed is discarded once complete, and a report that names no step is another role's and released."""
-    stage = ReportRecord2Record(context, _StepGrouping(), exclusive_sources=True)
-    return threshold_pipeline(context, record2record=stage)
+    return threshold_pipeline(context, record2sample=_StepSamples(context))
 
 
 def tttd_pipeline(context: PipelineContext) -> TrainingPipeline:
     """The TTTD recipe's stages, one group of two rollouts per step."""
-    record2record = TTTDRecord2Record(context, TTTDGridSettings(groups_per_step=1, rollouts_per_group=2))
+    record2sample = TTTDSamples(context, TTTDSettings(groups_per_step=1, rollouts_per_group=2))
     return TrainingPipeline(
         context,
-        record2record=record2record,
-        record2sample=TTTDSamples(SampleAssemblySettings(), record2record),
-        sample2job=TTTDJobData(context, record2record, None, None),
+        record2sample=record2sample,
+        sample2job=TTTDJobData(context, record2sample, None, None),
     )
 
 

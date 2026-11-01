@@ -6,6 +6,7 @@ import logging
 import shutil
 import tempfile
 import time
+import uuid
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
@@ -51,6 +52,8 @@ from reef.storage.record_items import request_record_copy, sync_scenario_records
 from reef.storage.records import RecordRetention
 from reef.storage.samples import StoredSample
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage
+from reef.storage.work_queue import WorkItem
+from reef.train.instructions import InstructionQueue
 from reef.train.job_queue import JobExperimentRecorder, JobQueueComponent, TrainingJobWorker
 from reef.train.trainer import Trainer
 
@@ -195,6 +198,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
             lifecycle=self,
             # Only control activates a scenario's artifact on the engines when it loads the scenario.
             activates_runtime=self.services.runs_control,
+            instructions=InstructionQueue(self.queue),
         )
         self.errors = TrainingErrors()
         self.background_threads = BackgroundThreads()
@@ -619,18 +623,34 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         release_id: str | None = None,
     ) -> AgentRecord:
         with self.registry.lock_for(item.scenario):
-            # An instruction names a scenario that exists; inference and reports keep implicit creation.
-            current = self.get_or_create_scenario(
-                item.scenario,
-                release_id=release_id,
-                allow_implicit_creation=False if item.request_type is RequestType.TRAIN else None,
-            )
+            current = self.get_or_create_scenario(item.scenario, release_id=release_id)
             if current is None:
                 raise UnknownScenario(f"unknown scenario {item.scenario!r}")
             stored, inserted = ingest.append_record(current, item)
             if inserted:
                 self.process_accepted_records(current)
             return stored
+
+    def accept_instruction(
+        self,
+        scenario: str,
+        payload: Mapping[str, Any],
+        *,
+        request_id: str | None = None,
+        release_id: str | None = None,
+    ) -> WorkItem:
+        """Queue a training instruction of ``scenario`` (``ingest.file_instruction``) and wake its workers.
+
+        The scenario must exist. ``request_id`` makes the request retry-safe; without it the instruction gets a new
+        ID. Return the instruction's queue item.
+        """
+        with self.registry.lock_for(scenario):
+            current = self.get_or_create_scenario(scenario, release_id=release_id, allow_implicit_creation=False)
+            if current is None:
+                raise UnknownScenario(f"unknown scenario {scenario!r}")
+            item = ingest.file_instruction(current, request_id or uuid.uuid4().hex, payload)
+            self.local_workers.wake(current)
+            return item
 
     def accept_records(
         self, items: Sequence[AgentRecord], *, release_id: str | None = None
@@ -639,8 +659,8 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         if not items:
             raise ValueError("a record batch must not be empty")
         scenario = items[0].scenario
-        if any(item.scenario != scenario or item.request_type is RequestType.TRAIN for item in items):
-            raise ValueError("a record batch must contain inferences or reports from one scenario")
+        if any(item.scenario != scenario for item in items):
+            raise ValueError("a record batch must contain records from one scenario")
         with self.registry.lock_for(scenario):
             current = self.get_or_create_scenario(scenario, release_id=release_id)
             if current is None:
@@ -849,6 +869,10 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         current = self.registry.get_loaded(scenario)
         if current is not None:
             self.local_workers.wake(current)
+
+    def instructions_added(self, scenario: str) -> None:
+        """Another process queued a training instruction of ``scenario``: its local workers run it."""
+        self.samples_added(scenario)
 
     def request_samples(self, current: Scenario) -> None:
         """Ask the samples service for a selection of the new records of each trainer of ``current`` that trains."""

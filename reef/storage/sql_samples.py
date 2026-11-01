@@ -2,7 +2,10 @@
 
 The sample table and the train count table are in the same database as the
 records and the commits. Each database operation uses one transaction of the
-record store. The commit history counts the samples that a commit consumed in
+record store. A trajectory that a trainer made from records keeps only the IDs of
+its calls and its own fields: the store renders the calls from their trajectory
+nodes and applies the sample's patch (``referenced_content``, RFC #1054), and the
+calls stay stored while the sample does (``sample_record_table``). The commit history counts the samples that a commit consumed in
 the transaction of the commit (``SQLCommitHistory``). The adapters build the
 tables with :func:`sample_table` and :func:`sample_train_count_table` and supply
 their namespace.
@@ -12,8 +15,9 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy import (
     BigInteger,
@@ -33,7 +37,10 @@ from sqlalchemy import (
 from sqlalchemy.engine import Connection, RowMapping
 from sqlalchemy.sql.elements import ColumnElement
 
+from reef.core.atif_payloads import patch_of, patched
 from reef.core.job_data import Sample, TaskSample, TrajectorySample
+from reef.core.records_types import AgentRecord
+from reef.core.trajectories import make_trajectory
 from reef.storage.samples import SampleConflict, SampleKind, SampleStore, StoredSample
 from reef.storage.sql_records import ScopedTable, SQLRecordStore
 from reef.storage.tasks import SPLIT_NAMES, SplitName, TaskFileStore
@@ -44,8 +51,9 @@ def sample_table(metadata: MetaData, *, foreign_key: str | None = None) -> Table
 
     ``kind`` is the kind of the sample, ``trajectory`` or ``task``, and
     ``split`` is ``train`` or ``eval``; a trajectory is always ``train``.
-    ``content_json`` holds the sample as canonical JSON (``trajectory_content``, ``made_task_content``, ``imported_task_content``),
-    and ``content_sha256`` its SHA-256. ``component`` is the trainer that made
+    ``content_json`` holds the sample as canonical JSON (``trajectory_content``, ``referenced_content``,
+    ``made_task_content``, ``imported_task_content``), and ``content_sha256`` the SHA-256 of the sample's whole
+    content: of ``trajectory_content`` for a trajectory in either form, else of ``content_json``. ``component`` is the trainer that made
     the sample from records (the component its commits name, or ``""`` for the
     only trainer of a scenario), or NULL for a sample that every trainer reads,
     such as an upload. ``group_key`` is the group that trains together, or
@@ -137,6 +145,50 @@ def trajectory_content(sample: TrajectorySample) -> str:
     return canonical_json(content)
 
 
+def sample_calls(sample: TrajectorySample) -> tuple[str, ...]:
+    """The IDs of the calls that ``make_trajectory`` encoded into ``sample``, oldest first (``extra.reef.records``),
+    or ``()`` for a trajectory that names none, such as an upload."""
+    records = sample.metadata.get("records")
+    if not isinstance(records, list):
+        return ()
+    ids = tuple(record.get("agent_record_id") for record in records if isinstance(record, Mapping))
+    if len(ids) != len(records) or not all(isinstance(record_id, str) and record_id for record_id in ids):
+        return ()
+    return tuple(str(record_id) for record_id in ids)
+
+
+def referenced_content(sample: TrajectorySample, calls: Sequence[AgentRecord]) -> str | None:
+    """The canonical JSON of a trajectory made from the records ``calls``, which keeps their IDs instead of their
+    content, or ``None`` when ``calls`` do not render the trajectory.
+
+    The content is ``{"calls", "patch", "group_id", "source_agent_record_ids"}``: ``calls`` the IDs of ``calls`` in
+    order, and ``patch`` the patch (``patch_of``) that turns ``make_trajectory(calls)``, without reward or feedback,
+    into ``sample.trajectory``. ``rendered_trajectory`` reads it back to the same trajectory.
+    """
+    derived = make_trajectory(calls).trajectory
+    patch = patch_of(dict(sample.trajectory), derived)
+    if canonical_json(patched(derived, patch)) != canonical_json(dict(sample.trajectory)):
+        return None
+    return canonical_json(
+        {
+            "calls": [call.agent_record_id for call in calls],
+            "patch": patch,
+            "group_id": sample.group_id,
+            "source_agent_record_ids": list(sample.source_agent_record_ids),
+        }
+    )
+
+
+def rendered_trajectory(content: Mapping[str, Any], calls: Mapping[str, AgentRecord]) -> TrajectorySample:
+    """The trajectory of a ``referenced_content`` ``content``, rendered from the stored records ``calls`` by ID."""
+    derived = make_trajectory([calls[record_id] for record_id in content["calls"]]).trajectory
+    return TrajectorySample(
+        patched(derived, content["patch"]),
+        group_id=content["group_id"],
+        source_agent_record_ids=tuple(content["source_agent_record_ids"]),
+    )
+
+
 def made_task_content(task: TaskSample) -> str:
     """The canonical JSON of a task that a trainer's stage made: its path, records and metadata."""
     return canonical_json(
@@ -213,18 +265,37 @@ class SQLSampleStore(SampleStore):
             raise ValueError("a sample group must be a non-empty string or None")
         if not samples or any(not isinstance(record_id, str) or not record_id for record_id in record_ids):
             raise ValueError("record samples need one or more samples and non-empty record IDs")
-        rows: list[tuple[str, SampleKind, str]] = [
-            (
-                (sample_id, "trajectory", trajectory_content(sample))
-                if isinstance(sample, TrajectorySample)
-                else (sample_id, "task", made_task_content(sample))
-            )
-            for sample_id, sample in samples
-        ]
         consumed = canonical_json_list(record_ids)
         with self.records._transaction(write=True) as connection:
-            inserted = [
-                self.insert(
+            calls = self.records.records_by_id(
+                connection,
+                self.scenario,
+                (
+                    record_id
+                    for _, sample in samples
+                    if isinstance(sample, TrajectorySample)
+                    for record_id in sample_calls(sample)
+                ),
+            )
+            inserted = []
+            for sample_id, sample in samples:
+                held: tuple[str, ...] = ()
+                if isinstance(sample, TaskSample):
+                    kind: SampleKind = "task"
+                    content = made_task_content(sample)
+                    content_sha256 = None
+                else:
+                    kind = "trajectory"
+                    full = trajectory_content(sample)
+                    content_sha256 = hashlib.sha256(full.encode()).hexdigest()
+                    ids = sample_calls(sample)
+                    referenced = (
+                        referenced_content(sample, [calls[record_id] for record_id in ids])
+                        if ids and all(record_id in calls for record_id in ids)
+                        else None
+                    )
+                    content, held = (full, ()) if referenced is None else (referenced, ids)
+                is_new = self.insert(
                     connection,
                     sample_id,
                     kind,
@@ -233,9 +304,11 @@ class SQLSampleStore(SampleStore):
                     component=trainer,
                     group_key=group,
                     record_ids_json=consumed,
+                    content_sha256=content_sha256,
                 )
-                for sample_id, kind, content in rows
-            ]
+                if is_new:
+                    self.records.hold_records(connection, sample_id, held)
+                inserted.append(is_new)
         return any(inserted)
 
     def consumed_record_ids(self, trainer: str) -> frozenset[str]:
@@ -320,13 +393,16 @@ class SQLSampleStore(SampleStore):
         component: str | None = None,
         group_key: str | None = None,
         record_ids_json: str = "[]",
+        content_sha256: str | None = None,
     ) -> bool:
         """Store one sample unless it is stored as it is; return whether it is new. ``SampleConflict`` otherwise.
 
-        ``component``, ``group_key`` and ``record_ids_json`` are the columns of ``sample_table``.
+        ``component``, ``group_key``, ``record_ids_json`` and ``content_sha256`` are the columns of ``sample_table``;
+        ``content_sha256`` defaults to the SHA-256 of ``content``.
         """
         table = self.table.table
-        content_sha256 = hashlib.sha256(content.encode()).hexdigest()
+        if content_sha256 is None:
+            content_sha256 = hashlib.sha256(content.encode()).hexdigest()
         stored = connection.execute(
             select(table.c.kind, table.c.split, table.c.content_sha256).where(
                 self.table.condition(), table.c.sample_id == sample_id
@@ -397,11 +473,25 @@ class SQLSampleStore(SampleStore):
                 )
             ):
                 train_counts[count.sample_id][count.component] = int(count.train_count)
-        return tuple(self.stored_sample(row, train_counts[row["sample_id"]]) for row in rows)
+        contents = {row["sample_id"]: json.loads(row["content_json"]) for row in rows}
+        calls = self.records.records_by_id(
+            connection,
+            self.scenario,
+            (record_id for content in contents.values() for record_id in content.get("calls", ())),
+        )
+        return tuple(
+            self.stored_sample(row, contents[row["sample_id"]], calls, train_counts[row["sample_id"]]) for row in rows
+        )
 
-    def stored_sample(self, row: RowMapping, train_counts: Mapping[str, int]) -> StoredSample:
-        """Return the stored sample of one table row, with its train counts by component."""
-        content = json.loads(row["content_json"])
+    def stored_sample(
+        self,
+        row: RowMapping,
+        content: Mapping[str, Any],
+        calls: Mapping[str, AgentRecord],
+        train_counts: Mapping[str, int],
+    ) -> StoredSample:
+        """Return the stored sample of one table row, whose ``content_json`` is ``content``, with its train counts by
+        component; ``calls`` holds the stored records that its trajectory renders from, by ID."""
         sequence, sample_id, split = int(row["sequence"]), row["sample_id"], row["split"]
         if row["kind"] == "task" and row["component"] is None:
             digest = content["files_digest"]
@@ -415,6 +505,8 @@ class SQLSampleStore(SampleStore):
             sample = TaskSample(
                 Path(content["task_path"]), tuple(content["source_agent_record_ids"]), content["metadata"]
             )
+        elif "calls" in content:
+            sample = rendered_trajectory(content, calls)
         else:
             sample = TrajectorySample(
                 content["trajectory"],
