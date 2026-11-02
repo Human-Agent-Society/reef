@@ -234,6 +234,7 @@ def test_import_then_chat_continue_with_the_same_reported_processor(tmp_path, bu
                 "/reef/records", headers=HEADERS, json=imported("offline-0", inference_payload("changed"))
             )
             assert conflict.status == 409
+            await wait_for_inference(client, "s", headers=HEADERS)
             for index in range(2):
                 text = f"online-{index}"
                 response = await client.post(
