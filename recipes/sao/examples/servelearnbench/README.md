@@ -163,7 +163,11 @@ Reef's chat handler serves each episode from its exact sampled token IDs (`infer
 A later call appends only the new observations and turn delimiters to the tokens the model produced.
 Blind, Oracle, and SAO use the same setting.
 The trainer renders a reported episode again from its recorded messages with the model's chat template, thinking on, and trains every reply.
-Qwen3's template renders the replies as prefixes of one conversation only while each reply's reasoning stays in the history, which the benchmark's agent loop keeps.
+Qwen3's template renders the replies as prefixes of one conversation only while every reply keeps its reasoning in the history.
+It drops the reasoning of the replies before the last user message, and the benchmark's loop answers a reply without a tool call with a user message.
+It also renders a think block for a reply without reasoning only when that reply is the last message.
+An episode with either case cannot be rendered as one conversation; the trainer leaves it out of the job, and the batch's other episodes train.
+The training rows record `trained_samples` and `unrenderable_samples`. A job whose episodes all drop saves no checkpoint and fails the run.
 The DIS ratio compares the current policy against old-policy log-probabilities that the actor computes with the weights at the job's start.
 The driver trains each batch before it samples the next one, so those are the weights that sampled the batch.
 
@@ -281,14 +285,18 @@ Use a short allocation, including a preemptable allocation when available:
 export MODEL_DIR=/scratch/your-project/models/Qwen3-0.6B
 export SAO_GPUS=1
 export SAO_BATCH=2 SAO_MICRO_BATCH=2 SAO_WARMUP=1
-bash recipes/sao/examples/servelearnbench/run.sh --smoke --max-steps 20 --max-tokens 64
+bash recipes/sao/examples/servelearnbench/run.sh --smoke --max-steps 10 --max-tokens 2048
 ```
 
 This runs the first window only: three serving tasks and two test tasks.
 Smoke selects up to `max(2, 2 * SAO_BATCH - 1)` serving tasks to exercise a partial batch.
-Each task has at most 20 model calls, with at most 64 output tokens per call.
+Each task has at most 10 model calls, with at most 2,048 output tokens per call.
+The budget must let the model finish its reasoning and call a tool; a 64-token budget cuts every reply inside its reasoning, and no such episode can train.
 The first two serving tasks warm up the critic, then train actor and critic using the same trajectories.
 The one-task tail also trains actor and critic. This smoke produces two checkpoints and two actor updates.
+Qwen3-0.6B answers some turns in plain text, and an episode with such a turn does not train (see above).
+When every episode of a batch drops, the run ends with a job that saved no checkpoint.
+With Qwen3-8B, `SAO_GPUS=4` on eight GPUs and `SAO_BATCH=4 SAO_MICRO_BATCH=4`, about one episode in four rendered in our smoke: the first job trained, published its checkpoint, and the next batch was served from it, and the run stopped at a three-task tail without a renderable episode.
 The output explicitly marks the run as smoke. Do not compare its score with the 8B pilot.
 Restore `SAO_BATCH=64 SAO_MICRO_BATCH=16 SAO_WARMUP=1` and the 8B model for the pilot.
 
@@ -297,7 +305,7 @@ Restore `SAO_BATCH=64 SAO_MICRO_BATCH=16 SAO_WARMUP=1` and the 8B model for the 
 `REEF_WORK/results.jsonl` contains configuration, scored episodes, declared batches, finished training jobs, and a summary.
 Episode rows include traces, token usage, inference receipts, ending reasons, and the served artifact.
 A `batch_ready` row declares a batch's tasks, its training instruction, and its passes before any report is sent.
-Training rows record the actual `batch_size`, the job, and the artifact that serves after it.
+Training rows record the actual `batch_size`, how many of its episodes trained (`trained_samples`), the job, and the artifact that serves after it.
 `training_jobs` and `actor_updates` count actor updates; `critic_only_batches` counts extra warmup passes.
 The summary counts `partial_batch_tasks`; `untrained_tail_tasks` is zero.
 `test_score` is the combined mean of all test rewards, multiplied by 100; `window_scores` holds the same per window.

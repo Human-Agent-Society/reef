@@ -59,9 +59,14 @@ def instruction_jobs(jobs: list[dict]) -> dict[str, dict]:
     return {job["instruction"]["id"]: job for job in jobs if job["instruction"] is not None}
 
 
-def ensure_scenario(client: ReefClient, scenario: str, *, trains: bool) -> dict:
-    """Create the scenario when it does not exist; return its status block. A training run needs manual mode."""
-    client.post("/reef/scenarios", scenario, {"name": scenario})
+def ensure_scenario(client: ReefClient, scenario: str, *, trains: bool, creation_timeout_seconds: float) -> dict:
+    """Create the scenario when it does not exist; return its status block. A training run needs manual mode.
+
+    Creating a scenario writes its root release from the model files, which
+    takes minutes for a large model, so the creation gets its own timeout.
+    """
+    creation = ReefClient(client.service_url, token=client.token, timeout_s=creation_timeout_seconds)
+    creation.post("/reef/scenarios", scenario, {"name": scenario})
     block = scenario_status(client, scenario)
     if trains and block["training_mode"] != "manual":
         raise RuntimeError("The campaign queues each batch's training itself; set recipe.config.training_mode: manual")
@@ -124,7 +129,8 @@ def wait_for_training(
 
     The scenario then counts ``expected_jobs`` finished jobs, runs no job,
     admits inference again, and serves an artifact other than ``served_before``
-    that is also the trainer's training start. Return the job and that artifact.
+    that is also the trainer's training start. Return the job, that artifact,
+    and the number of the job's samples that the trainer could not render.
     """
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
@@ -139,6 +145,12 @@ def wait_for_training(
             raise
         if job is not None and job["state"] == "failed":
             raise RuntimeError(f"Training job {job['id']} failed: {job['error']}")
+        if job is not None and job["state"] == "finished" and not job["checkpoints"]:
+            # An episode that the trainer cannot render does not train (see the README); a job with none left
+            # saves no checkpoint, and the campaign cannot continue on the same weights.
+            raise RuntimeError(
+                f"Training job {job['id']} saved no checkpoint; its metrics: {job['result']['metrics']}"
+            )
         if block["finished_jobs"] > expected_jobs:
             raise RuntimeError("Unexpected training job; use a dedicated scenario for this run")
         served = block["served_artifact_id"]
@@ -151,7 +163,13 @@ def wait_for_training(
             and served != served_before
             and all(row["active"] == row["training_start"] == served for row in block["artifacts"].values())
         ):
-            return {"job_id": job["id"], "artifact_id": served, "scenario_step": block["scenario_step"]}
+            return {
+                "job_id": job["id"],
+                "artifact_id": served,
+                "scenario_step": block["scenario_step"],
+                "checkpoints": len(job["checkpoints"]),
+                "unrenderable_samples": int(job["result"]["metrics"].get("unrenderable_samples", 0)),
+            }
         time.sleep(min(POLL_SECONDS, max(0.0, deadline - time.monotonic())))
     raise TimeoutError(f"Training job {expected_jobs} did not serve its checkpoint within {timeout_seconds}s")
 
@@ -240,11 +258,13 @@ def recover_campaign(log: ResultLog, client: ReefClient, model: ReefLLM, config:
 
 
 def training_row(declared: dict, result: dict) -> dict:
-    """The result row of a declared batch: its tasks, instruction and passes, and the job and served artifact."""
+    """The result row of a declared batch: its tasks, instruction and passes, the job, the served artifact, and how
+    many of its episodes the trainer rendered and trained."""
     return {
         "type": "training",
         "task_ids": declared["task_ids"],
         "batch_size": len(declared["task_ids"]),
+        "trained_samples": len(declared["task_ids"]) - result["unrenderable_samples"],
         "instruction_id": declared["instruction_id"],
         "epochs": declared["epochs"],
         **result,
@@ -339,7 +359,9 @@ def main() -> None:
     if args.check_only:
         return
     client = ReefClient(os.environ["REEF_SERVICE_URL"], token=os.environ.get("REEF_TOKEN"), timeout_s=60)
-    scenario = ensure_scenario(client, args.scenario, trains=args.method == "sao")
+    scenario = ensure_scenario(
+        client, args.scenario, trains=args.method == "sao", creation_timeout_seconds=args.training_timeout
+    )
     if not args.resume and scenario["finished_jobs"]:
         raise RuntimeError("The scenario already trained; use --resume with its original directories")
     cfg = llm.ModelConfig(model="reef", reasoning_effort=None, max_tokens=args.max_tokens)

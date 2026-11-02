@@ -328,12 +328,13 @@ def status_block(finished_jobs, *, running=False, open_admission=True, served=No
     }
 
 
-def job_row(instruction_id, state="finished", error=None):
+def job_row(instruction_id, state="finished", error=None, checkpoints=1, metrics=None):
     return {
         "id": f"job-{instruction_id}",
         "state": state,
         "error": error,
-        "checkpoints": [],
+        "checkpoints": [{"step": step + 1} for step in range(checkpoints)],
+        "result": None if state != "finished" else {"state": "finished", "metrics": metrics or {}},
         "instruction": {"id": instruction_id},
     }
 
@@ -359,6 +360,27 @@ def reef_reads(statuses, jobs, sample_pages=()):
     return client
 
 
+def test_ensure_scenario_creates_with_its_own_timeout_and_requires_manual_mode(monkeypatch):
+    campaign = load_campaign(monkeypatch)
+    clients = []
+
+    def make_client(service_url, *, token=None, timeout_s):
+        client = reef_reads([{**status_block(0), "training_mode": "auto" if len(clients) else "manual"}], [])
+        client.service_url, client.token, client.timeout_s = service_url, token, timeout_s
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr(campaign, "ReefClient", make_client)
+    control = make_client("http://reef.invalid", token="t", timeout_s=60)
+    block = campaign.ensure_scenario(control, SCENARIO, trains=True, creation_timeout_seconds=1800)
+    assert block["training_mode"] == "manual"
+    creation = clients[-1]
+    assert creation is not control and creation.timeout_s == 1800
+    assert creation.post.call_args.args == ("/reef/scenarios", SCENARIO, {"name": SCENARIO})
+    with pytest.raises(RuntimeError, match="training_mode: manual"):
+        campaign.ensure_scenario(clients[-1], SCENARIO, trains=True, creation_timeout_seconds=1800)
+
+
 def test_training_barrier_never_succeeds_on_timeout(monkeypatch):
     campaign = load_campaign(monkeypatch)
     client = reef_reads([status_block(0, running=True)], [])
@@ -381,7 +403,13 @@ def test_training_barrier_needs_the_finished_job_open_admission_and_the_served_c
     client = reef_reads(statuses, [job_row("i1")])
     monkeypatch.setattr(campaign.time, "sleep", lambda _: None)
     result = campaign.wait_for_training(client, SCENARIO, "i1", 1, "artifact-0", 10)
-    assert result == {"job_id": "job-i1", "artifact_id": "artifact-1", "scenario_step": 3}
+    assert result == {
+        "job_id": "job-i1",
+        "artifact_id": "artifact-1",
+        "scenario_step": 3,
+        "checkpoints": 1,
+        "unrenderable_samples": 0,
+    }
     assert client.get.call_count == 10
 
 
@@ -391,6 +419,12 @@ def test_training_barrier_needs_the_finished_job_open_admission_and_the_served_c
         ([{**status_block(0), "error": "optimizer failed"}], [], "optimizer failed"),
         ([status_block(0, running=True)], [job_row("i1", "failed", "cuda out of memory")], "cuda out of memory"),
         ([status_block(2)], [job_row("i1")], "Unexpected training job"),
+        # Every episode of the batch was unrenderable: the job finished without a checkpoint.
+        (
+            [status_block(0, running=True)],
+            [job_row("i1", checkpoints=0, metrics={"unrenderable_samples": 2})],
+            "saved no checkpoint; its metrics: {'unrenderable_samples': 2}",
+        ),
     ],
 )
 def test_training_failures_do_not_wait_for_timeout(monkeypatch, statuses, jobs, match):
@@ -517,13 +551,17 @@ class FakeTraining:
             "job_id": f"job-{len(self.jobs)}",
             "artifact_id": f"artifact-{len(self.jobs)}",
             "scenario_step": 3 * len(self.jobs),
+            "checkpoints": 1,
+            "unrenderable_samples": 0,
         }
 
     def install(self, monkeypatch, campaign):
         client = Mock(spec=ReefClient)
         client.service_url, client.token = "http://reef.invalid", None
         monkeypatch.setattr(campaign, "ReefClient", lambda *args, **kwargs: client)
-        monkeypatch.setattr(campaign, "ensure_scenario", lambda client, scenario, *, trains: self.status())
+        monkeypatch.setattr(
+            campaign, "ensure_scenario", lambda client, scenario, *, trains, creation_timeout_seconds: self.status()
+        )
         monkeypatch.setattr(campaign, "scenario_status", self.status)
         monkeypatch.setattr(campaign, "training_jobs", self.listing)
         monkeypatch.setattr(campaign, "train_batch", self.train_batch)
@@ -608,6 +646,10 @@ def test_campaign_never_reports_test_tasks(bundle, monkeypatch, tmp_path, method
     assert [row["window"] for row in episodes] == [w for w, n, m in plan for _ in range(n + m)]
     declared = [row for row in rows if row.get("type") == "batch_ready"]
     assert [row["task_ids"] for row in declared] == training.batches
+    trained_rows = [row for row in rows if row.get("type") == "training"]
+    assert [(row["batch_size"], row["trained_samples"]) for row in trained_rows] == [
+        (len(batch), len(batch)) for batch in training.batches
+    ]
     assert [row["epochs"] for row in declared] == ([2] + [1] * (len(declared) - 1) if declared else [])
     assert rows[-1]["partial_batch_tasks"] == (sum(n % batch_size for _, n, _ in plan) if method == "sao" else 0)
     assert rows[-1]["training_jobs"] == finished
@@ -758,7 +800,13 @@ def test_resume_matches_uninterrupted_campaign(bundle, monkeypatch, tmp_path, in
         if existing is not None:
             # The job of an interrupted batch finished: nothing trains again.
             index = training.jobs.index(existing) + 1
-            return {"job_id": f"job-{index}", "artifact_id": f"artifact-{index}", "scenario_step": 3 * index}
+            return {
+                "job_id": f"job-{index}",
+                "artifact_id": f"artifact-{index}",
+                "scenario_step": 3 * index,
+                "checkpoints": 1,
+                "unrenderable_samples": 0,
+            }
         if (
             interruption in ("before_training", "tail_before_training")
             and not interrupted[0]
