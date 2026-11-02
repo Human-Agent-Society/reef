@@ -207,6 +207,13 @@ class SQLDataStore(DataStore):
         does nothing, for a store whose transactions already run one at a time.
         """
 
+    @contextmanager
+    def pack_lock(self, owner: str) -> Iterator[bool]:
+        """Try to take the lock that lets one caller at a time ``pack`` the content of ``owner``; yield whether it
+        took it. The lock holds until the block ends. The default always takes it, for a store whose transactions
+        already run one at a time."""
+        yield True
+
     def partition(self, owner: str) -> SegmentPartition | None:
         """The segment partition of ``owner``, or None without a segment store."""
         return None if self.segments is None else SegmentPartition(self.segments, owner)
@@ -374,7 +381,13 @@ class SQLDataStore(DataStore):
     ) -> tuple[StoredItem, ...]:
         check_query(owner, kind, scenario, after, limit)
         items = self.items_table
-        statement = select(items).where(items.c.owner == owner, items.c.sequence > after)
+        # Without content, read only the columns of the metadata: content_json can be large.
+        columns = (
+            (items,)
+            if content
+            else (items.c.sequence, items.c.owner, items.c.item_id, items.c.metadata_json, items.c.digest)
+        )
+        statement = select(*columns).where(items.c.owner == owner, items.c.sequence > after)
         if kind is not None:
             statement = statement.where(items.c.kind == kind)
         if scenario is not None:
@@ -446,7 +459,7 @@ class SQLDataStore(DataStore):
         """Move content of ``owner`` from the database into segments, oldest first, while at least ``PACK_BYTES`` of
         it waits, and return the number of rows moved. Each segment holds at least ``PACK_BYTES``.
 
-        A row that another call moved first keeps that segment line; this call's line then stays unused.
+        The caller holds ``pack_lock(owner)``, so no other call moves the same rows at once.
         """
         partition = self.partition(owner)
         if partition is None:
@@ -524,7 +537,9 @@ class SQLDataStore(DataStore):
                     )
                 )
         for owner in sorted(owners):
-            self.pack(owner)
+            with self.pack_lock(owner) as locked:
+                if locked:
+                    self.pack(owner)
         self.delete_unused_segments()
 
     def delete_unused_segments(self) -> int:
@@ -701,6 +716,7 @@ class PostgresDataStore(SQLDataStore):
         self.create_lock_key = int.from_bytes(
             hashlib.sha256(f"reef-data-create:{schema}".encode()).digest()[:8], "big", signed=True
         )
+        self.schema = schema
         with self.engine.begin() as connection:
             # Serialize the check-then-create of the schema across deployments that start together.
             connection.execute(select(func.pg_advisory_xact_lock(key)))
@@ -737,6 +753,24 @@ class PostgresDataStore(SQLDataStore):
         )
         # A row comes back only when this statement inserted one; rowcount is not reliable with RETURNING.
         return connection.execute(statement).first() is not None
+
+    @contextmanager
+    def pack_lock(self, owner: str) -> Iterator[bool]:
+        # A session lock on its own connection: a pack runs several transactions and writes segments between them.
+        if self.engine is None:
+            raise ReefError("the data store is closed")
+        key = int.from_bytes(
+            hashlib.sha256(f"reef-data-pack:{self.schema}:{owner}".encode()).digest()[:8], "big", signed=True
+        )
+        with self.engine.connect() as connection:
+            locked = bool(connection.scalar(select(func.pg_try_advisory_lock(key))))
+            connection.commit()
+            try:
+                yield locked
+            finally:
+                if locked:
+                    connection.execute(select(func.pg_advisory_unlock(key)))
+                    connection.commit()
 
     def lock_creates(self, connection: Connection) -> None:
         # Identity values are given at insert time, not at commit time. One lock per schema makes the two orders
