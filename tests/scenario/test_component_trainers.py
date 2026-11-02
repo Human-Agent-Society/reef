@@ -1437,9 +1437,9 @@ def test_adopted_checkpoint_is_attributed_to_the_trainer_that_made_it(
 
     # The record store is gone; the checkpoint is adopted from the head and belongs to the harness trainer.
     recovered, _ = dispatchers.open(records_dir=tmp_path / "records-2", backend_factory=backend_factory)
-    scenario = _scenario(recovered)
-    # The head names the last commit of the harness job: its end, after its submission and its checkpoint.
-    assert scenario.scenario_step == 3
+    scenario = recovered.get_or_create_scenario("agent")
+    # The checkpoint restores the running job; wait for its worker to commit the end.
+    assert _wait_for(lambda: scenario.scenario_step == 3)
     harness = JobLoopState.from_dict(scenario.trainer_for(HARNESS).state)
     assert harness.finished_jobs == 1 and harness.job is None
     assert JobLoopState.from_dict(scenario.trainer_for(WEIGHTS).state).finished_jobs == 0
