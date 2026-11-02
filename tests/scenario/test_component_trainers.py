@@ -566,16 +566,15 @@ def test_a_failing_local_cycle_runs_once_per_wake_and_keeps_its_error_in_the_sta
     # Both rows first, then one wake: an accept wakes the worker per row, which would be two wakes.
     _loaded(dispatcher, 1)
     dispatcher.local_workers.start("agent", HARNESS)
-    _wait_for(lambda: away.attempts > 0)
-    time.sleep(0.2)
+    assert _wait_for(lambda: dispatcher.build_training_status()["error"] == "agent: RuntimeError: proposer away")
     assert away.attempts == 1
-    assert dispatcher.build_training_status()["error"] == "agent: RuntimeError: proposer away"
     # Another wake: the worker looks again, once.
     dispatcher.local_workers.start("agent", HARNESS)
-    _wait_for(lambda: away.attempts > 1)
-    time.sleep(0.2)
+    assert _wait_for(
+        lambda: away.attempts > 1
+        and dispatcher.build_training_status()["error"] == "agent: RuntimeError: proposer away"
+    )
     assert away.attempts == 2
-    assert dispatcher.build_training_status()["error"] == "agent: RuntimeError: proposer away"
 
 
 class _BlockingAwayBackend(ComponentJobs):
@@ -883,6 +882,8 @@ def test_a_harness_commit_that_fails_leaves_its_rows_to_the_harness(
     of them is in the sample store, which consumed the rows for the harness: the rebuilt harness trains the sample
     once."""
     dispatcher, _ = dispatchers.open(training=WeightsJobComponent(tmp_path / "checkpoints"))
+    # Recovery reloads wake workers; this test drives each cycle explicitly.
+    monkeypatch.setattr(dispatcher.local_workers, "start", lambda scenario, component=None: None)
     scenario = _loaded(dispatcher, 1)
     _fail_first_record_of(monkeypatch, scenario, HARNESS)
     with pytest.raises(OSError, match="transient store write error"):
@@ -1438,7 +1439,7 @@ def test_adopted_checkpoint_is_attributed_to_the_trainer_that_made_it(
     # The record store is gone; the checkpoint is adopted from the head and belongs to the harness trainer.
     recovered, _ = dispatchers.open(records_dir=tmp_path / "records-2", backend_factory=backend_factory)
     scenario = recovered.get_or_create_scenario("agent")
-    # The checkpoint restores the running job; wait for its worker to commit the end.
+    # The checkpoint restores the running job; its worker must commit the end before inspecting final state.
     assert _wait_for(lambda: scenario.scenario_step == 3)
     harness = JobLoopState.from_dict(scenario.trainer_for(HARNESS).state)
     assert harness.finished_jobs == 1 and harness.job is None
