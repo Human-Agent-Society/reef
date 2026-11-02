@@ -37,6 +37,7 @@ from tests.support.component_trainers import (
     seeded_start,
     stop_workers,
 )
+from tests.support.runtime_stubs import StubInferenceRuntime
 from tests.support.samples_service import make_samples
 from tests.support.serving import wait_for_serving
 
@@ -1772,7 +1773,11 @@ def test_a_restart_before_the_trainers_next_commit_imports_its_start_again(
     dispatcher.close()
 
     restarted, _ = dispatchers.open(training=training, hold_local_cycles=True, backend_factory=factory)
-    scenario = _scenario(restarted, 2)
+    runtime = restarted.recipe.runtime
+    assert isinstance(runtime, StubInferenceRuntime)
+    # The previous owner's routes can remain until recovery starts. Wait for the new runtime to load its weights.
+    assert _wait_for(lambda: runtime.served == "w1")
+    scenario = _loaded(restarted, 2)
     assert len(training.imported) == 2
     assert scenario.current_artifact_ref() == served
     state = JobLoopState.from_dict(scenario.trainer_for(WEIGHTS).state)
