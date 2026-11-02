@@ -195,6 +195,8 @@ class TrainingPipeline:
         self.store_sequence = 0
         #: Whether the pipeline stored a new sample or read a new training instruction since ``produce`` returned.
         self.received_input = False
+        #: The number of new samples that this pipeline stored.
+        self.stored_sample_count = 0
         #: The stored samples that this trainer has not trained, in store order, each with the sample that job data
         #: trains: an upload rendered by the record-to-sample stage, else the stored sample. Imported tasks do not train.
         self.held: dict[str, tuple[StoredSample, Sample]] = {}
@@ -315,6 +317,14 @@ class TrainingPipeline:
 
     # ------------------------------------------------------------- records
 
+    def add_record_samples(
+        self, group: str | None, record_ids: tuple[str, ...], samples: tuple[tuple[str, Sample], ...]
+    ) -> bool:
+        """Save samples (``TrainerSamples.add_record_samples``), count the new ones, and return whether one is new."""
+        added = self.store.add_record_samples(group, record_ids, samples)
+        self.stored_sample_count += added
+        return added > 0
+
     def store_samples(self) -> bool:
         """Store the samples of each unit that the stage made ready, and the samples that it made from no set.
 
@@ -329,7 +339,7 @@ class TrainingPipeline:
         made = self.record2sample.made_samples()
         if made:
             stored = (
-                self.store.add_record_samples(
+                self.add_record_samples(
                     None, (), tuple((f"{self.sample_id_prefix}{name}", sample) for name, sample in made)
                 )
                 or stored
@@ -361,7 +371,7 @@ class TrainingPipeline:
             for index, sample in enumerate(set_samples)
         )
         group = f"{prefix}{unit.set_ids()[0]}" if len(samples) > 1 else None
-        stored = self.store.add_record_samples(group, tuple(unit.consumed_ids()), samples)
+        stored = self.add_record_samples(group, tuple(unit.consumed_ids()), samples)
         self.record2sample.consume(unit)
         return stored
 
