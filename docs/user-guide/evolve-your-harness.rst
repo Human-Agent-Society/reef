@@ -25,11 +25,14 @@ A deployment chooses three things:
 How it works
 ------------
 
-.. diagram::
-   :caption: The client installs the active release as the agent's own plugin, beside the person's own configuration, and sends back what a session changed. Reef records the model calls and reports, runs a training step on a batch of reports or of uploaded train tasks, and makes a selected candidate the new head, which the activation rule activates.
+.. figure:: ../assets/harness-architecture-light.svg
+   :alt: Harness evolution: what runs on a person's machine, what runs in Reef, the routes between them, and the two ways a step gets its traces
 
-   <img class="fig-light" src="../assets/harness-architecture-light.svg" alt="Harness evolution: what runs on a person's machine, what runs in Reef, the routes between them, and the two ways a step gets its traces">
-   <img class="fig-dark" src="../assets/harness-architecture-dark.svg" alt="Harness evolution: what runs on a person's machine, what runs in Reef, the routes between them, and the two ways a step gets its traces">
+   The client installs the active release as the agent's own plugin, beside the
+   person's own configuration, and sends back what a session changed. Reef
+   records the model calls and reports, runs a training step on a batch of
+   reports or of uploaded train tasks, and makes a selected candidate the new
+   head, which the activation rule activates.
 
 .. list-table::
    :header-rows: 1
@@ -427,12 +430,18 @@ The deployment's ``evolution.adapter`` decides the agent; ``GET
    pip install reef-client
    reef-client harness connect --reef http://127.0.0.1:8900
 
-.. flow::
-   :loop: each run starts on the active release
+.. container:: flow
 
-   connect :: sets the machine up, once
-   run :: syncs, starts the agent with its model calls on Reef, and sends its changes when it exits
-   Reef* :: records each model call; steps publish releases
+   connect
+       sets the machine up, once
+
+   run
+       syncs, starts the agent with its model calls on Reef, and sends its changes when it exits
+
+   **Reef**
+       records each model call; steps publish releases
+
+   :Loop: each run starts on the active release
 
 .. list-table::
    :header-rows: 1
