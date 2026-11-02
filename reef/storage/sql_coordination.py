@@ -22,7 +22,7 @@ import json
 import math
 import time
 from abc import abstractmethod
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Collection, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -630,7 +630,7 @@ class SQLServedModels(ServedModelsWriter):
         worker_id: str,
         *,
         stop_delay_seconds: float,
-        keep_routes: bool,
+        kept: Collection[ServedArtifact],
         now: float | None = None,
     ) -> None:
         if not math.isfinite(stop_delay_seconds) or stop_delay_seconds < 0:
@@ -659,8 +659,10 @@ class SQLServedModels(ServedModelsWriter):
             self.checked_owner(connection, owner, worker_id, moment)
             for row in connection.execute(latest).mappings().all():
                 current = item_from_row(row)
-                if not keep_routes:
-                    self.replace_routes(connection, served_counter, current.scenario, {}, moment + stop_delay_seconds)
+                served = self.tables.served_model
+                routes = connection.execute(select(served).where(served.c.scenario == current.scenario)).mappings()
+                staying = {row["name"]: route for row in routes if (route := served_from_row(row)) in kept}
+                self.replace_routes(connection, served_counter, current.scenario, staying, moment + stop_delay_seconds)
                 if current.state != "finished" or not current.payload:
                     continue
                 sequence = counter.next()
