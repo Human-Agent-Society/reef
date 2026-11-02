@@ -102,8 +102,8 @@ class ArtifactLayout(ABC):
 
     ``stored(files, directory)`` checks ``files``, then stores them in the empty directory ``directory``:
     ``files.reference`` when the source keeps the files fixed and ``resolves_references`` is true (RFC #995), else
-    a copy of the files (RFC #980). It returns the unpublished artifact in ``directory``, whose content id is
-    ``files.checksum()`` (a copy has the same bytes, so its computed content id is equal).
+    a copy of the files (RFC #980). It returns the unpublished artifact in ``directory``, with a new artifact ID
+    (``Artifact.local``).
 
     Purpose: a recipe binds it on ``ComponentSurface.layout``. The committer stores an import with it, and the
     scenario factory stores the artifact item that a new scenario starts from.

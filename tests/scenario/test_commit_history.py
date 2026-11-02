@@ -35,7 +35,7 @@ from reef.dispatcher import Dispatcher, local_workers
 from reef.recipe.base import Recipe
 from reef.runtime.jobs import SavedCheckpoint, TrainingJob
 from reef.storage.commit_history import CommitHistoryError, CommitHistoryScenarioStore
-from reef.storage.commits import CommitRecord, active_artifact_ref
+from reef.storage.commits import CommitRecord, active_snapshot
 from reef.storage.samples import SAMPLE_KINDS, consumed_sample_id
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
@@ -267,20 +267,20 @@ def test_the_active_artifact_is_the_last_activation_in_the_log() -> None:
     made = replace(sample_record(step=1, checkpoint=True), activated=True)
     held = sample_record(step=2, checkpoint=True, release_label="w2")
     nothing = replace(sample_record(step=3), snapshot=made.snapshot)
-    assert active_artifact_ref((), creation) == creation
-    assert active_artifact_ref((made,), creation) == made.snapshot
+    assert active_snapshot((), creation) == creation
+    assert active_snapshot((made,), creation) == made.snapshot
     assert made.to_dict()["activated"] is True and "activated" not in held.to_dict()
     assert CommitRecord.from_dict(made.to_dict()) == made
     # An artifact the rule did not activate, a step that made nothing and a new training start activate nothing.
     start = operation_record("train_from", 4, "base")
-    assert active_artifact_ref((made, held, nothing, start), creation) == made.snapshot
+    assert active_snapshot((made, held, nothing, start), creation) == made.snapshot
     activation = operation_record("activate", 5, held.snapshot.revision, snapshot=held.snapshot)
-    assert active_artifact_ref((made, held, nothing, start, activation), creation) == held.snapshot
+    assert active_snapshot((made, held, nothing, start, activation), creation) == held.snapshot
     back = operation_record("activate", 6, "base", snapshot=creation)
-    assert active_artifact_ref((made, held, nothing, start, activation, back), creation) == creation
+    assert active_snapshot((made, held, nothing, start, activation, back), creation) == creation
     # A training step that makes and activates an artifact afterwards is the newest activation.
     newest = replace(sample_record(step=7, checkpoint=True, release_label="w7"), activated=True)
-    assert active_artifact_ref((made, held, activation, back, newest), creation) == newest.snapshot
+    assert active_snapshot((made, held, activation, back, newest), creation) == newest.snapshot
 
 
 @pytest.mark.unit
@@ -1056,13 +1056,13 @@ def test_artifact_commit_failure_keeps_the_pending_job_data_retryable(tmp_path, 
         return original(*args, **kwargs)
 
     monkeypatch.setattr(target, method_name, fail_once)
-    active = scenario.current_artifact_ref()
+    active = scenario.current_snapshot()
 
     with pytest.raises(RuntimeError, match=f"injected {failure_point} failure"):
         scenario.commit(result)
 
     # The active release moves only after the runtime serves the new one and its record lands.
-    assert scenario.current_artifact_ref() == active
+    assert scenario.current_snapshot() == active
     assert scenario.scenario_step == 1
     assert scenario.trainer.state == submitted_state
     assert [record.agent_record_id for record in scenario.records.replay("math")] == ["i1", "r1"]
@@ -1072,7 +1072,7 @@ def test_artifact_commit_failure_keeps_the_pending_job_data_retryable(tmp_path, 
 
     assert backend.data_ids == [pending.data_id]
     assert scenario.trainer.state == result.state
-    assert scenario.current_artifact_ref() != active
+    assert scenario.current_snapshot() != active
     assert [record.agent_record_id for record in scenario.records.replay("math")] == ["i1", "r1", "i2"]
     assert len(scenario.store.history()) == 2
     dispatcher.close()

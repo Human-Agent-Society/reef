@@ -442,13 +442,13 @@ def active_record(records: Sequence[CommitRecord]) -> CommitRecord | None:
     return next((record for record in reversed(records) if record.activates), None)
 
 
-def active_artifact_ref(records: Sequence[CommitRecord], fallback: SnapshotRef) -> SnapshotRef:
+def active_snapshot(records: Sequence[CommitRecord], fallback: SnapshotRef) -> SnapshotRef:
     """The release that is active after ``records``: the one :func:`active_record` names, else ``fallback``.
 
     ``fallback`` is the release that is active when no record activates one:
     the creation artifact, or, for a store that keeps no history across a
     restart, the release that the artifact head's metadata names
-    (:func:`served_artifact_ref`).
+    (:func:`served_snapshot`).
     """
     record = active_record(records)
     return fallback if record is None else record.snapshot
@@ -596,7 +596,7 @@ def parse_scenario_metadata(
     return scenario, start_artifact, source, commit
 
 
-def served_artifact_ref(value: Mapping[str, Any], *, checkpoint_head: SnapshotRef) -> SnapshotRef:
+def served_snapshot(value: Mapping[str, Any], *, checkpoint_head: SnapshotRef) -> SnapshotRef:
     """The artifact that serves after the commit whose scenario metadata is ``value``.
 
     ``checkpoint_head`` is the release that carries ``value``. It serves when ``value`` names no
@@ -622,10 +622,10 @@ __all__ = [
     "CommitOperation",
     "CommitRecord",
     "RecordProgress",
-    "active_artifact_ref",
     "active_record",
+    "active_snapshot",
     "parse_record_progress",
     "parse_scenario_metadata",
     "scenario_metadata_for",
-    "served_artifact_ref",
+    "served_snapshot",
 ]

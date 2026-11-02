@@ -34,8 +34,8 @@ from reef.storage.commits import (
     CommitOperation,
     CommitRecord,
     RecordProgress,
-    active_artifact_ref,
     active_record,
+    active_snapshot,
     scenario_metadata_for,
     to_json_value,
 )
@@ -301,7 +301,7 @@ class ScenarioCommitter:
             )
 
     def recorded_components(self, artifact: Artifact, revision: str) -> dict[str, str] | None:
-        """The ``artifact_id`` of each component that ``artifact``, published as ``revision``, binds; ``None`` for a flat release."""
+        """The ``artifact_id`` of each component that ``artifact``, published as ``revision``, binds; ``None`` for a scenario of one component."""
         if self._binding.surface.single:
             return None
         return self.release_manifest(artifact).artifact_ids(revision)
@@ -1038,7 +1038,7 @@ class ScenarioCommitter:
     def finish_recorded_retry(self, record: CommitRecord, prepared: PreparedCommit, trainer: Trainer) -> CommitRecord:
         """Retry storage settlement, then complete the exact release already on record."""
         record = self._store.commit_step(expected_step=self._step, commit=record)
-        previous = active_artifact_ref(self._store.history()[:-1], self.release_queries.creation_artifact)
+        previous = active_snapshot(self._store.history()[:-1], self.release_queries.creation_artifact)
         self.finish_committed_step(
             prepared, record, trainer, expected=previous, expected_checkpoint=self._artifacts.checkpoint
         )

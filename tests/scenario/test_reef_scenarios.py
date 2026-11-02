@@ -351,10 +351,10 @@ def test_checkpoint_metadata_names_the_artifact_that_serves_after_a_held_step() 
     from reef.core.snapshot import SnapshotRef
     from reef.storage.commits import (
         RecordProgress,
-        active_artifact_ref,
+        active_snapshot,
         parse_scenario_metadata,
         scenario_metadata_for,
-        served_artifact_ref,
+        served_snapshot,
     )
 
     base = SnapshotRef("base-release", None)
@@ -372,15 +372,15 @@ def test_checkpoint_metadata_names_the_artifact_that_serves_after_a_held_step() 
     )
     _, _, _, checkpoint = parse_scenario_metadata(held, checkpoint_head=head)
     assert checkpoint is not None and checkpoint.activated is False
-    assert served_artifact_ref(held, checkpoint_head=head) == served
-    assert active_artifact_ref((checkpoint,), served_artifact_ref(held, checkpoint_head=head)) == served
+    assert served_snapshot(held, checkpoint_head=head) == served
+    assert active_snapshot((checkpoint,), served_snapshot(held, checkpoint_head=head)) == served
 
     activated = scenario_metadata_for(
         name="math", source=source, start_artifact=base, scenario_step=2, record_progress=progress
     )
-    assert served_artifact_ref(activated, checkpoint_head=head) == head
+    assert served_snapshot(activated, checkpoint_head=head) == head
     with pytest.raises(ValueError, match="active_artifact must be an object"):
-        served_artifact_ref({**held, "active_artifact": "served-release"}, checkpoint_head=head)
+        served_snapshot({**held, "active_artifact": "served-release"}, checkpoint_head=head)
     with pytest.raises(ValueError, match="names no active_artifact"):
         scenario_metadata_for(name="math", source=source, active_artifact=served)
     with pytest.raises(ValueError, match="start_artifact exactly after step zero"):
@@ -490,7 +490,7 @@ def test_a_changed_default_start_neither_blocks_nor_changes_an_existing_scenario
     second = _weights_dispatcher(tmp_path, backend_factory, "new-model")
     try:
         old = second.get_or_create_scenario("old")
-        assert old.repository.start_artifact == old.current_artifact_ref() == old_root
+        assert old.repository.start_artifact == old.current_snapshot() == old_root
         # The runtime serves the old scenario's own root.
         wait_for_serving(second, "old")
         assert second.recipe.runtime.served == "old-model"
@@ -631,7 +631,7 @@ def test_an_item_root_is_checked_by_the_layout_and_the_training_start_before_it_
         scenario, created = dispatcher.create_scenario("started", item(weights))
         assert created
         root = scenario.repository.start_artifact
-        assert scenario.current_artifact_ref() == root and root.parent_revision is None
+        assert scenario.current_snapshot() == root and root.parent_revision is None
         assert (scenario.repository.materialize(root).local_path / "model.safetensors").read_text() == "w9"
         (row,) = scenario.artifacts()
         assert row["source"] == {"kind": "item", "item": "upload-1", "uri": weights.as_uri(), "version": "v1"}

@@ -45,7 +45,7 @@ class Registry:
             artifact_status=lambda: {"weights": {"active": runtime.release, "training_start": None}},
             served_component=lambda: "weights",
             serving_artifact_id=lambda: runtime.release,
-            current_artifact_ref=lambda: SimpleNamespace(release_id=runtime.release),
+            current_snapshot=lambda: SimpleNamespace(release_id=runtime.release),
             artifact_selection=lambda ref=None: ArtifactSelection(
                 {"weights": runtime.release if ref is None else "older-weights"}
             ),

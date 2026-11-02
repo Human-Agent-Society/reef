@@ -429,7 +429,7 @@ class ArtifactEvaluations:
         if component not in kinds:
             raise ValueError(f"the artifacts of scenario {current.name!r} hold no component {component!r}")
         if artifact_id is None:
-            active = Artifact(current.current_artifact_ref(), current.repository)
+            active = Artifact(current.current_snapshot(), current.repository)
             artifact_id = current.surface.component_artifact(active, component).artifact_id
         request = settings.request(artifact_id, component)
         kind = kinds[component]

@@ -359,7 +359,7 @@ class ScenarioReleases:
         return listed
 
     def find_snapshot(self, revision: str) -> tuple[SnapshotRef, bool] | None:
-        """The artifact ``revision`` names and whether it has durable bytes; ``None`` when no record names it.
+        """The snapshot that ``revision`` names and whether it has durable bytes; ``None`` when no record names it.
 
         A training step that made the artifact, or the creation, gives it
         durable bytes. Other records (a step that made nothing, an
@@ -385,13 +385,6 @@ class ScenarioReleases:
             return current, current.durable
         return None
 
-    def metrics_for_version(self, revision: str) -> Mapping[str, Any] | None:
-        """Metrics of the training step that published ``revision``, if logged."""
-        for record in self.records():
-            if record.snapshot.revision == revision and record.operation == "training":
-                return record.metrics
-        return None
-
     def artifact_for_version(self, revision: str) -> Artifact:
         """Materialize a scenario release for a read-only content serve.
 
@@ -414,20 +407,6 @@ class ScenarioReleases:
             return self._artifacts.resolve(ref)
         except ArtifactError as exc:
             raise ArtifactNotFound(f"scenario {self._name!r} cannot restore release {revision!r}: {exc}") from exc
-
-    def artifact_with_metrics(
-        self,
-        revision: str | None = None,
-    ) -> tuple[Artifact, Mapping[str, Any] | None]:
-        """Capture one artifact and its metrics without waiting for preparation."""
-        with self.publication_lock:
-            artifact = (
-                Artifact(self._artifacts.current, self._artifacts.repository)
-                if revision is None
-                else self.artifact_for_version(revision)
-            )
-            metrics = self.metrics_for_version(artifact.ref.revision)
-            return artifact, metrics
 
     @staticmethod
     def snapshot_row(

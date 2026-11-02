@@ -65,7 +65,7 @@ def test_an_import_publishes_beside_the_chain_and_changes_nothing_else(tmp_path)
     train(value, 1)
     wait_for_serving(value)
     scenario = value.get_or_create_scenario("math")
-    served = scenario.current_artifact_ref()
+    served = scenario.current_snapshot()
     checkpoint = scenario.repository.checkpoint_artifact
     trainer_state = dict(scenario.trainer.state)
     status = value.build_training_status()["scenarios"]["math"]["artifacts"]
@@ -76,7 +76,7 @@ def test_an_import_publishes_beside_the_chain_and_changes_nothing_else(tmp_path)
     )
 
     # Nothing serves, trains from or moves to the artifact: the active release, the chain tip and the start stay.
-    assert scenario.current_artifact_ref() == served
+    assert scenario.current_snapshot() == served
     assert scenario.repository.checkpoint_artifact == checkpoint
     assert scenario.trainer.state == trainer_state
     assert value.build_training_status()["scenarios"]["math"]["artifacts"] == status

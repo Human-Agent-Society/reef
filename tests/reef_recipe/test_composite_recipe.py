@@ -419,7 +419,7 @@ def test_composite_scenario_serves_its_config_and_reports_components(tmp_path: P
     with closing(_serve(_composite(tmp_path), tmp_path, hold_local_cycles=True)) as dispatcher:
         scenario = dispatcher.get_or_create_scenario("agent")
         assert scenario is not None
-        artifact = Artifact(scenario.current_artifact_ref(), scenario.repository)
+        artifact = Artifact(scenario.current_snapshot(), scenario.repository)
         local = artifact.component("config").materialize().local_path
         assert json.loads((local / CONFIG_FILE).read_text()) == {"request_defaults": {"temperature": 0.2}}
 
@@ -445,7 +445,7 @@ def test_composite_scenario_serves_its_config_and_reports_components(tmp_path: P
         assert result is not None
         scenario.commit(result, component="harness")
 
-        rows = scenario.snapshot_rows()
+        rows = scenario.release_queries.snapshot_rows(scenario.scenario_step)
         assert rows[0]["component"] == "harness"
         assert "component" not in rows[1]
         # The config component runs no step: the one commit is the harness's job submission, naming the rows it
@@ -639,7 +639,7 @@ def test_a_flat_scenario_without_a_durable_log_still_serves_its_head(tmp_path: P
         evolved.mkdir()
         (evolved / "rules.md").write_text("evolved")
         scenario.commit(TrainStepResult(state={}, artifact=Artifact.local(evolved)))
-        head = scenario.current_artifact_ref().revision
+        head = scenario.current_snapshot().revision
         source = service.harness_manifest(headers, form="source")
         assert source["release_id"] == head and source["files"] == {"rules.md": "evolved"}
         artifact_id = source["artifact_id"]
@@ -823,13 +823,13 @@ def test_a_recipe_that_overrides_build_artifact_validator_still_admits_through_i
     with closing(_serve(flat, tmp_path / "flat")) as dispatcher:
         scenario = dispatcher.get_or_create_scenario("agent")
         assert scenario is not None
-        head = scenario.current_artifact_ref()
+        head = scenario.current_snapshot()
         evolved = tmp_path / "evolved"
         evolved.mkdir()
         (evolved / "AGENTS.md").write_text("unvetted")
         with pytest.raises(ValueError, match="validator refused the artifact"):
             scenario.commit(TrainStepResult(state={}, artifact=Artifact.local(evolved)))
-        assert scenario.current_artifact_ref() == head
+        assert scenario.current_snapshot() == head
     composite = CompositeRecipe(components={"harness": flat, "config": _ConfigRecipe()})
     with pytest.raises(ValueError, match="validator refused the artifact"):
         composite.build_surface("agent").components["harness"].validator.validate(Artifact.local(evolved))
@@ -860,7 +860,7 @@ def test_a_recipe_serving_no_component_admits_the_whole_release_through_its_vali
     try:
         scenario = dispatcher.get_or_create_scenario("agent")
         assert scenario is not None and scenario.surface.names == ()
-        head = scenario.current_artifact_ref()
+        head = scenario.current_snapshot()
         evolved = tmp_path / "evolved"
         evolved.mkdir()
         (evolved / "notes.txt").write_text("unvetted")
@@ -868,7 +868,7 @@ def test_a_recipe_serving_no_component_admits_the_whole_release_through_its_vali
             scenario.surface.validate(Artifact.local(evolved))
         with pytest.raises(ValueError, match="validator refused the artifact"):
             scenario.commit(TrainStepResult(state={}, artifact=Artifact.local(evolved)))
-        assert scenario.current_artifact_ref() == head
+        assert scenario.current_snapshot() == head
     finally:
         dispatcher.close()
 
@@ -918,12 +918,12 @@ def test_inside_a_composite_a_recipe_serving_no_component_admits_its_component_t
     with closing(_serve(composite, tmp_path / "svc")) as dispatcher:
         scenario = dispatcher.get_or_create_scenario("agent")
         assert scenario is not None
-        seed = scenario.current_artifact_ref()
+        seed = scenario.current_snapshot()
         with pytest.raises(ValueError, match="validator refused the artifact"):
             scenario.commit(TrainStepResult(state={}, artifact=_tree(tmp_path, "c", "unvetted")), component="notes")
-        assert scenario.current_artifact_ref() == seed
+        assert scenario.current_snapshot() == seed
         scenario.commit(TrainStepResult(state={}, artifact=_tree(tmp_path, "v", "vetted")), component="notes")
-        assert scenario.current_artifact_ref() != seed
+        assert scenario.current_snapshot() != seed
 
 
 @dataclass(frozen=True)
@@ -947,12 +947,12 @@ def test_a_commit_runs_the_release_check_an_activation_of_that_release_runs(tmp_
     with closing(_serve(composite, tmp_path / "svc")) as dispatcher:
         scenario = dispatcher.get_or_create_scenario("agent")
         assert scenario is not None
-        seed = scenario.current_artifact_ref()
+        seed = scenario.current_snapshot()
         with pytest.raises(ValueError, match="validator refused the artifact"):
             scenario.commit(TrainStepResult(state={}, artifact=_tree(tmp_path, "c", "unvetted")), component="harness")
-        assert scenario.current_artifact_ref() == seed
+        assert scenario.current_snapshot() == seed
         scenario.commit(TrainStepResult(state={}, artifact=_tree(tmp_path, "v", "vetted")), component="harness")
-        published = scenario.current_artifact_ref()
+        published = scenario.current_snapshot()
         assert published != seed
         # The root release made the creation's artifacts, under its own release ID.
         seed_harness = scenario.repository.materialize(seed).components.artifact_ids(seed.revision)["harness"]
@@ -962,7 +962,7 @@ def test_a_commit_runs_the_release_check_an_activation_of_that_release_runs(tmp_
         )
         scenario.activate(seed_harness, "harness")
         scenario.activate(scenario.repository.resolve(published).component("harness").artifact_id, "harness")
-        served = scenario.repository.materialize(scenario.current_artifact_ref()).components
+        served = scenario.repository.materialize(scenario.current_snapshot()).components
         made = scenario.repository.materialize(published).components
         assert served is not None and made is not None
         assert served.artifact_ids("served") == made.artifact_ids("made")
@@ -1018,21 +1018,21 @@ def test_an_activation_never_judges_a_component_again(tmp_path: Path) -> None:
         scenario = dispatcher.get_or_create_scenario("agent")
         assert scenario is not None
         scenario.commit(TrainStepResult(state={}, artifact=_tree(tmp_path, "a", "one")), component="harness")
-        first = scenario.current_artifact_ref()
+        first = scenario.current_snapshot()
         scenario.commit(TrainStepResult(state={}, artifact=_tree(tmp_path, "b", "two")), component="harness")
         checks.count = 0
         dispatcher.activate("agent", scenario.repository.resolve(first).component("harness").artifact_id, "harness")
-        served = scenario.repository.materialize(scenario.current_artifact_ref()).components
+        served = scenario.repository.materialize(scenario.current_snapshot()).components
         assert served is not None
-        current = scenario.current_artifact_ref()
+        current = scenario.current_snapshot()
         assert served.artifact_ids(current.revision) == scenario.store.history()[0].components
         assert checks.count == 0
-        head = scenario.current_artifact_ref()
+        head = scenario.current_snapshot()
         scenario.commit(
             TrainStepResult(state={}, artifact=_tree(tmp_path, "c", "three"), changed_kinds=frozenset({"held"})),
             component="harness",
         )
-        assert scenario.current_artifact_ref() == head
+        assert scenario.current_snapshot() == head
         held = scenario.repository.resolve(scenario.store.history()[-1].snapshot).component("harness").artifact_id
         assert dispatcher.activate("agent", held, "harness").artifact_id == held
         assert checks.count == 1

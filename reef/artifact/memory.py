@@ -5,7 +5,7 @@ import tempfile
 import uuid
 from collections.abc import Mapping
 from pathlib import Path
-from threading import Lock
+from threading import RLock
 
 from reef.artifact.artifact import (
     ARTIFACT_ID_METADATA_KEY,
@@ -26,7 +26,7 @@ class _InMemoryStorage:
     def __init__(self, directory: Path | None) -> None:
         self.root = Path(directory) if directory is not None else Path(tempfile.mkdtemp(prefix="reef-artifacts-"))
         self.root.mkdir(parents=True, exist_ok=True)
-        self.lock = Lock()
+        self.lock = RLock()
         self.refs: dict[str, SnapshotRef] = {}
         self.paths: dict[str, Path] = {}
         self.metadata: dict[str, dict[str, object]] = {}
@@ -89,11 +89,11 @@ class InMemoryRepositoryBackend(StagedReleaseRepositoryBackend):
         return directory_checksum(files.local_path), content_metadata(snapshot, component)
 
     def bind_artifact_id(self, artifact_id: str, ref: SnapshotRef) -> SnapshotRef | None:
-        """Bind ``artifact_id`` while the caller holds the storage lock."""
-        existing = self._storage.artifacts.get(artifact_id)
-        if existing is None:
-            self._storage.artifacts[artifact_id] = ref
-        return existing
+        with self._storage.lock:
+            existing = self._storage.artifacts.get(artifact_id)
+            if existing is None:
+                self._storage.artifacts[artifact_id] = ref
+            return existing
 
     def register(self, root: Artifact, *, metadata: Mapping[str, object]) -> SnapshotRef:
         if root.local_path is None or not root.local_path.is_dir():

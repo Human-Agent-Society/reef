@@ -227,10 +227,10 @@ def _wait_for_error(dispatcher: Dispatcher) -> str:
 def test_report_returns_and_inference_resolves_while_training_job_is_blocked(start_dispatcher) -> None:
     component, dispatcher = start_dispatcher(block=True)
     scenario = dispatcher.get_or_create_scenario("math")
-    expected = scenario.current_artifact_ref()
+    expected = scenario.current_snapshot()
     _submit_pair(dispatcher)
     assert component.started.wait(_ASYNC_WAIT_TIMEOUT_S)
-    assert scenario.current_artifact_ref() == expected
+    assert scenario.current_snapshot() == expected
     component.release.set()
     _wait_for_jobs(dispatcher, 1)
     assert len(component.calls) == 1
@@ -332,7 +332,7 @@ def test_two_jobs_form_one_deterministic_release_chain(start_dispatcher) -> None
     _submit_pair(dispatcher)
     _wait_for_jobs(dispatcher, 1)
     scenario = dispatcher.get_or_create_scenario("math")
-    first = scenario.current_artifact_ref()
+    first = scenario.current_snapshot()
     _submit_pair(dispatcher, "2")
     _wait_for_jobs(dispatcher, 2)
 
@@ -340,7 +340,7 @@ def test_two_jobs_form_one_deterministic_release_chain(start_dispatcher) -> None
     # Training is linear: the second job starts from the first job's checkpoint.
     assert component.calls[0].start == component.base_start
     assert component.calls[1].start == str(component.checkpoint_root / "1")
-    assert scenario.current_artifact_ref().parent_revision == first.revision
+    assert scenario.current_snapshot().parent_revision == first.revision
     with pytest.raises(ReefError, match="already bound"):
         dispatcher.get_or_create_scenario("other")
 
@@ -358,14 +358,14 @@ def test_training_result_metrics_reach_the_durable_commit(start_dispatcher) -> N
     scenario = dispatcher.get_or_create_scenario("math")
 
     # The checkpoint's commit publishes the release and carries the job's training metrics.
-    _, committed = scenario.release_queries.artifact_with_metrics()
+    committed = next(record.metrics for record in scenario.store.history() if record.checkpoint)
     assert committed is not None
     assert {key: committed[key] for key in metrics} == metrics
     assert committed["training_job"]["event"] == "checkpoint"
     assert not {"selected", "selection"} & set(committed)
     # The default activation rule serves the checkpoint at its commit.
     [checkpoint] = [record for record in scenario.store.history() if record.checkpoint]
-    assert checkpoint.activated and scenario.current_artifact_ref() == checkpoint.snapshot
+    assert checkpoint.activated and scenario.current_snapshot() == checkpoint.snapshot
     # The last commit is the job's end.
     status = dispatcher.build_training_status()["scenarios"]["math"]["last_committed_step"]
     assert status["step"] == 3
@@ -387,8 +387,12 @@ def test_experiment_provider_observes_the_generic_commit_boundary(start_dispatch
     _submit_pair(dispatcher)
     _wait_for_jobs(dispatcher, 1)
     scenario = dispatcher.get_or_create_scenario("math")
-    produced = scenario.current_artifact_ref()
-    _, committed = scenario.release_queries.artifact_with_metrics(produced.revision)
+    produced = scenario.current_snapshot()
+    committed = next(
+        record.metrics
+        for record in scenario.store.history()
+        if record.snapshot == produced and record.operation == "training"
+    )
 
     assert committed is not None
     assert committed["experiment/provider"] == "test"

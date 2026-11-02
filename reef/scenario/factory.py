@@ -38,10 +38,10 @@ from reef.scenario.scenario import Scenario
 from reef.storage.commits import (
     SCENARIO_METADATA_KEY,
     CommitRecord,
-    active_artifact_ref,
+    active_snapshot,
     parse_scenario_metadata,
     scenario_metadata_for,
-    served_artifact_ref,
+    served_snapshot,
 )
 from reef.storage.scenario import ScenarioStorage, ScenarioStore
 from reef.storage.served_models import ServedModels
@@ -342,7 +342,7 @@ class ScenarioFactory:
         if registered_name != name:
             raise ValueError(f"scenario metadata is for {registered_name!r}, not {name!r}")
         # What served after the artifact head's commit; the commit history's activations come after it.
-        served_at_head = served_artifact_ref(registration, checkpoint_head=checkpoint_head)
+        served_at_head = served_snapshot(registration, checkpoint_head=checkpoint_head)
         start_artifact = backend.resolve_snapshot(start_artifact.revision)
         # A root registered before artifact IDs existed has no bindings yet; indexing a bound root changes nothing.
         backend.index_snapshot(start_artifact)
@@ -367,7 +367,7 @@ class ScenarioFactory:
                     checkpoint_head = checkpoints[-1].snapshot
             # The active artifact is the newest activation in the log; the chain tip, the parent of the next
             # publication, stays the checkpoint. Without a durable log, the artifact head's metadata names it.
-            current_artifact = active_artifact_ref(committed_records(store, head_record), served_at_head)
+            current_artifact = active_snapshot(committed_records(store, head_record), served_at_head)
 
             repository = Repository(
                 backend,

@@ -677,7 +677,7 @@ def test_a_grouped_recipe_trains_one_comparison_set_as_one_job(tmp_path) -> None
     # After the root release, the job's checkpoint is what the scenario serves.
     wait_for_serving(dispatcher)
     assert inference_runtime.activated[1:] == ["w1"]
-    assert scenario.served_artifact_id() == scenario.repository.resolve(scenario.current_artifact_ref()).artifact_id
+    assert scenario.served_artifact_id() == scenario.repository.resolve(scenario.current_snapshot()).artifact_id
 
 
 @pytest.mark.unit

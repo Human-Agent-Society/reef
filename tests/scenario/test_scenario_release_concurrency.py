@@ -155,11 +155,12 @@ def _model_text(artifact: Artifact) -> str:
 @pytest.mark.unit
 def test_release_reads_remain_live_during_local_training(local_scenario) -> None:
     scenario, backend = local_scenario
-    initial_ref = scenario.current_artifact_ref()
+    initial_ref = scenario.current_snapshot()
     scenario.commit(_prepare(scenario))
     _finish(scenario)
-    current_ref = scenario.current_artifact_ref()
-    expected_releases = scenario.snapshot_rows()
+    current_ref = scenario.current_snapshot()
+    expected_rows = scenario.artifact_rows()
+    expected_selection = scenario.artifact_selection()
     backend.block = True
     _queue_batch(scenario, 2)
     writer_started = Event()
@@ -176,24 +177,18 @@ def test_release_reads_remain_live_during_local_training(local_scenario) -> None
             assert writer_started.wait(2), "writer did not start"
             # A queued writer must wait on the operation lock without first
             # taking the publication lock and starving the read-side callers.
-            catalog = executor.submit(scenario.snapshot_rows)
-            latest = executor.submit(scenario.release_queries.artifact_with_metrics)
-            historical = executor.submit(scenario.release_queries.artifact_with_metrics, initial_ref.revision)
+            catalog = executor.submit(scenario.artifact_rows)
+            selection = executor.submit(scenario.artifact_selection)
             version = executor.submit(scenario.release_queries.artifact_for_version, current_ref.revision)
             old_version = executor.submit(scenario.release_queries.artifact_for_version, initial_ref.revision)
 
-            assert catalog.result(timeout=2) == expected_releases
-            artifact, metrics = latest.result(timeout=2)
-            assert artifact.ref == current_ref
-            assert _model_text(artifact) == "step 1"
-            assert metrics["score"] == 1.0
-            artifact, metrics = historical.result(timeout=2)
-            assert artifact.ref == initial_ref
-            assert _model_text(artifact) == "initial"
-            # The job submissions name the release that they ran on; they score nothing.
-            assert "score" not in (metrics or {})
-            assert version.result(timeout=2).ref == current_ref
-            assert old_version.result(timeout=2).ref == initial_ref
+            assert catalog.result(timeout=2) == expected_rows
+            assert selection.result(timeout=2) == expected_selection
+            assert next(row for row in expected_rows if row["active"])["metrics"]["score"] == 1.0
+            artifact = version.result(timeout=2)
+            assert artifact.ref == current_ref and _model_text(artifact) == "step 1"
+            artifact = old_version.result(timeout=2)
+            assert artifact.ref == initial_ref and _model_text(artifact) == "initial"
             with pytest.raises(TimeoutError):
                 writer.result(timeout=0.1)
             assert not training.done()
@@ -205,7 +200,7 @@ def test_release_reads_remain_live_during_local_training(local_scenario) -> None
         # The submission waits for its commit, so the activation is refused.
         with pytest.raises(CommitPending, match="waits for its commit"):
             writer.result(timeout=2)
-        assert scenario.current_artifact_ref() == current_ref
+        assert scenario.current_snapshot() == current_ref
         assert scenario.scenario_step == 3
 
 
@@ -213,10 +208,10 @@ def test_release_reads_remain_live_during_local_training(local_scenario) -> None
 @pytest.mark.parametrize("operation", ["commit", "activate"])
 def test_release_reads_wait_for_complete_publication(local_scenario, monkeypatch, operation) -> None:
     scenario, _ = local_scenario
-    initial_ref = scenario.current_artifact_ref()
+    initial_ref = scenario.current_snapshot()
     scenario.commit(_prepare(scenario))
     scenario.commit(_prepare(scenario))
-    previous_ref = scenario.current_artifact_ref()
+    previous_ref = scenario.current_snapshot()
     result = _prepare(scenario) if operation == "commit" else None
     publication_started = Event()
     resume_publication = Event()
@@ -233,22 +228,18 @@ def test_release_reads_wait_for_complete_publication(local_scenario, monkeypatch
         return original(value)
 
     monkeypatch.setattr(journal, "append", block_publication)
-    readers_started = [Event() for _ in range(4)]
+    readers_started = [Event() for _ in range(3)]
 
     def read_catalog():
         readers_started[0].set()
-        return scenario.snapshot_rows()
+        return scenario.artifact_rows()
 
-    def read_latest():
+    def read_selection():
         readers_started[1].set()
-        return scenario.release_queries.artifact_with_metrics()
-
-    def read_historical():
-        readers_started[2].set()
-        return scenario.release_queries.artifact_with_metrics(previous_ref.revision)
+        return scenario.artifact_selection()
 
     def read_version():
-        readers_started[3].set()
+        readers_started[2].set()
         return scenario.release_queries.artifact_for_version(previous_ref.revision)
 
     with ThreadPoolExecutor(max_workers=5) as executor:
@@ -260,10 +251,10 @@ def test_release_reads_wait_for_complete_publication(local_scenario, monkeypatch
         try:
             assert publication_started.wait(2), "publication did not start"
             # The head stays put until the journal commits, and publication reads wait for it.
-            assert scenario.current_artifact_ref() == previous_ref
+            assert scenario.current_snapshot() == previous_ref
             # Each job commits its submission, its checkpoint and its end; the next job's submission is committed.
             assert scenario.scenario_step == (7 if operation == "commit" else 5)
-            readers = [executor.submit(read) for read in (read_catalog, read_latest, read_historical, read_version)]
+            readers = [executor.submit(read) for read in (read_catalog, read_selection, read_version)]
             for started in readers_started:
                 assert started.wait(2), "reader did not start"
             for reader in readers:
@@ -273,22 +264,18 @@ def test_release_reads_wait_for_complete_publication(local_scenario, monkeypatch
             resume_publication.set()
 
         writer.result(timeout=2)
-        catalog, latest, historical, version = [reader.result(timeout=2) for reader in readers]
+        catalog, selection, version = [reader.result(timeout=2) for reader in readers]
 
-    current_ref = scenario.current_artifact_ref()
+    current_ref = scenario.current_snapshot()
     assert scenario.scenario_step == (8 if operation == "commit" else 6)
-    # The listing marks the active artifact; an activation adds no row.
-    assert len(catalog) == (9 if operation == "commit" else 6)
-    active = catalog[0] if operation == "commit" else catalog[-1]
+    # The catalog marks exactly one active artifact; an activation adds no row.
+    [active] = [row for row in catalog if row["active"]]
     assert active["snapshot"].revision == current_ref.revision
     assert active["operation"] == ("training" if operation == "commit" else "creation")
-    assert sum(row["active"] for row in catalog) == 1 and active["active"] is True
-    artifact, metrics = latest
-    assert artifact.ref == current_ref
-    assert _model_text(artifact) == ("step 3" if operation == "commit" else "initial")
-    assert (metrics or {}).get("score") == (3.0 if operation == "commit" else None)
-    assert historical[0].ref == previous_ref
-    assert historical[1]["score"] == 2.0
+    assert (active.get("metrics") or {}).get("score") == (3.0 if operation == "commit" else None)
+    assert selection == scenario.artifact_selection(current_ref)
+    assert _model_text(scenario.repository.resolve(current_ref)) == ("step 3" if operation == "commit" else "initial")
+    assert next(row for row in catalog if row["snapshot"] == previous_ref)["metrics"]["score"] == 2.0
     assert version.ref == previous_ref
 
 
@@ -303,7 +290,7 @@ def test_pointer_failure_is_reported_and_repaired_before_next_commit(local_scena
     with monkeypatch.context() as patch:
         patch.setattr(backend, "commit_release", unavailable)
         scenario.commit(first)
-        committed = scenario.current_artifact_ref()
+        committed = scenario.current_snapshot()
         # The job's submission, then its checkpoint.
         assert scenario.scenario_step == 2
         assert scenario.repository.checkpoint_artifact == committed
@@ -323,7 +310,7 @@ def test_pointer_failure_is_reported_and_repaired_before_next_commit(local_scena
             scenario.commit(ended)
         assert scenario.scenario_step == 2
         assert len(scenario.store.history()) == 2
-        assert scenario.current_artifact_ref() == committed
+        assert scenario.current_snapshot() == committed
 
     # Retry the same prepared commit after storage recovers; the committed
     # parent is repaired first, and the commit advances exactly once.
@@ -342,7 +329,7 @@ def test_pointer_conflict_preserves_committed_step_and_activation_leaves_the_bac
 ):
     scenario, _ = local_scenario
     backend = scenario.repository.backend
-    initial = scenario.current_artifact_ref()
+    initial = scenario.current_snapshot()
     first = _prepare(scenario)
     foreign_path = tmp_path / "foreign"
     foreign_path.mkdir()
@@ -366,7 +353,7 @@ def test_pointer_conflict_preserves_committed_step_and_activation_leaves_the_bac
         scenario.activate(scenario.repository.resolve(initial).artifact_id).artifact_id
         == scenario.repository.resolve(initial).artifact_id
     )
-    assert scenario.current_artifact_ref() == initial
+    assert scenario.current_snapshot() == initial
     assert scenario.scenario_step == 3
     assert backend.current() == unrelated
     assert scenario.commit_status["artifact_head_sync"]["state"] == "conflict"
@@ -374,7 +361,7 @@ def test_pointer_conflict_preserves_committed_step_and_activation_leaves_the_bac
 
 def test_activation_does_no_storage_io(local_scenario, monkeypatch):
     scenario, _ = local_scenario
-    initial = scenario.current_artifact_ref()
+    initial = scenario.current_snapshot()
     scenario.commit(_prepare(scenario))
     backend = scenario.repository.backend
     tip = backend.current()
@@ -389,7 +376,7 @@ def test_activation_does_no_storage_io(local_scenario, monkeypatch):
     assert activated.artifact_id == scenario.repository.resolve(initial).artifact_id
     assert scenario.scenario_step == 3
     assert scenario.store.history()[-1].operation == "activate"
-    assert scenario.current_artifact_ref() == initial
+    assert scenario.current_snapshot() == initial
     # The chain tip stays the parent of the next publication, and the backend head never moves backward.
     assert scenario.repository.checkpoint_artifact == tip
     assert backend.current() == tip
@@ -398,7 +385,7 @@ def test_activation_does_no_storage_io(local_scenario, monkeypatch):
         "error": None,
     }
     scenario.commit(_prepare(scenario))
-    assert scenario.current_artifact_ref().parent_revision == tip.revision
+    assert scenario.current_snapshot().parent_revision == tip.revision
 
 
 def test_committed_record_retry_reports_pointer_failure_without_repeating_step(local_scenario, monkeypatch):
@@ -424,7 +411,7 @@ def test_committed_record_retry_reports_pointer_failure_without_repeating_step(l
     assert scenario.scenario_step == 2
     assert len(scenario.store.history()) == 2
     assert scenario.trainer.state == result.state
-    assert scenario.current_artifact_ref() == committed.snapshot
+    assert scenario.current_snapshot() == committed.snapshot
     assert scenario.repository.checkpoint_artifact == committed.snapshot
     assert scenario.commit_status["artifact_head_sync"] == {
         "state": "pending",

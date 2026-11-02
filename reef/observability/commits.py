@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from threading import Lock, Thread
 
 from reef.core.artifact_selection import ArtifactSelection
+from reef.core.components import legacy_artifact_id
 from reef.observability.base import (
     ExperimentTracker,
     TrainFromExperimentEvent,
@@ -119,8 +120,11 @@ def training_starts(source: ArtifactSelection, commit: CommitRecord) -> Artifact
         raise ValueError("a composite training-start change requires component artifact IDs")
     if name not in components:
         raise ValueError(f"unknown training component {name!r}")
-    # A legacy flat record names its artifact by its storage revision.
-    components[name] = commit.snapshot.revision if commit.artifact_ids is None else commit.artifact_ids[name]
+    components[name] = (
+        legacy_artifact_id(commit.snapshot.revision, None if len(components) == 1 else name)
+        if commit.artifact_ids is None
+        else commit.artifact_ids[name]
+    )
     return ArtifactSelection(components)
 
 

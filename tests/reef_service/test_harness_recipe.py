@@ -1033,10 +1033,10 @@ def test_a_restart_without_a_durable_log_keeps_a_held_tree_inactive(tmp_path: Pa
     try:
         scenario = dispatcher.get_or_create_scenario("review")
         assert scenario is not None
-        served = scenario.current_artifact_ref()
+        served = scenario.current_snapshot()
         run_step(scenario, "1")
         tip = scenario.repository.require_checkpoint_artifact()
-        assert tip != served and scenario.current_artifact_ref() == served
+        assert tip != served and scenario.current_snapshot() == served
     finally:
         dispatcher.close()
 
@@ -1045,7 +1045,7 @@ def test_a_restart_without_a_durable_log_keeps_a_held_tree_inactive(tmp_path: Pa
         recovered = reopened.get_or_create_scenario("review")
         assert recovered is not None
         assert recovered.repository.require_checkpoint_artifact() == tip
-        assert recovered.current_artifact_ref() == served
+        assert recovered.current_snapshot() == served
     finally:
         reopened.close()
 
@@ -1064,19 +1064,19 @@ def test_never_activation_keeps_the_kept_tree_inactive_until_activated(tmp_path:
     try:
         scenario = dispatcher.get_or_create_scenario("review")
         assert scenario is not None
-        head_before = scenario.current_artifact_ref()
+        head_before = scenario.current_snapshot()
         result = run_step(scenario, "1")
         assert result.changed_kinds == {"rules"}
         record = last_made(scenario)
         assert record.operation == "training" and record.activated is False and record.checkpoint is True
-        assert scenario.current_artifact_ref() == head_before
+        assert scenario.current_snapshot() == head_before
         row = scenario.artifacts()[0]
         assert row["artifact_id"] == scenario.repository.resolve(record.snapshot).artifact_id
         assert row["active"] is False
         tree = scenario.surface.files
         held_files = tree.read_files(scenario.resolve_artifact(row["artifact_id"])[1])
         assert any("marker" in text for text in held_files.values())
-        served_files = tree.read_files(scenario.release_queries.artifact_with_metrics()[0])
+        served_files = tree.read_files(scenario.repository.resolve(scenario.current_snapshot()))
         assert not any("marker" in text for text in served_files.values())
 
         async def activate() -> None:
@@ -1099,8 +1099,8 @@ def test_never_activation_keeps_the_kept_tree_inactive_until_activated(tmp_path:
                 await client.close()
 
         asyncio.run(activate())
-        assert scenario.current_artifact_ref() == record.snapshot
-        served_files = tree.read_files(scenario.release_queries.artifact_with_metrics()[0])
+        assert scenario.current_snapshot() == record.snapshot
+        served_files = tree.read_files(scenario.repository.resolve(scenario.current_snapshot()))
         assert any("marker" in text for text in served_files.values())
         last = scenario.store.history()[-1]
         assert last.operation == "activate" and last.snapshot == record.snapshot
@@ -1237,7 +1237,7 @@ def test_a_sync_serves_at_once_and_is_the_training_start_after_a_restart(tmp_pat
             metrics={"sync": {"files": 2}},
         )
         record = scenario.store.history()[-1]
-        assert (record.operation, record.snapshot, record.component) == ("sync", scenario.current_artifact_ref(), None)
+        assert (record.operation, record.snapshot, record.component) == ("sync", scenario.current_snapshot(), None)
         assert record.checkpoint and record.activates and record.metrics["sync"] == {"files": 2}
         assert scenario.artifact_selection().components[COMPONENT] == synced.artifact_id
         assert scenario.artifact_status()[COMPONENT] == {
@@ -1296,7 +1296,7 @@ def test_a_publish_keeps_the_source_tree_and_the_jobs_tree_is_the_next_start(tmp
         # The job's kept tree outlives the commit: the next job starts from it.
         assert source is not None and source.is_dir()
         assert scenario.trainer.state["start"] == str(source)
-        committed = scenario.repository.resolve(scenario.current_artifact_ref())
+        committed = scenario.repository.resolve(scenario.current_snapshot())
         assert (committed.local_path / "rules.md").read_text() == "marker rules\n"
     finally:
         dispatcher.close()

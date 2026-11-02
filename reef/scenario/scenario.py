@@ -37,6 +37,10 @@ from reef.train.trainer import ComponentTrainer, Trainer
 from reef.train.types import TrainStepResult
 
 
+#: The keys of a ``Scenario.harness_snapshot_rows`` row that hold private storage locators.
+SNAPSHOT_ROW_KEYS = frozenset({"snapshot", "artifact_snapshot", "parent_snapshot"})
+
+
 @dataclass(frozen=True)
 class ScenarioCapabilities:
     """The artifact operations that one scenario can run, as its store, runtime and trainers allow them.
@@ -391,7 +395,7 @@ class Scenario:
         active = self.artifact_status()[component]["active"] if self.store.durable else None
         if active is not None:
             return active
-        return self.repository.resolve(self.current_artifact_ref()).component(component).artifact_id
+        return self.repository.resolve(self.current_snapshot()).component(component).artifact_id
 
     def served_artifact_id(self) -> str | None:
         """The artifact that serves requests, or None before inference publishes a route.
@@ -426,11 +430,6 @@ class Scenario:
         """The newest durable commit made by ``component``'s trainer, read from the commit history without waiting on a commit."""
         return self._committer.last_record_for(component)
 
-    def snapshot_rows(self) -> tuple[dict[str, Any], ...]:
-        """One row per committed snapshot, with its ``SnapshotRef`` (``ScenarioReleases.snapshot_rows``)."""
-        with self.release_queries.publication_lock:
-            return tuple(self.release_queries.snapshot_rows(self._committer.step))
-
     def artifact_rows(self) -> tuple[dict[str, Any], ...]:
         """Internal artifact catalog, including the storage locators needed to materialize each artifact."""
         with self.release_queries.publication_lock:
@@ -448,12 +447,19 @@ class Scenario:
                 for row in self.artifact_rows()
             )
 
-    def harness_history(self) -> list[dict[str, Any]]:
-        """Return harness publication and training rows, newest first, with private storage locators.
+    def harness_rows(self) -> list[dict[str, Any]]:
+        """Public harness history, newest first: ``harness_snapshot_rows`` without ``SNAPSHOT_ROW_KEYS``."""
+        return [
+            {key: value for key, value in row.items() if key not in SNAPSHOT_ROW_KEYS}
+            for row in self.harness_snapshot_rows()
+        ]
+
+    def harness_snapshot_rows(self) -> list[dict[str, Any]]:
+        """Internal harness history, newest first: publication and training rows with private storage locators.
 
         Each row identifies its harness artifact and its component parent. Other
         components' publications and job-submission events do not add harness rows.
-        Storage locators support legacy HTTP serialization only.
+        The locators (``SNAPSHOT_ROW_KEYS``) serve the legacy HTTP catalog only, as ``artifact_rows`` does.
         """
         with self.release_queries.publication_lock:
             component = self.surface.files_component
@@ -498,7 +504,7 @@ class Scenario:
                 )
             return kept
 
-    def current_artifact_ref(self) -> SnapshotRef:
+    def current_snapshot(self) -> SnapshotRef:
         """The private storage or local-view locator of the current component selection."""
         return self._artifact_chain.current
 
@@ -506,7 +512,7 @@ class Scenario:
         """Return the complete component-to-artifact-ID mapping for independent serving workers."""
         with self.release_queries.publication_lock:
             return self.repository.selection(
-                self.current_artifact_ref() if ref is None else ref, self._committer.component_names()
+                self.current_snapshot() if ref is None else ref, self._committer.component_names()
             )
 
     def resume_training_starts(self) -> None:

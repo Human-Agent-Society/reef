@@ -870,7 +870,7 @@ def test_scenario_commits_recovers_activates_and_trains_from_remote_checkpoint(t
     try:
         scenario = first.get_or_create_scenario("math")
         wait_for_serving(first)
-        base = scenario.current_artifact_ref().revision
+        base = scenario.current_snapshot().revision
         handler = inference.inference_handler
         # As the inference service does: the request names the row's model, the sampler that serves now.
         response = asyncio.run(
@@ -907,7 +907,7 @@ def test_scenario_commits_recovers_activates_and_trains_from_remote_checkpoint(t
             time.sleep(0.01)
         state = loop_state(scenario)
         assert state.finished_jobs == 1 and state.job is None, first.build_training_status()
-        published = scenario.current_artifact_ref()
+        published = scenario.current_snapshot()
         assert published.revision != base
         wait_for_serving(first)
         assert inference.served_model_name("math") == "tinker://update-1/sampler"
@@ -930,7 +930,7 @@ def test_scenario_commits_recovers_activates_and_trains_from_remote_checkpoint(t
         scenario.activate(base_artifact)
         scenario.train_from(base_artifact)
         assert scenario.scenario_step == step + 2
-        assert scenario.current_artifact_ref().revision == base
+        assert scenario.current_snapshot().revision == base
         wait_for_serving(second)
         assert inference.served_model_name("math") == UNTRAINED.sampler_path
         # The root release imports as any release: the next job starts from the untrained adapter.

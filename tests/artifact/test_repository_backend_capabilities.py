@@ -145,7 +145,7 @@ def test_basic_backend_remains_usable_without_commit_log(tmp_path):
         try:
             scenario = dispatcher.get_or_create_scenario("math")
             assert not scenario.store.durable
-            assert scenario.current_artifact_ref() == backend.current()
+            assert scenario.current_snapshot() == backend.current()
         finally:
             dispatcher.close()
 
@@ -166,6 +166,6 @@ def test_custom_staged_backend_can_create_and_recover_scenario_with_commit_log(t
         try:
             scenario = dispatcher.get_or_create_scenario("math")
             assert scenario.store.durable
-            assert scenario.current_artifact_ref() == backend.current()
+            assert scenario.current_snapshot() == backend.current()
         finally:
             dispatcher.close()

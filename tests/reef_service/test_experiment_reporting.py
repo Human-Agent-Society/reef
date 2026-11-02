@@ -116,7 +116,7 @@ def test_local_tracker_read_locks(tmp_path, monkeypatch, callback, failing):
                     assert operation.result(timeout=2)
                     assert value.get_or_create_scenario("agent") is scenario
                 else:
-                    pool.submit(scenario.release_queries.artifact_with_metrics).result(timeout=2)
+                    pool.submit(scenario.artifact_rows).result(timeout=2)
                     assert not operation.done()
             finally:
                 release.set()

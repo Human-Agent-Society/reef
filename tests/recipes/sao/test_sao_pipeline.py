@@ -481,7 +481,7 @@ def test_an_activation_rule_that_activates_nothing_keeps_the_checkpoint_from_ser
         scenario = dispatcher.get_or_create_scenario("math")
         wait_for_serving(dispatcher)
         base = inference.activated[:]
-        served = scenario.current_artifact_ref()
+        served = scenario.current_snapshot()
         _rollout(dispatcher, 1, 0.9)
 
         _wait_for_finished_jobs(dispatcher, 1)
@@ -497,7 +497,7 @@ def test_an_activation_rule_that_activates_nothing_keeps_the_checkpoint_from_ser
             "event": "checkpoint",
             "step": 0,
         }
-        assert scenario.current_artifact_ref() == served
+        assert scenario.current_snapshot() == served
         assert scenario.repository.checkpoint_artifact == record.snapshot
     finally:
         dispatcher.close()

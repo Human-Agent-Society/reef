@@ -26,7 +26,7 @@ from reef.harness.sync import HarnessFiles, import_files, layer_install, merge_t
 from reef.harness.tree import HarnessTree, validate_tree
 from reef.harness.tree.checks import clip_record_value
 from reef.scenario.release_files import component_files
-from reef.scenario.scenario import Scenario
+from reef.scenario.scenario import SNAPSHOT_ROW_KEYS, Scenario
 from reef.service.release_page import before_artifact_id, build_release_page, build_running_step_page, result_of
 from reef.service.request_page import STATE_WORDS, build_request_page, request_state, settled_step
 from reef.service.wire import (
@@ -91,10 +91,6 @@ def instruction_view(scenario: Scenario, request_id: str, rows: Sequence[Mapping
         "payload": {key: value for key, value in request.items() if key != "id"},
         "created_at": None,
     }
-
-
-#: The keys of a ``Scenario.harness_history`` row that hold private storage locators.
-SNAPSHOT_ROW_KEYS = frozenset({"snapshot", "artifact_snapshot", "parent_snapshot"})
 
 
 class RequestService:
@@ -438,18 +434,10 @@ class RequestService:
         return manifest
 
     @classmethod
-    def harness_rows(cls, scenario: Scenario) -> list[dict[str, Any]]:
-        """Return artifact-addressed harness history for pages and step records, without storage locators."""
-        return [
-            {key: value for key, value in row.items() if key not in SNAPSHOT_ROW_KEYS}
-            for row in scenario.harness_history()
-        ]
-
-    @classmethod
     def legacy_harness_rows(cls, scenario: Scenario) -> list[dict[str, Any]]:
         """Serialize old release selectors only for the legacy harness catalog endpoint."""
         rows = []
-        for row in scenario.harness_history():
+        for row in scenario.harness_snapshot_rows():
             snapshot, selected, parent = row["snapshot"], row["artifact_snapshot"], row["parent_snapshot"]
             listed = {key: value for key, value in row.items() if key not in SNAPSHOT_ROW_KEYS}
             listed["release_id"] = selected.revision
@@ -476,7 +464,7 @@ class RequestService:
         training row carries the metrics of the step that published it, so an
         update is a decision over numbers rather than a blind pull. A scenario
         with several components lists the releases that changed the pulled
-        tree (see ``harness_history``); the others stay addressable by id.
+        tree (see ``Scenario.harness_rows``); the others stay addressable by id.
         Same read-only rules as ``harness_manifest``.
         """
         scenario = self._file_scenario(headers)
@@ -488,7 +476,7 @@ class RequestService:
     def harness_step_records(self, headers: Mapping[str, str], step: int, relative: str | None) -> dict[str, Any]:
         """Raw retained files for a catalog row; presentation belongs to the caller."""
         scenario = self._file_scenario(headers)
-        rows = list(reversed(self.harness_rows(scenario)))
+        rows = list(reversed(scenario.harness_rows()))
         if not 0 <= step < len(rows):
             raise ArtifactNotFound(f"scenario {scenario.name!r} has no step {step}")
         directory = (rows[step].get("metrics") or {}).get("step_record")
@@ -517,7 +505,7 @@ class RequestService:
         An unknown step raises ArtifactNotFound naming the range.
         """
         scenario = self._file_scenario(headers)
-        rows = list(reversed(self.harness_rows(scenario)))
+        rows = list(reversed(scenario.harness_rows()))
         if step == len(rows):
             # The next step, while a request runs it: the catalog has no row yet, so the page says so and links the
             # request's page, which follows the step live.
@@ -564,7 +552,7 @@ class RequestService:
         """
         scenario = self._file_scenario(headers)
         # The step a request settled as counts the catalog rows, the ones the release page opens.
-        rows = list(reversed(self.harness_rows(scenario)))
+        rows = list(reversed(scenario.harness_rows()))
         record = instruction_view(scenario, record_id, rows)
         progress = self.step_progress(scenario)
         reserved = self.files_trainer(scenario).pending_job_data
@@ -585,7 +573,7 @@ class RequestService:
         ArtifactNotFound naming it.
         """
         scenario = self._file_scenario(headers)
-        rows = list(reversed(self.harness_rows(scenario)))
+        rows = list(reversed(scenario.harness_rows()))
         record = instruction_view(scenario, record_id, rows)
         step = settled_step(rows, record_id)
         if step is not None:
