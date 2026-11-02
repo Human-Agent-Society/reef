@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import time
 from abc import abstractmethod
 from collections.abc import Iterator, Mapping, Sequence
@@ -63,7 +64,14 @@ from reef.storage.coordination import Coordination, CoordinationResource
 from reef.storage.marks import Marks, check_mark_name
 from reef.storage.migrations import migrate_work_item_columns
 from reef.storage.postgres import postgres_url, validate_postgres_schema
-from reef.storage.served_models import ControlLeaseConflict, ServedModelsWriter
+from reef.storage.served_models import (
+    INFERENCE_OWNER_QUEUE,
+    SERVING_KIND,
+    SERVING_QUEUE,
+    STOP_SERVING_KIND,
+    ControlLeaseConflict,
+    ServedModelsWriter,
+)
 from reef.storage.sqlite import enable_wal
 from reef.storage.work_queue import (
     FINAL_STATES,
@@ -204,19 +212,22 @@ class CoordinationDatabase(CoordinationResource):
     def write(self, sequence: int) -> Iterator[tuple[Connection, SequenceCounter]]:
         """A write transaction that holds the counter ``sequence`` (``WORK_SEQUENCE`` or ``SERVED_SEQUENCE``) until
         it ends."""
-        with self.connection(write=True) as connection:
-            query = select(self.tables.sequence.c.value).where(self.tables.sequence.c.id == sequence)
-            if self.locks_rows:
-                query = query.with_for_update()
-            value = connection.execute(query).scalar_one()
-            counter = SequenceCounter(int(value))
+        with self.connection(write=True) as connection, self.counter(connection, sequence) as counter:
             yield connection, counter
-            if counter.value != value:
-                connection.execute(
-                    update(self.tables.sequence)
-                    .where(self.tables.sequence.c.id == sequence)
-                    .values(value=counter.value)
-                )
+
+    @contextmanager
+    def counter(self, connection: Connection, sequence: int) -> Iterator[SequenceCounter]:
+        """Hold one change counter in ``connection``. Transactions using both counters take work before serving."""
+        query = select(self.tables.sequence.c.value).where(self.tables.sequence.c.id == sequence)
+        if self.locks_rows:
+            query = query.with_for_update()
+        value = connection.execute(query).scalar_one()
+        counter = SequenceCounter(int(value))
+        yield counter
+        if counter.value != value:
+            connection.execute(
+                update(self.tables.sequence).where(self.tables.sequence.c.id == sequence).values(value=counter.value)
+            )
 
     @contextmanager
     def read(self) -> Iterator[Connection]:
@@ -361,12 +372,276 @@ def served_from_row(row: RowMapping) -> ServedArtifact:
 
 
 class SQLServedModels(ServedModelsWriter):
-    """``served_models`` in a coordination database. Writes check the number of ``lease`` in their transaction."""
+    """Serving work and routes in one database. Each write checks its control or work lease in its transaction."""
 
     def __init__(self, database: CoordinationDatabase, lease: SQLControlLease) -> None:
         self.database = database
         self.tables = database.tables
         self.lease = lease
+        self.work = SQLWorkQueue(database)
+
+    def request_in(self, connection: Connection, scenario: str) -> WorkItem | None:
+        table = self.tables.work_item
+        row = (
+            connection.execute(
+                select(table)
+                .where(table.c.queue == SERVING_QUEUE, table.c.kind == SERVING_KIND, table.c.scenario == scenario)
+                .order_by(table.c.created_sequence.desc())
+                .limit(1)
+            )
+            .mappings()
+            .first()
+        )
+        return None if row is None else item_from_row(row)
+
+    def current_request(self, scenario: str) -> WorkItem | None:
+        with self.database.read() as connection:
+            return self.request_in(connection, scenario)
+
+    def request(
+        self,
+        scenario: str,
+        payload: Mapping[str, JsonValue],
+        *,
+        control_lease_number: int,
+        stop_delay_seconds: float = 0.0,
+        retry_failed: bool = False,
+        now: float | None = None,
+    ) -> WorkItem:
+        require_text(scenario, "scenario")
+        if not math.isfinite(stop_delay_seconds) or stop_delay_seconds < 0:
+            raise ValueError("stop_delay_seconds must be finite and non-negative")
+        moment = clock(now)
+        table = self.tables.work_item
+        with (
+            self.database.write(WORK_SEQUENCE) as (connection, counter),
+            self.database.counter(connection, SERVED_SEQUENCE) as served_counter,
+        ):
+            self.checked(connection, control_lease_number)
+            current = self.request_in(connection, scenario)
+            if (
+                current is not None
+                and canonical_json(dict(current.payload)) == canonical_json(dict(payload))
+                and not (retry_failed and current.state == "failed")
+            ):
+                return current
+            waiting = connection.execute(
+                select(table).where(
+                    table.c.queue == SERVING_QUEUE,
+                    table.c.kind == SERVING_KIND,
+                    table.c.scenario == scenario,
+                    table.c.state == "queued",
+                )
+            ).mappings()
+            for row in waiting.all():
+                self.work.save(
+                    connection,
+                    counter,
+                    item_from_row(row),
+                    moment,
+                    state="failed",
+                    error="a newer serving request replaced this work",
+                    ended_at=moment,
+                )
+            sequence = counter.next()
+            item = self.work.insert(
+                connection,
+                NewWork(SERVING_QUEUE, f"serve:{sequence}", scenario, SERVING_KIND, payload, serial_key=SERVING_QUEUE),
+                sequence,
+                moment,
+            )
+            if payload:
+                return item
+            self.replace_routes(connection, served_counter, scenario, {}, moment + stop_delay_seconds)
+            return self.work.save(connection, counter, item, moment, state="finished", result={}, ended_at=moment)
+
+    def replace_routes(
+        self,
+        connection: Connection,
+        counter: SequenceCounter,
+        scenario: str,
+        models: Mapping[str, ServedArtifact],
+        stop_after: float,
+    ) -> None:
+        """Replace a scenario's routes and schedule unreferenced old routes in the caller's transaction."""
+        table = self.tables.served_model
+        rows = connection.execute(select(table).where(table.c.scenario == scenario)).mappings().all()
+        previous = {row["name"]: served_from_row(row) for row in rows}
+        if previous == models:
+            return
+        connection.execute(delete(table).where(table.c.scenario == scenario))
+        for name, served in models.items():
+            connection.execute(
+                insert(table).values(scenario=scenario, name=require_text(name, "model name"), **served.to_json())
+            )
+        self.schedule_unreferenced(connection, counter, set(previous.values()) - set(models.values()), stop_after)
+        counter.next()
+
+    def schedule_unreferenced(
+        self,
+        connection: Connection,
+        counter: SequenceCounter,
+        models: set[ServedArtifact],
+        stop_after: float,
+    ) -> None:
+        """Schedule stops for ``models`` that no published route names."""
+        table = self.tables.served_model
+        for served in models:
+            referenced = connection.execute(
+                select(table.c.scenario)
+                .where(
+                    table.c.url == served.url,
+                    table.c.model_name == served.model_name,
+                )
+                .limit(1)
+            ).first()
+            if referenced is None:
+                stops = self.tables.scheduled_stop
+                connection.execute(delete(stops).where(*self.stop_condition(served)))
+                connection.execute(insert(stops).values(stop_after=stop_after, **served.to_json()))
+                counter.next()
+
+    def complete_request(
+        self,
+        item: WorkItem,
+        worker_id: str,
+        models: Mapping[str, ServedArtifact],
+        *,
+        stop_delay_seconds: float,
+        owner: WorkItem | None = None,
+        now: float | None = None,
+    ) -> WorkItem:
+        if item.queue != SERVING_QUEUE or item.kind != SERVING_KIND:
+            raise ValueError("only serving work can publish routes")
+        if not math.isfinite(stop_delay_seconds) or stop_delay_seconds < 0:
+            raise ValueError("stop_delay_seconds must be finite and non-negative")
+        moment = clock(now)
+        with self.database.write(WORK_SEQUENCE) as (connection, counter):
+            if owner is not None:
+                self.checked_owner(connection, owner, worker_id, moment)
+            held = self.work.held(connection, item.queue, item.id, worker_id, moment)
+            if held.attempt_count != item.attempt_count:
+                raise WorkLeaseLost("a later attempt holds this serving request")
+            current = self.request_in(connection, item.scenario)
+            result: dict[str, JsonValue] = {}
+            with self.database.counter(connection, SERVED_SEQUENCE) as served_counter:
+                if current is not None and current.id == item.id:
+                    self.replace_routes(connection, served_counter, item.scenario, models, moment + stop_delay_seconds)
+                    result = {name: dict(served.to_json()) for name, served in models.items()}
+                else:
+                    self.schedule_unreferenced(
+                        connection, served_counter, set(models.values()), moment + stop_delay_seconds
+                    )
+            return self.work.save(
+                connection,
+                counter,
+                held,
+                moment,
+                state="finished",
+                result=result,
+                worker_id=None,
+                lease_expires_at=None,
+                ended_at=moment,
+            )
+
+    def complete_stop(
+        self,
+        item: WorkItem,
+        worker_id: str,
+        stop: ScheduledStop,
+        *,
+        owner: WorkItem | None = None,
+        now: float | None = None,
+    ) -> WorkItem:
+        if item.queue != SERVING_QUEUE or item.kind != STOP_SERVING_KIND:
+            raise ValueError("only serving cleanup work can complete a stop")
+        moment = clock(now)
+        with self.database.write(WORK_SEQUENCE) as (connection, counter):
+            if owner is not None:
+                self.checked_owner(connection, owner, worker_id, moment)
+            held = self.work.held(connection, item.queue, item.id, worker_id, moment)
+            if held.attempt_count != item.attempt_count:
+                raise WorkLeaseLost("a later attempt holds this serving cleanup")
+            with self.database.counter(connection, SERVED_SEQUENCE) as served_counter:
+                deleted = connection.execute(
+                    delete(self.tables.scheduled_stop).where(
+                        *self.stop_condition(stop.served), self.tables.scheduled_stop.c.stop_after == stop.stop_after
+                    )
+                ).rowcount
+                if deleted:
+                    served_counter.next()
+                return self.work.save(
+                    connection,
+                    counter,
+                    held,
+                    moment,
+                    state="finished",
+                    result={},
+                    worker_id=None,
+                    lease_expires_at=None,
+                    ended_at=moment,
+                )
+
+    def checked_owner(self, connection: Connection, owner: WorkItem, worker_id: str, now: float) -> None:
+        """Check the inference owner's lease and attempt inside the serving transaction."""
+        if owner.queue != INFERENCE_OWNER_QUEUE or owner.kind != INFERENCE_OWNER_QUEUE:
+            raise ValueError("the inference owner must hold an inference-owner item")
+        held = self.work.held(connection, owner.queue, owner.id, worker_id, now)
+        if held.attempt_count != owner.attempt_count:
+            raise WorkLeaseLost("a later attempt holds the inference runtime")
+
+    def recover_completed(
+        self,
+        owner: WorkItem,
+        worker_id: str,
+        *,
+        stop_delay_seconds: float,
+        now: float | None = None,
+    ) -> None:
+        if not math.isfinite(stop_delay_seconds) or stop_delay_seconds < 0:
+            raise ValueError("stop_delay_seconds must be finite and non-negative")
+        moment = clock(now)
+        table = self.tables.work_item
+        newer = table.alias("newer_serving")
+        latest = select(table).where(
+            table.c.queue == SERVING_QUEUE,
+            table.c.kind == SERVING_KIND,
+            not_(
+                exists(
+                    select(newer.c.item_id).where(
+                        newer.c.queue == SERVING_QUEUE,
+                        newer.c.kind == SERVING_KIND,
+                        newer.c.scenario == table.c.scenario,
+                        newer.c.created_sequence > table.c.created_sequence,
+                    )
+                )
+            ),
+        )
+        with (
+            self.database.write(WORK_SEQUENCE) as (connection, counter),
+            self.database.counter(connection, SERVED_SEQUENCE) as served_counter,
+        ):
+            self.checked_owner(connection, owner, worker_id, moment)
+            for row in connection.execute(latest).mappings().all():
+                current = item_from_row(row)
+                self.replace_routes(connection, served_counter, current.scenario, {}, moment + stop_delay_seconds)
+                if current.state != "finished" or not current.payload:
+                    continue
+                sequence = counter.next()
+                recovery = self.work.insert(
+                    connection,
+                    NewWork(
+                        SERVING_QUEUE,
+                        f"serve:{sequence}",
+                        current.scenario,
+                        SERVING_KIND,
+                        current.payload,
+                        serial_key=SERVING_QUEUE,
+                    ),
+                    sequence,
+                    moment,
+                )
+                self.work.save(connection, counter, recovery, moment, metadata_json=canonical_json({"recovery": True}))
 
     def checked(self, connection: Connection, control_lease_number: int) -> None:
         current = self.lease.number_in(connection)
@@ -521,8 +796,11 @@ class SQLControlLease(ControlLease):
             return True
 
     def number_in(self, connection: Connection) -> int:
-        """The number of the lease that holds now, read in ``connection``'s transaction; 0 before the first take."""
-        number = connection.execute(select(self.table.c.number).where(self.table.c.id == 1)).scalar()
+        """The current lease number, held against takeover until this transaction ends; 0 before the first take."""
+        query = select(self.table.c.number).where(self.table.c.id == 1)
+        if self.database.locks_rows:
+            query = query.with_for_update()
+        number = connection.execute(query).scalar()
         return 0 if number is None else int(number)
 
     def current(self) -> ControlLeaseState | None:
@@ -717,8 +995,23 @@ class SQLWorkQueue(WorkQueue):
         return added
 
     def delete_final(self, *, finished_before: float) -> int:
+        newer = self.table.alias("newer_serving")
+        latest_serving = and_(
+            self.table.c.queue == SERVING_QUEUE,
+            self.table.c.kind == SERVING_KIND,
+            not_(
+                exists(
+                    select(newer.c.item_id).where(
+                        newer.c.queue == SERVING_QUEUE,
+                        newer.c.kind == SERVING_KIND,
+                        newer.c.scenario == self.table.c.scenario,
+                        newer.c.created_sequence > self.table.c.created_sequence,
+                    )
+                )
+            ),
+        )
         statement = delete(self.table).where(
-            self.table.c.state.in_(sorted(FINAL_STATES)), self.table.c.ended_at < finished_before
+            self.table.c.state.in_(sorted(FINAL_STATES)), self.table.c.ended_at < finished_before, not_(latest_serving)
         )
         with self.database.write(WORK_SEQUENCE) as (connection, _counter):
             return int(connection.execute(statement).rowcount or 0)

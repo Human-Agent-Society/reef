@@ -365,6 +365,26 @@ def open_scenario_storage(settings: ServiceConfig) -> tuple[ScenarioStorage, Tas
     return storage, task_files
 
 
+def build_artifact_backend(settings: ServiceConfig) -> ConfigurableRepositoryBackendFactory:
+    """Build the artifact backend shared by control and inference."""
+    artifact_backend = (
+        {"module": GIT_LFS_ARTIFACT_BACKEND, "config": {"repository": settings.artifact_repository}}
+        if settings.artifact_backend == "git_lfs"
+        else settings.artifact_backend
+    )
+    reference = ConfigurableRepositoryBackendFactory.reference(artifact_backend, setting="storage.artifact_backend")
+    factory_class = ConfigurableRepositoryBackendFactory.referenced_class(reference)
+    context = RepositoryBackendContext(
+        work_dir=Path(settings.artifact_work_dir), cache_dir=Path(settings.artifact_cache_dir)
+    )
+    try:
+        backend_factory = factory_class.from_config(reference.config, context=context)
+    except Exception as error:
+        error.add_note(f"while building storage.artifact_backend {factory_class.__name__}")
+        raise
+    return backend_factory
+
+
 def build_dispatcher(
     settings: ServiceConfig,
     *,
@@ -424,23 +444,7 @@ def build_dispatcher(
         record_storage = scenario_storage
         # Each scenario's session opens with copies of the data items that the scenario uses.
         scenario_storage = DataScenarioStorage(scenario_storage, data_store, task_import)
-        artifact_backend = (
-            {"module": GIT_LFS_ARTIFACT_BACKEND, "config": {"repository": settings.artifact_repository}}
-            if settings.artifact_backend == "git_lfs"
-            else settings.artifact_backend
-        )
-        reference = ConfigurableRepositoryBackendFactory.reference(
-            artifact_backend, setting="storage.artifact_backend"
-        )
-        factory_class = ConfigurableRepositoryBackendFactory.referenced_class(reference)
-        context = RepositoryBackendContext(
-            work_dir=Path(settings.artifact_work_dir), cache_dir=Path(settings.artifact_cache_dir)
-        )
-        try:
-            backend_factory = factory_class.from_config(reference.config, context=context)
-        except Exception as error:
-            error.add_note(f"while building storage.artifact_backend {factory_class.__name__}")
-            raise
+        backend_factory = build_artifact_backend(settings)
         if not isinstance(settings.training_settings, Mapping):
             raise ValueError("training must be an object")
         experiment_tracker = build_experiment_tracker(

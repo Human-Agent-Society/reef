@@ -3,9 +3,9 @@
 Each service reads and writes the shared store of the deployment (``storage.record_backend``): PostgreSQL for
 processes on several hosts, SQLite for processes on one host. The services are:
 
-- ``control``: the Reef HTTP API except the data routes, scenarios, commits and activation. It writes
-  ``served_models``, adds the work of the queues, and syncs loaded scenarios after data writes.
-- ``inference``: answers model requests from ``served_models`` and appends their records
+- ``control``: the Reef HTTP API except the data routes, scenarios, commits and activation. It queues
+  artifact startup and syncs loaded scenarios after data writes.
+- ``inference``: starts selected artifacts, writes ``served_models``, answers model requests, and appends their records
   (``reef.service.inference_service``).
 - ``samples``: makes the samples of record selections from the samples queue.
 - ``training``: runs the jobs of the jobs queue on the training component.
@@ -21,18 +21,22 @@ all of them in one process, on the same interfaces.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
+from pathlib import Path
 
 from aiohttp import web
 
+from reef.dispatcher.serving import ServingWorker
 from reef.execution.workers import SERVICE_COMPONENTS
 from reef.observability import build_record_observer
 from reef.runtime.deployment import close_runtimes
 from reef.service.app import create_data_app, create_harness_app
 from reef.service.assembly import (
     build_app,
+    build_artifact_backend,
     build_dispatcher,
     open_scenario_storage,
     open_service_coordination,
@@ -43,6 +47,7 @@ from reef.service.deploy.service_config import ServiceConfig
 from reef.service.engine_clients import DeploymentEngineClients
 from reef.service.inference_service import build_inference_app
 from reef.service.web import service_application
+from reef.storage.coordination import instance_id
 from reef.storage.observer import ObservedScenarioStorage
 
 
@@ -65,14 +70,14 @@ class ControlApp(ComponentApp):
 
 
 class InferenceApp(ComponentApp):
-    """The inference service. It builds the same recipe as control's, whose runtime this process never opens: it
-    reaches each engine with the runtime's own request handler, as control does, and changes no engine."""
+    """The inference service owns runtime startup and serves requests from published routes."""
 
     def build(self, settings: ServiceConfig, environ: Mapping[str, str]) -> web.Application:
         recipe = serving_recipe(settings, environ)
         runtime = recipe.runtime
         coordination = open_service_coordination(settings)
         try:
+            backends = build_artifact_backend(settings) if runtime is not None and runtime.serves_requests else None
             storage, _ = open_scenario_storage(settings)
             # Records that this service appends are traced as the records that control appends are.
             record_observer = build_record_observer(settings.tracing_config, environ=environ)
@@ -95,7 +100,20 @@ class InferenceApp(ComponentApp):
             for_codex=recipe.harness_adapter == "codex",
         )
 
+        worker = None
+        if backends is not None:
+            worker = ServingWorker(
+                recipe,
+                backends,
+                coordination,
+                worker_id=instance_id("inference-startup"),
+                local_artifact_dir=Path(settings.artifact_cache_dir) / "staged",
+            )
+            worker.start()
+
         async def close_inference(app: web.Application) -> None:
+            if worker is not None:
+                await asyncio.to_thread(worker.stop)
             storage.close()
             coordination.close()
             close_runtimes(recipe.job_components(), runtime)

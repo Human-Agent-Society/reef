@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from tests.support._policy_recipe import TestPolicyRecipe
 from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, runtime_bindings
+from tests.support.serving import wait_for_serving
 
 from reef.artifact import Artifact, DefaultStart, DirectorySource, InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
@@ -484,6 +485,7 @@ def test_a_changed_default_start_neither_blocks_nor_changes_an_existing_scenario
         old = second.get_or_create_scenario("old")
         assert old.repository.start_artifact == old.current_artifact_ref() == old_root
         # The runtime serves the old scenario's own root.
+        wait_for_serving(second, "old")
         assert second.recipe.runtime.served == old_root.release_id
         old_start = Path(JobLoopState.from_dict(old.trainer.state).start)
         assert (old_start / "model.txt").read_text() == "old-model"

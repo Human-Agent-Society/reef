@@ -115,7 +115,7 @@ def serving_engine_config(
 
 @dataclass(frozen=True)
 class RemoteServingRuntimeConfig:
-    """Options of the control plane's runtime for published weights that engines on an inference component serve.
+    """Options of the inference service's runtime for published weights that engines on an inference component serve.
 
     Values: ``remote`` is an ``inference.remote`` section that
     ``RemoteInferenceSettings.from_mapping`` accepts. ``release_format`` is a
@@ -283,7 +283,7 @@ class RemoteServingRuntimeFactory(RuntimeFactory):
             **dict(config["inference_handler_config"]),
             request_headers=ProviderRequestHeaders(inference_token),
         )
-        # Building the runtime touches no engine: only control opens it, in every layout.
+        # Building the runtime touches no engine: only the inference owner opens it, in every layout.
         engines = ComponentEngines(service)
         if release_format.layout == "adapter":
             return AdapterServingRuntime(

@@ -120,7 +120,7 @@ A harness sync is different. ``POST /reef/harness/import`` merges the files that
 Activate an artifact
 --------------------
 
-The active release is the one that Reef serves. Inference answers from it, and the harness routes serve its tree. It binds one active artifact for each component. To serve another artifact, activate it:
+The active release records the selected artifact of each component. Harness routes serve its tree. Inference serves the last route that completed startup. To select another artifact, activate it:
 
 .. code:: bash
 
@@ -129,12 +129,12 @@ The active release is the one that Reef serves. Inference answers from it, and t
      -d '{"artifact_id": "<id>"}' \
      "$REEF_URL/reef/scenarios/code-repair/activate"
 
-The target is any row of the artifact list: an artifact that a training step or an import made, or the creation artifact. Reef loads the artifact into serving and makes it the active artifact of its component. What Reef writes depends on the scenario:
+The target is any row of the artifact list: an artifact that a training step or an import made, or the creation artifact. Reef selects the artifact, then inference loads it in the background. What Reef writes depends on the scenario:
 
-- In a scenario of one component, Reef writes no artifact or release. It appends an ``activate`` record. The release that made the artifact serves again.
+- In a scenario of one component, Reef writes no artifact or release. It appends an ``activate`` record. It selects the release that made the artifact.
 - In a scenario of several components, Reef publishes a release: the active release with ``component`` bound to the artifact. This release makes no new content. The other components stay as they serve.
 
-The answer's ``artifact_id`` names the activated artifact, and its ``release_id`` names the active release. Leave out ``component`` when the scenario has one component. A scenario of several components requires it. An unknown component is HTTP 400. History is not rewritten, and the step counter keeps increasing. Activation never changes a trainer's training start.
+The response accepts the selection. Poll the `startup status <../reference/http-api.rst#startup-status>`__ before using the new artifact. Repeating activation can retry a failed startup. The answer's ``artifact_id`` names the activated artifact, and its ``release_id`` names the active release. Leave out ``component`` when the scenario has one component. A scenario of several components requires it. An unknown component is HTTP 400. History is not rewritten, and the step counter keeps increasing. Activation never changes a trainer's training start.
 
 A full-weight serving runtime that activates the root release after it served a checkpoint loads the root's files from the artifact repository. `HTTP API <../reference/http-api.rst#activate-an-artifact>`__ lists the answers and status codes.
 
@@ -315,11 +315,11 @@ goes from evaluation to control, for the candidate that a rollout evaluates.
    * - ``control``
      - The HTTP API except the data routes; scenarios, commits and activation.
        It syncs each loaded scenario after a data write
-     - ``served_models``, training jobs, sample requests, record copy
+     - serving requests, training jobs, sample requests, record copy
        requests, evaluations, commits
    * - ``inference``
-     - Answers model requests with the model that ``served_models`` names
-     - records
+     - Starts selected artifacts and answers requests with their published routes
+     - ``served_models``, serving results, records
    * - ``samples``
      - Makes training samples from new records
      - samples
@@ -355,9 +355,9 @@ Start each service with the same config and ``--component``:
    reef serve -c deploy.yaml --component data --reef.port 8906
    reef serve -c deploy.yaml --component harness --reef.port 8907
 
-A ``--component`` process starts no other child. Start the inference engines
-and the training backend that the config names on their own. All processes
-must reach the same store:
+A ``--component`` process starts no other Reef service. Start any external
+engines and training backends that the config requires. Inference owns the
+serving runtime's startup work. All processes must reach the same store:
 
 * On one host, the default ``sqlite`` record backend works. The processes share
   the files under ``storage.agent-record-dir``.
@@ -399,7 +399,7 @@ service.
 
 Every service except inference must also reach the same data store
 (``storage.data-store``, which follows the record backend by default; see
-`Choose the data store`_). Control, training, evaluation and data must reach
+`Choose the data store`_). Control, inference, training, evaluation and data must reach
 the same artifact backend.
 
 **Data requests.** Send the data routes (``/reef/namespaces/{owner}/data...``),
@@ -419,8 +419,11 @@ that the write touched, and waits up to 30 seconds for the syncs. The response
 says whether they ended (``synced``). A sync that did not end runs when control
 takes it, or when the scenario next loads.
 
-Only control activates a scenario's artifact on the engines. The samples,
-evaluation and data services load a scenario without activating it.
+Control queues each selected artifact for inference to start. The inference
+service opens the serving runtime, loads the artifact, and publishes its route.
+Scenario creation and activation do not wait for this work.
+The samples, evaluation and data services load a scenario without changing
+its production engine.
 
 **Inference requests.** Send model requests to the inference service, with the
 scenario in ``x-reef-scenario``. The inference service answers
@@ -428,6 +431,11 @@ scenario in ``x-reef-scenario``. The inference service answers
 ``/v1/messages/count_tokens``, the evaluation routes and the routes of an
 artifact served beside the active release. A one-process ``reef serve`` answers
 the same routes in the same way, in control's process.
+
+Send ``GET /reef/scenarios/{scenario}/inference/status`` to inference to read
+the selected artifact's startup result. It reports ``pending``, ``starting``,
+``ready`` or ``failed`` with the artifact ID. See `Startup status
+<../reference/http-api.rst#startup-status>`__ for the response and retry rules.
 
 For each request, the inference service reads the scenario's rows in
 ``served_models``. The request's ``model`` selects the row of an artifact
@@ -443,6 +451,9 @@ inference service never creates a scenario: create it first with
 ``POST /reef/scenarios`` or a harness install. The inference service answers:
 
 * ``404`` when the scenario is unknown or serves no model.
+* ``503`` with ``inference_starting`` and ``Retry-After: 30`` when its model
+  is pending or starting and no route can serve it. A failed startup returns
+  ``503`` with ``inference_start_failed``.
 * ``502`` when the engine fails or cannot be reached, and ``504`` when it does
   not answer within ``inference.timeout-s``.
 * ``409`` when the engine answers with another model name or aborts the
@@ -460,11 +471,16 @@ because control adds them. The data service continues to take data writes, but
 their syncs wait for control: each write waits 30 seconds and then answers
 ``"synced": false``.
 
-When control starts, it does not load again what the engines still serve. A
-runtime that serves one adapter per scenario takes over each adapter that
-``served_models`` names and that the engines still report, and loads only what
-they lost. A runtime that loads full weights in place loads the active artifact
-again. When a replaced value's stop is due, the engines unload its adapter.
+Control restarts do not reopen engines. One inference worker holds runtime
+ownership through an existing work lease, including while it is idle. Other
+inference replicas only serve requests. An interrupted startup returns to the
+queue after its work lease expires.
+
+After ownership changes, completed selections return to starting. The new
+owner opens its runtime, adopts retained engines, and activates the selections
+before it publishes routes again. This status is not a continuous engine
+health check. Runtime backends still control cancellation of engine calls
+that were already in progress when a worker lost its lease.
 
 Control runs as one active instance and any number of standby instances on the
 same store. The active instance holds the control lease and extends it. A
@@ -475,8 +491,8 @@ instance stops, it releases the lease, and a standby takes over within 10
 seconds. When the active instance crashes, a standby takes over after the lease
 expires (30 seconds). An instance that loses the lease stops its training work
 and ends its process, so that its supervisor starts it again as a standby. Each
-``served_models`` write carries the lease number, so an old instance cannot
-overwrite the table. To deploy a new control version, start the new
+serving request carries the control lease number. Route publication checks the
+work lease, its attempt, and the current request before it commits. To deploy a new control version, start the new
 instance as a standby, then stop the old one.
 
 **Limits.** The inference service serves what ``served_models`` names: the

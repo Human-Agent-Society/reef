@@ -1,7 +1,7 @@
-"""Serve saved weights on inference engines that the control plane controls directly.
+"""Serve saved weights on inference engines that the inference service controls directly.
 
 Reef's serving engines are their own service, separate from every trainer.
-The runtimes here are the control plane's ``InferenceRuntime`` for such a
+The runtimes here are the inference service's ``InferenceRuntime`` for such a
 service. They reach the engines through an ``InferenceBackend`` (for an
 inference component, ``reef.inference.remote.service.RemoteInferenceBackend``)
 and load only weights that a training job saved and Reef published: a
@@ -52,8 +52,8 @@ HEALTH_INTERVAL_S = 30.0
 
 @dataclass(frozen=True)
 class OpenedEngines:
-    """Engines that control took: ``backend`` drives them, and ``attached`` is whether they ran already, under the
-    weights and versions that a former control instance gave them; false for engines that ``open`` started.
+    """Engines that inference took: ``backend`` drives them, and ``attached`` is whether they ran already, under the
+    weights and versions that a former inference worker gave them; false for engines that ``open`` started.
 
     Purpose: ``ServingEngines.open`` makes it; ``SavedWeightServingRuntime.open`` reads it.
     """
@@ -69,7 +69,7 @@ class OpenedEngines:
 
 
 class ServingEngines(ABC):
-    """The engines of a serving runtime, which only control opens.
+    """The engines of a serving runtime, which only the inference worker opens.
 
     Values: ``base_url`` is the engines' HTTP(S) address, known without opening them. ``open`` attaches to the
     engines that run, or starts them when none run (``OpenedEngines``); a runtime calls it at most once.
@@ -77,7 +77,7 @@ class ServingEngines(ABC):
     ``close`` releases what ``open`` took and stops no engine that serves requests.
 
     Purpose: a ``SavedWeightServingRuntime`` holds one and opens it in ``InferenceRuntime.open``. A process that
-    runs no control never opens it, so it only sends requests to ``base_url``.
+    runs no inference worker never opens it, so it only sends requests to ``base_url``.
     """
 
     @property
@@ -152,7 +152,7 @@ class SavedWeightServingRuntime(InferenceRuntime):
     """The engines, the request handler and the runtime load IDs that both serving runtimes share.
 
     ``engines`` reaches the engines, and ``handler`` executes requests at ``engines.base_url``. Building the
-    runtime touches no engine: control opens it (``open``), which attaches to the engines or starts them, and
+    runtime touches no engine: the inference worker opens it (``open``), which attaches to the engines or starts them, and
     stamps the base model's version on them; before that, the runtime only sends requests, and an operation that
     changes the engines raises ``ReefError``.
     ``weights`` gives each release's weight files; the default is
@@ -192,8 +192,8 @@ class SavedWeightServingRuntime(InferenceRuntime):
         self._next_sequence = 1
         self.base_version = str(RuntimeLoadId(self._incarnation, 0))
         self._version = self.base_version
-        #: The versions the engines served when control opened this runtime: what they kept from before a
-        #: control restart, which ``adopt`` takes over. Empty until ``open``.
+        #: The versions the engines served when inference opened this runtime: what they kept from before a
+        #: inference restart, which ``adopt`` takes over. Empty until ``open``.
         self.versions_at_start: frozenset[str] = frozenset()
         self._health_interval_s = health_interval_s
         self._stopping = threading.Event()
@@ -221,7 +221,9 @@ class SavedWeightServingRuntime(InferenceRuntime):
     @property
     def _backend(self) -> InferenceBackend:
         if self._opened is None:
-            raise ReefError("the serving runtime is not open: only control, which opens it, changes the engines")
+            raise ReefError(
+                "the serving runtime is not open: only the inference worker, which opens it, changes the engines"
+            )
         return self._opened
 
     @property
@@ -403,7 +405,7 @@ class AdapterServingRuntime(SavedWeightServingRuntime):
         with self._lock:
             adopted = self._adopted.pop(scenario, None)
             if adopted is not None and adopted[1] == artifact.artifact_id:
-                # The engines still serve this artifact's adapter from before a control restart: load nothing.
+                # The engines still serve this artifact's adapter from before a inference restart: load nothing.
                 path = artifact.materialize().local_path
                 if path is None:
                     raise ReefError("serving a release requires a materialized artifact")

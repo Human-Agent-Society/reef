@@ -26,6 +26,7 @@ from tests.support.runtime_stubs import (
     runtime_bindings,
 )
 from tests.support.samples_service import make_samples
+from tests.support.serving import wait_for_serving
 
 from recipes.sao import SAORecipe
 from recipes.sao.processor import SAOJobData, SAOSamples
@@ -479,6 +480,7 @@ def test_an_activation_rule_that_activates_nothing_keeps_the_checkpoint_from_ser
     dispatcher = _sao_dispatcher(tmp_path, recipe)
     try:
         scenario = dispatcher.get_or_create_scenario("math")
+        wait_for_serving(dispatcher)
         base = inference.activated[:]
         served = scenario.current_artifact_ref()
         _rollout(dispatcher, 1, 0.9)
@@ -515,6 +517,7 @@ def test_sao_train_step_swaps_the_served_artifact(tmp_path) -> None:
     )
     try:
         scenario = dispatcher.get_or_create_scenario("math")
+        wait_for_serving(dispatcher)
         pre_head = scenario.repository.require_current_artifact()
         pre_served = scenario.serving_artifact_id()
 
@@ -522,11 +525,12 @@ def test_sao_train_step_swaps_the_served_artifact(tmp_path) -> None:
 
         _wait_for_finished_jobs(dispatcher, 1)
         head = scenario.repository.require_current_artifact()
+        wait_for_serving(dispatcher)
         # The new head is the saved release of the trained checkpoint, and it
         # actually moved off the pre-train head (guards against a constant stub).
         assert head.release_id != pre_head.release_id
         # The runtime loaded the checkpoint once, and the scenario serves its artifact.
-        assert inference.activated[1:] == ["w1"]
+        assert inference.activated == [pre_head.release_id, head.release_id]
         assert pre_served != scenario.serving_artifact_id() == head.release_id
     finally:
         dispatcher.close()
