@@ -10,7 +10,7 @@ import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from threading import Lock
+from threading import Lock, RLock
 from typing import Any, Self
 from urllib.parse import urlsplit
 
@@ -37,6 +37,9 @@ from reef.core.plugins import PluginSettings
 _MANIFEST = "reef-artifact.json"
 _LFS_PATTERNS = ("*.safetensors", "*.bin", "*.pt", "*.pth", "*.ckpt")
 _LFS_ATTRIBUTES = "".join(f"{pattern} filter=lfs diff=lfs merge=lfs -text\n" for pattern in _LFS_PATTERNS)
+# Backend instances in one process can share a working directory.
+WORKSPACE_LOCKS: dict[Path, RLock] = {}
+WORKSPACE_LOCKS_LOCK = Lock()
 
 
 def _check_tools() -> None:
@@ -121,11 +124,11 @@ def token_config(repository: str, token: str) -> dict[str, str]:
 
 
 class _GitWorkspace:
-    """Manage one git working tree used by a single scenario backend.
+    """Manage one git working tree shared by scenario backend instances.
 
     Encapsulates git clone/checkout/commit/push so the backend does not
     call git directly. Holds the work_dir, clone_dir, and a per-process
-    lock serializing mutations.
+    lock shared by backends that use this working directory.
     """
 
     def __init__(
@@ -142,7 +145,8 @@ class _GitWorkspace:
         self.work_dir = Path(work_dir).resolve()
         self.clone_dir = self.work_dir / "repository"
         self._git_client = git_client
-        self.lock = Lock()
+        with WORKSPACE_LOCKS_LOCK:
+            self.lock = WORKSPACE_LOCKS.setdefault(self.work_dir, RLock())
 
     def open_repository(self) -> None:
         if not (self.clone_dir / ".git").exists():
@@ -323,13 +327,15 @@ class _GitWorkspace:
         review without moving the head, has no remote commit of its own to stop
         the scan.
         """
-        self.git("fetch", "origin", version)
-        self.git("update-ref", FETCHED_RELEASE_REF, "FETCH_HEAD")
-        return self.git("rev-parse", "FETCH_HEAD")
+        with self.lock:
+            self.git("fetch", "origin", version)
+            self.git("update-ref", FETCHED_RELEASE_REF, "FETCH_HEAD")
+            return self.git("rev-parse", "FETCH_HEAD")
 
     def show_file(self, version: str, path: str) -> str:
-        self.fetch_version(version)
-        return self.git("show", f"FETCH_HEAD:{path}")
+        with self.lock:
+            self.fetch_version(version)
+            return self.git("show", f"FETCH_HEAD:{path}")
 
     def ls_remote(self, ref_name: str) -> str | None:
         output = self.git("ls-remote", "origin", ref_name)
@@ -723,7 +729,8 @@ class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
                 raise
 
     def _open_repository(self) -> None:
-        self._workspace.open_repository()
+        with self._workspace.lock:
+            self._workspace.open_repository()
 
 
 @dataclass(frozen=True)

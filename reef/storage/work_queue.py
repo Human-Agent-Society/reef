@@ -233,10 +233,12 @@ class WorkQueue(ABC):
 
     @abstractmethod
     def delete_final(self, *, finished_before: float) -> int:
-        """Delete every final item of every queue whose ``ended_at`` is before ``finished_before``; return how many.
+        """Delete final items whose ``ended_at`` is before ``finished_before``; return how many.
 
         A reader of a final item, such as the trainer of a job, reads it within the retention that control keeps,
-        so a deleted item is one that no reader needs."""
+        so a deleted item is one that no reader needs.
+        Keep each scenario's newest serving request: its status remains readable until another selection replaces it.
+        """
 
     @abstractmethod
     def take(self, queue: str, worker_id: str, kinds: Sequence[str], *, now: float | None = None) -> WorkItem | None:

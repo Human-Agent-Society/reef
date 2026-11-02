@@ -4,6 +4,7 @@ import asyncio
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
+from tests.support.inference import wait_for_inference
 
 from reef.artifact import Artifact, ArtifactRef, InMemoryRepositoryBackend
 from reef.dispatcher import Dispatcher
@@ -147,6 +148,7 @@ def test_http_app_routes_scenarios_to_runtime_specific_inference_services(tmp_pa
             client = TestClient(TestServer(create_app(dispatcher)))
             await client.start_server()
             try:
+                await wait_for_inference(client, scenario)
                 response = await client.post(
                     "/v1/chat/completions",
                     headers={"x-reef-scenario": scenario},
@@ -163,7 +165,7 @@ def test_http_app_routes_scenarios_to_runtime_specific_inference_services(tmp_pa
 @pytest.mark.unit
 @pytest.mark.parametrize("path", ["/v1/chat/completions", "/v1/responses", "/v1/messages"])
 def test_a_deployment_without_an_inference_engine_serves_no_model(tmp_path, path) -> None:
-    """The ``none`` runtime has no HTTP engine address, so control writes no served_models row: every call is 404."""
+    """The ``none`` runtime schedules no inference startup and serves no model."""
 
     async def run() -> None:
         runtime = RuntimeRegistry().build({"type": "none"}, model_path="model")
@@ -177,9 +179,10 @@ def test_a_deployment_without_an_inference_engine_serves_no_model(tmp_path, path
         client = TestClient(TestServer(create_app(dispatcher)))
         await client.start_server()
         try:
+            assert (await client.get("/reef/scenarios/roleplay/inference/status")).status == 404
             response = await client.post(path, headers={"x-reef-scenario": "roleplay"}, json={"messages": []})
             assert response.status == 404, await response.text()
-            assert "scenario 'roleplay' serves no model 'active'" in await response.text()
+            assert "has no inference startup request" in await response.text()
         finally:
             await client.close()
 

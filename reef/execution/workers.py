@@ -165,6 +165,10 @@ class QueueWorker(ServiceWorker):
         """React to ``item``, which finished with ``result``; the default does nothing."""
         return
 
+    def finish_item(self, item: WorkItem, result: Mapping[str, JsonValue]) -> None:
+        """Commit the result. A worker can include its output writes in this transaction."""
+        self.queue.finish(self.queue_name, item.id, self.worker_id, dict(result))
+
     def start(self) -> None:
         if self.thread is not None:
             return
@@ -198,7 +202,7 @@ class QueueWorker(ServiceWorker):
             with LeaseExtender(self.queue, item, self.worker_id) as extender:
                 self.queue.start(self.queue_name, item.id, self.worker_id)
                 result = self.run_item(item, extender.lease_lost)
-            self.queue.finish(self.queue_name, item.id, self.worker_id, dict(result))
+            self.finish_item(item, result)
         except WorkLeaseLost:
             logger.warning("worker %s lost %s", self.worker_id, item.id)
             return True
