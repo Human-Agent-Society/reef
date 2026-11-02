@@ -1070,7 +1070,8 @@ def test_a_job_trainer_runs_each_instruction_as_a_job_and_a_failed_job_does_not_
     # Only the second job saved a checkpoint, and its release now serves.
     wait_for_serving(dispatcher, "s")
     scenario = dispatcher.get_or_create_scenario("s")
-    assert runtime.served == scenario.current_artifact_ref().release_id
+    assert runtime.served == "w2"
+    assert scenario.served_artifact_id() == scenario.current_artifact_ref().release_id
     assert (scenario.repository.resolve(scenario.current_artifact_ref()).local_path / "model.txt").read_text() == "w2"
     assert scenario.trainer.pipeline.training_mode == "manual"
     assert scenario.trainer.pending_instructions() == 0

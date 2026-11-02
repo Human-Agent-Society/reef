@@ -22,6 +22,7 @@ from reef.artifact.release_chain import ArtifactReleaseChain, ReleaseNotRestorab
 from reef.artifact.sources import SourceFiles
 from reef.core.activation import MadeArtifact
 from reef.core.artifact_ref import RootSource
+from reef.core.artifact_selection import ArtifactSelection, SelectedArtifact
 from reef.core.components import COMPONENTS_METADATA_KEY, ComponentEntry, ReleaseComponents, made_artifact_id
 from reef.core.errors import CommitPending, ReefError
 from reef.observability.base import TrainingExperimentContext
@@ -243,6 +244,10 @@ class ScenarioCommitter:
 
         active = active_record(records)
         active_release = creation if active is None else active.artifact_ref.release_id
+        recovered_active: Mapping[str, str] = {}
+        if active is None and self._artifacts.current != queries.creation_artifact:
+            repository = self._artifacts.repository
+            recovered_active = repository.selection(repository.resolve(self._artifacts.current), names).artifact_ids
         trainers = {component_trainer.component: component_trainer for component_trainer in self.trainers}
         status: dict[str, dict[str, str | None]] = {}
         for name in names:
@@ -255,7 +260,7 @@ class ScenarioCommitter:
                     start = bound(latest.artifact_ref.release_id, name)
                 else:
                     start = made_artifact_id(latest.artifact_ref.release_id, name, single=len(names) == 1)
-            status[name] = {"active": bound(active_release, name), "training_start": start}
+            status[name] = {"active": recovered_active.get(name, bound(active_release, name)), "training_start": start}
         return status
 
     def last_record_for(self, component: str | None) -> CommitRecord | None:
@@ -367,12 +372,9 @@ class ScenarioCommitter:
     def activate(self, artifact_id: str, component: str | None = None) -> ComponentArtifact:
         """Make ``artifact_id`` the active artifact of ``component``; return it with the release that is active after.
 
-        With one component the release that made the artifact becomes the
-        active release: no artifact or release is written. With several, the
-        activation publishes a release: the active release with
-        ``component`` bound to the artifact. It reuses the components'
-        content, and the chain tip, the parent of the next training
-        publication, stays. No training start changes. A standalone scenario activates the runtime first.
+        The selected artifact replaces only its component in the scenario's
+        active selection. No artifact is published. The checkpoint and every
+        training start stay. A standalone scenario activates the runtime first.
         A service scenario leaves engine activation to inference after the commit.
         The ``"activate"`` record lands at the next step, then the active release moves.
         A crash before the record leaves the active release that the log names. Activating the active artifact
@@ -401,28 +403,72 @@ class ScenarioCommitter:
             return replace(selected, release_id=target.ref.release_id)
 
     def release_with(self, active: Artifact, selected: ComponentArtifact, release: Artifact) -> Artifact:
-        """The release ``active`` with ``selected.component`` bound to the artifact ``selected``.
-
-        ``release`` is the release that made the artifact. With one component,
-        the result is ``release``, after its own admission check, as at its
-        publication. With several, the result is a new release: ``active``
-        with the one component replaced. It is published beside the chain, so
-        the chain tip and the backend head stay.
-        """
+        """A validated local view of ``active`` with one existing artifact replaced; publish nothing."""
         surface = self._binding.surface
         if surface.single:
             surface.validate(release)
             return release
-        staged = self.stage_combination(
-            self._step + 1, active, selected.component, release.component(selected.component)
-        )
-        published_ref = self._artifacts.publish(
-            staged,
-            expected_parent=self._artifacts.checkpoint,
-            metadata={**dict(staged.metadata), COMPONENTS_METADATA_KEY: self.release_manifest(staged).to_dict()},
-            advance_heads=False,
-        )
-        return self._artifacts.resolve(published_ref)
+        repository = self._artifacts.repository
+        components = dict(repository.selection(active, self.component_names()).components)
+        components[selected.component] = SelectedArtifact(selected.artifact_id, release.ref)
+        cached = set(repository.selections)
+        target = repository.select(ArtifactSelection(components))
+        try:
+            surface.validator.validate(target)
+        except BaseException:
+            if target.ref.release_id not in cached:
+                repository.discard(target)
+            raise
+        return target
+
+    def restore(self, step: int) -> Mapping[str, str]:
+        """Restore the complete active component mapping after ``step`` without changing artifacts or training starts.
+
+        Zero selects the scenario's creation. Other steps require enough operation history to reconstruct their
+        active selection. Validation and runtime activation precede the new restore record; recovery reads that
+        record's complete selection.
+        """
+        with self._lock, self._publication_lock:
+            if not isinstance(step, int) or isinstance(step, bool) or step < 0:
+                raise ValueError("restore step must be a non-negative integer")
+            records = self.release_queries.records()
+            if step and not any(record.step == step for record in records):
+                raise ValueError(f"scenario {self._name!r} has no operation at step {step}")
+            self.require_no_pending_commit("restore a selection")
+            preceding = tuple(record for record in records if record.step <= step)
+            previous = active_record(preceding)
+            if step and previous is None and preceding[0].step > 1:
+                raise ValueError(f"cannot restore step {step}: earlier operation history is unavailable")
+            ref = self.release_queries.creation_artifact if previous is None else previous.artifact_ref
+            repository = self._artifacts.repository
+            selection = (
+                previous.selection
+                if previous is not None and previous.selection is not None
+                else repository.selection(repository.resolve(ref), self.component_names())
+            )
+            current_ref = self._artifacts.current
+            current = repository.resolve(current_ref)
+            if repository.selection(current, self.component_names()).artifact_ids == selection.artifact_ids:
+                return selection.artifact_ids
+            cached = set(repository.selections)
+            target = repository.select(selection)
+            try:
+                surface = self._binding.surface
+                if surface.single:
+                    surface.validate(target)
+                else:
+                    surface.validator.validate(target)
+            except BaseException:
+                if target.ref.release_id.startswith("selection:") and target.ref.release_id not in cached:
+                    repository.discard(target)
+                raise
+            self._activate(target)
+            record = self.append_operation_record(
+                "restore", target.ref, component=None, components=selection.artifact_ids, selection=selection
+            )
+            self._artifacts.activate(target.ref, expected=current_ref)
+            self.advance_to(record.step)
+            return selection.artifact_ids
 
     def serve(self, artifact_id: str, component: str | None = None) -> ComponentArtifact:
         """Serve ``artifact_id`` as ``component`` beside the active release; return it with the release that serves it.
@@ -861,6 +907,11 @@ class ScenarioCommitter:
             training_job_id=prepared.training_job_id,
             component=self.component_on_record(component),
             active_artifact=active_artifact,
+            active_selection=(
+                None
+                if active_artifact is None
+                else self._artifacts.repository.selections.get(active_artifact.release_id)
+            ),
         )
         return {
             **dict(artifact.metadata),
@@ -1039,6 +1090,7 @@ class ScenarioCommitter:
         component: str | None,
         components: Mapping[str, str] | None = None,
         metrics: Mapping[str, Any] | None = None,
+        selection: ArtifactSelection | None = None,
     ) -> CommitRecord:
         """Append a record that carries no trainer state at the next step: an ``"activate"``, ``"train_from"``,
         ``"import"``, ``"sync"``, ``"serve"`` or ``"stop_serving"`` record.
@@ -1059,6 +1111,7 @@ class ScenarioCommitter:
             operation=operation,
             component=component,
             components=components,
+            selection=selection or self._artifacts.repository.selections.get(artifact_ref.release_id),
         )
         return self._store.commit_step(expected_step=self._step, commit=record)
 
@@ -1087,6 +1140,7 @@ class ScenarioCommitter:
             training_job_id=prepared.training_job_id,
             component=self.component_on_record(component),
             components=components,
+            selection=self._artifacts.repository.selections.get(artifact_ref.release_id),
         )
         return self._store.commit_step(expected_step=self._step, commit=record)
 

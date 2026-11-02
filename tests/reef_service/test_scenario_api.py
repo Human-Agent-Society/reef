@@ -57,7 +57,8 @@ def test_list_scenarios_shows_loaded_bindings(tmp_path) -> None:
     rows = dispatcher.list_scenarios()
     names = [row["scenario"] for row in rows]
     assert names == ["a", "b"]
-    assert all(row["loaded"] and row["release_id"] for row in rows)
+    assert all(row["loaded"] and row["components"] for row in rows)
+    assert all("release_id" not in row and "content_id" not in row for row in rows)
     assert all("recipe" not in row for row in rows)
 
 

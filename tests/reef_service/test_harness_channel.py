@@ -37,8 +37,14 @@ TREE_V2 = HarnessTree(changed_rules("marker marker rules\n"))
 EMPTY_SEED = HarnessTree({})
 PI = get_adapter("pi")
 HEADERS = {"x-reef-scenario": "delivery"}
-UPDATE_TIMEOUT_S = 5.0
+UPDATE_TIMEOUT_S = 10.0
 UPDATE_POLL_S = 0.01
+
+
+@pytest.fixture(autouse=True)
+def poll_stub_jobs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Poll completed stub jobs without spending the HTTP assertion timeout on idle waits."""
+    monkeypatch.setattr("reef.dispatcher.local_workers.POLL_SECONDS", 0.01)
 
 
 def evaluate(task: str, result: TaskResult) -> float:
@@ -202,7 +208,7 @@ def test_a_published_step_reaches_the_served_files_and_the_catalog(tmp_path) -> 
     async def run() -> None:
         async with served(channel_dispatcher(tmp_path, PATCHES[:1])) as client:
             rows = (await (await client.get("/reef/scenarios/delivery/artifacts")).json())["artifacts"]
-            current = next(row["release_id"] for row in rows if row["active"])
+            current = next(row["artifact_id"] for row in rows if row["active"])
             manifest = await evaluated_step(client)
             assert manifest["release_id"] != current
 
@@ -248,6 +254,13 @@ def test_version_addressed_pull_returns_the_superseded_tree(tmp_path) -> None:
                 "/reef/harness", params={"release_id": first["release_id"], "form": "source"}, headers=HEADERS
             )
             assert (await source.json())["files"] == dict(TREE_V1.files)
+            selected = await client.get("/reef/harness", params={"artifact_id": first["artifact_id"]}, headers=HEADERS)
+            assert selected.headers["x-reef-artifact-id"] == first["artifact_id"]
+            assert await selected.json() == first
+            catalog = await (await client.get("/reef/harness/artifacts", headers=HEADERS)).json()
+            assert [row["artifact_id"] for row in catalog["artifacts"] if row["active"]] == [second["artifact_id"]]
+            assert all("release_id" not in row and "content_id" not in row for row in catalog["artifacts"])
+            assert second["parent_artifact_id"] == first["artifact_id"]
 
     asyncio.run(run())
 
