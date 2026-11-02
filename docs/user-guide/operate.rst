@@ -135,7 +135,7 @@ The target is any row of the artifact list. Reef updates the component selection
 
 For example, changing ``harness`` from artifact B to C changes ``{weights: A, harness: B}`` to ``{weights: A, harness: C}``. The weights keep artifact A and its identity. The operation stores the complete selection, so recovery restores the same combination.
 
-The response accepts the selection. Poll the `startup status <../reference/http-api.rst#startup-status>`__ before using the new artifact. Repeating activation can retry a failed startup. The answer contains ``scenario``, ``component`` and the selected ``artifact_id``. Leave out ``component`` when the scenario has one component. A scenario of several components requires it. An unknown component is HTTP 400. History is not rewritten, and the step counter keeps increasing. Activation never changes a trainer's training start.
+The response accepts the selection. Poll the `startup status <../reference/http-api.rst#startup-status>`__ before using the new artifact. Repeating activation retries a failed startup at once. The answer contains ``scenario``, ``component`` and the selected ``artifact_id``. Leave out ``component`` when the scenario has one component. A scenario of several components requires it. An unknown component is HTTP 400. History is not rewritten, and the step counter keeps increasing. Activation never changes a trainer's training start.
 
 A full-weight serving runtime that activates its starting artifact after a checkpoint loads the starting artifact's files from the artifact repository. `HTTP API <../reference/http-api.rst#activate-an-artifact>`__ lists the answers and status codes.
 
@@ -464,7 +464,8 @@ inference service never creates a scenario: create it first with
 * ``404`` when the scenario is unknown or serves no model.
 * ``503`` with ``inference_starting`` and ``Retry-After: 30`` when its model
   is pending or starting and no route can serve it. A failed startup returns
-  ``503`` with ``inference_start_failed``.
+  ``503`` with ``inference_start_failed`` until a retry of the startup
+  succeeds.
 * ``502`` when the engine fails or cannot be reached, and ``504`` when it does
   not answer within ``inference.timeout-s``.
 * ``409`` when the engine answers with another model name or aborts the
@@ -486,6 +487,14 @@ Control restarts do not reopen engines. One inference worker holds runtime
 ownership through an existing work lease, including while it is idle. Other
 inference replicas only serve requests. An interrupted startup returns to the
 queue after its work lease expires.
+
+A failed startup does not stay failed, because the selection still states what
+the scenario serves. Control queues the startup again 60 seconds after it
+failed. After each automatic retry that fails, control doubles the wait, up to
+one hour. To retry at once, activate the active artifact again
+(``POST /reef/scenarios/{scenario}/activate``). This also sets the wait back to
+60 seconds. The service that fails a work item writes one warning to its log,
+with the queue, the item ID, the scenario and the error.
 
 After ownership changes, completed selections return to starting. The new
 owner opens its runtime, adopts retained engines, and activates the selections
