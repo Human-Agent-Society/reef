@@ -184,7 +184,7 @@ def test_engine_extension_preserves_version_and_lora_request_schemas(monkeypatch
 
     def request(route, payload=None, **_kwargs):
         calls.append((route, payload or {}))
-        return [True] if route == "set_internal_state" else {"success": True}
+        return {"success": True}
 
     engine.node_rank = 0
     engine._make_request = request
@@ -212,10 +212,6 @@ def test_engine_extension_preserves_version_and_lora_request_schemas(monkeypatch
         (
             "update_weight_version",
             {"new_version": "deployment:2", "abort_all_requests": False},
-        ),
-        (
-            "set_internal_state",
-            {"server_args": {"weight_version": "deployment:2"}},
         ),
         (
             "load_lora_adapter_from_tensors",
@@ -282,11 +278,15 @@ def test_engine_preflights_scheduler_runtime_load_id_tracking_before_registratio
     engine.node_rank = 0
     engine.worker_type = "regular"
     engine.get_runtime_load_id = lambda: "engine:3"
-    engine._make_request = lambda endpoint, payload, **_kwargs: events.append((endpoint, payload)) or [True]
+    engine._make_request = lambda endpoint, payload, **_kwargs: events.append((endpoint, payload)) or {"success": True}
 
     engine.router_ip = None
     assert engine._register_to_router({"model_path": "model"}) is None
-    assert events == [("set_internal_state", {"server_args": {"weight_version": "engine:3"}})]
+    assert events == [("update_weight_version", {"new_version": "engine:3", "abort_all_requests": False})]
+    # An engine that does not take the version, such as one without Reef's plugin, fails registration.
+    engine._make_request = lambda endpoint, payload, **_kwargs: {"success": False, "message": "refused"}
+    with pytest.raises(RuntimeError, match="did not accept the runtime-load-ID"):
+        engine._register_to_router({"model_path": "model"})
 
 
 @pytest.mark.unit

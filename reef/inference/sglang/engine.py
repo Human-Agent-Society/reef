@@ -326,19 +326,26 @@ class ReefSGLangEngine(InferenceEngine):
             raise RuntimeError("SGLang model_info reports no weight_version (runtime-load-ID)")
         return version
 
-    def _sync_scheduler_runtime_load_id(self, runtime_load_id: str | None) -> None:
+    def _sync_scheduler_runtime_load_id(self, runtime_load_id: str | None) -> object:
+        """Give the engine ``runtime_load_id`` as its ``weight_version`` and return SGLang's answer.
+
+        ``/update_weight_version`` sets the tokenizer manager's version and, in
+        SGLang 0.5.21, forwards it to every scheduler, which records it in the
+        serving context that Reef's plugin stamps each token with. The earlier
+        ``/set_internal_state`` detour carried the version as a string, which
+        0.5.21's typed request refuses before the scheduler sees it.
+        """
         if self.node_rank != 0:
-            return
+            return None
         if not isinstance(runtime_load_id, str) or not runtime_load_id:
             raise RuntimeError("SGLang model_info must report a non-empty weight_version (runtime-load-ID)")
-        updated = self._make_request(
-            "set_internal_state",
-            {"server_args": {"weight_version": runtime_load_id}},
+        answer = self._make_request(
+            "update_weight_version",
+            {"new_version": runtime_load_id, "abort_all_requests": False},
         )
-        if not isinstance(updated, list) or not updated or any(value is not True for value in updated):
-            raise RuntimeError(
-                "SGLang scheduler rejected runtime-load-ID synchronization; install and enable Reef's SGLang plugin"
-            )
+        if not isinstance(answer, dict) or answer.get("success") is not True:
+            raise RuntimeError(f"SGLang did not accept the runtime-load-ID {runtime_load_id!r}: {answer!r}")
+        return answer
 
     def flush_cache(self) -> None:
         if self.node_rank != 0:
@@ -360,13 +367,7 @@ class ReefSGLangEngine(InferenceEngine):
         raise TimeoutError("Timeout while flushing cache.")
 
     def set_runtime_load_id(self, runtime_load_id: str) -> object:
-        version = str(runtime_load_id)
-        result = self._make_request(
-            "update_weight_version",
-            {"new_version": version, "abort_all_requests": False},
-        )
-        self._sync_scheduler_runtime_load_id(version)
-        return result
+        return self._sync_scheduler_runtime_load_id(str(runtime_load_id))
 
     def load_lora_adapter_from_tensors(
         self,
