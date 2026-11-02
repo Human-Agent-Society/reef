@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 import yaml
 from tests.support.chat_templates import CharTemplate
+from tests.support.serving import wait_for_serving
 
 from recipes.tttd.tinker import TttdTinkerLoss
 from reef.artifact.artifact import Artifact
@@ -868,6 +869,7 @@ def test_scenario_commits_recovers_activates_and_trains_from_remote_checkpoint(t
     first, component, inference = build(RemoteClient())
     try:
         scenario = first.get_or_create_scenario("math")
+        wait_for_serving(first)
         base = scenario.current_artifact_ref().release_id
         handler = inference.inference_handler
         # As the inference service does: the request names the row's model, the sampler that serves now.
@@ -907,6 +909,7 @@ def test_scenario_commits_recovers_activates_and_trains_from_remote_checkpoint(t
         assert state.finished_jobs == 1 and state.job is None, first.build_training_status()
         published = scenario.current_artifact_ref()
         assert published.release_id != base
+        wait_for_serving(first)
         assert inference.served_model_name("math") == "tinker://update-1/sampler"
         assert TinkerCheckpoint.read(Path(state.start)).state_path == "tinker://update-1/state"
         step = scenario.scenario_step
@@ -927,6 +930,7 @@ def test_scenario_commits_recovers_activates_and_trains_from_remote_checkpoint(t
         scenario.train_from(base_artifact)
         assert scenario.scenario_step == step + 2
         assert scenario.current_artifact_ref().release_id == base
+        wait_for_serving(second)
         assert inference.served_model_name("math") == UNTRAINED.sampler_path
         # The root release imports as any release: the next job starts from the untrained adapter.
         assert TinkerCheckpoint.read(Path(loop_state(scenario).start)) == UNTRAINED

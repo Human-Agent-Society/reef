@@ -43,6 +43,7 @@ from reef.storage.commits import (
     served_artifact_ref,
 )
 from reef.storage.scenario import ScenarioStorage, ScenarioStore
+from reef.storage.served_models import ServedModels
 from reef.surface.base import Surface
 from reef.train.instructions import InstructionQueue
 from reef.train.trainer import ComponentTrainer
@@ -150,9 +151,8 @@ def recovered_trainer_states(
 class ScenarioFactory:
     """Register, assemble, and recover complete scenario instances.
 
-    ``activates_runtime`` is whether a recovered scenario's active artifact is activated on the runtime. Only the
-    process that runs control activates: a process of another service that loads a scenario on demand (samples,
-    evaluation, data) must not load weights onto the engines that control manages.
+    ``activates_runtime`` permits direct activation on load and commit for standalone scenarios.
+    Service scenarios leave activation to inference. ``served_models`` supplies the actual serving artifact for training.
     """
 
     def __init__(
@@ -165,12 +165,14 @@ class ScenarioFactory:
         scenario_storage: ScenarioStorage,
         experiment_reports: ExperimentReportQueue | None = None,
         activates_runtime: bool = True,
+        served_models: ServedModels | None = None,
         instructions: InstructionQueue | None = None,
     ) -> None:
         self._recipe = recipe
         #: The training instructions of every scenario; None builds scenarios that take no instruction.
         self._instructions = instructions
         self._activates_runtime = activates_runtime
+        self.served_models = served_models
         self._backend_factory = backend_factory
         self._local_artifact_dir = local_artifact_dir
         self._experiment_tracker = experiment_tracker
@@ -422,6 +424,8 @@ class ScenarioFactory:
                     runtime=runtime,
                     training_component=self._recipe.training_component,
                     activation_rule=self._recipe.activation_rule(),
+                    activates_runtime=self._activates_runtime,
+                    served_models=self.served_models,
                     # The recipe's own contract, not the first trainer's: a composite agrees
                     # one across its components, whatever order they are listed in.
                     report_type=self._recipe.report_type,

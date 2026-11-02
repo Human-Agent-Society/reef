@@ -25,6 +25,8 @@ from tests.support.artifact_versions import (
 )
 from tests.support.runtime_stubs import runtime_bindings
 
+from tests.support.serving import wait_for_serving
+
 from reef.dispatcher import Dispatcher
 from reef.observability import TrainFromExperimentEvent, TrainingExperimentContext, TrainingExperimentEvent
 from reef.runtime.interfaces import InferenceHandler
@@ -112,10 +114,12 @@ def test_activate_serves_an_existing_release_and_writes_no_artifact(tmp_path) ->
     checkpoint = scenario.repository.checkpoint_artifact
     stored = stored_paths(tmp_path)
     trainer_state = dict(scenario.trainer.state)
+    wait_for_serving(value)
     runtime.restore_order.clear()
     served_before = len(runtime.activated)
 
     activated = value.activate("math", target["artifact_id"])
+    wait_for_serving(value)
 
     # The release serves as it was made: its own id and bytes, no copy, no new release.
     assert (activated.artifact_id, activated.release_id, activated.content_id) == (
@@ -193,6 +197,7 @@ def test_activation_and_training_start_survive_a_restart(tmp_path) -> None:
 
     restarted, component = restart(tmp_path, backend_factory)
     recovered = restarted.get_or_create_scenario("math")
+    wait_for_serving(restarted)
 
     # The active artifact is the last activation in the log, not the newest checkpoint.
     assert recovered.current_artifact_ref().release_id == activated.release_id
@@ -283,6 +288,7 @@ def test_request_records_the_artifact_ref_captured_before_inference(tmp_path) ->
     async def run() -> None:
         value, _, _ = serving_dispatcher(tmp_path)
         train(value, 1)
+        await asyncio.to_thread(wait_for_serving, value)
         selected_version = value.get_or_create_scenario("math").current_artifact_ref().release_id
         backend = BlockingBackend()
         async with TestClient(TestServer(create_app(value, inference_handler=backend))) as client:
@@ -378,10 +384,11 @@ def test_activate_and_train_from_http_api(tmp_path, monkeypatch) -> None:
 
 
 @pytest.mark.parametrize("component", ["training", "inference"])
-def test_a_failed_activation_or_training_start_changes_nothing(tmp_path, monkeypatch, component):
+def test_a_failed_start_preserves_training_and_reports_inference_failure(tmp_path, monkeypatch, component):
     value, training, _ = dispatcher(tmp_path)
     created = value.get_or_create_scenario("math").artifacts()[0]["artifact_id"]
     train(value, 1)
+    wait_for_serving(value)
     scenario = value.get_or_create_scenario("math")
     head = scenario.current_artifact_ref()
     trainer_state = dict(scenario.trainer.state)
@@ -396,11 +403,19 @@ def test_a_failed_activation_or_training_start_changes_nothing(tmp_path, monkeyp
         monkeypatch.setattr(training.inference, "activate_checkpoint", fail_restore)
         operation = value.activate
     try:
-        with pytest.raises(RuntimeError, match="restore failed"):
+        if component == "training":
+            with pytest.raises(RuntimeError, match="restore failed"):
+                operation("math", created)
+            assert scenario.current_artifact_ref() == head
+            assert len(scenario.store.history()) == 3
+        else:
             operation("math", created)
-        assert scenario.current_artifact_ref() == head
+            with pytest.raises(AssertionError, match="restore failed"):
+                wait_for_serving(value)
+            assert scenario.current_artifact_ref().release_id == created
+            assert len(scenario.store.history()) == 4
+            assert training.inference.served == "w1"
         assert scenario.trainer.state == trainer_state
-        assert len(scenario.store.history()) == 3
     finally:
         value.close()
 

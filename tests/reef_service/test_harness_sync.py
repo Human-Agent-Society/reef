@@ -25,6 +25,7 @@ from tests.reef_service.test_harness_channel import HEADERS, PATCHES, channel_di
 from tests.reef_service.test_harness_channel import served as served_client
 from tests.support.harness_service import EchoInference
 from tests.support.harness_steps import PI_SEED
+from tests.support.serving import wait_for_serving
 
 from reef.harness.sync import TOKEN_PLACEHOLDER
 from reef.service.app import create_app
@@ -133,6 +134,7 @@ def served(dispatcher) -> Iterator[str]:
     thread = threading.Thread(target=loop.run_forever, daemon=True)
     thread.start()
     try:
+        wait_for_serving(dispatcher, "delivery")
         yield f"http://127.0.0.1:{port}"
     finally:
         asyncio.run_coroutine_threadsafe(runner.cleanup(), loop).result(10)

@@ -336,6 +336,20 @@ def served_adapters(tmp_path) -> list[Path]:
     return [path for path in (tmp_path / "remote-work").iterdir() if path.is_dir()]
 
 
+def wait_for_serving(dispatcher) -> None:
+    """Wait for the selected adapter to load on the remote engines."""
+    deadline = time.monotonic() + (1500 if REAL else 120)
+    while time.monotonic() < deadline:
+        item = dispatcher.coordination.served_models.current_request(SCENARIO)
+        selected = dispatcher.get_or_create_scenario(SCENARIO).current_artifact_ref().release_id
+        if item is not None and item.payload.get("release_id") == selected:
+            if item.state == "finished":
+                return
+            assert item.state != "failed", item.error
+        time.sleep(0.05)
+    pytest.fail("the selected adapter did not start serving")
+
+
 @pytest.mark.integration
 def test_tinker_trains_in_the_control_plane_and_serves_on_an_inference_component(tmp_path, monkeypatch):
     from reef.artifact import InMemoryRepositoryBackend
@@ -348,10 +362,14 @@ def test_tinker_trains_in_the_control_plane_and_serves_on_an_inference_component
             monkeypatch.delenv(key)
     with inference_component(tmp_path) as (url, control):
         with control_plane(tmp_path, monkeypatch, url, repository) as (dispatcher, _, inference):
-            initial = inference.base_version
+            dispatcher.get_or_create_scenario(SCENARIO)
+            wait_for_serving(dispatcher)
+            initial = inference.serving_adapter_runtime_load_id(SCENARIO)
+            assert initial is not None
             assert control.call("GET", "runtime-load-ids")["runtime_load_ids"] == [initial] * 2
             assert inference.base_url == url
             train_one_step(dispatcher, inference)
+            wait_for_serving(dispatcher)
             published = inference.serving_adapter_runtime_load_id(SCENARIO)
             assert published is not None and published != initial
             assert control.call("GET", "runtime-load-ids")["runtime_load_ids"] == [published] * 2
@@ -376,6 +394,7 @@ def test_tinker_trains_in_the_control_plane_and_serves_on_an_inference_component
         # with no second load.
         with control_plane(tmp_path, monkeypatch, url, repository) as (dispatcher, _, inference):
             scenario = dispatcher.get_or_create_scenario(SCENARIO)
+            wait_for_serving(dispatcher)
             assert inference.serving_adapter_runtime_load_id(SCENARIO) == published
             assert control.call("GET", "runtime-load-ids")["runtime_load_ids"] == [published] * 2
             (adapter,) = served_adapters(tmp_path)

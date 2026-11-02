@@ -17,6 +17,7 @@ from reef.core.artifact_ref import RootSource
 from reef.core.components import RECORDS_COMPONENT
 from reef.core.errors import ReefError
 from reef.core.reports import ReportBase
+from reef.core.served_models import ScenarioModel
 from reef.observability.commits import CommitExperimentObserver
 from reef.observability.operations import OperationMetrics
 from reef.runtime.interfaces import InferenceRuntime
@@ -302,12 +303,21 @@ class Scenario:
         for a long evaluation.
         """
         trainer = self.trainer_for(component)
-        self.refresh_instructions()
         with self._committer.lock if len(self.trainers) == 1 else nullcontext():
             # The staleness check measures data against the weights that serve; a scenario that loads no weights
             # serves one fixed model, so its data never goes stale.
-            weights_load = self._binding.surface.loader_component is not None and self.runtime is not None
-            serving = self.serving_artifact_id() if weights_load else None
+            runtime = self.runtime
+            weights_load = self._binding.surface.loader_component is not None and runtime is not None
+            serving = self.served_artifact_id() if weights_load else None
+            if (
+                weights_load
+                and runtime is not None
+                and runtime.serves_requests
+                and self._binding.served_models is not None
+                and serving != self.serving_artifact_id()
+            ):
+                return None
+            self.refresh_instructions()
             return trainer.run_once(serving_artifact_id=serving)
 
     def pending_instructions(self) -> int:
@@ -335,12 +345,24 @@ class Scenario:
         return names[0] if len(names) == 1 else None
 
     def serving_artifact_id(self) -> str:
-        """The artifact that answers this scenario's requests now: the active artifact of ``served_component``,
+        """The artifact selected for this scenario: the active artifact of ``served_component``,
         or the active release for a scenario whose model is no Reef artifact or whose store keeps no commit
         history to name the active artifact."""
         component = self.served_component()
         active = None if component is None or not self.store.durable else self.artifact_status()[component]["active"]
         return active or self.current_artifact_ref().release_id
+
+    def served_artifact_id(self) -> str | None:
+        """The artifact that serves requests, or None before inference publishes a route.
+
+        Standalone scenarios activate their own runtime, so their selected artifact is also their served artifact.
+        Training uses this identity while a newly selected artifact still starts.
+        """
+        routes = self._binding.served_models
+        if routes is None:
+            return self.serving_artifact_id() if self._binding.activates_runtime else None
+        served = routes.read(ScenarioModel(self.name))
+        return None if served is None else served.artifact_id
 
     def replay_retained(
         self, *, up_to_sequence: int, consumed_ids: frozenset[str], component: str | None = None
