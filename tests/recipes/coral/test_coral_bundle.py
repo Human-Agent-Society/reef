@@ -194,12 +194,3 @@ def test_middleware_usage_from_final_sse_chunk(tmp_path):
     assert record.agent_record_id == "rec-s"
     assert record.prompt_tokens == 11
     assert record.completion_tokens == 4
-
-
-def test_legacy_journal_rows_write_artifact_ids():
-    original = _record("a1", "c1", "r1", release="artifact:old")
-    row = json.loads(original.to_json())
-    row["release_id"] = row.pop("artifact_id")
-    restored = CallRecord.from_json(json.dumps(row))
-    assert restored == original
-    assert "release_id" not in json.loads(restored.to_json())

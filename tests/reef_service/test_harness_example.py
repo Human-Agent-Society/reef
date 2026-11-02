@@ -534,7 +534,13 @@ def session_events(session: str, release: str, stages, tool: str | None = None) 
             "type": "session",
             "seq": 0,
             "time": 1000,
-            "data": {"session": session, "release_id": release, "model": "m", "tools": ["read_file"], "agent": "root"},
+            "data": {
+                "session": session,
+                "artifact_id": release,
+                "model": "m",
+                "tools": ["read_file"],
+                "agent": "root",
+            },
         },
         {"type": "turn/start", "seq": 1, "time": 1001, "data": {"turn": 1, "prompt": "go"}},
     ]
@@ -637,8 +643,8 @@ def test_replay_collects_a_run_and_renders_one_self_contained_page(tmp_path: Pat
         events = session_events(name, release, ["think"], tool)
         (native / "sessions" / name / "session.jsonl").write_text("\n".join(json.dumps(e) for e in events) + "\n")
     mounts = (
-        {"type": "harness/mount", "seq": 0, "time": 999, "data": {"release_id": "r1", "source": "boot"}},
-        {"type": "harness/mount", "seq": 1, "time": 1051, "data": {"release_id": "r2", "source": "release"}},
+        {"type": "harness/mount", "seq": 0, "time": 999, "data": {"artifact_id": "r1", "source": "boot"}},
+        {"type": "harness/mount", "seq": 1, "time": 1051, "data": {"artifact_id": "r2", "source": "release"}},
     )
     (native / "sessions" / "serve.jsonl").write_text("".join(json.dumps(event) + "\n" for event in mounts))
 

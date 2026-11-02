@@ -334,7 +334,7 @@ def test_baseline_eval_reuses_an_earlier_evaluation_and_samples_only_for_trainin
             "question_id": "e0",
             "seed": seed,
             "receipt": f"old-receipt-{seed}",
-            "release_id": "old-r0",
+            "artifact_id": "old-r0",
             "correct": seed == 0,
             "finish_reason": "stop",
             "usage": {"completion_tokens": 5},
@@ -359,10 +359,7 @@ def test_baseline_eval_reuses_an_earlier_evaluation_and_samples_only_for_trainin
     assert metrics[0]["elapsed_scope"] == "reused" and metrics[0]["reused_from"] == str(earlier)
     with (campaign_args.output / "eval-0000.jsonl").open() as handle:
         copied = [json.loads(line) for line in handle]
-    expected = [{**row, "artifact_id": row["release_id"]} for row in rows]
-    for row in expected:
-        row.pop("release_id")
-    assert copied == expected
+    assert copied == rows
     # Repeating the finished campaign is read-only with respect to the service.
     campaign_args.resume = True
     Campaign(campaign_args).run()

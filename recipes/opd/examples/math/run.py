@@ -65,15 +65,6 @@ def report_id(scenario: str, receipt: str) -> str:
     return uuid.uuid5(uuid.NAMESPACE_URL, f"reef:opd:{scenario}:{receipt}").hex
 
 
-def artifact_row(row: dict[str, Any]) -> dict[str, Any]:
-    """Read a saved campaign row, accepting the former release_id key."""
-    row = dict(row)
-    legacy_id = row.pop("release_id", None)
-    if "artifact_id" not in row and legacy_id is not None:
-        row["artifact_id"] = legacy_id
-    return row
-
-
 class Campaign:
     """One scenario with synchronous version boundaries and separate evaluation records."""
 
@@ -209,7 +200,7 @@ class Campaign:
                         # A killed append may leave only the last record incomplete.
                         handle.truncate(offset)
                         break
-                    row = artifact_row(json.loads(line))
+                    row = json.loads(line)
                     key = (row["question_id"], row["seed"])
                     if key in rows or key not in expected or row.get("evaluation") is not expected[key]:
                         raise ValueError(f"Unexpected or duplicate sample in {path}: {key}")
@@ -270,7 +261,7 @@ class Campaign:
         }
         metric_path = self.output / f"eval-{step:04d}.metrics.json"
         if metric_path.exists():
-            saved = artifact_row(json.loads(metric_path.read_text()))
+            saved = json.loads(metric_path.read_text())
             if any(
                 saved[key] != metric[key]
                 for key in ("step", "artifact_id", "accuracy", "samples", "questions", "truncated")
@@ -278,9 +269,7 @@ class Campaign:
                 raise ValueError(f"Saved metric does not match predictions at step {step}")
         else:
             write_json(metric_path, metric)
-        metrics = [
-            artifact_row(json.loads(path.read_text())) for path in sorted(self.output.glob("eval-*.metrics.json"))
-        ]
+        metrics = [json.loads(path.read_text()) for path in sorted(self.output.glob("eval-*.metrics.json"))]
         temporary = self.output / "metrics.jsonl.tmp"
         with temporary.open("w") as handle:
             handle.writelines(json.dumps(value) + "\n" for value in metrics)
@@ -298,12 +287,12 @@ class Campaign:
         target = self.output / "eval-0000.jsonl"
         metric_path = self.output / "eval-0000.metrics.json"
         if metric_path.exists():
-            if artifact_row(json.loads(metric_path.read_text())).get("reused_from") != str(self.args.baseline_eval):
+            if json.loads(metric_path.read_text()).get("reused_from") != str(self.args.baseline_eval):
                 raise ValueError("eval-0000 was not reused from the configured --baseline-eval")
             return
         # Split on newlines only: a response may contain Unicode line separators that splitlines() would honor.
         with self.args.baseline_eval.open(encoding="utf-8") as handle:
-            rows = [artifact_row(json.loads(line)) for line in handle if line.strip()]
+            rows = [json.loads(line) for line in handle if line.strip()]
         expected = {(q.id, self.args.seed + repeat) for q in questions for repeat in range(self.args.eval_repeats)}
         if {(row["question_id"], row["seed"]) for row in rows} != expected or len(rows) != len(expected):
             raise ValueError("--baseline-eval does not cover exactly this campaign's evaluation questions and seeds")
@@ -424,7 +413,7 @@ class Campaign:
             self.verify_update(step, rows, history)
             release_path = self.output / f"releases-{step:04d}.json"
             if release_path.exists():
-                saved = [artifact_row(row) for row in reversed(json.loads(release_path.read_text()))]
+                saved = list(reversed(json.loads(release_path.read_text())))
                 if [row["artifact_id"] for row in saved] != [row["artifact_id"] for row in history[: len(saved)]]:
                     raise RuntimeError("Saved publication history no longer matches the service")
             else:

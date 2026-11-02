@@ -45,11 +45,7 @@ class CallRecord:
 
     @classmethod
     def from_json(cls, line: str) -> CallRecord:
-        data = json.loads(line)
-        legacy_id = data.pop("release_id", None)
-        if "artifact_id" not in data:
-            data["artifact_id"] = legacy_id
-        return cls(**data)
+        return cls(**json.loads(line))
 
 
 class CallJournal:

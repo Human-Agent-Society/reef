@@ -25,16 +25,8 @@ MAIN_GRAPH = "native/graphs/main.json"
 
 
 def read_events(path):
-    """Read native events and normalize identity fields from older logs."""
-    events = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
-    for event in events:
-        data = event.get("data", {})
-        for old, new in (("release_id", "artifact_id"), ("parent_release_id", "parent_artifact_id")):
-            if old in data:
-                data.setdefault(new, data.pop(old))
-        if event["type"].startswith("release/"):
-            event["type"] = "artifact/" + event["type"].removeprefix("release/")
-    return events
+    """The native events in the JSON-lines log ``path``."""
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
 def read_tree(directory: Path) -> dict:
