@@ -25,6 +25,7 @@ import asyncio
 import os
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
+from contextlib import suppress
 from pathlib import Path
 
 from aiohttp import web
@@ -32,12 +33,15 @@ from aiohttp import web
 from reef.dispatcher.serving import ServingWorker
 from reef.execution.workers import SERVICE_COMPONENTS
 from reef.observability import build_record_observer
+from reef.recipe.base import ServedEndpoint
+from reef.recipe.composite import CompositeRecipe
 from reef.runtime.deployment import close_runtimes
 from reef.service.app import create_data_app, create_harness_app
 from reef.service.assembly import (
     build_app,
     build_artifact_backend,
     build_dispatcher,
+    default_served_url,
     open_scenario_storage,
     open_service_coordination,
     serving_recipe,
@@ -47,8 +51,9 @@ from reef.service.deploy.service_config import ServiceConfig
 from reef.service.engine_clients import DeploymentEngineClients
 from reef.service.inference_service import build_inference_app
 from reef.service.web import service_application
-from reef.storage.coordination import instance_id
+from reef.storage.coordination import Coordination, instance_id
 from reef.storage.observer import ObservedScenarioStorage
+from reef.train.job_queue import TrainingJobWorker
 
 
 class ComponentApp(ABC):
@@ -151,8 +156,74 @@ class HarnessApp(ComponentApp):
         )
 
 
+class TrainingApp(ComponentApp):
+    """Build the training service from its job components and coordination store.
+
+    Values: this stateless builder returns an app with one worker per recipe job component, and refuses a recipe
+    with no job component. The app owns these workers, their components, the runtime and the coordination store.
+    Purpose: ``build_component_app("training", ...)`` runs jobs without opening scenario, artifact or data stores.
+    """
+
+    def build(self, settings: ServiceConfig, environ: Mapping[str, str]) -> web.Application:
+        recipe = serving_recipe(settings, environ)
+        if isinstance(recipe, CompositeRecipe):
+            recipe = recipe.with_served_endpoint(
+                ServedEndpoint(url=settings.served_url or default_served_url(settings.host, settings.port), token=None)
+            )
+        components = recipe.job_components()
+        runtime = recipe.runtime
+        coordination: Coordination | None = None
+        workers: list[TrainingJobWorker] = []
+
+        def close_training() -> None:
+            errors: list[BaseException] = []
+            unclosed_components = list(components[len(workers) :])
+            for worker in reversed(workers):
+                try:
+                    worker.stop()
+                except BaseException as exc:
+                    errors.append(exc)
+                    # A failed stop can precede component.close, for example when its thread never started.
+                    unclosed_components.append(worker.component)
+            try:
+                errors.extend(close_runtimes(unclosed_components, runtime))
+            except BaseException as exc:
+                errors.append(exc)
+            if coordination is not None:
+                try:
+                    coordination.close()
+                except BaseException as exc:
+                    errors.append(exc)
+            if errors:
+                raise errors[0]
+
+        try:
+            if not components:
+                raise ValueError(f"recipe {settings.recipe!r} submits no training job, so it has no training service")
+            coordination = open_service_coordination(settings)
+            workers.extend(
+                TrainingJobWorker(
+                    component, coordination.work_queue, worker_id=instance_id(f"training-{component.name}")
+                )
+                for component in components
+            )
+            for worker in workers:
+                worker.start()
+            app = service_application(settings.tokens)
+        except BaseException:
+            with suppress(Exception):
+                close_training()
+            raise
+
+        async def cleanup(app: web.Application) -> None:
+            await asyncio.to_thread(close_training)
+
+        app.on_cleanup.append(cleanup)
+        return app
+
+
 class QueueServiceApp(ComponentApp):
-    """A service that only takes work from a queue (samples, training, evaluation): a dispatcher that runs only the
+    """A service that only takes work from a queue (samples, evaluation): a dispatcher that runs only the
     service's own workers on the shared store, and answers ``/healthz`` alone. The evaluation service loads each
     rollout's scenario on demand, resolves the candidate artifact and serves it itself.
 
@@ -164,9 +235,6 @@ class QueueServiceApp(ComponentApp):
 
     def build(self, settings: ServiceConfig, environ: Mapping[str, str]) -> web.Application:
         dispatcher = build_dispatcher(settings, environ=environ, components=frozenset({self.name}))
-        if dispatcher.services.runs_training and not dispatcher.recipe.job_components():
-            dispatcher.close()
-            raise ValueError(f"recipe {settings.recipe!r} submits no training job, so it has no training service")
         app = service_application(settings.tokens)
 
         async def close_dispatcher(app: web.Application) -> None:
@@ -181,7 +249,7 @@ COMPONENT_APPS: dict[str, ComponentApp] = {
     "control": ControlApp(),
     "inference": InferenceApp(),
     "samples": QueueServiceApp("samples"),
-    "training": QueueServiceApp("training"),
+    "training": TrainingApp(),
     "evaluation": QueueServiceApp("evaluation"),
     "data": DataApp(),
     "harness": HarnessApp(),
