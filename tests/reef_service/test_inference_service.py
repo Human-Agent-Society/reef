@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -11,19 +10,12 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
-from reef.core.artifact_ref import ArtifactRef
-from reef.core.artifact_selection import ArtifactSelection, SelectedArtifact
 from reef.core.records_types import RequestType
 from reef.core.served_models import ACTIVE, ScenarioModel, ServedArtifact
+from reef.core.snapshot import SnapshotRef
 from reef.inference.http import HttpInferenceHandler
 from reef.runtime.interfaces import EngineClients, InferenceHandler
-from reef.service.inference_service import (
-    ARTIFACT_HEADER,
-    RECORD_HEADER,
-    RELEASE_HEADER,
-    ArtifactRefs,
-    build_inference_app,
-)
+from reef.service.inference_service import ARTIFACT_HEADER, RECORD_HEADER, RELEASE_HEADER, build_inference_app
 from reef.storage.commits import CommitRecord
 from reef.storage.served_models import SERVING_KIND, SERVING_QUEUE
 from reef.storage.sql_coordination import memory_coordination
@@ -58,7 +50,7 @@ def commit(release_id: str) -> CommitRecord:
     return CommitRecord(
         scenario="math",
         step=1,
-        artifact_ref=ArtifactRef("content:1", release_id, "base"),
+        snapshot=SnapshotRef(release_id, "base"),
         checkpoint=True,
         algorithm_state={},
         consumed_ids=frozenset(),
@@ -98,7 +90,7 @@ def test_a_request_goes_to_the_served_artifact_and_its_record_joins_the_record_s
     assert headers[ARTIFACT_HEADER] == headers[RELEASE_HEADER] == "release-1"
     (item,) = inference_records(records)
     assert item.agent_record_id == headers[RECORD_HEADER]
-    assert item.artifact_ref is not None and item.artifact_ref.release_id == "release-1"
+    assert item.artifact_id == "release-1"
     assert item.payload["metadata"]["tags"] == {"session": "s1"}
     assert item.payload["response"]["model"] == "math-v1"
 
@@ -302,26 +294,28 @@ def test_a_ready_old_route_does_not_make_its_replacement_ready(tmp_path: Path) -
     asyncio.run(check())
 
 
-def test_inference_records_resolve_durable_components_of_a_selection(tmp_path):
+def test_inference_records_do_not_need_snapshot_history(tmp_path):
+    # The serving row alone identifies the responding artifact, including before
+    # the first training commit and after older operations have been pruned.
     storage = SQLiteScenarioStorage(tmp_path / "records")
-    store = storage.open("math")
-    original = commit("stored-model")
-    store.commit_step(expected_step=0, commit=original)
-    selected = ArtifactSelection({"weights": SelectedArtifact("model-artifact", original.artifact_ref)})
-    store.commit_step(
-        expected_step=1,
-        commit=replace(
-            original,
-            step=2,
-            operation="activate",
-            checkpoint=False,
-            algorithm_state=None,
-            artifact_ref=ArtifactRef("selection-content", "selection:local-cache", None),
-            component="weights",
-            components=selected.artifact_ids,
-            selection=selected,
-        ),
-    )
-    assert ArtifactRefs(storage).ref("math", "model-artifact") == original.artifact_ref
-    store.close()
-    storage.close()
+    coordination = memory_coordination()
+    try:
+        from reef.service.inference_service import InferenceReplica, ServedModelsCache
+        from reef.service.wire import RequestHeaders
+
+        replica = InferenceReplica(ServedModelsCache(coordination.served_models), storage, Engines())
+        receipt = replica.record(
+            RequestHeaders(scenario="math", request_type=RequestType.INFERENCE),
+            {"model": "reef", "artifact_id": "model-artifact"},
+            {"choices": []},
+            "model-artifact",
+        )
+        store = storage.open("math")
+        try:
+            assert store.history() == ()
+            assert store.records.get("math", receipt).artifact_id == "model-artifact"
+        finally:
+            store.close()
+    finally:
+        storage.close()
+        coordination.close()

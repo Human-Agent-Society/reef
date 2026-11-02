@@ -42,7 +42,7 @@ class SourceFiles(ArtifactFiles):
     name of what the source served, or ``""`` when the source has none; it is recorded for people to trace an
     import. ``reference`` is ``None`` when Reef stores a copy of ``D``; otherwise it maps each path of the files that
     Reef stores instead to their bytes, for a source that keeps ``D`` fixed. ``copy_into(directory)`` writes ``D``
-    into the empty ``directory``, so that ``directory_content_id(directory) == content_id()``; it raises
+    into the empty ``directory``, so that ``directory_checksum(directory) == checksum()``; it raises
     ``ArtifactSourceError`` when the source fails.
 
     Purpose: an ``ArtifactSourceReader`` opens one for a URI. The import checks the component's layout on it, which

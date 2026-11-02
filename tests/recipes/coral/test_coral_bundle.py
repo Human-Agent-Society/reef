@@ -21,7 +21,7 @@ def _record(agent, commit, record_id, *, release=None, prompt=0, completion=0, r
         path="/v1/chat/completions",
         status_code=200,
         agent_record_id=record_id,
-        release_id=release,
+        artifact_id=release,
         prompt_tokens=prompt,
         completion_tokens=completion,
         tags={"coral-run": run, "coral-agent": agent, "coral-commit": commit},
@@ -65,9 +65,9 @@ def test_bundle_scores_best_revisions_and_tokens(tmp_path):
     }
     first, second = bundle["attempts"]
     assert first["inference_calls"] == 2 and first["prompt_tokens"] == 110
-    assert second["release_ids"] == ["rel-1"]
+    assert second["artifact_ids"] == ["rel-1"]
     # the revision check the issue asks for: later attempt on a newer release
-    assert [(a["commit_hash"], a["release_ids"]) for a in bundle["attempts"]] == [
+    assert [(a["commit_hash"], a["artifact_ids"]) for a in bundle["attempts"]] == [
         ("c1", ["rel-0"]),
         ("c2", ["rel-1"]),
     ]
@@ -109,7 +109,7 @@ def test_middleware_captures_release_and_usage(tmp_path):
                     "headers": [
                         (b"content-type", b"application/json"),
                         (b"x-reef-agent-record-id", b"rec-1"),
-                        (b"x-reef-release-id", b"rel-42"),
+                        (b"x-reef-artifact-id", b"rel-42"),
                     ],
                 }
             )
@@ -145,7 +145,7 @@ def test_middleware_captures_release_and_usage(tmp_path):
 
     asyncio.run(run())
     (record,) = journal.records()
-    assert record.release_id == "rel-42"
+    assert record.artifact_id == "rel-42"
     assert record.prompt_tokens == 7
     assert record.completion_tokens == 3
 

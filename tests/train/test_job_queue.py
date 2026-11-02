@@ -12,8 +12,9 @@ from tests.support._trajectories import policy_trajectory
 from tests.support.runtime_stubs import STUB_ROOT
 
 from reef.artifact import DefaultStart
-from reef.core.artifact_ref import ArtifactRef
+from reef.core.artifact_selection import ArtifactSelection
 from reef.core.job_data import JobData, TaskSample
+from reef.core.snapshot import SnapshotRef
 from reef.core.training_request import TrainingRequest
 from reef.observability.base import (
     ExperimentRun,
@@ -270,9 +271,11 @@ class RunTracker(ExperimentTracker):
 
 
 def job_event(job_id: str | None) -> TrainingExperimentEvent:
-    ref = ArtifactRef(content_id="s", release_id="r1", parent_release_id=None)
-    context = TrainingExperimentContext(scenario="s", recipe="recipe", step=1, source_artifact_ref=ref)
-    return TrainingExperimentEvent(context, ref, {}, "committed", training_job_id=job_id)
+    ref = SnapshotRef(revision="r1", parent_revision=None)
+    context = TrainingExperimentContext(
+        scenario="s", recipe="recipe", step=1, source_artifacts=ArtifactSelection({"weights": ref.revision})
+    )
+    return TrainingExperimentEvent(context, context.source_artifacts, {}, "committed", training_job_id=job_id)
 
 
 @pytest.mark.unit

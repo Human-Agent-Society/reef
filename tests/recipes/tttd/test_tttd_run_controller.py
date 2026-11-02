@@ -319,8 +319,8 @@ def test_status_client_reads_authenticated_public_training_status() -> None:
 def test_controller_fails_fast_when_reef_discards_a_mixed_artifact_step(tmp_path) -> None:
     failure = ScenarioTrainingFailure(
         step=0,
-        reason="mixed_release_ids",
-        release_ids=("v0", "v1"),
+        reason="mixed_artifact_ids",
+        artifact_ids=("v0", "v1"),
     )
     store = TTTDRunStateStore(tmp_path / "state.json", _identity())
     store.save_pending(next_step=1, previous_served_artifact_id="v0", archive={"steps": [0]})
@@ -332,7 +332,7 @@ def test_controller_fails_fast_when_reef_discards_a_mixed_artifact_step(tmp_path
         sleep=lambda _seconds: None,
     )
 
-    with pytest.raises(TTTDRunStateError, match="mixed_release_ids"):
+    with pytest.raises(TTTDRunStateError, match="mixed_artifact_ids"):
         controller.run(1)
 
 

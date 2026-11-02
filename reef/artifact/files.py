@@ -22,12 +22,12 @@ class ArtifactFiles(ABC):
 
     Values: ``paths()`` is the set of ``D``'s paths without duplicates, possibly empty, sorted by ``path_order``.
     For each path ``p`` in it, ``sha256(p)`` is the lowercase hex SHA-256 of ``D[p]`` and ``read_bytes(p)`` is
-    ``D[p]``. Both raise ``FileNotFoundError`` for a path that is not in ``paths()``. ``content_id()`` is the
-    SHA-256 of the pairs ``(p, sha256(p))`` in that order, so equal files at equal paths give equal IDs wherever
+    ``D[p]``. Both raise ``FileNotFoundError`` for a path that is not in ``paths()``. ``checksum()`` is the
+    SHA-256 of the pairs ``(p, sha256(p))`` in that order, prefixed by ``sha256:``, so equal files at equal paths give equal checksums wherever
     they are stored.
 
-    Purpose: an import and a component's ``ArtifactLayout`` read it; the import names its content with
-    ``content_id``.
+    Purpose: import validation and storage integrity checks read these files.
+    Checksums compare bytes and paths independently of artifact identity.
     """
 
     @abstractmethod
@@ -39,9 +39,9 @@ class ArtifactFiles(ABC):
     @abstractmethod
     def read_bytes(self, path: str) -> bytes: ...
 
-    def content_id(self) -> str:
+    def checksum(self) -> str:
         files = [(path, self.sha256(path)) for path in self.paths()]
-        return f"content:{hashlib.sha256(json.dumps(files).encode()).hexdigest()}"
+        return f"sha256:{hashlib.sha256(json.dumps(files).encode()).hexdigest()}"
 
 
 class DirectoryFiles(ArtifactFiles):
@@ -69,6 +69,6 @@ class DirectoryFiles(ArtifactFiles):
         return self.directory / relative
 
 
-def directory_content_id(directory: Path) -> str:
-    """The content ID of the files under ``directory`` (``ArtifactFiles.content_id``)."""
-    return DirectoryFiles(directory).content_id()
+def directory_checksum(directory: Path) -> str:
+    """The checksum of the files under ``directory`` (``ArtifactFiles.checksum``)."""
+    return DirectoryFiles(directory).checksum()

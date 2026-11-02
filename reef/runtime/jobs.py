@@ -23,8 +23,8 @@ from typing import Any, Literal, cast
 from reef.artifact.artifact import Artifact
 from reef.artifact.files import ArtifactFiles
 from reef.artifact.repository import DefaultStart
-from reef.core.artifact_ref import RootSource
 from reef.core.job_data import JobData
+from reef.core.snapshot import RootSource
 from reef.core.weight_layout import ADAPTER_DIR, WEIGHT_LAYOUTS, WeightLayout
 from reef.surface.base import ArtifactLayout
 
@@ -279,7 +279,7 @@ class TrainingComponent(ABC):
         """
         local_path = root.artifact.materialize().local_path
         if local_path is None:
-            raise ValueError(f"the root release {root.artifact.ref.release_id} has no local files to train from")
+            raise ValueError(f"the root release {root.artifact.ref.revision} has no local files to train from")
         return self.import_start(local_path)
 
     @property

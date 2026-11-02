@@ -13,10 +13,11 @@ from pathlib import Path
 from threading import Event, Lock, Thread
 from typing import Any
 
-from reef.artifact.artifact import Artifact, ArtifactRef
+from reef.artifact.artifact import Artifact
 from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.artifact.repository import EnumerableRepositoryBackendFactory, RepositoryBackendFactory
 from reef.artifact.sources import SourceFiles
+from reef.core.artifact_selection import ArtifactSelection
 from reef.core.errors import ReefError, ScenarioCapacityFull, UnknownScenario
 from reef.core.job_data import TrajectorySample
 from reef.core.records_types import AgentRecord, RequestType
@@ -601,21 +602,21 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         self.request_artifact_copy(scenario)
         return imported
 
-    def sync_release(
+    def sync_artifact(
         self,
         scenario: str,
         artifact: Artifact,
         *,
         component: str,
-        expected_release_id: str,
+        expected_selection: ArtifactSelection,
         metrics: Mapping[str, Any],
-    ) -> ArtifactRef:
+    ) -> ComponentArtifact:
         """Make a person's merged ``component`` tree ``scenario``'s active release and training start, under the
-        scenario's lock, and write what the scenario serves now; see :meth:`ScenarioCommitter.sync_release`."""
+        scenario's lock, and write what the scenario serves now; see :meth:`ScenarioCommitter.sync_artifact`."""
         with self.registry.lock_for(scenario):
             current = self.registry.require(scenario)
-            published = current.sync_release(
-                artifact, component=component, expected_release_id=expected_release_id, metrics=metrics
+            published = current.sync_artifact(
+                artifact, component=component, expected_selection=expected_selection, metrics=metrics
             )
             self.scenario_committed(current)
             return published
@@ -981,13 +982,16 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
             self.background_threads.idle_unload_thread.join()
         for worker in local_workers:
             worker.thread.join()
+        errors: list[BaseException] = []
         # The service workers stop after the local cycles, so that the publisher releases the control lease only
         # when no cycle of this instance can commit any more.
-        self.workers.stop()
+        try:
+            self.workers.stop()
+        except BaseException as exc:
+            errors.append(exc)
         if self.background_threads.metrics_thread is not None:
             self.background_threads.metrics_thread.join()
             self.record_operational_metrics()
-        errors: list[BaseException] = []
         replaced = self.local_workers.take_replaced()
         for scenario in (*replaced, *self.registry.loaded_scenarios()):
             # Use scenario.close(), not records.close(). The processors must

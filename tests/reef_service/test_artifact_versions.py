@@ -29,7 +29,7 @@ from tests.support.serving import wait_for_serving
 
 from reef.dispatcher import Dispatcher
 from reef.observability import TrainFromExperimentEvent, TrainingExperimentContext, TrainingExperimentEvent
-from reef.runtime.interfaces import InferenceHandler
+from reef.runtime.interfaces import InferenceArtifact, InferenceHandler
 from reef.runtime.jobs import SavedCheckpoint
 from reef.service.app import create_app
 from reef.storage.commit_history import CommitHistoryScenarioStore
@@ -43,11 +43,11 @@ class BlockingBackend(InferenceHandler):
     def __init__(self) -> None:
         self.started = asyncio.Event()
         self.finish = asyncio.Event()
-        self.release_id: str | None = None
+        self.artifact_id: str | None = None
 
-    async def inference(self, artifact, path, payload):
+    async def inference(self, artifact: InferenceArtifact, path, payload):
         del path, payload
-        self.release_id = artifact.ref.release_id
+        self.artifact_id = artifact.artifact_id
         self.started.set()
         await self.finish.wait()
         return {"choices": [{"message": {"content": "ok"}}]}
@@ -77,7 +77,7 @@ def test_the_status_names_each_components_active_artifact_and_training_start(tmp
     moves only the training start."""
     value, _, _ = dispatcher(tmp_path)
     scenario = value.get_or_create_scenario("math")
-    base = scenario.repository.start_artifact.release_id
+    base = scenario.repository.resolve(scenario.repository.start_artifact).artifact_id
     (component,) = scenario.artifact_status()
 
     def artifacts() -> dict:
@@ -109,9 +109,9 @@ def test_activate_serves_an_existing_release_and_writes_no_artifact(tmp_path) ->
     # Each release made its own artifact: a training step's, and the creation's, the scenario's root release.
     assert all(row["artifact_id"] and row["component"] for row in before)
     assert all(not {"release_id", "content_id", "parent_release_id"} & row.keys() for row in before)
-    assert before[-1]["artifact_id"] == value.get_or_create_scenario("math").repository.start_artifact.release_id
+    assert before[-1]["artifact_id"] == scenario.repository.resolve(scenario.repository.start_artifact).artifact_id
     target = before[-2]
-    target_ref = scenario.artifact_release_ref(target["artifact_id"])[1]
+    target_ref = scenario.artifact_snapshot(target["artifact_id"])[1]
     last_training_step = value.build_training_status()["scenarios"]["math"]["last_committed_step"]
     checkpoint = scenario.repository.checkpoint_artifact
     stored = stored_paths(tmp_path)
@@ -124,13 +124,9 @@ def test_activate_serves_an_existing_release_and_writes_no_artifact(tmp_path) ->
     wait_for_serving(value)
 
     # The release serves as it was made: its own id and bytes, no copy, no new release.
-    assert (activated.artifact_id, activated.release_id, activated.content_id) == (
-        target["artifact_id"],
-        target_ref.release_id,
-        target_ref.content_id,
-    )
+    assert activated.artifact_id == target["artifact_id"]
     assert activated.component == target["component"]
-    assert scenario.current_artifact_ref() == target_ref
+    assert scenario.current_snapshot() == target_ref
     assert scenario.repository.checkpoint_artifact == checkpoint
     assert scenario.repository.backend.current() == checkpoint
     assert stored_paths(tmp_path) == stored
@@ -140,7 +136,7 @@ def test_activate_serves_an_existing_release_and_writes_no_artifact(tmp_path) ->
     assert scenario.trainer.state == trainer_state
     record = scenario.store.history()[-1]
     assert record.operation == "activate"
-    assert record.artifact_ref == scenario.current_artifact_ref()
+    assert record.snapshot == scenario.current_snapshot()
     assert record.checkpoint is False and record.algorithm_state is None and record.component is None
     after = value.list_artifacts("math")
     assert len(after) == len(before)
@@ -160,7 +156,7 @@ def test_train_from_sets_the_next_job_start_and_leaves_serving_alone(tmp_path) -
     train(value, 1)
     train(value, 2)
     scenario = value.get_or_create_scenario("math")
-    served = scenario.current_artifact_ref()
+    served = scenario.current_snapshot()
     target = value.list_artifacts("math")[-2]
     runtime.restore_order.clear()
     served_before = len(runtime.activated)
@@ -168,16 +164,18 @@ def test_train_from_sets_the_next_job_start_and_leaves_serving_alone(tmp_path) -
     start = value.train_from("math", target["artifact_id"])
 
     assert start.artifact_id == target["artifact_id"]
-    assert scenario.current_artifact_ref() == served
+    assert scenario.current_snapshot() == served
     assert runtime.activated[served_before:] == []
     assert runtime.restore_order == ["training"]
     record = scenario.store.history()[-1]
-    assert (record.operation, record.artifact_ref.release_id, record.component) == (
+    assert (record.operation, record.selection.components, record.component) == (
         "train_from",
-        start.release_id,
+        {"weights": start.artifact_id},
         None,
     )
-    assert [row["artifact_id"] for row in value.list_artifacts("math") if row["active"]] == [served.release_id]
+    assert [row["artifact_id"] for row in value.list_artifacts("math") if row["active"]] == [
+        scenario.repository.resolve(served).artifact_id
+    ]
     imported = str(runtime.imported[-1])
     assert JobLoopState.from_dict(scenario.trainer.state).start == imported
     # The next job starts from the imported release.
@@ -240,7 +238,7 @@ def test_activation_and_training_start_survive_a_restart(tmp_path) -> None:
     wait_for_serving(restarted)
 
     # The active artifact is the last activation in the log, not the newest checkpoint.
-    assert recovered.current_artifact_ref().release_id == activated.release_id
+    assert recovered.serving_artifact_id() == activated.artifact_id
     assert component.activated == ["w1"]
     assert [row["artifact_id"] for row in recovered.artifacts() if row["active"]] == [first["artifact_id"]]
     # The training start is taken again: the trainer's own commits do not record it yet.
@@ -256,7 +254,7 @@ def test_a_lost_activation_record_leaves_the_release_the_log_names(tmp_path) -> 
     train(value, 1)
     train(value, 2)
     scenario = value.get_or_create_scenario("math")
-    newest = scenario.current_artifact_ref()
+    newest = scenario.current_snapshot()
     value.activate("math", value.list_artifacts("math")[-2]["artifact_id"])
     assert isinstance(scenario.store, CommitHistoryScenarioStore)
     last_step = scenario.store.history()[-1].step
@@ -269,7 +267,7 @@ def test_a_lost_activation_record_leaves_the_release_the_log_names(tmp_path) -> 
     restarted, _ = restart(tmp_path, backend_factory)
     recovered = restarted.get_or_create_scenario("math")
 
-    assert recovered.current_artifact_ref() == newest
+    assert recovered.current_snapshot() == newest
     assert recovered.store.history()[-1].operation == "training"
     restarted.close()
 
@@ -297,9 +295,11 @@ def test_train_from_starts_a_new_experiment_run_segment_and_activate_does_not(tm
     ]
     (start,) = tracker.starts
     assert (start.step, start.run_segment) == (8, 0)
-    assert start.start_artifact_ref.release_id == creation["artifact_id"]
+    assert start.start_artifacts.components == {"weights": creation["artifact_id"]}
     # The steps after the new start name the training start as their source, not the active release.
-    assert {event.context.source_artifact_ref.release_id for event in tracker.events[6:7]} == {creation["artifact_id"]}
+    assert {event.context.source_artifacts.components["weights"] for event in tracker.events[6:7]} == {
+        creation["artifact_id"]
+    }
     value.close()
 
 
@@ -311,17 +311,20 @@ def test_older_versions_and_version_catalog_survive_restart(tmp_path) -> None:
     scenario = value.get_or_create_scenario("math")
 
     version_one = scenario.artifacts()[-2]
-    version_one_ref = scenario.artifact_release_ref(version_one["artifact_id"])[1]
+    version_one_ref = scenario.artifact_snapshot(version_one["artifact_id"])[1]
     assert scenario.repository.resolve(version_one_ref).local_path.joinpath("model.txt").read_text() == "w1"
 
     restarted, _ = restart(tmp_path, backend_factory)
     recovered = restarted.get_or_create_scenario("math")
-    assert [version["operation"] for version in recovered.releases()] == [*(["training"] * 9), "creation"]
+    assert [version["operation"] for version in recovered.release_queries.snapshot_rows(recovered.scenario_step)] == [
+        *(["training"] * 9),
+        "creation",
+    ]
     assert recovered.artifacts() == scenario.artifacts()
 
 
 @pytest.mark.unit
-def test_request_records_the_artifact_ref_captured_before_inference(tmp_path) -> None:
+def test_request_records_the_artifact_id_captured_before_inference(tmp_path) -> None:
     """A request keeps the served artifact it read first: a commit during the call changes neither the release
     the engine got nor the release its record names."""
 
@@ -329,7 +332,7 @@ def test_request_records_the_artifact_ref_captured_before_inference(tmp_path) ->
         value, _, _ = serving_dispatcher(tmp_path)
         train(value, 1)
         await asyncio.to_thread(wait_for_serving, value)
-        selected_version = value.get_or_create_scenario("math").current_artifact_ref().release_id
+        selected_version = value.get_or_create_scenario("math").serving_artifact_id()
         backend = BlockingBackend()
         async with TestClient(TestServer(create_app(value, inference_handler=backend))) as client:
             request = asyncio.create_task(
@@ -339,19 +342,19 @@ def test_request_records_the_artifact_ref_captured_before_inference(tmp_path) ->
                     json={"model": "reef", "messages": [{"role": "user", "content": "hi"}]},
                 )
             )
-            await backend.started.wait()
+            await asyncio.wait_for(backend.started.wait(), timeout=10)
 
             await asyncio.to_thread(train, value, 2)
-            assert value.get_or_create_scenario("math").current_artifact_ref().release_id != selected_version
+            assert value.get_or_create_scenario("math").serving_artifact_id() != selected_version
 
             backend.finish.set()
             response = await request
             assert response.status == 200
             record_id = response.headers["x-reef-agent-record-id"]
         item = value.get_or_create_scenario("math").records.get("math", record_id)
-        assert backend.release_id == selected_version
-        assert item.artifact_ref is not None
-        assert item.artifact_ref.release_id == selected_version
+        assert backend.artifact_id == selected_version
+        assert item.artifact_id is not None
+        assert item.artifact_id == selected_version
         value.close()
 
     asyncio.run(run())
@@ -428,7 +431,7 @@ def test_a_failed_start_preserves_training_and_reports_inference_failure(tmp_pat
     train(value, 1)
     wait_for_serving(value)
     scenario = value.get_or_create_scenario("math")
-    head = scenario.current_artifact_ref()
+    head = scenario.current_snapshot()
     trainer_state = dict(scenario.trainer.state)
 
     def fail_restore(*args, **kwargs):
@@ -444,13 +447,13 @@ def test_a_failed_start_preserves_training_and_reports_inference_failure(tmp_pat
         if component == "training":
             with pytest.raises(RuntimeError, match="restore failed"):
                 operation("math", created)
-            assert scenario.current_artifact_ref() == head
+            assert scenario.current_snapshot() == head
             assert len(scenario.store.history()) == 3
         else:
             operation("math", created)
             with pytest.raises(AssertionError, match="restore failed"):
                 wait_for_serving(value)
-            assert scenario.current_artifact_ref().release_id == created
+            assert scenario.artifact_status()["weights"]["active"] == created
             assert len(scenario.store.history()) == 4
             assert training.inference.served == "w1"
         assert scenario.trainer.state == trainer_state
@@ -538,18 +541,18 @@ def test_experiment_events_follow_durable_commits_and_a_new_training_start(
     try:
         train(value, 1)
         value.registry.experiment_reports.flush()
-        trained = scenario.current_artifact_ref()
+        trained = scenario.current_snapshot()
         assert [event_step for event_step, _ in observed] == [1, 2, 3]
         assert all(stored_step >= event_step for event_step, stored_step in observed)
         assert observed[-1] == (3, 3)
         observed.clear()
         # The creation's artifact is the scenario's root release.
-        value.train_from("math", scenario.repository.start_artifact.release_id)
+        value.train_from("math", scenario.repository.resolve(scenario.repository.start_artifact).artifact_id)
         value.registry.experiment_reports.flush()
         # A new start leaves serving alone: the trained release still serves.
         assert observed == [(4, 4), True]
         assert scenario.scenario_step == 4
-        assert scenario.current_artifact_ref() == trained
+        assert scenario.current_snapshot() == trained
     finally:
         value.close()
 
@@ -572,13 +575,13 @@ def test_a_slow_tracker_holds_up_neither_the_training_start_nor_scenario_resolut
     try:
         train(value, 1)
         monkeypatch.setattr(tracker, "record_train_from", record)
-        start = value.train_from("math", scenario.repository.start_artifact.release_id)
+        start = value.train_from("math", scenario.repository.resolve(scenario.repository.start_artifact).artifact_id)
         assert entered.wait(5), "the tracker was not called"
         assert runtime.inference.inference_admission_status["open"]
         assert value.get_or_create_scenario("math") is scenario
         release.set()
         value.registry.experiment_reports.flush()
-        assert tracker.starts[0].start_artifact_ref.release_id == start.release_id
+        assert tracker.starts[0].start_artifacts.components == {"weights": start.artifact_id}
         assert scenario.store.history()[-1].operation == "train_from"
     finally:
         release.set()
@@ -592,7 +595,7 @@ def test_slow_correlation_tracker_does_not_block_published_artifact_reads(
     tracker = RecordingExperimentTracker()
     value, _, _ = dispatcher(tmp_path, experiment_tracker=tracker)
     scenario = value.get_or_create_scenario("math")
-    initial = scenario.current_artifact_ref()
+    initial = scenario.current_snapshot()
     entered, release, recorded = Event(), Event(), Event()
     record_event = tracker.record
 
@@ -613,9 +616,8 @@ def test_slow_correlation_tracker_does_not_block_published_artifact_reads(
         with ThreadPoolExecutor(max_workers=1) as executor:
             try:
                 assert entered.wait(5), "correlation tracker was not called"
-                read = executor.submit(scenario.release_queries.artifact_with_metrics)
-                artifact, _ = read.result(timeout=2)
-                assert artifact.ref == initial
+                read = executor.submit(scenario.artifact_rows)
+                assert next(row for row in read.result(timeout=2) if row["active"])["snapshot"] == initial
                 assert not recorded.is_set(), "commit must wait for correlation metadata"
             finally:
                 release.set()
@@ -626,7 +628,9 @@ def test_slow_correlation_tracker_does_not_block_published_artifact_reads(
         assert commit.metrics["experiment/run_id"] == "run-0"
         assert event.metrics == commit.metrics
         assert event.context.step == commit.step == 1
-        assert event.context.source_artifact_ref == initial
+        assert event.context.source_artifacts.components == {
+            "weights": scenario.repository.resolve(initial).artifact_id
+        }
     finally:
         release.set()
         value.close()

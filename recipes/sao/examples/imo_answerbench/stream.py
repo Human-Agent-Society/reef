@@ -136,10 +136,10 @@ def training_step_count() -> int | None:
     return 0 if scenario is None else int(scenario["scenario_step"])
 
 
-def serving_release() -> str | None:
-    """The release of the scenario's active artifact, so each record names the weights that served it."""
+def serving_artifact() -> str | None:
+    """The active artifact ID observed before submitting a rollout."""
     rows = artifacts()
-    return next((str(row["release_id"]) for row in rows or () if row["active"]), None)
+    return next((str(row["artifact_id"]) for row in rows or () if row["active"]), None)
 
 
 class TrainerPacer:
@@ -197,7 +197,7 @@ def wait_for_training(expected: int) -> None:
 
 def one_rollout(client: ReefClient, model: str, problem: dict, position: int) -> dict:
     started = time.time()
-    release = serving_release()
+    artifact_id = serving_artifact()
     response, receipt = client.inference_with_record(
         SCENARIO,
         "/v1/chat/completions",
@@ -219,7 +219,7 @@ def one_rollout(client: ReefClient, model: str, problem: dict, position: int) ->
         "score": score,
         "predicted": predicted,
         "gold": str(problem["gold"]),
-        "serving_release_id": release,
+        "serving_artifact_id": artifact_id,
         "agent_record_id": receipt,
         "prompt_tokens": response["usage"]["prompt_tokens"],
         "completion_tokens": response["usage"]["completion_tokens"],
@@ -233,7 +233,7 @@ def one_rollout(client: ReefClient, model: str, problem: dict, position: int) ->
             out.write(json.dumps(record) + "\n")
     print(
         f"[{RECIPE} {position}] idx={problem['problem_idx']} score={score:.0f} "
-        f"tokens={record['completion_tokens']} release={release} predicted={predicted!r}",
+        f"tokens={record['completion_tokens']} artifact_id={artifact_id} predicted={predicted!r}",
         flush=True,
     )
     return record

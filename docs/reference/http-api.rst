@@ -227,15 +227,16 @@ Headers
 |                                   | token opens it.                                         |
 +-----------------------------------+---------------------------------------------------------+
 
-Client release tags
-~~~~~~~~~~~~~~~~~~~
+Client artifact tags
+~~~~~~~~~~~~~~~~~~~~
 
-``x-reef-tag-release`` identifies the harness release installed by the client.
+``x-reef-tag-artifact_id`` identifies the harness artifact installed by the native client.
 Reef stores it under ``metadata.tags`` like any other tag, so a processor can
-read which harness release made the call. It does not change which release
-serves inference, and it does not change the record's ``artifact_ref``: the
-record names the release of the artifact that answered. This tag is separate
-from ``x-reef-release-id``, the response header that names that artifact.
+read which harness artifact made the call. Older clients can send ``x-reef-tag-release``.
+The tag does not change which artifact
+serves inference, and it does not change the record's ``artifact_id``: the
+record names the artifact that answered. This tag is separate
+from ``x-reef-artifact-id``, the response header that names the model artifact.
 
 Import records for cold-start learning
 --------------------------------------
@@ -505,15 +506,15 @@ owner:
 
 - Its ID is ``<scenario>/<agent_record_id>``.
 - Its content is ``{"agent_record_id", "request_type", "payload",
-  "created_at", "references", "artifact_ref"}``: the record as the scenario
+  "created_at", "references", "artifact_id"}``: the record as the scenario
   stores it.
 - Its metadata is ``{"kind": "record", "scenarios": {"<scenario>": "train"},
   "origin": {"scenario", "artifact_id"}}``. ``artifact_id`` names the artifact
   that answered the call, or is null when the record names none.
 
-The immutable record-item content retains the stored ``artifact_ref`` for
-compatibility with existing archives and content hashes. It is a storage
-snapshot; new callers identify artifacts through ``origin.artifact_id``.
+New record items store ``artifact_id`` directly. Older archives containing
+``artifact_ref`` remain readable and retain their original content hashes.
+When copying an old record, Reef uses its recorded component ID when present.
 Older ``origin.release_id`` input is accepted but adds no public identity.
 
 The data service makes the items after the records are stored, so an item
@@ -547,7 +548,7 @@ The artifact items of an owner are its artifact library: the artifacts of all
 of its scenarios, also of scenarios in other deployments that share the data
 store, and artifacts whose files you stored yourself. An artifact item is a
 reference. Its content says where the files are; the files stay there. The
-content is ``{source_uri, kind, component, content_id}``:
+content is ``{source_uri, kind, component}``:
 
 - ``source_uri``: the directory of the files, as an import reads it (`Import
   an artifact`_), or null when there is none.
@@ -555,9 +556,11 @@ content is ``{source_uri, kind, component, content_id}``:
   null.
 - ``component``: the component of the scenario that made the artifact, or null
   for your own item.
-- ``content_id``: an optional storage checksum, retained in this immutable
-  item format for compatibility. Use the item's ``origin.artifact_id`` to
-  identify a Reef artifact.
+
+Use the item's ``origin.artifact_id`` to identify a Reef artifact. Older items
+may include ``content_id``; readers accept that field but do not use it as an
+artifact identity. New writes discard it. A retry of an older item preserves
+its original content and digest when every other content field matches.
 
 The data service makes an item for each artifact that a scenario lists
 (``GET /reef/scenarios/{scenario}/artifacts``), after each commit. Its ID is
@@ -1693,10 +1696,11 @@ The manifest and catalog reads take ``x-reef-scenario`` and never create a
 scenario. An unknown scenario or one without a harness tree answers HTTP 404.
 
 The older ``/reef/harness/releases`` catalog and the harness fields
-``release_id``, ``parent_release_id`` and ``content_id`` remain for pinned
+``release_id`` and ``parent_release_id`` remain for pinned
 clients. New callers use the artifact catalog and artifact fields. Inference
-and harness responses also retain ``x-reef-release-id`` as an alias of
-``x-reef-artifact-id``. Neither header selects an artifact on a request.
+responses retain ``x-reef-release-id`` as an alias of ``x-reef-artifact-id``.
+Harness responses retain the older snapshot revision in ``x-reef-release-id``.
+Neither header selects an artifact on a request.
 
 ``?form=`` chooses what ``files`` holds, path to text:
 

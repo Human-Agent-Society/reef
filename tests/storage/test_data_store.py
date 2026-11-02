@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import closing
+from dataclasses import replace
 
 import pytest
 from sqlalchemy import func, select
@@ -36,7 +37,7 @@ def record_content(record_id: str) -> dict:
 
 
 def artifact_content(source_uri: str | None, component: str | None) -> dict:
-    return {"source_uri": source_uri, "kind": None, "component": component, "content_id": None}
+    return {"source_uri": source_uri, "kind": None, "component": component}
 
 
 def trajectory(item_id: str, text: str = "hi", **metadata) -> NewItem:
@@ -435,3 +436,31 @@ def test_legacy_origin_is_read_at_admission_without_persisting_a_second_identity
         "acme", [NewItem("coding/r1", record_content("r1"), {"kind": "record", "origin": legacy})]
     )
     assert stored.metadata["origin"] == ORIGIN
+
+
+def test_artifact_creates_drop_content_id_and_retries_keep_legacy_rows_immutable(store):
+    content = artifact_content("s3://bucket/weights", None)
+    legacy_content = {**content, "content_id": "old-checksum"}
+    item = NewItem("weights", legacy_content, {"kind": "artifact"})
+    (created,) = store.create("acme", [item])
+    assert created.content == content
+    assert created.digest == json_digest(content)
+    assert store.create("acme", [NewItem("weights", content, item.metadata)]) == (created,)
+
+    # Seed a row written before the migration; a retry must not rewrite its immutable content or digest.
+    legacy = replace(created, content=legacy_content, digest=json_digest(legacy_content))
+    if isinstance(store, MemoryDataStore):
+        store.items["acme"]["weights"] = legacy
+    else:
+        table = store.items_table
+        with store.transaction() as connection:
+            connection.execute(
+                table.update()
+                .where(table.c.owner == "acme", table.c.item_id == "weights")
+                .values(content_json=canonical_json(legacy_content), digest=legacy.digest)
+            )
+    assert store.create("acme", [item]) == (legacy,)
+    assert store.create("acme", [NewItem("weights", content, item.metadata)]) == (legacy,)
+    with pytest.raises(ItemConflict, match="other content"):
+        store.create("acme", [NewItem("weights", {**content, "source_uri": "s3://other/weights"}, item.metadata)])
+    assert store.read("acme", "weights") == legacy

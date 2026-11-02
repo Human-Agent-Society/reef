@@ -54,7 +54,7 @@ def test_training_starts_and_reads_finish_while_the_tracker_blocks(tmp_path, mon
     value, _, _ = dispatcher(tmp_path, experiment_tracker=tracker)
     scenario = value.get_or_create_scenario("math")
     # The creation's artifact is the scenario's root release.
-    base_artifact = scenario.repository.start_artifact.release_id
+    base_artifact = scenario.repository.resolve(scenario.repository.start_artifact).artifact_id
     entered, release = Event(), Event()
     record_train_from = tracker.record_train_from
 
@@ -66,10 +66,10 @@ def test_training_starts_and_reads_finish_while_the_tracker_blocks(tmp_path, mon
     try:
         train(value, 1)
         monkeypatch.setattr(tracker, "record_train_from", blocked)
-        trained = scenario.current_artifact_ref()
+        trained = scenario.serving_artifact_id()
         value.train_from("math", base_artifact)
         assert entered.wait(5)
-        value.train_from("math", trained.release_id)
+        value.train_from("math", trained)
         value.activate("math", base_artifact)
         assert value.get_or_create_scenario("math") is scenario
         assert tracker.starts == []
@@ -116,7 +116,7 @@ def test_local_tracker_read_locks(tmp_path, monkeypatch, callback, failing):
                     assert operation.result(timeout=2)
                     assert value.get_or_create_scenario("agent") is scenario
                 else:
-                    pool.submit(scenario.release_queries.artifact_with_metrics).result(timeout=2)
+                    pool.submit(scenario.artifact_rows).result(timeout=2)
                     assert not operation.done()
             finally:
                 release.set()

@@ -96,7 +96,10 @@ Two other extension points have separate names and purposes:
   ``HarnessBackend`` as one job, in the training service.
   The trainer's job size is its sample-to-job stage's ``job_samples``.
 - ``reef.runtime.interfaces.InferenceHandler`` executes one buffered or streaming
-  request. Runtime and recipe objects expose it as ``inference_handler``;
+  request. Its ``artifact`` argument is an ``InferenceArtifact``: the component
+  ``artifact_id``, an optional ``local_path``, and ``require_token_runtime_load_ids``.
+  Handlers receive no repository or snapshot locator. Runtime and recipe objects
+  expose the handler as ``inference_handler``;
   ``create_app`` and ``build_app`` accept the same keyword for an injected
   handler (see `Embed the service`_).
 
@@ -563,7 +566,8 @@ flags, metrics and training job identity. Operations include ``training``,
 ``stop_serving`` and ``restore``. Restore records a complete prior active
 selection and leaves training starts unchanged. A sync selects its new
 artifact for serving and training in one commit. Activation and serving record a complete selection without
-publishing another artifact snapshot. Older records without a selection
+publishing another artifact snapshot. A selection maps component names directly to artifact IDs.
+Older records without a selection
 remain readable through their stored artifact references.
 An ``activate`` or ``train_from`` record carries no trainer state. The store must atomically validate
 the current step before accepting a new successor: two different commits
@@ -871,13 +875,27 @@ A backend shares no release between scenarios. It must:
 
 - Implement ``register(root, *, metadata)``. ``root`` is an unpublished
   ``Artifact`` whose ``local_path`` is a directory. When the scenario has no
-  head, store the files of ``root`` as a release with no parent, with
-  ``root.ref.content_id`` and ``metadata``, and make it the head in one atomic
+  head, store the files of ``root`` as a release with no parent, preserve its
+  artifact IDs and ``metadata``, and make it the head in one atomic
   step. When the scenario has a head, also one that another caller registered
   first, store nothing and return that head.
-- Resolve ``resolve_release(release_id)`` to a release that the repository
-  holds, and raise ``ArtifactNotFound`` for any other ID. No ID names a
-  shared release.
+- Implement ``artifact_snapshot(artifact_id)``. Return the ``SnapshotRef`` of
+  the stored snapshot that holds the artifact, or raise ``ArtifactNotFound``
+  when this repository has no such ID. The ID must keep naming the same files
+  and metadata across publications and restarts. Reject an attempt to bind it
+  to different content. The inherited ``resolve_artifact(artifact_id)``
+  materializes that snapshot and returns the artifact's component.
+- Implement ``bind_artifact_id(artifact_id, ref)`` and ``artifact_content(ref, artifact_id)``.
+  The first binds an unbound ID to a stored snapshot and returns any earlier binding; a binding never
+  changes. The second returns a value that is equal for two snapshots exactly when they hold the same
+  files and metadata for the artifact. The inherited ``bind_artifact_ids(snapshot)`` uses both, and
+  raises ``ArtifactConflict`` for an ID that names other content. Call it before a head moves.
+- Implement ``index_snapshot(ref)`` to add ID bindings for older stored snapshots.
+  Recovery calls it before resolving artifacts from legacy records. Repeated
+  calls preserve existing bindings; conflicting bindings raise ``ArtifactConflict``.
+- Implement ``resolve_snapshot(revision)``. Return a ``SnapshotRef`` for a
+  stored snapshot, or raise ``ArtifactNotFound``. Its ``revision`` and
+  ``parent_revision`` are backend locators, separate from component IDs.
 - Keep each component entry's ``artifact_id`` in the manifests it stores.
 
 The optional capabilities are separate base classes. Inherit only the ones

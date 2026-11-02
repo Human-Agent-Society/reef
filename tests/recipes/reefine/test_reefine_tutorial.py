@@ -246,7 +246,7 @@ def test_the_measurement_counts_won_and_published_apart(run_module) -> None:
 def test_install_renders_the_source_tree_for_pi_with_a_binding_at_this_reef(run_module, tmp_path, monkeypatch) -> None:
     """The demo is the client: it pulls the source tree, checks what the release requires on this machine, and
     renders the tree locally with its own model binding; a release that requires what the machine lacks stops it."""
-    manifest: dict = {"release_id": "r1", "files": {"rules.md": "Answer briefly.\n"}, "requires": []}
+    manifest: dict = {"artifact_id": "r1", "files": {"rules.md": "Answer briefly.\n"}, "requires": []}
     paths: list[str] = []
 
     class Client:
@@ -264,10 +264,15 @@ def test_install_renders_the_source_tree_for_pi_with_a_binding_at_this_reef(run_
     assert run_module.SERVICE_URL in models["providers"]["reef"]["baseUrl"]
     assert models["providers"]["reef"]["headers"] == {"x-reef-scenario": run_module.SCENARIO}
     record = json.loads((tmp_path / "harness" / run_module.RELEASE_FILE).read_text())
-    assert record["release_id"] == "r1" and "plugin/rules.md" in record["files"]
+    assert record["artifact_id"] == "r1" and "plugin/rules.md" in record["files"]
+    assert "release_id" not in record
+    assert run_module.installed_artifact() == "r1"
+    # An older install names no artifact: it reads as nothing installed, and the next install replaces it.
+    (tmp_path / "harness" / run_module.RELEASE_FILE).write_text(json.dumps({"release_id": "storage:old"}))
+    assert run_module.installed_artifact() is None
     monkeypatch.delenv("REEF_DEMO_PHONE", raising=False)
     manifest["requires"] = [{"name": "REEF_DEMO_PHONE", "kind": "env", "prompt": "The phone number to text"}]
-    assert run_module.install("r2") is None and paths[-1] == "/reef/harness?form=source&release_id=r2"
+    assert run_module.install("r2") is None and paths[-1] == "/reef/harness?form=source&artifact_id=r2"
 
 
 def test_the_workspace_fixture_fails_exactly_one_test() -> None:

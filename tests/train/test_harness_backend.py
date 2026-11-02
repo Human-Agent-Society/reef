@@ -75,7 +75,7 @@ def test_a_winning_candidate_publishes_and_the_history_keeps_it(tmp_path: Path) 
     result = backend_step(backend, data(1), HarnessState().to_json())
     # The step names the tree kinds its patch changes; the scenario's activation rule decides from them.
     assert result.metrics["selected"] is True and set(result.metrics["patch_parts"].values()) == {"rules"}
-    assert result.metrics["patch"] == MARKER.to_json() and result.metrics["head_release_id"] == "base"
+    assert result.metrics["patch"] == MARKER.to_json() and result.metrics["head_artifact_id"] == "base"
     assert result.metrics["method_summary"] == "added the marker" and result.metrics["method_notes"] == {
         "why": "it scores"
     }
