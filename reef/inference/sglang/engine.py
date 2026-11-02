@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import time
 from contextlib import suppress
-from dataclasses import fields
+from dataclasses import fields, is_dataclass
 from typing import Any
 
 import requests
@@ -144,7 +144,11 @@ class ReefSGLangEngine(InferenceEngine):
                 options.pop("enable_hierarchical_cache", None)
         if self.worker_type == "encoder":
             options["encoder_only"] = True
-        names = {item.name for item in fields(ServerArgs)}
+        if is_dataclass(ServerArgs):
+            names = {item.name for item in fields(ServerArgs)}
+        else:
+            # SGLang 0.5.21 represents ServerArgs as a msgspec Struct, which names its fields itself.
+            names = set(ServerArgs.__struct_fields__)
         if "cuda_graph_backend_prefill" in names and options.get("enable_memory_saver"):
             options.setdefault("cuda_graph_backend_prefill", "disabled")
             if options["cuda_graph_backend_prefill"] is None:
