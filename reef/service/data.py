@@ -302,7 +302,9 @@ def query_items(
     if kind is not None and kind not in KINDS:
         raise ValueError(f"kind must be one of {', '.join(ITEM_KINDS)}, got {kind!r}")
     checked_kind = None if kind is None else KINDS[kind]
-    found = data.require_store().query(owner, kind=checked_kind, scenario=scenario, after=after, limit=limit)
+    found = data.require_store().query(
+        owner, kind=checked_kind, scenario=scenario, after=after, limit=limit, content=content
+    )
     return {
         "owner": owner,
         "items": [item_json(item, content=content) for item in found],
