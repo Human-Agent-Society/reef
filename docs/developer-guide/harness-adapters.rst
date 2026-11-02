@@ -618,15 +618,15 @@ Run and serve modes
 ~~~~~~~~~~~~~~~~~~~~~~~
 
 ``reef-native -p`` runs one turn; runs use it. ``reef-native serve`` is
-one resident process that follows the scenario's active release:
+one resident process that follows the scenario's active harness artifact:
 
-- It mounts each new release between two steps, and keeps the current tree
+- It mounts each new artifact between two steps, and keeps the current tree
   when a new one fails to load. With ``--follow pinned``, it mounts only the
-  release that ``reef-native mount <release_id>`` names.
-- Its model calls carry the scenario, the token and the ``release`` tag.
+  artifact that ``reef-native mount <artifact_id>`` names.
+- Its model calls carry the scenario, the token and the ``artifact_id`` tag.
 - Tree code runs with the user's privileges; only tool calls are confined,
   with ``REEF_NATIVE_ENFORCE=bwrap``.
 - ``--self-tools`` adds ``harness_inspect`` and ``harness_try``.
 - The socket ``native/serve.sock`` takes one JSON line per connection:
   ``{"turn": {...}}``, ``{"control": "status"}`` or ``{"control": "mount",
-  "release_id": ...}``.
+  "artifact_id": ...}``.

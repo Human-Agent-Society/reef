@@ -58,7 +58,7 @@ def test_the_harness_service_serves_the_tree_and_control_commits_its_imports(tmp
             served = await (await client.get("/reef/harness", params={"form": "source"}, headers=HEADERS)).json()
             assert served["files"] == dict(PI_SEED.files)
             base = served["release_id"]
-            assert base == control.get_or_create_scenario("demo").current_artifact_ref().release_id
+            assert base == control.get_or_create_scenario("demo").current_snapshot().revision
             # A client's layer sends its model calls to the inference service that the deployment names.
             layer = await client.get(
                 "/reef/harness",
@@ -74,8 +74,8 @@ def test_the_harness_service_serves_the_tree_and_control_commits_its_imports(tmp
             assert response.status == 200, await response.text()
             imported = await response.json()
             assert imported["changed"] is True and imported["parent_release_id"] == base
-            current = control.get_or_create_scenario("demo").current_artifact_ref()
-            assert current.release_id == imported["release_id"] == response.headers["x-reef-release-id"]
+            current = control.get_or_create_scenario("demo").current_snapshot()
+            assert current.revision == imported["release_id"] == response.headers["x-reef-release-id"]
             # The harness service reads the release that control committed.
             source = await (await client.get("/reef/harness", params={"form": "source"}, headers=HEADERS)).json()
             assert source["release_id"] == imported["release_id"] and source["files"]["rules.md"] == "Mine.\n"

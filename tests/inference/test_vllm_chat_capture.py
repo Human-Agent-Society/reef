@@ -10,9 +10,9 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
-from reef.artifact import Artifact, ArtifactRef
+from reef.artifact import Artifact
 from reef.inference.vllm.chat import VLLMGenerateClient, VLLMInferenceHandler, VLLMToolCallParser
-from reef.runtime.interfaces import inference_aborted
+from reef.runtime.interfaces import InferenceArtifact, inference_aborted
 
 
 class FakeTokenizer:
@@ -42,17 +42,14 @@ class FixedParserClient(VLLMGenerateClient):
         return self.parser
 
 
-def _local_artifact(tmp_path) -> Artifact:
+def _local_artifact(tmp_path) -> InferenceArtifact:
     checkpoint = tmp_path / "checkpoint"
     checkpoint.mkdir()
-    return Artifact.local(checkpoint)
+    return InferenceArtifact.from_artifact(Artifact.local(checkpoint))
 
 
-def _live_artifact() -> Artifact:
-    return Artifact(
-        ArtifactRef(content_id="live-test", release_id="live:engine:6", parent_release_id="checkpoint"),
-        None,
-    )
+def _live_artifact() -> InferenceArtifact:
+    return InferenceArtifact("artifact:engine:6")
 
 
 def _generate_response(*, stamps=None, finish_reason="stop"):
@@ -150,7 +147,7 @@ def test_vllm_facade_serves_a_local_release_without_stamps_under_its_release_ver
         assert received[0]["sampling_params"] == {"max_tokens": 2, "logprobs": 0}
         assert response["choices"][0]["message"]["content"] == "<20><21>"
         captured = VLLMGenerateClient().parse(artifact, _generate_response())
-        assert captured.token_runtime_load_ids == [artifact.ref.release_id] * 2
+        assert captured.token_runtime_load_ids == [artifact.artifact_id] * 2
 
     asyncio.run(_serve(_generate_response(), run))
 

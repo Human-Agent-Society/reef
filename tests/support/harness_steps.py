@@ -32,7 +32,7 @@ from reef.harness.tree import HarnessTree
 from reef.inference.http import InferenceProxyRuntime
 from reef.recipe.harness import EvolutionSettings, HarnessEvolutionRecipe
 from reef.runtime.executor.config import ExecutorSettings
-from reef.train.backend import CommittedReleases, ReleaseFiles
+from reef.train.backend import ArtifactTextFiles, CommittedArtifacts
 from reef.train.harness_backend import Method, StepContext, Workspace
 from reef.train.harness_backend.agent.settings import AgentSettings
 from reef.train.harness_backend.backend import HarnessBackend
@@ -90,7 +90,7 @@ def marker_score(task: str, result: TaskResult) -> float:
     return 1.0 if "marker" in result.trajectory[-1]["rules"] else 0.0
 
 
-class TreeReleases(CommittedReleases):
+class TreeReleases(CommittedArtifacts):
     """An in-memory commit history of one component: its releases by id, the head the latest one.
 
     ``base`` is the root release; ``publish`` appends one, as a commit that publishes for the component does.
@@ -104,13 +104,13 @@ class TreeReleases(CommittedReleases):
         self.trees[release_id] = tree
         self.order.append(release_id)
 
-    def head(self, component: str) -> ReleaseFiles:
-        return self.release(self.order[-1], component)
+    def head(self, component: str) -> ArtifactTextFiles:
+        return self.artifact(self.order[-1], component)
 
-    def release(self, release_id: str, component: str) -> ReleaseFiles:
+    def artifact(self, release_id: str, component: str) -> ArtifactTextFiles:
         if release_id not in self.trees:
             raise ArtifactNotFound(f"no release {release_id!r}")
-        return ReleaseFiles(release_id, dict(self.trees[release_id].files))
+        return ArtifactTextFiles(release_id, dict(self.trees[release_id].files))
 
 
 def harness_recipe(
@@ -175,7 +175,7 @@ def build_harness_backend(
     return backend
 
 
-def head_of(backend: HarnessBackend) -> ReleaseFiles:
+def head_of(backend: HarnessBackend) -> ArtifactTextFiles:
     """The head that ``backend``'s next step runs on: the latest release of its ``build_harness_backend`` history."""
     return BACKEND_RELEASES[backend].head(COMPONENT)
 

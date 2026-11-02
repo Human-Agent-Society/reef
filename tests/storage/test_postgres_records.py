@@ -10,10 +10,10 @@ from sqlalchemy import func, select
 from tests.support.consumption_receipts import write_consumption_receipt
 from tests.support.conversations import conversation
 
-from reef.core.artifact_ref import ArtifactRef
 from reef.core.atif_payloads import canonical_json
 from reef.core.errors import ReefError
 from reef.core.records_types import AgentRecord, RequestType
+from reef.core.snapshot import SnapshotRef
 from reef.service.assembly import _recipe_owned_settings, build_dispatcher
 from reef.service.deploy.config_utils import load_config
 from reef.service.deploy.deployment_config import translate_layout
@@ -293,7 +293,7 @@ def test_factory_commit_recovery_and_archive(postgres_config, tmp_path, monkeypa
     committed = CommitRecord(
         scenario="math",
         step=1,
-        artifact_ref=ArtifactRef("content:1", "release:1", "base"),
+        snapshot=SnapshotRef("release:1", "base"),
         checkpoint=True,
         algorithm_state={"step": 1},
         consumed_ids=frozenset({"first"}),

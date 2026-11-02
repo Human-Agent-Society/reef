@@ -13,6 +13,7 @@ from __future__ import annotations
 import dataclasses
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any
+from urllib.parse import quote
 
 from reef_client import ReefClient
 
@@ -30,7 +31,7 @@ class ReefTTTDiscoverHarness(_TTTDiscoverHarnessBase):
         *,
         scenario: str,
         model: str,
-        release_id: str | None = None,
+        artifact_id: str | None = None,
         inference_path: str = "/v1/chat/completions",
         groups_per_step: int = 8,
         rollouts_per_group: int = 64,
@@ -52,8 +53,16 @@ class ReefTTTDiscoverHarness(_TTTDiscoverHarnessBase):
         )
         self.client = client
         self.scenario = scenario
-        self.release_id = release_id
-        self.inference_path = inference_path
+        if artifact_id is not None:
+            if not isinstance(artifact_id, str) or not artifact_id:
+                raise ValueError("artifact_id must be a non-empty string")
+            if not inference_path.startswith("/v1/"):
+                raise ValueError("an artifact inference_path must start with /v1/")
+            self.inference_path = (
+                f"/reef/scenarios/{quote(scenario, safe='')}/artifacts/{quote(artifact_id, safe='')}{inference_path}"
+            )
+        else:
+            self.inference_path = inference_path
 
     def _rollout(
         self,
@@ -63,12 +72,10 @@ class ReefTTTDiscoverHarness(_TTTDiscoverHarnessBase):
         group_index: int,
         rollout_index: int,
     ) -> RolloutResult:
-        release_headers = {} if self.release_id is None else {"x-reef-release-id": self.release_id}
         response, agent_record_id = self.client.inference_with_record(
             self.scenario,
             self.inference_path,
             self._request_payload(parent),
-            extra_headers=release_headers,
         )
 
         result = dataclasses.replace(
@@ -94,6 +101,5 @@ class ReefTTTDiscoverHarness(_TTTDiscoverHarnessBase):
                     "search_value": result.search_value,
                 },
             },
-            extra_headers=release_headers,
         )
         return result

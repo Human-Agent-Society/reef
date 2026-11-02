@@ -14,7 +14,7 @@ from tests.support._trajectories import policy_trajectory
 from tests.support.runtime_stubs import StubTrainingComponent
 from tests.support.task_service_stubs import StandInGenerator, task_for
 
-from reef.artifact import ArtifactRef
+from reef.artifact import SnapshotRef
 from reef.core import AgentRecord, RequestType
 from reef.core.job_data import JobData, JobOutcome, TaskSample, TrajectorySample
 from reef.core.plugins import PluginConfigError
@@ -359,7 +359,7 @@ class CommittingPipeline(TrainingPipeline):
         commit = CommitRecord(
             scenario="tasks",
             step=step + 1,
-            artifact_ref=ArtifactRef(f"content:{step + 1}", f"release:{step + 1}", "base"),
+            snapshot=SnapshotRef(f"release:{step + 1}", "base"),
             checkpoint=True,
             algorithm_state={},
             high_water_sequence=step + 1,
@@ -654,7 +654,7 @@ def test_a_restart_hands_out_the_saved_tasks_that_did_not_train_without_generati
         commit=CommitRecord(
             scenario="tasks",
             step=1,
-            artifact_ref=ArtifactRef("content:1", "release:1", "base"),
+            snapshot=SnapshotRef("release:1", "base"),
             checkpoint=True,
             algorithm_state={},
             high_water_sequence=1,

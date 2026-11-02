@@ -16,7 +16,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from threading import Lock, Thread
 
-from reef.core.artifact_ref import ArtifactRef
+from reef.core.artifact_selection import ArtifactSelection
+from reef.core.components import legacy_artifact_id
 from reef.observability.base import (
     ExperimentTracker,
     TrainFromExperimentEvent,
@@ -97,6 +98,36 @@ class ExperimentReportQueue:
             logger.exception("experiment tracker failed to report a committed step")
 
 
+def training_starts(source: ArtifactSelection, commit: CommitRecord) -> ArtifactSelection:
+    """Apply one committed training-start change to a component-to-artifact mapping.
+
+    New records supply a selection. Older records supply component IDs, or
+    the historical snapshot identity for a flat scenario. Other operations
+    leave every training start unchanged.
+    """
+    if not commit.sets_training_start:
+        return source
+    components = dict(source.components)
+    if commit.component is not None:
+        name = commit.component
+    elif len(components) == 1:
+        name = next(iter(components))
+    elif commit.artifact_ids is not None:
+        # A single trainer can train a complete multi-component snapshot.
+        # Its records have no trainer component and replace the whole start.
+        return ArtifactSelection(commit.artifact_ids)
+    else:
+        raise ValueError("a composite training-start change requires component artifact IDs")
+    if name not in components:
+        raise ValueError(f"unknown training component {name!r}")
+    components[name] = (
+        legacy_artifact_id(commit.snapshot.revision, None if len(components) == 1 else name)
+        if commit.artifact_ids is None
+        else commit.artifact_ids[name]
+    )
+    return ArtifactSelection(components)
+
+
 class CommitExperimentObserver(RecordObserver):
     """Observe serialized commits for one recovered scenario storage session."""
 
@@ -106,24 +137,24 @@ class CommitExperimentObserver(RecordObserver):
         *,
         scenario: str,
         recipe: str,
-        source_artifact_ref: ArtifactRef,
+        source_artifacts: ArtifactSelection,
         scenario_step: int,
         store: ScenarioStore,
         reports: ExperimentReportQueue | None = None,
     ) -> None:
         """``reports`` delivers the events; the dispatcher shares one queue across its scenarios.
 
-        ``start_artifact_ref`` is the training start: the newest artifact a
+        ``start_artifacts`` is the training start: the newest artifact a
         record made or a ``train_from`` record named, else
-        ``source_artifact_ref``. Each event names it as its source.
+        ``source_artifacts``. Each event names it as its source.
         """
         self.tracker = tracker
         self.scenario = scenario
         self.recipe = recipe
         records = store.history() if store.durable else ()
-        self.start_artifact_ref = next(
-            (record.artifact_ref for record in reversed(records) if self.moves_start(record)), source_artifact_ref
-        )
+        self.start_artifacts = source_artifacts
+        for record in records:
+            self.start_artifacts = training_starts(self.start_artifacts, record)
         self.last_reported_step = scenario_step
         self.run_segment, self.run_step = store.training_run_position() if store.durable else (0, 0)
         self.durable = store.durable
@@ -145,24 +176,18 @@ class CommitExperimentObserver(RecordObserver):
             logger.exception("experiment tracker failed to prepare correlation metadata")
             return {}
 
-    @staticmethod
-    def moves_start(commit: CommitRecord) -> bool:
-        """Whether ``commit`` moves the training start: a new start, a sync, or an artifact the trainer goes on
-        from."""
-        return commit.sets_training_start
-
     def record_committed(self, commit: CommitRecord) -> None:
         if commit.step <= self.last_reported_step:
             return
         prepared = self.prepared
-        source = self.start_artifact_ref
+        source = self.start_artifacts
         run_segment, run_step = self.run_segment, self.run_step
         # Advance even when the provider fails: a storage retry must not rotate
         # the same run twice or report a training row twice in this session.
         self.last_reported_step = commit.step
         self.prepared = None
-        if self.moves_start(commit):
-            self.start_artifact_ref = commit.artifact_ref
+        if commit.sets_training_start:
+            self.start_artifacts = training_starts(self.start_artifacts, commit)
         if self.durable:
             if commit.operation == "train_from":
                 self.run_segment, self.run_step = commit.step, 0
@@ -178,7 +203,7 @@ class CommitExperimentObserver(RecordObserver):
                     recipe=self.recipe,
                     step=commit.step,
                     run_segment=run_segment,
-                    start_artifact_ref=commit.artifact_ref,
+                    start_artifacts=self.start_artifacts,
                     component=commit.component,
                 )
             )
@@ -193,7 +218,7 @@ class CommitExperimentObserver(RecordObserver):
                 scenario=self.scenario,
                 recipe=self.recipe,
                 step=commit.step,
-                source_artifact_ref=source,
+                source_artifacts=source,
                 run_segment=run_segment,
                 run_step=run_step,
                 component=commit.component,
@@ -202,7 +227,7 @@ class CommitExperimentObserver(RecordObserver):
         self.reports.put(
             TrainingExperimentEvent(
                 context=context,
-                produced_artifact_ref=self.start_artifact_ref,
+                produced_artifacts=self.start_artifacts,
                 metrics=metrics,
                 outcome="rejected" if metrics.get("selected") is False else "committed",
                 training_job_id=commit.training_job_id,

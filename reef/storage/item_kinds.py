@@ -22,10 +22,9 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from reef.core.artifact_ref import decode_artifact_ref
 from reef.core.evaluation import ARTIFACT_KINDS
 from reef.core.job_data import TrajectorySample
-from reef.core.records_types import AgentRecord, RequestType
+from reef.core.records_types import AgentRecord, RequestType, stored_record_artifact_id
 from reef.storage.tasks import TaskFileStore
 
 #: Prefixes the task file partition of an owner. A scenario name never contains ``/``, so no scenario's partition
@@ -33,10 +32,10 @@ from reef.storage.tasks import TaskFileStore
 TASK_PARTITION_PREFIX = "data/"
 #: The keys of a record item's content.
 RECORD_CONTENT_KEYS = frozenset(
-    {"agent_record_id", "request_type", "payload", "created_at", "references", "artifact_ref"}
+    {"agent_record_id", "request_type", "payload", "created_at", "references", "artifact_id"}
 )
 #: The keys of an artifact item's content.
-ARTIFACT_CONTENT_KEYS = frozenset({"source_uri", "kind", "component", "content_id"})
+ARTIFACT_CONTENT_KEYS = frozenset({"source_uri", "kind", "component"})
 
 
 def json_digest(content: Mapping[str, Any]) -> str:
@@ -58,10 +57,11 @@ def copied_record(item_id: str, content: Mapping[str, Any], origin: str, scenari
     ``ValueError`` unless ``content`` has the keys ``RECORD_CONTENT_KEYS`` with the types that ``record_item``
     gives them, for an inference or a report, and ``item_id`` is ``<origin>/<agent_record_id>``.
     """
-    if not isinstance(content, Mapping) or content.keys() != RECORD_CONTENT_KEYS:
+    legacy_keys = RECORD_CONTENT_KEYS - {"artifact_id"} | {"artifact_ref"}
+    if not isinstance(content, Mapping) or set(content) not in (RECORD_CONTENT_KEYS, legacy_keys):
         raise ValueError(f"a record item's content has exactly the keys {', '.join(sorted(RECORD_CONTENT_KEYS))}")
     record_id, request_type, payload = content["agent_record_id"], content["request_type"], content["payload"]
-    created_at, references, artifact = content["created_at"], content["references"], content["artifact_ref"]
+    created_at, references = content["created_at"], content["references"]
     if not isinstance(record_id, str) or item_id != f"{origin}/{record_id}":
         raise ValueError(f"a record item made in scenario {origin!r} has the ID {origin}/<agent_record_id>")
     if request_type not in (RequestType.INFERENCE.value, RequestType.REPORT.value):
@@ -72,8 +72,6 @@ def copied_record(item_id: str, content: Mapping[str, Any], origin: str, scenari
         raise ValueError("a record item's created_at is a number")
     if not isinstance(references, list) or not all(isinstance(reference, str) for reference in references):
         raise ValueError("a record item's references is a list of strings")
-    if artifact is not None and not isinstance(artifact, Mapping):
-        raise ValueError("a record item's artifact_ref is an object or null")
     copied = tuple(f"{origin}/{reference}" for reference in references)
     payload = dict(payload)
     if isinstance(payload.get("references"), list):
@@ -85,7 +83,7 @@ def copied_record(item_id: str, content: Mapping[str, Any], origin: str, scenari
         payload=payload,
         created_at=float(created_at),
         references=copied,
-        artifact_ref=None if artifact is None else decode_artifact_ref(artifact),
+        artifact_id=stored_record_artifact_id(content, payload),
     )
 
 
@@ -99,7 +97,7 @@ def check_artifact_content(content: Mapping[str, Any], *, made_by_scenario: bool
     """
     if set(content) != ARTIFACT_CONTENT_KEYS:
         raise ValueError(f"an artifact item's content holds exactly {sorted(ARTIFACT_CONTENT_KEYS)}")
-    for key in sorted(ARTIFACT_CONTENT_KEYS):
+    for key in sorted(content):
         value = content[key]
         if value is not None and not (isinstance(value, str) and value):
             raise ValueError(f"an artifact item's content.{key} is a non-empty string or null")
@@ -117,9 +115,12 @@ class ItemKindRules(ABC):
     Values: ``kind`` is the kind, one of ``ITEM_KINDS``. ``stored_digest(owner, item_id, content, metadata,
     task_files)`` checks ``content``, the content of the new item ``item_id`` of ``owner`` with the created
     ``metadata``, against the kind's rules, and returns the digest of the content that the store keeps. It raises
-    ``ValueError`` for content that breaks the rules.
+    ``ValueError`` for content that breaks the rules. ``current_content(content)`` is ``content`` in the current
+    format; an older stored format maps to the same value as its current equivalent. ``matches_stored(content,
+    digest)`` is whether stored ``content`` in an older format has the current content with ``digest``.
 
-    Purpose: ``ITEM_KIND_RULES`` holds one per kind; ``prepared_items`` calls it for each item of a create.
+    Purpose: ``ITEM_KIND_RULES`` holds one per kind; ``prepared_items`` calls it for each item of a create, and a
+    create compares a retry with ``matches_stored``.
     """
 
     @property
@@ -130,6 +131,14 @@ class ItemKindRules(ABC):
     def stored_digest(
         self, owner: str, item_id: str, content: object, metadata: Mapping[str, Any], task_files: TaskFileStore
     ) -> str: ...
+
+    def current_content(self, content: Mapping[str, Any] | Path) -> Mapping[str, Any] | Path:
+        """``content`` unchanged: this kind has one format."""
+        return content
+
+    def matches_stored(self, content: object, digest: str) -> bool:
+        """False: without older formats, only an equal digest matches."""
+        return False
 
 
 class JsonItemRules(ItemKindRules):
@@ -142,6 +151,12 @@ class JsonItemRules(ItemKindRules):
             raise ValueError(f"{self.kind} item {item_id!r} needs a JSON object as its content")
         self.check_json(item_id, content, metadata)
         return json_digest(content)
+
+    def matches_stored(self, content: object, digest: str) -> bool:
+        if not isinstance(content, Mapping):
+            return False
+        current = self.current_content(content)
+        return current is not content and isinstance(current, Mapping) and json_digest(current) == digest
 
     @abstractmethod
     def check_json(self, item_id: str, content: Mapping[str, Any], metadata: Mapping[str, Any]) -> None:
@@ -162,6 +177,17 @@ class RecordRules(JsonItemRules):
 
     kind = "record"
 
+    def current_content(self, content: Mapping[str, Any] | Path) -> Mapping[str, Any] | Path:
+        """An older record names its artifact by ``artifact_ref``; the current one by ``artifact_id``."""
+        if not isinstance(content, Mapping) or "artifact_ref" not in content:
+            return content
+        payload = content.get("payload")
+        if not isinstance(payload, Mapping):
+            return content  # Malformed content: ``check_json`` rejects it.
+        current = {key: value for key, value in content.items() if key != "artifact_ref"}
+        current["artifact_id"] = stored_record_artifact_id(content, payload)
+        return current
+
     def check_json(self, item_id: str, content: Mapping[str, Any], metadata: Mapping[str, Any]) -> None:
         origin = metadata["origin"]["scenario"]
         copied_record(item_id, content, origin, origin)
@@ -172,6 +198,12 @@ class ArtifactRules(JsonItemRules):
     ``origin``."""
 
     kind = "artifact"
+
+    def current_content(self, content: Mapping[str, Any] | Path) -> Mapping[str, Any] | Path:
+        """An older artifact item also held an unused ``content_id``."""
+        if not isinstance(content, Mapping) or "content_id" not in content:
+            return content
+        return {key: value for key, value in content.items() if key != "content_id"}
 
     def check_json(self, item_id: str, content: Mapping[str, Any], metadata: Mapping[str, Any]) -> None:
         check_artifact_content(content, made_by_scenario="origin" in metadata)

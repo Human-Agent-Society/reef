@@ -6,7 +6,7 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from tests.support.inference import wait_for_inference
 
-from reef.artifact import Artifact, ArtifactRef, InMemoryRepositoryBackend
+from reef.artifact import Artifact, InMemoryRepositoryBackend, SnapshotRef
 from reef.dispatcher import Dispatcher
 from reef.inference.http import InferenceProxyRuntime
 from reef.recipe import Recipe
@@ -129,7 +129,7 @@ def test_http_app_routes_scenarios_to_runtime_specific_inference_services(tmp_pa
                 return _Backend()
 
             def activate_checkpoint(self, artifact, *, scenario=None) -> str:
-                return artifact.ref.release_id
+                return artifact.ref.revision
 
         backend_factory = InMemoryRepositoryBackend.factory()
         dispatchers = {
@@ -214,7 +214,7 @@ def test_recipe_runtime_advertises_itself_and_proxies_provider_api() -> None:
         )
         try:
             response = await runtime.inference_handler.inference(
-                Artifact(ArtifactRef("id", "version-1", None), None),
+                Artifact(SnapshotRef("version-1", None), None),
                 "/v1/chat/completions",
                 {"messages": [{"role": "user", "content": "hi"}]},
             )
@@ -227,7 +227,7 @@ def test_recipe_runtime_advertises_itself_and_proxies_provider_api() -> None:
             }
 
             stream = await runtime.inference_handler.inference_stream(
-                Artifact(ArtifactRef("id", "version-1", None), None),
+                Artifact(SnapshotRef("version-1", None), None),
                 "/v1/chat/completions",
                 {"messages": [], "stream": True},
             )
@@ -269,7 +269,7 @@ def test_recipe_runtime_proxies_anthropic_auth_and_version() -> None:
         )
         try:
             response = await runtime.inference_handler.inference(
-                Artifact(ArtifactRef("id", "rev", None), None),
+                Artifact(SnapshotRef("rev", None), None),
                 "/v1/messages",
                 {"model": "claude-compatible", "messages": []},
             )

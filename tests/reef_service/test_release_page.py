@@ -32,7 +32,7 @@ from reef.harness.tasks.run import TaskResult
 from reef.harness.tree import HarnessTree, TreePatch
 from reef.service.app import create_app
 from reef.service.page_layout import status_label
-from reef.service.release_page import before_release_id, build_release_page, result_of, served_step
+from reef.service.release_page import before_artifact_id, build_release_page, result_of, served_step
 
 MODULE = Path(__file__).parents[2] / "reef" / "service" / "release_page.py"
 LAYOUT = Path(__file__).parents[2] / "reef" / "service" / "page_layout.py"
@@ -56,18 +56,16 @@ SCENARIO = "agents"
 # Hand-made catalog rows of a one-component scenario, where a row's artifact id is its release id: the creation,
 # active until a step replaces it, and a step that made release rel-1 on it; a test sets ``active`` and the metrics.
 CREATION = {
-    "release_id": "rel-0",
     "artifact_id": "rel-0",
-    "parent_release_id": None,
+    "parent_artifact_id": None,
     "operation": "creation",
     "checkpoint": True,
     "active": True,
     "activated": True,
 }
 PUBLISHED = {
-    "release_id": "rel-1",
     "artifact_id": "rel-1",
-    "parent_release_id": "rel-0",
+    "parent_artifact_id": "rel-0",
     "operation": "training",
     "checkpoint": True,
     "active": False,
@@ -86,8 +84,8 @@ def answer(workspace, services) -> TreePatch:
     return TreePatch(ANSWERS[request.text] if request is not None else NOTES)
 
 
-def train_request(text: str, *, session: str = "3f1c2a9d0b7e", release_id: str = "rel-0") -> dict:
-    return {"text": text, "session": session, "release_id": release_id}
+def train_request(text: str, *, session: str = "3f1c2a9d0b7e", artifact_id: str = "rel-0") -> dict:
+    return {"text": text, "session": session, "artifact_id": artifact_id}
 
 
 def _dispatcher(tmp_path: Path) -> Dispatcher:
@@ -117,7 +115,7 @@ def _chain(tmp_path: Path) -> Dispatcher:
                 dispatcher.accept_record(record)
             await wait_for_rows(scenario, 4)
             dispatcher.set_training_mode(SCENARIO, "manual")
-            body = train_request(FOURTH, session="s4", release_id="rel-1")
+            body = train_request(FOURTH, session="s4", artifact_id="rel-1")
             response = await client.post("/reef/train", headers=headers, json=body)
             assert response.status == 200, await response.text()
             await wait_for_rows(scenario, 5)
@@ -222,11 +220,11 @@ def test_release_pages_show_the_chain_active_release_and_unknown_steps(chain_dis
     assert "<dt>Run failures</dt><dd>0</dd>" in selection_result
     assert "nothing to set up" in _section(page, "Setup")
     chain = _section(page, "Chain")
-    assert rows[0]["release_id"] in chain and rows[1]["release_id"] in chain
+    assert rows[0]["artifact_id"] in chain and rows[1]["artifact_id"] in chain
     # The inactive extension update was evaluated against this head, so it is this release's child.
-    assert f">v4</a><span class=\"id\">{rows[4]['release_id']}</span>" in chain
+    assert f">v4</a><span class=\"id\">{rows[4]['artifact_id']}</span>" in chain
     data = _data(page)
-    assert data["release_id"] == rows[1]["release_id"] and data["metrics"]["training_request"]["text"] == FIRST
+    assert data["artifact_id"] == rows[1]["artifact_id"] and data["metrics"]["training_request"]["text"] == FIRST
     assert data["metrics"]["training_request"]["requires"] == []
 
     page = _page(dispatcher, 0)
@@ -237,16 +235,16 @@ def test_release_pages_show_the_chain_active_release_and_unknown_steps(chain_dis
     chain = _section(page, "Chain")
     # Only the win ran on the seed; the two rejected candidates ran on the win, whose id their rows carry.
     assert chain.count('class="step-name"') == 1
-    assert f'>v1</a><span class="id">{rows[1]["release_id"]}</span><span class="selected">Published</span>' in chain
+    assert f'>v1</a><span class="id">{rows[1]["artifact_id"]}</span><span class="selected">Published</span>' in chain
     assert '<span class="rejected">' not in chain
     # Each child links the page of its own step, opened the way this one was.
     assert 'href="/reef/harness/releases/1/page"' in chain
     head = _section(_page(dispatcher, 1), "Chain")
     assert head.count('class="step-name"') == 3 and ">v1</a>" not in head
     for step in (2, 3):
-        assert f'>v{step}</a><span class="id">{rows[1]["release_id"]}</span><span class="rejected"' in head
+        assert f'>v{step}</a><span class="id">{rows[1]["artifact_id"]}</span><span class="rejected"' in head
     assert (
-        f'>v4</a><span class="id">{rows[4]["release_id"]}</span><span class="inactive">Waiting for activation</span>'
+        f'>v4</a><span class="id">{rows[4]["artifact_id"]}</span><span class="inactive">Waiting for activation</span>'
         in head
     )
 
@@ -279,8 +277,8 @@ def test_the_page_for_an_inactive_extension_step_diffs_the_file_against_the_head
     changed = _section(page, "What changed")
     assert f'<span class="tag operation-update">update</span><span class="node-id">{EXTENSION_PATH}</span>' in changed
     # A unified diff of the source file against the copy in the release it ran on, the added line marked.
-    assert f"--- {EXTENSION_PATH} ({rows[1]['release_id'][:8]})" in changed
-    assert f"+++ {EXTENSION_PATH} ({rows[4]['release_id'][:8]})" in changed
+    assert f"--- {EXTENSION_PATH} ({rows[1]['artifact_id'].removeprefix('artifact:')[:8]})" in changed
+    assert f"+++ {EXTENSION_PATH} ({rows[4]['artifact_id'].removeprefix('artifact:')[:8]})" in changed
     assert '<span class="add">+  pi.on(&quot;session_start&quot;, () =&gt; {});</span>' in changed
     assert "if (1 &lt; 2) return;" in changed
     # The rules bump that made the patch win rides beside it.
@@ -289,8 +287,8 @@ def test_the_page_for_an_inactive_extension_step_diffs_the_file_against_the_head
     assert '<span class="inactive">Waiting for activation</span>' in selection_result
     assert "a person activates it first" in selection_result
     chain = _section(page, "Chain")
-    assert f'<dt>Parent</dt><dd class="id">{rows[1]["release_id"]}</dd>' in chain
-    assert rows[4]["release_id"] in chain and "<li>" not in chain
+    assert f'<dt>Parent</dt><dd class="id">{rows[1]["artifact_id"]}</dd>' in chain
+    assert rows[4]["artifact_id"] in chain and "<li>" not in chain
     data = _data(page)
     assert data["active"] is False and data["metrics"]["patch"][EXTENSION_PATH] == NEW_CODE
 
@@ -309,9 +307,9 @@ def test_the_page_for_a_rejected_step_names_the_head_it_ran_on_and_the_candidate
     assert "Did not pass the checks" in selection_result and "The active release did not change" in selection_result
     assert "<dt>Wins</dt><dd>0</dd>" in selection_result and "<dt>Losses</dt><dd>1</dd>" in selection_result
     chain = _section(page, "Chain")
-    assert rows[2]["release_id"] == rows[1]["release_id"]
-    assert f'{rows[1]["release_id"]} (the active release at this step; the candidate published nothing)' in chain
-    assert before_release_id(rows[2]) == rows[1]["release_id"]
+    assert rows[2]["artifact_id"] == rows[1]["artifact_id"]
+    assert f'{rows[1]["artifact_id"]} (the active release at this step; the candidate published nothing)' in chain
+    assert before_artifact_id(rows[2]) == rows[1]["artifact_id"]
 
 
 def test_the_page_for_an_automatic_step_without_a_request_says_a_failure_in_the_job_data(
@@ -336,10 +334,10 @@ def test_the_page_carries_the_shared_layout_and_links_the_other_steps_with_the_q
     A person opens either from a browser, which sends no header, so the
     scenario and the token ride in the query; every link the page draws has
     to carry them on or the next page is a 401."""
-    creation = {"release_id": "rel-0", "parent_release_id": None, "operation": "creation"}
+    creation = {"artifact_id": "rel-0", "parent_artifact_id": None, "operation": "creation"}
     row = {
-        "release_id": "rel-1",
-        "parent_release_id": "rel-0",
+        "artifact_id": "rel-1",
+        "parent_artifact_id": "rel-0",
         "operation": "training",
         "metrics": {"selected": True},
     }
@@ -479,7 +477,7 @@ def test_the_page_module_is_ascii_and_the_builder_escapes_every_angle_bracket() 
             "training_request": {
                 "id": "q-1",
                 "session": "s1",
-                "release_id": "rel-0",
+                "artifact_id": "rel-0",
                 "text": "caf\u00e9 <script>alert(1)</script>",
                 "requires": [
                     {"name": "SLACK_WEBHOOK", "kind": "env", "check": "SLACK_WEBHOOK"},
@@ -541,30 +539,30 @@ def test_the_setup_section_splits_the_steps_own_items_from_what_the_chain_carrie
     twilio = {"name": "TWILIO_SID", "kind": "env", "check": "TWILIO_SID"}
     notify = {"name": "notify", "kind": "permission", "check": "test -d /", "prompt": "Allow notifications"}
     never = {"name": "never", "kind": "service"}
-    creation = {"release_id": "rel-0", "parent_release_id": None, "operation": "creation"}
+    creation = {"artifact_id": "rel-0", "parent_artifact_id": None, "operation": "creation"}
     first = {
-        "release_id": "rel-1",
-        "parent_release_id": "rel-0",
+        "artifact_id": "rel-1",
+        "parent_artifact_id": "rel-0",
         "operation": "training",
         "metrics": {"selected": True, "training_request": {"id": "q-1", "text": "text me", "requires": [twilio]}},
     }
     # The rejected candidate's row carries the active release's id; its own item never installed anywhere.
     rejected = {
-        "release_id": "rel-1",
-        "parent_release_id": "rel-0",
+        "artifact_id": "rel-1",
+        "parent_artifact_id": "rel-0",
         "operation": "training",
         "metrics": {"selected": False, "training_request": {"id": "q-2", "text": "more", "requires": [never]}},
     }
     second = {
-        "release_id": "rel-2",
-        "parent_release_id": "rel-1",
+        "artifact_id": "rel-2",
+        "parent_artifact_id": "rel-1",
         "operation": "training",
         "metrics": {"selected": True, "training_request": {"id": "q-3", "text": "notify", "requires": [notify]}},
     }
     # The next step names nothing itself; through its parent it carries the whole chain.
     third = {
-        "release_id": "rel-3",
-        "parent_release_id": "rel-2",
+        "artifact_id": "rel-3",
+        "parent_artifact_id": "rel-2",
         "operation": "training",
         "metrics": {"selected": True},
     }
@@ -588,11 +586,11 @@ def test_the_setup_section_splits_the_steps_own_items_from_what_the_chain_carrie
 
 
 def test_each_file_of_the_patch_reads_against_the_release_the_step_ran_on() -> None:
-    creation = {"release_id": "rel-0", "parent_release_id": None, "operation": "creation"}
+    creation = {"artifact_id": "rel-0", "parent_artifact_id": None, "operation": "creation"}
     patch = {EXTENSION_PATH: NEW_CODE, "skills/notes/SKILL.md": "# notes\n", "rules.md": None}
     row = {
-        "release_id": "rel-1",
-        "parent_release_id": "rel-0",
+        "artifact_id": "rel-1",
+        "parent_artifact_id": "rel-0",
         "operation": "training",
         "metrics": {"selected": True, "patch": patch},
     }
@@ -621,8 +619,8 @@ def test_an_activated_step_reads_selected_and_adds_no_row(tmp_path: Path) -> Non
     dispatcher = _chain(tmp_path)
     try:
         scenario = dispatcher.get_or_create_scenario(SCENARIO)
-        inactive_id = list(reversed(catalog(scenario)))[4]["release_id"]
-        assert dispatcher.activate(SCENARIO, inactive_id).release_id == inactive_id
+        artifact_id = list(reversed(catalog(scenario)))[4]["artifact_id"]
+        assert dispatcher.activate(SCENARIO, artifact_id).artifact_id == artifact_id
         rows = list(reversed(catalog(scenario)))
         assert len(rows) == 5 and rows[4]["active"] is True and rows[1]["active"] is False
         assert result_of(rows[4]) == "selected"
@@ -632,10 +630,10 @@ def test_an_activated_step_reads_selected_and_adds_no_row(tmp_path: Path) -> Non
         assert '<span class="chip">Active release</span>' in _sub(page)
         assert "a person activates it first" not in _section(page, "Result")
         # The step still diffs against the release it was evaluated on.
-        assert f"+++ {EXTENSION_PATH} ({inactive_id[:8]})" in _section(page, "What changed")
+        assert f"+++ {EXTENSION_PATH} ({artifact_id.removeprefix('artifact:')[:8]})" in _section(page, "What changed")
         assert "Active release" not in _sub(_page(dispatcher, 1))
         head = _section(_page(dispatcher, 1), "Chain")
-        assert f'>v4</a><span class="id">{inactive_id}</span><span class="selected">Published</span>' in head
+        assert f'>v4</a><span class="id">{artifact_id}</span><span class="selected">Published</span>' in head
     finally:
         dispatcher.close()
 
@@ -644,14 +642,14 @@ def test_a_step_that_published_nothing_chains_to_the_release_it_ran_on() -> None
     head = {**PUBLISHED, "active": True}
     skipped = {**PUBLISHED, "checkpoint": False, "active": False, "metrics": {"skipped": UNCHANGED}}
     rows = [{**CREATION, "active": False}, head, skipped]
-    assert before_release_id(skipped) == "rel-1" and served_step(rows) == 1
+    assert before_artifact_id(skipped) == "rel-1" and served_step(rows) == 1
     chain = _section(build_release_page(2, rows), "Chain")
     assert '<dt>Ran on</dt><dd class="id">rel-1 (the active release at this step; nothing was evaluated)</dd>' in chain
     assert "none (the candidate published nothing)" in chain
-    assert "<dt>Parent</dt>" not in chain and "<dt>This release</dt>" not in chain and "rel-0" not in chain
+    assert "<dt>Parent</dt>" not in chain and "<dt>This artifact</dt>" not in chain and "rel-0" not in chain
     published = _section(build_release_page(1, rows), "Chain")
     assert '<dt>Parent</dt><dd class="id">rel-0</dd>' in published
-    assert '<dt>This release</dt><dd class="id">rel-1</dd>' in published
+    assert '<dt>This artifact</dt><dd class="id">rel-1</dd>' in published
     # The skipped step ran on rel-1, so it is rel-1's child and not rel-0's, though its row names rel-0 as parent.
     assert '>v2</a><span class="id">rel-1</span><span class="skipped">No changes</span></li>' in published
     seed = _section(build_release_page(0, rows), "Chain")
@@ -659,10 +657,10 @@ def test_a_step_that_published_nothing_chains_to_the_release_it_ran_on() -> None
 
 
 def test_the_diff_colours_lines_by_position_so_a_plus_plus_line_is_an_addition() -> None:
-    creation = {"release_id": "rel-0", "parent_release_id": None, "operation": "creation"}
+    creation = {"artifact_id": "rel-0", "parent_artifact_id": None, "operation": "creation"}
     row = {
-        "release_id": "rel-1",
-        "parent_release_id": "rel-0",
+        "artifact_id": "rel-1",
+        "parent_artifact_id": "rel-0",
         "operation": "training",
         "metrics": {"selected": True, "patch": {EXTENSION_PATH: "let n = 0;\n++n;\n"}},
     }
@@ -676,12 +674,12 @@ def test_the_diff_colours_lines_by_position_so_a_plus_plus_line_is_an_addition()
 def test_the_page_shows_the_method_summary_and_notes_and_escapes_them() -> None:
     """What the method returned shows as written: the summary as plain text with its line breaks after Why, and the
     notes as JSON after the Result; neither is read as HTML."""
-    creation = {"release_id": "rel-0", "parent_release_id": None, "operation": "creation"}
+    creation = {"artifact_id": "rel-0", "parent_artifact_id": None, "operation": "creation"}
     summary = "Add an <away> command.\n\nHow to use: type /away on."
     notes = {"review": {"result": "partial", "uncovered": ["no <b>notice</b>"]}, "attempts": 2}
     row = {
-        "release_id": "rel-1",
-        "parent_release_id": "rel-0",
+        "artifact_id": "rel-1",
+        "parent_artifact_id": "rel-0",
         "operation": "training",
         "metrics": {
             "selected": True,
@@ -704,7 +702,7 @@ def test_the_page_shows_the_method_summary_and_notes_and_escapes_them() -> None:
 
 
 def test_a_row_without_a_method_summary_or_notes_has_no_such_section() -> None:
-    creation = {"release_id": "rel-0", "parent_release_id": None, "operation": "creation"}
+    creation = {"artifact_id": "rel-0", "parent_artifact_id": None, "operation": "creation"}
     plain = ["Why", "What changed", "Result", "Setup", "Chain"]
     for metrics in (
         {"selected": True},
@@ -712,7 +710,7 @@ def test_a_row_without_a_method_summary_or_notes_has_no_such_section() -> None:
         {"selected": True, "method_summary": "  ", "method_notes": {}},
         {"skipped": UNCHANGED},
     ):
-        row = {"release_id": "rel-1", "parent_release_id": "rel-0", "operation": "training", "metrics": metrics}
+        row = {"artifact_id": "rel-1", "parent_artifact_id": "rel-0", "operation": "training", "metrics": metrics}
         assert _sections(build_release_page(1, [creation, row])) == plain
 
 
@@ -732,7 +730,7 @@ def test_a_step_that_failed_reads_as_failed_names_its_error_and_published_nothin
     }
     page = build_release_page(1, [creation, row])
     page.encode("ascii")
-    assert result_of(row) == "failed" and served_step([creation, row]) == 0 and before_release_id(row) == "rel-0"
+    assert result_of(row) == "failed" and served_step([creation, row]) == 0 and before_artifact_id(row) == "rel-0"
     assert '<span class="failed">Failed</span>' in page
     assert _sections(page) == ["Why", "What changed", "Result", "Setup", "Chain"]
     selection_result = _section(page, "Result")
@@ -754,10 +752,10 @@ def test_a_step_that_failed_reads_as_failed_names_its_error_and_published_nothin
 def test_the_result_lists_the_floor_metrics_and_omits_the_current_score_when_no_current_side_ran(
     legacy_policy_version: bool,
 ) -> None:
-    creation = {"release_id": "rel-0", "parent_release_id": None, "operation": "creation"}
+    creation = {"artifact_id": "rel-0", "parent_artifact_id": None, "operation": "creation"}
     row = {
-        "release_id": "rel-1",
-        "parent_release_id": "rel-0",
+        "artifact_id": "rel-1",
+        "parent_artifact_id": "rel-0",
         "operation": "training",
         "metrics": {
             "selected": True,
@@ -802,7 +800,7 @@ def test_the_result_lists_the_floor_metrics_and_omits_the_current_score_when_no_
 
 
 def test_the_setup_section_lists_the_requires_the_step_refused_with_their_reasons() -> None:
-    creation = {"release_id": "rel-0", "parent_release_id": None, "operation": "creation"}
+    creation = {"artifact_id": "rel-0", "parent_artifact_id": None, "operation": "creation"}
     refused_items = [
         {
             "item": {"name": "notify", "kind": "service", "check": 'curl -H "Bearer <token>" && echo 1 < 2'},
@@ -814,8 +812,8 @@ def test_the_setup_section_lists_the_requires_the_step_refused_with_their_reason
         },
     ]
     row = {
-        "release_id": "rel-1",
-        "parent_release_id": "rel-0",
+        "artifact_id": "rel-1",
+        "parent_artifact_id": "rel-0",
         "operation": "training",
         "metrics": {
             "selected": True,
