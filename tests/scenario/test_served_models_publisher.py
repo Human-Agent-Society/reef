@@ -9,8 +9,9 @@ import pytest
 from reef.core.artifact_ref import ArtifactRef
 from reef.core.artifact_selection import ArtifactSelection, SelectedArtifact
 from reef.core.served_models import CACHE_SECONDS, ScheduledStop, ServedArtifact
-from reef.dispatcher.served import ControlInstance, ServedModelsPublisher, wait_for_control_lease
+from reef.dispatcher.served import ControlInstance, ServedModelsPublisher, retry_delay_seconds, wait_for_control_lease
 from reef.storage.coordination import Coordination
+from reef.storage.served_models import AUTOMATIC_RETRIES, SERVING_KIND, SERVING_QUEUE
 from reef.storage.sql_coordination import (
     SQLControlLease,
     SQLiteCoordinationDatabase,
@@ -83,6 +84,13 @@ def coordination() -> Coordination:
     database = SQLiteCoordinationDatabase(None)
     lease = SQLControlLease(database)
     return Coordination(database, SQLWorkQueue(database), SQLServedModels(database, lease), lease, SQLMarks(database))
+
+
+def fail_current_request(store: Coordination, *, now: float) -> str:
+    """Let an inference worker take the current serving request and fail it for good; return its ID."""
+    item = store.work_queue.take(SERVING_QUEUE, "inference", [SERVING_KIND], now=now)
+    store.work_queue.fail(SERVING_QUEUE, item.id, "inference", "the engine is not ready", retryable=False, now=now)
+    return item.id
 
 
 @pytest.mark.unit
@@ -212,3 +220,57 @@ def test_control_leaves_scheduled_engine_stops_to_inference() -> None:
     assert publisher.run_once(now=131.0)
     assert runtime.stopped == []
     assert store.served_models.due_stops(131.0) == (ScheduledStop(old, 110.0),)
+
+
+@pytest.mark.unit
+def test_control_retries_a_failed_request_after_a_delay_that_doubles_up_to_an_hour() -> None:
+    runtime = Runtime()
+    store = coordination()
+    lease = store.control_lease.acquire("control", now=0.0)
+    publisher = ServedModelsPublisher(
+        Registry(runtime), store, Instance(), lease, instance_id="control", stop_delay_seconds=60
+    )
+    publisher.run_once(now=0.0)
+    delays = [60.0, 120.0, 240.0, 480.0, 960.0, 1920.0, 3600.0, 3600.0]
+    assert [retry_delay_seconds(retries) for retries in range(len(delays))] == delays
+    assert retry_delay_seconds(10_000) == 3600.0
+    moment = 0.0
+    for retries, delay in enumerate(delays):
+        failed = fail_current_request(store, now=moment)
+        assert publisher.run_once(now=moment + delay - 1)
+        assert store.served_models.current_request("math").id == failed
+        moment += delay
+        assert publisher.run_once(now=moment)
+        retried = store.served_models.current_request("math")
+        assert retried.id != failed and retried.state == "queued"
+        assert retried.metadata == {AUTOMATIC_RETRIES: retries + 1}
+
+    # A failed request whose payload is no longer desired is replaced at once, with no retry count.
+    fail_current_request(store, now=moment)
+    runtime.release = "release-2"
+    assert publisher.run_once(now=moment + 1)
+    replaced = store.served_models.current_request("math")
+    assert replaced.payload["artifact_id"] == "release-2" and replaced.metadata == {}
+
+
+@pytest.mark.unit
+def test_a_manual_retry_starts_at_once_and_resets_the_delay() -> None:
+    store = coordination()
+    registry = Registry(Runtime())
+    lease = store.control_lease.acquire("control", now=0.0)
+    publisher = ServedModelsPublisher(registry, store, Instance(), lease, instance_id="control", stop_delay_seconds=60)
+    publisher.run_once(now=0.0)
+    fail_current_request(store, now=0.0)
+    publisher.run_once(now=60.0)
+    fail_current_request(store, now=60.0)
+    assert store.served_models.current_request("math").metadata == {AUTOMATIC_RETRIES: 1}
+
+    # Activate and restore publish with retry_failed: the retry starts before the 120 s delay ends.
+    publisher.publish(registry.scenario, retry_failed=True, now=61.0)
+    manual = store.served_models.current_request("math")
+    assert manual.state == "queued" and manual.metadata == {}
+    fail_current_request(store, now=61.0)
+    publisher.run_once(now=120.0)
+    assert store.served_models.current_request("math").id == manual.id
+    publisher.run_once(now=121.0)
+    assert store.served_models.current_request("math").metadata == {AUTOMATIC_RETRIES: 1}

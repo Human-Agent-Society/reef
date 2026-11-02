@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 
 import pytest
@@ -95,9 +96,10 @@ def startup(tmp_path):
 
 @pytest.mark.unit
 @pytest.mark.parametrize("fails", [False, True])
-def test_slow_start_reports_its_result_without_blocking_control(startup, fails):
+def test_slow_start_reports_its_result_without_blocking_control(startup, fails, caplog):
     control, worker, runtime, inference_app = startup
     runtime.fail_start = fails
+    caplog.set_level(logging.WARNING, logger="reef.execution.workers")
 
     async def run() -> None:
         async with (
@@ -136,6 +138,11 @@ def test_slow_start_reports_its_result_without_blocking_control(startup, fails):
             assert response.status == (503 if fails else 200)
             if fails:
                 assert (await response.json())["error"]["type"] == "inference_start_failed"
+                failed = control.coordination.served_models.current_request("math")
+                warnings = [record.getMessage() for record in caplog.records if record.levelno == logging.WARNING]
+                assert warnings == [
+                    f"work item serving/{failed.id} of scenario math failed: ValueError: the selected model cannot load"
+                ]
             assert (await control_client.get("/reef/scenarios/math/settings")).status == 200
             assert runtime.opens == 1
 
