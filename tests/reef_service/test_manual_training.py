@@ -39,7 +39,7 @@ from reef.storage.samples import CONSUMED_SAMPLE_PREFIX
 from reef.storage.scenario import ScenarioSettings
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
-from reef.train.backend import ComponentReleases, ReleaseFiles
+from reef.train.backend import ArtifactTextFiles, ComponentArtifacts
 from reef.train.harness_backend.state import HarnessState
 from reef.train.instructions import ScenarioInstructions
 from reef.train.jobs import JobLoop
@@ -208,7 +208,7 @@ def recipe_in(mode, tmp_path, method, **fields) -> HarnessEvolutionRecipe:
 def _trainer(recipe: HarnessEvolutionRecipe, records) -> Trainer:
     """The recipe's trainer over an in-memory commit history whose base is the recipe's seed."""
     return recipe.build(
-        "s", records, releases=ComponentReleases(TreeReleases(recipe.seed), COMPONENT), root=seed_root(recipe)
+        "s", records, releases=ComponentArtifacts(TreeReleases(recipe.seed), COMPONENT), root=seed_root(recipe)
     )
 
 
@@ -1071,7 +1071,7 @@ def test_a_job_trainer_runs_each_instruction_as_a_job_and_a_failed_job_does_not_
     wait_for_serving(dispatcher, "s")
     scenario = dispatcher.get_or_create_scenario("s")
     assert runtime.served == "w2"
-    assert scenario.served_artifact_id() == scenario.current_artifact_ref().release_id
+    assert scenario.served_artifact_id() == scenario.repository.resolve(scenario.current_artifact_ref()).artifact_id
     assert (scenario.repository.resolve(scenario.current_artifact_ref()).local_path / "model.txt").read_text() == "w2"
     assert scenario.trainer.pipeline.training_mode == "manual"
     assert scenario.trainer.pending_instructions() == 0
@@ -1164,7 +1164,7 @@ def test_an_instruction_runs_past_the_step_budget_and_the_failure_streak(tmp_pat
         seen.append(asked(workspace)[0])
 
     recipe = recipe_in("manual", tmp_path, method, max_steps=1)
-    head = ReleaseFiles("base", dict(recipe.seed.files))
+    head = ArtifactTextFiles("base", dict(recipe.seed.files))
     trainer = _trainer(recipe, records)
     file(instructions, "one")
     file(instructions, "two")

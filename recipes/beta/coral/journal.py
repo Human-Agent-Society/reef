@@ -15,7 +15,12 @@ from pathlib import Path
 
 @dataclass(frozen=True)
 class CallRecord:
-    """One provider call as the gateway saw it."""
+    """One provider call as the gateway saw it.
+
+    ``artifact_id`` is absent when the response has no artifact header;
+    otherwise it is a nonempty string identifying the served weights.
+    The journal and result bundle use it to group calls by artifact.
+    """
 
     request_id: str
     timestamp: str
@@ -25,11 +30,15 @@ class CallRecord:
     path: str
     status_code: int
     agent_record_id: str | None = None
-    #: ``x-reef-release-id`` from the response: which serving revision answered.
-    release_id: str | None = None
+    #: ``x-reef-artifact-id`` from the response: which serving revision answered.
+    artifact_id: str | None = None
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
     tags: dict[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.artifact_id is not None and (not isinstance(self.artifact_id, str) or not self.artifact_id):
+            raise ValueError("artifact_id must be a nonempty string or None")
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), ensure_ascii=False, separators=(",", ":"))
@@ -37,6 +46,9 @@ class CallRecord:
     @classmethod
     def from_json(cls, line: str) -> CallRecord:
         data = json.loads(line)
+        legacy_id = data.pop("release_id", None)
+        if "artifact_id" not in data:
+            data["artifact_id"] = legacy_id
         return cls(**data)
 
 

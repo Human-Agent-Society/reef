@@ -116,6 +116,7 @@ def make_trajectory(
                         {
                             "agent_record_id": record.agent_record_id,
                             "created_at": record.created_at,
+                            "artifact_id": record.artifact_id,
                             "payload": dict(record.payload),
                         }
                         for record in records

@@ -321,7 +321,7 @@ def test_release_reads_stay_responsive_during_evaluation(tmp_path, monkeypatch) 
                 assert current == pinned == first
                 head = catalog["releases"][-1]
                 assert head["active"] is True and head["release_id"] == first["release_id"]
-                assert head["content_id"] == first["content_id"] and head["metrics"] == first["evaluation"]
+                assert head["artifact_id"] == first["artifact_id"] and head["metrics"] == first["evaluation"]
 
                 finish_evaluation.set()
                 second = await asyncio.wait_for(second_step, UPDATE_TIMEOUT_S)
@@ -330,7 +330,7 @@ def test_release_reads_stay_responsive_during_evaluation(tmp_path, monkeypatch) 
                 assert updated["releases"][-2]["active"] is False
                 head = updated["releases"][-1]
                 assert head["active"] is True and head["release_id"] == second["release_id"] != first["release_id"]
-                assert head["content_id"] == second["content_id"] and head["metrics"] == second["evaluation"]
+                assert head["artifact_id"] == second["artifact_id"] and head["metrics"] == second["evaluation"]
                 assert second["files"] == render_tree(TREE_V2, PI)
                 assert await read_release("/reef/harness", first["release_id"]) == first
             finally:

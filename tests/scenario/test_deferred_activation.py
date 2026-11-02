@@ -56,7 +56,7 @@ def test_load_training_activation_and_recovery_do_not_load_an_engine(deferred_fa
             assert result is not None
             scenario.commit(result)
         assert scenario.current_artifact_ref() != root
-        scenario.activate(root.release_id)
+        scenario.activate(scenario.repository.resolve(root).artifact_id)
         assert scenario.current_artifact_ref() == root
         assert runtime.activated == []
 

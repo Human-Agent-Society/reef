@@ -44,8 +44,6 @@ import aiohttp
 from aiohttp import web
 from sqlalchemy.exc import SQLAlchemyError
 
-from reef.artifact.artifact import Artifact
-from reef.core.artifact_ref import ArtifactRef
 from reef.core.errors import ReefError
 from reef.core.records_types import ROLLOUT_HEADER, AgentRecord, RequestType
 from reef.core.served_models import ACTIVE, CACHE_SECONDS, ServedArtifact
@@ -54,6 +52,7 @@ from reef.inference.provider_protocol import SSEFrameDecoder
 from reef.runtime.interfaces import (
     INFERENCE_ABORT_ERROR,
     EngineClients,
+    InferenceArtifact,
     InferenceHandler,
     UpstreamStatusError,
     inference_aborted,
@@ -154,52 +153,6 @@ class ServedModelsCache:
         return served
 
 
-class ArtifactRefs:
-    """The release of each artifact that a replica serves, read once from the scenario's commit history.
-
-    A selection supplies the artifact's durable storage reference. Older commits supply the release whose
-    manifest (``CommitRecord.components``) names it, or whose ``release_id`` equals the artifact ID. Local
-    selection caches never enter inference records. An
-    artifact that no commit binds, such as the artifact that a scenario started from, has no release here, and its
-    records carry no ``artifact_ref``.
-
-    Values: ``storage`` holds the commit histories; ``known`` maps each ``(scenario, artifact_id)`` read before to
-    its release, or to None.
-
-    Purpose: ``InferenceReplica`` reads the release of each request's artifact through it, for the record.
-    """
-
-    def __init__(self, storage: ScenarioStorage) -> None:
-        self.storage = storage
-        self.known: dict[tuple[str, str], ArtifactRef | None] = {}
-
-    def ref(self, scenario: str, artifact_id: str) -> ArtifactRef | None:
-        key = (scenario, artifact_id)
-        if key in self.known:
-            return self.known[key]
-        store = self.storage.open(scenario)
-        try:
-            history = store.history()
-        finally:
-            store.close()
-        found = None
-        for commit in reversed(history):
-            if commit.selection is not None:
-                selected = next(
-                    (item for item in commit.selection.components.values() if item.artifact_id == artifact_id), None
-                )
-                if selected is not None:
-                    found = selected.ref
-                    break
-            if not commit.artifact_ref.release_id.startswith("selection:") and (
-                artifact_id in (commit.components or {}).values() or commit.artifact_ref.release_id == artifact_id
-            ):
-                found = commit.artifact_ref
-                break
-        self.known[key] = found
-        return found
-
-
 async def read_object(request: web.Request) -> dict[str, Any]:
     """The request's JSON object; 400 for a body that is not one."""
     try:
@@ -211,11 +164,9 @@ async def read_object(request: web.Request) -> dict[str, Any]:
     return payload
 
 
-def upstream_artifact(served: ServedArtifact, ref: ArtifactRef | None) -> Artifact:
-    """The artifact that the engine handler gets for its request headers: the release, or the artifact by its ID."""
-    return Artifact(
-        ref or ArtifactRef(served.artifact_id, served.artifact_id, None), None, artifact_id=served.artifact_id
-    )
+def upstream_artifact(served: ServedArtifact) -> InferenceArtifact:
+    """Build a handler identity from the route, without inventing a storage snapshot."""
+    return InferenceArtifact(served.artifact_id)
 
 
 def provider_response(response: Mapping[str, Any]) -> dict[str, Any]:
@@ -275,8 +226,7 @@ class InferenceReplica:
 
     Values: ``cache`` reads ``served_models``; ``storage`` holds each scenario's records and commit history;
     ``engines`` gives the handler of each row's engine; ``timeout_seconds`` is the positive time that the replica
-    waits for an engine; ``for_codex`` is whether streams are rewritten for a Codex client; ``refs`` resolves the
-    release of each served artifact.
+    waits for an engine; ``for_codex`` is whether streams are rewritten for a Codex client.
 
     Purpose: ``add_inference_routes`` routes model requests to ``answer`` and status reads to ``startup_status``.
     """
@@ -286,15 +236,13 @@ class InferenceReplica:
     engines: EngineClients
     timeout_seconds: float = 300.0
     for_codex: bool = False
-    refs: ArtifactRefs = field(init=False)
 
     def __post_init__(self) -> None:
         if not self.timeout_seconds > 0:
             raise ValueError("timeout_seconds is positive")
-        self.refs = ArtifactRefs(self.storage)
 
     def record(
-        self, parsed: RequestHeaders, payload: Mapping[str, Any], response: Mapping[str, Any], ref: ArtifactRef | None
+        self, parsed: RequestHeaders, payload: Mapping[str, Any], response: Mapping[str, Any], artifact_id: str
     ) -> str:
         """Append the record of one answered request; return its ID. ``payload`` names the artifact that answered
         (``artifact_id``)."""
@@ -302,7 +250,7 @@ class InferenceReplica:
             scenario=parsed.scenario,
             request_type=RequestType.INFERENCE,
             payload={**with_request_tags(payload, parsed), "response": provider_response(response)},
-            artifact_ref=ref,
+            artifact_id=artifact_id,
         )
         store = self.storage.open(parsed.scenario)
         try:
@@ -347,17 +295,13 @@ class InferenceReplica:
             "error": "The inference engine did not start. Check the service logs." if state == "failed" else None,
         }
 
-    async def resolve(
-        self, scenario: str, model: object, *, name: str | None, refresh: bool
-    ) -> tuple[ServedArtifact, ArtifactRef | None]:
-        """The row that answers (``name``, or the one that ``model`` names) and its release, read off the event
-        loop. A missing route answers 503 during startup or after failure, and 404 for an unknown model."""
+    async def resolve(self, scenario: str, model: object, *, name: str | None, refresh: bool) -> ServedArtifact:
+        """The serving row for ``name`` or ``model``, read off the event loop. A missing route answers 503 during startup or after failure, and 404 for an unknown model."""
         try:
             if name is None:
                 served = await asyncio.to_thread(self.cache.read, scenario, model, refresh=refresh)
             else:
                 served = await asyncio.to_thread(self.cache.read_named, scenario, name, refresh=refresh)
-            ref = await asyncio.to_thread(self.refs.ref, scenario, served.artifact_id)
         except NotServed as exc:
             status = await asyncio.to_thread(self.startup_status, scenario, ACTIVE if name is None else name)
             if status["state"] in ("pending", "starting"):
@@ -376,7 +320,7 @@ class InferenceReplica:
             raise web.HTTPServiceUnavailable(text="The inference route is unavailable.") from exc
         except StaleServedModels as exc:
             raise web.HTTPServiceUnavailable(text=str(exc)) from exc
-        return served, ref
+        return served
 
     def handler(self, served: ServedArtifact) -> InferenceHandler:
         try:
@@ -396,17 +340,13 @@ class InferenceReplica:
         except ValueError as exc:
             raise web.HTTPBadRequest(text=str(exc)) from exc
 
-    async def forward(
-        self, served: ServedArtifact, ref: ArtifactRef | None, path: str, payload: Mapping[str, Any]
-    ) -> dict[str, Any]:
+    async def forward(self, served: ServedArtifact, path: str, payload: Mapping[str, Any]) -> dict[str, Any]:
         """The answer of the engine of ``served`` to ``payload`` under the row's model name: 502 for an error status,
         an unreachable engine or an answer that is no JSON object, 504 when the engine does not answer in time."""
         handler = self.handler(served)
         try:
             return await asyncio.wait_for(
-                handler.inference(
-                    upstream_artifact(served, ref), path, handler.address_model(payload, served.model_name)
-                ),
+                handler.inference(upstream_artifact(served), path, handler.address_model(payload, served.model_name)),
                 timeout=self.timeout_seconds,
             )
         except (UpstreamStatusError, aiohttp.ClientError, TypeError, json.JSONDecodeError) as exc:
@@ -433,25 +373,27 @@ class InferenceReplica:
         except HeaderError as exc:
             raise web.HTTPBadRequest(text=str(exc)) from exc
         payload = await read_object(request)
-        served, ref = await self.resolve(parsed.scenario, payload.get("model"), name=name, refresh=False)
+        served = await self.resolve(parsed.scenario, payload.get("model"), name=name, refresh=False)
         if payload.get("stream") is True:
             if rollout:
                 raise web.HTTPBadRequest(text="a rollout's call does not stream; send it without stream")
             sent = self.request_payload(parsed.scenario, served, payload)
-            return await self.relay_stream(request, path, parsed, sent, served, ref, record=record)
+            return await self.relay_stream(request, path, parsed, sent, served, record=record)
         for attempt in range(2):
             sent = self.request_payload(parsed.scenario, served, payload)
-            response = await self.forward(served, ref, path, sent)
+            response = await self.forward(served, path, sent)
             if not inference_aborted(response):
                 break
             if attempt == 1:
                 raise web.HTTPConflict(text=INFERENCE_ABORT_ERROR)
-            served, ref = await self.resolve(parsed.scenario, payload.get("model"), name=name, refresh=True)
+            served = await self.resolve(parsed.scenario, payload.get("model"), name=name, refresh=True)
         stamped = {**sent, "artifact_id": served.artifact_id}
         reply_headers = {ARTIFACT_HEADER: served.artifact_id, RELEASE_HEADER: served.artifact_id}
         if record:
             try:
-                reply_headers[RECORD_HEADER] = await asyncio.to_thread(self.record, parsed, stamped, response, ref)
+                reply_headers[RECORD_HEADER] = await asyncio.to_thread(
+                    self.record, parsed, stamped, response, served.artifact_id
+                )
             except Exception as exc:
                 logger.exception("could not append the record of a request to %s", parsed.scenario)
                 raise web.HTTPServiceUnavailable(text="the record store cannot take the request's record") from exc
@@ -464,7 +406,6 @@ class InferenceReplica:
         parsed: RequestHeaders,
         payload: Mapping[str, Any],
         served: ServedArtifact,
-        ref: ArtifactRef | None,
         *,
         record: bool,
     ) -> web.StreamResponse:
@@ -473,7 +414,7 @@ class InferenceReplica:
         handler = self.handler(served)
         try:
             upstream = await handler.inference_stream(
-                upstream_artifact(served, ref), path, handler.address_model(payload, served.model_name)
+                upstream_artifact(served), path, handler.address_model(payload, served.model_name)
             )
         except (UpstreamStatusError, aiohttp.ClientError) as exc:
             raise web.HTTPBadGateway(text=f"the engine at {served.url} failed: {exc}") from exc
@@ -515,7 +456,11 @@ class InferenceReplica:
                         recorded = True
                         captured = stream_record(upstream, bytes(body), complete=True)
                         record_id = await asyncio.to_thread(
-                            self.record, parsed, {**payload, "artifact_id": served.artifact_id}, captured, ref
+                            self.record,
+                            parsed,
+                            {**payload, "artifact_id": served.artifact_id},
+                            captured,
+                            served.artifact_id,
                         )
                         frames = receipt_sse_events(path, relay.chat_identity, relay.terminal, record_id)
                     for frame in frames:
@@ -537,7 +482,11 @@ class InferenceReplica:
                 captured = stream_record(upstream, bytes(body), complete=complete, error=error)
                 try:
                     await asyncio.to_thread(
-                        self.record, parsed, {**payload, "artifact_id": served.artifact_id}, captured, ref
+                        self.record,
+                        parsed,
+                        {**payload, "artifact_id": served.artifact_id},
+                        captured,
+                        served.artifact_id,
                     )
                 except Exception:
                     logger.exception("could not append the record of a stream of %s", parsed.scenario)
@@ -644,7 +593,6 @@ __all__ = [
     "INFERENCE_PATHS",
     "RECORD_HEADER",
     "RELEASE_HEADER",
-    "ArtifactRefs",
     "InferenceReplica",
     "NotServed",
     "ServedModelsCache",

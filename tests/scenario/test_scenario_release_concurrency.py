@@ -166,7 +166,7 @@ def test_release_reads_remain_live_during_local_training(local_scenario) -> None
 
     def write():
         writer_started.set()
-        return scenario.activate(initial_ref.release_id)
+        return scenario.activate(scenario.repository.resolve(initial_ref).artifact_id)
 
     with ThreadPoolExecutor(max_workers=7) as executor:
         training = executor.submit(scenario.prepare_training_step)
@@ -178,9 +178,9 @@ def test_release_reads_remain_live_during_local_training(local_scenario) -> None
             # taking the publication lock and starving the read-side callers.
             catalog = executor.submit(scenario.releases)
             latest = executor.submit(scenario.release_queries.artifact_with_metrics)
-            historical = executor.submit(scenario.release_queries.artifact_with_metrics, initial_ref.release_id)
-            version = executor.submit(scenario.release_queries.artifact_for_version, current_ref.release_id)
-            old_version = executor.submit(scenario.release_queries.artifact_for_version, initial_ref.release_id)
+            historical = executor.submit(scenario.release_queries.artifact_with_metrics, initial_ref.revision)
+            version = executor.submit(scenario.release_queries.artifact_for_version, current_ref.revision)
+            old_version = executor.submit(scenario.release_queries.artifact_for_version, initial_ref.revision)
 
             assert catalog.result(timeout=2) == expected_releases
             artifact, metrics = latest.result(timeout=2)
@@ -245,17 +245,17 @@ def test_release_reads_wait_for_complete_publication(local_scenario, monkeypatch
 
     def read_historical():
         readers_started[2].set()
-        return scenario.release_queries.artifact_with_metrics(previous_ref.release_id)
+        return scenario.release_queries.artifact_with_metrics(previous_ref.revision)
 
     def read_version():
         readers_started[3].set()
-        return scenario.release_queries.artifact_for_version(previous_ref.release_id)
+        return scenario.release_queries.artifact_for_version(previous_ref.revision)
 
     with ThreadPoolExecutor(max_workers=5) as executor:
         writer = (
             executor.submit(scenario.commit, result)
             if operation == "commit"
-            else executor.submit(scenario.activate, initial_ref.release_id)
+            else executor.submit(scenario.activate, scenario.repository.resolve(initial_ref).artifact_id)
         )
         try:
             assert publication_started.wait(2), "publication did not start"
@@ -280,7 +280,7 @@ def test_release_reads_wait_for_complete_publication(local_scenario, monkeypatch
     # The listing marks the active artifact; an activation adds no row.
     assert len(catalog) == (9 if operation == "commit" else 6)
     active = catalog[0] if operation == "commit" else catalog[-1]
-    assert active["release_id"] == current_ref.release_id
+    assert active["release_id"] == current_ref.revision
     assert active["operation"] == ("training" if operation == "commit" else "creation")
     assert sum(row["active"] for row in catalog) == 1 and active["active"] is True
     artifact, metrics = latest
@@ -362,7 +362,10 @@ def test_pointer_conflict_preserves_committed_step_and_activation_leaves_the_bac
     assert scenario.commit_status["artifact_head_sync"]["state"] == "conflict"
     assert backend.current() == unrelated
     # An activation writes to the commit history only: the conflicted backend head stays as it is.
-    assert scenario.activate(initial.release_id).release_id == initial.release_id
+    assert (
+        scenario.activate(scenario.repository.resolve(initial).artifact_id).artifact_id
+        == scenario.repository.resolve(initial).artifact_id
+    )
     assert scenario.current_artifact_ref() == initial
     assert scenario.scenario_step == 3
     assert backend.current() == unrelated
@@ -382,8 +385,8 @@ def test_activation_does_no_storage_io(local_scenario, monkeypatch):
     with monkeypatch.context() as patch:
         for method in ("commit_release", "publish", "register"):
             patch.setattr(backend, method, unavailable)
-        activated = scenario.activate(initial.release_id)
-    assert (activated.artifact_id, activated.release_id) == (initial.release_id, initial.release_id)
+        activated = scenario.activate(scenario.repository.resolve(initial).artifact_id)
+    assert activated.artifact_id == scenario.repository.resolve(initial).artifact_id
     assert scenario.scenario_step == 3
     assert scenario.store.history()[-1].operation == "activate"
     assert scenario.current_artifact_ref() == initial
@@ -395,7 +398,7 @@ def test_activation_does_no_storage_io(local_scenario, monkeypatch):
         "error": None,
     }
     scenario.commit(_prepare(scenario))
-    assert scenario.current_artifact_ref().parent_release_id == tip.release_id
+    assert scenario.current_artifact_ref().parent_revision == tip.revision
 
 
 def test_committed_record_retry_reports_pointer_failure_without_repeating_step(local_scenario, monkeypatch):
@@ -421,8 +424,8 @@ def test_committed_record_retry_reports_pointer_failure_without_repeating_step(l
     assert scenario.scenario_step == 2
     assert len(scenario.store.history()) == 2
     assert scenario.trainer.state == result.state
-    assert scenario.current_artifact_ref() == committed.artifact_ref
-    assert scenario.repository.checkpoint_artifact == committed.artifact_ref
+    assert scenario.current_artifact_ref() == committed.snapshot
+    assert scenario.repository.checkpoint_artifact == committed.snapshot
     assert scenario.commit_status["artifact_head_sync"] == {
         "state": "pending",
         "error": "storage unavailable",

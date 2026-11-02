@@ -11,34 +11,34 @@ from dataclasses import dataclass
 from threading import RLock
 from typing import Any
 
-from reef.artifact.artifact import Artifact, ArtifactError, ArtifactNotFound, ArtifactRef
+from reef.artifact.artifact import Artifact, ArtifactError, ArtifactNotFound, SnapshotRef, is_local_snapshot
 from reef.artifact.release_chain import ArtifactReleaseChain
-from reef.core.artifact_ref import RootSource
-from reef.core.components import made_artifact_id
+from reef.core.artifact_selection import ArtifactSelection
+from reef.core.components import validate_component_name
+from reef.core.snapshot import RootSource
 from reef.storage.commits import CommitRecord, active_record
 from reef.storage.scenario import ScenarioStore
 
 
 @dataclass(frozen=True)
 class ServedBesideArtifact:
-    """An artifact that a scenario serves beside its active release, and the release that serves it.
+    """An artifact served at its own route with a complete component selection.
 
-    Values: ``component`` is a non-empty component name and ``artifact_id`` a non-empty artifact ID. ``release`` is
-    the release of the ``"serve"`` record that started to serve the artifact; that record checked that ``release``
-    binds ``artifact_id`` as ``component``. Purpose: ``ScenarioReleases.served_beside`` makes it from the commit
-    history. The request service answers a call to the artifact's URL from ``release``, and
-    ``ScenarioCommitter.stop_serving`` returns the one that it ended.
+    ``selection`` maps component names to immutable artifact IDs. It contains
+    ``component`` with value ``artifact_id``. Scenario history builds these
+    values; serving workers materialize the selection to answer that route.
     """
 
     component: str
     artifact_id: str
-    release: ArtifactRef
+    selection: ArtifactSelection
 
     def __post_init__(self) -> None:
-        if not all(isinstance(value, str) and value for value in (self.component, self.artifact_id)):
-            raise ValueError("a served artifact's component and artifact_id are non-empty strings")
-        if not isinstance(self.release, ArtifactRef):
-            raise ValueError("a served artifact's release is an ArtifactRef")
+        validate_component_name(self.component)
+        if not isinstance(self.selection, ArtifactSelection):
+            raise TypeError("a served artifact requires an ArtifactSelection")
+        if self.selection.components.get(self.component) != self.artifact_id:
+            raise ValueError("a served artifact must occur in its selection")
 
 
 class ScenarioReleases:
@@ -66,7 +66,7 @@ class ScenarioReleases:
         self.served_read: tuple[int, Mapping[str, ServedBesideArtifact]] | None = None
 
     @property
-    def creation_artifact(self) -> ArtifactRef:
+    def creation_artifact(self) -> SnapshotRef:
         """The scenario's root release, which the scenario was created with."""
         return self._artifacts.start
 
@@ -89,14 +89,14 @@ class ScenarioReleases:
                 return None
             self.creation_components_read = True
             if manifest is not None:
-                self.recorded_creation_components = manifest.artifact_ids(self.creation_artifact.release_id)
+                self.recorded_creation_components = manifest.artifact_ids(self.creation_artifact.revision)
         return self.recorded_creation_components
 
     def records(self) -> tuple[CommitRecord, ...]:
         """The durable commit history; empty for a store that keeps none."""
         return self._store.history() if self._store.durable else ()
 
-    def releases(self, scenario_step: int) -> tuple[dict[str, Any], ...]:
+    def snapshot_rows(self, scenario_step: int) -> tuple[dict[str, Any], ...]:
         """List the creation, every training step, every import and every sync, newest first; activations and new
         training starts are not listed. The creation row is the scenario's root release, with its ``source``.
 
@@ -112,29 +112,29 @@ class ScenarioReleases:
             # Without a durable log nothing names the active release but the chain: a recovery row stands for it.
             recovered = not records and scenario_step > 0
             activating = [record for record in records if record.activates]
-            active_id = activating[-1].artifact_ref.release_id if activating else self._artifacts.current.release_id
-            activated = {self.creation_artifact.release_id, active_id} | {
-                record.artifact_ref.release_id for record in activating
+            active_id = activating[-1].snapshot.revision if activating else self._artifacts.current.revision
+            activated = {self.creation_artifact.revision, active_id} | {
+                record.snapshot.revision for record in activating
             }
-            creation = self._release_row(
+            creation = self.snapshot_row(
                 step=0,
-                artifact_ref=self.creation_artifact,
+                snapshot=self.creation_artifact,
                 checkpoint=True,
                 recorded_at=None,
                 operation="creation",
-                active=not recovered and active_id == self.creation_artifact.release_id,
+                active=not recovered and active_id == self.creation_artifact.revision,
                 activated=True,
             )
             rows = [{**creation, "source": self.root_source.to_dict()}]
             rows.extend(
-                self._release_row(
+                self.snapshot_row(
                     step=record.step,
-                    artifact_ref=record.artifact_ref,
+                    snapshot=record.snapshot,
                     checkpoint=record.checkpoint,
                     recorded_at=record.recorded_at,
                     operation=record.operation,
-                    active=record.checkpoint and record.artifact_ref.release_id == active_id,
-                    activated=record.artifact_ref.release_id in activated,
+                    active=record.checkpoint and record.snapshot.revision == active_id,
+                    activated=record.snapshot.revision in activated,
                     high_water_sequence=record.high_water_sequence,
                     high_water_offset=record.high_water_offset,
                     metrics=record.metrics,
@@ -146,9 +146,9 @@ class ScenarioReleases:
             )
             if recovered:
                 rows.append(
-                    self._release_row(
+                    self.snapshot_row(
                         step=scenario_step,
-                        artifact_ref=self._artifacts.current,
+                        snapshot=self._artifacts.current,
                         checkpoint=True,
                         recorded_at=None,
                         operation="recovery",
@@ -163,17 +163,21 @@ class ScenarioReleases:
 
         A training record that made a release and an activation that
         published one carry their manifest; the creation's is read from the
-        release. A flat scenario's releases carry none.
+        release. Without a durable journal, the current snapshot supplies its own manifest.
         """
         known: dict[str, Mapping[str, str]] = {}
         creation = self.creation_components(scenario_step)
         if creation is not None:
-            known[self.creation_artifact.release_id] = creation
+            known[self.creation_artifact.revision] = creation
         for record in self.records():
             if record.selection is not None:
-                known[record.artifact_ref.release_id] = record.selection.artifact_ids
+                known[record.snapshot.revision] = record.selection.artifact_ids
             elif record.components is not None:
-                known[record.artifact_ref.release_id] = record.components
+                known[record.snapshot.revision] = record.components
+        if not self._store.durable and self._artifacts.current.revision not in known:
+            current = self._artifacts.resolve(self._artifacts.current)
+            if current.components is not None:
+                known[current.ref.revision] = current.components.artifact_ids(current.ref.revision)
         return known
 
     def active_components(self, scenario_step: int) -> Mapping[str, str] | None:
@@ -183,7 +187,7 @@ class ScenarioReleases:
             if self._artifacts.current != self.creation_artifact:
                 artifact = self._artifacts.resolve(self._artifacts.current)
                 manifest = artifact.components
-                return None if manifest is None else manifest.artifact_ids(artifact.ref.release_id)
+                return None if manifest is None else manifest.artifact_ids(artifact.ref.revision)
             return self.creation_components(scenario_step)
         if record.selection is not None:
             return record.selection.artifact_ids
@@ -196,15 +200,14 @@ class ScenarioReleases:
         including explicit ``train_from`` operations. A sync follows its previously active artifact. Storage
         commit ancestry never substitutes for these component relationships.
         """
-        active = self.bound_artifact_ids(self.creation_artifact.release_id, components, scenario_step)
+        active = self.bound_artifact_ids(self.creation_artifact.revision, components, scenario_step)
         starts = dict(active)
         parents: dict[str, str | None] = dict.fromkeys(active.values())
         for record in self.records():
             bound = (
                 record.selection.artifact_ids
                 if record.selection is not None
-                else record.components
-                or self.bound_artifact_ids(record.artifact_ref.release_id, components, scenario_step)
+                else record.components or self.bound_artifact_ids(record.snapshot.revision, components, scenario_step)
             )
             changed = components if record.component is None else (record.component,)
             if record.made_artifact:
@@ -228,72 +231,35 @@ class ScenarioReleases:
     def artifacts(self, scenario_step: int, components: tuple[str, ...]) -> tuple[dict[str, Any], ...]:
         """List the artifacts of each component in ``components``, newest first, with each component's active one.
 
-        An artifact is the content of one component. Each row lists an
-        artifact under the release that made it.
-
-        - With one component, each release that a training step, an import or a sync
-          made is one artifact. Its ``artifact_id`` is its ``release_id``.
-        - With several components, a release made the artifact of a component
-          when its manifest gives the component the ``artifact_id`` that the
-          release makes (``made_artifact_id``). The row's ``content_id`` is
-          ``None``, because the records name the artifact, not its content.
-        - The creation row lists the artifacts of the scenario's root
-          release. Its ``source`` is where the root came from
-          (``RootSource.to_dict``).
-        - When the manifest of a release is unknown, the row lists the
-          artifact of the component that the release's trainer named.
+        Each artifact appears once, at the first retained publication that
+        names it. Later snapshots carrying that component do not create another
+        row. Creation and import rows retain their source information.
 
         ``activated`` marks an artifact that has been active at some time, and
         ``served`` one that the scenario serves beside its active release. An
         import's row has ``source``: where its content was read from.
         """
         with self.publication_lock:
-            made = [row for row in self.releases(scenario_step) if row["checkpoint"]]
-            creation = self.creation_components(scenario_step) or {}
+            made = [row for row in self.snapshot_rows(scenario_step) if row["checkpoint"]]
             beside = self.served_beside(scenario_step, components)
-            if len(components) == 1:
-                (component,) = components
-                rows = []
-                for row in made:
-                    artifact_id = (
-                        creation.get(component, row["release_id"])
-                        if row["operation"] == "creation"
-                        else row["release_id"]
-                    )
-                    rows.append(
-                        self.artifact_row(
-                            row,
-                            component,
-                            artifact_id,
-                            row["content_id"],
-                            row["active"],
-                            row["activated"],
-                            artifact_id in beside,
-                        )
-                    )
-                return tuple(rows)
-            manifests = self.manifests(scenario_step)
-            active = self.active_components(scenario_step) or {}
+            active = self.active_components(scenario_step) or self.bound_artifact_ids(
+                self._artifacts.current.revision, components, scenario_step
+            )
             activated = {name: self.activated_artifacts(name, scenario_step) for name in components}
+            seen: set[tuple[str, str]] = set()
             listed: list[dict[str, Any]] = []
             for row in reversed(made):
-                manifest = manifests.get(row["release_id"])
+                bound = self.bound_artifact_ids(row["snapshot"].revision, components, scenario_step)
                 for component in components:
-                    made_here = made_artifact_id(row["release_id"], component, single=False)
-                    if manifest is None or component not in manifest:
-                        if row["operation"] != "creation" and row.get("component") not in (None, component):
-                            continue
-                        artifact_id = made_here
-                    elif row["operation"] == "creation" or manifest[component] == made_here:
-                        artifact_id = manifest[component]
-                    else:
+                    artifact_id = bound.get(component)
+                    if artifact_id is None or (component, artifact_id) in seen:
                         continue
+                    seen.add((component, artifact_id))
                     listed.append(
                         self.artifact_row(
                             row,
                             component,
                             artifact_id,
-                            None,
                             active.get(component) == artifact_id,
                             artifact_id in activated[component],
                             artifact_id in beside,
@@ -301,21 +267,20 @@ class ScenarioReleases:
                     )
             return tuple(reversed(listed))
 
-    def bound_artifact_ids(self, release_id: str, components: tuple[str, ...], scenario_step: int) -> dict[str, str]:
-        """The ``artifact_id`` of each of ``components`` that the release ``release_id`` binds, as the records name it.
+    def bound_artifact_ids(self, revision: str, components: tuple[str, ...], scenario_step: int) -> dict[str, str]:
+        """The ``artifact_id`` of each of ``components`` that the release ``revision`` binds, as the records name it.
 
-        With one component, the artifact of a release is the one that it made: its ``release_id``. For the creation,
+        With one component, the artifact of a release is the one that it made: its ``revision``. For the creation,
         it is the artifact that the scenario started from. With several components, it is the release's manifest
         entry. A component that no known manifest names is left out.
         """
+        manifest = self.manifests(scenario_step).get(revision)
+        if manifest is not None:
+            return {name: manifest[name] for name in components if name in manifest}
+        # Legacy flat records used their storage revision as the artifact ID.
         if len(components) == 1:
-            (component,) = components
-            creation = self.creation_components(scenario_step) or {}
-            if release_id == self.creation_artifact.release_id:
-                return {component: creation.get(component, release_id)}
-            return {component: release_id}
-        manifest = self.manifests(scenario_step).get(release_id) or {}
-        return {name: manifest[name] for name in components if name in manifest}
+            return {components[0]: revision}
+        return {}
 
     def served_beside(self, scenario_step: int, components: tuple[str, ...]) -> Mapping[str, ServedBesideArtifact]:
         """The artifacts that the scenario serves beside its active release, by ``artifact_id``.
@@ -332,11 +297,11 @@ class ScenarioReleases:
             if record.operation in ("serve", "stop_serving"):
                 component = components[0] if record.component is None else record.component
                 bound = record.components or self.bound_artifact_ids(
-                    record.artifact_ref.release_id, components, scenario_step
+                    record.snapshot.revision, components, scenario_step
                 )
                 artifact_id = bound[component]
                 if record.operation == "serve":
-                    served[artifact_id] = ServedBesideArtifact(component, artifact_id, record.artifact_ref)
+                    served[artifact_id] = ServedBesideArtifact(component, artifact_id, ArtifactSelection(bound))
                 else:
                     served.pop(artifact_id, None)
         self.served_read = (scenario_step, served)
@@ -345,7 +310,13 @@ class ScenarioReleases:
     def activated_artifacts(self, component: str, scenario_step: int) -> set[str]:
         """The ``artifact_id`` values that ``component`` has served: the creation's, and each activating record's."""
         creation = self.creation_components(scenario_step) or {}
-        served = {record.components[component] for record in self.records() if record.activates and record.components}
+        served = {
+            bound[component]
+            for record in self.records()
+            if record.activates
+            for bound in [self.bound_artifact_ids(record.snapshot.revision, (component,), scenario_step)]
+            if component in bound
+        }
         current = self.active_components(scenario_step) or {}
         if component in current:
             served.add(current[component])
@@ -356,7 +327,6 @@ class ScenarioReleases:
         row: Mapping[str, Any],
         component: str,
         artifact_id: str,
-        content_id: str | None,
         active: bool,
         activated: bool,
         served: bool,
@@ -368,9 +338,7 @@ class ScenarioReleases:
         listed: dict[str, Any] = {
             "artifact_id": artifact_id,
             "component": component,
-            "release_id": row["release_id"],
-            "parent_release_id": row["parent_release_id"],
-            "content_id": content_id,
+            "snapshot": row["snapshot"],
             "operation": row["operation"],
             "recorded_at": row["recorded_at"],
             "active": active,
@@ -388,8 +356,8 @@ class ScenarioReleases:
             listed["metrics"] = dict(row["metrics"])
         return listed
 
-    def find_release(self, release_id: str) -> tuple[ArtifactRef, bool] | None:
-        """The artifact ``release_id`` names and whether it has durable bytes; ``None`` when no record names it.
+    def find_snapshot(self, revision: str) -> tuple[SnapshotRef, bool] | None:
+        """The artifact ``revision`` names and whether it has durable bytes; ``None`` when no record names it.
 
         A training step that made the artifact, or the creation, gives it
         durable bytes. Other records (a step that made nothing, an
@@ -397,32 +365,33 @@ class ScenarioReleases:
         newest of them answers without bytes when nothing made it.
         """
         records = self.records()
-        found: tuple[ArtifactRef, bool] | None = None
+        found: tuple[SnapshotRef, bool] | None = None
         for record in reversed(records):
-            if record.artifact_ref.release_id == release_id:
+            if record.snapshot.revision == revision:
                 if record.made_artifact:
-                    return record.artifact_ref, True
+                    return record.snapshot, True
                 if found is None:
-                    found = (record.artifact_ref, False)
-        if self.creation_artifact.release_id == release_id:
+                    found = (record.snapshot, False)
+        if self.creation_artifact.revision == revision:
             # A first step that made nothing records the creation without a checkpoint; the creation has its own bytes.
             return self.creation_artifact, True
         if found is not None:
             return found
         current = self._artifacts.current
-        if current.release_id == release_id:
-            # Without a durable log the active release is known by the chain alone.
-            return current, False
+        if current.revision == revision:
+            # A logless scenario still publishes durable snapshots; local selection views have no stored bytes.
+            durable = not is_local_snapshot(current.revision) and not current.revision.startswith("selection:")
+            return current, durable
         return None
 
-    def metrics_for_version(self, release_id: str) -> Mapping[str, Any] | None:
-        """Metrics of the training step that published ``release_id``, if logged."""
+    def metrics_for_version(self, revision: str) -> Mapping[str, Any] | None:
+        """Metrics of the training step that published ``revision``, if logged."""
         for record in self.records():
-            if record.artifact_ref.release_id == release_id and record.operation == "training":
+            if record.snapshot.revision == revision and record.operation == "training":
                 return record.metrics
         return None
 
-    def artifact_for_version(self, release_id: str) -> Artifact:
+    def artifact_for_version(self, revision: str) -> Artifact:
         """Materialize a scenario release for a read-only content serve.
 
         The read-side counterpart of ``activate``: the same release lookup,
@@ -432,38 +401,38 @@ class ScenarioReleases:
         write): to a reader, a version whose bytes are gone and a version
         that was recorded but not kept are the same absent content.
         """
-        if not isinstance(release_id, str) or not release_id.strip():
-            raise ValueError("release_id must be a non-empty string")
-        release_id = release_id.strip()
+        if not isinstance(revision, str) or not revision.strip():
+            raise ValueError("revision must be a non-empty string")
+        revision = revision.strip()
         with self.publication_lock:
-            found = self.find_release(release_id)
+            found = self.find_snapshot(revision)
         if found is None:
-            raise ArtifactNotFound(f"scenario {self._name!r} has no release {release_id!r}")
+            raise ArtifactNotFound(f"scenario {self._name!r} has no release {revision!r}")
         ref, _ = found
         try:
             return self._artifacts.resolve(ref)
         except ArtifactError as exc:
-            raise ArtifactNotFound(f"scenario {self._name!r} cannot restore release {release_id!r}: {exc}") from exc
+            raise ArtifactNotFound(f"scenario {self._name!r} cannot restore release {revision!r}: {exc}") from exc
 
     def artifact_with_metrics(
         self,
-        release_id: str | None = None,
+        revision: str | None = None,
     ) -> tuple[Artifact, Mapping[str, Any] | None]:
         """Capture one artifact and its metrics without waiting for preparation."""
         with self.publication_lock:
             artifact = (
                 Artifact(self._artifacts.current, self._artifacts.repository)
-                if release_id is None
-                else self.artifact_for_version(release_id)
+                if revision is None
+                else self.artifact_for_version(revision)
             )
-            metrics = self.metrics_for_version(artifact.ref.release_id)
+            metrics = self.metrics_for_version(artifact.ref.revision)
             return artifact, metrics
 
     @staticmethod
-    def _release_row(
+    def snapshot_row(
         *,
         step: int,
-        artifact_ref: ArtifactRef,
+        snapshot: SnapshotRef,
         checkpoint: bool,
         recorded_at: float | None,
         operation: str,
@@ -477,9 +446,7 @@ class ScenarioReleases:
     ) -> dict[str, Any]:
         row: dict[str, Any] = {
             "step": step,
-            "release_id": artifact_ref.release_id,
-            "parent_release_id": artifact_ref.parent_release_id,
-            "content_id": artifact_ref.content_id,
+            "snapshot": snapshot,
             "checkpoint": checkpoint,
             "restorable": checkpoint,
             "recorded_at": recorded_at,

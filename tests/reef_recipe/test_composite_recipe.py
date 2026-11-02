@@ -17,16 +17,15 @@ from aiohttp.test_utils import TestClient, TestServer
 from tests.support._threshold_processor import ThresholdJobData, threshold_pipeline
 from tests.support.runtime_stubs import StubTrainingComponent
 from tests.support.samples_service import make_samples
-
 from tests.support.serving import wait_for_serving
 
 from reef.artifact import Artifact, DefaultStart, GitLFSRepositoryBackendFactory, InMemoryRepositoryBackend
 from reef.artifact.artifact import ArtifactValidator
 from reef.artifact.composite import compose_release
 from reef.core import AgentRecord, RequestType
-from reef.core.artifact_ref import RootSource
 from reef.core.plugins import PluginReference
 from reef.core.reports import ReportValidationError, ScoredRolloutReport
+from reef.core.snapshot import RootSource
 from reef.dispatcher import Dispatcher
 from reef.evaluation.activation import AlwaysActivate, NeverActivate
 from reef.execution.workers import ServiceSet
@@ -640,9 +639,14 @@ def test_a_flat_scenario_without_a_durable_log_still_serves_its_head(tmp_path: P
         evolved.mkdir()
         (evolved / "rules.md").write_text("evolved")
         scenario.commit(TrainStepResult(state={}, artifact=Artifact.local(evolved)))
-        head = scenario.current_artifact_ref().release_id
+        head = scenario.current_artifact_ref().revision
         source = service.harness_manifest(headers, form="source")
         assert source["release_id"] == head and source["files"] == {"rules.md": "evolved"}
+        artifact_id = source["artifact_id"]
+        assert artifact_id != head
+        assert scenario.artifact_selection().components["harness"] == artifact_id
+        assert any(row["artifact_id"] == artifact_id and row["active"] for row in scenario.artifacts())
+        assert service.harness_manifest(headers, artifact_id=artifact_id, form="source")["files"] == source["files"]
         # The default form renders the source tree for the adapter.
         assert service.harness_manifest(headers)["files"]["plugin/rules.md"].startswith("evolved")
     finally:
@@ -951,14 +955,17 @@ def test_a_commit_runs_the_release_check_an_activation_of_that_release_runs(tmp_
         published = scenario.current_artifact_ref()
         assert published != seed
         # The root release made the creation's artifacts, under its own release ID.
-        seed_harness = scenario.repository.materialize(seed).components.artifact_ids(seed.release_id)["harness"]
-        assert seed_harness == f"{scenario.repository.start_artifact.release_id}:harness"
+        seed_harness = scenario.repository.materialize(seed).components.artifact_ids(seed.revision)["harness"]
+        assert (
+            seed_harness
+            == scenario.repository.resolve(scenario.repository.start_artifact).component("harness").artifact_id
+        )
         scenario.activate(seed_harness, "harness")
-        scenario.activate(f"{published.release_id}:harness", "harness")
+        scenario.activate(scenario.repository.resolve(published).component("harness").artifact_id, "harness")
         served = scenario.repository.materialize(scenario.current_artifact_ref()).components
         made = scenario.repository.materialize(published).components
         assert served is not None and made is not None
-        assert served.content_ids == made.content_ids
+        assert served.artifact_ids("served") == made.artifact_ids("made")
 
 
 class _CountedChecks(_RefuseUnvetted):
@@ -1014,11 +1021,11 @@ def test_an_activation_never_judges_a_component_again(tmp_path: Path) -> None:
         first = scenario.current_artifact_ref()
         scenario.commit(TrainStepResult(state={}, artifact=_tree(tmp_path, "b", "two")), component="harness")
         checks.count = 0
-        dispatcher.activate("agent", f"{first.release_id}:harness", "harness")
+        dispatcher.activate("agent", scenario.repository.resolve(first).component("harness").artifact_id, "harness")
         served = scenario.repository.materialize(scenario.current_artifact_ref()).components
         assert served is not None
         current = scenario.current_artifact_ref()
-        assert served.artifact_ids(current.release_id) == scenario.store.history()[0].components
+        assert served.artifact_ids(current.revision) == scenario.store.history()[0].components
         assert checks.count == 0
         head = scenario.current_artifact_ref()
         scenario.commit(
@@ -1026,8 +1033,8 @@ def test_an_activation_never_judges_a_component_again(tmp_path: Path) -> None:
             component="harness",
         )
         assert scenario.current_artifact_ref() == head
-        held = scenario.store.history()[-1].artifact_ref.release_id
-        assert dispatcher.activate("agent", f"{held}:harness", "harness").artifact_id == f"{held}:harness"
+        held = scenario.repository.resolve(scenario.store.history()[-1].snapshot).component("harness").artifact_id
+        assert dispatcher.activate("agent", held, "harness").artifact_id == held
         assert checks.count == 1
 
 

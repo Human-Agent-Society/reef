@@ -11,13 +11,13 @@ import time
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
-from reef.core.artifact_ref import ArtifactRef
+from reef.core.snapshot import decode_snapshot_ref
 
 
-class RequestType(str, Enum):
+class RequestType(StrEnum):
     INFERENCE = "inference"
     REPORT = "report"
 
@@ -37,13 +37,26 @@ def parse_references(payload: Mapping[str, Any]) -> tuple[str, ...]:
 
 @dataclass(frozen=True)
 class AgentRecord:
+    """One inference or report, with its receipt, payload, time and referenced receipts.
+
+    ``artifact_id`` is the nonempty opaque ID of the artifact that answered,
+    or None when no artifact is known. Stores persist this value; training and
+    record exports read it without resolving a storage snapshot.
+    """
+
     agent_record_id: str
     scenario: str
     request_type: RequestType
     payload: Mapping[str, Any]
     created_at: float
     references: tuple[str, ...] = ()
-    artifact_ref: ArtifactRef | None = None
+    artifact_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.artifact_id is None:
+            object.__setattr__(self, "artifact_id", decode_record_artifact_id(None, self.payload))
+        if self.artifact_id is not None and (not isinstance(self.artifact_id, str) or not self.artifact_id):
+            raise ValueError("a record artifact_id must be a nonempty string or null")
 
     @classmethod
     def create(
@@ -55,7 +68,7 @@ class AgentRecord:
         agent_record_id: str | None = None,
         created_at: float | None = None,
         references: tuple[str, ...] | None = None,
-        artifact_ref: ArtifactRef | None = None,
+        artifact_id: str | None = None,
     ) -> AgentRecord:
         return cls(
             agent_record_id=agent_record_id or uuid.uuid4().hex,
@@ -64,5 +77,24 @@ class AgentRecord:
             payload=dict(payload),
             created_at=time.time() if created_at is None else created_at,
             references=parse_references(payload) if references is None else references,
-            artifact_ref=artifact_ref,
+            artifact_id=artifact_id,
         )
+
+
+def decode_record_artifact_id(value: object, payload: Mapping[str, object]) -> str | None:
+    """Read an ID or an older record locator; prefer the legacy payload's component ID.
+
+    Old records may contain a snapshot locator enclosing several components.
+    Their payload names the actual responding component when available.
+    A locator without that field uses the historical flat-artifact identity.
+    """
+    if isinstance(value, Mapping):
+        ref = decode_snapshot_ref(value)
+        identity = payload.get("artifact_id", ref.revision)
+    elif value is None:
+        identity = payload.get("artifact_id")
+    else:
+        identity = value
+    if identity is not None and (not isinstance(identity, str) or not identity):
+        raise ValueError("a record artifact_id must be a nonempty string or null")
+    return identity

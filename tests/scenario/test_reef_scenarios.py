@@ -12,7 +12,7 @@ from tests.support.serving import wait_for_serving
 
 from reef.artifact import Artifact, DefaultStart, DirectorySource, InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
-from reef.core.artifact_ref import RootSource
+from reef.core.snapshot import RootSource
 from reef.dispatcher import Dispatcher, build_default_dispatcher
 from reef.harness.adapters import get_adapter
 from reef.harness.sync import create_harness_surface
@@ -50,7 +50,7 @@ def test_scenario_owns_recipe_derived_policy_and_its_root_release() -> None:
     assert not hasattr(scenario, "recipe")
     # A new scenario is at its root release: a release with no parent, made from the recipe's default start.
     root = scenario.repository.start_artifact
-    assert root.parent_release_id is None and root.content_id == DefaultStart().content_id
+    assert root.parent_revision is None
     assert scenario.repository.current_artifact == scenario.repository.checkpoint_artifact == root
 
 
@@ -61,8 +61,8 @@ def test_scenario_step_is_owned_by_scenario() -> None:
 
     assert not hasattr(scenario.repository.start_artifact, "scenario")
     assert scenario.scenario_step == 0
-    assert scenario.repository.current_artifact.release_id
-    assert scenario.repository.checkpoint_artifact.release_id
+    assert scenario.repository.current_artifact.revision
+    assert scenario.repository.checkpoint_artifact.revision
     assert not hasattr(scenario, "release_id")
     assert not hasattr(scenario, "selected_release_id")
 
@@ -92,7 +92,7 @@ def test_scenario_metadata_round_trips() -> None:
     source = RootSource("default", inputs={"seed": "s"})
     metadata = scenario_metadata_for(name=scenario.name, source=source, scenario_step=scenario.scenario_step)
 
-    assert metadata["format"] == "reef-scenario/6"
+    assert metadata["format"] == "reef-scenario/7"
     # The registration is carried by the root release, so it names no start_artifact.
     assert "start_artifact" not in metadata
     assert metadata["source"] == {"kind": "default", "inputs": {"seed": "s"}}
@@ -117,15 +117,15 @@ def test_scenario_metadata_round_trips() -> None:
 @pytest.mark.parametrize("operation", ["activate", "train_from", "rollback"])
 def test_checkpoint_metadata_names_only_a_training_step(operation) -> None:
     """An artifact is made only by a training step; its metadata names no other operation."""
-    from reef.core.artifact_ref import ArtifactRef
+    from reef.core.snapshot import SnapshotRef
     from reef.storage.commits import parse_scenario_metadata, scenario_metadata_for
 
-    base = ArtifactRef("base", "base", None)
+    base = SnapshotRef("base", None)
     metadata = scenario_metadata_for(name="math", source=RootSource("default"), start_artifact=base, scenario_step=1)
     metadata["operation"] = operation
     metadata["record_progress"] = {"high_water_sequence": 0, "high_water_offset": 0, "consumed_ids": []}
     with pytest.raises(ValueError, match="operation must be 'training'"):
-        parse_scenario_metadata(metadata, checkpoint_head=ArtifactRef("head", "head", base.release_id))
+        parse_scenario_metadata(metadata, checkpoint_head=SnapshotRef("head", base.revision))
 
 
 def test_dispatcher_restores_agent_record_from_configured_directory(tmp_path) -> None:
@@ -269,18 +269,18 @@ def test_lock_instance_tells_a_replaced_instance_from_a_removed_one() -> None:
 
 @pytest.mark.parametrize("operation", [None, "training"])
 def test_checkpoint_metadata_decodes_directly_to_commit_record(operation) -> None:
-    from reef.core.artifact_ref import ArtifactRef, encode_artifact_ref
+    from reef.core.snapshot import SnapshotRef, encode_snapshot_ref
     from reef.storage.commits import CommitRecord, RecordProgress, parse_scenario_metadata, scenario_metadata_for
 
-    base = ArtifactRef("base-content", "base-release", None)
-    head = ArtifactRef("checkpoint-content", "checkpoint-release", base.release_id)
+    base = SnapshotRef("base-release", None)
+    head = SnapshotRef("checkpoint-release", base.revision)
     # Persisted reef-scenario/5 metadata contains registration and recovery
     # fields; the containing artifact supplies the checkpoint release identity.
     metadata = {
         "format": "reef-scenario/5",
         "scenario": "math",
         "source": {"kind": "item", "item": "upload-1", "uri": "s3://bucket/upload-1/", "version": ""},
-        "start_artifact": encode_artifact_ref(base),
+        "start_artifact": encode_snapshot_ref(base),
         "scenario_step": 3,
         "algorithm_state": {"steps": 3},
         "record_progress": {
@@ -301,7 +301,7 @@ def test_checkpoint_metadata_decodes_directly_to_commit_record(operation) -> Non
     assert registered_base == base
     assert source == RootSource("item", item="upload-1", uri="s3://bucket/upload-1/", version="")
     assert isinstance(checkpoint, CommitRecord)
-    assert checkpoint.artifact_ref == head
+    assert checkpoint.snapshot == head
     assert checkpoint.step == 3
     assert checkpoint.checkpoint is True
     # Metadata that names no active_artifact belongs to a checkpoint the activation rule activated.
@@ -331,7 +331,7 @@ def test_checkpoint_metadata_decodes_directly_to_commit_record(operation) -> Non
     )
     assert encoded == {
         **metadata,
-        "format": "reef-scenario/6",
+        "format": "reef-scenario/7",
         "operation": "training",
         "record_progress": {
             "high_water_sequence": 7,
@@ -348,7 +348,7 @@ def test_checkpoint_metadata_decodes_directly_to_commit_record(operation) -> Non
 
 def test_checkpoint_metadata_names_the_artifact_that_serves_after_a_held_step() -> None:
     """A recovery without the commit history reads from the artifact head which artifact serves."""
-    from reef.core.artifact_ref import ArtifactRef
+    from reef.core.snapshot import SnapshotRef
     from reef.storage.commits import (
         RecordProgress,
         active_artifact_ref,
@@ -357,9 +357,9 @@ def test_checkpoint_metadata_names_the_artifact_that_serves_after_a_held_step() 
         served_artifact_ref,
     )
 
-    base = ArtifactRef("base-content", "base-release", None)
-    served = ArtifactRef("served-content", "served-release", base.release_id)
-    head = ArtifactRef("held-content", "held-release", served.release_id)
+    base = SnapshotRef("base-release", None)
+    served = SnapshotRef("served-release", base.revision)
+    head = SnapshotRef("held-release", served.revision)
     progress = RecordProgress(0, 0, frozenset())
     source = RootSource("default")
     held = scenario_metadata_for(
@@ -398,20 +398,20 @@ def test_checkpoint_metadata_names_the_artifact_that_serves_after_a_held_step() 
         # A scenario that an earlier Reef stored is refused, not read: it is created again.
         (
             {"format": "reef-scenario/4"},
-            r"format 'reef-scenario/4'; this Reef reads reef-scenario/6 and legacy reef-scenario/5",
+            r"format 'reef-scenario/4'; this Reef reads reef-scenario/7 and legacy reef-scenario/5 or reef-scenario/6",
         ),
     ],
 )
 def test_checkpoint_metadata_rejects_invalid_recovery_state(changes, message) -> None:
-    from reef.core.artifact_ref import ArtifactRef, encode_artifact_ref
+    from reef.core.snapshot import SnapshotRef, encode_snapshot_ref
     from reef.storage.commits import parse_scenario_metadata
 
-    base = ArtifactRef("base", "base", None)
+    base = SnapshotRef("base", None)
     metadata = {
         "format": "reef-scenario/5",
         "scenario": "math",
         "source": {"kind": "default", "inputs": {}},
-        "start_artifact": encode_artifact_ref(base),
+        "start_artifact": encode_snapshot_ref(base),
         "scenario_step": 1,
         "record_progress": {
             "high_water_sequence": 0,
@@ -465,12 +465,15 @@ def test_two_scenarios_own_distinct_root_releases(tmp_path) -> None:
     try:
         first, second = (dispatcher.get_or_create_scenario(name) for name in ("first", "second"))
         roots = [scenario.repository.start_artifact for scenario in (first, second)]
-        assert roots[0].release_id != roots[1].release_id
-        # Equal default starts make equal content, so content-addressed serving names do not change.
-        assert roots[0].content_id == roots[1].content_id == DefaultStart(inputs={"model": "base-model"}).content_id
-        assert all(root.parent_release_id is None for root in roots)
+        assert roots[0].revision != roots[1].revision
+        # Equal default bytes still have independently allocated artifact IDs.
+        assert first.repository.resolve(roots[0]).artifact_id != second.repository.resolve(roots[1]).artifact_id
+        assert all(root.parent_revision is None for root in roots)
         (creation,) = first.artifacts()
-        assert creation["operation"] == "creation" and creation["artifact_id"] == roots[0].release_id
+        assert (
+            creation["operation"] == "creation"
+            and creation["artifact_id"] == first.repository.resolve(roots[0]).artifact_id
+        )
         assert creation["source"] == {"kind": "default", "inputs": {"model": "base-model"}}
     finally:
         dispatcher.close()
@@ -491,7 +494,7 @@ def test_a_changed_default_start_neither_blocks_nor_changes_an_existing_scenario
         # The runtime serves the old scenario's own root.
         wait_for_serving(second, "old")
         assert second.recipe.runtime.served == "old-model"
-        assert old.served_artifact_id() == old_root.release_id
+        assert old.served_artifact_id() == old.repository.resolve(old_root).artifact_id
         old_start = Path(JobLoopState.from_dict(old.trainer.state).start)
         assert (old_start / "model.txt").read_text() == "old-model"
         assert old.artifacts()[0]["source"] == {"kind": "default", "inputs": {"model": "old-model"}}
@@ -529,7 +532,7 @@ def test_a_scenario_stored_by_an_earlier_reef_is_refused_not_read(tmp_path) -> N
     try:
         with pytest.raises(
             ValueError,
-            match=r"'reef-scenario/4'; this Reef reads reef-scenario/6 and legacy reef-scenario/5, so create",
+            match=r"'reef-scenario/4'; this Reef reads reef-scenario/7 and legacy reef-scenario/5 or reef-scenario/6, so create",
         ):
             dispatcher.get_or_create_scenario("math")
     finally:
@@ -600,7 +603,7 @@ def test_composite_item_roots_are_checked_before_registration(
             assert not dispatcher.has_scenario("retry")
             scenario, created = dispatcher.create_scenario("retry")
         assert created
-        assert scenario.repository.start_artifact.parent_release_id is None
+        assert scenario.repository.start_artifact.parent_revision is None
     finally:
         dispatcher.close()
 
@@ -628,7 +631,7 @@ def test_an_item_root_is_checked_by_the_layout_and_the_training_start_before_it_
         scenario, created = dispatcher.create_scenario("started", item(weights))
         assert created
         root = scenario.repository.start_artifact
-        assert scenario.current_artifact_ref() == root and root.parent_release_id is None
+        assert scenario.current_artifact_ref() == root and root.parent_revision is None
         assert (scenario.repository.materialize(root).local_path / "model.safetensors").read_text() == "w9"
         (row,) = scenario.artifacts()
         assert row["source"] == {"kind": "item", "item": "upload-1", "uri": weights.as_uri(), "version": "v1"}

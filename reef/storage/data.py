@@ -23,7 +23,7 @@ from reef.core.errors import ReefError
 from reef.core.plugins import Plugin, PluginConfigError
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.trajectory_index import TrajectoryIndex
-from reef.storage.item_kinds import ITEM_KIND_RULES, task_partition
+from reef.storage.item_kinds import ITEM_KIND_RULES, check_artifact_content, json_digest, task_partition
 from reef.storage.tasks import SPLIT_NAMES, TaskFileStore
 
 ItemKind = Literal["trajectory", "task", "record", "artifact"]
@@ -245,7 +245,9 @@ class DataStore(Plugin, ABC):
 
     * ``create(owner, items)`` stores each item, all or none. An item whose ID the owner stores with the same
       digest is unchanged; with another digest it is an ``ItemConflict``, and nothing is stored. Bad metadata or
-      content is a ``ValueError``, and nothing is stored. It returns the stored items in the order given.
+      content is a ``ValueError``, and nothing is stored. New artifact items omit the obsolete ``content_id``.
+      A retry of an older artifact compares all other content fields and preserves the stored content and digest.
+      It returns the stored items in the order given.
     * ``read(owner, item_id)`` returns the item, or None.
     * ``query(owner, kind, scenario, after, limit)`` returns the items of ``owner`` with ``sequence > after``,
       in sequence order, at most ``limit``, of ``kind`` and used by ``scenario`` when those are given.
@@ -322,12 +324,26 @@ def check_query(owner: str, kind: object, scenario: object, after: object, limit
         raise ValueError(f"limit must be an int from 1 to {MAX_QUERY_LIMIT}")
 
 
+def item_digest_matches(item: StoredItem, digest: str) -> bool:
+    """Compare a create's canonical digest without rewriting an immutable legacy artifact item.
+
+    Older artifact items included an unused content_id. Ignore only that field
+    for a retry; every other content field must still match.
+    """
+    if item.digest == digest:
+        return True
+    if item.metadata["kind"] == "artifact" and item.content is not None and "content_id" in item.content:
+        return json_digest({key: value for key, value in item.content.items() if key != "content_id"}) == digest
+    return False
+
+
 def prepared_items(
     owner: str, items: Sequence[NewItem], task_files: TaskFileStore
 ) -> list[tuple[NewItem, dict[str, Any], str]]:
     """Check a ``create`` call and return each item with its created metadata and digest.
 
-    Each item's content follows the rules of its kind (``ITEM_KIND_RULES``). A task directory is copied into the
+    Each item's content follows the rules of its kind (``ITEM_KIND_RULES``). Legacy artifact input loses its
+    obsolete ``content_id`` before hashing and storage. A task directory is copied into the
     owner's task file partition, so its digest names stored files. The copy happens before the store checks for
     conflicts; files are kept by digest, so a refused call leaves at most an unused copy. Raise ``ValueError`` for
     an invalid owner, ID, metadata or content, or for an ID given twice.
@@ -341,6 +357,11 @@ def prepared_items(
             raise ValueError(f"item {item.item_id!r} is given twice")
         seen.add(item.item_id)
         metadata = created_metadata(owner, item.metadata)
+        if metadata["kind"] == "artifact" and isinstance(item.content, Mapping) and "content_id" in item.content:
+            check_artifact_content(item.content, made_by_scenario="origin" in metadata)
+            item = NewItem(
+                item.item_id, {key: value for key, value in item.content.items() if key != "content_id"}, item.metadata
+            )
         rules = ITEM_KIND_RULES[metadata["kind"]]
         prepared.append((item, metadata, rules.stored_digest(owner, item.item_id, item.content, metadata, task_files)))
     return prepared
@@ -371,7 +392,7 @@ class MemoryDataStore(DataStore):
         stored = self.items.setdefault(owner, {})
         for entry in prepared:
             existing = stored.get(entry[0].item_id)
-            if existing is not None and existing.digest != entry[2]:
+            if existing is not None and not item_digest_matches(existing, entry[2]):
                 raise ItemConflict(f"item {entry[0].item_id!r} of {owner!r} is stored with other content")
         result: list[StoredItem] = []
         for item, metadata, digest in prepared:

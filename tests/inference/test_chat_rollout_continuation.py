@@ -14,6 +14,7 @@ from aiohttp.test_utils import TestServer
 from reef.artifact import Artifact
 from reef.inference import chat as chat_module
 from reef.inference.sglang.chat import SGLangInferenceHandler
+from reef.runtime.interfaces import InferenceArtifact
 from reef.service.streaming import stream_record
 
 IM_START, IM_END, NEWLINE = 998, 999, ord("\n")
@@ -120,10 +121,10 @@ class ScriptedEngine:
         )
 
 
-def artifact(tmp_path) -> Artifact:
+def artifact(tmp_path) -> InferenceArtifact:
     checkpoint = tmp_path / "checkpoint"
     checkpoint.mkdir(exist_ok=True)
-    return Artifact.local(checkpoint)
+    return InferenceArtifact.from_artifact(Artifact.local(checkpoint))
 
 
 def run(coroutine):

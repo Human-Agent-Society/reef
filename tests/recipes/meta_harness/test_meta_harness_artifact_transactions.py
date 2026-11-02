@@ -140,7 +140,7 @@ def test_restart_repairs_artifact_head_from_successful_journal_commit(publicatio
             "error": "backend pointer unavailable",
         }
         assert dispatcher.build_training_status()["scenarios"]["stale-artifact-head"]["artifact_head_sync"] == sync
-        assert scenario.store.history()[-1].artifact_ref == committed_head
+        assert scenario.store.history()[-1].snapshot == committed_head
     finally:
         dispatcher.close()
     restarted = Dispatcher(
@@ -220,8 +220,8 @@ def test_lost_journal_ack_retries_the_committed_release_without_evaluating_again
         scenario.commit(result)
 
         assert scenario.scenario_step == 2 and len(chat.prompts) == 1
-        assert scenario.current_artifact_ref() == committed.artifact_ref
-        assert scenario.repository.resolve(committed.artifact_ref).local_path.is_dir()
+        assert scenario.current_artifact_ref() == committed.snapshot
+        assert scenario.repository.resolve(committed.snapshot).local_path.is_dir()
         assert len(scenario.store.history()) == 2
     finally:
         dispatcher.close()
@@ -243,13 +243,16 @@ def test_postcommit_conflict_keeps_durable_step_and_rejects_unrelated_head(publi
         competing_path = records.parent / "competing-artifact"
         competing_path.mkdir()
         (competing_path / "foreign.txt").write_text("another writer's artifact")
-        competing = Artifact.local(competing_path, metadata=backend.metadata())
+        metadata = dict(backend.metadata())
+        # This writer publishes new bytes, so it cannot carry the root's component IDs.
+        metadata.pop("components", None)
+        competing = Artifact.local(competing_path, metadata=metadata)
         commit_release = backend.commit_release
         unrelated = None
 
         def conflict_after_journal(ref, *, expected_parent):
             nonlocal unrelated
-            assert scenario.store.history()[-1].artifact_ref == ref
+            assert scenario.store.history()[-1].snapshot == ref
             unrelated = backend.publish(competing, expected_parent=expected_parent)
             return commit_release(ref, expected_parent=expected_parent)
 
@@ -262,11 +265,11 @@ def test_postcommit_conflict_keeps_durable_step_and_rejects_unrelated_head(publi
         committed = scenario.store.history()[-1]
         assert scenario.scenario_step == committed.step == 2
         assert scenario.trainer.state == committed.algorithm_state == result.state
-        assert scenario.current_artifact_ref() == committed.artifact_ref
-        assert backend.current() == unrelated
+        assert scenario.current_artifact_ref() == committed.snapshot
+        assert backend.current() == unrelated, scenario.commit_status
         assert scenario.commit_status["artifact_head_sync"]["state"] == "conflict"
-        assert scenario.repository.checkpoint_artifact == committed.artifact_ref
-        assert unrelated not in (old_head, committed.artifact_ref)
+        assert scenario.repository.checkpoint_artifact == committed.snapshot
+        assert unrelated not in (old_head, committed.snapshot)
         with pytest.raises(ArtifactConflict):
             scenario.repository.synchronize_checkpoint()
         assert backend.current() == unrelated and len(scenario.store.history()) == 2

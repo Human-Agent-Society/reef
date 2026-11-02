@@ -18,7 +18,7 @@ def record_metadata(stored: StoredRecord) -> dict[str, Any]:
         "request_type": item.request_type.value,
         "created_at": item.created_at,
         "references": list(item.references),
-        "artifact_id": item.payload.get("artifact_id"),
+        "artifact_id": item.artifact_id,
         "score": item.payload.get("score"),
     }
 
@@ -76,7 +76,7 @@ def read_commits(scenario: Scenario, *, after_step: int, limit: int, record_ids:
                     commit.selection.artifact_ids
                     if commit.selection is not None
                     else commit.components
-                    or queries.bound_artifact_ids(commit.artifact_ref.release_id, components, scenario.scenario_step)
+                    or queries.bound_artifact_ids(commit.snapshot.revision, components, scenario.scenario_step)
                 ),
                 "component": commit.component,
                 "activated": commit.activated,

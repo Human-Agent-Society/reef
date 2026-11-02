@@ -8,7 +8,7 @@ and load only weights that a training job saved and Reef published: a
 release's files, when a scenario starts, when a release is committed, or
 when one is activated. No trainer holds a serving engine. ``ReleaseWeights``
 says where a release's files come from: the release itself
-(``ReleaseFiles``), or a service that the release names.
+(``ArtifactTextFiles``), or a service that the release names.
 
 ``AdapterServingRuntime`` serves each scenario its own PEFT adapter on one
 base model; ``FullWeightServingRuntime`` serves one scenario's full weights.
@@ -109,7 +109,7 @@ class ReleaseWeights(ConfiguredPlugin, ABC):
     releases give files of equal content. It raises ``ReefError`` when the
     release gives no files of ``layout``.
 
-    Purpose: the serving runtimes below call it at each load. ``ReleaseFiles``,
+    Purpose: the serving runtimes below call it at each load. ``ArtifactTextFiles``,
     the default, reads the release's own files. A training backend whose
     releases name weights on a service instead names the plugin that fetches
     them (``TrainingDeployment.engine_weights``).
@@ -119,7 +119,7 @@ class ReleaseWeights(ConfiguredPlugin, ABC):
     def weight_files(self, release: Path, layout: WeightLayout) -> WeightFiles: ...
 
 
-class ReleaseFiles(ReleaseWeights):
+class ArtifactTextFiles(ReleaseWeights):
     """The release's own files: the release directory for ``"full"``, its ``adapter/`` for ``"adapter"``.
 
     The files of a release that refers to a Hugging Face revision (``read_reference``, RFC #995) are that
@@ -156,7 +156,7 @@ class SavedWeightServingRuntime(InferenceRuntime):
     stamps the base model's version on them; before that, the runtime only sends requests, and an operation that
     changes the engines raises ``ReefError``.
     ``weights`` gives each release's weight files; the default is
-    ``ReleaseFiles``.
+    ``ArtifactTextFiles``.
     Runtime load IDs belong to one fresh incarnation, so a restart never
     reuses an ID for other weights. The base model serves under the first one,
     ``base_version``, and each load under the next unused one;
@@ -182,7 +182,7 @@ class SavedWeightServingRuntime(InferenceRuntime):
         weights: ReleaseWeights | None = None,
     ) -> None:
         super().__init__(base_url=engines.base_url, inference_timeout_s=inference_timeout_s)
-        self._weights = ReleaseFiles() if weights is None else weights
+        self._weights = ArtifactTextFiles() if weights is None else weights
         self._engines = engines
         self._opened: InferenceBackend | None = None
         self._handler = handler
@@ -306,8 +306,8 @@ class AdapterServingRuntime(SavedWeightServingRuntime):
     ``adapter_capacity`` adapters stay resident. The residency manager is the
     one record of what each scenario serves: the version of its current
     adapter, or none, and then the scenario samples the base model. The
-    runtime also keeps the content ID of the release that each current
-    adapter was loaded from, so a release of the same content loads nothing.
+    runtime records the artifact ID of each current adapter. Selecting that
+    artifact again loads nothing, even when its storage snapshot changes.
     """
 
     def __init__(
@@ -325,8 +325,8 @@ class AdapterServingRuntime(SavedWeightServingRuntime):
         #: The adapter that the engines still serve for each scenario from before this runtime (``adopt``), by
         #: scenario: its runtime load ID and the artifact it serves.
         self._adopted: dict[str, tuple[str, str]] = {}
-        #: The content ID of the release that each current adapter was loaded from, by its runtime load ID.
-        self._content_ids: dict[str, str] = {}
+        #: The artifact ID of each resident adapter, indexed by its runtime load ID.
+        self.loaded_artifact_ids: dict[str, str] = {}
         super().__init__(
             engines,
             handler,
@@ -387,8 +387,8 @@ class AdapterServingRuntime(SavedWeightServingRuntime):
     def activate_checkpoint(self, artifact: Artifact, *, scenario: str | None = None) -> str:
         """Serve the release ``artifact`` of ``scenario``; return the version that serves it.
 
-        A release whose content the engines already serve for the scenario
-        loads nothing. Any other release loads its adapter under a new
+        An artifact that the engines already serve for the scenario loads
+        nothing. Any other artifact loads its adapter under a new
         version; a root release made from the default start holds an untrained adapter, which loads in
         the same way. Raise ``ReefError`` without ``scenario``.
         A failed load can leave the scenario serving no adapter, when the new
@@ -401,20 +401,20 @@ class AdapterServingRuntime(SavedWeightServingRuntime):
         """
         if scenario is None:
             raise ReefError("per-scenario adapters are served for a named scenario")
-        content_id = artifact.ref.content_id
+        artifact_id = artifact.artifact_id
         with self._lock:
             adopted = self._adopted.pop(scenario, None)
-            if adopted is not None and adopted[1] == artifact.artifact_id:
+            if adopted is not None and adopted[1] == artifact_id:
                 # The engines still serve this artifact's adapter from before a inference restart: load nothing.
                 path = artifact.materialize().local_path
                 if path is None:
                     raise ReefError("serving a release requires a materialized artifact")
                 version = adopted[0]
                 self._residency.adopt(scenario, version, files=self._weights.weight_files(path, "adapter"))
-                self._content_ids[version] = content_id
+                self.loaded_artifact_ids[version] = artifact_id
                 return version
             current = self._residency.current_adapter(scenario)
-            if current is not None and self._content_ids.get(current.runtime_load_id) == content_id:
+            if current is not None and self.loaded_artifact_ids.get(current.runtime_load_id) == artifact_id:
                 return current.runtime_load_id
             path = artifact.materialize().local_path
             if path is None:
@@ -427,11 +427,13 @@ class AdapterServingRuntime(SavedWeightServingRuntime):
                     self.restart_engines()
                 # Generation is paused, so the scenario's own adapter may make room for its new one.
                 self._residency.activate(scenario, version, self._engine, files=files, supersede=True)
-                self._content_ids[version] = content_id
+                self.loaded_artifact_ids[version] = artifact_id
             finally:
                 self._backend.resume()
                 resident = {adapter.runtime_load_id for adapter in self._residency.current_adapters()}
-                self._content_ids = {key: value for key, value in self._content_ids.items() if key in resident}
+                self.loaded_artifact_ids = {
+                    key: value for key, value in self.loaded_artifact_ids.items() if key in resident
+                }
             self._version = version
             return version
 
@@ -470,7 +472,7 @@ class FullWeightServingRuntime(SavedWeightServingRuntime):
     ``scenario``; the registry refuses a second training scenario on it
     (``shared_by_training_scenarios`` is False). The engines start with the
     base model. Every release loads its files, a root release's included,
-    unless the engines serve its content already.
+    unless the engines serve that artifact already.
     """
 
     def __init__(
@@ -483,7 +485,7 @@ class FullWeightServingRuntime(SavedWeightServingRuntime):
         health_interval_s: float = HEALTH_INTERVAL_S,
         weights: ReleaseWeights | None = None,
     ) -> None:
-        self._served_content: str | None = None
+        self.served_artifact_id: str | None = None
         self._served_files: WeightFiles | None = None
         super().__init__(
             engines,
@@ -495,9 +497,9 @@ class FullWeightServingRuntime(SavedWeightServingRuntime):
         )
 
     def activate_checkpoint(self, artifact: Artifact, *, scenario: str | None = None) -> str:
-        content_id = artifact.ref.content_id
+        artifact_id = artifact.artifact_id
         with self._lock:
-            if self._served_content == content_id:
+            if self.served_artifact_id == artifact_id:
                 return self._version
             path = artifact.materialize().local_path
             if path is None:
@@ -512,7 +514,7 @@ class FullWeightServingRuntime(SavedWeightServingRuntime):
                 check_engines_serve(self._backend, version)
             finally:
                 self._backend.resume()
-            self._served_content = content_id
+            self.served_artifact_id = artifact_id
             self._served_files = files
             self._version = version
             return version

@@ -179,7 +179,7 @@ class ServingWorker(QueueWorker):
             artifact = repository.select(selection)
         else:
             # Work queued before component selections carried a durable storage revision.
-            reference = backend.resolve_release(require_text(item.payload.get("release_id"), "release_id"))
+            reference = backend.resolve_snapshot(require_text(item.payload.get("release_id"), "release_id"))
             artifact = Artifact(reference, repository)
         surface = self.recipe.serving_surface(item.scenario)
         # Before the activation, so that an engine that starts for the artifact starts with the override.
@@ -207,7 +207,7 @@ class ServingWorker(QueueWorker):
                 if "selection" in value:
                     beside_artifact = repository.select(ArtifactSelection.from_dict(value["selection"]))
                 else:
-                    ref = backend.resolve_release(require_text(value.get("release_id"), "release_id"))
+                    ref = backend.resolve_snapshot(require_text(value.get("release_id"), "release_id"))
                     beside_artifact = Artifact(ref, repository)
                 beside_model = runtime.served_artifact_on_request(
                     surface.component_artifact(beside_artifact, component)

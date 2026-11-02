@@ -870,7 +870,7 @@ def test_scenario_commits_recovers_activates_and_trains_from_remote_checkpoint(t
     try:
         scenario = first.get_or_create_scenario("math")
         wait_for_serving(first)
-        base = scenario.current_artifact_ref().release_id
+        base = scenario.current_artifact_ref().revision
         handler = inference.inference_handler
         # As the inference service does: the request names the row's model, the sampler that serves now.
         response = asyncio.run(
@@ -908,7 +908,7 @@ def test_scenario_commits_recovers_activates_and_trains_from_remote_checkpoint(t
         state = loop_state(scenario)
         assert state.finished_jobs == 1 and state.job is None, first.build_training_status()
         published = scenario.current_artifact_ref()
-        assert published.release_id != base
+        assert published.revision != base
         wait_for_serving(first)
         assert inference.served_model_name("math") == "tinker://update-1/sampler"
         assert TinkerCheckpoint.read(Path(state.start)).state_path == "tinker://update-1/state"
@@ -925,11 +925,12 @@ def test_scenario_commits_recovers_activates_and_trains_from_remote_checkpoint(t
         assert loop_state(scenario) == state
         # The creation is the scenario's root release: its artifact_id is the root's release ID.
         base_artifact = scenario.release_queries.artifact_for_version(base).artifact_id
-        assert base_artifact == scenario.repository.start_artifact.release_id == base
+        assert base_artifact == scenario.repository.resolve(scenario.repository.start_artifact).artifact_id
+        assert scenario.repository.start_artifact.revision == base
         scenario.activate(base_artifact)
         scenario.train_from(base_artifact)
         assert scenario.scenario_step == step + 2
-        assert scenario.current_artifact_ref().release_id == base
+        assert scenario.current_artifact_ref().revision == base
         wait_for_serving(second)
         assert inference.served_model_name("math") == UNTRAINED.sampler_path
         # The root release imports as any release: the next job starts from the untrained adapter.

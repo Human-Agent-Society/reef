@@ -22,10 +22,9 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from reef.core.artifact_ref import decode_artifact_ref
 from reef.core.evaluation import ARTIFACT_KINDS
 from reef.core.job_data import TrajectorySample
-from reef.core.records_types import AgentRecord, RequestType
+from reef.core.records_types import AgentRecord, RequestType, decode_record_artifact_id
 from reef.storage.tasks import TaskFileStore
 
 #: Prefixes the task file partition of an owner. A scenario name never contains ``/``, so no scenario's partition
@@ -33,10 +32,10 @@ from reef.storage.tasks import TaskFileStore
 TASK_PARTITION_PREFIX = "data/"
 #: The keys of a record item's content.
 RECORD_CONTENT_KEYS = frozenset(
-    {"agent_record_id", "request_type", "payload", "created_at", "references", "artifact_ref"}
+    {"agent_record_id", "request_type", "payload", "created_at", "references", "artifact_id"}
 )
 #: The keys of an artifact item's content.
-ARTIFACT_CONTENT_KEYS = frozenset({"source_uri", "kind", "component", "content_id"})
+ARTIFACT_CONTENT_KEYS = frozenset({"source_uri", "kind", "component"})
 
 
 def json_digest(content: Mapping[str, Any]) -> str:
@@ -58,10 +57,12 @@ def copied_record(item_id: str, content: Mapping[str, Any], origin: str, scenari
     ``ValueError`` unless ``content`` has the keys ``RECORD_CONTENT_KEYS`` with the types that ``record_item``
     gives them, for an inference or a report, and ``item_id`` is ``<origin>/<agent_record_id>``.
     """
-    if not isinstance(content, Mapping) or content.keys() != RECORD_CONTENT_KEYS:
+    legacy_keys = RECORD_CONTENT_KEYS - {"artifact_id"} | {"artifact_ref"}
+    if not isinstance(content, Mapping) or set(content) not in (RECORD_CONTENT_KEYS, legacy_keys):
         raise ValueError(f"a record item's content has exactly the keys {', '.join(sorted(RECORD_CONTENT_KEYS))}")
     record_id, request_type, payload = content["agent_record_id"], content["request_type"], content["payload"]
-    created_at, references, artifact = content["created_at"], content["references"], content["artifact_ref"]
+    created_at, references = content["created_at"], content["references"]
+    artifact = content.get("artifact_id", content.get("artifact_ref"))
     if not isinstance(record_id, str) or item_id != f"{origin}/{record_id}":
         raise ValueError(f"a record item made in scenario {origin!r} has the ID {origin}/<agent_record_id>")
     if request_type not in (RequestType.INFERENCE.value, RequestType.REPORT.value):
@@ -72,8 +73,6 @@ def copied_record(item_id: str, content: Mapping[str, Any], origin: str, scenari
         raise ValueError("a record item's created_at is a number")
     if not isinstance(references, list) or not all(isinstance(reference, str) for reference in references):
         raise ValueError("a record item's references is a list of strings")
-    if artifact is not None and not isinstance(artifact, Mapping):
-        raise ValueError("a record item's artifact_ref is an object or null")
     copied = tuple(f"{origin}/{reference}" for reference in references)
     payload = dict(payload)
     if isinstance(payload.get("references"), list):
@@ -85,7 +84,7 @@ def copied_record(item_id: str, content: Mapping[str, Any], origin: str, scenari
         payload=payload,
         created_at=float(created_at),
         references=copied,
-        artifact_ref=None if artifact is None else decode_artifact_ref(artifact),
+        artifact_id=decode_record_artifact_id(artifact, payload),
     )
 
 
@@ -97,9 +96,9 @@ def check_artifact_content(content: Mapping[str, Any], *, made_by_scenario: bool
     ``kind`` is an ``ArtifactKind``; a client's item has a ``source_uri`` and no ``component``, and an item that a
     scenario made has a ``component``.
     """
-    if set(content) != ARTIFACT_CONTENT_KEYS:
+    if set(content) not in (ARTIFACT_CONTENT_KEYS, ARTIFACT_CONTENT_KEYS | {"content_id"}):
         raise ValueError(f"an artifact item's content holds exactly {sorted(ARTIFACT_CONTENT_KEYS)}")
-    for key in sorted(ARTIFACT_CONTENT_KEYS):
+    for key in sorted(content):
         value = content[key]
         if value is not None and not (isinstance(value, str) and value):
             raise ValueError(f"an artifact item's content.{key} is a non-empty string or null")

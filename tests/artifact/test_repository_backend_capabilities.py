@@ -7,12 +7,12 @@ import pytest
 from reef.artifact import (
     Artifact,
     ArtifactPublicationError,
-    ArtifactRef,
     EnumerableRepositoryBackendFactory,
     InMemoryRepositoryBackend,
     RegistrationAwareRepositoryBackendFactory,
     RepositoryBackend,
     RepositoryBackendFactory,
+    SnapshotRef,
     StagedReleaseRepositoryBackend,
 )
 from reef.dispatcher import build_default_dispatcher
@@ -26,22 +26,28 @@ class BasicBackend(RepositoryBackend):
     def __init__(self, delegate: InMemoryRepositoryBackend) -> None:
         self.delegate = delegate
 
-    def resolve_release(self, release_id: str) -> ArtifactRef:
-        return self.delegate.resolve_release(release_id)
+    def resolve_snapshot(self, release_id: str) -> SnapshotRef:
+        return self.delegate.resolve_snapshot(release_id)
 
-    def register(self, root: Artifact, *, metadata: Mapping[str, object]) -> ArtifactRef:
+    def index_snapshot(self, ref: SnapshotRef) -> None:
+        self.delegate.index_snapshot(ref)
+
+    def resolve_artifact(self, artifact_id: str) -> Artifact:
+        return self.delegate.resolve_artifact(artifact_id)
+
+    def register(self, root: Artifact, *, metadata: Mapping[str, object]) -> SnapshotRef:
         return self.delegate.register(root, metadata=metadata)
 
     def metadata(self) -> Mapping[str, object] | None:
         return self.delegate.metadata()
 
-    def current(self) -> ArtifactRef:
+    def current(self) -> SnapshotRef:
         return self.delegate.current()
 
-    def materialize(self, ref: ArtifactRef) -> Artifact:
+    def materialize(self, ref: SnapshotRef) -> Artifact:
         return self.delegate.materialize(ref)
 
-    def publish(self, artifact: Artifact, *, expected_parent: ArtifactRef, advance_head: bool = True) -> ArtifactRef:
+    def publish(self, artifact: Artifact, *, expected_parent: SnapshotRef, advance_head: bool = True) -> SnapshotRef:
         return self.delegate.publish(artifact, expected_parent=expected_parent, advance_head=advance_head)
 
 
@@ -50,7 +56,7 @@ class IncompleteStagedBackend(BasicBackend, StagedReleaseRepositoryBackend):
 
 
 class UndeclaredStagedBackend(BasicBackend):
-    def commit_release(self, ref: ArtifactRef, *, expected_parent: ArtifactRef) -> None:
+    def commit_release(self, ref: SnapshotRef, *, expected_parent: SnapshotRef) -> None:
         self.delegate.commit_release(ref, expected_parent=expected_parent)
 
 

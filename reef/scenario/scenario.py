@@ -8,18 +8,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from reef.artifact.artifact import Artifact, ArtifactRef
+from reef.artifact.artifact import Artifact, SnapshotRef
 from reef.artifact.release_chain import ArtifactReleaseChain, ReleaseNotRestorable
 from reef.artifact.repository import Repository
 from reef.artifact.sources import SourceFiles
 from reef.core.activation import ActivationRule
-from reef.core.artifact_ref import RootSource
 from reef.core.artifact_selection import ArtifactSelection
 from reef.core.components import RECORDS_COMPONENT
 from reef.core.errors import ReefError
 from reef.core.reports import ReportBase
 from reef.core.served_models import ScenarioModel
 from reef.core.serving_config import ServingConfig
+from reef.core.snapshot import RootSource
 from reef.core.values import JsonValue
 from reef.observability.commits import CommitExperimentObserver
 from reef.observability.operations import OperationMetrics
@@ -420,20 +420,23 @@ class Scenario:
     @property
     def commit_status(self) -> Mapping[str, Any]:
         """The non-blocking committed step, training outcome, and artifact-head sync status."""
-        status = dict(self._committer.commit_status)
-        status["artifact_head_sync"] = {
-            key: value for key, value in status["artifact_head_sync"].items() if key != "release_id"
-        }
-        return status
+        return self._committer.commit_status
 
     def last_commit_for(self, component: str | None) -> CommitRecord | None:
         """The newest durable commit made by ``component``'s trainer, read from the commit history without waiting on a commit."""
         return self._committer.last_record_for(component)
 
     def releases(self) -> tuple[dict[str, Any], ...]:
-        """Committed releases, newest first; the scenario step is read under the same lock as the commit history."""
+        """Legacy release catalog serialization, newest first; new callers use artifacts or artifact selections."""
         with self.release_queries.publication_lock:
-            return self.release_queries.releases(self._committer.step)
+            return tuple(
+                {
+                    **{key: value for key, value in row.items() if key != "snapshot"},
+                    "release_id": row["snapshot"].revision,
+                    "parent_release_id": row["snapshot"].parent_revision,
+                }
+                for row in self.release_queries.snapshot_rows(self._committer.step)
+            )
 
     def artifact_rows(self) -> tuple[dict[str, Any], ...]:
         """Internal artifact catalog, including the storage locators needed to materialize each artifact."""
@@ -446,22 +449,18 @@ class Scenario:
             parents = self.release_queries.artifact_parents(self._committer.step, self._committer.component_names())
             return tuple(
                 {
-                    **{
-                        key: value
-                        for key, value in row.items()
-                        if key not in {"release_id", "parent_release_id", "content_id"}
-                    },
+                    **{key: value for key, value in row.items() if key != "snapshot"},
                     "parent_artifact_id": parents.get(row["artifact_id"]),
                 }
                 for row in self.artifact_rows()
             )
 
-    def current_artifact_ref(self) -> ArtifactRef:
+    def current_artifact_ref(self) -> SnapshotRef:
         """The private storage or local-view locator of the current component selection."""
         return self._artifact_chain.current
 
-    def artifact_selection(self, ref: ArtifactRef | None = None) -> ArtifactSelection:
-        """Return the complete component selection, including durable locators for independent serving workers."""
+    def artifact_selection(self, ref: SnapshotRef | None = None) -> ArtifactSelection:
+        """Return the complete component-to-artifact-ID mapping for independent serving workers."""
         with self.release_queries.publication_lock:
             artifact = Artifact(self.current_artifact_ref() if ref is None else ref, self.repository)
             return self.repository.selection(artifact, self._committer.component_names())
@@ -512,24 +511,24 @@ class Scenario:
         with self.release_queries.publication_lock:
             return self._committer.artifact_status()
 
-    def artifact_release_ref(self, artifact_id: str, component: str | None = None) -> tuple[str, ArtifactRef]:
+    def artifact_snapshot(self, artifact_id: str, component: str | None = None) -> tuple[str, SnapshotRef]:
         """The component that ``artifact_id`` names and the ref of the release that minted it, without materializing
-        the release; see :meth:`ScenarioCommitter.artifact_release_ref`."""
+        the release; see :meth:`ScenarioCommitter.artifact_snapshot`."""
         with self.release_queries.publication_lock:
-            return self._committer.artifact_release_ref(artifact_id, component)
+            return self._committer.artifact_snapshot(artifact_id, component)
 
     def resolve_artifact(self, artifact_id: str, component: str | None = None) -> tuple[ComponentArtifact, Artifact]:
         """The artifact ``artifact_id`` names and a release that binds it; see :meth:`ScenarioCommitter.resolve_artifact`."""
         with self.release_queries.publication_lock:
             return self._committer.resolve_artifact(artifact_id, component)
 
-    def sync_release(
-        self, artifact: Artifact, *, component: str, expected_release_id: str, metrics: Mapping[str, Any]
-    ) -> ArtifactRef:
+    def sync_artifact(
+        self, artifact: Artifact, *, component: str, expected_selection: ArtifactSelection, metrics: Mapping[str, Any]
+    ) -> ComponentArtifact:
         """Make a person's merged ``component`` tree active and the training start; see
-        :meth:`ScenarioCommitter.sync_release`."""
-        return self._committer.sync_release(
-            artifact, component=component, expected_release_id=expected_release_id, metrics=metrics
+        :meth:`ScenarioCommitter.sync_artifact`."""
+        return self._committer.sync_artifact(
+            artifact, component=component, expected_selection=expected_selection, metrics=metrics
         )
 
     def commit(self, result: TrainStepResult, *, component: str | None = None) -> Any:

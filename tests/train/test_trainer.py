@@ -23,7 +23,7 @@ from tests.support.serving import wait_for_serving
 
 from recipes.sao import SAOJobData, SAOSamples
 from recipes.tttd import TTTDGroupedRolloutReport, TTTDJobData, TTTDSamples, TTTDSettings
-from reef.artifact import ArtifactRef, InMemoryRepositoryBackend
+from reef.artifact import InMemoryRepositoryBackend, SnapshotRef
 from reef.core import AgentRecord, RequestType
 from reef.core.chat_rendering import rendered_job_data
 from reef.core.errors import TrainingStartRefused
@@ -86,7 +86,7 @@ def record_commit(session: CommitHistoryScenarioStore, step: int, prepared) -> N
         commit=CommitRecord(
             scenario="math",
             step=step,
-            artifact_ref=ArtifactRef(f"content:{step}", f"release:{step}", "base"),
+            snapshot=SnapshotRef(f"release:{step}", "base"),
             checkpoint=True,
             algorithm_state=prepared.algorithm_state,
             high_water_sequence=prepared.high_water_sequence,
@@ -672,7 +672,7 @@ def test_a_grouped_recipe_trains_one_comparison_set_as_one_job(tmp_path) -> None
     # After the root release, the job's checkpoint is what the scenario serves.
     wait_for_serving(dispatcher)
     assert inference_runtime.activated[1:] == ["w1"]
-    assert scenario.served_artifact_id() == scenario.current_artifact_ref().release_id
+    assert scenario.served_artifact_id() == scenario.repository.resolve(scenario.current_artifact_ref()).artifact_id
 
 
 @pytest.mark.unit

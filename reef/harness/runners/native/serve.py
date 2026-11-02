@@ -1,4 +1,4 @@
-"""``reef-native serve``: one resident process that runs a scenario's harness release and follows its head.
+"""``reef-native serve``: one resident process that runs a scenario's harness artifact and follows its head.
 
 A mount renders a source tree for the native adapter into a fresh directory
 under ``native/mounts/`` and builds a ``NativeHost`` from the rendered files.
@@ -6,8 +6,8 @@ The process boots on the source tree it mounted last (``source/`` beside the
 release file), else on the head's, read through
 ``GET /reef/harness?form=source``. It starts the capture proxy in process
 and listens on a Unix socket for turns and control requests. A session holds
-one ``Run`` across turns. A new head reaches the process through the release
-poll or the ``x-reef-release-id`` header of an inference answer, and its host
+one ``Run`` across turns. A new head reaches the process through the artifact
+poll or a resolved legacy harness header, and its host
 replaces the current one between two steps of the open turn, or at once when
 no turn is open. A tree that does not render or load leaves the current host
 in place. Every mount, unmount and failed mount is an event in the open
@@ -44,11 +44,11 @@ from reef.harness.runners.native.enforce import Enforcer, InProcessEnforcer, Too
 from reef.harness.runners.native.graph import GraphError, Run, run_graph, run_loop_module
 from reef.harness.runners.native.host import NativeHost
 from reef.harness.runners.native.release_client import (
+    ArtifactClient,
+    ArtifactClientError,
+    ArtifactUpdateListener,
     EventWriter,
     HeadWatch,
-    ReleaseClient,
-    ReleaseClientError,
-    ReleaseUpdateListener,
 )
 from reef.harness.runners.native.selftools import HostTool, ServeState, self_tools
 from reef.harness.tasks.model_binding import ModelBinding
@@ -123,10 +123,10 @@ def tree_of(manifest: Mapping[str, Any]) -> HarnessTree:
     try:
         return HarnessTree(dict(manifest.get("files") or {}))
     except (TypeError, ValueError) as exc:
-        raise ServeError(f"release {manifest.get('release_id')!r} carries no source tree: {exc}") from exc
+        raise ServeError(f"release {manifest.get('artifact_id')!r} carries no source tree: {exc}") from exc
 
 
-def read_release_info(dest: Path) -> dict[str, Any]:
+def read_artifact_info(dest: Path) -> dict[str, Any]:
     """The release file beside the tree, or an empty record when there is none or it is unreadable."""
     try:
         record = json.loads((dest / HARNESS_RELEASE_FILE).read_text(encoding="utf-8"))
@@ -249,10 +249,10 @@ class _Conversation:
 class _Pending:
     """One queued release mount and the answer whoever queued it waits for; the manifest is fetched when it lands."""
 
-    def __init__(self, release_id: str, source: str, manifest: Mapping[str, Any] | None = None) -> None:
+    def __init__(self, artifact_id: str, source: str, manifest: Mapping[str, Any] | None = None) -> None:
         self.manifest: dict[str, Any] | None = None if manifest is None else dict(manifest)
         self.source = source
-        self.release_id = release_id
+        self.artifact_id = artifact_id
         self.result: dict[str, Any] = {}
         self._done = threading.Event()
 
@@ -262,18 +262,18 @@ class _Pending:
 
     def wait(self, timeout_s: float) -> dict[str, Any]:
         if not self._done.wait(timeout_s):
-            return {"mounted": False, "release_id": self.release_id, "error": f"no mount within {timeout_s:.0f} s"}
+            return {"mounted": False, "artifact_id": self.artifact_id, "error": f"no mount within {timeout_s:.0f} s"}
         return self.result
 
 
 # -- the process -------------------------------------------------------------------------------------------
 
 
-class Server(ServeState, ReleaseUpdateListener):
+class Server(ServeState, ArtifactUpdateListener):
     """The resident process: the mounted host, the sessions, the proxy, the release watch and the socket."""
 
     @property
-    def client(self) -> ReleaseClient:
+    def client(self) -> ArtifactClient:
         return self._client
 
     def __init__(
@@ -314,12 +314,12 @@ class Server(ServeState, ReleaseUpdateListener):
             token if token is not None else (os.environ.get("REEF_TOKEN") or self._installed_binding.api_key or None)
         )
         self.binding: ModelBinding = self._installed_binding
-        self._client = ReleaseClient(self.reef_url, self.token, scenario, timeout_s=release_timeout_s)
+        self._client = ArtifactClient(self.reef_url, self.token, scenario, timeout_s=release_timeout_s)
         #: The served release's source tree, and the tree the current host runs: the served one, or a trial's.
         self._tree = HarnessTree({})
         self._live_tree = self._tree
-        self._release_id: str | None = None
-        self._parent_release_id: str | None = None
+        self._artifact_id: str | None = None
+        self._parent_artifact_id: str | None = None
         self._pending: _Pending | None = None
         self._trial: str | None = None
         self._builtin_tools: list[HostTool] = []
@@ -342,8 +342,8 @@ class Server(ServeState, ReleaseUpdateListener):
     # -- what the self tools and the status read ---------------------------------------------------------------
 
     @property
-    def release_id(self) -> str | None:
-        return self._release_id
+    def artifact_id(self) -> str | None:
+        return self._artifact_id
 
     @property
     def host(self) -> NativeHost:
@@ -360,11 +360,11 @@ class Server(ServeState, ReleaseUpdateListener):
     def status(self) -> dict[str, Any]:
         with self._state_lock:
             return {
-                "release_id": self._release_id,
-                "parent_release_id": self._parent_release_id,
+                "artifact_id": self._artifact_id,
+                "parent_artifact_id": self._parent_artifact_id,
                 "follow": self.follow,
                 "files": len(self._tree.files),
-                "pending_mount": None if self._pending is None else self._pending.release_id,
+                "pending_mount": None if self._pending is None else self._pending.artifact_id,
                 "sessions": len(self._conversations),
                 "socket": str(self.socket_path),
                 "self_tools": self.self_tools,
@@ -382,28 +382,32 @@ class Server(ServeState, ReleaseUpdateListener):
             self._enforcer = BuiltinToolEnforcer(select_enforcer(os.environ))
         except ValueError as exc:
             raise ServeError(str(exc)) from exc
-        release_info = read_release_info(self.dest)
-        release = str(release_info["release_id"]) if release_info.get("release_id") else None
-        parent = str(release_info["parent_release_id"]) if release_info.get("parent_release_id") else None
+        release_info = read_artifact_info(self.dest)
+        legacy_manifest: Mapping[str, Any] | None = None
+        if not release_info.get("artifact_id") and release_info.get("release_id"):
+            legacy_manifest = self.client.fetch_legacy(str(release_info["release_id"]))
+            release_info = dict(legacy_manifest)
+        release = str(release_info["artifact_id"]) if release_info.get("artifact_id") else None
+        parent = str(release_info["parent_artifact_id"]) if release_info.get("parent_artifact_id") else None
         stored = read_source(self.dest) if release is not None else None
-        manifest: Mapping[str, Any] | None = None
+        manifest = legacy_manifest
         if stored is None:
             # Nothing mounted here yet: the head's source tree, which the boot mount stores for the next start.
             try:
                 manifest = self.client.fetch(release)
-            except ReleaseClientError as exc:
+            except ArtifactClientError as exc:
                 raise ServeError(
                     f"no source tree under {self.dest / SOURCE_DIR} and Reef answered none: {exc}"
                 ) from exc
             stored = tree_of(manifest)
-            release = str(manifest["release_id"])
-            parent = None if manifest.get("parent_release_id") is None else str(manifest["parent_release_id"])
+            release = str(manifest["artifact_id"])
+            parent = None if manifest.get("parent_artifact_id") is None else str(manifest["parent_artifact_id"])
         self._watch = HeadWatch(self.client, self, self._log, self.poll_interval_s, mounted=release)
         self._proxy = CaptureProxy(
             self.reef_url,
             self.scenario,
             self.token,
-            tags={"release": release} if release else {},
+            tags={"artifact_id": release} if release else {},
             observer=self._watch,
         )
         try:
@@ -492,38 +496,47 @@ class Server(ServeState, ReleaseUpdateListener):
             if control == "status":
                 return {"type": "control/result", "data": self.status()}
             if control == "mount":
-                release_id = request.get("release_id")
-                if not isinstance(release_id, str) or not release_id:
-                    return _error("mount needs a release_id")
-                return {"type": "control/result", "data": self.mount(release_id)}
+                artifact_id = request.get("artifact_id")
+                if artifact_id is None and isinstance(request.get("release_id"), str):
+                    try:
+                        artifact_id = self.client.fetch_legacy(request["release_id"])["artifact_id"]
+                    except ArtifactClientError as exc:
+                        return _error(str(exc))
+                if not isinstance(artifact_id, str) or not artifact_id:
+                    return _error("mount needs a artifact_id")
+                return {"type": "control/result", "data": self.mount(artifact_id)}
             return _error(f"unknown control {control!r}; status or mount")
         return _error("request must carry turn or control")
 
-    def mount(self, release_id: str) -> dict[str, Any]:
+    def mount(self, artifact_id: str) -> dict[str, Any]:
         """A manual mount: queue the release and answer once it landed or failed."""
-        pending = self._enqueue(release_id, "release")
+        pending = self._enqueue(artifact_id, "release")
         self._drain_if_idle()
         return pending.wait(self.turn_timeout_s + 5.0)
 
     # -- the head ----------------------------------------------------------------------------------------------
 
-    def new_head(self, release_id: str, source: str) -> None:
+    def new_head(self, artifact_id: str, source: str) -> None:
         """A head the watch learned of: queued for a mount under ``head``, announced and left alone under ``pinned``."""
         if self.follow == "pinned":
-            self._log.write("release/available", {"release_id": release_id})
+            self._log.write("artifact/available", {"artifact_id": artifact_id})
             return
         # Only the id is queued here: the caller may be the proxy's relay thread, and the manifest fetch belongs
         # to the thread that mounts, so an inference answer is never held behind a round trip to reef.
-        self._enqueue(release_id, "release")
+        self._enqueue(artifact_id, "release")
         self._drain_if_idle()
 
-    def _enqueue(self, release_id: str, source: str) -> _Pending:
-        pending = _Pending(release_id, source)
+    def _enqueue(self, artifact_id: str, source: str) -> _Pending:
+        pending = _Pending(artifact_id, source)
         with self._state_lock:
             previous, self._pending = self._pending, pending
         if previous is not None:
             previous.settle(
-                {"mounted": False, "release_id": previous.release_id, "error": f"superseded by {pending.release_id}"}
+                {
+                    "mounted": False,
+                    "artifact_id": previous.artifact_id,
+                    "error": f"superseded by {pending.artifact_id}",
+                }
             )
         return pending
 
@@ -546,32 +559,37 @@ class Server(ServeState, ReleaseUpdateListener):
 
     def _mount_manifest(self, pending: _Pending) -> dict[str, Any]:
         try:
-            manifest = pending.manifest if pending.manifest is not None else self.client.fetch(pending.release_id)
+            manifest = pending.manifest if pending.manifest is not None else self.client.fetch(pending.artifact_id)
             tree = tree_of(manifest)
-        except (ServeError, ReleaseClientError) as exc:
+        except (ServeError, ArtifactClientError) as exc:
             self._log.write(
-                "harness/mount-failed", {"release_id": pending.release_id, "source": pending.source, "error": str(exc)}
+                "harness/mount-failed",
+                {"artifact_id": pending.artifact_id, "source": pending.source, "error": str(exc)},
             )
-            if isinstance(exc, ReleaseClientError) and exc.timed_out:
+            if isinstance(exc, ArtifactClientError) and exc.timed_out:
                 # Reef is busy (an evolve step holds the manifest as it holds the catalog), not gone: the next poll
                 # that names this head announces it again, so the mount is retried at the interval, not forgotten.
-                self._watch.forget(pending.release_id)
-            return {"mounted": False, "release_id": pending.release_id, "error": str(exc)}
-        parent = manifest.get("parent_release_id")
+                self._watch.forget(pending.artifact_id)
+            return {"mounted": False, "artifact_id": pending.artifact_id, "error": str(exc)}
+        parent = manifest.get("parent_artifact_id")
         failure = self._mount(
-            tree, pending.release_id, None if parent is None else str(parent), source=pending.source, manifest=manifest
+            tree,
+            pending.artifact_id,
+            None if parent is None else str(parent),
+            source=pending.source,
+            manifest=manifest,
         )
         if failure is not None:
-            return {"mounted": False, "release_id": pending.release_id, "error": failure["error"]}
-        return {"mounted": True, "release_id": pending.release_id, "error": None}
+            return {"mounted": False, "artifact_id": pending.artifact_id, "error": failure["error"]}
+        return {"mounted": True, "artifact_id": pending.artifact_id, "error": None}
 
     # -- mounts ------------------------------------------------------------------------------------------------
 
     def _mount(
         self,
         tree: HarnessTree,
-        release_id: str | None,
-        parent_release_id: str | None,
+        artifact_id: str | None,
+        parent_artifact_id: str | None,
         *,
         source: str,
         manifest: Mapping[str, Any] | None = None,
@@ -586,7 +604,7 @@ class Server(ServeState, ReleaseUpdateListener):
         try:
             host, directory = self.build_host(tree)
         except (RenderError, LoadError, GraphError) as exc:
-            self._log.write("harness/mount-failed", {"release_id": release_id, "source": source, "error": str(exc)})
+            self._log.write("harness/mount-failed", {"artifact_id": artifact_id, "source": source, "error": str(exc)})
             return {"error": str(exc)}
         previous, self._host, self._mount_dir, self._live_tree = self._mount_dir, host, directory, tree
         if previous is not None:
@@ -594,20 +612,20 @@ class Server(ServeState, ReleaseUpdateListener):
         if source in ("boot", "release"):
             with self._state_lock:
                 self._tree = tree
-                self._release_id = release_id
-                self._parent_release_id = parent_release_id
-            if release_id:
-                self._proxy.tags["release"] = release_id
+                self._artifact_id = artifact_id
+                self._parent_artifact_id = parent_artifact_id
+            if artifact_id:
+                self._proxy.tags["artifact_id"] = artifact_id
             else:
                 self._proxy.tags.pop("release", None)
-            self._watch.mounted(release_id)
+            self._watch.mounted(artifact_id)
             if manifest is not None:
                 self._install(tree, manifest)
         self._log.write(
             "harness/mount",
             {
-                "release_id": release_id,
-                "parent_release_id": parent_release_id,
+                "artifact_id": artifact_id,
+                "parent_artifact_id": parent_artifact_id,
                 "source": source,
                 "files": len(tree.files),
                 **(extra or {}),
@@ -647,9 +665,8 @@ class Server(ServeState, ReleaseUpdateListener):
         shutil.rmtree(self.dest / SOURCE_DIR, ignore_errors=True)
         staging.rename(self.dest / SOURCE_DIR)
         record = {
-            "release_id": manifest.get("release_id"),
-            "content_id": manifest.get("content_id"),
-            "parent_release_id": manifest.get("parent_release_id"),
+            "artifact_id": manifest.get("artifact_id"),
+            "parent_artifact_id": manifest.get("parent_artifact_id"),
             "installed_at": datetime.now(UTC).isoformat(timespec="seconds"),
         }
         (self.dest / HARNESS_RELEASE_FILE).write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
@@ -666,8 +683,8 @@ class Server(ServeState, ReleaseUpdateListener):
             return {"error": validation.message()}
         failure = self._mount(
             served.apply(patch),
-            self._release_id,
-            self._parent_release_id,
+            self._artifact_id,
+            self._parent_artifact_id,
             source="try",
             extra={"try_id": try_id, "paths": sorted(patch.changes)},
         )
@@ -681,9 +698,9 @@ class Server(ServeState, ReleaseUpdateListener):
         if self._trial is None:
             return
         try_id, self._trial = self._trial, None
-        self._mount(self.served_tree(), self._release_id, self._parent_release_id, source="rollback")
+        self._mount(self.served_tree(), self._artifact_id, self._parent_artifact_id, source="rollback")
         self._proxy.tags.pop("trial", None)
-        self._log.write("harness/unmount", {"try_id": try_id, "release_id": self._release_id})
+        self._log.write("harness/unmount", {"try_id": try_id, "artifact_id": self._artifact_id})
 
     # -- turns -------------------------------------------------------------------------------------------------
 
@@ -781,7 +798,7 @@ class Server(ServeState, ReleaseUpdateListener):
                 "enforcement": self._enforcer.mode,
                 "mode": "serve",
                 "session": conversation.id,
-                "release_id": self._release_id,
+                "artifact_id": self._artifact_id,
             }
             loop = _ServeLoop(self, session, self.native, conversation.dir, header, self._enforcer)
             run = Run(loop, prompt, self.binding, self._host, workdir, session=session)
@@ -916,7 +933,7 @@ def serve_command(args: Any) -> int:
     except ServeError as exc:
         print(f"reef-native serve: {exc}", file=sys.stderr)
         return 2
-    print(f"reef-native serve: release {server.release_id} on {server.socket_path}", file=sys.stderr, flush=True)
+    print(f"reef-native serve: release {server.artifact_id} on {server.socket_path}", file=sys.stderr, flush=True)
     try:
         server.wait()
     finally:
@@ -944,7 +961,7 @@ def turn_command(args: Any) -> int:
 def control_command(args: Any) -> int:
     payload: dict[str, Any] = {"control": args.command}
     if args.command == "mount":
-        payload["release_id"] = args.release_id
+        payload["artifact_id"] = args.artifact_id
     try:
         reply = request(socket_path(args.tree, args.socket), payload)
     except ServeError as exc:
@@ -979,7 +996,7 @@ __all__ = [
     "ServeError",
     "ServeSession",
     "Server",
-    "read_release_info",
+    "read_artifact_info",
     "read_source",
     "request",
     "run_command",

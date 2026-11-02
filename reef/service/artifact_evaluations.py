@@ -28,7 +28,6 @@ from dataclasses import dataclass, replace
 from typing import Any, Literal, cast
 
 from reef.artifact.artifact import Artifact
-from reef.core.components import made_artifact_id
 from reef.core.errors import CommitPending, ReefError
 from reef.core.evaluation import (
     ArtifactEvaluationRequest,
@@ -98,14 +97,15 @@ class NewArtifacts(RecordObserver):
         # names one that exists, and a person who imports an artifact decides what to do with it.
         if not commit.trained_artifact:
             return
-        if commit.components is None:
-            self.queue.put(NewArtifact(commit.scenario, commit.artifact_ref.release_id, commit.component))
+        selected = commit.selection.artifact_ids if commit.selection is not None else commit.components
+        if selected is None:
+            # Legacy flat commits used their storage revision as their artifact identity.
+            self.queue.put(NewArtifact(commit.scenario, commit.snapshot.revision, commit.component))
             return
-        # With several components, the release made the artifact of each component that it gave a new artifact_id.
-        release_id = commit.artifact_ref.release_id
-        for name, artifact_id in commit.components.items():
-            if artifact_id == made_artifact_id(release_id, name, single=False):
-                self.queue.put(NewArtifact(commit.scenario, artifact_id, name))
+        changed = selected if commit.component is None else {commit.component: selected[commit.component]}
+        for name, artifact_id in changed.items():
+            component = None if len(selected) == 1 and commit.component is None else name
+            self.queue.put(NewArtifact(commit.scenario, artifact_id, component))
 
     def close(self) -> None:
         self.queue.put(None)

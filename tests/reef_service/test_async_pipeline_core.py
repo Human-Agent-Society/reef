@@ -90,8 +90,8 @@ class RecordingExperimentTracker(ExperimentTracker):
         self.loggers = {}
         self.closed = False
 
-    def bind_scenario(self, *, scenario, recipe, source_artifact_ref, run_segment):
-        del recipe, source_artifact_ref, run_segment
+    def bind_scenario(self, *, scenario, recipe, source_artifacts, run_segment):
+        del recipe, source_artifacts, run_segment
         return self.loggers.setdefault(scenario, RecordingExperimentLogger())
 
     def correlation_metrics(self, context):
@@ -310,7 +310,7 @@ def test_weight_inference_does_not_materialize_its_checkpoint(start_dispatcher, 
     monkeypatch.setattr(
         scenario.repository,
         "resolve",
-        lambda ref: pytest.fail(f"unexpected inference materialization: {ref.release_id}"),
+        lambda ref: pytest.fail(f"unexpected inference materialization: {ref.revision}"),
     )
 
     async def run() -> dict:
@@ -340,7 +340,7 @@ def test_two_jobs_form_one_deterministic_release_chain(start_dispatcher) -> None
     # Training is linear: the second job starts from the first job's checkpoint.
     assert component.calls[0].start == component.base_start
     assert component.calls[1].start == str(component.checkpoint_root / "1")
-    assert scenario.current_artifact_ref().parent_release_id == first.release_id
+    assert scenario.current_artifact_ref().parent_revision == first.revision
     with pytest.raises(ReefError, match="already bound"):
         dispatcher.get_or_create_scenario("other")
 
@@ -365,7 +365,7 @@ def test_training_result_metrics_reach_the_durable_commit(start_dispatcher) -> N
     assert not {"selected", "selection"} & set(committed)
     # The default activation rule serves the checkpoint at its commit.
     [checkpoint] = [record for record in scenario.store.history() if record.checkpoint]
-    assert checkpoint.activated and scenario.current_artifact_ref() == checkpoint.artifact_ref
+    assert checkpoint.activated and scenario.current_artifact_ref() == checkpoint.snapshot
     # The last commit is the job's end.
     status = dispatcher.build_training_status()["scenarios"]["math"]["last_committed_step"]
     assert status["step"] == 3
@@ -388,7 +388,7 @@ def test_experiment_provider_observes_the_generic_commit_boundary(start_dispatch
     _wait_for_jobs(dispatcher, 1)
     scenario = dispatcher.get_or_create_scenario("math")
     produced = scenario.current_artifact_ref()
-    _, committed = scenario.release_queries.artifact_with_metrics(produced.release_id)
+    _, committed = scenario.release_queries.artifact_with_metrics(produced.revision)
 
     assert committed is not None
     assert committed["experiment/provider"] == "test"
@@ -406,8 +406,12 @@ def test_experiment_provider_observes_the_generic_commit_boundary(start_dispatch
     assert event.context.backend_config == {
         "job_parameters": {kind: {"method": {"objective": "sft"}} for kind in ("trajectory", "task")},
     }
-    assert event.context.source_artifact_ref.release_id == produced.parent_release_id
-    assert event.produced_artifact_ref == produced
+    assert event.context.source_artifacts.components == {
+        "weights": scenario.repository.resolve(
+            scenario.repository.backend.resolve_snapshot(produced.parent_revision)
+        ).artifact_id
+    }
+    assert event.produced_artifacts.components == {"weights": scenario.repository.resolve(produced).artifact_id}
     assert event.metrics["train/loss"] == pytest.approx(0.25)
     assert event.training_job_id == tracker.events[0].training_job_id
     assert scenario.trainer.pipeline.experiment_logger is tracker.loggers["math"]

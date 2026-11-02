@@ -18,7 +18,6 @@ def test_the_item_of_a_scenarios_artifact_names_where_it_came_from_and_where_its
         "source_uri": "s3://bucket/coding/r1/",
         "kind": "model",
         "component": "weights",
-        "content_id": "c1",
     }
     assert item.metadata == {
         "kind": "artifact",

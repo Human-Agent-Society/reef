@@ -167,7 +167,7 @@ class Trainer:
                     start = job_loop.component.root_start(root)
                 except ValueError as exc:
                     raise TrainingStartRefused(
-                        f"scenario {scenario!r} cannot train from its root release {root.artifact.ref.release_id}: "
+                        f"scenario {scenario!r} cannot train from its root release {root.artifact.ref.revision}: "
                         f"{exc}"
                     ) from exc
                 initial_state = JobLoopState(start).to_dict()
@@ -717,7 +717,7 @@ class Trainer:
         """
         tree = artifact.local_path
         if tree is None:
-            raise TrainingStartRefused(f"artifact {artifact.ref.release_id!r} has no local files to train from")
+            raise TrainingStartRefused(f"artifact {artifact.ref.revision!r} has no local files to train from")
         with self._lock:
             if self._pending is not None:
                 raise CommitPending("cannot set the training start while a training result waits for its commit")

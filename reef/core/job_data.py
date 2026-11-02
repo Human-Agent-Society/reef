@@ -83,7 +83,9 @@ class TrajectorySample:
         records = self.metadata.get("records")
         last = records[-1] if isinstance(records, list) and records else None
         payload = last.get("payload") if isinstance(last, Mapping) else None
-        recorded = payload.get("artifact_id") if isinstance(payload, Mapping) else None
+        recorded = last.get("artifact_id") if isinstance(last, Mapping) else None
+        if recorded is None and isinstance(payload, Mapping):
+            recorded = payload.get("artifact_id")
         return recorded if isinstance(recorded, str) and recorded else None
 
     def with_metadata(self, **fields: Any) -> TrajectorySample:

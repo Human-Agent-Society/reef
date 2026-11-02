@@ -36,7 +36,6 @@ from sqlalchemy import (
 from sqlalchemy.engine import Connection, RowMapping
 from sqlalchemy.sql.elements import ColumnElement
 
-from reef.core.artifact_ref import decode_artifact_ref, encode_artifact_ref
 from reef.core.atif_payloads import (
     AtifCall,
     CallShape,
@@ -47,7 +46,7 @@ from reef.core.atif_payloads import (
     canonical_json,
     provider_payload,
 )
-from reef.core.records_types import AgentRecord, RequestType
+from reef.core.records_types import AgentRecord, RequestType, decode_record_artifact_id
 from reef.core.serving_config import ServingConfig
 from reef.core.trajectory_index import CallKey, ParentCandidate, best_parent, call_key, sha256_text, trajectory_calls
 from reef.storage.records import (
@@ -626,18 +625,18 @@ class SQLRecordRetention:
 def content_sha256(item: AgentRecord) -> str:
     """The retry fingerprint of a record: the SHA-256 of its canonical content without ``created_at``.
 
-    The content holds the whole payload, so the fingerprint does not depend on how a store splits the payload,
-    and the fingerprints in older stores stay valid. A client retrying with its own agent_record_id regenerates
+    The content holds the whole payload and the artifact ID, so its fingerprint
+    does not depend on how a store splits the payload. A client retrying with its own agent_record_id regenerates
     the timestamp, so a timestamp difference alone must dedup, not conflict.
     """
-    artifact = item.artifact_ref
+    artifact = item.artifact_id
     content = {
         "agent_record_id": item.agent_record_id,
         "scenario": item.scenario,
         "request_type": item.request_type.value,
         "payload_json": SQLRecordStore._json(dict(item.payload)),
         "references_json": SQLRecordStore._json(item.references),
-        "artifact_json": None if artifact is None else SQLRecordStore._json(encode_artifact_ref(artifact)),
+        "artifact_json": None if artifact is None else SQLRecordStore._json(artifact),
     }
     return hashlib.sha256(SQLRecordStore._json(content).encode("utf-8")).hexdigest()
 
@@ -700,10 +699,10 @@ class SQLRecordStore(RecordStore):
     @classmethod
     def _encode(cls, item: AgentRecord) -> tuple[EncodedRecord, CallKey | None]:
         """The row of ``item``, and its payload as an ATIF call."""
-        artifact = item.artifact_ref
+        artifact = item.artifact_id
         artifact_json = None
         if artifact is not None:
-            artifact_json = cls._json(encode_artifact_ref(artifact))
+            artifact_json = cls._json(artifact)
         key = call_key(item.payload)
         shape = None if key is None else call_shape(item.payload)
         encoded = EncodedRecord(
@@ -730,9 +729,6 @@ class SQLRecordStore(RecordStore):
         records: list[AgentRecord] = []
         for row in rows:
             raw_artifact = json.loads(row["artifact_json"]) if row["artifact_json"] is not None else None
-            artifact = None
-            if raw_artifact is not None:
-                artifact = decode_artifact_ref(raw_artifact)
             if row["message_field"] is not None:
                 payload = provider_payload(contents[int(row["sequence"])].atif_call())
             else:
@@ -745,7 +741,7 @@ class SQLRecordStore(RecordStore):
                     payload=payload,
                     created_at=row["created_at"],
                     references=tuple(json.loads(row["references_json"])),
-                    artifact_ref=artifact,
+                    artifact_id=decode_record_artifact_id(raw_artifact, payload),
                 )
             )
         return tuple(records)
@@ -761,6 +757,13 @@ class SQLRecordStore(RecordStore):
     def _content(cls, encoded: EncodedRecord) -> dict[str, object]:
         """The encoded fields that define row content, excluding ``created_at`` (``content_sha256``)."""
         return {name: value for name, value in encoded._asdict().items() if name != "created_at"}
+
+    def matches_content(self, connection: Connection, row: RowMapping, encoded: EncodedRecord) -> bool:
+        """Compare retry content after translating an older row's artifact locator to its ID."""
+        stored = self.row_content(row)
+        if stored.artifact_json != encoded.artifact_json:
+            stored, _ = self._encode(self._decode(connection, [row])[0])
+        return self._content(stored) == self._content(encoded)
 
     def append(self, item: AgentRecord) -> AgentRecord:
         return self.append_result(item).item
@@ -800,7 +803,7 @@ class SQLRecordStore(RecordStore):
             )
             if row is None:
                 return None
-            if self._content(self.row_content(row)) != self._content(encoded):
+            if not self.matches_content(connection, row, encoded):
                 raise RecordConflict(f"agent_record_id {item.agent_record_id!r} already has different content")
             return self._decode(connection, [row])[0]
 
@@ -863,7 +866,7 @@ class SQLRecordStore(RecordStore):
                     .mappings()
                     .first()
                 )
-                if existing is not None and self._content(self.row_content(existing)) != self._content(encoded):
+                if existing is not None and not self.matches_content(connection, existing, encoded):
                     raise RecordConflict(f"agent_record_id {item.agent_record_id!r} already has different content")
                 self._insert(
                     connection,
@@ -895,7 +898,7 @@ class SQLRecordStore(RecordStore):
             .mappings()
             .first()
         )
-        if existing is None or self._content(self.row_content(existing)) != self._content(encoded):
+        if existing is None or not self.matches_content(connection, existing, encoded):
             raise RecordConflict(f"agent_record_id {item.agent_record_id!r} already has different content")
         stored = self._decode(connection, [existing])[0]
         live = self._live_records.get(item.agent_record_id)

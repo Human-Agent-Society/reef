@@ -28,7 +28,7 @@ from pathlib import Path
 from threading import Lock
 from typing import Any, Literal
 
-from reef.artifact.artifact import Artifact
+from reef.artifact.artifact import Artifact, is_local_snapshot
 from reef.core.errors import InferenceUnavailable, ReefError
 from reef.core.evaluation import ArtifactKind, PolicyModel
 from reef.core.served_models import ServedArtifact
@@ -422,6 +422,35 @@ class InferenceStream:
             await self._close()
 
 
+@dataclass(frozen=True)
+class InferenceArtifact:
+    """The selected component identity and request-time requirements for inference.
+
+    ``artifact_id`` is a nonempty component ID. ``local_path`` is None or a
+    Path supplied by local evaluation. ``require_token_runtime_load_ids`` is
+    a bool: true requires engine stamps for each generated token; false
+    permits a fixed local model's stamp. This value contains no storage locator.
+    Serving and evaluation construct it; handlers read its fields without I/O.
+    """
+
+    artifact_id: str
+    local_path: Path | None = None
+    require_token_runtime_load_ids: bool = True
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.artifact_id, str) or not self.artifact_id:
+            raise ValueError("inference requires a nonempty artifact_id")
+        if self.local_path is not None and not isinstance(self.local_path, Path):
+            raise TypeError("inference local_path must be a Path or None")
+        if not isinstance(self.require_token_runtime_load_ids, bool):
+            raise TypeError("require_token_runtime_load_ids must be a bool")
+
+    @classmethod
+    def from_artifact(cls, artifact: Artifact) -> InferenceArtifact:
+        """Copy identity and available path; only unpublished local artifacts permit unstamped tokens."""
+        return cls(artifact.artifact_id, artifact.local_path, not is_local_snapshot(artifact.ref.revision))
+
+
 class InferenceHandler(ABC):
     """Execute inference for a selected artifact without implicitly materializing it."""
 
@@ -438,7 +467,7 @@ class InferenceHandler(ABC):
         raise ValueError(f"{cls.__name__} does not support deployment configuration")
 
     @abstractmethod
-    async def inference(self, artifact: Artifact, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+    async def inference(self, artifact: InferenceArtifact, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         """Return the provider response for one native request payload."""
 
     def address_model(self, payload: Mapping[str, Any], model_name: str) -> dict[str, Any]:
@@ -471,7 +500,9 @@ class InferenceHandler(ABC):
         ``ValueError`` for a body that the handler refuses. The default is ``payload`` unchanged."""
         return dict(payload)
 
-    async def inference_stream(self, artifact: Artifact, path: str, payload: dict[str, Any]) -> InferenceStream:
+    async def inference_stream(
+        self, artifact: InferenceArtifact, path: str, payload: dict[str, Any]
+    ) -> InferenceStream:
         """Return a stream for one native request payload.
 
         Custom handlers that only implement buffered inference keep working: the

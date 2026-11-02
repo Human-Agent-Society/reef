@@ -24,16 +24,16 @@ from reef.artifact.repository import (
     StagedReleaseRepositoryBackend,
 )
 from reef.artifact.sources import SourceFiles
-from reef.core.artifact_ref import RootSource
 from reef.core.artifact_selection import ArtifactSelection
 from reef.core.components import COMPONENTS_METADATA_KEY, RECORDS_COMPONENT, ReleaseComponents, release_components
 from reef.core.errors import ReefError
+from reef.core.snapshot import RootSource
 from reef.observability import ExperimentTracker, NullExperimentTracker
-from reef.observability.commits import CommitExperimentObserver, ExperimentReportQueue
+from reef.observability.commits import CommitExperimentObserver, ExperimentReportQueue, training_starts
 from reef.recipe.base import Recipe
 from reef.runtime.jobs import ScenarioRoot
 from reef.scenario.binding import ScenarioBinding
-from reef.scenario.release_files import ScenarioReleaseFiles
+from reef.scenario.release_files import ScenarioArtifactFiles
 from reef.scenario.scenario import Scenario
 from reef.storage.commits import (
     SCENARIO_METADATA_KEY,
@@ -238,7 +238,12 @@ class ScenarioFactory:
             registration_metadata: dict[str, object] = {
                 SCENARIO_METADATA_KEY: scenario_metadata_for(name=scenario, source=source)
             }
-            if not surface.single:
+            names = surface.names or (RECORDS_COMPONENT,)
+            if surface.single:
+                registration_metadata[COMPONENTS_METADATA_KEY] = {
+                    names[0]: {"artifact_id": root.artifact_id, "metadata": {}}
+                }
+            else:
                 registration_metadata[COMPONENTS_METADATA_KEY] = root.metadata[COMPONENTS_METADATA_KEY]
             backend.register(root, metadata=registration_metadata)
 
@@ -266,7 +271,7 @@ class ScenarioFactory:
         tree.mkdir()
         default.write(tree)
         if surface.single:
-            return Artifact.local(tree, content_id=default.content_id), source
+            return Artifact.local(tree), source
         # Files outside every component directory, a model laid out at the root say, belong to no component.
         stray = sorted(entry.name for entry in tree.iterdir() if entry.name not in surface.names or not entry.is_dir())
         if stray:
@@ -274,9 +279,7 @@ class ScenarioFactory:
                 f"the default start keeps {stray} outside its components {list(surface.names)}: a release serving "
                 "several components keeps one directory per component"
             )
-        components = {
-            name: Artifact.local(tree / name, content_id=f"{default.content_id}:{name}") for name in surface.names
-        }
+        components = {name: Artifact.local(tree / name) for name in surface.names}
         if item is None:
             return compose_release(components, directory=work / "root"), source
         components[item[0]] = item[1]
@@ -333,14 +336,15 @@ class ScenarioFactory:
             components=(
                 None
                 if surface.single or registered_components is None
-                else registered_components.artifact_ids(checkpoint_head.release_id)
+                else registered_components.artifact_ids(checkpoint_head.revision)
             ),
         )
         if registered_name != name:
             raise ValueError(f"scenario metadata is for {registered_name!r}, not {name!r}")
         # What served after the artifact head's commit; the commit history's activations come after it.
         served_at_head = served_artifact_ref(registration, checkpoint_head=checkpoint_head)
-        start_artifact = backend.resolve_release(start_artifact.release_id)
+        start_artifact = backend.resolve_snapshot(start_artifact.revision)
+        backend.index_snapshot(start_artifact)
         checkpoint_step = 0 if checkpoint is None else checkpoint.step
         runtime = self._recipe.runtime
         store = self._storage.open(name)
@@ -359,7 +363,7 @@ class ScenarioFactory:
                     record for record in store.history() if record.trained_artifact and record.step >= checkpoint_step
                 ]
                 if checkpoints:
-                    checkpoint_head = checkpoints[-1].artifact_ref
+                    checkpoint_head = checkpoints[-1].snapshot
             # The active artifact is the newest activation in the log; the chain tip, the parent of the next
             # publication, stays the checkpoint. Without a durable log, the artifact head's metadata names it.
             current_artifact = active_artifact_ref(committed_records(store, head_record), served_at_head)
@@ -377,17 +381,25 @@ class ScenarioFactory:
                 )
             for record in committed_records(store, head_record):
                 if record.selection is not None:
-                    repository.remember_selection(record.artifact_ref, record.selection)
+                    repository.remember_selection(record.snapshot, record.selection)
+                elif not record.snapshot.revision.startswith(("local:", "selection:")):
+                    backend.index_snapshot(record.snapshot)
             repository.synchronize_checkpoint()
             # Traffic must not reach a recovered scenario before its committed
             # head is servable; a failed activation leaves the scenario unloaded.
             if self._activates_runtime:
                 surface.activate(Artifact(current_artifact, repository), runtime)
 
+            root_artifacts = repository.selection(
+                repository.resolve(start_artifact), surface.names or (RECORDS_COMPONENT,)
+            )
+            training_artifacts = root_artifacts
+            for record in committed_records(store, head_record):
+                training_artifacts = training_starts(training_artifacts, record)
             experiment_logger = self._experiment_tracker.bind_scenario(
                 scenario=name,
                 recipe=self._recipe.name,
-                source_artifact_ref=repository.require_current_artifact(),
+                source_artifacts=training_artifacts,
                 run_segment=store.training_run_position()[0] if store.durable else 0,
             )
             trainers = self._recipe.build_trainers(
@@ -397,7 +409,7 @@ class ScenarioFactory:
                 algorithm_states={component: state.algorithm_state for component, state in recovered_states.items()},
                 experiment_logger=experiment_logger,
                 task_storage=store.tasks,
-                releases=ScenarioReleaseFiles(name=name, store=store, repository=repository, surface=surface),
+                releases=ScenarioArtifactFiles(name=name, store=store, repository=repository, surface=surface),
                 samples=store.samples,
                 root=ScenarioRoot(Artifact(start_artifact, repository), root_source),
             )
@@ -419,7 +431,7 @@ class ScenarioFactory:
                     self._experiment_tracker,
                     scenario=name,
                     recipe=self._recipe.name,
-                    source_artifact_ref=repository.require_current_artifact(),
+                    source_artifacts=root_artifacts,
                     scenario_step=scenario_step,
                     store=store,
                     reports=self.experiment_reports,

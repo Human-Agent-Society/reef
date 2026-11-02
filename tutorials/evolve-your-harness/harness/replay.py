@@ -22,8 +22,17 @@ RELEASE_FILE = ".reef-harness-release"
 MAIN_GRAPH = "native/graphs/main.json"
 
 
-def _lines(path):
-    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+def read_events(path):
+    """Read native events and normalize identity fields from older logs."""
+    events = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    for event in events:
+        data = event.get("data", {})
+        for old, new in (("release_id", "artifact_id"), ("parent_release_id", "parent_artifact_id")):
+            if old in data:
+                data.setdefault(new, data.pop(old))
+        if event["type"].startswith("release/"):
+            event["type"] = "artifact/" + event["type"].removeprefix("release/")
+    return events
 
 
 def read_tree(directory: Path) -> dict:
@@ -67,21 +76,26 @@ def collect(work: Path) -> dict:
             rows = connection.execute("SELECT commit_json FROM scenario_commit ORDER BY step").fetchall()
         commits.extend(json.loads(text) for (text,) in rows)
     commits.sort(key=lambda row: row.get("recorded_at") or 0)
-    releases = [{"release_id": "seed", "step": 0, "kind": "seed", "files": seed_files, "diff": None, "result": None}]
+    releases = [{"artifact_id": "seed", "step": 0, "kind": "seed", "files": seed_files, "diff": None, "result": None}]
     previous = seed_files
     # The tree of each release by id, so an activation or a new training start shows the tree it names.
-    files_by_release: dict[str, dict] = {"seed": seed_files}
+    files_by_snapshot: dict[str, dict] = {"seed": seed_files}
     for row in commits:
         metrics = row.get("metrics") or {}
         operation = row.get("operation")
-        ref = row.get("artifact_ref") or {}
+        legacy_ref = row.get("artifact_ref") or {}
+        snapshot = row.get("snapshot") or {}
+        revision = snapshot.get("revision", legacy_ref.get("release_id"))
+        parent_revision = snapshot.get("parent_revision", legacy_ref.get("parent_release_id"))
+        artifact_id = (row.get("selection") or row.get("components") or {}).get("harness")
+        if artifact_id is None and legacy_ref:
+            artifact_id = legacy_ref.get("release_id")
         if operation in ("activate", "train_from"):
             # Not a step: a person activated a release or set the training start. The row carries no state.
-            named = files_by_release.get(ref.get("release_id"), previous)
+            named = files_by_snapshot.get(revision, previous)
             releases.append(
                 {
-                    "release_id": ref.get("release_id"),
-                    "parent_release_id": ref.get("parent_release_id"),
+                    "artifact_id": artifact_id,
                     "step": row.get("step"),
                     "kind": operation,
                     "recorded_at": row.get("recorded_at"),
@@ -98,15 +112,14 @@ def collect(work: Path) -> dict:
         if operation != "training":
             continue
         # A step builds on its parent release, so the first step names the seed's release id.
-        files_by_release.setdefault(ref.get("parent_release_id"), previous)
+        files_by_snapshot.setdefault(parent_revision, previous)
         published = bool(metrics.get("selected"))
         selection = metrics.get("selection") or {}
         patch = metrics.get("patch") or {}
         files = applied(previous, patch) if published else previous
         releases.append(
             {
-                "release_id": ref.get("release_id") if published else None,
-                "parent_release_id": ref.get("parent_release_id"),
+                "artifact_id": artifact_id if published else None,
                 "step": row.get("step"),
                 "kind": "published" if published else ("skipped" if metrics.get("skipped") else "rejected"),
                 "skipped": metrics.get("skipped"),
@@ -129,7 +142,7 @@ def collect(work: Path) -> dict:
             }
         )
         if published:
-            files_by_release[ref.get("release_id")] = files
+            files_by_snapshot[revision] = files
         previous = files
 
     sessions = []
@@ -139,15 +152,15 @@ def collect(work: Path) -> dict:
             log = directory / "session.jsonl"
             if not log.is_file():
                 continue
-            events = _lines(log)
+            events = read_events(log)
             agents = {}
             for path in sorted((directory / "agents").glob("*.jsonl")) if (directory / "agents").is_dir() else []:
-                agents[path.stem] = _lines(path)
+                agents[path.stem] = read_events(path)
             header = events[0]["data"] if events and events[0]["type"] == "session" else {}
             sessions.append(
                 {
                     "session": directory.name,
-                    "release_id": header.get("release_id"),
+                    "artifact_id": header.get("artifact_id"),
                     "model": header.get("model"),
                     "tools": header.get("tools"),
                     "start": events[0]["time"] if events else None,
@@ -156,7 +169,7 @@ def collect(work: Path) -> dict:
                     "agents": agents,
                 }
             )
-    process = _lines(sessions_dir / "serve.jsonl") if (sessions_dir / "serve.jsonl").is_file() else []
+    process = read_events(sessions_dir / "serve.jsonl") if (sessions_dir / "serve.jsonl").is_file() else []
     sessions.sort(key=lambda s: s["start"] or 0)
     return {"releases": releases, "sessions": sessions, "process": process, "seed_files": seed_files}
 
@@ -243,7 +256,7 @@ function renderChain() {
     const source = r.step ? 'method proposal' : 'the served tree before any step';
     const muts = r.diff ? '' : (r.patch || []).map(path => `<li>${esc(path)}</li>`).join('');
     const diff = r.diff ? ['added','updated','removed'].filter(k => r.diff[k].length).map(k => `<li>${k}: ${r.diff[k].map(esc).join(', ')}</li>`).join('') : '';
-    d.innerHTML = `<div class="id">${r.step ? 'step ' + r.step + ' · ' : ''}${esc(short(r.release_id) || '-')}</div>` +
+    d.innerHTML = `<div class="id">${r.step ? 'step ' + r.step + ' · ' : ''}${esc(short(r.artifact_id) || '-')}</div>` +
       `<div class="k ${r.kind}">${esc(r.kind)}${r.skipped ? ': ' + esc(r.skipped) : ''}</div>` +
       `<div>${esc(source)}</div>` + (r.summary ? `<div>${esc(r.summary)}</div>` : '') +
       (v.wins != null ? `<div>W / L / T ${v.wins} / ${v.losses} / ${v.ties} · candidate ${v.candidate_score} vs current ${v.current_score}</div>` : '') +
@@ -254,7 +267,7 @@ function renderChain() {
     el.appendChild(d);
   });
   const sel = document.getElementById('relsel'); sel.innerHTML = '';
-  D.releases.forEach((r, i) => { const o = document.createElement('option'); o.value = i; o.textContent = (r.step ? 'step ' + r.step + ' ' : 'seed ') + short(r.release_id); o.selected = i === state.release; sel.appendChild(o); });
+  D.releases.forEach((r, i) => { const o = document.createElement('option'); o.value = i; o.textContent = (r.step ? 'step ' + r.step + ' ' : 'seed ') + short(r.artifact_id); o.selected = i === state.release; sel.appendChild(o); });
 }
 function layout(g) {
   // Layers by breadth first walk from the start stage; a stage keeps the first layer it is reached in.
@@ -302,7 +315,7 @@ function renderGraph() {
 function describe(e) {
   const d = e.data || {};
   switch (e.type) {
-    case 'session': return `session ${short(d.session)} on release ${short(d.release_id)}, tools ${(d.tools || []).join(', ')}`;
+    case 'session': return `session ${short(d.session)} on artifact ${short(d.artifact_id)}, tools ${(d.tools || []).join(', ')}`;
     case 'turn/start': return `turn ${d.turn}: ${d.prompt}`;
     case 'step/start': return `step ${d.step} of turn ${d.turn} starts`;
     case 'step/end': return `step ${d.step} of turn ${d.turn} ends`;
@@ -313,9 +326,9 @@ function describe(e) {
     case 'tool/call': return `${d.name}(${typeof d.arguments === 'string' ? d.arguments : JSON.stringify(d.arguments)})`;
     case 'tool/result': return `${d.name} -> ${d.is_error ? 'error: ' : ''}${d.content}`;
     case 'user/message': return `user message from ${d.source ? d.source.kind : '?'}: ${d.content}`;
-    case 'harness/mount': return `mount ${short(d.release_id)} (${d.source}, ${d.files} files)`;
-    case 'harness/mount-failed': return `mount failed ${short(d.release_id)}: ${d.error}`;
-    case 'release/poll-failed': return `poll failed, retry in ${d.retry_in_s}s: ${d.error}`;
+    case 'harness/mount': return `mount ${short(d.artifact_id)} (${d.source}, ${d.files} files)`;
+    case 'harness/mount-failed': return `mount failed ${short(d.artifact_id)}: ${d.error}`;
+    case 'artifact/poll-failed': return `poll failed, retry in ${d.retry_in_s}s: ${d.error}`;
     case 'turn/end': return `turn ${d.turn} ended: ${JSON.stringify(d.reason)}`;
     default: return JSON.stringify(d);
   }
@@ -340,18 +353,18 @@ function renderSessionEvents() {
     tr.onclick = () => { state.pos = i; sync(); }; tb.appendChild(tr);
   });
   const sel = document.getElementById('sessel'); sel.innerHTML = '';
-  D.sessions.forEach((x, i) => { const o = document.createElement('option'); o.value = i; o.textContent = `${short(x.session)} on ${short(x.release_id)} (${x.events.length} events)`; o.selected = i === state.session; sel.appendChild(o); });
+  D.sessions.forEach((x, i) => { const o = document.createElement('option'); o.value = i; o.textContent = `${short(x.session)} on ${short(x.artifact_id)} (${x.events.length} events)`; o.selected = i === state.session; sel.appendChild(o); });
   const scrub = document.getElementById('scrub'); scrub.max = Math.max(0, s.events.length - 1); scrub.value = state.pos;
 }
 function renderProcess() {
   const tb = document.querySelector('#proc tbody'); tb.innerHTML = '';
   const rows = [...D.process.map(e => ({ t: e.time, e }))];
-  D.sessions.forEach(s => { rows.push({ t: s.start, e: { type: 'turn', data: { session: s.session, release_id: s.release_id } } }); });
+  D.sessions.forEach(s => { rows.push({ t: s.start, e: { type: 'turn', data: { session: s.session, artifact_id: s.artifact_id } } }); });
   rows.sort((a, b) => a.t - b.t);
   rows.forEach(({ t, e }) => {
     const tr = document.createElement('tr'); const d = e.data || {};
     if (e.type === 'harness/mount') tr.className = 'mount'; if (/failed/.test(e.type)) tr.className = 'fail';
-    const what = e.type === 'turn' ? `turn in session ${short(d.session)} on release ${short(d.release_id)}` : describe(e);
+    const what = e.type === 'turn' ? `turn in session ${short(d.session)} on artifact ${short(d.artifact_id)}` : describe(e);
     tr.innerHTML = `<td class="t">${sec(t)}</td><td>${esc(e.type)}</td><td>${esc(what)}</td>`; tb.appendChild(tr);
   });
   if (!rows.length) tb.innerHTML = '<tr><td colspan="3" class="empty">No process log: the run form writes none.</td></tr>';

@@ -62,18 +62,16 @@ def sibling_group(context: ReportContext) -> tuple[str, str]:
     return (parent if isinstance(parent, str) and parent else ROOT_GROUP), coral["commit_hash"]
 
 
-def attempt_release_ids(context: ReportContext) -> set[str]:
-    """The releases that served the attempt's inference records."""
-    return {
-        inference.artifact_ref.release_id for inference in context.inferences if inference.artifact_ref is not None
-    }
+def attempt_artifact_ids(context: ReportContext) -> set[str]:
+    """The artifacts that served the attempt's inference records."""
+    return {inference.artifact_id for inference in context.inferences if inference.artifact_id is not None}
 
 
 class CoralGrouping(ReportGrouping):
     """The siblings of one parent commit form one group, and each attempt's commit hash is its slot.
 
     A group is ready once ``group_size`` siblings are present. A group whose
-    attempts span releases is discarded and listed in ``discarded_groups``.
+    attempts span artifacts is discarded and listed in ``discarded_groups``.
     """
 
     def __init__(self, group_size: int) -> None:
@@ -86,13 +84,13 @@ class CoralGrouping(ReportGrouping):
     def decide(self, key: Hashable, members: tuple[ReportContext, ...]) -> GroupDecision:
         if len(members) < self.group_size:
             return GroupDecision.INCOMPLETE
-        versions = {release_id for member in members for release_id in attempt_release_ids(member)}
+        versions = {artifact_id for member in members for artifact_id in attempt_artifact_ids(member)}
         if len(versions) <= 1:
             return GroupDecision.READY
         ordered = tuple(sorted(versions))
         self.mixed_release_groups[str(key)] = ordered
         logger.error(
-            "CORAL sibling group %s discarded: %d attempts span releases %s",
+            "CORAL sibling group %s discarded: %d attempts span artifacts %s",
             key,
             len(members),
             list(ordered),
@@ -102,7 +100,7 @@ class CoralGrouping(ReportGrouping):
     def status(self) -> Mapping[str, Any]:
         return {
             "discarded_groups": [
-                {"parent": parent, "reason": "mixed_release_ids", "release_ids": list(versions)}
+                {"parent": parent, "reason": "mixed_artifact_ids", "artifact_ids": list(versions)}
                 for parent, versions in sorted(self.mixed_release_groups.items())
             ],
         }
@@ -163,11 +161,11 @@ class CoralSamples(ReportSamples):
         if coral is None:
             raise ValueError("CoralJobData requires metadata.coral with a commit_hash")
         sample = self.assembly.build(context, context.require_score())
-        release_ids = attempt_release_ids(context)
-        if len(release_ids) > 1:
-            raise ValueError(f"attempt {coral['commit_hash'][:12]} spans releases {sorted(release_ids)}")
+        artifact_ids = attempt_artifact_ids(context)
+        if len(artifact_ids) > 1:
+            raise ValueError(f"attempt {coral['commit_hash'][:12]} spans artifacts {sorted(artifact_ids)}")
         return sample.with_metadata(
-            coral={**coral, "group": sibling_group(context)[0], "release_id": next(iter(release_ids), None)}
+            coral={**coral, "group": sibling_group(context)[0], "artifact_id": next(iter(artifact_ids), None)}
         )
 
 

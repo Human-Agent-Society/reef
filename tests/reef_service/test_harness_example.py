@@ -40,7 +40,7 @@ from reef.recipe.registry import build_named_recipe
 from reef.service.assembly import _serving_recipe, _upstream_runtime
 from reef.service.deploy.service_config import service_config_from_mapping
 from reef.storage.sqlite import SQLiteRecordStore
-from reef.train.backend import ComponentReleases
+from reef.train.backend import ComponentArtifacts
 from reef.train.harness_backend.state import HarnessState
 from reef.train.trainer import Trainer
 from reef.train.types import JobData
@@ -116,8 +116,8 @@ def pi_message(text: str) -> dict:
     return {"type": "message", "message": {"role": "assistant", "content": [{"type": "text", "text": text}]}}
 
 
-def releases_for(recipe: HarnessEvolutionRecipe) -> ComponentReleases:
-    return ComponentReleases(TreeReleases(recipe.seed), COMPONENT)
+def releases_for(recipe: HarnessEvolutionRecipe) -> ComponentArtifacts:
+    return ComponentArtifacts(TreeReleases(recipe.seed), COMPONENT)
 
 
 # -- the grader: exact last-line answers ---------------------------------------------------------
@@ -618,7 +618,7 @@ def test_replay_collects_a_run_and_renders_one_self_contained_page(tmp_path: Pat
     (native / "sessions" / "serve.jsonl").write_text("".join(json.dumps(event) + "\n" for event in mounts))
 
     data = replay.collect(work)
-    assert [(release["step"], release["kind"], release["release_id"]) for release in data["releases"]] == [
+    assert [(release["step"], release["kind"], release["artifact_id"]) for release in data["releases"]] == [
         (0, "seed", "seed"),
         (1, "published", "r2"),
     ]
@@ -630,7 +630,7 @@ def test_replay_collects_a_run_and_renders_one_self_contained_page(tmp_path: Pat
     assert published["summary"] == "rewrote rules.md from 1 failing trace(s)"
     assert published["result"]["wins"] == 2 and published["result"]["reason"].startswith("candidate won")
     assert published["result"]["model_seconds"] == 1.5
-    assert [(s["session"], s["release_id"], len(s["events"])) for s in data["sessions"]] == [
+    assert [(s["session"], s["artifact_id"], len(s["events"])) for s in data["sessions"]] == [
         ("s1", "r1", 6),
         ("s2", "r2", 5),
     ]
@@ -673,7 +673,7 @@ def test_replay_collects_a_run_and_renders_one_self_contained_page(tmp_path: Pat
     }
     write_commits(work / "agent-record", commit, activation)
     with_activation = replay.collect(work)
-    assert [(release["kind"], release["step"], release["release_id"]) for release in with_activation["releases"]] == [
+    assert [(release["kind"], release["step"], release["artifact_id"]) for release in with_activation["releases"]] == [
         ("seed", 0, "seed"),
         ("published", 1, "r2"),
         ("activate", 2, "r1"),
@@ -688,3 +688,64 @@ def test_replay_collects_a_run_and_renders_one_self_contained_page(tmp_path: Pat
     assert empty["releases"][0]["files"] == dict(PI_SEED.files) == empty["seed_files"]
     assert empty["sessions"] == [] and empty["process"] == []
     assert '<script id="data" type="application/json">' in replay.render(empty)
+
+
+@pytest.mark.parametrize("identity_field", ["selection", "components"])
+def test_replay_uses_component_ids_from_current_commits_and_native_events(
+    tmp_path: Path, monkeypatch, identity_field: str
+) -> None:
+    replay = _method(monkeypatch, "replay")
+    records = tmp_path / "agent-record"
+    records.mkdir()
+    sessions = tmp_path / "tree" / "native" / "sessions"
+    session = sessions / "current"
+    session.mkdir(parents=True)
+    commit = {
+        "step": 1,
+        "recorded_at": 1050.0,
+        "operation": "training",
+        "snapshot": {"revision": "storage:new", "parent_revision": "storage:seed"},
+        identity_field: {"harness": "artifact:new", "weights": "artifact:weights"},
+        "metrics": {"selected": True, "patch": {"rules.md": "updated\n"}},
+    }
+    activation = {
+        "step": 2,
+        "recorded_at": 1060.0,
+        "operation": "activate",
+        "snapshot": {"revision": "storage:seed", "parent_revision": None},
+        identity_field: {"harness": "artifact:seed", "weights": "artifact:weights"},
+    }
+    write_commits(records, commit, activation)
+    event = {"type": "session", "time": 1051.0, "data": {"session": "current", "artifact_id": "artifact:new"}}
+    (session / "session.jsonl").write_text(json.dumps(event) + "\n")
+    poll = {"type": "artifact/poll-failed", "time": 1052.0, "data": {"error": "unavailable", "retry_in_s": 2}}
+    (sessions / "serve.jsonl").write_text(json.dumps(poll) + "\n")
+
+    data = replay.collect(tmp_path)
+    assert [row["artifact_id"] for row in data["releases"]] == ["seed", "artifact:new", "artifact:seed"]
+    assert data["releases"][1]["files"]["rules.md"] == "updated\n"
+    assert data["releases"][2]["files"] == data["seed_files"]
+    assert data["sessions"][0]["artifact_id"] == "artifact:new"
+    assert data["sessions"][0]["events"] == [event]
+    assert data["process"] == [poll]
+    assert "storage:new" not in replay.render(data)
+
+
+def test_tutorial_driver_finds_mounts_by_artifact_identity(tmp_path: Path, monkeypatch) -> None:
+    _method(monkeypatch, "evolution")
+    spec = importlib.util.spec_from_file_location("harness_evolution_driver", EXAMPLE_DIR / "run.py")
+    assert spec is not None and spec.loader is not None
+    driver = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(driver)
+    monkeypatch.setattr(driver, "TREE_DIR", tmp_path)
+    sessions = tmp_path / "native" / "sessions"
+    sessions.mkdir(parents=True)
+    mounted = {"artifact_id": "artifact:harness", "source": "poll"}
+    (sessions / "serve.jsonl").write_text(
+        json.dumps({"type": "harness/mount", "data": mounted})
+        + "\n"
+        + json.dumps({"type": "harness/mount", "data": {"artifact_id": "artifact:another"}})
+        + "\n"
+    )
+    assert driver.mount_events("artifact:harness") == [("native/sessions/serve.jsonl", mounted)]
+    assert driver.mount_events("storage:snapshot") == []

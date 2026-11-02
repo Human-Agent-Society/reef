@@ -20,8 +20,9 @@ from tests.support.trajectory_uploads import dispatcher_for
 
 from reef.artifact import InMemoryRepositoryBackend
 from reef.artifact.artifact import Artifact
-from reef.core.artifact_ref import ArtifactRef
+from reef.core.artifact_selection import ArtifactSelection
 from reef.core.evaluation import ArtifactEvaluationRequest, PolicyModel
+from reef.core.snapshot import SnapshotRef
 from reef.core.tasks import write_harbor_task
 from reef.dispatcher import Dispatcher
 from reef.evaluation.activation import AlwaysActivate, EvaluatedActivation, NeverActivate, activation_reference
@@ -373,7 +374,8 @@ def test_reef_evaluates_each_new_artifact_with_the_scenarios_settings_through_th
             commit = CommitRecord(
                 scenario="s",
                 step=1,
-                artifact_ref=ArtifactRef(f"c-{artifact_id}", artifact_id, None),
+                snapshot=SnapshotRef("storage:evaluated", None),
+                selection=ArtifactSelection({"weights": artifact_id}),
                 checkpoint=True,
                 algorithm_state={},
                 high_water_sequence=0,
@@ -530,8 +532,8 @@ def test_a_committed_step_that_publishes_a_checkpoint_reports_a_new_artifact(tmp
     try:
         session = storage.open("s")
         step = {"algorithm_state": {}, "high_water_sequence": 0, "high_water_offset": 0, "scenario": "s"}
-        published = CommitRecord(step=1, artifact_ref=ArtifactRef("c1", "a1", None), checkpoint=True, **step)
-        kept = CommitRecord(step=2, artifact_ref=ArtifactRef("c1", "a1", None), checkpoint=False, **step)
+        published = CommitRecord(step=1, snapshot=SnapshotRef("a1", None), checkpoint=True, **step)
+        kept = CommitRecord(step=2, snapshot=SnapshotRef("a1", None), checkpoint=False, **step)
         session.commit_step(expected_step=0, commit=published)
         session.commit_step(expected_step=1, commit=kept)
         assert new_artifacts.queue.get_nowait() == NewArtifact("s", "a1", None)
@@ -540,7 +542,7 @@ def test_a_committed_step_that_publishes_a_checkpoint_reports_a_new_artifact(tmp
         operation = {"high_water_sequence": 0, "high_water_offset": 0, "scenario": "s", "algorithm_state": None}
         activation = CommitRecord(
             step=3,
-            artifact_ref=ArtifactRef("c2", "a2", "a1"),
+            snapshot=SnapshotRef("a2", "a1"),
             checkpoint=False,
             operation="activate",
             component="harness",
@@ -548,7 +550,7 @@ def test_a_committed_step_that_publishes_a_checkpoint_reports_a_new_artifact(tmp
             **operation,
         )
         start = CommitRecord(
-            step=4, artifact_ref=ArtifactRef("c1", "a1", None), checkpoint=False, operation="train_from", **operation
+            step=4, snapshot=SnapshotRef("a1", None), checkpoint=False, operation="train_from", **operation
         )
         session.commit_step(expected_step=2, commit=activation)
         session.commit_step(expected_step=3, commit=start)
@@ -557,3 +559,37 @@ def test_a_committed_step_that_publishes_a_checkpoint_reports_a_new_artifact(tmp
     finally:
         storage.close()
     assert new_artifacts.queue.get_nowait() is None, "the observer closes with the storage"
+
+
+@pytest.mark.parametrize(
+    ("component", "selected", "expected"),
+    [
+        (None, {"weights": "artifact:weights"}, [NewArtifact("s", "artifact:weights", None)]),
+        (
+            "harness",
+            {"weights": "artifact:carried", "harness": "artifact:new"},
+            [NewArtifact("s", "artifact:new", "harness")],
+        ),
+        (
+            None,
+            {"weights": "artifact:weights", "harness": "artifact:harness"},
+            [NewArtifact("s", "artifact:weights", "weights"), NewArtifact("s", "artifact:harness", "harness")],
+        ),
+    ],
+)
+def test_automatic_evaluation_uses_published_artifact_ids(component, selected, expected) -> None:
+    observer = NewArtifacts()
+    commit = CommitRecord(
+        scenario="s",
+        step=1,
+        snapshot=SnapshotRef("storage:snapshot", None),
+        checkpoint=True,
+        algorithm_state={},
+        high_water_sequence=0,
+        high_water_offset=0,
+        component=component,
+        selection=ArtifactSelection(selected),
+    )
+    observer.record_committed(commit)
+    assert [observer.queue.get_nowait() for _ in expected] == expected
+    assert observer.queue.empty()

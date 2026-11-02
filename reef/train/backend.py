@@ -5,6 +5,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any, Literal
 
 from reef.core.evaluation import UpdateCandidate
@@ -51,25 +52,38 @@ class PreparedStep:
 
 
 @dataclass(frozen=True)
-class ReleaseFiles:
-    """One component's files in one committed release.
+class ArtifactTextFiles:
+    """One committed component artifact's ID and text files.
 
-    Values: ``release_id`` is the non-empty id of the release; ``files`` maps
-    each relative path of the component's view of that release to its UTF-8
-    text, without the repository's own files.
-    Purpose: ``CommittedReleases`` makes it; a harness step builds its
+    Values: ``artifact_id`` is the non-empty opaque ID of the component artifact; ``files`` maps
+    each relative POSIX path to its decoded text. Paths have nonempty segments,
+    with no dot, dot-dot, or backslash segments. The mapping is immutable
+    and excludes repository metadata.
+    Purpose: ``CommittedArtifacts`` makes it; a harness step builds its
     head from ``files``.
     """
 
-    release_id: str
+    artifact_id: str
     files: Mapping[str, str]
 
     def __post_init__(self) -> None:
-        if not isinstance(self.release_id, str) or not self.release_id:
-            raise ValueError("ReleaseFiles.release_id must be a non-empty string")
+        if not isinstance(self.artifact_id, str) or not self.artifact_id:
+            raise ValueError("ArtifactTextFiles.artifact_id must be a non-empty string")
+        if not isinstance(self.files, Mapping):
+            raise ValueError("artifact text files must be a mapping")
+        for path, text in self.files.items():
+            if (
+                not isinstance(path, str)
+                or not path
+                or "\\" in path
+                or any(part in ("", ".", "..") for part in path.split("/"))
+                or not isinstance(text, str)
+            ):
+                raise ValueError("artifact text files map relative paths to strings")
+        object.__setattr__(self, "files", MappingProxyType(dict(self.files)))
 
 
-class CommittedReleases(ABC):
+class CommittedArtifacts(ABC):
     """The releases a scenario's commits recorded, read for one component at a time.
 
     Purpose: a harness trainer reads the committed head here, as the release of
@@ -82,17 +96,17 @@ class CommittedReleases(ABC):
     """
 
     @abstractmethod
-    def head(self, component: str) -> ReleaseFiles:
+    def head(self, component: str) -> ArtifactTextFiles:
         """``component``'s files in its head release."""
 
     @abstractmethod
-    def release(self, release_id: str, component: str) -> ReleaseFiles:
-        """``component``'s files in release ``release_id``; ``ArtifactNotFound`` for an unknown release."""
+    def artifact(self, artifact_id: str, component: str) -> ArtifactTextFiles:
+        """Return a committed component artifact; raise ``ArtifactNotFound`` when its ID is unknown."""
 
 
 @dataclass(frozen=True)
-class ComponentReleases:
-    """One component's view of a scenario's ``CommittedReleases``.
+class ComponentArtifacts:
+    """One component's view of a scenario's ``CommittedArtifacts``.
 
     Values: ``releases`` is the scenario's reader, and ``component`` names a
     component of the scenario's release, non-empty.
@@ -100,23 +114,23 @@ class ComponentReleases:
     to ``Recipe.build``; a harness trainer reads its head through it.
     """
 
-    releases: CommittedReleases
+    releases: CommittedArtifacts
     component: str
 
     def __post_init__(self) -> None:
         if not isinstance(self.component, str) or not self.component:
-            raise ValueError("ComponentReleases.component must be a non-empty string")
+            raise ValueError("ComponentArtifacts.component must be a non-empty string")
 
-    def head(self) -> ReleaseFiles:
+    def head(self) -> ArtifactTextFiles:
         return self.releases.head(self.component)
 
-    def release(self, release_id: str) -> ReleaseFiles:
-        return self.releases.release(release_id, self.component)
+    def artifact(self, artifact_id: str) -> ArtifactTextFiles:
+        return self.releases.artifact(artifact_id, self.component)
 
 
 __all__ = [
-    "CommittedReleases",
-    "ComponentReleases",
+    "ArtifactTextFiles",
+    "CommittedArtifacts",
+    "ComponentArtifacts",
     "PreparedStep",
-    "ReleaseFiles",
 ]

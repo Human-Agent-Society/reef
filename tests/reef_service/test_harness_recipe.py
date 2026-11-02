@@ -84,7 +84,7 @@ from reef.service.app import create_app
 from reef.storage.samples import TrainerSamples
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
-from reef.train.backend import ComponentReleases
+from reef.train.backend import ComponentArtifacts
 from reef.train.harness_backend.backend import HarnessBackend
 from reef.train.harness_backend.component import HarnessTrainingComponent
 from reef.train.harness_backend.state import HarnessState
@@ -110,8 +110,8 @@ def flat(scores: list[dict[str, object]]) -> list[object]:
     return [score for task in scores for score in task["scores"]]
 
 
-def releases_for(recipe: HarnessEvolutionRecipe) -> ComponentReleases:
-    return ComponentReleases(TreeReleases(recipe.seed), COMPONENT)
+def releases_for(recipe: HarnessEvolutionRecipe) -> ComponentArtifacts:
+    return ComponentArtifacts(TreeReleases(recipe.seed), COMPONENT)
 
 
 def backend_of(recipe: HarnessEvolutionRecipe) -> HarnessBackend:
@@ -1071,7 +1071,7 @@ def test_never_activation_keeps_the_kept_tree_inactive_until_activated(tmp_path:
         assert record.operation == "training" and record.activated is False and record.checkpoint is True
         assert scenario.current_artifact_ref() == head_before
         row = scenario.artifacts()[0]
-        assert row["artifact_id"] == record.artifact_ref.release_id
+        assert row["artifact_id"] == scenario.repository.resolve(record.snapshot).artifact_id
         assert row["active"] is False
         tree = scenario.surface.files
         held_files = tree.read_files(scenario.resolve_artifact(row["artifact_id"])[1])
@@ -1099,11 +1099,11 @@ def test_never_activation_keeps_the_kept_tree_inactive_until_activated(tmp_path:
                 await client.close()
 
         asyncio.run(activate())
-        assert scenario.current_artifact_ref() == record.artifact_ref
+        assert scenario.current_artifact_ref() == record.snapshot
         served_files = tree.read_files(scenario.release_queries.artifact_with_metrics()[0])
         assert any("marker" in text for text in served_files.values())
         last = scenario.store.history()[-1]
-        assert last.operation == "activate" and last.artifact_ref == record.artifact_ref
+        assert last.operation == "activate" and last.snapshot == record.snapshot
         assert scenario.artifacts()[0]["active"] is True
     finally:
         dispatcher.close()
@@ -1137,9 +1137,9 @@ def test_a_harness_trainer_evolves_the_tree_it_was_told_to_train_from(tmp_path: 
             coordination=memory_coordination(),
         )
 
-    def rules_of(scenario, release_id: str) -> str:
-        """Every file text of the release ``release_id``, joined: the rules render into one of them."""
-        files = scenario.surface.files.read_files(scenario.release_queries.artifact_for_version(release_id))
+    def rules_of(scenario, artifact_id: str) -> str:
+        """Every file text of ``artifact_id``, joined: the rules render into one of them."""
+        files = scenario.surface.files.read_files(scenario.resolve_artifact(artifact_id)[1])
         return "".join(files.values())
 
     first_recipe = recipe("r1", "r2")
@@ -1158,9 +1158,12 @@ def test_a_harness_trainer_evolves_the_tree_it_was_told_to_train_from(tmp_path: 
         started = dispatcher.train_from("start", first["artifact_id"])
         assert (started.artifact_id, started.component) == (first["artifact_id"], first["component"])
         # What serves stays the second release.
-        assert scenario.current_artifact_ref().release_id == second["artifact_id"]
+        assert scenario.artifact_status()[COMPONENT]["active"] == second["artifact_id"]
         record = scenario.store.history()[-1]
-        assert (record.operation, record.artifact_ref.release_id) == ("train_from", first["artifact_id"])
+        assert (record.operation, scenario.repository.resolve(record.snapshot).artifact_id) == (
+            "train_from",
+            first["artifact_id"],
+        )
     finally:
         dispatcher.close()
 
@@ -1169,14 +1172,17 @@ def test_a_harness_trainer_evolves_the_tree_it_was_told_to_train_from(tmp_path: 
     try:
         scenario = restarted.get_or_create_scenario("start")
         assert scenario is not None
-        assert scenario.current_artifact_ref().release_id == second["artifact_id"]
+        assert scenario.artifact_status()[COMPONENT]["active"] == second["artifact_id"]
         # The next step evolves the first release's tree: r3 joins r1, and r2 is not there. It publishes on the
         # chain tip, the second release.
         result = run_step(scenario, "3")
         assert result.artifact is not None
         newest = last_made(scenario)
-        assert newest.made_artifact and newest.artifact_ref.parent_release_id == second["artifact_id"]
-        evolved = rules_of(scenario, newest.artifact_ref.release_id)
+        assert (
+            newest.made_artifact
+            and newest.snapshot.parent_revision == scenario.resolve_artifact(second["artifact_id"])[1].ref.revision
+        )
+        evolved = rules_of(scenario, scenario.repository.resolve(newest.snapshot).artifact_id)
         assert "marker r1" in evolved and "marker r3" in evolved and "marker r2" not in evolved
     finally:
         restarted.close()
@@ -1219,24 +1225,24 @@ def test_a_sync_serves_at_once_and_is_the_training_start_after_a_restart(tmp_pat
         scenario = dispatcher.get_or_create_scenario("sync")
         assert scenario is not None
         assert run_step(scenario, "1").artifact is not None
-        trained = last_made(scenario).artifact_ref.release_id
+        trained = last_made(scenario).snapshot.revision
         # The person's tree: the seed's rules with a line of their own, without the trained marker.
         person = tmp_path / "person"
         PI_SEED.apply(TreePatch(changed_rules("Answer briefly.\nmarker person\n"))).write(person)
-        synced = dispatcher.sync_release(
+        synced = dispatcher.sync_artifact(
             "sync",
             Artifact.local(person),
             component=COMPONENT,
-            expected_release_id=scenario.current_artifact_ref().release_id,
+            expected_selection=scenario.artifact_selection(),
             metrics={"sync": {"files": 2}},
         )
         record = scenario.store.history()[-1]
-        assert (record.operation, record.artifact_ref, record.component) == ("sync", synced, None)
+        assert (record.operation, record.snapshot, record.component) == ("sync", scenario.current_artifact_ref(), None)
         assert record.checkpoint and record.activates and record.metrics["sync"] == {"files": 2}
-        assert scenario.current_artifact_ref() == synced
+        assert scenario.artifact_selection().components[COMPONENT] == synced.artifact_id
         assert scenario.artifact_status()[COMPONENT] == {
-            "active": synced.release_id,
-            "training_start": synced.release_id,
+            "active": synced.artifact_id,
+            "training_start": synced.artifact_id,
         }
     finally:
         dispatcher.close()
@@ -1245,16 +1251,16 @@ def test_a_sync_serves_at_once_and_is_the_training_start_after_a_restart(tmp_pat
     try:
         scenario = restarted.get_or_create_scenario("sync")
         assert scenario is not None
-        assert scenario.current_artifact_ref().release_id == synced.release_id
-        assert scenario.artifact_status()[COMPONENT]["training_start"] == synced.release_id
+        assert scenario.artifact_selection().components[COMPONENT] == synced.artifact_id
+        assert scenario.artifact_status()[COMPONENT]["training_start"] == synced.artifact_id
         # The next step evolves the synced tree: r2 joins the person's line, and r1 is not there. A sync is
         # published beside the chain, so the step publishes on the chain tip, the trained release.
         result = run_step(scenario, "2")
         assert result.artifact is not None
         newest = last_made(scenario)
-        assert newest.made_artifact and newest.artifact_ref.parent_release_id == trained
+        assert newest.made_artifact and newest.snapshot.parent_revision == trained
         files = scenario.surface.files.read_files(
-            scenario.release_queries.artifact_for_version(newest.artifact_ref.release_id)
+            scenario.release_queries.artifact_for_version(newest.snapshot.revision)
         )
         evolved = "".join(files.values())
         assert "marker person" in evolved and "marker r2" in evolved and "marker r1" not in evolved

@@ -519,8 +519,8 @@ instance as a standby, then stop the old one.
 active artifact of each scenario and the artifacts served beside it. A
 candidate under evaluation is not one of them: the evaluation service loads the
 candidate from the artifact repository and answers its rollouts with the
-scenario's runtime, so it needs no other service. A record of the
-artifact that a scenario started from carries no ``artifact_ref``. A runtime
+scenario's runtime, so it needs no other service. Inference records name the
+answering artifact with ``artifact_id``, including the starting artifact. A runtime
 that loads full weights in place serves the next artifact under the same model
 name after an activation, so a request in flight at that moment can be answered
 by the next artifact while its record names the old one. Adapter runtimes serve
@@ -656,12 +656,13 @@ each release to the Hub as it publishes it:
          token_env: HF_TOKEN
 
 - ``refs: branches-and-tags`` keeps each release on a tag
-  ``reef/releases/<release_id>``, and the refs that move on branches under
+  ``reef/releases/<revision>``, and the refs that move on branches under
   ``reef/``, because the Hub accepts no other refs. The default, ``reef``,
   keeps every ref under ``refs/reef/``. A repository keeps the layout it
   started with, and Reef refuses the other.
-- A release's ID is its commit, so ``hf://org/reef-artifacts@<release_id>``
-  names the release on the Hub, for a serving runtime or an import.
+- ``hf://org/reef-artifacts@<revision>`` names a stored snapshot by its Git
+  commit revision, for a serving runtime or an import. Artifact IDs used by
+  Reef's API are independent of these storage revisions.
 - ``token_env`` names the variable of a token that can write the repository.
   Reef sends it to the repository's host only, as an HTTP header, so it
   appears in no URL, file or log. Keep the repository private unless you mean

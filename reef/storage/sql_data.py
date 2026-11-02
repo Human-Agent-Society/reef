@@ -63,6 +63,7 @@ from reef.storage.data import (
     StoredItem,
     check_owner,
     check_query,
+    item_digest_matches,
     patched_metadata,
     prepared_items,
 )
@@ -239,11 +240,12 @@ class SQLDataStore(DataStore):
                         )
             # An ID that was stored before, or that a concurrent create stored first, keeps its row; another
             # digest there is a conflict, and the rollback removes the rows that this call inserted.
-            stored = self.rows(connection, owner, item_ids)
-            for entry in prepared:
-                if stored[entry[0].item_id]["digest"] != entry[2]:
+            rows = self.rows(connection, owner, item_ids)
+            stored = self.stored_items(connection, owner, [rows[item_id] for item_id in item_ids])
+            for stored_item, entry in zip(stored, prepared, strict=True):
+                if not item_digest_matches(stored_item, entry[2]):
                     raise ItemConflict(f"item {entry[0].item_id!r} of {owner!r} is stored with other content")
-            return self.stored_items(connection, owner, [stored[item_id] for item_id in item_ids])
+            return stored
 
     def read(self, owner: str, item_id: str) -> StoredItem | None:
         check_owner(owner)

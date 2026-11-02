@@ -5,7 +5,7 @@ item ``record_item(r)`` is the item of ``o`` with:
 
 * the ID ``<s>/<r.agent_record_id>``, unique within ``o`` because a scenario name has no ``/`` and a record ID is
   unique within its scenario;
-* the content ``{agent_record_id, request_type, payload, created_at, references, artifact_ref}`` of ``r``;
+* the content ``{agent_record_id, request_type, payload, created_at, references, artifact_id}`` of ``r``;
 * the metadata ``kind: record``, ``scenarios: {s: train}`` and ``origin: {scenario: s, artifact_id}``,
   where ``artifact_id`` names the artifact that answered it, or null when ``r`` names none.
 
@@ -25,9 +25,9 @@ so it has no record item of its own.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 
-from reef.core.artifact_ref import encode_artifact_ref
-from reef.core.records_types import AgentRecord
+from reef.core.records_types import AgentRecord, decode_record_artifact_id
 from reef.storage.data import DataStore, NewItem, StoredItem
 from reef.storage.data_queue import DATA_QUEUE, RECORD_COPY_KIND
 from reef.storage.item_kinds import copied_record
@@ -45,7 +45,7 @@ RECORD_PAGE_SIZE = 256
 
 def record_item(record: AgentRecord) -> NewItem:
     """The record item of ``record``, an inference or a report, as the module docstring defines it."""
-    artifact_id = record.payload.get("artifact_id")
+    artifact_id = record.artifact_id
     return NewItem(
         f"{record.scenario}/{record.agent_record_id}",
         {
@@ -54,7 +54,7 @@ def record_item(record: AgentRecord) -> NewItem:
             "payload": dict(record.payload),
             "created_at": record.created_at,
             "references": list(record.references),
-            "artifact_ref": None if record.artifact_ref is None else encode_artifact_ref(record.artifact_ref),
+            "artifact_id": record.artifact_id,
         },
         {
             "kind": "record",
@@ -90,10 +90,21 @@ def copy_records(records: RecordStore, data: DataStore, owner: str, scenario: st
     page = records.replay_page(scenario, after_sequence=after_sequence, limit=RECORD_PAGE_SIZE)
     if not page:
         return after_sequence
-    data.create(
-        owner,
-        [record_item(record) for _, record in page if not is_record_copy(data, owner, scenario, record)],
-    )
+    items = []
+    for _, record in page:
+        if is_record_copy(data, owner, scenario, record):
+            continue
+        item = record_item(record)
+        existing = data.read(owner, item.item_id)
+        if existing is not None and existing.kind == "record" and isinstance(existing.content, Mapping):
+            previous = dict(existing.content)
+            if "artifact_ref" in previous:
+                previous["artifact_id"] = decode_record_artifact_id(previous.pop("artifact_ref"), record.payload)
+                if previous == item.content:
+                    # Immutable archives keep their original digest on a copy retry.
+                    item = NewItem(item.item_id, existing.content, item.metadata)
+        items.append(item)
+    data.create(owner, items)
     return page[-1][0]
 
 

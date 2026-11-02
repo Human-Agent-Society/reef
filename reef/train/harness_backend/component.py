@@ -7,8 +7,8 @@ its ``JobLoop``; a training worker runs it here, and control commits the selecte
 - ``start``: the tree that the step builds on. ``base:<checksum>`` is the recipe's seed tree; any other start is a
   directory that holds a tree, which ``import_start`` or an earlier job's checkpoint wrote.
 - ``data``: the step's material: the traces of traffic, the train tasks of an offline step, and the instruction.
-- ``parameters``: ``component``, the scenario component that the step evolves; ``head_release_id``, the release
-  of the start; ``evaluation_tasks``, the eval split of the scenario's imported tasks, or ``None`` for the
+- ``parameters``: ``component``, the scenario component that the step evolves; ``head_artifact_id``, the component artifact
+  used as the start; ``evaluation_tasks``, the eval split of the scenario's imported tasks, or ``None`` for the
   configured tasks; ``previous_job``, the last job whose end the trainer committed, or ``None`` before the first.
 
 A job's directory keeps ``outcome.json``: the settled step, with the steps that ended and the ``HarnessState``
@@ -35,7 +35,7 @@ from reef.harness.tree import HarnessTree
 from reef.runtime.durable_files import read_json, write_json
 from reef.runtime.jobs import JobStatus, ReleaseFormat, SavedCheckpoint, TrainingJob
 from reef.surface.files import TextFileTree
-from reef.train.backend import ReleaseFiles
+from reef.train.backend import ArtifactTextFiles
 from reef.train.harness_backend.backend import HarnessBackend, StepProgress
 from reef.train.harness_backend.state import HarnessState
 from reef.train.local_jobs import JOB_FILE, LocalJobComponent
@@ -178,9 +178,9 @@ class HarnessTrainingComponent(LocalJobComponent):
         component = parameters.get("component")
         if not isinstance(component, str) or not component:
             raise ValueError("a harness job names the scenario component that it evolves in parameters.component")
-        head = parameters.get("head_release_id")
+        head = parameters.get("head_artifact_id", parameters.get("head_release_id"))
         if not isinstance(head, str) or not head:
-            raise ValueError("a harness job names the release of its start in parameters.head_release_id")
+            raise ValueError("a harness job names the artifact of its start in parameters.head_artifact_id")
         tasks = parameters.get("evaluation_tasks")
         if tasks is not None and (not isinstance(tasks, list) or not all(isinstance(task, str) for task in tasks)):
             raise ValueError("parameters.evaluation_tasks of a harness job must be a list of task paths or null")
@@ -275,7 +275,10 @@ class HarnessTrainingComponent(LocalJobComponent):
         component = str(parameters["component"])
         backend = self.backend_for(job.scenario, component)
         steps, state = self.state_after(parameters.get("previous_job"))
-        head = ReleaseFiles(str(parameters["head_release_id"]), dict(HarnessTree.read(Path(job.start)).files))
+        head = ArtifactTextFiles(
+            str(parameters.get("head_artifact_id", parameters.get("head_release_id"))),
+            dict(HarnessTree.read(Path(job.start)).files),
+        )
         tasks = parameters.get("evaluation_tasks")
         progress = self.steps.state_root(job.scenario, component) / PROGRESS_FILE
         try:

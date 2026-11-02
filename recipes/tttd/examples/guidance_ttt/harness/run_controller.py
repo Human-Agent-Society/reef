@@ -240,7 +240,7 @@ def wait_for_training_step(
             if failure is not None:
                 raise RuntimeError(
                     f"TTTD step {expected_rollout_id} failed ({failure['reason']}) because its reports span "
-                    f"releases {failure['release_ids']!r}"
+                    f"artifacts {failure['artifact_ids']!r}"
                 )
             position = TrainingPosition.from_status(last_status)
             if position.finished_jobs > expected_jobs:
@@ -335,11 +335,11 @@ def failed_training_step(status: Mapping[str, Any], step: int) -> dict[str, Any]
             not isinstance(failure, Mapping)
             or not isinstance(failure.get("reason"), str)
             or not failure["reason"]
-            or not isinstance(failure.get("release_ids"), list)
+            or not isinstance(failure.get("artifact_ids", failure.get("release_ids")), list)
         ):
             raise RuntimeError(f"Reef returned invalid processor status: {status!r}")
         if failure.get("step") == step:
-            return dict(failure)
+            return {**failure, "artifact_ids": failure.get("artifact_ids", failure.get("release_ids"))}
     return None
 
 

@@ -9,7 +9,7 @@ from sqlalchemy import Column, Integer, MetaData, String, Table, Text, create_en
 from tests.support.conversations import conversation
 from tests.support.task_service_stubs import task_for
 
-from reef.artifact import ArtifactRef
+from reef.artifact import SnapshotRef
 from reef.core.job_data import TaskSample, TrajectorySample
 from reef.core.tasks import write_harbor_task
 from reef.core.trajectories import make_trajectory
@@ -88,7 +88,7 @@ def training_commit(step: int, *consumed: str, component: str | None = None) -> 
     return CommitRecord(
         scenario="math",
         step=step,
-        artifact_ref=ArtifactRef(f"content:{step}", f"release:{step}", "base"),
+        snapshot=SnapshotRef(f"release:{step}", "base"),
         checkpoint=True,
         algorithm_state={"step": step},
         high_water_sequence=step,

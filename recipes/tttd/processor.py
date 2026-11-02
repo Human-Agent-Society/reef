@@ -26,10 +26,10 @@ from reef.train.types import JobData, Sample, TrajectorySample, trajectories
 logger = logging.getLogger(__name__)
 
 
-def inference_release_id(context: ReportContext) -> str | None:
-    """The release that served the report's first inference, if the record names one."""
+def inference_artifact_id(context: ReportContext) -> str | None:
+    """The artifact that served the report's first inference, if the record names one."""
     inference = context.ends[0]
-    return inference.artifact_ref.release_id if inference.artifact_ref is not None else None
+    return inference.artifact_id
 
 
 @dataclass(frozen=True)
@@ -78,9 +78,9 @@ class TTTDGrouping(ReportGrouping):
         expected_count = self.groups_per_step * self.rollouts_per_group
         if len(members) != expected_count:
             return GroupDecision.INCOMPLETE
-        # 2. A step whose reports span releases is discarded
+        # 2. A step whose reports span artifacts is discarded
         #    wholesale — mixed-version rewards are not comparable.
-        versions = {release_id for member in members if (release_id := inference_release_id(member)) is not None}
+        versions = {artifact_id for member in members if (artifact_id := inference_artifact_id(member)) is not None}
         if len(versions) <= 1:
             return GroupDecision.READY
         if not isinstance(key, int):
@@ -89,7 +89,7 @@ class TTTDGrouping(ReportGrouping):
         ordered_versions = tuple(sorted(versions))
         self.failed_step_versions[step] = ordered_versions
         logger.error(
-            "TTTD step %d failed because its %d reports span releases %s",
+            "TTTD step %d failed because its %d reports span artifacts %s",
             step,
             expected_count,
             list(ordered_versions),
@@ -102,8 +102,8 @@ class TTTDGrouping(ReportGrouping):
             "failed_steps": [
                 {
                     "step": step,
-                    "reason": "mixed_release_ids",
-                    "release_ids": list(versions),
+                    "reason": "mixed_artifact_ids",
+                    "artifact_ids": list(versions),
                 }
                 for step, versions in sorted(self.failed_step_versions.items())
             ]
@@ -155,7 +155,7 @@ class TTTDSamples(ReportSamples):
                 "step": parsed.step,
                 "group": parsed.group,
                 "rollout": parsed.rollout,
-                "release_id": inference_release_id(context),
+                "artifact_id": inference_artifact_id(context),
             }
         )
 
@@ -170,7 +170,7 @@ class TTTDJobData(Sample2Job):
     set — its barrier is the recipe's ``TTTDGrouping``, its (group, rollout)
     coordinates are candidate slots (a retried report at an occupied
     coordinate is terminal; the first durable report wins), and a step whose
-    reports span releases is discarded wholesale with every row
+    reports span artifacts is discarded wholesale with every row
     released.
 
     Constant-reward groups are removed only after the complete step is
