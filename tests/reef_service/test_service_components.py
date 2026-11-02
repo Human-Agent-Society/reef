@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from pathlib import Path
+from threading import Thread
 from types import SimpleNamespace
 
 import pytest
@@ -13,6 +15,7 @@ from tests.support.artifact_versions import ImportingComponent
 from tests.support.runtime_stubs import runtime_bindings
 
 from reef.artifact import InMemoryRepositoryBackend
+from reef.artifact.sources import ArtifactSources
 from reef.dispatcher import Dispatcher
 from reef.dispatcher.data_sync_worker import DataSyncWorker
 from reef.dispatcher.samples import LocalSampleProducers
@@ -20,12 +23,13 @@ from reef.dispatcher.served import ServedModelsPublisher
 from reef.dispatcher.store_changes import StoreChanges, StoreChangesWatcher
 from reef.dispatcher.work_retention import EndedWorkSweeper
 from reef.evaluation.rollout_worker import EvaluationRolloutWorker
-from reef.execution.workers import SERVICE_COMPONENTS, service_components
+from reef.execution.workers import SERVICE_COMPONENTS, ServiceWorker, service_components
 from reef.record2sample.service import RECORD_SELECTION_KIND, SAMPLES_QUEUE, SamplesWorker, request_selection
 from reef.service import assembly
 from reef.service.app import create_data_app
 from reef.service.components import build_component_app
-from reef.service.data_service import DataWorker
+from reef.service.data_service import DataJob, DataWorker
+from reef.service.data_transfer import ArchiveWriters
 from reef.service.deploy.cli import build_serve_parser
 from reef.service.deploy.service_config import ServiceConfig
 from reef.storage.sql_coordination import memory_coordination, open_coordination
@@ -77,6 +81,75 @@ def test_a_process_runs_the_workers_of_its_own_services_only(tmp_path: Path) -> 
         service_components({"control", "router"})
     with pytest.raises(ValueError, match="one or more"):
         service_components(frozenset())
+
+
+@pytest.mark.parametrize("failure_stage", ["jobs", "start"])
+@pytest.mark.parametrize("stop_fails", [False, True])
+def test_failed_assembly_stops_workers_before_closing_their_stores(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure_stage: str, stop_fails: bool
+) -> None:
+    config = settings(tmp_path)
+    startup_error = RuntimeError("data worker assembly failed")
+    dispatchers: list[Dispatcher] = []
+    workers: list[ServiceWorker] = []
+    threads: list[Thread] = []
+    closed_with_running_workers: list[bool] = []
+    data_jobs = assembly.data_jobs
+    start_data_worker = DataWorker.start
+    stop_watcher = StoreChangesWatcher.stop
+
+    def observe_jobs(dispatcher: Dispatcher, sources: ArtifactSources, writers: ArchiveWriters) -> tuple[DataJob, ...]:
+        dispatchers.append(dispatcher)
+        workers.extend(dispatcher.workers.workers)
+        publisher = dispatcher.publisher
+        assert publisher is not None and publisher.thread is not None
+        threads.append(publisher.thread)
+        close_storage = dispatcher.storage.close
+
+        def close() -> None:
+            closed_with_running_workers.append(any(thread.is_alive() for thread in threads))
+            close_storage()
+
+        monkeypatch.setattr(dispatcher.storage, "close", close)
+        if failure_stage == "jobs":
+            raise startup_error
+        return data_jobs(dispatcher, sources, writers)
+
+    def fail_start(worker: DataWorker) -> None:
+        workers.append(worker)
+        start_data_worker(worker)
+        assert worker.thread is not None
+        threads.append(worker.thread)
+        raise startup_error
+
+    def fail_stop(watcher: StoreChangesWatcher) -> None:
+        stop_watcher(watcher)
+        raise RuntimeError("store watcher cleanup failed")
+
+    monkeypatch.setattr(assembly, "data_jobs", observe_jobs)
+    monkeypatch.setattr(DataWorker, "start", fail_start)
+    if stop_fails:
+        monkeypatch.setattr(StoreChangesWatcher, "stop", fail_stop)
+    try:
+        with pytest.raises(RuntimeError) as raised:
+            assembly.build_dispatcher(config, environ={}, components=frozenset({"control", "data"}))
+        assert raised.value is startup_error
+        assert closed_with_running_workers == [False]
+        assert all(not thread.is_alive() for thread in threads)
+        coordination = assembly.open_service_coordination(config)
+        try:
+            assert coordination.control_lease.acquire("replacement-control") is not None
+        finally:
+            coordination.close()
+    finally:
+        # Also reap leaked workers when the regression runs against the old implementation.
+        monkeypatch.setattr(StoreChangesWatcher, "stop", stop_watcher)
+        for worker in reversed(workers):
+            with suppress(Exception):
+                worker.stop()
+        for dispatcher in dispatchers:
+            with suppress(Exception):
+                dispatcher.close()
 
 
 @pytest.mark.unit
