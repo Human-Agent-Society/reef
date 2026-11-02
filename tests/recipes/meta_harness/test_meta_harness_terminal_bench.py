@@ -107,15 +107,13 @@ def test_task_pin_and_drift_checks(driver, tmp_path, monkeypatch):
         driver.benchmark.task_paths(root, [task.name])
 
 
-def test_configuration_scales_budgets_and_isolates_campaigns(driver, monkeypatch):
-    full = driver.configuration(tuple(driver.benchmark.MANIFEST["tasks"]), None, None)
+def test_configuration_fills_the_tasks_and_isolates_campaigns(driver, monkeypatch):
+    full = driver.configuration(tuple(driver.benchmark.MANIFEST["tasks"]), None)
     tasks = full["evolution"]["evaluation"]["tasks"]
     assert len(tasks) == len(set(tasks)) == 89
-    # The seed and four candidates, each evaluated once on 89 tasks with two repeats.
-    assert full["evolution"]["method"]["config"]["max_target_runs"] == 890
-    short = driver.configuration(("task",), 1, 1)
-    assert short["evolution"]["max_steps"] == 2
-    assert short["evolution"]["method"]["config"]["max_target_runs"] == 2
+    assert full["data"]["training_mode"] == "manual" and full["evolution"]["evaluation"]["repeats"] == 2
+    short = driver.configuration(("task",), 1)
+    assert short["evolution"]["evaluation"]["repeats"] == 1
     original = driver.campaign_id(short)
     assert original != driver.campaign_id(full)
     monkeypatch.setenv("REEF_MODEL", "another-model")
@@ -148,9 +146,8 @@ def campaign(driver, monkeypatch, tmp_path, fake_git_lfs):
         assert kwargs["timeout"] == 9000
         return task_run(task, int("# improved" in files.get("terminus/context/agent.py", "")))
 
-    monkeypatch.setattr(driver, "run_task", launch)
     monkeypatch.setattr("reef.evaluation.harness.runner.run_task", launch)
-    config = driver.configuration(("task",), 1, 1)
+    config = driver.configuration(("task",), 1)
     recipe = driver.load_recipe(config, tmp_path)
     chat = Proposals(HarnessTree.read(driver.SEED))
     recipe = dataclasses.replace(recipe, models={"proposer": chat})
@@ -171,11 +168,12 @@ def test_search_commits_and_restart_resumes_from_the_commit_without_more_runs(dr
     dispatcher = driver.open_campaign(recipe, directory)
     try:
         scenario = dispatcher.get_or_create_scenario(driver.SCENARIO)
-        summary = driver.search(scenario, recipe, directory)
+        summary = driver.search(dispatcher, scenario, recipe, directory, 1)
         assert summary["generated_candidates"] == 1
         assert summary["evaluation_runs"] == 2
-        assert len(launches) == 3  # One recorded run and one paired evaluation.
-        assert len(chat.prompts) == 1 and "terminus_run" in chat.prompts[0]
+        assert len(launches) == 2  # One paired evaluation: the seed and the candidate.
+        # The step's training request is the proposer's instruction.
+        assert len(chat.prompts) == 1 and driver.STEP_REQUEST in chat.prompts[0]
         assert "target-test-key" not in chat.prompts[0]
         served = driver.served_tree(scenario).checksum()
         assert summary["served_id"] == served != recipe.seed.checksum()
@@ -191,9 +189,9 @@ def test_search_commits_and_restart_resumes_from_the_commit_without_more_runs(dr
     restarted = driver.open_campaign(dataclasses.replace(recipe), directory)
     try:
         scenario = restarted.get_or_create_scenario(driver.SCENARIO)
-        assert driver.search(scenario, recipe, directory) == summary
+        assert driver.search(restarted, scenario, recipe, directory, 1) == summary
         assert json.loads((directory / "summary.json").read_text())["served_id"] == summary["served_id"]
-        assert len(launches) == 3 and len(chat.prompts) == 1
+        assert len(launches) == 2 and len(chat.prompts) == 1
     finally:
         restarted.close()
 
@@ -211,7 +209,7 @@ def test_commit_failure_writes_no_summary_and_restart_commits_the_queued_job(dri
         with monkeypatch.context() as patch:
             patch.setattr(scenario.store.commit_history, "append", fail)
             with pytest.raises(OSError, match="commit failed"):
-                driver.search(scenario, recipe, directory)
+                driver.search(dispatcher, scenario, recipe, directory, 1)
         assert scenario.trainer.state == before
         assert not (directory / "summary.json").exists()
     finally:
@@ -220,34 +218,12 @@ def test_commit_failure_writes_no_summary_and_restart_commits_the_queued_job(dri
     restarted = driver.open_campaign(dataclasses.replace(recipe), directory)
     try:
         scenario = restarted.get_or_create_scenario(driver.SCENARIO)
-        summary = driver.search(scenario, recipe, directory)
-        # The commit of the job's submission failed, but the jobs queue on disk kept the job: the restart submits
-        # the same job again, and commits the step that it ran once, without another proposal or launch.
+        summary = driver.search(restarted, scenario, recipe, directory, 1)
+        # The commit of the job's submission failed, but the jobs queue on disk kept the job: the restart queues the
+        # step's request again, which finds the queued one, submits the same job again, and commits the step that it
+        # ran once, without another proposal or launch.
         assert (summary["generated_candidates"], summary["evaluation_runs"]) == (1, 2)
         assert summary["served_id"] != recipe.seed.checksum()
-        assert len(launches) == 3 and len(chat.prompts) == 1
+        assert len(launches) == 2 and len(chat.prompts) == 1
     finally:
         restarted.close()
-
-
-def test_run_record_survives_interrupted_report(driver, campaign, monkeypatch):
-    recipe, _, launches, directory = campaign
-    dispatcher = driver.open_campaign(recipe, directory)
-    try:
-        scenario = dispatcher.get_or_create_scenario(driver.SCENARIO)
-        append = scenario.records.append
-
-        def fail_report(record):
-            if record.request_type is driver.RequestType.REPORT:
-                raise OSError("report interrupted")
-            return append(record)
-
-        with monkeypatch.context() as patch:
-            patch.setattr(scenario.records, "append", fail_report)
-            with pytest.raises(OSError, match="report interrupted"):
-                driver.record_run(scenario, recipe)
-        driver.record_run(scenario, recipe)
-        assert len(launches) == 1
-        assert scenario.records.count(scenario.name) == 2
-    finally:
-        dispatcher.close()
