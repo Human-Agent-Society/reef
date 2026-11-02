@@ -102,7 +102,7 @@ class ServingWorker(QueueWorker):
             runtime = self.recipe.runtime
             if runtime is None or not runtime.serves_requests:
                 return False
-            self.queue.requeue_expired()
+            self.requeue_expired()
             self.queue.request(INFERENCE_OWNER_QUEUE, "inference", INFERENCE_OWNER_QUEUE, INFERENCE_OWNER_QUEUE, {})
             item = self.queue.take(INFERENCE_OWNER_QUEUE, self.worker_id, [INFERENCE_OWNER_QUEUE])
             if item is None:
