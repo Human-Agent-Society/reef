@@ -28,7 +28,7 @@ class Producers(SampleProducers):
         self.calls.append((scenario, component))
         if self.error is not None:
             raise self.error
-        return ProducedSamples(changed=True, background=self.background)
+        return ProducedSamples(changed=True, background=self.background, records_read=4, samples_created=2)
 
 
 @pytest.mark.unit
@@ -60,6 +60,7 @@ def test_the_worker_makes_the_samples_and_comes_back_while_background_work_runs(
     assert producers.calls == [("s", "weights")]
     items = queue.items(SAMPLES_QUEUE, scenario="s")
     assert [item.state for item in items] == ["finished", "queued"]
+    assert items[0].result == {"changed": True, "background": True, "records_read": 4, "samples_created": 2}
     assert items[1].available_at > items[0].created_at
     producers.background = False
     assert worker.run_once() is False  # the next look waits for its time

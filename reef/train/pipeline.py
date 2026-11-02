@@ -145,6 +145,9 @@ def grouped(stored: StoredSample, sample: Sample) -> Sample:
 class TrainingPipeline:
     """Turn a scenario's records into typed job data through a recipe's two stages.
 
+    ``inserted_sample_count`` counts new samples saved by this instance since construction.
+    It is non-negative, or None after a store could not report its insertion count.
+
     Without stages it is the no-update default: it reads records for audit
     but never becomes ready and never produces job data.
 
@@ -195,6 +198,7 @@ class TrainingPipeline:
         self.store_sequence = 0
         #: Whether the pipeline stored a new sample or read a new training instruction since ``produce`` returned.
         self.received_input = False
+        self.inserted_sample_count: int | None = 0
         #: The stored samples that this trainer has not trained, in store order, each with the sample that job data
         #: trains: an upload rendered by the record-to-sample stage, else the stored sample. Imported tasks do not train.
         self.held: dict[str, tuple[StoredSample, Sample]] = {}
@@ -315,6 +319,20 @@ class TrainingPipeline:
 
     # ------------------------------------------------------------- records
 
+    def save_record_samples(
+        self,
+        group: str | None,
+        record_ids: tuple[str, ...],
+        samples: tuple[tuple[str, Sample], ...],
+    ) -> bool:
+        """Save samples and count this instance's inserts; an unknown count stays unknown."""
+        changed, count = self.store.store.save_record_samples(self.store.trainer, group, record_ids, samples)
+        if self.inserted_sample_count is not None and count is not None:
+            self.inserted_sample_count += count
+        else:
+            self.inserted_sample_count = None
+        return changed
+
     def store_samples(self) -> bool:
         """Store the samples of each unit that the stage made ready, and the samples that it made from no set.
 
@@ -329,7 +347,7 @@ class TrainingPipeline:
         made = self.record2sample.made_samples()
         if made:
             stored = (
-                self.store.add_record_samples(
+                self.save_record_samples(
                     None, (), tuple((f"{self.sample_id_prefix}{name}", sample) for name, sample in made)
                 )
                 or stored
@@ -361,7 +379,7 @@ class TrainingPipeline:
             for index, sample in enumerate(set_samples)
         )
         group = f"{prefix}{unit.set_ids()[0]}" if len(samples) > 1 else None
-        stored = self.store.add_record_samples(group, tuple(unit.consumed_ids()), samples)
+        stored = self.save_record_samples(group, tuple(unit.consumed_ids()), samples)
         self.record2sample.consume(unit)
         return stored
 

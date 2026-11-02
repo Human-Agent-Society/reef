@@ -207,6 +207,20 @@ class SampleStore(ABC):
         no sample of the call.
         """
 
+    def save_record_samples(
+        self,
+        trainer: str,
+        group: str | None,
+        record_ids: tuple[str, ...],
+        samples: tuple[tuple[str, Sample], ...],
+    ) -> tuple[bool, int | None]:
+        """Save record samples and return (changed, inserted count).
+
+        The count is non-negative, or None when this store cannot report it. A known count is positive exactly when changed.
+        Existing stores keep their write behavior.
+        """
+        return self.add_record_samples(trainer, group, record_ids, samples), None
+
     @abstractmethod
     def consumed_record_ids(self, trainer: str) -> frozenset[str]:
         """The records that the stored samples of ``trainer`` (a ``train_counts`` key) consumed."""
@@ -306,9 +320,20 @@ class MemorySampleStore(SampleStore):
         record_ids: tuple[str, ...],
         samples: tuple[tuple[str, Sample], ...],
     ) -> bool:
+        return self.save_record_samples(trainer, group, record_ids, samples)[0]
+
+    def save_record_samples(
+        self,
+        trainer: str,
+        group: str | None,
+        record_ids: tuple[str, ...],
+        samples: tuple[tuple[str, Sample], ...],
+    ) -> tuple[bool, int | None]:
         if not samples or any(not isinstance(record_id, str) or not record_id for record_id in record_ids):
             raise ValueError("record samples need one or more samples and non-empty record IDs")
-        return self.add_rows(samples, component=trainer, group=group, record_ids=tuple(sorted(set(record_ids))))
+        before = len(self.rows)
+        changed = self.add_rows(samples, component=trainer, group=group, record_ids=tuple(sorted(set(record_ids))))
+        return changed, len(self.rows) - before
 
     def add_rows(
         self,

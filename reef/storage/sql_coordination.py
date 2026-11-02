@@ -77,6 +77,7 @@ from reef.storage.sqlite import enable_wal
 from reef.storage.work_queue import (
     FINAL_STATES,
     HELD_STATES,
+    WORK_STATES,
     JsonValue,
     NewWork,
     WorkConflict,
@@ -1267,6 +1268,40 @@ class SQLWorkQueue(WorkQueue):
         query = select(self.table).where(*conditions).order_by(self.table.c.created_sequence)
         with self.database.read() as connection:
             return tuple(item_from_row(row) for row in connection.execute(query).mappings().all())
+
+    def page(
+        self,
+        queue: str,
+        *,
+        scenario: str,
+        state: str | None = None,
+        before_sequence: int | None = None,
+        limit: int = 50,
+    ) -> tuple[WorkItem, ...]:
+        if state is not None and state not in WORK_STATES:
+            raise ValueError("unknown work state")
+        if not 1 <= limit <= 1000 or (before_sequence is not None and before_sequence < 1):
+            raise ValueError("limit must be 1 to 1000 and before must be positive")
+        conditions = [self.table.c.queue == queue, self.table.c.scenario == scenario]
+        if state is not None:
+            conditions.append(self.table.c.state == state)
+        if before_sequence is not None:
+            conditions.append(self.table.c.created_sequence < before_sequence)
+        query = select(self.table).where(*conditions).order_by(self.table.c.created_sequence.desc()).limit(limit)
+        with self.database.read() as connection:
+            return tuple(item_from_row(row) for row in connection.execute(query).mappings().all())
+
+    def counts(self, queue: str, *, scenario: str) -> Mapping[str, int]:
+        query = (
+            select(self.table.c.state, func.count())
+            .where(
+                self.table.c.queue == queue,
+                self.table.c.scenario == scenario,
+            )
+            .group_by(self.table.c.state)
+        )
+        with self.database.read() as connection:
+            return {**dict.fromkeys(WORK_STATES, 0), **{state: count for state, count in connection.execute(query)}}
 
 
 def open_coordination_database(

@@ -330,6 +330,39 @@ class WorkQueue(ABC):
     def items(self, queue: str, *, scenario: str | None = None, kind: str | None = None) -> tuple[WorkItem, ...]:
         """The items of ``queue``, optionally of one scenario and kind, in ``created_sequence`` order."""
 
+    def page(
+        self,
+        queue: str,
+        *,
+        scenario: str,
+        state: str | None = None,
+        before_sequence: int | None = None,
+        limit: int = 50,
+    ) -> tuple[WorkItem, ...]:
+        """Return up to ``limit`` items, newest first, of one scenario and optional state.
+
+        Exclude sequences at or above ``before_sequence`` when given. The limit is 1 to 1000;
+        the cursor is positive. Raise ValueError for an invalid state, limit, or cursor.
+        """
+        if state is not None and state not in WORK_STATES:
+            raise ValueError("unknown work state")
+        if not 1 <= limit <= 1000 or (before_sequence is not None and before_sequence < 1):
+            raise ValueError("limit must be 1 to 1000 and before must be positive")
+        rows = self.items(queue, scenario=scenario)
+        return tuple(
+            item
+            for item in reversed(rows)
+            if (state is None or item.state == state)
+            and (before_sequence is None or item.created_sequence < before_sequence)
+        )[:limit]
+
+    def counts(self, queue: str, *, scenario: str) -> Mapping[str, int]:
+        """Return each work state's non-negative item count for this queue and scenario, including zero counts."""
+        counts: dict[str, int] = dict.fromkeys(WORK_STATES, 0)
+        for item in self.items(queue, scenario=scenario):
+            counts[item.state] += 1
+        return counts
+
 
 def clock(now: float | None) -> float:
     """``now``, or the current time when it is None."""

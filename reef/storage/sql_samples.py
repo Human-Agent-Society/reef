@@ -259,6 +259,15 @@ class SQLSampleStore(SampleStore):
         record_ids: tuple[str, ...],
         samples: tuple[tuple[str, Sample], ...],
     ) -> bool:
+        return self.save_record_samples(trainer, group, record_ids, samples)[0]
+
+    def save_record_samples(
+        self,
+        trainer: str,
+        group: str | None,
+        record_ids: tuple[str, ...],
+        samples: tuple[tuple[str, Sample], ...],
+    ) -> tuple[bool, int | None]:
         if not isinstance(trainer, str):
             raise TypeError("trainer must be a string")
         if group is not None and (not isinstance(group, str) or not group):
@@ -309,7 +318,7 @@ class SQLSampleStore(SampleStore):
                 if is_new:
                     self.records.hold_records(connection, sample_id, held)
                 inserted.append(is_new)
-        return any(inserted)
+        return any(inserted), sum(inserted)
 
     def consumed_record_ids(self, trainer: str) -> frozenset[str]:
         table = self.table.table

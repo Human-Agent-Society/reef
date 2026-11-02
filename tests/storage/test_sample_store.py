@@ -116,7 +116,7 @@ def test_a_commit_counts_each_sample_it_consumed_once_for_its_trainer(storage):
         assert train_counts(session) == {"t1": {"": 2}, "t2": {"": 1}}
         # The commit of one component of several counts for that component only.
         session.commit_step(expected_step=2, commit=training_commit(3, consumed_sample_id("t2"), component="b"))
-        (_, second) = session.samples.page()
+        _, second = session.samples.page()
         assert second.train_counts == {"": 1, "b": 1}
         assert (second.train_count(""), second.train_count("b"), second.train_count("c")) == (1, 1, 0)
 
@@ -322,8 +322,8 @@ def test_record_samples_belong_to_their_trainer_and_consume_their_records(storag
         samples = session.samples
         samples.add_trajectories((("upload", trajectory("u")),))
         grid = (("a:r1:0", trajectory("a1")), ("a:r2:0", trajectory("a2")))
-        assert samples.add_record_samples("a", "a:r1", ("r1", "i1", "r2"), grid)
-        assert not samples.add_record_samples("a", "a:r1", ("r1", "i1", "r2"), grid), "a retry changes nothing"
+        assert samples.save_record_samples("a", "a:r1", ("r1", "i1", "r2"), grid) == (True, 2)
+        assert samples.save_record_samples("a", "a:r1", ("r1", "i1", "r2"), grid) == (False, 0)
         samples.add_record_samples("b", None, ("r3",), (("b:r3:0", trajectory("b")),))
         with pytest.raises(SampleConflict, match="other content"):
             samples.add_record_samples("a", "a:r1", ("r1",), (("a:r1:0", trajectory("other")),))
@@ -333,7 +333,7 @@ def test_record_samples_belong_to_their_trainer_and_consume_their_records(storag
         assert [item.sample_id for item in samples.page(trainer="a")] == ["upload", "a:r1:0", "a:r2:0"]
         assert [item.sample_id for item in samples.page(trainer="b")] == ["upload", "b:r3:0"]
         assert len(samples.page(trainer="a")) == 3 and len(samples.page()) == 4
-        (_, first, _) = samples.page(trainer="a")
+        _, first, _ = samples.page(trainer="a")
         assert (first.component, first.group, first.record_ids) == ("a", "a:r1", ("i1", "r1", "r2"))
         assert samples.page()[0].component is None and samples.page()[0].record_ids == ()
         assert samples.consumed_record_ids("a") == {"r1", "i1", "r2"}
