@@ -7,10 +7,11 @@ release file), else on the head's, read through
 ``GET /reef/harness?form=source``. It starts the capture proxy in process
 and listens on a Unix socket for turns and control requests. A session holds
 one ``Run`` across turns. A new head reaches the process through the release
-poll or the ``x-reef-release-id`` header of an inference answer, and its host
-replaces the current one between two steps of the open turn, or at once when
-no turn is open. A tree that does not render or load leaves the current host
-in place. Every mount, unmount and failed mount is an event in the open
+poll, or through the ``x-reef-release-id`` header of an inference answer from a
+service older than ``x-reef-artifact-id``. Its host replaces the current one
+between two steps of the open turn, or at once when no turn is open. A tree
+that does not render or load leaves the current host in place. Every mount,
+unmount and failed mount is an event in the open
 turn's session, else in ``sessions/serve.jsonl``. ``reef-native -p`` stays
 the run form: one process, one turn.
 """

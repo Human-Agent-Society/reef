@@ -457,7 +457,8 @@ deployment's provider key (``inference.upstream-api-key``), when one is set.
 No artifact changes the request on its way to the engine. The service
 appends the record to the scenario's record store and returns the record ID in
 ``x-reef-agent-record-id``, and the ID of the artifact that answered in
-``x-reef-release-id``. ``x-reef-tag-*`` headers go into the record. The
+``x-reef-artifact-id``; ``x-reef-release-id`` repeats it for older clients.
+``x-reef-tag-*`` headers go into the record. The
 inference service never creates a scenario: create it first with
 ``POST /reef/scenarios`` or a harness install. The inference service answers:
 

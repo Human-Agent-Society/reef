@@ -148,7 +148,7 @@ class CaptureProxy:
 
     Forwards to ``upstream`` with ``x-reef-scenario`` and the token, tags every
     call with ``tags`` as ``x-reef-tag-<name>`` headers, keeps the receipts,
-    and hands the release id an answer names to ``observer``.
+    and hands ``observer`` the legacy harness head that an older service names in an answer.
 
     With ``is_unrecorded``, every call carries ``ROLLOUT_HEADER`` and is sent without streaming: Reef keeps no
     record of it, and the captured response holds the whole training block. A streaming agent still gets a

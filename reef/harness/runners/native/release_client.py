@@ -1,9 +1,8 @@
 """The serve process's view of Reef's release channel: the poll, the manifest read, and the head watch.
 
 ``ReleaseClient`` reads the release catalog and one release's source tree.
-``HeadWatch`` learns the head from
-the periodic poll and from the ``x-reef-release-id`` header the capture proxy
-reads on every inference answer, and notifies its listener once per new head; a
+``HeadWatch`` learns the head from the periodic poll, and from the ``x-reef-release-id`` header of an inference
+answer only when a service older than ``x-reef-artifact-id`` sends it; it notifies its listener once per new head. A
 failure is logged and retried with backoff, and the process keeps serving.
 """
 
@@ -110,9 +109,9 @@ class ReleaseClient:
 class HeadWatch(ReleaseObserver):
     """Compares every release id it hears of with the mounted one and notifies the listener of a new head once.
 
-    The poll runs on its own thread every ``interval_s``; a response header
-    is considered on the proxy's thread at once, before the answer reaches
-    the agent, so the mount is queued by the time the next step starts."""
+    The poll runs on its own thread every ``interval_s``. A legacy response header from an older service is
+    considered on the proxy's thread at once, before the answer reaches the agent; a current service's answers name
+    the model artifact instead, so a new head waits for the poll."""
 
     def __init__(
         self,
