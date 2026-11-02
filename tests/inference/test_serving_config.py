@@ -175,3 +175,24 @@ def test_a_refused_serving_config_answers_400_and_stores_nothing(serving, update
     finally:
         worker.stop()
         control.close()
+
+
+@pytest.mark.unit
+def test_another_service_reads_the_stored_serving_config_that_control_changed(serving, tmp_path):
+    control_of, worker = serving[0], serving[1]
+    control = control_of()
+    # The data service reads settings with its own dispatcher, which loaded the scenario before the change.
+    data = control_of(memory_coordination(), SQLiteScenarioStorage(tmp_path / "records"))
+    try:
+        control.create_scenario("math")
+        assert data.scenario_settings("math")["effective_serving_config"] == {
+            "weights": {"min_replicas": 0, "temperature": 1.0}
+        }
+        control.set_serving_config("math", {"weights": {"min_replicas": 2}})
+        settings = data.scenario_settings("math")
+        assert settings["serving_config"] == {"weights": {"min_replicas": 2}}
+        assert settings["effective_serving_config"] == {"weights": {"min_replicas": 2, "temperature": 1.0}}
+    finally:
+        worker.stop()
+        data.close()
+        control.close()
