@@ -114,7 +114,7 @@ def test_an_instruction_needs_an_instruction_mode_and_commits_through_the_train_
             assert response.status == 200, await response.text()
             (row,) = await committed(scenario, 1)
             request = row["metrics"]["training_request"]
-            assert request["text"] == "run tests first" and request["release_id"] == "rel-3"
+            assert request["text"] == "run tests first" and request["artifact_id"] == "rel-3"
             assert request["session"] == "3f1c2a9d0b7e"
             # A request carries its requires list everywhere it goes, empty when the person named nothing.
             assert request["requires"] == []
@@ -137,7 +137,7 @@ def test_an_instruction_needs_an_instruction_mode_and_commits_through_the_train_
 
 
 def test_training_request_parses_requires_and_names_the_first_bad_item() -> None:
-    base = {"text": "text me when you are blocked", "session": "s", "release_id": "r"}
+    base = {"text": "text me when you are blocked", "session": "s", "artifact_id": "r"}
     plain = TrainingRequest.from_dict(base)
     assert plain.requires == () and plain.to_dict() == {**base, "requires": []}
     items = [
@@ -184,7 +184,7 @@ def test_training_request_parses_requires_and_names_the_first_bad_item() -> None
 def test_an_env_item_names_a_shell_identifier_in_its_check_else_its_name() -> None:
     """A change reads the variable an env item names from the environment, so the check when present, else the
     name, is a shell identifier; the other kinds keep a command as their check."""
-    base = {"text": "text me when you are blocked", "session": "s", "release_id": "r"}
+    base = {"text": "text me when you are blocked", "session": "s", "artifact_id": "r"}
     named = [{"name": "twilio.sid", "kind": "env", "check": "TWILIO_SID"}, {"name": "SMTP2", "kind": "env"}]
     assert TrainingRequest.from_dict({**base, "requires": named}).to_dict()["requires"] == named
     for requires, message in (
@@ -450,7 +450,7 @@ def test_the_step_row_keeps_the_backends_training_request_and_fills_a_step_that_
 ) -> None:
     """The backend's dict wins, since it carries what the method added; a step the backend skipped before it
     merged the list gets the request as accepted, requires included."""
-    payload = {"text": "text me", "session": "session-1", "release_id": "release-1", "requires": REQUIRES}
+    payload = {"text": "text me", "session": "session-1", "artifact_id": "release-1", "requires": REQUIRES}
     merged = [*REQUIRES, {"name": "SMTP_HOST", "kind": "env"}]
 
     def adding(workspace, services):
@@ -627,7 +627,7 @@ def test_an_activated_release_needs_what_it_named(tmp_path: Path) -> None:
                 "/reef/scenarios/agents/activate", json={"artifact_id": inactive["release_id"]}
             )
             assert response.status == 200
-            assert (await response.json())["release_id"] == inactive["release_id"]
+            assert (await response.json())["artifact_id"] == inactive["artifact_id"]
             head = await (await client.get("/reef/harness", headers=headers)).json()
             assert head["release_id"] == inactive["release_id"] and head["requires"] == REQUIRES
             assert head["evaluation"] == inactive["metrics"]

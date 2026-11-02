@@ -69,8 +69,8 @@ other bare name resolves only to a YAML preset under
 Artifact
 --------
 
-The content of one component of a release, such as a checkpoint's weights or
-a harness tree. Training makes artifacts. An artifact is of exactly one of
+One immutable output of a component, such as checkpoint weights or a
+harness tree. Training, import and harness sync make artifacts. An artifact is of exactly one of
 four kinds:
 
 - ``harness``: a whole agent harness that Reef runs as it is, such as a Harbor
@@ -81,38 +81,36 @@ four kinds:
 - ``model``: a whole model, such as a provider's model or full weights.
 - ``model_adapter``: a LoRA adapter on a base model.
 
-``artifact_id`` identifies an artifact. In a scenario of one component it is
-the ``release_id`` of the release that made the artifact; in a scenario of
-several components it is ``<release_id>:<component>``. ``content_id``
-identifies the contents independently of when or why Reef published them.
+``artifact_id`` is the public identity of an immutable artifact. Treat it as
+an opaque string. It stays the same when the scenario activates it, serves it
+beside another artifact, or carries it through another component's update.
+Repository revisions and content checksums are storage details.
 
 Release
 -------
 
-One immutable version of a scenario's content, which binds one artifact for
-each component. A release is the release that created the scenario, the
-output of one training step, or, in a scenario of several components, an
-activation. ``release_id`` identifies it in the scenario history and
-``parent_release_id`` identifies its parent. Making a release changes nothing
-else: whether it serves is a separate decision. History is appended, never
-rewound.
+An internal repository snapshot that stores artifact bytes and recovery
+metadata. Existing backend interfaces call its storage locator
+``release_id``. Callers use ``artifact_id`` instead. Activation and serving
+change scenario state without publishing a snapshot. Older harness protocol
+fields with release names remain compatibility aliases.
 
 Creation artifact
 -----------------
 
-The first artifact of each component of a scenario: the content of the
-release that created the scenario. Its row in the artifact list has
+The first artifact of each component, created when the scenario starts. Its row in the artifact list has
 ``operation: creation``. Reef serves it until the first activation. It is
 each trainer's first training start. A weight creation artifact holds no
 optimizer state, so training from it starts with a new optimizer state.
 
-Active release
---------------
+Active selection
+----------------
 
-The release that a scenario serves. It binds the active artifact of each
-component. Inference answers from it, and the harness routes serve its tree.
-``POST /reef/scenarios/{scenario}/activate`` makes another existing artifact
-active. By default Reef activates each new artifact that passes its checks.
+A scenario's serving selection: a mapping from each
+component name to its selected ``artifact_id``. Inference answers from the
+selection that completed startup; harness routes read the selected tree.
+``POST /reef/scenarios/{scenario}/activate`` updates one component in the
+mapping and records the complete selection atomically. By default Reef activates each new artifact that passes its checks.
 Every other artifact is inactive. An artifact that a training step made and
 that was never active waits for activation. See `Operate a deployment
 <../user-guide/operate.rst#activate-an-artifact>`__.
@@ -120,11 +118,10 @@ that was never active waits for activation. See `Operate a deployment
 Chain tip
 ---------
 
-The newest release on a scenario's release chain: the parent of the next
-release that a training step publishes. A training step whose artifact Reef
-activates moves the chain tip to its release. An inactive artifact's release,
-and the release that an activation publishes in a scenario of several
-components, do not move it. The chain tip and the active release can differ.
+The repository's publication head, used internally to order new artifact
+snapshots. It is independent of the scenario's active selection. Activating
+or serving an existing artifact does not publish a snapshot or move this
+head.
 See `The release chain <../advanced_topics/state-model.rst#the-release-chain>`__.
 
 Training start
@@ -134,31 +131,31 @@ The artifact that a trainer's next job or evolve step starts from. It is the
 creation artifact until the trainer first trains. After each job or step the
 trainer moves its start to its own newest output.
 ``POST /reef/scenarios/{scenario}/train-from`` sets it to an existing
-artifact. The training start and the active release change independently. See
+artifact. The training start and the active selection change independently. See
 `Train from an artifact <../user-guide/operate.rst#train-from-an-artifact>`__.
 
 Content ID
 ----------
 
-The identity of the bytes or logical model state of a release. Equal
-``content_id`` values mean equal content even when the ``release_id`` values
-differ.
+An internal checksum of bytes or logical model state. Storage can use equal
+checksums to reuse content. A checksum does not replace ``artifact_id``:
+two imports can contain the same files and still create distinct artifacts.
 
 Release chain
 -------------
 
-A scenario's history of releases, each release carrying its parent. An
-artifact of the chain can be activated when its surface and runtime can serve
-it, and a trainer can start from it when the trainer can load it.
+The internal repository history used to publish and recover artifact
+snapshots. A scenario's operation history separately records training,
+imports, activation, training starts and serving changes. Changing a
+selection appends an operation without creating another artifact.
 
 Component
 ---------
 
-One named part of a release's content, such as ``weights``, ``harness``, or
-``skills``. A recipe's surface declares the components its releases bind and
-how each is admitted, loaded, and read. A one-component release is
-flat; a release with several keeps one directory per component and a manifest
-naming each component's ``content_id``.
+One named part of a scenario, such as ``weights``, ``harness`` or ``skills``.
+A recipe's surface declares its components and how each artifact is
+admitted, loaded and read. The scenario selects one artifact per component.
+Updating one component preserves the other components' artifact IDs.
 
 Candidate selection
 -------------------

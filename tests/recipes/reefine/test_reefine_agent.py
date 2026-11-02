@@ -37,7 +37,7 @@ from reef.train.types import JobData
 
 REVIEW = {"result": "complete", "covered": ["reads answers aloud"], "uncovered": [], "delivers": True}
 SPEAK = "export default function (pi) { if (process.env.PI_OFFLINE) return; }"
-ASK = TrainingRequest(text="Read my answers aloud with a natural voice", session="s1", release_id="base", id="r1")
+ASK = TrainingRequest(text="Read my answers aloud with a natural voice", session="s1", artifact_id="base", id="r1")
 
 
 class Upstream:

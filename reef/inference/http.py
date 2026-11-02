@@ -49,7 +49,7 @@ class RequestHeadersFactory(ABC):
 
 def content_identity_headers(artifact: Artifact) -> dict[str, str]:
     """Reef identity headers for one selected, optionally materialized artifact."""
-    headers = {"x-reef-release-id": artifact.ref.release_id}
+    headers = {"x-reef-artifact-id": artifact.artifact_id, "x-reef-release-id": artifact.artifact_id}
     if artifact.local_path is not None:
         headers["x-reef-artifact-path"] = str(artifact.local_path)
     return headers

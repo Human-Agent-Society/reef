@@ -4,7 +4,6 @@ import asyncio
 
 from aiohttp import web
 
-from reef.core.components import made_artifact_id
 from reef.core.errors import UnknownScenario
 from reef.core.records_types import RequestType
 from reef.service.artifact_evaluations import ArtifactEvaluations
@@ -52,6 +51,17 @@ def register_scenario_reads(app: web.Application, *, request_service: RequestSer
         )
         return web.json_response(result, headers={"Cache-Control": "no-store"})
 
+    async def operation_list(request: web.Request) -> web.Response:
+        result = await asyncio.to_thread(
+            request_service.dispatcher.read_commits,
+            request.match_info["scenario"],
+            after_step=int(request.query.get("after_step", "0")),
+            limit=int(request.query.get("limit", "50")),
+            record_ids=tuple(request.query.getall("record_id", [])),
+        )
+        result["operations"] = result.pop("commits")
+        return web.json_response(result, headers={"Cache-Control": "no-store"})
+
     async def record_detail(request: web.Request) -> web.Response:
         result = await asyncio.to_thread(
             request_service.dispatcher.read_record,
@@ -77,6 +87,7 @@ def register_scenario_reads(app: web.Application, *, request_service: RequestSer
     app.router.add_get("/reef/scenarios/{scenario}/contract", scenario_contract)
     app.router.add_get("/reef/scenarios/{scenario}/records", record_list)
     app.router.add_get("/reef/scenarios/{scenario}/commits", commit_list)
+    app.router.add_get("/reef/scenarios/{scenario}/operations", operation_list)
     app.router.add_get("/reef/scenarios/{scenario}/records/{record_id}", record_detail)
     app.router.add_get("/reef/scenarios/{scenario}/artifacts", list_artifacts)
 
@@ -126,16 +137,14 @@ def register_scenario_writes(
         if owner is not None:
             # The default owner is the scenario's own name.
             await asyncio.to_thread(dispatcher.set_scenario_owner, name, owner)
-        current = scenario.repository.require_current_artifact()
+        components = {row["component"]: row["artifact_id"] for row in scenario.artifacts() if row["active"]}
         answer: dict[str, object] = {
             "scenario": scenario.name,
             "owner": dispatcher.scenario_owner(name),
-            "release_id": current.release_id,
-            "content_id": current.content_id,
+            "components": components,
         }
-        if item_id is not None and created:
-            landed, _ = scenario.surface.import_target(target)
-            answer["artifact_id"] = made_artifact_id(current.release_id, landed, single=scenario.surface.single)
+        if len(components) == 1:
+            answer["artifact_id"] = next(iter(components.values()))
         return web.json_response(answer, status=201 if created else 200)
 
     async def update_scenario(request: web.Request) -> web.Response:
@@ -181,8 +190,6 @@ def register_scenario_writes(
                 "scenario": scenario,
                 "component": activated.component,
                 "artifact_id": activated.artifact_id,
-                "release_id": activated.release_id,
-                "content_id": activated.content_id,
             }
         )
 
@@ -195,10 +202,19 @@ def register_scenario_writes(
                 "scenario": scenario,
                 "component": served.component,
                 "artifact_id": served.artifact_id,
-                "release_id": served.release_id,
-                "content_id": served.content_id,
             }
         )
+
+    async def restore_selection(request: web.Request) -> web.Response:
+        payload = await read_object(request)
+        if set(payload) != {"step"}:
+            raise ValueError("restore takes one step naming the scenario selection to restore")
+        step = payload["step"]
+        if not isinstance(step, int) or isinstance(step, bool) or step < 0:
+            raise ValueError("restore step must be a non-negative integer")
+        scenario = request.match_info["scenario"]
+        components = await asyncio.to_thread(request_service.dispatcher.restore, scenario, step)
+        return web.json_response({"scenario": scenario, "components": dict(components)})
 
     async def stop_serving_artifact(request: web.Request) -> web.Response:
         scenario = request.match_info["scenario"]
@@ -211,7 +227,6 @@ def register_scenario_writes(
                 "scenario": scenario,
                 "component": stopped.component,
                 "artifact_id": stopped.artifact_id,
-                "release_id": stopped.release.release_id,
             }
         )
 
@@ -237,6 +252,7 @@ def register_scenario_writes(
     app.router.add_post("/reef/scenarios/{scenario}/update", update_scenario)
     app.router.add_delete("/reef/scenarios/{scenario}", delete_scenario)
     app.router.add_post("/reef/scenarios/{scenario}/activate", activate_artifact)
+    app.router.add_post("/reef/scenarios/{scenario}/restore", restore_selection)
     app.router.add_post("/reef/scenarios/{scenario}/train-from", train_from_artifact)
     app.router.add_post("/reef/scenarios/{scenario}/serve", serve_artifact)
     app.router.add_post("/reef/scenarios/{scenario}/stop-serving", stop_serving_artifact)

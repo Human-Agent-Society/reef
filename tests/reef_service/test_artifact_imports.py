@@ -91,12 +91,8 @@ def test_an_import_publishes_beside_the_chain_and_changes_nothing_else(tmp_path)
     assert record.artifact_ref.release_id == imported.release_id
     assert record.artifact_ref.parent_release_id == checkpoint.release_id
     row = value.list_artifacts("math")[0]
-    assert (row["operation"], row["artifact_id"], row["release_id"], row["content_id"]) == (
-        "import",
-        imported.artifact_id,
-        imported.release_id,
-        imported.content_id,
-    )
+    assert (row["operation"], row["artifact_id"]) == ("import", imported.artifact_id)
+    assert "release_id" not in row and "content_id" not in row
     assert imported.artifact_id == imported.release_id
     assert imported.content_id == directory_content_id(tmp_path / "w9")
     assert (row["source"], row["active"], row["activated"]) == (source(tmp_path / "w9"), False, False)
@@ -225,9 +221,7 @@ def test_the_import_http_api_takes_a_uri(tmp_path) -> None:
             assert receipt == {
                 "scenario": "math",
                 "component": receipt["component"],
-                "artifact_id": receipt["release_id"],
-                "release_id": receipt["release_id"],
-                "content_id": directory_content_id(tmp_path / "source"),
+                "artifact_id": receipt["artifact_id"],
             }
             listed = (await (await client.get("/reef/scenarios/math/artifacts")).json())["artifacts"]
             assert (listed[0]["operation"], listed[0]["source"]) == ("import", {"uri": uri, "version": ""})
@@ -281,7 +275,8 @@ def test_an_import_of_a_commit_keeps_a_reference_and_downloads_no_weights(tmp_pa
             copy.mkdir()
             for path, data in hub.files.items():
                 (copy / path).write_bytes(data)
-            assert receipt["content_id"] == directory_content_id(copy)
+            selected, _ = value.get_or_create_scenario("math").resolve_artifact(receipt["artifact_id"])
+            assert selected.content_id == directory_content_id(copy)
             assert "model.safetensors" not in hub.downloads
             listed = (await (await client.get("/reef/scenarios/math/artifacts")).json())["artifacts"]
             assert listed[0]["source"] == {"uri": uri, "version": COMMIT}

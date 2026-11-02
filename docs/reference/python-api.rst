@@ -541,10 +541,15 @@ The session contract is:
    * - ``close()``
      - Release the session's record and commit resources; repeated calls are safe.
 
-``CommitRecord`` carries the operation (``training``, ``activate``,
-``train_from``, ``import`` or ``sync``; a ``sync`` activates its release and
-makes it the component's training start in one commit), the artifact ref, algorithm state, record watermark,
-consumed IDs, checkpoint/pending flags, metrics, and training job identity.
+``CommitRecord`` carries the operation, component selection, private storage
+locator, algorithm state, record watermark, consumed IDs, checkpoint/pending
+flags, metrics and training job identity. Operations include ``training``,
+``activate``, ``train_from``, ``import``, ``sync``, ``serve``,
+``stop_serving`` and ``restore``. Restore records a complete prior active
+selection and leaves training starts unchanged. A sync selects its new
+artifact for serving and training in one commit. Activation and serving record a complete selection without
+publishing another artifact snapshot. Older records without a selection
+remain readable through their stored artifact references.
 An ``activate`` or ``train_from`` record carries no trainer state. The store must atomically validate
 the current step before accepting a new successor: two different commits
 prepared from the same step cannot both succeed. An identical recorded retry
@@ -721,8 +726,9 @@ changes: the JSON object of a trajectory or a record, or the directory of a
 task, which the task file store keeps in the owner's partition. Its metadata
 is a JSON object. Reef reads ``kind`` (``trajectory``, ``task`` or
 ``record``), ``owner``, ``scenarios`` (scenario name to ``train`` or
-``eval``) and, for a record, ``origin`` (``{scenario, release_id,
-load_id}``). ``kind``, ``owner`` and ``origin`` never change. A deployment
+``eval``) and, for a record or artifact, ``origin``
+(``{scenario, artifact_id}``). Older origin metadata can carry ``release_id``;
+the input boundary accepts it for compatibility. ``kind``, ``owner`` and ``origin`` never change. A deployment
 selects the store in ``storage.data_store``; ``SQLiteDataStore`` and
 ``PostgresDataStore`` (``reef.storage.sql_data``) and ``MemoryDataStore`` are
 built in. Every operation names one owner and reads or writes only its items.
@@ -793,8 +799,13 @@ plugin implements one class method:
 - ``context`` is a ``RepositoryBackendContext``. ``work_dir`` and ``cache_dir``
   are ``storage.artifact_work_dir`` and ``storage.artifact_cache_dir``.
 
-Every scenario owns its root release, which Reef writes when it creates the
-scenario (`The root release <../user-guide/operate.rst#the-root-release>`__).
+Repository backends use *release* to mean a durable storage snapshot. Its
+revision and checksum are private locators; the public identity belongs to
+each component's ``artifact_id``. Activating or serving an existing artifact
+updates scenario selections without calling ``publish``.
+
+Every scenario owns its root snapshot, which Reef writes when it creates the
+scenario (`Starting artifacts <../user-guide/operate.rst#starting-artifacts>`__).
 A backend shares no release between scenarios. It must:
 
 - Implement ``register(root, *, metadata)``. ``root`` is an unpublished

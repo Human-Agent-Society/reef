@@ -466,7 +466,7 @@ def test_composite_scenario_serves_its_config_and_reports_components(tmp_path: P
         manifest = RequestService(dispatcher).harness_manifest({"x-reef-scenario": "agent"}, form="source")
         assert manifest["files"] == {"harness.txt": "harness step 1"}
         assert set(manifest["components"]) == {"harness", "config"}
-        assert manifest["components"]["harness"] == checkpoint.artifact.ref.content_id
+        assert manifest["components"]["harness"] == scenario.artifact_status()["harness"]["active"]
 
 
 @dataclass(frozen=True)
