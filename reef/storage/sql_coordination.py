@@ -1300,8 +1300,10 @@ class SQLWorkQueue(WorkQueue):
             )
             .group_by(self.table.c.state)
         )
+        counts: dict[str, int] = dict.fromkeys(WORK_STATES, 0)
         with self.database.read() as connection:
-            return {**dict.fromkeys(WORK_STATES, 0), **{state: count for state, count in connection.execute(query)}}
+            counts.update(connection.execute(query).tuples().all())
+        return counts
 
 
 def open_coordination_database(
