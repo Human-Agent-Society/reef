@@ -47,6 +47,7 @@ from reef.core.atif_payloads import (
     canonical_json,
     provider_payload,
 )
+from reef.core.errors import ReefError
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.serving_config import ServingConfig
 from reef.core.trajectory_index import CallKey, ParentCandidate, best_parent, call_key, sha256_text, trajectory_calls
@@ -370,11 +371,14 @@ class TrajectoryNodes:
         texts: dict[int, tuple[str, str | None, str]] = {}
         packed: dict[int, SegmentLine] = {}
         for row in rows:
-            line = None if row["entries_json"] is not None else row_line(row)
+            sequence = int(row["node_sequence"])
+            if row["entries_json"] is not None:
+                texts[sequence] = (row["entries_json"], row["shape_json"], row["call_json"])
+                continue
+            line = None if self.segments is None else row_line(row)
             if line is None:
-                texts[int(row["node_sequence"])] = (row["entries_json"], row["shape_json"], row["call_json"])
-            else:
-                packed[int(row["node_sequence"])] = line
+                raise ReefError(f"trajectory node {sequence} is in a segment, but the store has no segment store")
+            packed[sequence] = line
         if packed and self.segments is not None:
             for sequence, text in zip(packed, self.segments.read_text(list(packed.values())), strict=True):
                 texts[sequence] = node_texts(text)
