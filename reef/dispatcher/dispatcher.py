@@ -21,6 +21,7 @@ from reef.core.errors import ReefError, ScenarioCapacityFull, UnknownScenario
 from reef.core.job_data import TrajectorySample
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.served_models import CACHE_SECONDS
+from reef.core.serving_config import ServingConfig
 from reef.dispatcher import ingest
 from reef.dispatcher.data_sync_worker import DataSyncWorker, ItemSync
 from reef.dispatcher.errors import TrainingErrors
@@ -815,10 +816,16 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         ``activation`` are the stored settings, or None. ``effective_activation`` is the rule that applies: the
         scenario's ``activation``, else the deployment's. ``serving_config`` is the stored serving config, and
         ``effective_serving_config`` the serving fields of each component with the values that the scenario serves
-        with (``Scenario.effective_serving_config``). Raise ``UnknownScenario`` for an unknown scenario.
+        with (``Scenario.effective_serving_config``): those of the stored config, which control may have changed
+        after this process loaded the scenario, or the deployment's when the runtime refuses the stored config, as
+        a load does. Raise ``UnknownScenario`` for an unknown scenario.
         """
         with self.locked_scenario(scenario) as current:
             settings = self.registry.stored_settings(scenario)
+            try:
+                effective_serving = current.effective_serving_config(settings.serving_config)
+            except ValueError:
+                effective_serving = current.effective_serving_config(ServingConfig())
             return {
                 "scenario": scenario,
                 "training_mode": current.training_mode,
@@ -826,7 +833,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
                 "activation": settings.activation,
                 "effective_activation": self.registry.effective_activation(settings),
                 "serving_config": settings.serving_config.to_json(),
-                "effective_serving_config": current.effective_serving_config(current.serving_config),
+                "effective_serving_config": effective_serving,
             }
 
     def imported_tasks(self, scenario: str) -> tuple[StoredSample, ...]:
