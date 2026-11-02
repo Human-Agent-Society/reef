@@ -108,8 +108,8 @@ jobs:
   test-suites:
     needs: [select-tests]
     name: ${{ matrix.suite }} tests (${{ matrix.python-version }})
-    # Real nested network namespaces are only proven on the GitHub runner.
-    runs-on: ${{ matrix.suite == 'sandbox' && 'ubuntu-latest' || 'blacksmith-8vcpu-ubuntu-2404' }}
+    # Nested bubblewrap jails require the verified Ubuntu 24.04 runner configuration.
+    runs-on: ${{ matrix.suite == 'sandbox' && 'ubuntu-24.04' || 'blacksmith-8vcpu-ubuntu-2404' }}
     timeout-minutes: 10
     services:
       postgres:
