@@ -19,6 +19,7 @@ import pytest
 reef_service = pytest.importorskip("reef.service.app", reason="requires a reef checkout")
 
 from aiohttp.test_utils import TestClient, TestServer
+from tests.support.inference import wait_for_inference
 
 from recipes.beta.coral.journal import CallJournal
 from recipes.beta.coral.middleware import ReefGatewayMiddleware
@@ -109,6 +110,7 @@ def test_full_loop_against_real_reef_service(tmp_path):
         reef_client = TestClient(TestServer(reef_service.create_app(dispatcher, inference_handler=_EchoBackend())))
         await reef_client.start_server()
         try:
+            await wait_for_inference(reef_client, "coral-demo")
             journal = CallJournal(tmp_path / "calls.jsonl")
             mw = ReefGatewayMiddleware(
                 _HttpForwarder(reef_client),

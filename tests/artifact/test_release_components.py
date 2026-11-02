@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from tests.support.runtime_stubs import StubInferenceRuntime
+from tests.support.serving import wait_for_serving
 
 from reef.artifact import (
     Artifact,
@@ -252,7 +254,7 @@ class _TwoComponentRecipe(Recipe):
 
 @pytest.mark.unit
 def test_multi_component_scenario_commits_one_component_and_carries_the_rest(tmp_path: Path) -> None:
-    recipe = _TwoComponentRecipe()
+    recipe = _TwoComponentRecipe(runtime=StubInferenceRuntime())
     activator = recipe.activator
     activator.activated.clear()
     dispatcher = Dispatcher(
@@ -270,6 +272,7 @@ def test_multi_component_scenario_commits_one_component_and_carries_the_rest(tmp
         assert base.components is not None
         assert base.components.names == (WEIGHTS, HARNESS)
         base_weights = base.components.entries[WEIGHTS].content_id
+        wait_for_serving(dispatcher, "agent")
         assert activator.activated == [base_weights]
         assert surface.files is not None
         assert surface.files.read_files(base) == {"AGENTS.md": "seed"}
@@ -283,6 +286,7 @@ def test_multi_component_scenario_commits_one_component_and_carries_the_rest(tmp
         assert after_harness.components.entries[HARNESS].content_id == evolved.ref.content_id
         assert surface.files.read_files(after_harness) == {"AGENTS.md": "evolved"}
         assert TextFileTree().read_files(after_harness.component(WEIGHTS)) == {"adapter_config.json": "{}"}
+        wait_for_serving(dispatcher, "agent")
         assert activator.activated == [base_weights]
 
         # A weights step activates the new weights and keeps the evolved harness.
@@ -295,6 +299,7 @@ def test_multi_component_scenario_commits_one_component_and_carries_the_rest(tmp
         assert after_weights.components.entries[WEIGHTS].content_id == trained.ref.content_id
         assert dict(after_weights.component(WEIGHTS).metadata) == {"runtime_load_id": "inc:1"}
         assert surface.files.read_files(after_weights) == {"AGENTS.md": "evolved"}
+        wait_for_serving(dispatcher, "agent")
         assert activator.activated[0] == base_weights
         assert set(activator.activated[1:]) == {trained.ref.content_id}
         # The record names the harness trainer, but the tree did not change: no new harness head.
@@ -328,6 +333,7 @@ def test_multi_component_scenario_commits_one_component_and_carries_the_rest(tmp
         assert served.components is not None
         assert served.components.entries[WEIGHTS].content_id == trained.ref.content_id
         assert surface.files.read_files(served) == {"AGENTS.md": "evolved"}
+        wait_for_serving(dispatcher, "agent")
         assert activator.activated[served_before:] == []
         assert service.harness_release_id(scenario) == after_harness.ref.release_id
 
@@ -344,6 +350,7 @@ def test_multi_component_scenario_commits_one_component_and_carries_the_rest(tmp
         assert served.components is not None
         assert served.components.entries[WEIGHTS].content_id == base_weights
         assert surface.files.read_files(served) == {"AGENTS.md": "evolved"}
+        wait_for_serving(dispatcher, "agent")
         assert activator.activated[served_before:] == [base_weights]
         assert scenario.repository.checkpoint_artifact == tip
 
@@ -380,6 +387,7 @@ def test_multi_component_scenario_commits_one_component_and_carries_the_rest(tmp
         assert served.components is not None
         assert served.components.entries[WEIGHTS].content_id == held_weights.ref.content_id
         assert surface.files.read_files(served) == {"AGENTS.md": "newest"}
+        wait_for_serving(dispatcher, "agent")
         assert activator.activated[-1] == held_weights.ref.content_id
         # That activation changed no tree: the harness head and catalog stay at the newest harness step.
         assert service.harness_release_id(scenario) == newest_release

@@ -33,7 +33,7 @@ class ServedArtifact:
     query or fragment: the engine outside the Reef process. ``model_name`` is the name that the engine serves the
     artifact under, a non-empty string.
 
-    Purpose: a runtime makes it for the artifact that it serves (``InferenceRuntime.served_artifact``); control
+    Purpose: a runtime makes it for the artifact that it serves (``InferenceRuntime.served_artifact``); inference
     writes it to ``served_models``, and inference replicas send requests with it.
     """
 
@@ -71,7 +71,7 @@ class ScenarioModel:
     artifact ID for an artifact served beside the active one, or the name of an auxiliary model that the scenario
     configures, such as a judge. ``name`` is a non-empty string.
 
-    Purpose: control writes ``served_models`` under it; an inference replica reads the row of the request's key.
+    Purpose: inference writes ``served_models`` under it; an inference replica reads the row of the request's key.
     """
 
     scenario: str
@@ -84,12 +84,12 @@ class ScenarioModel:
 
 @dataclass(frozen=True)
 class ScheduledStop:
-    """A served artifact that control stops serving at a time.
+    """A served artifact that inference stops serving at a time.
 
     Values: ``served`` is a ``ServedArtifact``; ``stop_after`` is a finite time in seconds since the epoch.
 
-    Purpose: control adds one when it replaces or removes a ``served_models`` value that no row names any more, so
-    that requests that already read the old value end before it stops (``stop_delay_seconds``). Control reads the
+    Purpose: a route update adds one when it replaces or removes a ``served_models`` value that no row names any more, so
+    that requests that already read the old value end before it stops (``stop_delay_seconds``). Inference reads the
     due ones, asks the runtime at ``served.url`` to stop serving the value when no row names it, and deletes them.
     """
 

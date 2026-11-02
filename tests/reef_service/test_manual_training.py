@@ -18,6 +18,7 @@ from tests.support.harness_service import catalog, drive_trainer_job, harness_di
 from tests.support.harness_steps import COMPONENT, UNCHANGED, TreeReleases, changed_rules, harness_recipe
 from tests.support.runtime_stubs import STUB_ROOT, RecordingComponent, StubInferenceRuntime, StubTrainingComponent
 from tests.support.samples_service import make_samples as produce_samples
+from tests.support.serving import wait_for_serving
 from tests.train.test_harness_evolve_processor import harness_stages, records_pipeline, reports_pipeline
 from tests.train.test_reef_trainer_contracts import ExampleJobData
 
@@ -1067,8 +1068,10 @@ def test_a_job_trainer_runs_each_instruction_as_a_job_and_a_failed_job_does_not_
     )
     assert failed["training_job"]["error"] == "RuntimeError: job failed"
     # Only the second job saved a checkpoint, and its release now serves.
-    assert runtime.served == "w2"
+    wait_for_serving(dispatcher, "s")
     scenario = dispatcher.get_or_create_scenario("s")
+    assert runtime.served == scenario.current_artifact_ref().release_id
+    assert (scenario.repository.resolve(scenario.current_artifact_ref()).local_path / "model.txt").read_text() == "w2"
     assert scenario.trainer.pipeline.training_mode == "manual"
     assert scenario.trainer.pending_instructions() == 0
 
