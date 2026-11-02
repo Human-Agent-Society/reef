@@ -13,7 +13,7 @@ from collections.abc import Iterator, Mapping, Sequence
 from contextlib import closing, contextmanager
 from pathlib import Path
 from threading import RLock
-from typing import Any, ClassVar, Self
+from typing import Any, Self
 from weakref import WeakValueDictionary
 
 from sqlalchemy import REAL, URL, Column, Index, Integer, MetaData, Table, Text, create_engine, inspect
@@ -48,6 +48,10 @@ from reef.storage.sql_records import (
 from reef.storage.sql_samples import SQLSampleStore, manual_buffer_table, sample_table, sample_train_count_table
 from reef.storage.sql_tasks import SQLTaskStorage, task_tables
 from reef.storage.tasks import LocalTaskFileStore, TaskFileStore
+
+# Named memory databases share table locks; weak references release locks after their last store is gone.
+memory_locks: WeakValueDictionary[str, RLock] = WeakValueDictionary()
+memory_locks_lock = RLock()
 
 _METADATA = MetaData()
 _AGENT_RECORD = Table(
@@ -177,10 +181,6 @@ class SQLiteRecordStore(SQLRecordStore):
     operation that deletes record bodies.
     """
 
-    # Named memory databases share table locks; weak references release locks after their last store is gone.
-    memory_locks: ClassVar[WeakValueDictionary[str, RLock]] = WeakValueDictionary()
-    memory_locks_lock: ClassVar[RLock] = RLock()
-
     _WAL_SWITCH_TIMEOUT = 30.0
     _WAL_RETRY_INTERVAL = 0.01
 
@@ -196,11 +196,11 @@ class SQLiteRecordStore(SQLRecordStore):
         if memory_name is None:
             self.transaction_lock = RLock()
         else:
-            with self.memory_locks_lock:
-                shared_lock = self.memory_locks.get(memory_name)
+            with memory_locks_lock:
+                shared_lock = memory_locks.get(memory_name)
                 if shared_lock is None:
                     shared_lock = RLock()
-                    self.memory_locks[memory_name] = shared_lock
+                    memory_locks[memory_name] = shared_lock
                 self.transaction_lock = shared_lock
         super().__init__(_TABLES)
         url = (
