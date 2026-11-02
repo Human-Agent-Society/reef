@@ -154,7 +154,8 @@ class ServedModelsPublisher(ServiceWorker):
             self.stopped.wait(self.interval_seconds)
 
     def desired(self, scenario: str) -> dict[str, JsonValue]:
-        """The selected release and route names, without opening or calling an engine."""
+        """The selected release, the route names and the serving config of the served component, without opening
+        or calling an engine."""
         current = self.registry.get_loaded(scenario)
         if current is None or current.runtime is None or not current.runtime.serves_requests:
             return {}
@@ -173,6 +174,7 @@ class ServedModelsPublisher(ServiceWorker):
             "selection": cast(dict[str, JsonValue], current.artifact_selection().to_dict()),
             "aliases": aliases,
             "beside": beside,
+            "serving_config": current.served_serving_config(),
         }
 
     def publish(self, current: Scenario, *, now: float | None = None, retry_failed: bool = False) -> None:

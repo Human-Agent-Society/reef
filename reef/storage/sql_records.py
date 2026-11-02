@@ -48,6 +48,7 @@ from reef.core.atif_payloads import (
     provider_payload,
 )
 from reef.core.records_types import AgentRecord, RequestType
+from reef.core.serving_config import ServingConfig
 from reef.core.trajectory_index import CallKey, ParentCandidate, best_parent, call_key, sha256_text, trajectory_calls
 from reef.storage.records import (
     AppendResult,
@@ -1143,6 +1144,7 @@ class SQLRecordStore(RecordStore):
             artifact_evaluation=values.get("artifact_evaluation"),
             activation=values.get("activation"),
             owner=values.get("owner"),
+            serving_config=ServingConfig.from_json(values.get("serving_config", {})),
         )
 
     def write_settings(self, settings: ScenarioSettings) -> None:
@@ -1155,6 +1157,7 @@ class SQLRecordStore(RecordStore):
             ),
             "activation": None if settings.activation is None else dict(settings.activation),
             "owner": settings.owner,
+            "serving_config": settings.serving_config.to_json() or None,
         }
         rows = [
             {**self._tables.scope, "name": name, "value_json": json.dumps(value, ensure_ascii=False)}
