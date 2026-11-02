@@ -14,9 +14,11 @@ from reef.artifact.repository import Repository
 from reef.artifact.sources import SourceFiles
 from reef.core.activation import ActivationRule
 from reef.core.artifact_ref import RootSource
+from reef.core.artifact_selection import ArtifactSelection
 from reef.core.components import RECORDS_COMPONENT
 from reef.core.errors import ReefError
 from reef.core.reports import ReportBase
+from reef.core.served_models import ScenarioModel
 from reef.observability.commits import CommitExperimentObserver
 from reef.observability.operations import OperationMetrics
 from reef.runtime.interfaces import InferenceRuntime
@@ -302,12 +304,21 @@ class Scenario:
         for a long evaluation.
         """
         trainer = self.trainer_for(component)
-        self.refresh_instructions()
         with self._committer.lock if len(self.trainers) == 1 else nullcontext():
             # The staleness check measures data against the weights that serve; a scenario that loads no weights
             # serves one fixed model, so its data never goes stale.
-            weights_load = self._binding.surface.loader_component is not None and self.runtime is not None
-            serving = self.serving_artifact_id() if weights_load else None
+            runtime = self.runtime
+            weights_load = self._binding.surface.loader_component is not None and runtime is not None
+            serving = self.served_artifact_id() if weights_load else None
+            if (
+                weights_load
+                and runtime is not None
+                and runtime.serves_requests
+                and self._binding.served_models is not None
+                and serving != self.serving_artifact_id()
+            ):
+                return None
+            self.refresh_instructions()
             return trainer.run_once(serving_artifact_id=serving)
 
     def pending_instructions(self) -> int:
@@ -326,21 +337,37 @@ class Scenario:
             self.instructions.give(component_trainer.trainer for component_trainer in self.trainers)
 
     def served_component(self) -> str | None:
-        """The component whose artifact the runtime serves: the component that the runtime loads, or the only
-        component; None when the scenario has several components and the runtime loads none of them."""
+        """The loaded component, the pulled file component, or the sole component; None for an ambiguous surface."""
         loader = self._binding.surface.loader_component
         if loader is not None:
             return loader
+        files = self._binding.surface.files_component
+        if files is not None:
+            return files
         names = self._committer.component_names()
         return names[0] if len(names) == 1 else None
 
     def serving_artifact_id(self) -> str:
-        """The artifact that answers this scenario's requests now: the active artifact of ``served_component``,
-        or the active release for a scenario whose model is no Reef artifact or whose store keeps no commit
-        history to name the active artifact."""
+        """The selected artifact of the served component; an ambiguous surface cannot name one artifact."""
         component = self.served_component()
-        active = None if component is None or not self.store.durable else self.artifact_status()[component]["active"]
-        return active or self.current_artifact_ref().release_id
+        if component is None:
+            raise ReefError(f"scenario {self.name!r} has no unique component for inference")
+        active = self.artifact_status()[component]["active"] if self.store.durable else None
+        if active is not None:
+            return active
+        return self.repository.resolve(self.current_artifact_ref()).component(component).artifact_id
+
+    def served_artifact_id(self) -> str | None:
+        """The artifact that serves requests, or None before inference publishes a route.
+
+        Standalone scenarios activate their own runtime, so their selected artifact is also their served artifact.
+        Training uses this identity while a newly selected artifact still starts.
+        """
+        routes = self._binding.served_models
+        if routes is None:
+            return self.serving_artifact_id() if self._binding.activates_runtime else None
+        served = routes.read(ScenarioModel(self.name))
+        return None if served is None else served.artifact_id
 
     def replay_retained(
         self, *, up_to_sequence: int, consumed_ids: frozenset[str], component: str | None = None
@@ -357,7 +384,11 @@ class Scenario:
     @property
     def commit_status(self) -> Mapping[str, Any]:
         """The non-blocking committed step, training outcome, and artifact-head sync status."""
-        return self._committer.commit_status
+        status = dict(self._committer.commit_status)
+        status["artifact_head_sync"] = {
+            key: value for key, value in status["artifact_head_sync"].items() if key != "release_id"
+        }
+        return status
 
     def last_commit_for(self, component: str | None) -> CommitRecord | None:
         """The newest durable commit made by ``component``'s trainer, read from the commit history without waiting on a commit."""
@@ -368,14 +399,36 @@ class Scenario:
         with self.release_queries.publication_lock:
             return self.release_queries.releases(self._committer.step)
 
-    def artifacts(self) -> tuple[dict[str, Any], ...]:
-        """Each component's artifacts, newest first, with each component's active one marked."""
+    def artifact_rows(self) -> tuple[dict[str, Any], ...]:
+        """Internal artifact catalog, including the storage locators needed to materialize each artifact."""
         with self.release_queries.publication_lock:
             return self.release_queries.artifacts(self._committer.step, self._committer.component_names())
 
+    def artifacts(self) -> tuple[dict[str, Any], ...]:
+        """Public artifact catalog, with opaque artifact identities and component-specific parent links."""
+        with self.release_queries.publication_lock:
+            parents = self.release_queries.artifact_parents(self._committer.step, self._committer.component_names())
+            return tuple(
+                {
+                    **{
+                        key: value
+                        for key, value in row.items()
+                        if key not in {"release_id", "parent_release_id", "content_id"}
+                    },
+                    "parent_artifact_id": parents.get(row["artifact_id"]),
+                }
+                for row in self.artifact_rows()
+            )
+
     def current_artifact_ref(self) -> ArtifactRef:
-        """The active release."""
+        """The private storage or local-view locator of the current component selection."""
         return self._artifact_chain.current
+
+    def artifact_selection(self, ref: ArtifactRef | None = None) -> ArtifactSelection:
+        """Return the complete component selection, including durable locators for independent serving workers."""
+        with self.release_queries.publication_lock:
+            artifact = Artifact(self.current_artifact_ref() if ref is None else ref, self.repository)
+            return self.repository.selection(artifact, self._committer.component_names())
 
     def resume_training_starts(self) -> None:
         """Give each trainer the training start of a ``train_from`` record that its own training commits do not hold yet."""
@@ -385,6 +438,10 @@ class Scenario:
     def activate(self, artifact_id: str, component: str | None = None) -> ComponentArtifact:
         """Make ``artifact_id`` serve as ``component``; see :meth:`ScenarioCommitter.activate`."""
         return self._committer.activate(artifact_id, component)
+
+    def restore(self, step: int) -> Mapping[str, str]:
+        """Restore the full component selection after ``step`` without changing training starts."""
+        return self._committer.restore(step)
 
     def serve(self, artifact_id: str, component: str | None = None) -> ComponentArtifact:
         """Serve ``artifact_id`` beside the active release; see :meth:`ScenarioCommitter.serve`."""

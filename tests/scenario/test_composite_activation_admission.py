@@ -65,11 +65,11 @@ def _dispatcher(tmp_path: Path, recipe: type[_LoadedRecipe] = _LoadedRecipe) -> 
 
 
 def _scenario(dispatcher: Dispatcher, runtime: StubInferenceRuntime):
-    """The scenario with its inference runtime bound on the committer alone, after the creation activated the base."""
+    """Bind a standalone runtime for direct commit and admission checks."""
     scenario = dispatcher.get_or_create_scenario("agent")
     # Loading the scenario woke its workers: stopped, they leave every step to the test.
     stop_workers(dispatcher, "agent")
-    binding = replace(scenario._binding, runtime=runtime)
+    binding = replace(scenario._binding, runtime=runtime, activates_runtime=True, served_models=None)
     scenario._binding = binding
     scenario._committer._binding = binding
     return scenario
@@ -139,9 +139,10 @@ def test_activating_a_held_harness_release_leaves_held_admission_closed(tmp_path
         runtime.close_admission()
         runtime.served = "before"
         activated = scenario.activate(held["artifact_id"], HARNESS)
-        assert activated.artifact_id == f"{held['release_id']}:{HARNESS}"
-        # The activation publishes the combination: the held harness on the weights served now.
-        assert activated.release_id != held["release_id"]
+        assert activated.artifact_id == held["artifact_id"]
+        # The activation records a selection of existing artifacts and materializes it locally.
+        assert scenario.store.history()[-1].selection is not None
+        assert not scenario.store.history()[-1].made_artifact
         assert component_files(scenario, scenario.current_artifact_ref()) == {
             WEIGHTS: "weights seed",
             HARNESS: "harness step 1",
@@ -393,7 +394,7 @@ def test_an_import_binds_one_component_on_the_active_release_and_activates_nothi
 
 @pytest.mark.unit
 def test_a_served_harness_binds_the_weights_served_now_and_leaves_the_active_release(tmp_path: Path) -> None:
-    """A serve publishes the combination beside the chain, as an activation does, and moves no head."""
+    """A serve records its component selection without publishing artifacts or moving a head."""
     runtime = StubInferenceRuntime()
     dispatcher = _dispatcher(tmp_path)
     try:

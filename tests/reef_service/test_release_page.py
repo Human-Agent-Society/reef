@@ -15,6 +15,7 @@ import asyncio
 import html
 import json
 import re
+from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
 from urllib.parse import urlencode
@@ -131,6 +132,16 @@ def _chain(tmp_path: Path) -> Dispatcher:
     return dispatcher
 
 
+@pytest.fixture(scope="module")
+def chain_dispatcher(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Dispatcher]:
+    """Build the shared read-only release chain once; mutation tests build their own."""
+    dispatcher = _chain(tmp_path_factory.mktemp("release-pages"))
+    try:
+        yield dispatcher
+    finally:
+        dispatcher.close()
+
+
 def _pages(dispatcher: Dispatcher, *paths: str) -> list[tuple[int, str, str]]:
     async def run() -> list[tuple[int, str, str]]:
         client = TestClient(TestServer(create_app(dispatcher)))
@@ -186,143 +197,137 @@ def _hero(page: str) -> str:
     return body
 
 
-def test_the_page_for_a_published_step_carries_the_request_the_result_and_the_chain(tmp_path: Path) -> None:
-    dispatcher = _chain(tmp_path)
-    try:
-        rows = list(reversed(catalog(dispatcher.get_or_create_scenario(SCENARIO))))
-        page = _page(dispatcher, 1)
-        assert page.startswith("<!doctype html>") and "<title>Harness v1</title>" in page
-        assert '<meta name="viewport" content="width=device-width, initial-scale=1">' in page
-        assert "<h1>Harness v1</h1>" in page
-        assert _sections(page) == ["Why", "What changed", "Result", "Setup", "Chain"]
-        assert FIRST in _section(page, "Why") and "3f1c2a9d0b7e" in _section(page, "Why")
-        changed = _section(page, "What changed")
-        # The patch file by file, each updated file diffed against the release the step ran on.
-        assert '<span class="tag operation-update">update</span><span class="node-id">rules.md</span>' in changed
-        assert (
-            '<span class="del">-Answer briefly.</span>' in changed
-            and '<span class="add">+marker rules</span>' in changed
-        )
-        selection_result = _section(page, "Result")
-        assert '<span class="selected">Published</span>' in selection_result
-        assert "<dt>Wins</dt><dd>1</dd>" in selection_result and "<dt>Losses</dt><dd>0</dd>" in selection_result
-        assert (
-            "<dt>Candidate score</dt><dd>1.0</dd>" in selection_result
-            and "<dt>Current score</dt><dd>0.0</dd>" in selection_result
-        )
-        assert "<dt>Run failures</dt><dd>0</dd>" in selection_result
-        assert "nothing to set up" in _section(page, "Setup")
-        chain = _section(page, "Chain")
-        assert rows[0]["release_id"] in chain and rows[1]["release_id"] in chain
-        # The inactive extension update was evaluated against this head, so it is this release's child.
-        assert f">v4</a><span class=\"id\">{rows[4]['release_id']}</span>" in chain
-        data = _data(page)
-        assert data["release_id"] == rows[1]["release_id"] and data["metrics"]["training_request"]["text"] == FIRST
-        assert data["metrics"]["training_request"]["requires"] == []
-    finally:
-        dispatcher.close()
+def test_release_pages_show_the_chain_active_release_and_unknown_steps(chain_dispatcher: Dispatcher) -> None:
+    dispatcher = chain_dispatcher
+    rows = list(reversed(catalog(dispatcher.get_or_create_scenario(SCENARIO))))
+    page = _page(dispatcher, 1)
+    assert page.startswith("<!doctype html>") and "<title>Harness v1</title>" in page
+    assert '<meta name="viewport" content="width=device-width, initial-scale=1">' in page
+    assert "<h1>Harness v1</h1>" in page
+    assert _sections(page) == ["Why", "What changed", "Result", "Setup", "Chain"]
+    assert FIRST in _section(page, "Why") and "3f1c2a9d0b7e" in _section(page, "Why")
+    changed = _section(page, "What changed")
+    # The patch file by file, each updated file diffed against the release the step ran on.
+    assert '<span class="tag operation-update">update</span><span class="node-id">rules.md</span>' in changed
+    assert (
+        '<span class="del">-Answer briefly.</span>' in changed and '<span class="add">+marker rules</span>' in changed
+    )
+    selection_result = _section(page, "Result")
+    assert '<span class="selected">Published</span>' in selection_result
+    assert "<dt>Wins</dt><dd>1</dd>" in selection_result and "<dt>Losses</dt><dd>0</dd>" in selection_result
+    assert (
+        "<dt>Candidate score</dt><dd>1.0</dd>" in selection_result
+        and "<dt>Current score</dt><dd>0.0</dd>" in selection_result
+    )
+    assert "<dt>Run failures</dt><dd>0</dd>" in selection_result
+    assert "nothing to set up" in _section(page, "Setup")
+    chain = _section(page, "Chain")
+    assert rows[0]["release_id"] in chain and rows[1]["release_id"] in chain
+    # The inactive extension update was evaluated against this head, so it is this release's child.
+    assert f">v4</a><span class=\"id\">{rows[4]['release_id']}</span>" in chain
+    data = _data(page)
+    assert data["release_id"] == rows[1]["release_id"] and data["metrics"]["training_request"]["text"] == FIRST
+    assert data["metrics"]["training_request"]["requires"] == []
+
+    page = _page(dispatcher, 0)
+    assert "<title>Harness v0</title>" in page
+    assert "no step made it" in _section(page, "Why")
+    assert "this release is the seed tree" in _section(page, "What changed")
+    assert '<span class="creation">Starting point</span>' in _section(page, "Result")
+    chain = _section(page, "Chain")
+    # Only the win ran on the seed; the two rejected candidates ran on the win, whose id their rows carry.
+    assert chain.count('class="step-name"') == 1
+    assert f'>v1</a><span class="id">{rows[1]["release_id"]}</span><span class="selected">Published</span>' in chain
+    assert '<span class="rejected">' not in chain
+    # Each child links the page of its own step, opened the way this one was.
+    assert 'href="/reef/harness/releases/1/page"' in chain
+    head = _section(_page(dispatcher, 1), "Chain")
+    assert head.count('class="step-name"') == 3 and ">v1</a>" not in head
+    for step in (2, 3):
+        assert f'>v{step}</a><span class="id">{rows[1]["release_id"]}</span><span class="rejected"' in head
+    assert (
+        f'>v4</a><span class="id">{rows[4]["release_id"]}</span><span class="inactive">Waiting for activation</span>'
+        in head
+    )
+
+    (missing, letters, long, longer) = _pages(
+        dispatcher,
+        "/reef/harness/releases/9/page",
+        "/reef/harness/releases/x/page",
+        "/reef/harness/releases/9999999999/page",
+        f"/reef/harness/releases/{'9' * 5000}/page",
+    )
+    assert missing[0] == 404 and "has no step 9" in missing[2] and "steps 0 to 4" in missing[2]
+    assert letters[0] == 404
+    # Ten digits and more never match the route: no catalog is that long, and int() would balk past 4300.
+    assert long[0] == 404 and longer[0] == 404
+
+    # The newest row made an inactive release, so it is not active.
+    assert rows[4]["active"] is False and rows[1]["active"] is True
+    assert served_step(rows) == 1
+    assert '<span class="chip">Active release</span>' in _sub(_page(dispatcher, 1))
+    for step in (0, 2, 3, 4):
+        assert "Active release" not in _sub(_page(dispatcher, step))
 
 
-def test_the_page_for_an_inactive_extension_step_diffs_the_file_against_the_head(tmp_path: Path) -> None:
-    dispatcher = _chain(tmp_path)
-    try:
-        rows = list(reversed(catalog(dispatcher.get_or_create_scenario(SCENARIO))))
-        page = _page(dispatcher, 4)
-        assert "<title>Harness v4</title>" in page
-        assert FOURTH.replace("<", "&lt;") in _section(page, "Why")
-        changed = _section(page, "What changed")
-        assert (
-            f'<span class="tag operation-update">update</span><span class="node-id">{EXTENSION_PATH}</span>' in changed
-        )
-        # A unified diff of the source file against the copy in the release it ran on, the added line marked.
-        assert f"--- {EXTENSION_PATH} ({rows[1]['release_id'][:8]})" in changed
-        assert f"+++ {EXTENSION_PATH} ({rows[4]['release_id'][:8]})" in changed
-        assert '<span class="add">+  pi.on(&quot;session_start&quot;, () =&gt; {});</span>' in changed
-        assert "if (1 &lt; 2) return;" in changed
-        # The rules bump that made the patch win rides beside it.
-        assert '<span class="add">+marker marker rules</span>' in changed
-        selection_result = _section(page, "Result")
-        assert '<span class="inactive">Waiting for activation</span>' in selection_result
-        assert "a person activates it first" in selection_result
-        chain = _section(page, "Chain")
-        assert f'<dt>Parent</dt><dd class="id">{rows[1]["release_id"]}</dd>' in chain
-        assert rows[4]["release_id"] in chain and "<li>" not in chain
-        data = _data(page)
-        assert data["active"] is False and data["metrics"]["patch"][EXTENSION_PATH] == NEW_CODE
-    finally:
-        dispatcher.close()
+def test_the_page_for_an_inactive_extension_step_diffs_the_file_against_the_head(chain_dispatcher: Dispatcher) -> None:
+    dispatcher = chain_dispatcher
+    rows = list(reversed(catalog(dispatcher.get_or_create_scenario(SCENARIO))))
+    page = _page(dispatcher, 4)
+    assert "<title>Harness v4</title>" in page
+    assert FOURTH.replace("<", "&lt;") in _section(page, "Why")
+    changed = _section(page, "What changed")
+    assert f'<span class="tag operation-update">update</span><span class="node-id">{EXTENSION_PATH}</span>' in changed
+    # A unified diff of the source file against the copy in the release it ran on, the added line marked.
+    assert f"--- {EXTENSION_PATH} ({rows[1]['release_id'][:8]})" in changed
+    assert f"+++ {EXTENSION_PATH} ({rows[4]['release_id'][:8]})" in changed
+    assert '<span class="add">+  pi.on(&quot;session_start&quot;, () =&gt; {});</span>' in changed
+    assert "if (1 &lt; 2) return;" in changed
+    # The rules bump that made the patch win rides beside it.
+    assert '<span class="add">+marker marker rules</span>' in changed
+    selection_result = _section(page, "Result")
+    assert '<span class="inactive">Waiting for activation</span>' in selection_result
+    assert "a person activates it first" in selection_result
+    chain = _section(page, "Chain")
+    assert f'<dt>Parent</dt><dd class="id">{rows[1]["release_id"]}</dd>' in chain
+    assert rows[4]["release_id"] in chain and "<li>" not in chain
+    data = _data(page)
+    assert data["active"] is False and data["metrics"]["patch"][EXTENSION_PATH] == NEW_CODE
 
 
-def test_the_page_for_a_rejected_step_names_the_head_it_ran_on_and_the_candidate(tmp_path: Path) -> None:
-    dispatcher = _chain(tmp_path)
-    try:
-        rows = list(reversed(catalog(dispatcher.get_or_create_scenario(SCENARIO))))
-        page = _page(dispatcher, 2)
-        assert SECOND in _section(page, "Why") and "s2" in _section(page, "Why")
-        # A rejected step ran on the head, so its patch reads against the head's files.
-        changed = _section(page, "What changed")
-        assert '<span class="del">-marker rules</span>' in changed
-        assert '<span class="add">+Answer briefly, with care.</span>' in changed
-        selection_result = _section(page, "Result")
-        assert '<span class="rejected">Not selected</span>' in selection_result
-        assert (
-            "Did not pass the checks" in selection_result and "The active release did not change" in selection_result
-        )
-        assert "<dt>Wins</dt><dd>0</dd>" in selection_result and "<dt>Losses</dt><dd>1</dd>" in selection_result
-        chain = _section(page, "Chain")
-        assert rows[2]["release_id"] == rows[1]["release_id"]
-        assert f'{rows[1]["release_id"]} (the active release at this step; the candidate published nothing)' in chain
-        assert before_release_id(rows[2]) == rows[1]["release_id"]
-    finally:
-        dispatcher.close()
+def test_the_page_for_a_rejected_step_names_the_head_it_ran_on_and_the_candidate(chain_dispatcher: Dispatcher) -> None:
+    dispatcher = chain_dispatcher
+    rows = list(reversed(catalog(dispatcher.get_or_create_scenario(SCENARIO))))
+    page = _page(dispatcher, 2)
+    assert SECOND in _section(page, "Why") and "s2" in _section(page, "Why")
+    # A rejected step ran on the head, so its patch reads against the head's files.
+    changed = _section(page, "What changed")
+    assert '<span class="del">-marker rules</span>' in changed
+    assert '<span class="add">+Answer briefly, with care.</span>' in changed
+    selection_result = _section(page, "Result")
+    assert '<span class="rejected">Not selected</span>' in selection_result
+    assert "Did not pass the checks" in selection_result and "The active release did not change" in selection_result
+    assert "<dt>Wins</dt><dd>0</dd>" in selection_result and "<dt>Losses</dt><dd>1</dd>" in selection_result
+    chain = _section(page, "Chain")
+    assert rows[2]["release_id"] == rows[1]["release_id"]
+    assert f'{rows[1]["release_id"]} (the active release at this step; the candidate published nothing)' in chain
+    assert before_release_id(rows[2]) == rows[1]["release_id"]
 
 
-def test_the_page_for_an_automatic_step_without_a_request_says_a_failure_in_the_job_data(tmp_path: Path) -> None:
-    dispatcher = _chain(tmp_path)
-    try:
-        page = _page(dispatcher, 3)
-        assert "A failure in the job data" in _section(page, "Why")
-        changed = _section(page, "What changed")
-        assert (
-            '<span class="tag operation-create">create</span><span class="node-id">skills/notes/SKILL.md</span>'
-            in changed
-        )
-        assert "<pre># notes\n</pre>" in changed
-        assert '<span class="rejected">Not selected</span>' in _section(page, "Result")
-        # The trainer writes training_request on every request step's row; an automatic step has none.
-        assert "training_request" not in _data(page)["metrics"]
-    finally:
-        dispatcher.close()
-
-
-def test_the_chain_lists_the_steps_evaluated_against_a_release_as_its_children(tmp_path: Path) -> None:
-    dispatcher = _chain(tmp_path)
-    try:
-        rows = list(reversed(catalog(dispatcher.get_or_create_scenario(SCENARIO))))
-        page = _page(dispatcher, 0)
-        assert "<title>Harness v0</title>" in page
-        assert "no step made it" in _section(page, "Why")
-        assert "this release is the seed tree" in _section(page, "What changed")
-        assert '<span class="creation">Starting point</span>' in _section(page, "Result")
-        chain = _section(page, "Chain")
-        # Only the win ran on the seed; the two rejected candidates ran on the win, whose id their rows carry.
-        assert chain.count('class="step-name"') == 1
-        assert (
-            f'>v1</a><span class="id">{rows[1]["release_id"]}</span><span class="selected">Published</span>' in chain
-        )
-        assert '<span class="rejected">' not in chain
-        # Each child links the page of its own step, opened the way this one was.
-        assert 'href="/reef/harness/releases/1/page"' in chain
-        head = _section(_page(dispatcher, 1), "Chain")
-        assert head.count('class="step-name"') == 3 and ">v1</a>" not in head
-        for step in (2, 3):
-            assert f'>v{step}</a><span class="id">{rows[1]["release_id"]}</span><span class="rejected"' in head
-        assert (
-            f'>v4</a><span class="id">{rows[4]["release_id"]}</span><span class="inactive">Waiting for activation</span>'
-            in head
-        )
-    finally:
-        dispatcher.close()
+def test_the_page_for_an_automatic_step_without_a_request_says_a_failure_in_the_job_data(
+    chain_dispatcher: Dispatcher,
+) -> None:
+    dispatcher = chain_dispatcher
+    page = _page(dispatcher, 3)
+    assert "A failure in the job data" in _section(page, "Why")
+    changed = _section(page, "What changed")
+    assert (
+        '<span class="tag operation-create">create</span><span class="node-id">skills/notes/SKILL.md</span>' in changed
+    )
+    assert "<pre># notes\n</pre>" in changed
+    assert '<span class="rejected">Not selected</span>' in _section(page, "Result")
+    # The trainer writes training_request on every request step's row; an automatic step has none.
+    assert "training_request" not in _data(page)["metrics"]
 
 
 def test_the_page_carries_the_shared_layout_and_links_the_other_steps_with_the_query_it_was_opened_with() -> None:
@@ -423,24 +428,6 @@ def test_the_page_names_each_state_and_metric_in_the_words_the_request_page_uses
         assert status_label(state) == label
     # The creation row is no step's result; it reads as the starting point.
     assert '<span class="creation">Starting point</span>' in _hero(build_release_page(0, [creation]))
-
-
-def test_an_unknown_step_is_404_naming_the_range_and_a_non_number_is_404(tmp_path: Path) -> None:
-    dispatcher = _chain(tmp_path)
-    try:
-        (missing, letters, long, longer) = _pages(
-            dispatcher,
-            "/reef/harness/releases/9/page",
-            "/reef/harness/releases/x/page",
-            "/reef/harness/releases/9999999999/page",
-            f"/reef/harness/releases/{'9' * 5000}/page",
-        )
-        assert missing[0] == 404 and "has no step 9" in missing[2] and "steps 0 to 4" in missing[2]
-        assert letters[0] == 404
-        # Ten digits and more never match the route: no catalog is that long, and int() would balk past 4300.
-        assert long[0] == 404 and longer[0] == 404
-    finally:
-        dispatcher.close()
 
 
 def test_the_page_module_is_ascii_and_the_builder_escapes_every_angle_bracket() -> None:
@@ -628,20 +615,6 @@ def test_each_file_of_the_patch_reads_against_the_release_the_step_ran_on() -> N
     assert change(with_files, "remove", "rules.md") == "</div>"
     unchanged = build_release_page(1, [creation, row], before_files={EXTENSION_PATH: NEW_CODE})
     assert f"{EXTENSION_PATH} is unchanged" in _section(unchanged, "What changed")
-
-
-def test_active_marks_the_active_release_and_not_the_newest_row(tmp_path: Path) -> None:
-    dispatcher = _chain(tmp_path)
-    try:
-        rows = list(reversed(catalog(dispatcher.get_or_create_scenario(SCENARIO))))
-        # The newest row made an inactive release, so it is not active.
-        assert rows[4]["active"] is False and rows[1]["active"] is True
-        assert served_step(rows) == 1
-        assert '<span class="chip">Active release</span>' in _sub(_page(dispatcher, 1))
-        for step in (0, 2, 3, 4):
-            assert "Active release" not in _sub(_page(dispatcher, step))
-    finally:
-        dispatcher.close()
 
 
 def test_an_activated_step_reads_selected_and_adds_no_row(tmp_path: Path) -> None:

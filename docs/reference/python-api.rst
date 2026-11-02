@@ -541,10 +541,15 @@ The session contract is:
    * - ``close()``
      - Release the session's record and commit resources; repeated calls are safe.
 
-``CommitRecord`` carries the operation (``training``, ``activate``,
-``train_from``, ``import`` or ``sync``; a ``sync`` activates its release and
-makes it the component's training start in one commit), the artifact ref, algorithm state, record watermark,
-consumed IDs, checkpoint/pending flags, metrics, and training job identity.
+``CommitRecord`` carries the operation, component selection, private storage
+locator, algorithm state, record watermark, consumed IDs, checkpoint/pending
+flags, metrics and training job identity. Operations include ``training``,
+``activate``, ``train_from``, ``import``, ``sync``, ``serve``,
+``stop_serving`` and ``restore``. Restore records a complete prior active
+selection and leaves training starts unchanged. A sync selects its new
+artifact for serving and training in one commit. Activation and serving record a complete selection without
+publishing another artifact snapshot. Older records without a selection
+remain readable through their stored artifact references.
 An ``activate`` or ``train_from`` record carries no trainer state. The store must atomically validate
 the current step before accepting a new successor: two different commits
 prepared from the same step cannot both succeed. An identical recorded retry
@@ -721,8 +726,9 @@ changes: the JSON object of a trajectory or a record, or the directory of a
 task, which the task file store keeps in the owner's partition. Its metadata
 is a JSON object. Reef reads ``kind`` (``trajectory``, ``task`` or
 ``record``), ``owner``, ``scenarios`` (scenario name to ``train`` or
-``eval``) and, for a record, ``origin`` (``{scenario, release_id,
-load_id}``). ``kind``, ``owner`` and ``origin`` never change. A deployment
+``eval``) and, for a record or artifact, ``origin``
+(``{scenario, artifact_id}``). Older origin metadata can carry ``release_id``;
+the input boundary accepts it for compatibility. ``kind``, ``owner`` and ``origin`` never change. A deployment
 selects the store in ``storage.data_store``; ``SQLiteDataStore`` and
 ``PostgresDataStore`` (``reef.storage.sql_data``) and ``MemoryDataStore`` are
 built in. Every operation names one owner and reads or writes only its items.
@@ -793,8 +799,13 @@ plugin implements one class method:
 - ``context`` is a ``RepositoryBackendContext``. ``work_dir`` and ``cache_dir``
   are ``storage.artifact_work_dir`` and ``storage.artifact_cache_dir``.
 
-Every scenario owns its root release, which Reef writes when it creates the
-scenario (`The root release <../user-guide/operate.rst#the-root-release>`__).
+Repository backends use *release* to mean a durable storage snapshot. Its
+revision and checksum are private locators; the public identity belongs to
+each component's ``artifact_id``. Activating or serving an existing artifact
+updates scenario selections without calling ``publish``.
+
+Every scenario owns its root snapshot, which Reef writes when it creates the
+scenario (`Starting artifacts <../user-guide/operate.rst#starting-artifacts>`__).
 A backend shares no release between scenarios. It must:
 
 - Implement ``register(root, *, metadata)``. ``root`` is an unpublished
@@ -1969,9 +1980,9 @@ Neither inherits from the other, and no trainer holds a serving engine.
   default, for full weights, or ``model_adapter`` for a LoRA adapter on its
   base model. A runtime that serves adapters must override it.
   ``served_artifact(artifact_id, scenario)`` gives the engine's HTTP(S) URL
-  and the model name (``served_model_name(scenario)``) that control writes to
+  and the model name (``served_model_name(scenario)``) that inference writes to
   ``served_models`` for the scenario. It returns None when the engine has no
-  such URL; the scenario then serves no model on the inference routes.
+  such URL; startup then fails without publishing a route.
   ``artifact_model(artifact)`` is the ``PolicyModel`` that the runtime serves
   for an artifact on request, without loading it, or None, the default, for a
   runtime that serves only its loaded artifact. A runtime whose handler answers
@@ -1982,14 +1993,23 @@ Neither inherits from the other, and no trainer holds a serving engine.
   ``capabilities`` read.
   ``shared_by_training_scenarios`` is true for a runtime that serves each
   training scenario its own weights.
-* ``ScenarioCommitter`` orders both around each commit. It publishes a
-  saved checkpoint, has the runtime serve it when the activation rule activates it
-  (``WeightRuntime.activate_checkpoint``), and then writes the commit record.
-  A failed publication therefore leaves serving unchanged. For an activation
-  it has the runtime serve the release that binds the artifact, then writes
-  an ``activate`` record; in a scenario of several components it first
-  publishes that release, with no new content. For a ``train-from`` it has
-  the trainer import the artifact, then writes a ``train_from`` record.
+* ``ScenarioCommitter`` publishes checkpoints and records artifact selections.
+  A dispatcher queues each selection for the inference worker. The worker
+  opens the runtime, loads the published release, and publishes routes when
+  activation returns. Route publication and startup completion share one
+  transaction. A superseded request cannot publish routes.
+  A standalone scenario keeps synchronous activation by default.
+  ``train-from`` still imports the artifact into the trainer before it writes
+  a ``train_from`` record.
+
+``Scenario.serving_artifact_id()`` names the selected artifact.
+``Scenario.served_artifact_id()`` reads the published route when a dispatcher
+owns the scenario. Training staleness checks use this served identity.
+Automatic weight training waits while the selected artifact has no matching
+served route. Standalone scenarios and deployments without inference keep
+their existing training behavior.
+Startup status is available through the inference service's
+``GET /reef/scenarios/{scenario}/inference/status`` route.
 
 ``reef.runtime.serving`` holds the two runtimes for saved weights, both over an
 ``InferenceBackend``:

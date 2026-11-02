@@ -18,7 +18,7 @@ class TrainingRequestPayload(TypedDict):
 
     text: str
     session: str
-    release_id: str
+    artifact_id: str
     requires: list[dict[str, str]]
     client: NotRequired[ClientReport]
     parameters: NotRequired[dict[str, Any]]
@@ -62,12 +62,15 @@ def normalize_training_request_payload(payload: Mapping[str, object]) -> Trainin
     Invalid instruction fields, requirements or parameters raise ValueError. Client machine
     information is advisory: malformed entries are dropped. Text is preserved,
     absent requirements become an empty list, and an empty client or empty parameters are omitted.
+    Older clients may send ``release_id`` instead of ``artifact_id``; normalized records use ``artifact_id``.
     ``parameters`` is a JSON object with string keys, at most ``MAX_PARAMETERS_BYTES`` bytes of JSON: the
     parameters of the instruction's training job over the recipe's (``Sample2Job.job_parameters``).
     """
     fields: dict[str, str] = {}
-    for key in ("text", "session", "release_id"):
+    for key in ("text", "session", "artifact_id"):
         value = payload.get(key)
+        if key == "artifact_id" and key not in payload:
+            value = payload.get("release_id")
         if not isinstance(value, str):
             raise ValueError(f"{key} must be a string")
         fields[key] = value
@@ -79,7 +82,7 @@ def normalize_training_request_payload(payload: Mapping[str, object]) -> Trainin
     normalized: TrainingRequestPayload = {
         "text": text,
         "session": fields["session"],
-        "release_id": fields["release_id"],
+        "artifact_id": fields["artifact_id"],
         "requires": parse_requires(payload.get("requires")),
     }
     client = parse_client(payload.get("client"))
@@ -104,7 +107,7 @@ class TrainingRequest:
     """A training instruction, independent of inference batches and feedback.
 
     ``id`` comes from the enclosing AgentRecord when the processor queues the request.
-    Session and release identify the request's source; they do not select an inference batch.
+    Session and artifact identify the request's source; they do not select an inference batch.
     ``requires`` is what the change needs from the person's machine, at most
     ``MAX_REQUIRES`` ``{name, kind, check}`` items of the shape
     ``reef.core.requirements.parse_requires`` admits; default none.
@@ -119,7 +122,7 @@ class TrainingRequest:
 
     text: str
     session: str
-    release_id: str
+    artifact_id: str
     id: str = ""
     # Out of the hash: the items are dicts, and the frozen contract is what the other fields carry.
     requires: tuple[Mapping[str, str], ...] = field(default=(), hash=False)
@@ -133,7 +136,7 @@ class TrainingRequest:
         return cls(
             text=normalized["text"],
             session=normalized["session"],
-            release_id=normalized["release_id"],
+            artifact_id=normalized["artifact_id"],
             id=request_id,
             requires=tuple(normalized["requires"]),
             client=normalized.get("client", {}),
@@ -144,7 +147,7 @@ class TrainingRequest:
         return {
             "text": self.text,
             "session": self.session,
-            "release_id": self.release_id,
+            "artifact_id": self.artifact_id,
             "requires": [dict(item) for item in self.requires],
             # Only when the client reported one, so a request without it keeps its earlier shape.
             **({"client": dict(self.client)} if self.client else {}),

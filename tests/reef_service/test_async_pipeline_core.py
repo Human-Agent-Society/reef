@@ -11,6 +11,8 @@ from aiohttp.test_utils import TestClient, TestServer
 from tests.support._policy_recipe import TestPolicyRecipe
 from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, runtime_bindings
 
+from tests.support.serving import wait_for_serving
+
 from reef.artifact import Artifact, ArtifactPublicationError, InMemoryRepositoryBackend
 from reef.core import AgentRecord, ReefError, RequestType
 from reef.core.trajectories import source_record_id
@@ -24,7 +26,7 @@ from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.job_queue import JobQueueComponent
 from reef.train.trainer import Trainer
 
-_ASYNC_WAIT_TIMEOUT_S = 5.0
+_ASYNC_WAIT_TIMEOUT_S = 10.0
 _ASYNC_WAIT_POLL_S = 0.01
 
 
@@ -54,7 +56,7 @@ class DurableComponent(StubTrainingComponent):
     def train(self, job: TrainingJob) -> tuple[SavedCheckpoint, ...]:
         self.calls.append(job)
         self.started.set()
-        if self.block and not self.release.wait(5):
+        if self.block and not self.release.wait(_ASYNC_WAIT_TIMEOUT_S):
             raise TimeoutError("test did not release blocked training")
         (checkpoint,) = super().train(job)
         return (SavedCheckpoint(checkpoint.step, checkpoint.path, checkpoint.release_path, self.complete_metrics),)
@@ -67,7 +69,7 @@ class BlockingLostAckBackend(InMemoryRepositoryBackend):
 
     def publish(self, artifact, *, expected_parent, advance_head=True):
         type(self).started.set()
-        if not type(self).release.wait(5):
+        if not type(self).release.wait(_ASYNC_WAIT_TIMEOUT_S):
             raise TimeoutError("test did not release blocked publication")
         ref = super().publish(artifact, expected_parent=expected_parent, advance_head=advance_head)
         if not type(self).failed:
@@ -133,7 +135,9 @@ def wait_for_operational_sample(
 
 
 @pytest.fixture
-def start_dispatcher(tmp_path: Path):
+def start_dispatcher(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    # Stub jobs finish immediately; polling must not consume the assertion timeout.
+    monkeypatch.setattr("reef.dispatcher.local_workers.POLL_SECONDS", 0.01)
     opened = []
 
     def start(backend_type=None, *, experiment_tracker=None, max_staleness=0, **component_options):
@@ -294,6 +298,7 @@ def test_lost_ack_publication_commits_the_checkpoint_once(start_dispatcher) -> N
     assert len(component.calls) == 1
     published = [row for row in dispatcher.list_artifacts("math") if row["operation"] == "training"]
     assert len(published) == 1
+    wait_for_serving(dispatcher)
     assert component.inference.served == "w1"
 
 
@@ -301,6 +306,7 @@ def test_lost_ack_publication_commits_the_checkpoint_once(start_dispatcher) -> N
 def test_weight_inference_does_not_materialize_its_checkpoint(start_dispatcher, monkeypatch) -> None:
     _, dispatcher = start_dispatcher()
     scenario = dispatcher.get_or_create_scenario("math")
+    wait_for_serving(dispatcher)
     monkeypatch.setattr(
         scenario.repository,
         "resolve",

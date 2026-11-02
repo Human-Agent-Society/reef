@@ -24,9 +24,11 @@ from tests.support.harness_service import harness_repository
 from tests.support.harness_steps import harness_recipe
 from tests.support.runtime_stubs import StubTrainingComponent, runtime_bindings
 from tests.support.samples_service import make_samples
+from tests.support.serving import wait_for_serving
 
 from reef.artifact import ArtifactRef, InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
+from reef.core.artifact_selection import ArtifactSelection, SelectedArtifact
 from reef.core.errors import ReefError
 from reef.core.trajectories import source_record_id
 from reef.dispatcher import Dispatcher, local_workers
@@ -118,6 +120,34 @@ def test_commit_record_detaches_nested_metrics() -> None:
     encoded["metrics"]["selection"]["selected"] = False
 
     assert record.metrics == {"selection": {"selected": True}}
+
+
+@pytest.mark.unit
+def test_new_records_read_legacy_history_and_keep_selection_locators(open_history) -> None:
+    legacy = sample_record().to_dict()
+    legacy["record"] = "reef-commit/5"
+    assert CommitRecord.from_dict(legacy) == sample_record()
+    reference = ArtifactRef("model-content", "stored-model", None)
+    selected = ArtifactSelection({"model": SelectedArtifact("stored-model", reference)})
+    restored = CommitRecord(
+        scenario="math",
+        step=1,
+        artifact_ref=reference,
+        checkpoint=False,
+        algorithm_state=None,
+        high_water_sequence=0,
+        high_water_offset=0,
+        operation="restore",
+        components=selected.artifact_ids,
+        selection=selected,
+    )
+    open_history().append(restored)
+    assert open_history().records() == (restored,)
+    assert restored.to_dict()["record"] == "reef-commit/6"
+    encoded = restored.to_dict()
+    encoded["selection"]["model"]["artifact_id"] = "another-model"
+    with pytest.raises(CommitHistoryError, match="components must match"):
+        CommitRecord.from_dict(encoded)
 
 
 @pytest.mark.unit
@@ -616,6 +646,7 @@ def test_recovery_resumes_record_progress_without_retraining(tmp_path) -> None:
     assert first_component.trained_data == [["i1"]]
     # Nothing was compacted: the consumed pair is still visible to training reads.
     assert first.get_or_create_scenario("math").records.get("math", "i1") is not None
+    first.close()
 
     second_component = RecordingComponent(tmp_path / "second")
     second = build(second_component)
@@ -625,7 +656,9 @@ def test_recovery_resumes_record_progress_without_retraining(tmp_path) -> None:
     train_pair(second, 2)
     # The only newly trained batch is the genuinely new pair; i1 never retrains.
     assert second_component.trained_data == [["i2"]]
+    wait_for_step(second, 6)
     assert recovered.scenario_step == 6
+    second.close()
 
 
 @pytest.mark.unit
@@ -691,6 +724,7 @@ def test_recovery_skips_consumption_after_processor_release_failure(tmp_path, mo
     train_pair(first, 1)
     assert first_component.trained_data == [["i1"]]
     assert crash["armed"] is False
+    first.close()
 
     second_component = RecordingComponent(tmp_path / "second")
     second = build_training_dispatcher(second_component, tmp_path, backend_factory, agent_record_dir=agent_record_dir)
@@ -703,6 +737,7 @@ def test_recovery_skips_consumption_after_processor_release_failure(tmp_path, mo
     assert second_component.trained_data == [["i2"]]
     # The job's three commits land on the scenario that serves now; a failed cycle can replace the instance.
     wait_until(lambda: second.get_or_create_scenario("math").scenario_step == 6, "the job's commits did not all land")
+    second.close()
 
 
 @pytest.mark.unit
@@ -1101,6 +1136,7 @@ def test_a_commit_failure_keeps_one_retryable_batch_and_one_record(tmp_path, mon
         hold_local_cycles=True,
     )
     scenario = dispatcher.get_or_create_scenario("math")
+    wait_for_serving(dispatcher)
     scenario.records.append(sft_inference("i1", scenario.serving_artifact_id()))
     scenario.records.append(sft_report("r1", "i1"))
     make_samples(scenario)

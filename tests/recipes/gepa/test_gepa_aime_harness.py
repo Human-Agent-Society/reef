@@ -20,6 +20,7 @@ from types import SimpleNamespace
 import pytest
 from tests.support.harness_service import job_backend, seed_root
 from tests.support.harness_steps import TreeReleases
+from tests.support.serving import wait_for_serving
 
 from reef.core.evaluation import PolicyHarness, RolloutRequest
 from reef.harness import TaskResult
@@ -390,6 +391,7 @@ def test_driver_reports_each_problem_against_its_recorded_request(load, monkeypa
 
         floor = driver.max_sequence(service.records(), service.scenario)
         references = []
+        wait_for_serving(service.dispatcher, service.scenario)
         for problem in problems:
             # What a Pi run does: an OpenAI-compatible call with no reef
             # headers, which the service stamps with this run's scenario.

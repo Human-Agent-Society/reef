@@ -114,6 +114,7 @@ def test_streaming_responses_and_errors_have_cors_headers():
             response = await client.get("/stream", headers={"Origin": ORIGIN, "Authorization": "Bearer local-secret"})
             assert response.status == 200
             assert response.headers["Access-Control-Allow-Origin"] == ORIGIN
+            assert "x-reef-artifact-id" in response.headers["Access-Control-Expose-Headers"]
             assert "x-reef-release-id" in response.headers["Access-Control-Expose-Headers"]
             assert "Origin" in response.headers.getall("Vary")
             assert await response.text() == "data: hello\n\n"

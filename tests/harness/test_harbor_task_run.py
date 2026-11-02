@@ -44,6 +44,9 @@ class StandInLab(TaskLab):
             trial.mkdir(parents=True)
         return RolloutRow(rewards=dict(self.rewards), error=self.error, trial_uri=trial.as_uri())
 
+    async def build_environment(self, task_path, *, overrides) -> str:
+        return ""
+
 
 def harbor_task(root: Path) -> Path:
     task = root / "multiply"

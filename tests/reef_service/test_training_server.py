@@ -500,6 +500,9 @@ class AdapterInference(StubInferenceRuntime):
     def serving_adapter_runtime_load_id(self, scenario: str) -> str | None:
         return f"adapter:{scenario}:{self.served}"
 
+    def served_model_name(self, scenario: str) -> str:
+        return f"adapter:{scenario}:{self.served}"
+
     def serve(self, artifact: Artifact) -> str:
         return super().serve(artifact.materialize())
 
@@ -529,7 +532,12 @@ def test_status_reports_the_running_job_the_finished_jobs_and_the_served_adapter
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
             block = await math_status(client)
-            if block["finished_jobs"] == finished_jobs and (block["training_job"] is not None) == running:
+            if (
+                block["finished_jobs"] == finished_jobs
+                and (block["training_job"] is not None) == running
+                and block["served_artifact_id"]
+                == dispatcher.get_or_create_scenario("math").current_artifact_ref().release_id
+            ):
                 return block
             await asyncio.sleep(0.01)
         pytest.fail(f"status did not reach {finished_jobs} finished jobs: {block}")
@@ -537,7 +545,7 @@ def test_status_reports_the_running_job_the_finished_jobs_and_the_served_adapter
     async def run() -> None:
         async with TestClient(TestServer(create_app(dispatcher))) as client:
             dispatcher.get_or_create_scenario("math")
-            idle = await math_status(client)
+            idle = await wait_for(client, finished_jobs=0, running=False)
             assert (idle["training_job"], idle["finished_jobs"]) == (None, 0)
             assert "last_drain_at" not in idle and "checkpoint_storage" not in idle
             assert ("adapter_runtime_load_id" in idle) is per_scenario_adapters

@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
+from tests.support.inference import wait_for_inference
 from tests.support.runtime_stubs import StubInferenceRuntime, runtime_bindings
 
 from reef.artifact import (
@@ -66,13 +67,13 @@ SERVED_MODEL = "stub-model"
 
 
 def serving_runtime() -> StubInferenceRuntime:
-    """A stub runtime whose engine has a URL and a model name, so control writes a ``served_models`` row for it."""
+    """A stub runtime whose engine has a URL and a model name, so inference can publish a ``served_models`` row for it."""
     return StubInferenceRuntime(model_path=SERVED_MODEL)
 
 
 def weight_dispatcher(tmp_path, *, training: bool = False):
     """A dispatcher of weight scenarios that a stub runtime serves; ``training`` gives them a training component.
-    The commit history is durable, so a commit's activation moves the served row."""
+    The commit history is durable, so a commit's activation queues a serving request."""
     return Dispatcher(
         (
             WeightRecipe(**runtime_bindings(runtime=serving_runtime()))
@@ -95,7 +96,7 @@ def serving_client(dispatcher, backend=None, **options) -> TestClient:
 
 def serving_dispatcher(tmp_path) -> Dispatcher:
     """A dispatcher of the record-only recipe whose runtime serves the created scenario "chat"; a /v1 call answers
-    only for a scenario that exists. The commit history is durable, so a commit's activation moves the served row."""
+    only for a scenario that exists. A commit's activation queues a serving request."""
     dispatcher = Dispatcher(
         Recipe(runtime=serving_runtime()),
         InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
@@ -118,6 +119,7 @@ async def proxied_client(tmp_path, path: str, upstream) -> AsyncIterator[tuple[T
         commit_saved_version(dispatcher, "chat", "v1", tmp_path)
         backend = HttpInferenceHandler(str(upstream_server.make_url("")).rstrip("/"))
         async with serving_client(dispatcher, inference_handler=backend) as client:
+            await wait_for_inference(client, "chat")
             yield client, dispatcher
 
 
@@ -318,6 +320,7 @@ def test_inference_payload_is_recorded_without_reef_body_fields(tmp_path) -> Non
 
     async def run() -> None:
         async with serving_client(dispatcher, backend) as client:
+            await wait_for_inference(client, "chat")
             response = await client.post("/v1/chat/completions", headers={"x-reef-scenario": "chat"}, json=payload)
             assert response.status == 200
 
@@ -348,6 +351,7 @@ def test_http_app_records_inference_and_returns_backend_response(tmp_path) -> No
 
     async def run() -> None:
         async with serving_client(dispatcher, backend) as client:
+            await wait_for_inference(client, "chat")
             response = await client.post(
                 "/v1/chat/completions",
                 headers={"x-reef-scenario": "chat"},
@@ -377,6 +381,7 @@ def test_a_rollout_call_keeps_no_record_and_returns_no_training_block(tmp_path) 
 
     async def run() -> None:
         async with serving_client(dispatcher, backend) as client:
+            await wait_for_inference(client, "chat")
             rollout = {"x-reef-scenario": "chat", ROLLOUT_HEADER: "1"}
             body = {"model": "reef", "messages": [{"role": "user", "content": "hi"}]}
             response = await client.post("/v1/chat/completions", headers=rollout, json=body)
@@ -603,7 +608,7 @@ def test_sse_without_terminal_event_has_no_receipt_and_is_recorded_incomplete(tm
 
 
 @pytest.mark.unit
-def test_published_candidate_is_used_by_next_inference(tmp_path) -> None:
+def test_published_candidate_is_used_after_inference_startup(tmp_path) -> None:
     used_versions = []
 
     async def backend(artifact: Artifact, path: str, payload: dict) -> dict:
@@ -629,6 +634,7 @@ def test_published_candidate_is_used_by_next_inference(tmp_path) -> None:
 
     async def run() -> None:
         async with serving_client(dispatcher, backend) as client:
+            await wait_for_inference(client, "chat")
             response = await client.post(
                 "/v1/chat/completions",
                 headers={"x-reef-scenario": "chat"},
@@ -653,7 +659,7 @@ def commit_saved_version(dispatcher, scenario: str, version: str, root: Path) ->
 
 
 def serving_weight_dispatcher(tmp_path, *, training: bool = False) -> Dispatcher:
-    """A weight dispatcher whose scenario "chat" serves the saved version ``sglang-v1``."""
+    """A weight dispatcher whose scenario "chat" selects the saved version ``sglang-v1``."""
     dispatcher = weight_dispatcher(tmp_path, training=training)
     dispatcher.get_or_create_scenario("chat")
     commit_saved_version(dispatcher, "chat", "sglang-v1", tmp_path)
@@ -676,6 +682,7 @@ def test_aborted_inference_restarts_before_recording(tmp_path) -> None:
 
     async def run() -> None:
         async with serving_client(dispatcher, backend) as client:
+            await wait_for_inference(client, "chat")
             response = await client.post(
                 "/v1/chat/completions", headers={"x-reef-scenario": "chat"}, json={"messages": []}
             )
@@ -773,6 +780,7 @@ def post_stream(dispatcher, handler, path: str):
 
     async def run():
         async with serving_client(dispatcher, inference_handler=handler) as client:
+            await wait_for_inference(client, "chat")
             response = await client.post(
                 path,
                 headers={"x-reef-scenario": "chat"},
@@ -866,6 +874,7 @@ def test_an_engine_that_aborts_twice_is_a_conflict_and_nothing_is_recorded(tmp_p
 
     async def run() -> None:
         async with serving_client(dispatcher, backend) as client:
+            await wait_for_inference(client, "chat")
             response = await client.post(
                 "/v1/chat/completions", headers={"x-reef-scenario": "chat"}, json={"messages": []}
             )
@@ -1107,6 +1116,7 @@ def test_a_record_names_the_served_release_and_keeps_the_release_the_client_runs
 
     async def run() -> list[str]:
         async with serving_client(dispatcher, backend) as client:
+            await wait_for_inference(client, "chat")
             for tag in (releases[1], releases[0], "no-such-release", None):
                 headers = {"x-reef-scenario": "chat", **({"x-reef-tag-release": tag} if tag else {})}
                 response = await client.post("/v1/chat/completions", headers=headers, json={"messages": []})

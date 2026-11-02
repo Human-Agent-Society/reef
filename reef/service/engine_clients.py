@@ -1,7 +1,7 @@
-"""How a separate inference service reaches the engine of each ``served_models`` row: as control reaches it.
+"""How inference reaches the engine of each ``served_models`` row.
 
-``DeploymentEngineClients`` holds the deployment's serving runtime, built from the same configuration as control's
-and never opened, so it changes no engine. A row at a URL that the runtime serves uses the runtime's own handler for
+``DeploymentEngineClients`` holds the deployment's serving runtime. It changes no engine.
+A row at a URL that the runtime serves uses the runtime's own handler for
 that URL (``InferenceRuntime.handler_for``), with its dialect and its credentials. A row at another URL uses a
 provider proxy with the deployment's provider key.
 """

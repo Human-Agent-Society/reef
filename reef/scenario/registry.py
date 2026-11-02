@@ -39,6 +39,7 @@ from reef.scenario.admission import LoadedScenario, ScenarioAdmission, ScenarioL
 from reef.scenario.factory import ItemStart, ScenarioFactory
 from reef.scenario.scenario import Scenario
 from reef.storage.scenario import ScenarioSettings, ScenarioStorage
+from reef.storage.served_models import ServedModels
 from reef.train.instructions import InstructionQueue
 
 logger = logging.getLogger(__name__)
@@ -132,6 +133,7 @@ class ScenarioRegistry:
         admission: ScenarioAdmission | None = None,
         lifecycle: ScenarioLifecycle | None = None,
         activates_runtime: bool = True,
+        served_models: ServedModels | None = None,
         instructions: InstructionQueue | None = None,
     ) -> None:
         self._storage = scenario_storage
@@ -146,6 +148,7 @@ class ScenarioRegistry:
             experiment_reports=self.experiment_reports,
             experiment_tracker=tracker,
             activates_runtime=activates_runtime,
+            served_models=served_models,
             instructions=instructions,
         )
         self._backend_factory = backend_factory
@@ -297,9 +300,7 @@ class ScenarioRegistry:
             current = loaded.get(name)
             row: dict[str, Any] = {"scenario": name, "loaded": current is not None}
             if current is not None:
-                ref = current.repository.require_current_artifact()
-                row["release_id"] = ref.release_id
-                row["content_id"] = ref.content_id
+                row["components"] = current.artifact_selection().artifact_ids
             if adapter is not None:
                 row["adapter"] = adapter
             rows.append(row)
