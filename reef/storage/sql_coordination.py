@@ -77,12 +77,14 @@ from reef.storage.sqlite import enable_wal
 from reef.storage.work_queue import (
     FINAL_STATES,
     HELD_STATES,
+    WORK_STATES,
     JsonValue,
     NewWork,
     WorkConflict,
     WorkItem,
     WorkLeaseLost,
     WorkQueue,
+    check_page,
     clock,
 )
 
@@ -1267,6 +1269,39 @@ class SQLWorkQueue(WorkQueue):
         query = select(self.table).where(*conditions).order_by(self.table.c.created_sequence)
         with self.database.read() as connection:
             return tuple(item_from_row(row) for row in connection.execute(query).mappings().all())
+
+    def page(
+        self,
+        queue: str,
+        *,
+        scenario: str,
+        state: str | None = None,
+        before_sequence: int | None = None,
+        limit: int = 50,
+    ) -> tuple[WorkItem, ...]:
+        check_page(state, before_sequence, limit)
+        conditions = [self.table.c.queue == queue, self.table.c.scenario == scenario]
+        if state is not None:
+            conditions.append(self.table.c.state == state)
+        if before_sequence is not None:
+            conditions.append(self.table.c.created_sequence < before_sequence)
+        query = select(self.table).where(*conditions).order_by(self.table.c.created_sequence.desc()).limit(limit)
+        with self.database.read() as connection:
+            return tuple(item_from_row(row) for row in connection.execute(query).mappings().all())
+
+    def counts(self, queue: str, *, scenario: str) -> Mapping[str, int]:
+        query = (
+            select(self.table.c.state, func.count())
+            .where(
+                self.table.c.queue == queue,
+                self.table.c.scenario == scenario,
+            )
+            .group_by(self.table.c.state)
+        )
+        counts: dict[str, int] = dict.fromkeys(WORK_STATES, 0)
+        with self.database.read() as connection:
+            counts.update(connection.execute(query).tuples().all())
+        return counts
 
 
 def open_coordination_database(

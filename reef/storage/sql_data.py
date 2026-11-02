@@ -6,12 +6,19 @@ an item, so that a query by scenario uses an index. ``data_record_node`` keeps t
 item with a message list, per owner (RFC #1054): the node keeps the payload as ATIF, with only the entries after
 its parent's, and the item's content keeps an empty payload. The tables are written in one transaction. Task directories are
 in the task file store, in each owner's partition.
+
+With a segment store, the content of a trajectory item, and the content of a trajectory node, can live in a segment
+line instead (``reef.storage.segments``). ``create`` writes the content of new trajectory items as one segment.
+``maintain`` moves the rest into segments once an owner has ``PACK_BYTES`` of it, and deletes the segments that no
+row uses. ``data_segment`` lists each segment that the store wrote, so that ``maintain`` finds the unused ones.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import time
+import uuid
 from abc import abstractmethod
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
@@ -24,6 +31,7 @@ from sqlalchemy import (
     URL,
     BigInteger,
     Column,
+    Float,
     Identity,
     Index,
     Integer,
@@ -33,6 +41,8 @@ from sqlalchemy import (
     Table,
     Text,
     UniqueConstraint,
+    and_,
+    bindparam,
     create_engine,
     delete,
     exists,
@@ -46,6 +56,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Connection, Engine, RowMapping
 from sqlalchemy.pool import NullPool
 from sqlalchemy.schema import CreateSchema
+from sqlalchemy.sql.elements import ColumnElement
 
 from reef.core.atif_payloads import call_shape, provider_payload
 from reef.core.config import config_metadata, config_option
@@ -68,21 +79,41 @@ from reef.storage.data import (
     prepared_items,
 )
 from reef.storage.item_kinds import task_partition
-from reef.storage.migrations import migrate_data_trajectories
+from reef.storage.migrations import migrate_data_segments, migrate_data_trajectories
 from reef.storage.postgres import postgres_url, validate_postgres_schema
-from reef.storage.sql_records import ScopedTable, TrajectoryNodes, batches, trajectory_node_table
+from reef.storage.segments import SegmentLine, SegmentPartition, SegmentStore, segment_lines
+from reef.storage.sql_records import (
+    SEGMENT_COLUMNS,
+    ScopedTable,
+    TrajectoryNodes,
+    batches,
+    node_line,
+    row_line,
+    trajectory_node_table,
+)
 from reef.storage.sqlite import enable_wal
 from reef.storage.tasks import TaskFileStore
 
+#: The content bytes that an owner's rows hold before ``maintain`` moves them into one segment.
+PACK_BYTES = 64 * 2**20
+#: The age in seconds after which ``maintain`` deletes a segment that no row uses. A new segment has no rows
+#: until the transaction that writes them commits.
+UNUSED_SEGMENT_SECONDS = 24 * 3600
 
-def data_tables(metadata: MetaData, *, sqlite: bool) -> tuple[Table, Table, Table]:
-    """Define ``data_item``, ``data_item_scenario`` and ``data_record_node`` in ``metadata``.
+
+def data_tables(metadata: MetaData, *, sqlite: bool) -> tuple[Table, Table, Table, Table]:
+    """Define ``data_item``, ``data_item_scenario``, ``data_record_node`` and ``data_segment`` in ``metadata``.
 
     ``sequence`` orders the items as they arrived. ``content_json`` is the canonical JSON of a trajectory's or a
     record's content, and NULL for a task. ``message_field`` names the message list of a record payload that the
     item's trajectory node keeps (``call_shape``); the content then holds an empty payload. It is NULL for an
     item without one. ``metadata_json`` is the item's metadata. ``data_record_node`` is the node table of ``TrajectoryNodes``,
     scoped by ``owner``; a node's sequence is its item's, and its scenario the item's origin.
+
+    The ``SEGMENT_COLUMNS`` of ``data_item`` and ``data_record_node`` are NULL, or the segment line that holds the
+    content of the row: then ``content_json`` of the item, or the JSON columns of the node, are NULL.
+    ``data_segment`` has one row per segment that the store wrote: its owner, ID, creation time in seconds since the
+    epoch and size.
     """
     sequence = (
         Column("sequence", Integer, primary_key=True)
@@ -100,7 +131,11 @@ def data_tables(metadata: MetaData, *, sqlite: bool) -> tuple[Table, Table, Tabl
         Column("metadata_json", Text, nullable=False),
         Column("content_json", Text, nullable=True),
         Column("message_field", Text, nullable=True),
+        Column("segment_id", Text, nullable=True),
+        Column("segment_offset", BigInteger, nullable=True),
+        Column("segment_length", BigInteger, nullable=True),
         UniqueConstraint("owner", "item_id"),
+        Index("data_item_by_segment", "owner", "segment_id"),
         # SQLite reuses the largest rowid after a delete without it; other dialects ignore the option.
         sqlite_autoincrement=sqlite,
     )
@@ -113,8 +148,17 @@ def data_tables(metadata: MetaData, *, sqlite: bool) -> tuple[Table, Table, Tabl
         PrimaryKeyConstraint("owner", "item_id", "scenario"),
         Index("data_item_scenario_by_scenario", "owner", "scenario"),
     )
-    nodes = trajectory_node_table(metadata, "data_record_node", Column("owner", Text, primary_key=True))
-    return items, scenarios, nodes
+    nodes = trajectory_node_table(metadata, "data_record_node", Column("owner", Text, primary_key=True), segments=True)
+    segments = Table(
+        "data_segment",
+        metadata,
+        Column("owner", Text, nullable=False),
+        Column("segment_id", Text, nullable=False),
+        Column("created_at", Float, nullable=False),
+        Column("byte_count", BigInteger, nullable=False),
+        PrimaryKeyConstraint("owner", "segment_id"),
+    )
+    return items, scenarios, nodes, segments
 
 
 def canonical_json(value: Mapping[str, Any]) -> str:
@@ -129,14 +173,19 @@ class SQLDataStore(DataStore):
     operation runs in one transaction, so an operation that refuses changes nothing in the database. ``create``
     inserts first and compares digests after, so two creates of one ID at once end in a no-op or an
     ``ItemConflict``, never in a failed insert. ``create`` and ``delete`` both take ``lock_creates``, since they
-    change the trajectory nodes of an owner.
+    change the trajectory nodes of an owner. ``segments`` is None, or the segment store that keeps the content of
+    trajectory items and nodes in the partition of each owner; the store closes it with itself.
     """
 
-    def __init__(self, items: Table, scenarios: Table, nodes: Table, task_files: TaskFileStore) -> None:
-        self.items_table = items
-        self.scenarios_table = scenarios
-        self.nodes_table = nodes
+    def __init__(
+        self,
+        tables: tuple[Table, Table, Table, Table],
+        task_files: TaskFileStore,
+        segments: SegmentStore | None,
+    ) -> None:
+        self.items_table, self.scenarios_table, self.nodes_table, self.segment_table = tables
         self.task_files = task_files
+        self.segments = segments
 
     @abstractmethod
     @contextmanager
@@ -158,21 +207,62 @@ class SQLDataStore(DataStore):
         does nothing, for a store whose transactions already run one at a time.
         """
 
+    def partition(self, owner: str) -> SegmentPartition | None:
+        """The segment partition of ``owner``, or None without a segment store."""
+        return None if self.segments is None else SegmentPartition(self.segments, owner)
+
     def trajectory_nodes(self, owner: str) -> TrajectoryNodes:
         """The trajectory nodes of the record items of ``owner``."""
-        return TrajectoryNodes(ScopedTable(self.nodes_table, {"owner": owner}))
+        return TrajectoryNodes(ScopedTable(self.nodes_table, {"owner": owner}), self.partition(owner))
 
-    def stored_items(self, connection: Connection, owner: str, rows: Sequence[RowMapping]) -> tuple[StoredItem, ...]:
-        """The items of the ``data_item`` rows ``rows`` of ``owner``, with their record payloads rendered from their
-        trajectory nodes."""
+    def write_segment(self, partition: SegmentPartition, lines: Sequence[str]) -> tuple[SegmentLine, ...]:
+        """Write ``lines`` as a new segment of ``partition``, and return the place of each line.
+
+        The ``data_segment`` row commits before the segment is written, so ``maintain`` deletes the segment later
+        when no row comes to use it.
+        """
+        segment_id = uuid.uuid4().hex
+        data, places = segment_lines(segment_id, lines)
+        with self.transaction() as connection:
+            connection.execute(
+                insert(self.segment_table).values(
+                    owner=partition.partition, segment_id=segment_id, created_at=time.time(), byte_count=len(data)
+                )
+            )
+        partition.store.put(partition.partition, segment_id, data)
+        return places
+
+    def stored_items(
+        self, connection: Connection, owner: str, rows: Sequence[RowMapping], *, content: bool = True
+    ) -> tuple[StoredItem, ...]:
+        """The items of the ``data_item`` rows ``rows`` of ``owner``. With ``content``, each has its content: from
+        its segment line, or from the row, with a record payload rendered from its trajectory node. Without, each
+        item's content is None."""
+        if not content:
+            return tuple(
+                StoredItem(
+                    row["sequence"], row["owner"], row["item_id"], json.loads(row["metadata_json"]), row["digest"]
+                )
+                for row in rows
+            )
         contents = self.trajectory_nodes(owner).contents(
             connection, (int(row["sequence"]) for row in rows if row["message_field"] is not None)
         )
+        packed = {int(row["sequence"]): line for row in rows if (line := row_line(row)) is not None}
+        partition = self.partition(owner)
+        if packed and partition is None:
+            raise ReefError("an item's content is in a segment, but the data store has no segment store")
+        texts = (
+            dict(zip(packed, partition.read_text(list(packed.values())), strict=True))
+            if packed and partition is not None
+            else {}
+        )
         items: list[StoredItem] = []
         for row in rows:
-            content = None if row["content_json"] is None else json.loads(row["content_json"])
-            if content is not None and row["message_field"] is not None:
-                content["payload"] = provider_payload(contents[int(row["sequence"])].atif_call())
+            text = texts.get(int(row["sequence"]), row["content_json"])
+            item_content = None if text is None else json.loads(text)
+            if item_content is not None and row["message_field"] is not None:
+                item_content["payload"] = provider_payload(contents[int(row["sequence"])].atif_call())
             items.append(
                 StoredItem(
                     row["sequence"],
@@ -180,7 +270,7 @@ class SQLDataStore(DataStore):
                     row["item_id"],
                     json.loads(row["metadata_json"]),
                     row["digest"],
-                    content,
+                    item_content,
                 )
             )
         return tuple(items)
@@ -210,10 +300,26 @@ class SQLDataStore(DataStore):
         if not prepared:
             return ()
         item_ids = [entry[0].item_id for entry in prepared]
+        places: dict[str, SegmentLine] = {}
+        partition = self.partition(owner)
+        if partition is not None:
+            with self.transaction() as connection:
+                existing = self.rows(connection, owner, item_ids)
+            new = [
+                (item.item_id, canonical_json(item.content))
+                for item, metadata, _ in prepared
+                if metadata["kind"] == "trajectory"
+                and isinstance(item.content, Mapping)
+                and item.item_id not in existing
+            ]
+            if new:
+                lines = self.write_segment(partition, [text for _, text in new])
+                places = {item_id: line for (item_id, _), line in zip(new, lines, strict=True)}
         with self.transaction() as connection:
             self.lock_creates(connection)
             for item, metadata, digest in prepared:
                 content = dict(item.content) if isinstance(item.content, Mapping) else None
+                place = places.get(item.item_id)
                 payload = content["payload"] if content is not None and metadata["kind"] == "record" else None
                 key = None if payload is None else call_key(payload)
                 shape = None if payload is None else call_shape(payload)
@@ -227,8 +333,11 @@ class SQLDataStore(DataStore):
                         "kind": metadata["kind"],
                         "digest": digest,
                         "metadata_json": canonical_json(metadata),
-                        "content_json": None if content is None else canonical_json(content),
+                        "content_json": None if content is None or place is not None else canonical_json(content),
                         "message_field": None if shape is None else shape.message_field,
+                        "segment_id": None if place is None else place.segment_id,
+                        "segment_offset": None if place is None else place.offset,
+                        "segment_length": None if place is None else place.length,
                     },
                 )
                 if inserted:
@@ -261,6 +370,7 @@ class SQLDataStore(DataStore):
         scenario: str | None = None,
         after: int = 0,
         limit: int = MAX_QUERY_LIMIT,
+        content: bool = True,
     ) -> tuple[StoredItem, ...]:
         check_query(owner, kind, scenario, after, limit)
         items = self.items_table
@@ -274,7 +384,7 @@ class SQLDataStore(DataStore):
             )
         with self.transaction() as connection:
             found = connection.execute(statement.order_by(items.c.sequence).limit(limit)).mappings().all()
-            return self.stored_items(connection, owner, found)
+            return self.stored_items(connection, owner, found, content=content)
 
     def update(self, owner: str, item_ids: Sequence[str], patch: Mapping[str, Any]) -> tuple[StoredItem, ...]:
         check_owner(owner)
@@ -319,6 +429,126 @@ class SQLDataStore(DataStore):
                 self.trajectory_nodes(owner).release(connection, [int(row["sequence"])])
         return True
 
+    def waiting_content(self) -> tuple[tuple[Table, ColumnElement[int], ColumnElement[bool]], ...]:
+        """For the items and for the nodes: the table, the content bytes of a row, and the condition of the rows
+        whose content the database holds and a segment can hold."""
+        items, nodes = self.items_table, self.nodes_table
+        return (
+            (
+                items,
+                func.length(items.c.content_json),
+                and_(items.c.kind == "trajectory", items.c.content_json.is_not(None)),
+            ),
+            (nodes, nodes.c.body_bytes, nodes.c.entries_json.is_not(None)),
+        )
+
+    def pack(self, owner: str) -> int:
+        """Move content of ``owner`` from the database into segments, oldest first, while at least ``PACK_BYTES`` of
+        it waits, and return the number of rows moved. Each segment holds at least ``PACK_BYTES``.
+
+        A row that another call moved first keeps that segment line; this call's line then stays unused.
+        """
+        partition = self.partition(owner)
+        if partition is None:
+            return 0
+        moved = 0
+        for table, size, waiting in self.waiting_content():
+            is_items = table is self.items_table
+            key = table.c.sequence if is_items else table.c.node_sequence
+            texts = (
+                (table.c.content_json,) if is_items else (table.c.entries_json, table.c.shape_json, table.c.call_json)
+            )
+            condition = and_(table.c.owner == owner, waiting)
+            while True:
+                rows: list[RowMapping] = []
+                total = 0
+                with self.transaction() as connection:
+                    if (connection.scalar(select(func.sum(size)).where(condition)) or 0) < PACK_BYTES:
+                        break
+                    result = connection.execute(
+                        select(key.label("key"), size.label("size"), *texts).where(condition).order_by(key)
+                    ).mappings()
+                    for row in result:
+                        rows.append(row)
+                        total += int(row["size"])
+                        if total >= PACK_BYTES:
+                            break
+                    result.close()
+                lines = [
+                    (
+                        row["content_json"]
+                        if is_items
+                        else node_line(row["entries_json"], row["shape_json"], row["call_json"])
+                    )
+                    for row in rows
+                ]
+                places = self.write_segment(partition, lines)
+                cleared = (
+                    {"content_json": None}
+                    if is_items
+                    else {"entries_json": None, "shape_json": None, "call_json": None}
+                )
+                with self.transaction() as connection:
+                    connection.execute(
+                        update(table)
+                        .where(condition, key == bindparam("row_key"))
+                        .values(
+                            **cleared,
+                            **{name: bindparam(f"new_{name}") for name in SEGMENT_COLUMNS},
+                        ),
+                        [
+                            {
+                                "row_key": row["key"],
+                                "new_segment_id": place.segment_id,
+                                "new_segment_offset": place.offset,
+                                "new_segment_length": place.length,
+                            }
+                            for row, place in zip(rows, places, strict=True)
+                        ],
+                    )
+                moved += len(rows)
+        return moved
+
+    def maintain(self) -> None:
+        if self.segments is None:
+            return
+        owners: set[str] = set()
+        with self.transaction() as connection:
+            for table, size, waiting in self.waiting_content():
+                owners.update(
+                    connection.scalars(
+                        select(table.c.owner)
+                        .where(waiting)
+                        .group_by(table.c.owner)
+                        .having(func.sum(size) >= PACK_BYTES)
+                    )
+                )
+        for owner in sorted(owners):
+            self.pack(owner)
+        self.delete_unused_segments()
+
+    def delete_unused_segments(self) -> int:
+        """Delete each segment older than ``UNUSED_SEGMENT_SECONDS`` that no item or node uses; return the count.
+
+        New rows only use new segments, so a segment that is old and unused stays unused.
+        """
+        if self.segments is None:
+            return 0
+        segment, items, nodes = self.segment_table, self.items_table, self.nodes_table
+        with self.transaction() as connection:
+            unused = connection.execute(
+                select(segment.c.owner, segment.c.segment_id).where(
+                    segment.c.created_at < time.time() - UNUSED_SEGMENT_SECONDS,
+                    ~exists().where(items.c.owner == segment.c.owner, items.c.segment_id == segment.c.segment_id),
+                    ~exists().where(nodes.c.owner == segment.c.owner, nodes.c.segment_id == segment.c.segment_id),
+                )
+            ).all()
+        for owner, segment_id in unused:
+            self.segments.delete(owner, segment_id)
+            with self.transaction() as connection:
+                connection.execute(delete(segment).where(segment.c.owner == owner, segment.c.segment_id == segment_id))
+        return len(unused)
+
     def task_path(self, item: StoredItem) -> Path:
         if item.kind != "task":
             raise ValueError(f"item {item.item_id!r} is a {item.kind}, not a task")
@@ -362,10 +592,12 @@ class SQLiteDataStore(SQLDataStore):
     It holds one connection for its lifetime and serializes its use with a lock, as the SQLite record store does.
     """
 
-    def __init__(self, directory: Path | None, task_files: TaskFileStore) -> None:
+    def __init__(
+        self, directory: Path | None, task_files: TaskFileStore, segments: SegmentStore | None = None
+    ) -> None:
         metadata = MetaData()
-        items, scenarios, nodes = data_tables(metadata, sqlite=True)
-        super().__init__(items, scenarios, nodes, task_files)
+        tables = data_tables(metadata, sqlite=True)
+        super().__init__(tables, task_files, segments)
         if directory is None:
             database = ":memory:"
         else:
@@ -387,15 +619,23 @@ class SQLiteDataStore(SQLDataStore):
             # Serialize the table creation of concurrent openers.
             self.connection.exec_driver_sql("BEGIN IMMEDIATE")
             metadata.create_all(self.connection)
-            migrate_data_trajectories(self.connection, items, nodes)
+            migrate_data_segments(self.connection, self.items_table, self.nodes_table)
+            migrate_data_trajectories(self.connection, self.items_table, self.nodes_table)
 
     @classmethod
-    def from_config(cls, config: Mapping[str, Any], *, directory: Path, task_files: TaskFileStore) -> Self:
+    def from_config(
+        cls,
+        config: Mapping[str, Any],
+        *,
+        directory: Path,
+        task_files: TaskFileStore,
+        segments: SegmentStore | None,
+    ) -> Self:
         if config:
             raise PluginConfigError(
                 f"the sqlite data store takes no config, got {', '.join(sorted(map(str, config)))}"
             )
-        return cls(directory, task_files)
+        return cls(directory, task_files, segments)
 
     @contextmanager
     def transaction(self) -> Iterator[Connection]:
@@ -424,6 +664,8 @@ class SQLiteDataStore(SQLDataStore):
                 self.connection.close()
                 self.connection = None
                 self.engine.dispose()
+                if self.segments is not None:
+                    self.segments.close()
 
 
 @dataclass(frozen=True)
@@ -437,11 +679,18 @@ class PostgresDataStoreSettings(PluginSettings):
 class PostgresDataStore(SQLDataStore):
     """The data store in a PostgreSQL schema. Deployments that name one database and schema share their items."""
 
-    def __init__(self, database_url: str, task_files: TaskFileStore, *, schema: str = "reef_data") -> None:
+    def __init__(
+        self,
+        database_url: str,
+        task_files: TaskFileStore,
+        *,
+        schema: str = "reef_data",
+        segments: SegmentStore | None = None,
+    ) -> None:
         validate_postgres_schema(schema)
         metadata = MetaData(schema=schema)
-        items, scenarios, nodes = data_tables(metadata, sqlite=False)
-        super().__init__(items, scenarios, nodes, task_files)
+        tables = data_tables(metadata, sqlite=False)
+        super().__init__(tables, task_files, segments)
         try:
             self.engine: Engine | None = create_engine(
                 postgres_url(database_url), pool_pre_ping=True, hide_parameters=True
@@ -457,12 +706,20 @@ class PostgresDataStore(SQLDataStore):
             connection.execute(select(func.pg_advisory_xact_lock(key)))
             connection.execute(CreateSchema(schema, if_not_exists=True))
             metadata.create_all(connection)
-            migrate_data_trajectories(connection, items, nodes)
+            migrate_data_segments(connection, self.items_table, self.nodes_table)
+            migrate_data_trajectories(connection, self.items_table, self.nodes_table)
 
     @classmethod
-    def from_config(cls, config: Mapping[str, Any], *, directory: Path, task_files: TaskFileStore) -> Self:
+    def from_config(
+        cls,
+        config: Mapping[str, Any],
+        *,
+        directory: Path,
+        task_files: TaskFileStore,
+        segments: SegmentStore | None,
+    ) -> Self:
         settings = PostgresDataStoreSettings.parse(config, plugin_class=cls)
-        return cls(settings.database_url, task_files, schema=settings.schema)
+        return cls(settings.database_url, task_files, schema=settings.schema, segments=segments)
 
     @contextmanager
     def transaction(self) -> Iterator[Connection]:
@@ -490,6 +747,8 @@ class PostgresDataStore(SQLDataStore):
         if self.engine is not None:
             self.engine.dispose()
             self.engine = None
+            if self.segments is not None:
+                self.segments.close()
 
 
 __all__ = [

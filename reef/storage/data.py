@@ -15,7 +15,7 @@ from __future__ import annotations
 import copy
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal, Self, get_args
 
@@ -24,6 +24,7 @@ from reef.core.plugins import Plugin, PluginConfigError
 from reef.core.records_types import AgentRecord, RequestType, decode_record_artifact_id
 from reef.core.trajectory_index import TrajectoryIndex
 from reef.storage.item_kinds import ITEM_KIND_RULES, check_artifact_content, json_digest, task_partition
+from reef.storage.segments import SegmentStore
 from reef.storage.tasks import SPLIT_NAMES, TaskFileStore
 
 ItemKind = Literal["trajectory", "task", "record", "artifact"]
@@ -187,7 +188,8 @@ class StoredItem:
     ``owner`` and ``item_id`` identify the item; no two items of one owner have the same ``item_id``.
     ``metadata`` passes ``created_metadata`` for ``owner``, and its ``kind`` is the item's kind. ``digest`` is the
     SHA-256 of the content: ``json_digest`` of the JSON content, or the task file store's digest of a task
-    directory. A trajectory, a record or an artifact has its JSON ``content``. A task has no ``content``: the task file store
+    directory. A trajectory, a record or an artifact has its JSON ``content``, except in the result of a ``query``
+    without content. A task has no ``content``: the task file store
     keeps its directory under ``digest``, in the owner's partition (``task_partition``).
 
     Purpose: what ``DataStore`` returns. Training reads a scenario's items, and clients read and query them.
@@ -249,8 +251,9 @@ class DataStore(Plugin, ABC):
       A retry of an older artifact compares all other content fields and preserves the stored content and digest.
       It returns the stored items in the order given.
     * ``read(owner, item_id)`` returns the item, or None.
-    * ``query(owner, kind, scenario, after, limit)`` returns the items of ``owner`` with ``sequence > after``,
-      in sequence order, at most ``limit``, of ``kind`` and used by ``scenario`` when those are given.
+    * ``query(owner, kind, scenario, after, limit, content)`` returns the items of ``owner`` with
+      ``sequence > after``, in sequence order, at most ``limit``, of ``kind`` and used by ``scenario`` when those
+      are given. Without ``content``, each item's ``content`` is None, and the store does not read it.
     * ``update(owner, item_ids, patch)`` applies one JSON merge patch to the metadata of each item, all or none
       (``patched_metadata``). An unknown ID is an ``ItemNotFound``. It returns the updated items.
     * ``delete(owner, item_id)`` removes the item and returns True, or returns False for an unknown ID.
@@ -259,6 +262,8 @@ class DataStore(Plugin, ABC):
       with a message list to its ``RecordLink``. The store links such an item into a trajectory when it creates
       it, by the rule of ``reef.core.trajectory_index`` among the earlier record items of the same origin scenario,
       and the link never changes; a deleted ancestor is skipped. Other IDs are left out.
+    * ``maintain()`` does the store's periodic work, such as moving content into segments. It changes no item.
+      The data service calls it every few minutes. The default does nothing.
 
     The store checks the form of the metadata. It does not know the scenarios, so the service checks that
     ``scenarios`` names only scenarios of the owner.
@@ -269,12 +274,21 @@ class DataStore(Plugin, ABC):
 
     @classmethod
     @abstractmethod
-    def from_config(cls, config: Mapping[str, Any], *, directory: Path, task_files: TaskFileStore) -> Self:
+    def from_config(
+        cls,
+        config: Mapping[str, Any],
+        *,
+        directory: Path,
+        task_files: TaskFileStore,
+        segments: SegmentStore | None,
+    ) -> Self:
         """Build the store a deployment names.
 
         ``config`` is the plugin's own configuration. ``directory`` is the deployment's
         ``storage.agent_record_dir``, for local files. ``task_files`` keeps the directories of task items, in the
-        partition of each owner (``task_partition``); the caller owns it and closes it.
+        partition of each owner (``task_partition``); the caller owns it and closes it. ``segments`` is the
+        ``storage.segment_backend`` store, or None when it is unset; a store can keep large content there, in the
+        partition of each owner. The data store owns it and closes it with itself.
         """
 
     @abstractmethod
@@ -292,6 +306,7 @@ class DataStore(Plugin, ABC):
         scenario: str | None = None,
         after: int = 0,
         limit: int = MAX_QUERY_LIMIT,
+        content: bool = True,
     ) -> tuple[StoredItem, ...]: ...
 
     @abstractmethod
@@ -305,6 +320,9 @@ class DataStore(Plugin, ABC):
 
     @abstractmethod
     def record_links(self, owner: str, item_ids: Sequence[str]) -> dict[str, RecordLink]: ...
+
+    def maintain(self) -> None:
+        """Do the store's periodic work. The default does nothing."""
 
     @abstractmethod
     def close(self) -> None:
@@ -382,7 +400,14 @@ class MemoryDataStore(DataStore):
         self.next_sequence = 1
 
     @classmethod
-    def from_config(cls, config: Mapping[str, Any], *, directory: Path, task_files: TaskFileStore) -> Self:
+    def from_config(
+        cls,
+        config: Mapping[str, Any],
+        *,
+        directory: Path,
+        task_files: TaskFileStore,
+        segments: SegmentStore | None,
+    ) -> Self:
         if config:
             raise PluginConfigError(f"MemoryDataStore takes no config, got {', '.join(sorted(map(str, config)))}")
         return cls(task_files)
@@ -432,6 +457,7 @@ class MemoryDataStore(DataStore):
         scenario: str | None = None,
         after: int = 0,
         limit: int = MAX_QUERY_LIMIT,
+        content: bool = True,
     ) -> tuple[StoredItem, ...]:
         check_query(owner, kind, scenario, after, limit)
         matched = sorted(
@@ -444,7 +470,7 @@ class MemoryDataStore(DataStore):
             ),
             key=lambda item: item.sequence,
         )
-        return tuple(matched[:limit])
+        return tuple(item if content else replace(item, content=None) for item in matched[:limit])
 
     def update(self, owner: str, item_ids: Sequence[str], patch: Mapping[str, Any]) -> tuple[StoredItem, ...]:
         check_owner(owner)

@@ -893,6 +893,9 @@ persistent.
    ``storage.data-store`` : follows ``record-backend``
        where the deployment's data items live: ``sqlite``, ``postgres`` (``record-database-url``, schema ``reef_data``), or a ``DataStore`` plugin reference
 
+   ``storage.segment-backend`` : unset
+       where a SQL data store keeps large content as JSON Lines segments: unset (in the database), ``local`` (``<agent-record-dir>/segments``), or a ``SegmentStore`` plugin reference
+
    ``storage.task-file-dir`` : .reef/task-files
        the files of generated tasks for ``local``, or the local cache of a plugin store
 

@@ -162,6 +162,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         self.services = ServiceSet.of(components)
         #: The work queue of the samples, jobs and evaluations queues.
         self.queue = coordination.work_queue
+        self.work_retention_seconds = work_retention_seconds
         # Every job component's jobs go through the jobs queue: the weight trainer's and a harness's alike. The
         # training service runs one worker for each of them.
         job_components = recipe.job_components()

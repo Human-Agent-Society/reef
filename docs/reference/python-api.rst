@@ -753,7 +753,9 @@ selects the store in ``storage.data_store``; ``SQLiteDataStore`` and
 built in. Every operation names one owner and reads or writes only its items.
 Every store links the record items of each owner into trajectories, as the
 record stores do. The SQL stores keep only the messages that each item adds;
-reads return the whole content.
+reads return the whole content. With a segment store, the SQL stores keep the
+content of trajectory items and record messages in segments (see `Segment
+stores`_).
 
 .. list-table::
    :header-rows: 1
@@ -761,19 +763,22 @@ reads return the whole content.
 
    * - Member
      - Contract
-   * - ``from_config(config, *, directory, task_files)``
+   * - ``from_config(config, *, directory, task_files, segments)``
      - Class method that builds the store a deployment names. ``directory``
        is ``storage.agent_record_dir``. The caller owns ``task_files``.
+       ``segments`` is the ``storage.segment_backend`` store or ``None``; the
+       data store owns it and closes it.
    * - ``create(owner, items)``
      - Stores ``NewItem`` values, all or none. The same ID and content again
        changes nothing; other content is ``ItemConflict``. Bad metadata is
        ``ValueError``.
    * - ``read(owner, item_id)``
      - The ``StoredItem``, or ``None``.
-   * - ``query(owner, *, kind, scenario, after, limit)``
+   * - ``query(owner, *, kind, scenario, after, limit, content=True)``
      - The owner's items after the sequence ``after``, in arrival order, at
        most ``limit`` (1 to 1000), of ``kind`` and used by ``scenario`` when
-       given.
+       given. With ``content=False``, each item's ``content`` is ``None`` and
+       the store does not read it.
    * - ``update(owner, item_ids, patch)``
      - Applies one JSON merge patch to each item's metadata, all or none.
        Changing ``kind``, ``owner`` or ``origin`` is ``ValueError``; an
@@ -789,11 +794,46 @@ reads return the whole content.
        a call that no stored call names as parent; its calls are
        ``reef.core.trajectory_index.trajectory_calls`` of the path from the
        root. Reports and unknown IDs are left out.
+   * - ``maintain()``
+     - The store's periodic work. The data service calls it every 5 minutes.
+       It changes no item. The default does nothing.
    * - ``close()``
      - Releases the store's resources; a second call does nothing.
 
 The store checks the form of the metadata. The service checks that
 ``scenarios`` names only scenarios of the owner.
+
+Segment stores
+~~~~~~~~~~~~~~
+
+A ``SegmentStore`` (``reef.storage.segments``) keeps segments: immutable
+JSON Lines files, each in one partition. The SQL data stores use one
+partition per owner. A deployment selects the store in
+``storage.segment_backend`` (see `Keep large content in segment files
+<../user-guide/operate.rst#keep-large-content-in-segment-files>`__).
+``LocalSegmentStore`` is the built-in store.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 45 55
+
+   * - Member
+     - Contract
+   * - ``from_config(config, *, directory)``
+     - Class method that builds the store a deployment names. ``directory``
+       is ``<storage.agent_record_dir>/segments``. A remote store can use it
+       as a local cache.
+   * - ``put(partition, segment_id, data)``
+     - Store the bytes ``data``. The segment is durable when the method
+       returns. The data store never puts one ID twice.
+   * - ``read(partition, lines)``
+     - The bytes of each ``SegmentLine`` (``segment_id``, ``offset``,
+       ``length``), in order. Raise ``SegmentNotFound`` for a missing
+       segment or a line past its end.
+   * - ``delete(partition, segment_id)``
+     - Remove the segment. A missing segment is not an error.
+   * - ``close()``
+     - Release the resources of the store.
 
 Artifact backends
 -----------------
