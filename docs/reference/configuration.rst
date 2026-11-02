@@ -2042,9 +2042,8 @@ Each scenario maps to a group named after the scenario or
 ``<group_prefix>/<scenario>``. Within it, Reef opens one run when the scenario
 binds and another after each train-from. The deterministic run id includes those
 identities, so restarting resumes the same run with ``resume=allow``. A
-train-from finishes the current run, marks its summary with the new start
-(``reef/train_from_release_id``) and the active release
-(``reef/active_release_id``), and resets ``train/step`` to zero. An activation
+train-from finishes the current run and records each component's training-start
+artifact ID in ``reef/train_from_artifact_ids``. It resets ``train/step`` to zero. An activation
 does not end a run. The globally monotonic ``reef/step`` stays attached for
 joining a run back to the commit history. A scenario with several
 trainers shares the run: each step's metrics carry its component name as a
@@ -2226,15 +2225,13 @@ id, so a restart or a second Reef host produces the same ids. The span carries:
   ``gen_ai.response.finish_reasons`` from the provider request and response,
   following the OpenTelemetry GenAI semantic conventions.
 * ``reef.artifact_id``: the artifact that answered the request.
-  ``reef.release_id`` and ``reef.content_id`` remain legacy storage diagnostics
-  when the record carries them; clients must not use them as artifact identities.
 * ``reef.tags``: the ``x-reef-tag-*`` request tags.
 
 A feedback record becomes a ``feedback`` span inside the trace of the first
 inference it references, with ``reef.score`` and ``reef.references``; further
 references are span links. A training instruction becomes a
 ``training request`` span. A committed step adds a ``training step N`` span
-with the commit's step, release, job id, consumed record counts,
+with the commit's step, component artifact IDs, job id, consumed record counts,
 its component as ``reef.component`` when the scenario runs several trainers,
 and its scalar metrics as ``reef.metrics.*``, plus one ``trained in step N``
 child span below every record the step consumed, linked back to the commit

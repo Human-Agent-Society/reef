@@ -21,7 +21,7 @@ from typing import Any, Literal, Self, get_args
 
 from reef.core.errors import ReefError
 from reef.core.plugins import Plugin, PluginConfigError
-from reef.core.records_types import AgentRecord, RequestType
+from reef.core.records_types import AgentRecord, RequestType, stored_record_artifact_id
 from reef.core.trajectory_index import TrajectoryIndex
 from reef.storage.item_kinds import ITEM_KIND_RULES, task_partition
 from reef.storage.segments import SegmentStore
@@ -247,7 +247,9 @@ class DataStore(Plugin, ABC):
 
     * ``create(owner, items)`` stores each item, all or none. An item whose ID the owner stores with the same
       digest is unchanged; with another digest it is an ``ItemConflict``, and nothing is stored. Bad metadata or
-      content is a ``ValueError``, and nothing is stored. It returns the stored items in the order given.
+      content is a ``ValueError``, and nothing is stored. New artifact items omit the obsolete ``content_id``.
+      A retry of an older artifact compares all other content fields and preserves the stored content and digest.
+      It returns the stored items in the order given.
     * ``read(owner, item_id)`` returns the item, or None.
     * ``query(owner, kind, scenario, after, limit, content)`` returns the items of ``owner`` with
       ``sequence > after``, in sequence order, at most ``limit``, of ``kind`` and used by ``scenario`` when those
@@ -340,12 +342,22 @@ def check_query(owner: str, kind: object, scenario: object, after: object, limit
         raise ValueError(f"limit must be an int from 1 to {MAX_QUERY_LIMIT}")
 
 
+def item_digest_matches(item: StoredItem, digest: str) -> bool:
+    """Whether the stored ``item`` has the content of a create with ``digest``.
+
+    A stored item in an older format matches the current content that it maps to
+    (``ItemKindRules.matches_stored``), so a retry never rewrites an immutable item.
+    """
+    return item.digest == digest or ITEM_KIND_RULES[item.metadata["kind"]].matches_stored(item.content, digest)
+
+
 def prepared_items(
     owner: str, items: Sequence[NewItem], task_files: TaskFileStore
 ) -> list[tuple[NewItem, dict[str, Any], str]]:
     """Check a ``create`` call and return each item with its created metadata and digest.
 
-    Each item's content follows the rules of its kind (``ITEM_KIND_RULES``). A task directory is copied into the
+    Each item's content follows the rules of its kind (``ITEM_KIND_RULES``), in the current format
+    (``ItemKindRules.current_content``). A task directory is copied into the
     owner's task file partition, so its digest names stored files. The copy happens before the store checks for
     conflicts; files are kept by digest, so a refused call leaves at most an unused copy. Raise ``ValueError`` for
     an invalid owner, ID, metadata or content, or for an ID given twice.
@@ -360,6 +372,7 @@ def prepared_items(
         seen.add(item.item_id)
         metadata = created_metadata(owner, item.metadata)
         rules = ITEM_KIND_RULES[metadata["kind"]]
+        item = NewItem(item.item_id, rules.current_content(item.content), item.metadata)
         prepared.append((item, metadata, rules.stored_digest(owner, item.item_id, item.content, metadata, task_files)))
     return prepared
 
@@ -396,7 +409,7 @@ class MemoryDataStore(DataStore):
         stored = self.items.setdefault(owner, {})
         for entry in prepared:
             existing = stored.get(entry[0].item_id)
-            if existing is not None and existing.digest != entry[2]:
+            if existing is not None and not item_digest_matches(existing, entry[2]):
                 raise ItemConflict(f"item {entry[0].item_id!r} of {owner!r} is stored with other content")
         result: list[StoredItem] = []
         for item, metadata, digest in prepared:
@@ -416,6 +429,7 @@ class MemoryDataStore(DataStore):
                         request_type=RequestType.INFERENCE,
                         payload=content["payload"],
                         agent_record_id=item.item_id,
+                        artifact_id=stored_record_artifact_id(content, content["payload"]),
                     )
                 )
             result.append(created)

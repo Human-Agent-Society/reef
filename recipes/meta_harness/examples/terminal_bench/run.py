@@ -183,7 +183,7 @@ def search(dispatcher: Dispatcher, scenario: Scenario, recipe: HarnessEvolutionR
     while steps_done(scenario) < steps:
         step = steps_done(scenario) + 1
         dispatcher.accept_instruction(
-            scenario.name, {"text": STEP_REQUEST, "session": "", "release_id": ""}, request_id=f"step-{step}"
+            scenario.name, {"text": STEP_REQUEST, "session": "", "artifact_id": ""}, request_id=f"step-{step}"
         )
         if not commit_job(scenario):
             raise RuntimeError(f"the training request of step {step} started no job")

@@ -39,7 +39,7 @@ from reef.storage.samples import CONSUMED_SAMPLE_PREFIX
 from reef.storage.scenario import ScenarioSettings
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
-from reef.train.backend import ComponentReleases, ReleaseFiles
+from reef.train.backend import ArtifactTextFiles, ComponentArtifacts
 from reef.train.harness_backend.state import HarnessState
 from reef.train.instructions import ScenarioInstructions
 from reef.train.jobs import JobLoop
@@ -208,7 +208,7 @@ def recipe_in(mode, tmp_path, method, **fields) -> HarnessEvolutionRecipe:
 def _trainer(recipe: HarnessEvolutionRecipe, records) -> Trainer:
     """The recipe's trainer over an in-memory commit history whose base is the recipe's seed."""
     return recipe.build(
-        "s", records, releases=ComponentReleases(TreeReleases(recipe.seed), COMPONENT), root=seed_root(recipe)
+        "s", records, releases=ComponentArtifacts(TreeReleases(recipe.seed), COMPONENT), root=seed_root(recipe)
     )
 
 
@@ -735,7 +735,9 @@ def test_a_stored_hybrid_mode_loads_the_scenario_with_the_recipe_default(tmp_pat
 def _committed_row(dispatcher, text):
     """The metrics of the step that answered the instruction ``text``, newest first; a job's submission names the
     instruction too, and is passed over."""
-    for row in dispatcher.get_or_create_scenario("s").releases():
+    for row in dispatcher.get_or_create_scenario("s").release_queries.snapshot_rows(
+        dispatcher.get_or_create_scenario("s").scenario_step
+    ):
         metrics = row.get("metrics") or {}
         if metrics.get("training_job", {}).get("event") == "submitted":
             continue
@@ -1019,7 +1021,11 @@ class _InstructionJobRecipe(WeightTrainingRecipe):
 
 def _job_events(dispatcher):
     """The (instruction text, job event) of every committed row, oldest first."""
-    rows = reversed(dispatcher.get_or_create_scenario("s").releases())
+    rows = reversed(
+        dispatcher.get_or_create_scenario("s").release_queries.snapshot_rows(
+            dispatcher.get_or_create_scenario("s").scenario_step
+        )
+    )
     return [
         (metrics.get("training_request", {}).get("text"), metrics["training_job"]["event"])
         for row in rows
@@ -1062,7 +1068,9 @@ def test_a_job_trainer_runs_each_instruction_as_a_job_and_a_failed_job_does_not_
         (job.data.request.text, [source_record_id(sample) for sample in job.data.samples])
         for job in component.submitted
     ] == [("one", ["a"]), ("two", ["b"])]
-    releases = dispatcher.get_or_create_scenario("s").releases()
+    releases = dispatcher.get_or_create_scenario("s").release_queries.snapshot_rows(
+        dispatcher.get_or_create_scenario("s").scenario_step
+    )
     failed = next(
         row["metrics"] for row in releases if row.get("metrics", {}).get("training_job", {}).get("event") == "failed"
     )
@@ -1071,8 +1079,8 @@ def test_a_job_trainer_runs_each_instruction_as_a_job_and_a_failed_job_does_not_
     wait_for_serving(dispatcher, "s")
     scenario = dispatcher.get_or_create_scenario("s")
     assert runtime.served == "w2"
-    assert scenario.served_artifact_id() == scenario.current_artifact_ref().release_id
-    assert (scenario.repository.resolve(scenario.current_artifact_ref()).local_path / "model.txt").read_text() == "w2"
+    assert scenario.served_artifact_id() == scenario.repository.resolve(scenario.current_snapshot()).artifact_id
+    assert (scenario.repository.resolve(scenario.current_snapshot()).local_path / "model.txt").read_text() == "w2"
     assert scenario.trainer.pipeline.training_mode == "manual"
     assert scenario.trainer.pending_instructions() == 0
 
@@ -1164,7 +1172,7 @@ def test_an_instruction_runs_past_the_step_budget_and_the_failure_streak(tmp_pat
         seen.append(asked(workspace)[0])
 
     recipe = recipe_in("manual", tmp_path, method, max_steps=1)
-    head = ReleaseFiles("base", dict(recipe.seed.files))
+    head = ArtifactTextFiles("base", dict(recipe.seed.files))
     trainer = _trainer(recipe, records)
     file(instructions, "one")
     file(instructions, "two")

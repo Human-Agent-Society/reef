@@ -6,17 +6,22 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from reef.core.artifact_ref import ArtifactRef
+from reef.core.artifact_selection import ArtifactSelection
 
 
 @dataclass(frozen=True, slots=True)
 class TrainingExperimentContext:
-    """Stable context known before a Reef training result is committed."""
+    """The training starts and run position known before one training commit.
+
+    ``source_artifacts`` is an immutable, nonempty component-to-artifact-ID
+    mapping. It names each trainer's start before the step. The committer
+    makes the context; experiment trackers use it to associate metrics.
+    """
 
     scenario: str
     recipe: str
     step: int
-    source_artifact_ref: ArtifactRef
+    source_artifacts: ArtifactSelection
     run_segment: int = 0
     run_step: int = 0
     backend: str | None = None
@@ -24,17 +29,30 @@ class TrainingExperimentContext:
     #: The release component whose trainer made the step, when the scenario runs several trainers.
     component: str | None = None
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.source_artifacts, ArtifactSelection):
+            raise TypeError("source_artifacts must be an ArtifactSelection")
+
 
 @dataclass(frozen=True, slots=True)
 class TrainingExperimentEvent:
-    """One durably committed training result and its final Reef version."""
+    """One committed training result with the component training starts after it.
+
+    ``produced_artifacts`` is an ``ArtifactSelection``. Only the changed
+    component advances; a step without an artifact keeps its previous start.
+    Commit observers make these events; trackers record their IDs and metrics.
+    """
 
     context: TrainingExperimentContext
-    produced_artifact_ref: ArtifactRef
+    produced_artifacts: ArtifactSelection
     metrics: Mapping[str, Any]
     outcome: str
     training_job_id: str | None = None
     checkpoint_path: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.produced_artifacts, ArtifactSelection):
+            raise TypeError("produced_artifacts must be an ArtifactSelection")
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,7 +61,8 @@ class TrainFromExperimentEvent:
 
     ``step`` is the step of the ``"train_from"`` commit, which numbers the
     next segment, and ``run_segment`` is the segment it ends.
-    ``start_artifact_ref`` is the new training start. ``component`` names
+    ``start_artifacts`` is the complete ``ArtifactSelection`` of training starts
+    after the change. Only the selected component changes. ``component`` names
     the trainer in a scenario of several components.
     The commit observer makes the value and the tracker reads it in
     :meth:`ExperimentTracker.record_train_from`.
@@ -53,8 +72,12 @@ class TrainFromExperimentEvent:
     recipe: str
     step: int
     run_segment: int
-    start_artifact_ref: ArtifactRef
+    start_artifacts: ArtifactSelection
     component: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.start_artifacts, ArtifactSelection):
+            raise TypeError("start_artifacts must be an ArtifactSelection")
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,7 +166,7 @@ class ExperimentTracker:
         *,
         scenario: str,
         recipe: str,
-        source_artifact_ref: ArtifactRef,
+        source_artifacts: ArtifactSelection,
         run_segment: int,
     ) -> ExperimentLogger:
         return NullExperimentLogger()

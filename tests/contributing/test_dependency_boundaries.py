@@ -87,13 +87,13 @@ def test_scenario_domain_does_not_depend_on_recipes() -> None:
 
 
 def test_core_package_does_not_depend_on_artifacts() -> None:
-    # The pure identity types (ArtifactRef and friends) live in reef.core;
+    # The pure identity types (SnapshotRef and friends) live in reef.core;
     # reef.artifact builds on them, never the other way around.
 
     for name in (
         "reef.core",
         "reef.core.records_types",
-        "reef.core.artifact_ref",
+        "reef.core.snapshot",
         "reef.core.errors",
     ):
         module = importlib.import_module(name)

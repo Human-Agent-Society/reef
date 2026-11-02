@@ -15,9 +15,9 @@ from threading import Barrier, Event
 
 import pytest
 
-from reef.core.artifact_ref import ArtifactRef
 from reef.core.errors import ReefError
 from reef.core.records_types import AgentRecord, RequestType
+from reef.core.snapshot import SnapshotRef
 from reef.storage.commit_history import CommitHistoryScenarioStore
 from reef.storage.commits import CommitRecord
 from reef.storage.postgres import PostgresScenarioStorage
@@ -39,7 +39,7 @@ def commit(step: int = 1, *, scenario: str = "math") -> CommitRecord:
     return CommitRecord(
         scenario=scenario,
         step=step,
-        artifact_ref=ArtifactRef(f"content:{step}", f"release:{step}", "base"),
+        snapshot=SnapshotRef(f"release:{step}", "base"),
         checkpoint=True,
         algorithm_state={"step": step},
         high_water_sequence=step,
@@ -183,7 +183,7 @@ def operation_commit(step: int, operation: str) -> CommitRecord:
     return CommitRecord(
         scenario="math",
         step=step,
-        artifact_ref=commit().artifact_ref,
+        snapshot=commit().snapshot,
         checkpoint=False,
         algorithm_state=None,
         high_water_sequence=0,

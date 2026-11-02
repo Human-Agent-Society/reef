@@ -193,16 +193,17 @@ def test_ordinary_harness_calls_model_evaluates_and_archives():
 
 
 class _Client:
-    def __init__(self):
+    def __init__(self, expected_path):
+        self.expected_path = expected_path
         self.index = 0
         self.reports = []
 
     def inference_with_record(self, scenario, path, payload, *, recipe=None, extra_headers=None):
         assert (scenario, path, recipe, extra_headers) == (
             "discovery",
-            "/v1/chat/completions",
+            self.expected_path,
             None,
-            {"x-reef-release-id": "checkpoint-v1"},
+            None,
         )
         self.index += 1
         content = "bad" if self.index == 2 else f"```python\n{self.index}\n```"
@@ -213,14 +214,21 @@ class _Client:
         return {}
 
 
-def test_reef_harness_reports_each_result_against_exact_inference():
-    client = _Client()
+@pytest.mark.parametrize(
+    ("artifact_id", "expected_path"),
+    [
+        (None, "/v1/chat/completions"),
+        ("artifact:v1", "/reef/scenarios/discovery/artifacts/artifact%3Av1/v1/chat/completions"),
+    ],
+)
+def test_reef_harness_reports_each_result_against_exact_inference(artifact_id, expected_path):
+    client = _Client(expected_path)
     harness = ReefTTTDiscoverHarness(
         client,
         _scorer(),
         "Improve the number.",
         scenario="discovery",
-        release_id="checkpoint-v1",
+        artifact_id=artifact_id,
         model="reef",
         groups_per_step=1,
         rollouts_per_group=3,
@@ -230,6 +238,7 @@ def test_reef_harness_reports_each_result_against_exact_inference():
     results = harness.run_step(2)
 
     assert [result.reward for result in results] == [1.0, 0.0, 3.0]
+    assert all(report[3] is None for report in client.reports)
     assert [report[1]["references"] for report in client.reports] == [
         ["agent-record-1"],
         ["agent-record-2"],

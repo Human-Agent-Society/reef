@@ -26,16 +26,16 @@ from tests.support.runtime_stubs import StubTrainingComponent, runtime_bindings
 from tests.support.samples_service import make_samples
 from tests.support.serving import wait_for_serving
 
-from reef.artifact import ArtifactRef, InMemoryRepositoryBackend
+from reef.artifact import InMemoryRepositoryBackend, SnapshotRef
 from reef.core import AgentRecord, RequestType
-from reef.core.artifact_selection import ArtifactSelection, SelectedArtifact
+from reef.core.artifact_selection import ArtifactSelection
 from reef.core.errors import ReefError
 from reef.core.trajectories import source_record_id
 from reef.dispatcher import Dispatcher, local_workers
 from reef.recipe.base import Recipe
 from reef.runtime.jobs import SavedCheckpoint, TrainingJob
 from reef.storage.commit_history import CommitHistoryError, CommitHistoryScenarioStore
-from reef.storage.commits import CommitRecord, active_artifact_ref
+from reef.storage.commits import CommitRecord, active_snapshot
 from reef.storage.samples import SAMPLE_KINDS, consumed_sample_id
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
@@ -55,9 +55,7 @@ def sample_record(
     return CommitRecord(
         scenario="math",
         step=step,
-        artifact_ref=ArtifactRef(
-            content_id=f"content:{step}", release_id=f"release:{release_label}:{step}", parent_release_id="base"
-        ),
+        snapshot=SnapshotRef(revision=f"release:{release_label}:{step}", parent_revision="base"),
         checkpoint=checkpoint,
         algorithm_state={"steps": step},
         high_water_sequence=step * 2,
@@ -94,7 +92,7 @@ def test_commit_record_round_trips_through_the_history(open_history) -> None:
     assert [record.step for record in records] == [1, 2]
     first, second = records
     assert first.scenario == "math"
-    assert first.artifact_ref == ArtifactRef("content:1", "release:w1:1", "base")
+    assert first.snapshot == SnapshotRef("release:w1:1", "base")
     assert first.checkpoint is False
     assert first.algorithm_state == {"steps": 1}
     assert first.high_water_sequence == 2
@@ -123,16 +121,25 @@ def test_commit_record_detaches_nested_metrics() -> None:
 
 
 @pytest.mark.unit
-def test_new_records_read_legacy_history_and_keep_selection_locators(open_history) -> None:
+@pytest.mark.parametrize("legacy_version", ["reef-commit/5", "reef-commit/6"])
+def test_new_records_read_legacy_history_and_keep_selection_ids(open_history, legacy_version) -> None:
     legacy = sample_record().to_dict()
-    legacy["record"] = "reef-commit/5"
+    legacy["record"] = legacy_version
+    snapshot = legacy.pop("snapshot")
+    legacy["artifact_ref"] = {
+        "kind": "artifact",
+        "release_id": snapshot["revision"],
+        "parent_release_id": snapshot["parent_revision"],
+        "content_id": "unused-legacy-content",
+    }
     assert CommitRecord.from_dict(legacy) == sample_record()
-    reference = ArtifactRef("model-content", "stored-model", None)
-    selected = ArtifactSelection({"model": SelectedArtifact("stored-model", reference)})
+    assert "content_id" not in CommitRecord.from_dict(legacy).to_dict()["snapshot"]
+    reference = SnapshotRef("stored-model", None)
+    selected = ArtifactSelection({"model": "stored-model"})
     restored = CommitRecord(
         scenario="math",
         step=1,
-        artifact_ref=reference,
+        snapshot=reference,
         checkpoint=False,
         algorithm_state=None,
         high_water_sequence=0,
@@ -143,9 +150,9 @@ def test_new_records_read_legacy_history_and_keep_selection_locators(open_histor
     )
     open_history().append(restored)
     assert open_history().records() == (restored,)
-    assert restored.to_dict()["record"] == "reef-commit/6"
+    assert restored.to_dict()["record"] == "reef-commit/7"
     encoded = restored.to_dict()
-    encoded["selection"]["model"]["artifact_id"] = "another-model"
+    encoded["selection"]["model"] = "another-model"
     with pytest.raises(CommitHistoryError, match="components must match"):
         CommitRecord.from_dict(encoded)
 
@@ -160,7 +167,7 @@ def test_commit_history_tracks_the_current_training_run_position(open_history) -
     start = CommitRecord(
         scenario="math",
         step=3,
-        artifact_ref=ArtifactRef("artifact:1", "checkpoint:1", None),
+        snapshot=SnapshotRef("checkpoint:1", None),
         checkpoint=False,
         algorithm_state=None,
         high_water_sequence=0,
@@ -177,7 +184,7 @@ def test_commit_history_tracks_the_current_training_run_position(open_history) -
         CommitRecord(
             scenario="math",
             step=5,
-            artifact_ref=ArtifactRef("artifact:1", "checkpoint:1", None),
+            snapshot=SnapshotRef("checkpoint:1", None),
             checkpoint=False,
             algorithm_state=None,
             high_water_sequence=0,
@@ -193,7 +200,7 @@ def operation_record(operation: str, step: int, release_id: str, **changes) -> C
     values = {
         "scenario": "math",
         "step": step,
-        "artifact_ref": ArtifactRef(f"content:{release_id}", release_id, None),
+        "snapshot": SnapshotRef(release_id, None),
         "checkpoint": False,
         "algorithm_state": None,
         "high_water_sequence": 0,
@@ -256,24 +263,24 @@ def test_each_operation_names_its_artifact_exactly() -> None:
 
 @pytest.mark.unit
 def test_the_active_artifact_is_the_last_activation_in_the_log() -> None:
-    creation = ArtifactRef("content:base", "base", None)
+    creation = SnapshotRef("base", None)
     made = replace(sample_record(step=1, checkpoint=True), activated=True)
     held = sample_record(step=2, checkpoint=True, release_label="w2")
-    nothing = replace(sample_record(step=3), artifact_ref=made.artifact_ref)
-    assert active_artifact_ref((), creation) == creation
-    assert active_artifact_ref((made,), creation) == made.artifact_ref
+    nothing = replace(sample_record(step=3), snapshot=made.snapshot)
+    assert active_snapshot((), creation) == creation
+    assert active_snapshot((made,), creation) == made.snapshot
     assert made.to_dict()["activated"] is True and "activated" not in held.to_dict()
     assert CommitRecord.from_dict(made.to_dict()) == made
     # An artifact the rule did not activate, a step that made nothing and a new training start activate nothing.
     start = operation_record("train_from", 4, "base")
-    assert active_artifact_ref((made, held, nothing, start), creation) == made.artifact_ref
-    activation = operation_record("activate", 5, held.artifact_ref.release_id, artifact_ref=held.artifact_ref)
-    assert active_artifact_ref((made, held, nothing, start, activation), creation) == held.artifact_ref
-    back = operation_record("activate", 6, "base", artifact_ref=creation)
-    assert active_artifact_ref((made, held, nothing, start, activation, back), creation) == creation
+    assert active_snapshot((made, held, nothing, start), creation) == made.snapshot
+    activation = operation_record("activate", 5, held.snapshot.revision, snapshot=held.snapshot)
+    assert active_snapshot((made, held, nothing, start, activation), creation) == held.snapshot
+    back = operation_record("activate", 6, "base", snapshot=creation)
+    assert active_snapshot((made, held, nothing, start, activation, back), creation) == creation
     # A training step that makes and activates an artifact afterwards is the newest activation.
     newest = replace(sample_record(step=7, checkpoint=True, release_label="w7"), activated=True)
-    assert active_artifact_ref((made, held, activation, back, newest), creation) == newest.artifact_ref
+    assert active_snapshot((made, held, activation, back, newest), creation) == newest.snapshot
 
 
 @pytest.mark.unit
@@ -311,22 +318,22 @@ def test_commit_history_reads_the_appends_of_another_writer(open_history) -> Non
 
 
 @pytest.mark.unit
-def test_commit_record_serializes_its_artifact_ref() -> None:
+def test_commit_record_serializes_its_storage_snapshot() -> None:
     durable = CommitRecord(
         scenario="math",
         step=1,
-        artifact_ref=ArtifactRef("artifact:1", "checkpoint:1", None),
+        snapshot=SnapshotRef("checkpoint:1", None),
         checkpoint=True,
         algorithm_state=None,
         high_water_sequence=0,
         high_water_offset=0,
     )
-    assert durable.to_dict()["artifact_ref"] == {
-        "kind": "artifact",
-        "content_id": "artifact:1",
-        "release_id": "checkpoint:1",
-        "parent_release_id": None,
+    assert durable.to_dict()["snapshot"] == {
+        "kind": "snapshot",
+        "revision": "checkpoint:1",
+        "parent_revision": None,
     }
+    assert "artifact_ref" not in durable.to_dict()
 
 
 @pytest.mark.unit
@@ -550,7 +557,7 @@ def test_each_committed_step_appends_one_atomic_record_and_a_restart_recovers_fr
     # The record's ref is exactly the serving head the scenario advanced to.
     scenario = dispatcher.get_or_create_scenario("math")
     committed_head = scenario.repository.require_current_artifact()
-    assert committed_head == records[4].artifact_ref == records[5].artifact_ref
+    assert committed_head == records[4].snapshot == records[5].snapshot
     committed_state = scenario.trainer.state
     assert committed_state["last_job"]["job_id"] == second_job
     # The checkpoint's metadata carries its commit record; the checkpoint commit consumes nothing.
@@ -775,7 +782,7 @@ def test_recovery_adopts_a_checkpoint_whose_record_was_lost(tmp_path) -> None:
     assert len(records) == 2
     assert adopted.step == 2
     assert adopted.checkpoint is True
-    assert adopted.artifact_ref == recovered.repository.require_current_artifact()
+    assert adopted.snapshot == recovered.repository.require_current_artifact()
     assert adopted.high_water_sequence == 2
     assert adopted.training_job_id == component.submitted[0].job_id
     assert adopted.operation == "training"
@@ -1049,13 +1056,13 @@ def test_artifact_commit_failure_keeps_the_pending_job_data_retryable(tmp_path, 
         return original(*args, **kwargs)
 
     monkeypatch.setattr(target, method_name, fail_once)
-    active = scenario.current_artifact_ref()
+    active = scenario.current_snapshot()
 
     with pytest.raises(RuntimeError, match=f"injected {failure_point} failure"):
         scenario.commit(result)
 
     # The active release moves only after the runtime serves the new one and its record lands.
-    assert scenario.current_artifact_ref() == active
+    assert scenario.current_snapshot() == active
     assert scenario.scenario_step == 1
     assert scenario.trainer.state == submitted_state
     assert [record.agent_record_id for record in scenario.records.replay("math")] == ["i1", "r1"]
@@ -1065,7 +1072,7 @@ def test_artifact_commit_failure_keeps_the_pending_job_data_retryable(tmp_path, 
 
     assert backend.data_ids == [pending.data_id]
     assert scenario.trainer.state == result.state
-    assert scenario.current_artifact_ref() != active
+    assert scenario.current_snapshot() != active
     assert [record.agent_record_id for record in scenario.records.replay("math")] == ["i1", "r1", "i2"]
     assert len(scenario.store.history()) == 2
     dispatcher.close()
@@ -1109,7 +1116,7 @@ def test_post_commit_failure_resumes_the_recorded_step_without_republication(tmp
     assert scenario.trainer.pending_job_data is pending
     assert scenario.store.durable
     [record] = scenario.store.history()
-    recorded_release = record.artifact_ref.release_id
+    recorded_release = record.snapshot.revision
     with pytest.raises(RuntimeError, match="does not match the pending step"):
         scenario.commit(replace(result, state={"steps": 999}))
 
@@ -1119,7 +1126,7 @@ def test_post_commit_failure_resumes_the_recorded_step_without_republication(tmp
     assert scenario.trainer.state == result.state
     assert scenario.trainer.pending_job_data is None
     assert len(scenario.store.history()) == 1
-    assert scenario.repository.require_current_artifact().release_id == recorded_release
+    assert scenario.repository.require_current_artifact().revision == recorded_release
     assert backend.data_ids == [pending.data_id]
     dispatcher.close()
 
@@ -1193,7 +1200,7 @@ def test_durable_local_backend_recovers_after_post_commit_notification_failure(t
     original = dispatcher.get_or_create_scenario("skills")
     assert original is not None
     # The creation's artifact is the scenario's root release.
-    activation_target = original.repository.start_artifact.release_id
+    activation_target = original.repository.resolve(original.repository.start_artifact).artifact_id
     release_failed = Event()
     reload_started = Event()
     allow_reload = Event()
@@ -1294,7 +1301,7 @@ def test_no_artifact_commit_appends_a_record_and_survives_a_restart(tmp_path) ->
     assert (submitted.step, ended.step) == (1, 2)
     assert submitted.checkpoint is False and ended.checkpoint is False
     current = scenario.repository.require_current_artifact()
-    assert submitted.artifact_ref == ended.artifact_ref == current  # no new artifact published
+    assert submitted.snapshot == ended.snapshot == current  # no new artifact published
     state = JobLoopState.from_dict(ended.algorithm_state)
     assert state.job is None and state.finished_jobs == 1 and state.last_job.event == "finished"
     assert submitted.high_water_sequence == ended.high_water_sequence == 2

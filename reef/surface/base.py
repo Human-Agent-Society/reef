@@ -16,7 +16,7 @@ from pathlib import Path
 from types import MappingProxyType
 
 from reef.artifact.artifact import Artifact, ArtifactValidator
-from reef.artifact.files import ArtifactFiles, directory_content_id
+from reef.artifact.files import ArtifactFiles
 from reef.artifact.sources import SourceFiles
 from reef.core.components import validate_component_name
 from reef.core.evaluation import ARTIFACT_KINDS, ArtifactKind
@@ -102,8 +102,8 @@ class ArtifactLayout(ABC):
 
     ``stored(files, directory)`` checks ``files``, then stores them in the empty directory ``directory``:
     ``files.reference`` when the source keeps the files fixed and ``resolves_references`` is true (RFC #995), else
-    a copy of the files (RFC #980). It returns the unpublished artifact in ``directory``, whose content id is
-    ``files.content_id()`` (a copy has the same bytes, so its computed content id is equal).
+    a copy of the files (RFC #980). It returns the unpublished artifact in ``directory``, with a new artifact ID
+    (``Artifact.local``).
 
     Purpose: a recipe binds it on ``ComponentSurface.layout``. The committer stores an import with it, and the
     scenario factory stores the artifact item that a new scenario starts from.
@@ -120,12 +120,10 @@ class ArtifactLayout(ABC):
         self.check(files)
         if files.reference is None or not self.resolves_references:
             files.copy_into(directory)
-            content_id = directory_content_id(directory)
         else:
             for path, data in files.reference.items():
                 (directory / path).write_bytes(data)
-            content_id = files.content_id()
-        return Artifact.local(directory, content_id=content_id)
+        return Artifact.local(directory)
 
 
 @dataclass(frozen=True)
@@ -308,19 +306,18 @@ class Surface:
             component.validator.validate(self.component_artifact(artifact, name))
 
     def component_changed(self, artifact: Artifact, previous: Artifact, name: str) -> bool:
-        """Whether ``name``'s content differs between two releases.
+        """Whether the snapshots select different artifacts for ``name``.
 
-        A flat release's content id is its one component's, so the refs
-        answer without materializing anything. A composed release answers from
-        its manifest; a release without one counts as changed.
+        A flat snapshot names its artifact directly. A composed snapshot uses
+        its component manifest; a missing manifest counts as changed.
         """
         if self.single:
-            return artifact.ref.content_id != previous.ref.content_id
+            return artifact.artifact_id != previous.artifact_id
         current = artifact.materialize().components
         before = previous.materialize().components
         if current is None or before is None or name not in current.entries or name not in before.entries:
             return True
-        return current.entries[name].content_id != before.entries[name].content_id
+        return current.artifact_id(name, artifact.ref.revision) != before.artifact_id(name, previous.ref.revision)
 
     def activate(
         self,

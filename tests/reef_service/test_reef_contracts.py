@@ -28,7 +28,7 @@ from reef.harness.adapters import get_adapter
 from reef.harness.sync import create_harness_surface
 from reef.inference.http import HttpInferenceHandler
 from reef.recipe import Recipe
-from reef.runtime.interfaces import InferenceHandler, InferenceStream
+from reef.runtime.interfaces import InferenceArtifact, InferenceHandler, InferenceStream
 from reef.service.app import RequestService, create_app
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
@@ -180,8 +180,8 @@ def test_dispatcher_isolates_agent_record_and_trainer_state_by_scenario() -> Non
     assert dispatcher.get_or_create_scenario("math").records.count("code") == 0
     assert dispatcher.get_or_create_scenario("code").records.count("math") == 0
     assert (
-        dispatcher.get_or_create_scenario("math").repository.current_artifact.release_id
-        != dispatcher.get_or_create_scenario("code").repository.current_artifact.release_id
+        dispatcher.get_or_create_scenario("math").repository.current_artifact.revision
+        != dispatcher.get_or_create_scenario("code").repository.current_artifact.revision
     )
 
 
@@ -200,7 +200,7 @@ def test_a_release_header_on_a_report_neither_selects_nor_binds_the_scenarios_st
     service.accept({**headers, "x-reef-release-id": "other"}, {"score": 2.0}, request_type=RequestType.REPORT)
 
     root = dispatcher.get_or_create_scenario("math").repository.start_artifact
-    assert root.parent_release_id is None and backend("math").current() == root
+    assert root.parent_revision is None and backend("math").current() == root
 
 
 @pytest.mark.unit
@@ -313,7 +313,7 @@ def test_inference_payload_is_recorded_without_reef_body_fields(tmp_path) -> Non
     commit_saved_version(dispatcher, "chat", "v1", tmp_path)
     payload = {"model": "reef", "messages": [{"role": "user", "content": "hi"}]}
 
-    async def backend(artifact: Artifact, path: str, request_payload: dict) -> dict:
+    async def backend(artifact: InferenceArtifact, path: str, request_payload: dict) -> dict:
         # The engine gets the payload under the served model name.
         assert request_payload == {**payload, "model": SERVED_MODEL}
         return {"provider": "ok"}
@@ -330,7 +330,7 @@ def test_inference_payload_is_recorded_without_reef_body_fields(tmp_path) -> Non
     record = scenario.records.replay("chat")[0]
     # The record names the artifact that answered.
     assert record.payload == {**payload, "artifact_id": scenario.serving_artifact_id(), "response": {"provider": "ok"}}
-    assert record.artifact_ref is not None
+    assert record.artifact_id == scenario.serving_artifact_id()
     assert "scenario" not in record.payload
     assert "type" not in record.payload
 
@@ -339,10 +339,10 @@ def test_inference_payload_is_recorded_without_reef_body_fields(tmp_path) -> Non
 def test_http_app_records_inference_and_returns_backend_response(tmp_path) -> None:
     used_artifact = None
 
-    async def backend(artifact: Artifact, path: str, payload: dict) -> dict:
+    async def backend(artifact: InferenceArtifact, path: str, payload: dict) -> dict:
         nonlocal used_artifact
         used_artifact = artifact
-        assert not hasattr(artifact.ref, "scenario")
+        assert isinstance(artifact, InferenceArtifact)
         assert path == "/v1/chat/completions"
         return {"choices": [{"message": {"content": payload["messages"][0]["content"]}}]}
 
@@ -365,13 +365,13 @@ def test_http_app_records_inference_and_returns_backend_response(tmp_path) -> No
     records = dispatcher.get_or_create_scenario("chat").records.replay("chat")
     assert [record.request_type for record in records] == [RequestType.INFERENCE]
     assert records[0].payload["response"]["choices"][0]["message"]["content"] == "hi"
-    assert records[0].artifact_ref == used_artifact.ref
+    assert records[0].artifact_id == used_artifact.artifact_id
     assert "artifact" not in records[0].payload
 
 
 @pytest.mark.unit
 def test_a_rollout_call_keeps_no_record_and_returns_no_training_block(tmp_path) -> None:
-    async def backend(artifact: Artifact, path: str, payload: dict) -> dict:
+    async def backend(artifact: InferenceArtifact, path: str, payload: dict) -> dict:
         # An engine handler may still return a training block; serving never passes it on.
         training = {"tokens": [1, 2, 3], "loss_mask": [1], "rollout_log_probs": [-0.5]}
         return {"choices": [{"message": {"content": "hi"}}], "training": training}
@@ -428,7 +428,7 @@ def test_artifact_proxy_backend_forwards_native_payload_unchanged(tmp_path) -> N
     assert received == {
         "path": "/v1/chat/completions",
         "payload": payload,
-        "release_id": artifact.ref.release_id,
+        "release_id": artifact.artifact_id,
         "artifact_path": str(artifact.local_path),
     }
 
@@ -495,11 +495,11 @@ def test_http_app_forwards_inference_stream_before_upstream_finishes(tmp_path) -
                 assert records[0].payload["response"]["complete"] is True
                 assert records[0].payload["response"]["status"] == 200
                 assert records[0].payload["response"]["body"] == (first_chunk + final_chunk).decode()
-                assert records[0].artifact_ref is not None
+                assert records[0].artifact_id is not None
                 assert received == {
                     "path": "/v1/chat/completions",
                     "payload": {**payload, "model": SERVED_MODEL},
-                    "release_id": records[0].artifact_ref.release_id,
+                    "release_id": records[0].artifact_id,
                 }
             finally:
                 finish_upstream.set()
@@ -611,9 +611,9 @@ def test_sse_without_terminal_event_has_no_receipt_and_is_recorded_incomplete(tm
 def test_published_candidate_is_used_after_inference_startup(tmp_path) -> None:
     used_versions = []
 
-    async def backend(artifact: Artifact, path: str, payload: dict) -> dict:
-        used_versions.append(artifact.ref.release_id)
-        return {"version": artifact.ref.release_id}
+    async def backend(artifact: InferenceArtifact, path: str, payload: dict) -> dict:
+        used_versions.append(artifact.artifact_id)
+        return {"version": artifact.artifact_id}
 
     repository_backend = InMemoryRepositoryBackend.factory(directory=tmp_path / "repository")
     dispatcher = Dispatcher(
@@ -643,8 +643,8 @@ def test_published_candidate_is_used_after_inference_startup(tmp_path) -> None:
             assert response.status == 200
 
     asyncio.run(run())
-    assert old_ref.release_id != new_ref.release_id
-    assert used_versions == [new_ref.release_id]
+    assert old_ref.revision != new_ref.revision
+    assert used_versions == [dispatcher.registry.get("chat").serving_artifact_id()]
 
 
 def commit_saved_version(dispatcher, scenario: str, version: str, root: Path) -> None:
@@ -671,14 +671,14 @@ def test_aborted_inference_restarts_before_recording(tmp_path) -> None:
     """A backend ``abort`` finish reason retries; only the completed response is recorded."""
     calls = []
 
-    async def backend(artifact: Artifact, path: str, payload: dict) -> dict:
-        calls.append(artifact.ref)
+    async def backend(artifact: InferenceArtifact, path: str, payload: dict) -> dict:
+        calls.append(artifact.artifact_id)
         if len(calls) == 1:
             return {"choices": [{"finish_reason": "abort"}]}
         return {"choices": [{"message": {"content": "hi"}, "meta_info": {"runtime_load_id": "sglang-v1"}}]}
 
     dispatcher = serving_weight_dispatcher(tmp_path)
-    head = dispatcher.get_or_create_scenario("chat").repository.current_artifact
+    head = dispatcher.get_or_create_scenario("chat").serving_artifact_id()
 
     async def run() -> None:
         async with serving_client(dispatcher, backend) as client:
@@ -695,7 +695,7 @@ def test_aborted_inference_restarts_before_recording(tmp_path) -> None:
     assert calls == [head, head]
     recorded = dispatcher.get_or_create_scenario("chat").records.replay("chat")
     assert len(recorded) == 1
-    assert recorded[0].artifact_ref == calls[-1]
+    assert recorded[0].artifact_id == calls[-1]
 
 
 class StreamRecordHandler(InferenceHandler):
@@ -868,7 +868,7 @@ def test_finished_stream_keeps_its_receipt_and_drops_the_training_block(tmp_path
 def test_an_engine_that_aborts_twice_is_a_conflict_and_nothing_is_recorded(tmp_path) -> None:
     calls = []
 
-    async def backend(artifact: Artifact, path: str, payload: dict) -> dict:
+    async def backend(artifact: InferenceArtifact, path: str, payload: dict) -> dict:
         calls.append(path)
         return {"choices": [{"finish_reason": "abort"}]}
 
@@ -1086,11 +1086,11 @@ class HarnessRecipe(Recipe):
     [HarnessRecipe(runtime=serving_runtime()), WeightRecipe(runtime=serving_runtime())],
     ids=["harness", "weights"],
 )
-def test_a_record_names_the_served_release_and_keeps_the_release_the_client_runs_as_a_tag(tmp_path, recipe) -> None:
+def test_a_record_names_the_served_artifact_and_keeps_the_release_the_client_runs_as_a_tag(tmp_path, recipe) -> None:
     """The inference service records every call against the release that served it: it reads served_models only,
     never the catalog. The release that a session says it runs stays in the record's tags."""
 
-    async def backend(artifact: Artifact, path: str, payload: dict) -> dict:
+    async def backend(artifact: InferenceArtifact, path: str, payload: dict) -> dict:
         return {"ok": True}
 
     dispatcher = Dispatcher(
@@ -1100,7 +1100,7 @@ def test_a_record_names_the_served_release_and_keeps_the_release_the_client_runs
         scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
         coordination=memory_coordination(),
     )
-    releases = [dispatcher.get_or_create_scenario("chat").current_artifact_ref().release_id]
+    releases = [dispatcher.get_or_create_scenario("chat").serving_artifact_id()]
     for version in (1, 2):
         if isinstance(recipe, WeightRecipe):
             commit_saved_version(dispatcher, "chat", f"sglang-v{version}", tmp_path)
@@ -1111,7 +1111,7 @@ def test_a_record_names_the_served_release_and_keeps_the_release_the_client_runs
             current = dispatcher.registry.get("chat")
             current.commit(TrainStepResult(state=None, artifact=Artifact.local(candidate)))
             dispatcher.scenario_committed(current)
-        releases.append(dispatcher.get_or_create_scenario("chat").current_artifact_ref().release_id)
+        releases.append(dispatcher.get_or_create_scenario("chat").serving_artifact_id())
     assert len(set(releases)) == 3
 
     async def run() -> list[str]:
@@ -1126,10 +1126,7 @@ def test_a_record_names_the_served_release_and_keeps_the_release_the_client_runs
             rows = [item for item in store.records.replay("chat") if item.request_type is RequestType.INFERENCE]
         finally:
             store.close()
-        return [
-            (item.artifact_ref.release_id, item.payload.get("metadata", {}).get("tags", {}).get("release"))
-            for item in rows
-        ]
+        return [(item.artifact_id, item.payload.get("metadata", {}).get("tags", {}).get("release")) for item in rows]
 
     recorded = asyncio.run(run())
     first, middle, served = releases

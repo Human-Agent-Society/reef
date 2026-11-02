@@ -77,9 +77,8 @@ provide the complete selection needed for recovery. Rejected or skipped
 training steps remain operations even when they create no artifact.
 
 The built-in repository stores durable bytes in Git with LFS patterns for
-weight files and a ``reef-artifact.json`` manifest. Existing backend
-interfaces call snapshots *releases* and their locators ``release_id``.
-Those names describe storage, not additional public artifact identities.
+weight files and a ``reef-artifact.json`` manifest. Backend interfaces use ``SnapshotRef`` with ``revision`` and ``parent_revision``.
+These fields locate stored bytes; component IDs remain independent of storage.
 The publication head orders new snapshots independently of the active
 selection. Publication checks its expected parent and uses a Git push lease;
 a stale writer conflicts instead of overwriting another publication.
