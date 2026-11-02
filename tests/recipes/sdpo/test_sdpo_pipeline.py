@@ -19,7 +19,6 @@ from tests.support.runtime_stubs import STUB_ROOT, runtime_bindings
 from recipes.sdpo import SDPOJobData, SDPORecipe, SDPOReport, SDPOSamples
 from recipes.sdpo.processor import SDPODemonstrationSettings, SDPOSettings
 from recipes.sdpo.slime import SdpoAlgorithm, SdpoSettings
-from reef.artifact.artifact import ArtifactRef
 from reef.core import AgentRecord, RequestType
 from reef.core.chat_rendering import rendered_job_data
 from reef.core.plugins import PluginConfigError
@@ -82,11 +81,7 @@ def push(
             scenario="science",
             request_type=RequestType.INFERENCE,
             agent_record_id=name,
-            artifact_ref=(
-                None
-                if release is None
-                else ArtifactRef(content_id="science", release_id=release, parent_release_id=None)
-            ),
+            artifact_id=release,
             payload={
                 "messages": question or QUESTION,
                 "tools": TOOLS,
@@ -190,7 +185,7 @@ def test_rejects_steps_without_one_known_policy_release(release: str | None) -> 
     push(target, 1, release=release)
     with pytest.raises(RuntimeError, match="no job data ready"):
         target.build_job_data(2)
-    assert target.status()["failed_steps"] == [{"step": 0, "reason": "missing_or_mixed_release_ids"}]
+    assert target.status()["failed_steps"] == [{"step": 0, "reason": "missing_or_mixed_artifact_ids"}]
 
 
 @pytest.mark.unit

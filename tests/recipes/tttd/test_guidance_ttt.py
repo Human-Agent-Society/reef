@@ -468,15 +468,15 @@ def test_training_wait_fails_when_tttd_reports_the_expected_step_failure() -> No
         failed_steps=[
             {
                 "step": 1,
-                "reason": "mixed_release_ids",
-                "release_ids": ["artifact-old", "artifact-new"],
+                "reason": "mixed_artifact_ids",
+                "artifact_ids": ["artifact-old", "artifact-new"],
             }
         ],
     )
 
     with pytest.raises(
         RuntimeError,
-        match=r"step 1 failed \(mixed_release_ids\).*artifact-old.*artifact-new",
+        match=r"step 1 failed \(mixed_artifact_ids\).*artifact-old.*artifact-new",
     ):
         _wait([failed], expected_rollout_id=1)
 

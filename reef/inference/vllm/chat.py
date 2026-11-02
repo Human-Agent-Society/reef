@@ -14,7 +14,6 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from reef.artifact.artifact import Artifact, is_local_release
 from reef.inference.chat import (
     CapturedGeneration,
     NativeGenerateClient,
@@ -26,6 +25,7 @@ from reef.inference.chat import (
 )
 from reef.inference.http import RequestHeadersFactory
 from reef.inference.vllm.versions import TOKEN_RUNTIME_LOAD_IDS_KEY, UNKNOWN_RUNTIME_LOAD_ID
+from reef.runtime.interfaces import InferenceArtifact
 
 VLLM_GENERATE_PATH = "/inference/v1/generate"
 #: vLLM renders logprob tokens as ``token_id:N`` on this route.
@@ -110,7 +110,7 @@ class VLLMGenerateClient(NativeGenerateClient):
             native_payload["request_id"] = request["rid"]
         return native_payload
 
-    def parse(self, artifact: Artifact, response: Mapping[str, Any]) -> CapturedGeneration:
+    def parse(self, artifact: InferenceArtifact, response: Mapping[str, Any]) -> CapturedGeneration:
         choices = response.get("choices")
         if not isinstance(choices, list) or len(choices) != 1 or not isinstance(choices[0], Mapping):
             raise ValueError("vLLM generate response must carry exactly one choice")
@@ -131,7 +131,7 @@ class VLLMGenerateClient(NativeGenerateClient):
             )
             for index, entry in enumerate(entries)
         ]
-        stamped = self._token_runtime_load_ids(artifact, response, len(output_ids))
+        stamped = self.token_runtime_load_ids(artifact, response, len(output_ids))
         public_meta = {
             key: value
             for key, value in (
@@ -151,18 +151,17 @@ class VLLMGenerateClient(NativeGenerateClient):
         )
 
     @staticmethod
-    def _token_runtime_load_ids(artifact: Artifact, response: Mapping[str, Any], count: int) -> list[str]:
+    def token_runtime_load_ids(artifact: InferenceArtifact, response: Mapping[str, Any], count: int) -> list[str]:
         params = response.get("kv_transfer_params")
         stamped = params.get(TOKEN_RUNTIME_LOAD_IDS_KEY) if isinstance(params, Mapping) else None
         if stamped is None:
-            if not is_local_release(artifact.ref.release_id):
+            if artifact.require_token_runtime_load_ids:
                 raise ValueError(
                     "vLLM generate response lacks per-token runtime load IDs; "
                     "select Reef's connector in the engine's --kv-transfer-config"
                 )
-            # A local release serves one fixed version, so every token carries it.
-            version = getattr(artifact.ref, "runtime_load_id", None) or artifact.ref.release_id
-            return [str(version)] * count
+            # A local artifact is fixed throughout this call.
+            return [artifact.artifact_id] * count
         if (
             not isinstance(stamped, list)
             or len(stamped) != count

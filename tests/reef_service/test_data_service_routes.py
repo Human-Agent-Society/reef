@@ -23,7 +23,7 @@ from tests.support.trajectory_uploads import (
     upload_trajectories,
 )
 
-from reef.artifact.artifact import ArtifactRef
+from reef.artifact.artifact import SnapshotRef
 from reef.artifact.files import DirectoryFiles
 from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.artifact.repository import DefaultStart, FileDownload
@@ -193,7 +193,7 @@ def test_an_artifacts_files_list_and_download_and_the_jobs_of_a_scenario_read_fr
 class SigningBackend(InMemoryRepositoryBackend):
     """An in-memory repository that signs a URL for each file of a release, as an object store does."""
 
-    def file_downloads(self, ref: ArtifactRef, expires_in_seconds: int) -> tuple[FileDownload, ...]:
+    def file_downloads(self, ref: SnapshotRef, expires_in_seconds: int) -> tuple[FileDownload, ...]:
         files = DirectoryFiles(self.materialize(ref).local_path)
         expires_at = int(time.time()) + expires_in_seconds
         return tuple(

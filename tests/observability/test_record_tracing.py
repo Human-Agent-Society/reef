@@ -13,7 +13,8 @@ from tests.support.runtime_stubs import runtime_bindings
 
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
-from reef.core.artifact_ref import ArtifactRef
+from reef.core.artifact_selection import ArtifactSelection
+from reef.core.snapshot import SnapshotRef
 from reef.dispatcher import Dispatcher
 from reef.observability import TracingConfig, build_record_observer
 from reef.service.deploy.service_config import service_config_from_mapping
@@ -153,7 +154,6 @@ def test_inference_record_becomes_a_client_span_with_stable_ids() -> None:
     observer, exporter = _observer()
     from reef.observability.open_telemetry import record_span_context
 
-    served = ArtifactRef(content_id="c1", release_id="v3", parent_release_id="v2")
     item = AgentRecord.create(
         scenario="math",
         request_type=RequestType.INFERENCE,
@@ -171,7 +171,7 @@ def test_inference_record_becomes_a_client_span_with_stable_ids() -> None:
         },
         agent_record_id="i1",
         created_at=1_700_000_000.5,
-        artifact_ref=served,
+        artifact_id="artifact-3",
     )
     observer.record_accepted(item)
     span = _spans(observer, exporter)["chat qwen"]
@@ -188,8 +188,6 @@ def test_inference_record_becomes_a_client_span_with_stable_ids() -> None:
         "reef.scenario": "math",
         "reef.agent_record_id": "i1",
         "reef.request_type": "inference",
-        "reef.release_id": "v3",
-        "reef.content_id": "c1",
         "reef.artifact_id": "artifact-3",
         "reef.tags": ("eval", "smoke"),
         "gen_ai.operation.name": "chat",
@@ -340,7 +338,8 @@ def test_committed_step_adds_a_child_span_below_every_consumed_record() -> None:
     commit = CommitRecord(
         scenario="math",
         step=3,
-        artifact_ref=ArtifactRef(content_id="c3", release_id="v3", parent_release_id="v2"),
+        snapshot=SnapshotRef(revision="v3", parent_revision="v2"),
+        selection=ArtifactSelection({"harness": "artifact:h3", "weights": "artifact:w2"}),
         checkpoint=True,
         algorithm_state=None,
         high_water_sequence=9,
@@ -361,7 +360,9 @@ def test_committed_step_adds_a_child_span_below_every_consumed_record() -> None:
     assert step.parent is None
     assert step.attributes["reef.step"] == 3
     assert step.attributes["reef.component"] == "harness"
-    assert step.attributes["reef.release_id"] == "v3"
+    assert step.attributes["reef.artifact_id"] == "artifact:h3"
+    assert step.attributes["reef.artifacts.weights"] == "artifact:w2"
+    assert "reef.release_id" not in step.attributes
     assert step.attributes["reef.consumed_record_count"] == 2
     assert "reef.compacted_record_count" not in step.attributes
     assert step.attributes["reef.training_job_id"] == "job-3"
@@ -378,7 +379,7 @@ def test_committed_step_adds_a_child_span_below_every_consumed_record() -> None:
         assert span.context.trace_id == expected_parent.trace_id
         assert span.parent.span_id == expected_parent.span_id
         assert [link.context.span_id for link in span.links] == [step.context.span_id]
-        assert span.attributes["reef.release_id"] == "v3"
+        assert span.attributes["reef.artifact_id"] == "artifact:h3"
         assert span.attributes["reef.component"] == "harness"
 
 
@@ -428,7 +429,7 @@ def test_observed_storage_reports_first_inserts_and_landed_commits_and_isolates_
         commit = CommitRecord(
             scenario="math",
             step=1,
-            artifact_ref=ArtifactRef(content_id="c1", release_id="v1", parent_release_id=None),
+            snapshot=SnapshotRef(revision="v1", parent_revision=None),
             checkpoint=False,
             algorithm_state=None,
             high_water_sequence=2,
