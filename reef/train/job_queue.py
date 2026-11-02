@@ -32,7 +32,7 @@ from typing import Any, cast
 
 from reef.artifact.files import ArtifactFiles
 from reef.artifact.repository import DefaultStart
-from reef.core.artifact_ref import ArtifactRef
+from reef.core.artifact_selection import ArtifactSelection
 from reef.core.job_data import JobData
 from reef.execution.workers import ItemFailed, QueueWorker, WorkerStopped
 from reef.observability.base import (
@@ -351,10 +351,10 @@ class JobExperimentRecorder(ExperimentTracker):
         return self.tracker.operational_metrics_enabled
 
     def bind_scenario(
-        self, *, scenario: str, recipe: str, source_artifact_ref: ArtifactRef, run_segment: int
+        self, *, scenario: str, recipe: str, source_artifacts: ArtifactSelection, run_segment: int
     ) -> ExperimentLogger:
         return self.tracker.bind_scenario(
-            scenario=scenario, recipe=recipe, source_artifact_ref=source_artifact_ref, run_segment=run_segment
+            scenario=scenario, recipe=recipe, source_artifacts=source_artifacts, run_segment=run_segment
         )
 
     def correlation_metrics(self, context: TrainingExperimentContext) -> Mapping[str, Any]:

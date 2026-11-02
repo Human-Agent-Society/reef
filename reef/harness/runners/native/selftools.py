@@ -21,7 +21,7 @@ from reef.harness.adapters.parts import Format
 from reef.harness.runners.native import ToolModule, ToolRunner
 from reef.harness.runners.native.enforce import ToolFailed
 from reef.harness.runners.native.graph import SEED_GRAPH
-from reef.harness.runners.native.release_client import ReleaseClient
+from reef.harness.runners.native.release_client import ArtifactClient
 from reef.harness.tree import HarnessTree, TreePatch
 
 #: How many catalog rows ``harness_inspect("results")`` returns, newest first.
@@ -60,11 +60,11 @@ class ServeState(ABC):
 
     @property
     @abstractmethod
-    def client(self) -> ReleaseClient: ...
+    def client(self) -> ArtifactClient: ...
 
     @property
     @abstractmethod
-    def release_id(self) -> str | None: ...
+    def artifact_id(self) -> str | None: ...
 
     @abstractmethod
     def live_tree(self) -> HarnessTree: ...
@@ -113,7 +113,7 @@ class SelfTools(ToolRunner):
         what = str(args.get("what", ""))
         tree = self._state.live_tree()
         if what == "tree":
-            return {"release_id": self._state.release_id, "files": dict(tree.files)}
+            return {"artifact_id": self._state.artifact_id, "files": dict(tree.files)}
         if what == "graph":
             graphs = {}
             for path, text in tree.files.items():
@@ -128,11 +128,11 @@ class SelfTools(ToolRunner):
         raise ToolFailed(f"what must be one of tree, graph, results, status; got {what!r}")
 
     def results(self) -> dict[str, Any]:
-        rows = list(reversed(self._state.client.releases()))[:RESULT_ROWS]
+        rows = list(reversed(self._state.client.artifacts()))[:RESULT_ROWS]
         releases = [
             {
-                "release_id": row.get("release_id"),
-                "parent_release_id": row.get("parent_release_id"),
+                "artifact_id": row.get("artifact_id"),
+                "parent_artifact_id": row.get("parent_artifact_id"),
                 "operation": row.get("operation"),
                 "active": bool(row.get("active")),
                 "recorded_at": row.get("recorded_at"),
@@ -140,13 +140,15 @@ class SelfTools(ToolRunner):
             }
             for row in rows
         ]
-        head = self._state.release_id or (str(rows[0]["release_id"]) if rows and rows[0].get("release_id") else None)
+        head = self._state.artifact_id or (
+            str(rows[0]["artifact_id"]) if rows and rows[0].get("artifact_id") else None
+        )
         rejected = None
         if head is not None:
             manifest = self._state.client.fetch(head)
             evaluation_metrics = manifest.get("evaluation")
             rejected = evaluation_metrics.get("rejected") if isinstance(evaluation_metrics, Mapping) else None
-        return {"head": head, "releases": releases, "rejected": rejected}
+        return {"head": head, "artifacts": releases, "rejected": rejected}
 
     def try_(self, args: dict[str, Any], workdir: str) -> Any:
         patch = patch_argument(args.get("patch"))

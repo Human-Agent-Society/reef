@@ -48,7 +48,7 @@ def test_history_reads_preserve_compacted_bodies_and_isolate_scenarios(tmp_path)
         commit = CommitRecord(
             scenario="one",
             step=1,
-            artifact_ref=scenario.current_artifact_ref(),
+            snapshot=scenario.current_snapshot(),
             checkpoint=False,
             algorithm_state={"private_state": "not part of the public history"},
             high_water_sequence=3,

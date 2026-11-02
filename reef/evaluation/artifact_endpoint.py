@@ -18,7 +18,7 @@ from typing import Any
 
 from reef.artifact.artifact import Artifact
 from reef.core.errors import InferenceUnavailable
-from reef.runtime.interfaces import InferenceRuntime, UpstreamStatusError
+from reef.runtime.interfaces import InferenceArtifact, InferenceRuntime, UpstreamStatusError
 
 #: The model call routes that the endpoint answers, as Reef's own inference routes do.
 MODEL_CALL_PATHS = ("/v1/chat/completions", "/v1/responses", "/v1/messages")
@@ -38,7 +38,7 @@ class ArtifactEndpoint:
 
     def __init__(self, runtime: InferenceRuntime, artifact: Artifact) -> None:
         if not runtime.serves_artifacts_on_request:
-            raise ValueError(f"the runtime serves only its current artifact, not {artifact.ref.release_id!r}")
+            raise ValueError(f"the runtime serves only its current artifact, not {artifact.ref.revision!r}")
         self.runtime = runtime
         self.artifact = artifact
         self.server: ThreadingHTTPServer | None = None
@@ -51,7 +51,9 @@ class ArtifactEndpoint:
         except InferenceUnavailable as exc:
             return 503, {"error": {"message": str(exc)}}
         try:
-            return 200, await self.runtime.inference_handler.inference(self.artifact, path, payload)
+            return 200, await self.runtime.inference_handler.inference(
+                InferenceArtifact.from_artifact(self.artifact), path, payload
+            )
         except UpstreamStatusError as exc:
             return exc.status, {"error": {"message": str(exc)}}
         except (ValueError, TimeoutError, OSError) as exc:

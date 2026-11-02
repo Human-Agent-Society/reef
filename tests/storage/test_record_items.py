@@ -6,7 +6,6 @@ from contextlib import closing
 
 import pytest
 
-from reef.core.artifact_ref import ArtifactRef
 from reef.core.records_types import AgentRecord, RequestType
 from reef.storage import record_items
 from reef.storage.data import ItemConflict, MemoryDataStore, NewItem
@@ -30,7 +29,7 @@ def test_a_record_item_keeps_the_record_and_says_where_it_came_from():
         payload={"tokens": [1, 2], "artifact_id": "artifact-1"},
         agent_record_id="i1",
         created_at=1.0,
-        artifact_ref=ArtifactRef(content_id="c1", release_id="rel-1", parent_release_id=None),
+        artifact_id="artifact-1",
     )
     item = record_item(served)
     assert item.item_id == "math/i1"
@@ -40,7 +39,7 @@ def test_a_record_item_keeps_the_record_and_says_where_it_came_from():
         "payload": {"tokens": [1, 2], "artifact_id": "artifact-1"},
         "created_at": 1.0,
         "references": [],
-        "artifact_ref": {"kind": "artifact", "content_id": "c1", "release_id": "rel-1", "parent_release_id": None},
+        "artifact_id": "artifact-1",
     }
     assert item.metadata == {
         "kind": "record",
@@ -133,3 +132,32 @@ def test_an_archive_releases_the_items_of_the_scenario_but_not_the_records_it_ma
         ("math/r1", {"math": "train"}),
         ("t1", {}),
     ]
+
+
+def test_copy_retry_keeps_legacy_record_item_digest(tmp_path):
+    served = AgentRecord.create(
+        scenario="math",
+        request_type=RequestType.INFERENCE,
+        payload={"artifact_id": "weights:existing"},
+        agent_record_id="legacy",
+        artifact_id="weights:existing",
+    )
+    canonical = record_item(served)
+    legacy_content = dict(canonical.content)
+    legacy_content.pop("artifact_id")
+    legacy_content["artifact_ref"] = {
+        "kind": "artifact",
+        "release_id": "snapshot",
+        "parent_release_id": None,
+        "content_id": "old",
+    }
+    data = MemoryDataStore(LocalTaskFileStore(tmp_path / "tasks"))
+    data.create("owner", [NewItem(canonical.item_id, legacy_content, canonical.metadata)])
+    digest = data.read("owner", canonical.item_id).digest
+    with closing(SQLiteScenarioStorage(tmp_path / "records")) as storage, closing(storage.open("math")) as store:
+        store.records.append(served)
+        assert copy_records(store.records, data, "owner", "math", 0) == 1
+        assert copy_records(store.records, data, "owner", "math", 0) == 1
+    archived = data.read("owner", canonical.item_id)
+    assert archived.digest == digest
+    assert copied_record(archived.item_id, archived.content, "math", "other").artifact_id == served.artifact_id

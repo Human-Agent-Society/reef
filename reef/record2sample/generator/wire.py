@@ -6,8 +6,7 @@ import math
 from collections.abc import Mapping
 from pathlib import Path
 
-from reef.core.artifact_ref import decode_artifact_ref
-from reef.core.records_types import AgentRecord, RequestType
+from reef.core.records_types import AgentRecord, RequestType, stored_record_artifact_id
 from reef.core.tasks import HarborTask, HarborTaskError
 from reef.harness.tasks.rollouts import RolloutTurn, TaskRollout
 from reef.record2sample.generator.designer import DesignerRequest
@@ -84,18 +83,16 @@ def source_records_from_document(fields: Mapping[str, object], *, scenario: str)
         created_at = record.get("created_at")
         if isinstance(created_at, bool) or not isinstance(created_at, (int, float)) or not math.isfinite(created_at):
             raise WireError("a source record's created_at must be a finite number")
-        artifact = record.get("artifact_ref")
+        payload = checked_object(record.get("payload"), "a source record's payload")
         records.append(
             AgentRecord(
                 agent_record_id=checked_string(record, "agent_record_id", label="a source record"),
                 scenario=scenario,
                 request_type=RequestType(checked_string(record, "request_type", label="a source record")),
-                payload=checked_object(record.get("payload"), "a source record's payload"),
+                payload=payload,
                 created_at=float(created_at),
                 references=tuple(checked_string_list(record, "references", label="a source record")),
-                artifact_ref=(
-                    decode_artifact_ref(checked_object(artifact, "artifact_ref")) if artifact is not None else None
-                ),
+                artifact_id=stored_record_artifact_id(record, payload),
             )
         )
     return tuple(records)

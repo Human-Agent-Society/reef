@@ -7,13 +7,13 @@ import pytest
 from reef.artifact import (
     Artifact,
     ArtifactConflict,
-    ArtifactRef,
     ArtifactReleaseChain,
     CachedRepositoryBackendFactory,
     HuggingFaceSource,
     InMemoryRepositoryBackend,
     Repository,
     RepositoryBackend,
+    SnapshotRef,
     download_huggingface_snapshot,
     parse_huggingface_source,
 )
@@ -21,7 +21,7 @@ from reef.artifact import (
 
 @pytest.mark.unit
 def test_artifact_ref_can_carry_ephemeral_local_path_without_changing_identity(tmp_path: Path) -> None:
-    durable = ArtifactRef("artifact-1", "version-1", None)
+    durable = SnapshotRef("version-1", None)
     local = Artifact(
         durable,
         InMemoryRepositoryBackend("math"),
@@ -36,7 +36,7 @@ def root_tree(directory: Path, text: str = "base") -> Artifact:
     """An unpublished root release in ``directory`` that holds ``model.txt`` = ``text``."""
     directory.mkdir()
     (directory / "model.txt").write_text(text)
-    return Artifact.local(directory, content_id=f"content:{text}")
+    return Artifact.local(directory)
 
 
 @pytest.mark.unit
@@ -70,7 +70,7 @@ def test_release_id_chain_owns_heads_staging_and_publication(tmp_path: Path) -> 
 
     assert chain.current == published
     assert chain.checkpoint == published
-    assert published.parent_release_id == root.release_id
+    assert published.parent_revision == root.revision
 
 
 @pytest.mark.unit
@@ -84,8 +84,8 @@ def test_in_memory_repository_registers_materializes_and_publishes(tmp_path: Pat
     code = code_backend.register(root_tree(tmp_path / "code-root"), metadata={"scenario": "code"})
 
     # Two scenarios get distinct roots, each a release with no parent and the root's content id.
-    assert math.release_id != code.release_id
-    assert math.parent_release_id is None and math.content_id == "content:base"
+    assert math.revision != code.revision
+    assert math.parent_revision is None
     assert math_backend.metadata() == {"scenario": "math"}
     # A second registration stores nothing and gets the winner's head.
     assert math_backend.register(root_tree(tmp_path / "late-root", "late"), metadata={}) == math
@@ -99,9 +99,9 @@ def test_in_memory_repository_registers_materializes_and_publishes(tmp_path: Pat
         expected_parent=math,
     )
 
-    assert published.parent_release_id == math.release_id
+    assert published.parent_revision == math.revision
     assert math_backend.current() == published
-    assert math_backend.resolve_release(published.release_id) == published
+    assert math_backend.resolve_snapshot(published.revision) == published
     assert math_backend.materialize(published).local_path.joinpath("model.txt").read_text() == "trained"
     # Each scenario keeps its own head; math's publish does not leak into code.
     assert code_backend.current() == code
@@ -165,7 +165,7 @@ def test_artifact_stages_serving_versions_and_publishes_checkpoints(tmp_path: Pa
     )
     (candidate_dir / "model.txt").write_text("mutated")
 
-    assert staged.ref.release_id.startswith("local:")
+    assert staged.ref.local
     lazy = Artifact(staged.ref, repository)
     assert lazy.materialize().local_path.joinpath("model.txt").read_text() == "trained"
 

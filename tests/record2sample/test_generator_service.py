@@ -23,7 +23,6 @@ from reef_client.client import ReefClientError
 
 from recipes.beta.spade import SpadeTaskGenerator
 from reef.core import AgentRecord, RequestType
-from reef.core.artifact_ref import ArtifactRef
 from reef.core.tasks import HarborTask, read_harbor_task
 from reef.execution.sandbox.task_environment import (
     HARBOR_E2B_NAMES,
@@ -850,7 +849,7 @@ def source_records() -> tuple[AgentRecord, ...]:
             request_type=RequestType.INFERENCE,
             payload={"messages": [{"role": "user", "content": "Recover the service port from its state file."}]},
             created_at=123.0,
-            artifact_ref=ArtifactRef("content", "release", None),
+            artifact_id="release",
         ),
         AgentRecord.create(
             agent_record_id="original-report",

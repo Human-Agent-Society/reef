@@ -12,7 +12,7 @@ from sqlalchemy.exc import IntegrityError, OperationalError
 from tests.support.consumption_receipts import write_consumption_receipt
 from tests.support.conversations import conversation, turn
 
-from reef.artifact import ArtifactRef
+from reef.artifact import SnapshotRef
 from reef.core import AgentRecord, RequestType
 from reef.core.atif_payloads import canonical_json
 from reef.core.errors import ReefError
@@ -88,23 +88,23 @@ def test_lookup_does_not_cross_scenario_boundaries() -> None:
 
 
 @pytest.mark.unit
-def test_inference_data_can_record_release_id() -> None:
-    artifact = ArtifactRef("artifact-1", "version-1", "initial")
+def test_inference_data_records_artifact_identity() -> None:
+    artifact = SnapshotRef("version-1", "initial")
 
     inference = AgentRecord.create(
         scenario="math",
         request_type=RequestType.INFERENCE,
         payload={"model": "reef"},
-        artifact_ref=artifact,
+        artifact_id=artifact.revision,
     )
 
-    assert inference.artifact_ref == artifact
+    assert inference.artifact_id == artifact.revision
 
 
 @pytest.mark.unit
 def test_agent_record_persists_across_store_restarts(tmp_path) -> None:
     database = tmp_path / "records.sqlite3"
-    artifact = ArtifactRef("artifact-1", "version-1", "initial")
+    artifact = SnapshotRef("version-1", "initial")
     original = AgentRecord.create(
         agent_record_id="persisted",
         scenario="math",
@@ -112,7 +112,7 @@ def test_agent_record_persists_across_store_restarts(tmp_path) -> None:
         payload={"messages": [{"role": "user", "content": "你好"}]},
         created_at=123.5,
         references=("parent",),
-        artifact_ref=artifact,
+        artifact_id=artifact.revision,
     )
 
     with SQLiteRecordStore(database) as first:
@@ -272,7 +272,7 @@ def test_legacy_schema_migrates_consumption_and_backfills_utf8_body_sizes(tmp_pa
         assert records.consumption_receipts("math")[0]["consumed_ids"] == ("retired",)
         assert retired.item.payload == {"text": "海"}
         assert retired.item.references == ("起点",)
-        assert retired.item.artifact_ref == ArtifactRef("内容", "发布", None)
+        assert retired.item.artifact_id == "发布"
         assert records.replay("math") == (retired.item, item("live", "math"))
 
     with SQLiteRecordStore(database) as records:
@@ -636,3 +636,32 @@ def test_legacy_retirement_migration_pages_ids_and_rolls_back_as_one_upgrade(tmp
         assert "agent_record_active_sequence" not in {
             row[1] for row in connection.execute("PRAGMA index_list(agent_record)")
         }
+
+
+@pytest.mark.parametrize("component_id", [None, "weights:existing"])
+def test_legacy_record_locator_reads_and_retries_as_an_artifact_id(tmp_path, component_id):
+    database = tmp_path / "records.sqlite3"
+    payload = {"messages": [{"role": "user", "content": "hello"}]}
+    if component_id is not None:
+        payload["artifact_id"] = component_id
+    identity = component_id or "old-snapshot"
+    original = AgentRecord.create(
+        scenario="math",
+        request_type=RequestType.INFERENCE,
+        payload=payload,
+        agent_record_id="legacy",
+        artifact_id=identity,
+    )
+    with SQLiteRecordStore(database) as store:
+        store.append(original)
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "UPDATE agent_record SET artifact_json = ? WHERE agent_record_id = 'legacy'",
+            ('{"kind":"artifact","release_id":"old-snapshot","parent_release_id":"parent","content_id":"old"}',),
+        )
+    with SQLiteRecordStore(database) as store:
+        restored = store.get("math", "legacy")
+        assert restored == original
+        assert store.append(restored) == original
+        assert store.append(original) == original
+        assert store.count("math") == 1

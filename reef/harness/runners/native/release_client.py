@@ -1,6 +1,6 @@
-"""The serve process's view of Reef's release channel: the poll, the manifest read, and the head watch.
+"""The serve process's view of Reef's harness artifact channel: the poll, the manifest read, and the head watch.
 
-``ReleaseClient`` reads the release catalog and one release's source tree.
+``ArtifactClient`` reads the artifact catalog and one artifact's source tree.
 ``HeadWatch`` learns the head from the periodic poll, and from the ``x-reef-release-id`` header of an inference
 answer only when a service older than ``x-reef-artifact-id`` sends it; it notifies its listener once per new head. A
 failure is logged and retried with backoff, and the process keeps serving.
@@ -23,7 +23,7 @@ from reef.harness.capture import ReleaseObserver
 MAX_BACKOFF_S = 600.0
 
 
-class ReleaseClientError(Exception):
+class ArtifactClientError(Exception):
     """Reef did not answer a release request; ``status`` carries the HTTP status when there was one."""
 
     def __init__(self, message: str, *, status: int | None = None, timed_out: bool = False) -> None:
@@ -40,11 +40,15 @@ def _timed_out(exc: BaseException) -> bool:
     return isinstance(exc, urllib.error.URLError) and isinstance(exc.reason, TimeoutError)
 
 
-class ReleaseUpdateListener(ABC):
+class ArtifactUpdateListener(ABC):
     """What learns of a new head: the serve process, which mounts it or announces it."""
 
     @abstractmethod
-    def new_head(self, release_id: str, source: str) -> None: ...
+    def new_head(self, artifact_id: str, source: str) -> None: ...
+
+    @abstractmethod
+    def new_legacy_head(self, revision: str) -> None:
+        """A head that an older Reef service named by its harness ``revision``; the mount resolves its artifact."""
 
 
 class EventWriter(ABC):
@@ -54,7 +58,7 @@ class EventWriter(ABC):
     def write(self, type_: str, data: Mapping[str, Any]) -> None: ...
 
 
-class ReleaseClient:
+class ArtifactClient:
     """The release routes of one scenario: the catalog and one manifest."""
 
     def __init__(self, reef_url: str, token: str | None, scenario: str, *, timeout_s: float = 30.0) -> None:
@@ -77,33 +81,46 @@ class ReleaseClient:
                 return int(response.status), json.loads(response.read() or b"null")
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode(errors="replace")[:600]
-            raise ReleaseClientError(f"{method} {path} answered {exc.code}: {detail}", status=exc.code) from exc
+            raise ArtifactClientError(f"{method} {path} answered {exc.code}: {detail}", status=exc.code) from exc
         except (OSError, ValueError) as exc:
-            raise ReleaseClientError(
+            raise ArtifactClientError(
                 f"{method} {path} failed: {type(exc).__name__}: {exc}", timed_out=_timed_out(exc)
             ) from exc
 
-    def releases(self) -> list[dict[str, Any]]:
-        """The catalog rows, oldest first, as ``GET /reef/harness/releases`` lists them."""
-        _, catalog = self._request("GET", "/reef/harness/releases")
-        rows = catalog.get("releases") if isinstance(catalog, Mapping) else None
+    def artifacts(self) -> list[dict[str, Any]]:
+        """The catalog rows, oldest first, as ``GET /reef/harness/artifacts`` lists them."""
+        _, catalog = self._request("GET", "/reef/harness/artifacts")
+        rows = catalog.get("artifacts") if isinstance(catalog, Mapping) else None
         if not isinstance(rows, list):
-            raise ReleaseClientError("the release catalog carries no releases list")
+            raise ArtifactClientError("the artifact catalog carries no artifacts list")
         return [dict(row) for row in rows if isinstance(row, Mapping)]
 
     def poll(self) -> str | None:
-        """The active release: the ``release_id`` of the catalog row marked ``active``, or None while no row is
+        """The active release: the ``artifact_id`` of the catalog row marked ``active``, or None while no row is
         active."""
-        release = next((row.get("release_id") for row in self.releases() if row.get("active")), None)
+        release = next((row.get("artifact_id") for row in self.artifacts() if row.get("active")), None)
         return str(release) if release else None
 
-    def fetch(self, release_id: str | None = None) -> dict[str, Any]:
-        """One release's manifest with its source tree as ``files``; the served head without ``release_id``."""
-        query = {"form": "source"} if release_id is None else {"form": "source", "release_id": release_id}
+    def fetch(self, artifact_id: str | None = None) -> dict[str, Any]:
+        """Read the source manifest for one artifact, or the active harness when no ID is given."""
+        query = {"form": "source"}
+        if artifact_id is not None:
+            query["artifact_id"] = artifact_id
+        return self.manifest(query)
+
+    def fetch_legacy(self, revision: str) -> dict[str, Any]:
+        """Resolve an installed legacy revision into a component artifact manifest."""
+        return self.manifest({"form": "source", "release_id": revision})
+
+    def manifest(self, query: Mapping[str, str]) -> dict[str, Any]:
         _, manifest = self._request("GET", f"/reef/harness?{urllib.parse.urlencode(query)}")
-        if not isinstance(manifest, Mapping) or "files" not in manifest or "release_id" not in manifest:
-            raise ReleaseClientError(f"release {release_id or 'head'!r} answered no manifest")
-        return dict(manifest)
+        if not isinstance(manifest, Mapping) or "files" not in manifest or not manifest.get("artifact_id"):
+            raise ArtifactClientError("the harness answered no artifact manifest")
+        return {
+            key: value
+            for key, value in manifest.items()
+            if key not in ("release_id", "parent_release_id", "content_id")
+        }
 
 
 class HeadWatch(ReleaseObserver):
@@ -115,8 +132,8 @@ class HeadWatch(ReleaseObserver):
 
     def __init__(
         self,
-        client: ReleaseClient,
-        listener: ReleaseUpdateListener,
+        client: ArtifactClient,
+        listener: ArtifactUpdateListener,
         log: EventWriter,
         interval_s: float,
         mounted: str | None,
@@ -127,48 +144,55 @@ class HeadWatch(ReleaseObserver):
         self._interval_s = interval_s
         self._mounted = mounted
         self._announced: str | None = None
+        #: The last harness revision that a legacy response header named.
+        self._observed_revision: str | None = None
         self._failure = ""
         self._failure_timed_out = False
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
-    def mounted(self, release_id: str | None) -> None:
+    def mounted(self, artifact_id: str | None) -> None:
         with self._lock:
-            self._mounted = release_id
+            self._mounted = artifact_id
 
-    def forget(self, release_id: str) -> None:
+    def forget(self, artifact_id: str) -> None:
         """A head whose mount could not even fetch its manifest: the next poll that names it announces it again."""
         with self._lock:
-            if self._announced == release_id:
+            if self._announced == artifact_id:
                 self._announced = None
 
-    def _consider(self, release_id: str | None, source: str) -> None:
+    def _consider(self, artifact_id: str | None, source: str) -> None:
         with self._lock:
-            if not release_id:
+            if not artifact_id:
                 return
             # Announced once per head: a mount that failed, or one the operator moved off, is not redone every
             # poll; a head that runs here is announced too, so moving off it later is not news either.
-            if release_id == self._announced:
+            if artifact_id == self._announced:
                 return
-            self._announced = release_id
-            if release_id == self._mounted:
+            self._announced = artifact_id
+            if artifact_id == self._mounted:
                 return
         try:
             # Outside the lock: the listener may mount at once, and a mount reports back through ``mounted``.
-            self._listener.new_head(release_id, source)
+            self._listener.new_head(artifact_id, source)
         except BaseException:
             with self._lock:
-                if self._announced == release_id:
+                if self._announced == artifact_id:
                     self._announced = None
             raise
 
-    def observe(self, release_id: str) -> None:
-        """The head an inference answer named; a failure here is logged like a poll failure."""
-        try:
-            self._consider(release_id, "response")
-        except Exception as exc:
-            self._log.write("release/poll-failed", {"error": f"{type(exc).__name__}: {exc}"[:600], "retry_in_s": 0})
+    def observe(self, revision: str) -> None:
+        """Queue the head that a legacy harness revision header names, once per revision, without a request.
+
+        Only an older Reef service, which sends no ``x-reef-artifact-id`` header, reaches this path. The mount
+        resolves the revision on the thread that mounts, before the agent's next step.
+        """
+        with self._lock:
+            if revision == self._observed_revision:
+                return
+            self._observed_revision = revision
+        self._listener.new_legacy_head(revision)
 
     def poll_once(self) -> bool:
         """One poll and its consequence; False when Reef did not answer."""
@@ -176,7 +200,7 @@ class HeadWatch(ReleaseObserver):
             self._consider(self._client.poll(), "poll")
         except Exception as exc:
             self._failure = f"{type(exc).__name__}: {exc}"[:600]
-            self._failure_timed_out = isinstance(exc, ReleaseClientError) and exc.timed_out
+            self._failure_timed_out = isinstance(exc, ArtifactClientError) and exc.timed_out
             return False
         return True
 
@@ -194,7 +218,7 @@ class HeadWatch(ReleaseObserver):
             else:
                 delay = backoff
                 backoff = min(backoff * 2, MAX_BACKOFF_S)
-            self._log.write("release/poll-failed", {"error": self._failure, "retry_in_s": delay})
+            self._log.write("artifact/poll-failed", {"error": self._failure, "retry_in_s": delay})
 
     def start(self) -> None:
         self._thread = threading.Thread(target=self._run, name="reef-native-poll", daemon=True)
@@ -207,4 +231,11 @@ class HeadWatch(ReleaseObserver):
             self._thread = None
 
 
-__all__ = ["MAX_BACKOFF_S", "EventWriter", "HeadWatch", "ReleaseClient", "ReleaseClientError", "ReleaseUpdateListener"]
+__all__ = [
+    "MAX_BACKOFF_S",
+    "ArtifactClient",
+    "ArtifactClientError",
+    "ArtifactUpdateListener",
+    "EventWriter",
+    "HeadWatch",
+]

@@ -16,14 +16,14 @@ from tests.support.harness_steps import COMPONENT, TreeReleases, changed_rules, 
 from tests.support.samples_service import make_samples
 
 from reef.core.plugins import PluginReference
-from reef.core.requirements import REQUIRE_KINDS, merge_requires, parse_requires
+from reef.core.requirements import REQUIRE_KINDS, merge_requires, parse_requires, required_by
 from reef.core.training_request import TrainingRequest
 from reef.evaluation.activation import NeverActivate
 from reef.harness.tree import TreePatch
 from reef.scenario import Scenario
 from reef.service.app import create_app
 from reef.storage.sqlite import SQLiteRecordStore
-from reef.train.backend import ComponentReleases
+from reef.train.backend import ComponentArtifacts
 from reef.train.harness_backend import Workspace
 from reef.train.harness_backend.state import HarnessState
 from reef.train.types import JobData
@@ -464,7 +464,10 @@ def test_the_step_row_keeps_the_backends_training_request_and_fills_a_step_that_
         recipe = manual_recipe(tmp_path / str(index), method)
         records = SQLiteRecordStore()
         trainer = recipe.build(
-            "agents", records, releases=ComponentReleases(TreeReleases(recipe.seed), COMPONENT), root=seed_root(recipe)
+            "agents",
+            records,
+            releases=ComponentArtifacts(TreeReleases(recipe.seed), COMPONENT),
+            root=seed_root(recipe),
         )
         try:
             trainer.queue_instructions([TrainingRequest.from_dict(payload, request_id="ask-1")])
@@ -624,7 +627,7 @@ def test_an_activated_release_needs_what_it_named(tmp_path: Path) -> None:
             waiting = await client.get("/reef/harness", params={"release_id": inactive["release_id"]}, headers=headers)
             assert (await waiting.json())["requires"] == REQUIRES
             response = await client.post(
-                "/reef/scenarios/agents/activate", json={"artifact_id": inactive["release_id"]}
+                "/reef/scenarios/agents/activate", json={"artifact_id": inactive["artifact_id"]}
             )
             assert response.status == 200
             assert (await response.json())["artifact_id"] == inactive["artifact_id"]
@@ -687,3 +690,31 @@ def test_a_binary_item_names_the_program_and_its_check_stays_optional() -> None:
     # An empty check is refused for a binary as for any other kind.
     with pytest.raises(ValueError, match=r"requires\[0\]\.check"):
         parse_requires([{"name": "pdftotext", "kind": "binary", "check": "   "}])
+
+
+def test_requirements_follow_component_artifact_parents_instead_of_snapshot_order() -> None:
+    rows = [
+        {
+            "artifact_id": "artifact:root",
+            "parent_artifact_id": None,
+            "release_id": "storage:root",
+            "metrics": {"training_request": {"requires": [{"name": "ROOT", "kind": "env"}]}},
+        },
+        {
+            "artifact_id": "artifact:sibling",
+            "parent_artifact_id": "artifact:root",
+            "release_id": "storage:sibling",
+            "metrics": {"training_request": {"requires": [{"name": "SIBLING", "kind": "env"}]}},
+        },
+        {
+            "artifact_id": "artifact:selected",
+            "parent_artifact_id": "artifact:root",
+            "release_id": "storage:selected",
+            "parent_release_id": "storage:sibling",
+            "metrics": {"training_request": {"requires": [{"name": "SELECTED", "kind": "env"}]}},
+        },
+    ]
+    assert required_by(rows, "artifact:selected") == [
+        {"name": "ROOT", "kind": "env"},
+        {"name": "SELECTED", "kind": "env"},
+    ]

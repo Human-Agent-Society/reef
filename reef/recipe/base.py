@@ -37,7 +37,7 @@ from reef.storage.tasks import TaskStorage
 from reef.surface.base import AcceptAnyArtifact, Surface
 from reef.surface.weights import create_weight_surface
 from reef.train.algos.registry import resolve_objective
-from reef.train.backend import CommittedReleases, ComponentReleases
+from reef.train.backend import CommittedArtifacts, ComponentArtifacts
 from reef.train.jobs import JobLoop
 from reef.train.pipeline import PipelineConfig, PipelineSpec, TrainingPipeline
 from reef.train.trainer import ComponentTrainer, Trainer
@@ -267,7 +267,7 @@ class Recipe:
         algorithm_state: Mapping[str, Any] | None = None,
         experiment_logger: ExperimentLogger | None = None,
         task_storage: TaskStorage | None = None,
-        releases: ComponentReleases | None = None,
+        releases: ComponentArtifacts | None = None,
         samples: TrainerSamples | None = None,
         root: ScenarioRoot | None = None,
     ) -> Trainer:
@@ -292,7 +292,7 @@ class Recipe:
         algorithm_states: Mapping[str, Mapping[str, Any] | None],
         experiment_logger: ExperimentLogger | None = None,
         task_storage: TaskStorage | None = None,
-        releases: CommittedReleases | None = None,
+        releases: CommittedArtifacts | None = None,
         samples: SampleStore | None = None,
         root: ScenarioRoot | None = None,
     ) -> tuple[ComponentTrainer, ...]:
@@ -329,7 +329,7 @@ class Recipe:
                     algorithm_state=algorithm_states.get(component),
                     experiment_logger=experiment_logger,
                     task_storage=task_storage,
-                    releases=None if releases is None else ComponentReleases(releases, component),
+                    releases=None if releases is None else ComponentArtifacts(releases, component),
                     samples=None if samples is None else TrainerSamples(samples),
                     root=root,
                 ),
@@ -602,7 +602,7 @@ class WeightTrainingRecipe(Recipe):
         algorithm_state: Mapping[str, Any] | None = None,
         experiment_logger: ExperimentLogger | None = None,
         task_storage: TaskStorage | None = None,
-        releases: ComponentReleases | None = None,
+        releases: ComponentArtifacts | None = None,
         samples: TrainerSamples | None = None,
         root: ScenarioRoot | None = None,
     ) -> Trainer:

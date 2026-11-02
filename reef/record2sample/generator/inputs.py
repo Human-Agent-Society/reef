@@ -7,7 +7,6 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
-from reef.core.artifact_ref import encode_artifact_ref
 from reef.core.records_types import AgentRecord
 
 MAX_ASSET_FILES = 128
@@ -78,7 +77,7 @@ def record_document(record: AgentRecord) -> dict[str, object]:
         "payload": dict(record.payload),
         "created_at": record.created_at,
         "references": list(record.references),
-        "artifact_ref": encode_artifact_ref(record.artifact_ref) if record.artifact_ref is not None else None,
+        "artifact_id": record.artifact_id,
     }
 
 

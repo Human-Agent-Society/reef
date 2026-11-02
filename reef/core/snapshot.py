@@ -6,57 +6,70 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+#: Revision prefix of a process-local snapshot: staged or unpublished, with no durable bytes.
+LOCAL_SNAPSHOT_PREFIX = "local:"
+#: Revision prefix of a local view composed from an ``ArtifactSelection``, with no durable bytes.
+SELECTION_VIEW_PREFIX = "selection:"
+
 
 @dataclass(frozen=True)
-class ArtifactRef:
-    """An internal storage locator, independent of the public artifact identity.
+class SnapshotRef:
+    """An immutable storage snapshot locator, separate from component artifact identity.
 
-    ``release_id`` locates an immutable repository snapshot or a process-local selection view. ``content_id``
-    identifies its bytes for storage and runtime caches. ``parent_release_id`` is its storage parent, if any.
-    Repository adapters and persisted recovery records use these values. Public callers select artifacts by
-    ``artifact_id`` and never need to construct or interpret this locator.
+    ``revision`` is a nonempty backend revision or process-local view key.
+    ``parent_revision`` is None for roots, otherwise a nonempty backend revision.
+    Repository adapters construct these values for publication and recovery.
+    Component selections use artifact IDs, never these storage keys.
+    A revision that starts with ``LOCAL_SNAPSHOT_PREFIX`` or
+    ``SELECTION_VIEW_PREFIX`` names a process-local view; every other revision
+    names durable storage (``durable``).
     """
 
-    content_id: str
-    release_id: str
-    parent_release_id: str | None
+    revision: str
+    parent_revision: str | None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.content_id, str) or not self.content_id:
-            raise ValueError("content_id must be a non-empty string")
-        if not isinstance(self.release_id, str) or not self.release_id:
-            raise ValueError("release_id must be a non-empty string")
-        if self.parent_release_id is not None and not isinstance(self.parent_release_id, str):
-            raise ValueError("parent_release_id must be a string or null")
+        if not isinstance(self.revision, str) or not self.revision:
+            raise ValueError("snapshot revision must be a nonempty string")
+        if self.parent_revision is not None and (
+            not isinstance(self.parent_revision, str) or not self.parent_revision
+        ):
+            raise ValueError("snapshot parent_revision must be a nonempty string or null")
+
+    @property
+    def local(self) -> bool:
+        """True for a process-local snapshot: staged or unpublished, with no durable bytes."""
+        return self.revision.startswith(LOCAL_SNAPSHOT_PREFIX)
+
+    @property
+    def selection_view(self) -> bool:
+        """True for a local view composed from an ``ArtifactSelection``."""
+        return self.revision.startswith(SELECTION_VIEW_PREFIX)
+
+    @property
+    def durable(self) -> bool:
+        """True when ``revision`` names backend storage: neither ``local`` nor ``selection_view``."""
+        return not self.local and not self.selection_view
 
 
-def encode_artifact_ref(ref: ArtifactRef) -> dict[str, Any]:
-    """Encode a ref in the release/content wire format."""
-    return {
-        "kind": "artifact",
-        "content_id": ref.content_id,
-        "release_id": ref.release_id,
-        "parent_release_id": ref.parent_release_id,
-    }
+def encode_snapshot_ref(ref: SnapshotRef) -> dict[str, object]:
+    """Encode a backend locator without claiming a component artifact identity."""
+    return {"kind": "snapshot", "revision": ref.revision, "parent_revision": ref.parent_revision}
 
 
-def decode_artifact_ref(value: Mapping[str, Any]) -> ArtifactRef:
-    """Decode the release/content ref wire format."""
-    kind = value.get("kind")
-    content_id = value.get("content_id")
-    release_id = value.get("release_id")
-    parent_release_id = value.get("parent_release_id")
-    if kind != "artifact":
-        raise ValueError(f"artifact ref kind must be 'artifact', got {kind!r}")
-    if not isinstance(content_id, str) or not content_id:
-        raise ValueError("artifact ref requires content_id")
-    if not isinstance(release_id, str) or not release_id:
-        raise ValueError("artifact ref requires release_id")
-    if parent_release_id is not None and not isinstance(parent_release_id, str):
-        raise ValueError("artifact ref parent_release_id must be a string or null")
+def decode_snapshot_ref(value: Mapping[str, object]) -> SnapshotRef:
+    """Decode current locators or the former artifact-ref wire format."""
+    if value.get("kind") == "snapshot":
+        revision, parent = value.get("revision"), value.get("parent_revision")
+    elif value.get("kind") == "artifact":
+        revision, parent = value.get("release_id"), value.get("parent_release_id")
+    else:
+        raise ValueError("snapshot ref kind must be 'snapshot' or legacy 'artifact'")
+    if not isinstance(revision, str) or (parent is not None and not isinstance(parent, str)):
+        raise ValueError("snapshot ref revision and parent_revision must be strings")
     if "runtime_load_id" in value:
-        raise ValueError("artifact ref must not carry runtime_load_id")
-    return ArtifactRef(content_id, release_id, parent_release_id)
+        raise ValueError("snapshot ref must not carry runtime_load_id")
+    return SnapshotRef(revision, parent)
 
 
 @dataclass(frozen=True)
@@ -124,8 +137,10 @@ class RootSource:
 
 
 __all__ = [
-    "ArtifactRef",
+    "LOCAL_SNAPSHOT_PREFIX",
+    "SELECTION_VIEW_PREFIX",
     "RootSource",
-    "decode_artifact_ref",
-    "encode_artifact_ref",
+    "SnapshotRef",
+    "decode_snapshot_ref",
+    "encode_snapshot_ref",
 ]

@@ -12,7 +12,7 @@ from tests.support.component_trainers import HARNESS, WEIGHTS, ComponentJobs, We
 from tests.support.component_trainers import _dispatcher as two_trainer_dispatcher
 from tests.support.component_trainers import _records
 from tests.support.component_trainers import _scenario as two_trainer_scenario
-from tests.support.component_trainers import _TwoTrainerRecipe, component_files, finish_job, stop_workers
+from tests.support.component_trainers import _TwoTrainerRecipe, component_files, component_id, finish_job, stop_workers
 from tests.support.runtime_stubs import StubInferenceRuntime
 from tests.support.samples_service import make_samples
 
@@ -83,7 +83,7 @@ def _step(scenario, component: str, step: int) -> str:
     assert result is not None
     scenario.commit(result, component=component)
     finish_job(scenario, component)
-    return scenario.current_artifact_ref().release_id
+    return scenario.current_snapshot().revision
 
 
 def _job_step(scenario, component: str):
@@ -143,7 +143,7 @@ def test_activating_a_held_harness_release_leaves_held_admission_closed(tmp_path
         # The activation records a selection of existing artifacts and materializes it locally.
         assert scenario.store.history()[-1].selection is not None
         assert not scenario.store.history()[-1].made_artifact
-        assert component_files(scenario, scenario.current_artifact_ref()) == {
+        assert component_files(scenario, scenario.current_snapshot()) == {
             WEIGHTS: "weights seed",
             HARNESS: "harness step 1",
         }
@@ -165,8 +165,8 @@ def test_a_harness_only_activation_leaves_held_admission_closed(tmp_path: Path) 
         # Another publication holds admission: published, not yet committed.
         runtime.close_admission()
         runtime.served = "before"
-        scenario.activate(f"{first}:{HARNESS}", HARNESS)
-        assert component_files(scenario, scenario.current_artifact_ref())[HARNESS] == "harness step 1"
+        scenario.activate(component_id(scenario, first, HARNESS), HARNESS)
+        assert component_files(scenario, scenario.current_snapshot())[HARNESS] == "harness step 1"
         assert not runtime.inference_admission_status["open"]
         assert runtime.served == "before"
     finally:
@@ -190,14 +190,16 @@ def test_a_failed_activation_record_leaves_the_active_artifact_and_a_retry_compl
 
         monkeypatch.setattr(scenario.store, "commit_step", store_away)
         with pytest.raises(OSError, match="commit storage away"):
-            scenario.activate(f"{scenario.repository.start_artifact.release_id}:{WEIGHTS}", WEIGHTS)
-        assert scenario.current_artifact_ref().release_id == trained
+            scenario.activate(component_id(scenario, scenario.repository.start_artifact.revision, WEIGHTS), WEIGHTS)
+        assert scenario.current_snapshot().revision == trained
         assert scenario.store.history()[-1].operation == "training"
         monkeypatch.setattr(scenario.store, "commit_step", commit_step)
 
-        activated = scenario.activate(f"{scenario.repository.start_artifact.release_id}:{WEIGHTS}", WEIGHTS)
-        assert scenario.current_artifact_ref().release_id == activated.release_id
-        assert component_files(scenario, scenario.current_artifact_ref())[WEIGHTS] == "weights seed"
+        activated = scenario.activate(
+            component_id(scenario, scenario.repository.start_artifact.revision, WEIGHTS), WEIGHTS
+        )
+        assert scenario.artifact_status()[WEIGHTS]["active"] == activated.artifact_id
+        assert component_files(scenario, scenario.current_snapshot())[WEIGHTS] == "weights seed"
         record = scenario.store.history()[-1]
         assert (record.operation, record.component, record.checkpoint) == ("activate", WEIGHTS, False)
         assert record.components is not None and WEIGHTS in record.components
@@ -216,18 +218,18 @@ def test_a_weights_start_the_training_component_refuses_is_refused_before_anythi
     try:
         scenario = two_trainer_scenario(dispatcher, 1)
         make_samples(scenario)
-        base = scenario.current_artifact_ref().release_id
+        base = scenario.current_snapshot().revision
         for _ in range(3):
             result = _job_step(scenario, WEIGHTS)
             scenario.commit(result, component=WEIGHTS)
-        served = scenario.current_artifact_ref().release_id
+        served = scenario.current_snapshot().revision
         steps = scenario.scenario_step
-        assert component_files(scenario, scenario.current_artifact_ref())[WEIGHTS] == "weights job 1"
+        assert component_files(scenario, scenario.current_snapshot())[WEIGHTS] == "weights job 1"
         with pytest.raises(TrainingStartRefused, match="cannot train from these weights"):
-            scenario.train_from(f"{scenario.repository.start_artifact.release_id}:{WEIGHTS}", WEIGHTS)
+            scenario.train_from(component_id(scenario, scenario.repository.start_artifact.revision, WEIGHTS), WEIGHTS)
         with pytest.raises(ValueError, match="name the component"):
             scenario.train_from(base)
-        assert scenario.current_artifact_ref().release_id == served
+        assert scenario.current_snapshot().revision == served
         assert scenario.scenario_step == steps
         assert dispatcher.recipe.runtime is not None
         assert dispatcher.recipe.runtime.inference_admission_status["open"]
@@ -244,26 +246,26 @@ def test_activation_and_a_new_start_wait_while_the_weight_trainer_has_a_prepared
     try:
         scenario = two_trainer_scenario(dispatcher, 1, 2)
         make_samples(scenario)
-        base = scenario.current_artifact_ref().release_id
+        base = scenario.current_snapshot().revision
         # The first job's submission, checkpoint and end; then the second job's submission.
         for _ in range(4):
             result = _job_step(scenario, WEIGHTS)
             scenario.commit(result, component=WEIGHTS)
-        served = scenario.current_artifact_ref().release_id
+        served = scenario.current_snapshot().revision
         assert served != base
         decided = _job_step(scenario, WEIGHTS)
         assert decided.metrics["training_job"]["event"] == "checkpoint"
         trainer = scenario.trainer_for(WEIGHTS)
         assert trainer.pending_job_data is None and trainer.has_pending_commit
         with pytest.raises(CommitPending, match="waits for its commit"):
-            scenario.activate(f"{scenario.repository.start_artifact.release_id}:{WEIGHTS}", WEIGHTS)
+            scenario.activate(component_id(scenario, scenario.repository.start_artifact.revision, WEIGHTS), WEIGHTS)
         with pytest.raises(CommitPending, match="waits for its commit"):
-            scenario.train_from(f"{scenario.repository.start_artifact.release_id}:{WEIGHTS}", WEIGHTS)
-        assert scenario.current_artifact_ref().release_id == served
+            scenario.train_from(component_id(scenario, scenario.repository.start_artifact.revision, WEIGHTS), WEIGHTS)
+        assert scenario.current_snapshot().revision == served
         scenario.commit(decided, component=WEIGHTS)
         assert not trainer.has_pending_commit
-        scenario.activate(f"{scenario.repository.start_artifact.release_id}:{WEIGHTS}", WEIGHTS)
-        assert component_files(scenario, scenario.current_artifact_ref())[WEIGHTS] == "weights seed"
+        scenario.activate(component_id(scenario, scenario.repository.start_artifact.revision, WEIGHTS), WEIGHTS)
+        assert component_files(scenario, scenario.current_snapshot())[WEIGHTS] == "weights seed"
     finally:
         dispatcher.close()
 
@@ -322,7 +324,7 @@ def test_a_component_whose_readers_resolve_no_reference_imports_a_copy(tmp_path:
         )
         # The harness's readers read its files, so the import stores them, not the source's reference.
         scenario.activate(imported.artifact_id, HARNESS)
-        assert component_files(scenario, scenario.current_artifact_ref())[HARNESS] == "harness imported"
+        assert component_files(scenario, scenario.current_snapshot())[HARNESS] == "harness imported"
     finally:
         dispatcher.close()
 
@@ -337,7 +339,7 @@ def test_an_import_binds_one_component_on_the_active_release_and_activates_nothi
     try:
         scenario = _scenario(dispatcher, runtime)
         _step(scenario, WEIGHTS, 1)
-        served = scenario.current_artifact_ref()
+        served = scenario.current_snapshot()
         tip = scenario.repository.checkpoint_artifact
 
         source = {"uri": imported_dir.as_uri(), "version": ""}
@@ -348,8 +350,8 @@ def test_an_import_binds_one_component_on_the_active_release_and_activates_nothi
             directory=store(tmp_path),
         )
 
-        assert imported.artifact_id == f"{imported.release_id}:{HARNESS}"
-        assert scenario.current_artifact_ref() == served
+        assert imported.artifact_id in scenario.store.history()[-1].components.values()
+        assert scenario.current_snapshot() == served
         assert scenario.repository.checkpoint_artifact == tip
         record = scenario.store.history()[-1]
         assert (record.operation, record.component, record.checkpoint) == ("import", HARNESS, True)
@@ -384,7 +386,7 @@ def test_an_import_binds_one_component_on_the_active_release_and_activates_nothi
 
         # Activating it binds the imported harness to the weights that serve now.
         scenario.activate(imported.artifact_id, HARNESS)
-        assert component_files(scenario, scenario.current_artifact_ref()) == {
+        assert component_files(scenario, scenario.current_snapshot()) == {
             WEIGHTS: "weights step 1",
             HARNESS: "harness imported",
         }
@@ -401,25 +403,25 @@ def test_a_served_harness_binds_the_weights_served_now_and_leaves_the_active_rel
         scenario = _scenario(dispatcher, runtime)
         first = _step(scenario, HARNESS, 1)
         _step(scenario, HARNESS, 2)
-        active = scenario.current_artifact_ref()
+        active = scenario.current_snapshot()
         tip = scenario.repository.checkpoint_artifact
-        artifact_id = f"{first}:{HARNESS}"
+        artifact_id = component_id(scenario, first, HARNESS)
         with pytest.raises(ReefError, match="answers only from the release it has loaded"):
             scenario.serve(artifact_id, HARNESS)
 
         runtime.answers_each_release = True
         served = scenario.serve(artifact_id, HARNESS)
-        assert served.artifact_id == artifact_id and served.release_id != first
-        release = scenario.served_beside()[artifact_id].release
-        assert release.release_id == served.release_id
+        assert served.artifact_id == artifact_id
+        selection = scenario.served_beside()[artifact_id].selection
+        release = scenario.repository.select(selection).ref
         assert component_files(scenario, release) == {WEIGHTS: "weights seed", HARNESS: "harness step 1"}
-        assert scenario.current_artifact_ref() == active
+        assert scenario.current_snapshot() == active
         assert scenario.repository.checkpoint_artifact == tip
         record = scenario.store.history()[-1]
         assert (record.operation, record.component, record.components[HARNESS]) == ("serve", HARNESS, artifact_id)
 
         stopped = scenario.stop_serving(artifact_id)
-        assert stopped.release == release
+        assert stopped.selection == selection
         assert scenario.store.history()[-1].components == record.components
         assert artifact_id not in scenario.served_beside()
     finally:

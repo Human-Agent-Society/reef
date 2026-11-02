@@ -6,8 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from reef.core.artifact_ref import ArtifactRef
-from reef.core.artifact_selection import ArtifactSelection, SelectedArtifact
+from reef.core.artifact_selection import ArtifactSelection
 from reef.core.served_models import CACHE_SECONDS, ScheduledStop, ServedArtifact
 from reef.dispatcher.served import ControlInstance, ServedModelsPublisher, retry_delay_seconds, wait_for_control_lease
 from reef.storage.coordination import Coordination
@@ -46,14 +45,9 @@ class Registry:
             artifact_status=lambda: {"weights": {"active": runtime.release, "training_start": None}},
             served_component=lambda: "weights",
             serving_artifact_id=lambda: runtime.release,
-            current_artifact_ref=lambda: SimpleNamespace(release_id=runtime.release),
+            current_snapshot=lambda: SimpleNamespace(release_id=runtime.release),
             artifact_selection=lambda ref=None: ArtifactSelection(
-                {
-                    "weights": SelectedArtifact(
-                        runtime.release if ref is None else "older-weights",
-                        ArtifactRef("content", runtime.release if ref is None else ref.release_id, None),
-                    )
-                }
+                {"weights": runtime.release if ref is None else "older-weights"}
             ),
             served_beside=dict,
             served_serving_config=lambda: {"temperature": 0.6},
@@ -135,7 +129,9 @@ def test_control_queues_beside_artifacts_as_references_and_withdraws_the_current
     runtime = Runtime()
     registry = Registry(runtime)
     registry.scenario.served_beside = lambda: {
-        "older-weights": SimpleNamespace(release=SimpleNamespace(release_id="release-0"), component="weights")
+        "older-weights": SimpleNamespace(
+            selection=ArtifactSelection({"weights": "older-weights"}), component="weights"
+        )
     }
     store = coordination()
     lease = store.control_lease.acquire("control", now=0)
