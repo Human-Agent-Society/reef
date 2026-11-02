@@ -1,10 +1,9 @@
 Write a harness method
 ======================
 
-.. page::
-   :for: authors of a harness evolution method
-   :needs: the loop and the harness tree from `Evolve your harness <../user-guide/evolve-your-harness.rst>`__
-   :outcome: a method that runs in Reef's steps, the scorer it needs, and a deployment that names it
+:For: authors of a harness evolution method
+:Before you start: the loop and the harness tree from `Evolve your harness <../user-guide/evolve-your-harness.rst>`__
+:You will have: a method that runs in Reef's steps, the scorer it needs, and a deployment that names it
 
 A method decides how the harness tree changes. It is one class with one
 operation, and a deployment names it in ``evolution.method``. GEPA, ACE and
@@ -25,11 +24,13 @@ that the method leaves is the candidate: Reef checks it and evaluates it
 under the publication policy. A selected candidate becomes a new release, and
 the deployment's activation rule decides whether that release serves.
 
-.. diagram::
-   :caption: Reef writes the workspace, calls step(context) once, and reads back the tree, the state and the output that the method left. Then Reef checks the candidate and evaluates it; a selected candidate becomes a release, which the activation rule activates or leaves inactive.
+.. figure:: ../assets/harness-method-step-light.svg
+   :alt: One training step from the method's view: the workspace Reef writes, the method and its services, what Reef reads back, then the check, the evaluation and the activation rule
 
-   <img class="fig-light" src="../assets/harness-method-step-light.svg" alt="One training step from the method's view: the workspace Reef writes, the method and its services, what Reef reads back, then the check, the evaluation and the activation rule">
-   <img class="fig-dark" src="../assets/harness-method-step-dark.svg" alt="One training step from the method's view: the workspace Reef writes, the method and its services, what Reef reads back, then the check, the evaluation and the activation rule">
+   Reef writes the workspace, calls step(context) once, and reads back the
+   tree, the state and the output that the method left. Then Reef checks the
+   candidate and evaluates it; a selected candidate becomes a release, which
+   the activation rule activates or leaves inactive.
 
 An example: add a tool
 ----------------------

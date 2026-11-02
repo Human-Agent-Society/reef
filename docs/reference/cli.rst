@@ -22,14 +22,25 @@ Once the stack is running, Ctrl-C requests graceful shutdown. Pressing it
 again during shutdown skips the remaining 30-second grace period and proceeds
 to forced cleanup of the managed service processes.
 
-.. config::
+.. container:: config
 
-   -c, --config | optional config file. No file is loaded unless explicitly selected.
-   --model [PROVIDER/]MODEL | the upstream model. An ``ollama/`` or ``openai/`` prefix fills the endpoint and the key; any other spelling is the model ID as is.
-   --component NAME | run one service of the deployment in this process: ``control``, ``inference``, ``samples``, ``training``, ``evaluation`` or ``data``. The process starts no other child. Without it, one process runs all services. See `Run the services in separate processes <../user-guide/operate.rst#run-the-services-in-separate-processes>`__.
-   --print-config | print every resolved setting with its source (file, command line, environment, automatic, default) and exit without downloading models or starting services. Credentials are masked.
-   --help | the command list
-   -V, --version | the installed reef version. Takes no command: ``reef --version``.
+   ``-c, --config``
+       optional config file. No file is loaded unless explicitly selected.
+
+   ``--model [PROVIDER/]MODEL``
+       the upstream model. An ``ollama/`` or ``openai/`` prefix fills the endpoint and the key; any other spelling is the model ID as is.
+
+   ``--component NAME``
+       run one service of the deployment in this process: ``control``, ``inference``, ``samples``, ``training``, ``evaluation`` or ``data``. The process starts no other child. Without it, one process runs all services. See `Run the services in separate processes <../user-guide/operate.rst#run-the-services-in-separate-processes>`__.
+
+   ``--print-config``
+       print every resolved setting with its source (file, command line, environment, automatic, default) and exit without downloading models or starting services. Credentials are masked.
+
+   ``--help``
+       the command list
+
+   ``-V, --version``
+       the installed reef version. Takes no command: ``reef --version``.
 
 Selecting the model
 -------------------

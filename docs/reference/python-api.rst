@@ -1604,12 +1604,19 @@ objective set what the component may do with the job's data:
 A job's optional ``scheduling`` parameter is a ``StepScheduling``
 (``reef.train.algos.schedule``) as an object:
 
-.. config::
+.. container:: config
 
-   epochs | 1 | the passes over the job's data, a positive int
-   shuffle | ``false`` | reorder the rollouts in every pass, deterministically from the data's rows
-   remainder | ``"partial"`` | a last step with fewer rollouts (or packs) than the batch size: ``"partial"`` trains it as a smaller step, ``"drop"`` leaves it out, ``"error"`` refuses the job's data
-   packing_length | ``null`` | pack the rollouts into packs of at most this many tokens (``training["tokens"]`` of each trajectory) before the steps are cut; one step then trains batch-size packs. A pack never splits a rollout, and a longer rollout is a pack of its own. ``shuffle`` and ``remainder`` apply to the packs.
+   ``epochs`` : 1
+       the passes over the job's data, a positive int
+
+   ``shuffle`` : ``false``
+       reorder the rollouts in every pass, deterministically from the data's rows
+
+   ``remainder`` : ``"partial"``
+       a last step with fewer rollouts (or packs) than the batch size: ``"partial"`` trains it as a smaller step, ``"drop"`` leaves it out, ``"error"`` refuses the job's data
+
+   ``packing_length`` : ``null``
+       pack the rollouts into packs of at most this many tokens (``training["tokens"]`` of each trajectory) before the steps are cut; one step then trains batch-size packs. A pack never splits a rollout, and a longer rollout is a pack of its own. ``shuffle`` and ``remainder`` apply to the packs.
 
 A component reads a job's ``method`` and ``scheduling`` parameters with
 ``reef.train.algos.registry.job_training(parameters)``. It raises

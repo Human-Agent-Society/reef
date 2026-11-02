@@ -1,10 +1,9 @@
 Development
 ===========
 
-.. page::
-   :for: contributors
-   :needs: a Reef checkout
-   :outcome: a development environment with the checks that run in CI
+:For: contributors
+:Before you start: a Reef checkout
+:You will have: a development environment with the checks that run in CI
 
 Setup
 -----
