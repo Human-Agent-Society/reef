@@ -312,6 +312,33 @@ def query_items(
     }
 
 
+def group_items(
+    data: DataAccess, owner: str, *, kind: str | None, key: str, before: int | None, limit: int
+) -> dict[str, Any]:
+    """The groups of the items of ``owner`` and ``kind`` by the metadata key ``key`` (``DataStore.groups``), newest
+    first: ``{owner, groups, next}``. Each group is ``{value, item_count, first_sequence, last_sequence, metadata}``.
+
+    ``next`` is the ``before`` of the next page, or null after the last group.
+    """
+    if kind not in KINDS:
+        raise ValueError(f"kind must be one of {', '.join(ITEM_KINDS)}, got {kind!r}")
+    found = data.require_store().groups(owner, kind=KINDS[kind], key=key, before=before, limit=limit)
+    return {
+        "owner": owner,
+        "groups": [
+            {
+                "value": group.value,
+                "item_count": group.item_count,
+                "first_sequence": group.first_sequence,
+                "last_sequence": group.last_sequence,
+                "metadata": dict(group.metadata),
+            }
+            for group in found
+        ],
+        "next": found[-1].first_sequence if len(found) == limit else None,
+    }
+
+
 def read_item(data: DataAccess, owner: str, item_id: str) -> dict[str, Any]:
     """One item of ``owner`` with its content; ``ItemNotFound`` for an unknown ID."""
     item = data.require_store().read(owner, item_id)
