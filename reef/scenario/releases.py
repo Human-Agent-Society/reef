@@ -112,8 +112,10 @@ class ScenarioReleases:
             # Without a durable log nothing names the active release but the chain: a recovery row stands for it.
             recovered = not records and scenario_step > 0
             activating = [record for record in records if record.activates]
-            active_id = activating[-1].artifact_ref.release_id if activating else self.creation_artifact.release_id
-            activated = {self.creation_artifact.release_id} | {record.artifact_ref.release_id for record in activating}
+            active_id = activating[-1].artifact_ref.release_id if activating else self._artifacts.current.release_id
+            activated = {self.creation_artifact.release_id, active_id} | {
+                record.artifact_ref.release_id for record in activating
+            }
             creation = self._release_row(
                 step=0,
                 artifact_ref=self.creation_artifact,
@@ -168,7 +170,9 @@ class ScenarioReleases:
         if creation is not None:
             known[self.creation_artifact.release_id] = creation
         for record in self.records():
-            if record.components is not None:
+            if record.selection is not None:
+                known[record.artifact_ref.release_id] = record.selection.artifact_ids
+            elif record.components is not None:
                 known[record.artifact_ref.release_id] = record.components
         return known
 
@@ -176,8 +180,50 @@ class ScenarioReleases:
         """The ``artifact_id`` of each component the active release binds; ``None`` for a flat release or when unknown."""
         record = active_record(self.records())
         if record is None:
+            if self._artifacts.current != self.creation_artifact:
+                artifact = self._artifacts.resolve(self._artifacts.current)
+                manifest = artifact.components
+                return None if manifest is None else manifest.artifact_ids(artifact.ref.release_id)
             return self.creation_components(scenario_step)
+        if record.selection is not None:
+            return record.selection.artifact_ids
         return record.components
+
+    def artifact_parents(self, scenario_step: int, components: tuple[str, ...]) -> dict[str, str | None]:
+        """The parent artifact of each output, derived from that component's training start or synced active tree.
+
+        Creation and external imports have no local parent. Training follows its component's training start,
+        including explicit ``train_from`` operations. A sync follows its previously active artifact. Storage
+        commit ancestry never substitutes for these component relationships.
+        """
+        active = self.bound_artifact_ids(self.creation_artifact.release_id, components, scenario_step)
+        starts = dict(active)
+        parents: dict[str, str | None] = dict.fromkeys(active.values())
+        for record in self.records():
+            bound = (
+                record.selection.artifact_ids
+                if record.selection is not None
+                else record.components
+                or self.bound_artifact_ids(record.artifact_ref.release_id, components, scenario_step)
+            )
+            changed = components if record.component is None else (record.component,)
+            if record.made_artifact:
+                for name in changed:
+                    artifact_id = bound.get(name)
+                    if artifact_id is None or artifact_id in parents:
+                        continue
+                    if record.operation == "training":
+                        parent = starts.get(name)
+                    elif record.operation == "sync":
+                        parent = active.get(name)
+                    else:
+                        parent = None
+                    parents[artifact_id] = parent
+            if record.sets_training_start:
+                starts.update({name: bound[name] for name in changed if name in bound})
+            if record.activates:
+                active = dict(bound)
+        return parents
 
     def artifacts(self, scenario_step: int, components: tuple[str, ...]) -> tuple[dict[str, Any], ...]:
         """List the artifacts of each component in ``components``, newest first, with each component's active one.
@@ -300,6 +346,9 @@ class ScenarioReleases:
         """The ``artifact_id`` values that ``component`` has served: the creation's, and each activating record's."""
         creation = self.creation_components(scenario_step) or {}
         served = {record.components[component] for record in self.records() if record.activates and record.components}
+        current = self.active_components(scenario_step) or {}
+        if component in current:
+            served.add(current[component])
         return served | ({creation[component]} if component in creation else set())
 
     @staticmethod

@@ -530,7 +530,7 @@ def test_sao_train_step_swaps_the_served_artifact(tmp_path) -> None:
         # actually moved off the pre-train head (guards against a constant stub).
         assert head.release_id != pre_head.release_id
         # The runtime loaded the checkpoint once, and the scenario serves its artifact.
-        assert inference.activated == [pre_head.release_id, head.release_id]
+        assert inference.activated == [pre_head.release_id, "w1"]
         assert pre_served != scenario.serving_artifact_id() == head.release_id
     finally:
         dispatcher.close()

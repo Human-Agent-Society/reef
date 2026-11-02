@@ -20,7 +20,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any, cast
 
-from reef.core.training_request import TrainingRequest
+from reef.core.training_request import TrainingRequest, normalize_training_request_payload
 from reef.storage.records import RecordConflict
 from reef.storage.work_queue import JsonValue, NewWork, WorkConflict, WorkItem, WorkQueue
 from reef.train.trainer import Trainer
@@ -73,6 +73,14 @@ class ScenarioInstructions:
         The same ID with the same payload returns the item that exists; with another payload it raises
         ``RecordConflict``, as a record with the same ID and other content does.
         """
+        previous = self.get(request_id)
+        if (
+            previous is not None
+            and "release_id" in previous.payload
+            and "artifact_id" not in previous.payload
+            and normalize_training_request_payload(previous.payload) == payload
+        ):
+            return previous
         work = NewWork(
             INSTRUCTIONS_QUEUE,
             request_id,

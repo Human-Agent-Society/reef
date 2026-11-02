@@ -78,7 +78,7 @@ def two_artifacts(tmp_path):
     answering_each_release(runtime)
     train(value, 1)
     train(value, 2)
-    newest, older, _ = value.list_artifacts("math")
+    newest, older, _ = value.get_or_create_scenario("math").artifact_rows()
     return value, runtime, backend_factory, newest, older
 
 
@@ -202,7 +202,7 @@ def test_the_served_artifacts_survive_a_restart(tmp_path) -> None:
 def test_a_runtime_that_answers_only_from_its_loaded_release_refuses_a_serve(tmp_path) -> None:
     value, _, _ = dispatcher(tmp_path)
     train(value, 1)
-    older = value.list_artifacts("math")[-1]
+    older = value.get_or_create_scenario("math").artifact_rows()[-1]
     scenario = value.get_or_create_scenario("math")
     steps = len(scenario.store.history())
     with pytest.raises(ReefError, match="answers only from the release it has loaded"):
@@ -225,8 +225,6 @@ def test_serve_and_stop_serving_http_api(tmp_path, monkeypatch) -> None:
                 "scenario": "math",
                 "component": older["component"],
                 "artifact_id": older["artifact_id"],
-                "release_id": older["release_id"],
-                "content_id": older["content_id"],
             }
             listed = await (await client.get("/reef/scenarios/math/artifacts")).json()
             assert [row["artifact_id"] for row in listed["artifacts"] if row["served"]] == [older["artifact_id"]]
@@ -240,7 +238,6 @@ def test_serve_and_stop_serving_http_api(tmp_path, monkeypatch) -> None:
                 "scenario": "math",
                 "component": older["component"],
                 "artifact_id": older["artifact_id"],
-                "release_id": older["release_id"],
             }
             for path in ("serve", "stop-serving"):
                 missing = await client.post(f"/reef/scenarios/math/{path}", json={"artifact_id": "missing"})

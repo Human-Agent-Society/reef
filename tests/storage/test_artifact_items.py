@@ -22,7 +22,7 @@ def test_the_item_of_a_scenarios_artifact_names_where_it_came_from_and_where_its
     }
     assert item.metadata == {
         "kind": "artifact",
-        "origin": {"scenario": "coding", "release_id": "r1", "artifact_id": "a1"},
+        "origin": {"scenario": "coding", "artifact_id": "a1"},
     }
     # A repository that gives no URI, and a component without a kind, leave those null.
     assert artifact_item("coding", ROW, None, None).content["source_uri"] is None

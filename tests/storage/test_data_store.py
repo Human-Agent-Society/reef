@@ -20,7 +20,7 @@ from reef.storage.sql_data import PostgresDataStore, SQLiteDataStore
 from reef.storage.tasks import LocalTaskFileStore, files_digest
 
 ATIF = {"schema_version": "ATIF-v1.4", "agent": {"name": "fixture"}, "steps": [{"step_id": 1, "message": "hi"}]}
-ORIGIN = {"scenario": "coding", "release_id": "r1", "artifact_id": "a1"}
+ORIGIN = {"scenario": "coding", "artifact_id": "a1"}
 
 
 def record_content(record_id: str) -> dict:
@@ -116,7 +116,7 @@ def test_metadata_says_what_an_item_is_and_which_scenarios_use_it(store):
     assert record.kind == "record"
     assert record.metadata["origin"] == ORIGIN
     # An imported record names no release and no artifact.
-    unserved = {**ORIGIN, "release_id": None, "artifact_id": None}
+    unserved = {**ORIGIN, "artifact_id": None}
     (imported,) = store.create(
         "acme", [NewItem("coding/r2", record_content("r2"), {"kind": "record", "origin": unserved})]
     )
@@ -140,7 +140,7 @@ def test_metadata_says_what_an_item_is_and_which_scenarios_use_it(store):
         (NewItem("x", {}, {"kind": "record", "origin": {**ORIGIN, "artifact_id": ""}}), "origin.artifact_id"),
         (trajectory("x", origin=ORIGIN), "only a record or an artifact"),
         (NewItem("x", {}, {"kind": "artifact", "scenarios": {"coding": "train"}}), "importing it"),
-        (NewItem("x", {}, {"kind": "artifact", "origin": unserved}), "names its release_id and artifact_id"),
+        (NewItem("x", {}, {"kind": "artifact", "origin": unserved}), "names its artifact_id"),
         (trajectory("x", scenarios={"coding": "eval"}), "always train"),
         (trajectory("x", scenarios={"coding": "dev"}), "train or eval"),
         (NewItem("x", ATIF, {"kind": "task"}), "task directory"),
@@ -409,3 +409,11 @@ def test_concurrent_creates_of_one_id_end_in_a_no_op_or_a_conflict(open_durable_
     finally:
         for store in stores:
             store.close()
+
+
+def test_legacy_origin_is_read_at_admission_without_persisting_a_second_identity(store):
+    legacy = {**ORIGIN, "release_id": "revision-1"}
+    (stored,) = store.create(
+        "acme", [NewItem("coding/r1", record_content("r1"), {"kind": "record", "origin": legacy})]
+    )
+    assert stored.metadata["origin"] == ORIGIN
