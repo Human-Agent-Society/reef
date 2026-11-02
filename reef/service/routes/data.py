@@ -19,6 +19,7 @@ from reef.service.data import (
     create_task_items,
     create_trajectory_items,
     delete_item,
+    group_items,
     jsonl_trajectories,
     parsed_metadata,
     query_items,
@@ -151,6 +152,19 @@ def register_data_routes(app: web.Application, *, request_service: RequestServic
         )
         return web.json_response(listing)
 
+    async def groups(request: web.Request) -> web.Response:
+        before = query_int(request, "before", 0)
+        listing = await asyncio.to_thread(
+            group_items,
+            data,
+            request.match_info["owner"],
+            kind=request.query.get("kind") or None,
+            key=request.match_info["key"],
+            before=before or None,
+            limit=query_int(request, "limit", MAX_QUERY_LIMIT),
+        )
+        return web.json_response(listing)
+
     async def read(request: web.Request) -> web.Response:
         item = await asyncio.to_thread(read_item, data, request.match_info["owner"], request.match_info["item_id"])
         return web.json_response(item)
@@ -176,6 +190,7 @@ def register_data_routes(app: web.Application, *, request_service: RequestServic
     # These come before the item routes, whose ID takes the rest of the path.
     app.router.add_post(f"{base}/{transfers}", start)
     app.router.add_get(f"{base}/{transfers}/{{transfer_id}}", transfer)
+    app.router.add_get(f"{base}/groups/{{key}}", groups)
     add_signed_download(app, base + "/{item_id:.+}/archive", archive)
     # An item ID can hold '/', so the route takes the rest of the path.
     app.router.add_get(base + "/{item_id:.+}", read)
