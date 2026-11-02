@@ -19,6 +19,7 @@ from tests.support.runtime_stubs import (
     runtime_bindings,
 )
 from tests.support.samples_service import make_samples
+from tests.support.serving import wait_for_serving
 
 from recipes.sao import SAOJobData, SAOSamples
 from recipes.tttd import TTTDGroupedRolloutReport, TTTDJobData, TTTDSamples, TTTDSettings
@@ -650,6 +651,7 @@ def test_a_grouped_recipe_trains_one_comparison_set_as_one_job(tmp_path) -> None
         coordination=memory_coordination(),
     )
     scenario = dispatcher.get_or_create_scenario("math")
+    wait_for_serving(dispatcher)
     serving = scenario.serving_artifact_id()
     for rid, score in (("i1", 0.2), ("i2", 0.8)):
         record = inference(rid)
@@ -668,7 +670,8 @@ def test_a_grouped_recipe_trains_one_comparison_set_as_one_job(tmp_path) -> None
     assert prepared.payload is not None and prepared.payload["advantages"] == pytest.approx([-1.0, 1.0])
     assert scenario.repository.current_artifact == scenario.repository.checkpoint_artifact
     # After the root release, the job's checkpoint is what the scenario serves.
-    assert inference_runtime.activated[1:] == ["w1"]
+    wait_for_serving(dispatcher)
+    assert inference_runtime.activated[1:] == [scenario.current_artifact_ref().release_id]
 
 
 @pytest.mark.unit

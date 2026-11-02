@@ -38,6 +38,7 @@ from tests.support.component_trainers import (
     stop_workers,
 )
 from tests.support.samples_service import make_samples
+from tests.support.serving import wait_for_serving
 
 from reef.artifact import Artifact, ArtifactNotFound, ArtifactRef, DefaultStart
 from reef.artifact.release_chain import ArtifactReleaseChain
@@ -174,9 +175,10 @@ def _settle_samples(dispatcher: Dispatcher, name: str = "agent") -> None:
 
 
 def _loaded(dispatcher: Dispatcher, *steps: int) -> Scenario:
-    """``_scenario`` once the samples worker ended the selection that the load asked for, with each step's rows
-    appended after it and their samples made, as the samples service makes them."""
+    """Load the scenario and wait for its serving and sample selections before the test prepares training."""
     scenario = _scenario(dispatcher)
+    if scenario.runtime is not None and scenario.runtime.serves_requests:
+        wait_for_serving(dispatcher, "agent")
     _settle_samples(dispatcher)
     _append_records(scenario, *steps)
     make_samples(scenario)
@@ -329,6 +331,7 @@ def test_a_weights_job_trainer_and_the_harness_trainer_share_one_release_chain(
     assert [item.source_agent_record_ids for item in job.data.samples] == [("i1", "r1")]
     assert _commit_step(scenario, HARNESS) == [("i1", "r1")]
     for _ in range(2):
+        wait_for_serving(dispatcher, "agent")
         result = scenario.prepare_training_step(WEIGHTS)
         assert result is not None
         scenario.commit(result, component=WEIGHTS)
@@ -782,10 +785,13 @@ def test_a_report_on_an_inference_the_weights_job_trained_is_skipped_not_raised(
     assert scenario.prepare_training_step(HARNESS) is None
     scenario.commit(submitted, component=WEIGHTS)
     _settle_weights_job(scenario)
+    wait_for_serving(dispatcher, "agent")
     make_samples(scenario)
     assert scenario.records.get("agent", "i1") is not None
     assert scenario.prepare_training_step(WEIGHTS) is None
-    assert "r1b" in scenario.trainer_for(WEIGHTS).skipped_record_ids
+    weights = scenario.trainer_for(WEIGHTS)
+    # The samples worker can skip the report before the job's final commit consumes the skipped ID.
+    assert "r1b" in weights.skipped_record_ids | weights.consumed_record_ids
     _append_records(scenario, 2)
     assert _commit_step(scenario, HARNESS) is not None
     rebuilt = _reload(dispatcher)
@@ -1022,11 +1028,13 @@ def test_a_run_report_on_an_inference_both_trainers_trained_is_skipped_by_both(
     scenario.records.append(_report("run", "i1", "i2"))
     scenario.commit(submitted, component=WEIGHTS)
     _settle_weights_job(scenario)
+    wait_for_serving(dispatcher, "agent")
     make_samples(scenario)
     assert scenario.prepare_training_step(HARNESS) is None
     assert scenario.prepare_training_step(WEIGHTS) is None
     for component in (WEIGHTS, HARNESS):
-        assert "run" in scenario.trainer_for(component).skipped_record_ids, component
+        trainer = scenario.trainer_for(component)
+        assert "run" in trainer.skipped_record_ids | trainer.consumed_record_ids, component
 
 
 @pytest.mark.unit

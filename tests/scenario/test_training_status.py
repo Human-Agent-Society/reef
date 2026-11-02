@@ -77,7 +77,7 @@ def scenario_double(
         runtime=runtime,
         commit_status={"scenario_step": 0, "last_committed_step": last_committed_step},
         artifact_status=lambda: {"weights": {"active": "base", "training_start": "base"}},
-        serving_artifact_id=lambda: "base",
+        served_artifact_id=lambda: "base",
     )
 
 
@@ -140,7 +140,7 @@ def test_status_names_the_served_artifact_and_the_inference_admission() -> None:
     assert status["served_artifact_id"] == "base"
     assert status["inference_admission"] == {"open": False, "active": 0}
 
-    scenario.serving_artifact_id = lambda: "trained"
+    scenario.served_artifact_id = lambda: "trained"
     runtime.open = True
     status = dispatcher.build_training_status()["scenarios"]["s"]
     assert status["served_artifact_id"] == "trained"

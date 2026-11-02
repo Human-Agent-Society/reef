@@ -27,6 +27,7 @@ from reef.dispatcher.errors import TrainingErrors
 from reef.dispatcher.local_workers import LocalTrainingWorkers
 from reef.dispatcher.samples import LocalSampleProducers
 from reef.dispatcher.served import ControlInstance, ServedModelsPublisher, take_control_lease
+from reef.dispatcher.serving import ServingWorker
 from reef.dispatcher.status import TrainingStatus
 from reef.dispatcher.store_changes import StoreChanges, StoreChangesWatcher
 from reef.dispatcher.work_retention import EndedWorkSweeper
@@ -139,7 +140,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
 
         ``components``: the services that this process runs (``SERVICE_COMPONENTS``). With ``control``, the
         constructor first waits for the control lease, while another control instance holds it; then the
-        dispatcher writes ``served_models``, watches the shared store, and runs the trainers' local workers, which
+        dispatcher queues serving requests, watches the shared store, and runs the trainers' local workers, which
         add the training jobs. With ``samples``, it runs the samples worker; without ``control``, that worker loads
         each scenario on demand and leaves the jobs to control.
 
@@ -196,14 +197,14 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
             experiment_tracker=self.experiment_tracker,
             admission=scenario_admission,
             lifecycle=self,
-            # Only control activates a scenario's artifact on the engines when it loads the scenario.
-            activates_runtime=self.services.runs_control,
+            activates_runtime=False,
+            served_models=coordination.served_models,
             instructions=InstructionQueue(self.queue),
         )
         self.errors = TrainingErrors()
         self.background_threads = BackgroundThreads()
         self.local_workers = LocalTrainingWorkers(self.registry, self.errors, held=hold_local_cycles)
-        #: The writer of ``served_models``, when this process runs control.
+        #: The writer of serving requests, when this process runs control.
         self.publisher: ServedModelsPublisher | None = None
         #: Set when another control instance took the lease (``control_lease_lost``).
         self.lease_lost = Event()
@@ -220,26 +221,27 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
                 coordination,
                 self,
                 lease,
-                runtime=runtime,
                 instance_id=lease.instance_id,
                 stop_delay_seconds=CACHE_SECONDS + request_timeout_seconds,
             )
             self.workers.add(publisher)
             self.publisher = publisher
-            if runtime is not None:
-                # Only control changes the engines. It takes them over, and does not activate again at start-up what
-                # they still serve: the runtime adopts each value that served_models names for its engine, before
-                # any scenario loads.
-                runtime.open()
-                for served in coordination.served_models.all_served():
-                    if served.url == runtime.base_url:
-                        runtime.adopt(served)
             # The publisher extends the lease; it starts now, so a slow start-up does not let the lease expire.
             publisher.start()
             self.workers.add(StoreChangesWatcher(self.registry, coordination.work_queue, self))
             self.workers.add(EndedWorkSweeper(coordination.work_queue, retention_seconds=work_retention_seconds))
             if data_store is not None:
                 self.workers.add(DataSyncWorker(coordination.work_queue, self, worker_id=instance_id("data-sync")))
+        if self.services.runs_inference and recipe.runtime is not None and recipe.runtime.serves_requests:
+            self.workers.add(
+                ServingWorker(
+                    recipe,
+                    backend_factory,
+                    coordination,
+                    worker_id=instance_id("inference-startup"),
+                    local_artifact_dir=local_artifact_dir,
+                )
+            )
         if self.services.runs_samples:
             self.workers.add(
                 SamplesWorker(
@@ -530,6 +532,8 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         with self.registry.lock_for(scenario):
             current = self.registry.require(scenario)
             changed = current.activate(artifact_id, component)
+            if self.publisher is not None:
+                self.publisher.publish(current, retry_failed=True)
             self.scenario_committed(current)
             return changed
 

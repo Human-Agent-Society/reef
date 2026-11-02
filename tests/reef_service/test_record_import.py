@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
+from tests.support.inference import wait_for_inference
 from tests.support.runtime_stubs import RecordingComponent
 
 from reef.artifact import InMemoryRepositoryBackend
@@ -151,6 +152,7 @@ def test_large_inference_context_reaches_the_handler(tmp_path, endpoint):
         async with TestClient(
             TestServer(create_app(dispatcher, tokens="import-test-token", inference_handler=handler))
         ) as client:
+            await wait_for_inference(client, "s", headers=HEADERS)
             response = await client.post(
                 endpoint, headers=HEADERS, json={"messages": [{"role": "user", "content": text}]}
             )
