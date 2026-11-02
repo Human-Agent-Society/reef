@@ -27,6 +27,7 @@ from reef.artifact import InMemoryRepositoryBackend, SnapshotRef
 from reef.core import AgentRecord, RequestType
 from reef.core.chat_rendering import rendered_job_data
 from reef.core.errors import TrainingStartRefused
+from reef.core.job_data import JobOutcome
 from reef.core.plugins import PluginConfigError
 from reef.core.reports import ReportValidationError
 from reef.core.trajectories import source_record_id, trajectory_reward
@@ -46,7 +47,8 @@ from reef.train.algos.schedule import StepScheduling
 from reef.train.jobs import JobLoop, JobLoopState
 from reef.train.pipeline import PipelineConfig, PipelineSpec
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
-from reef.train.types import JobData
+from reef.train.trainer import PendingTrainingResult, PreparedTrainingResult
+from reef.train.types import JobData, PreparedCommit, TrainStepResult
 
 NUM_GPUS = 0
 
@@ -391,6 +393,55 @@ def test_trainer_reserves_batch_and_commits_backend_preparation() -> None:
     assert trainer.job_running
     finish(trainer)
     assert JobLoopState.from_dict(trainer.state).finished_jobs == 1
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("training_job_id", ["another-job", None])
+def test_pending_job_outcome_must_name_the_results_job(training_job_id: str | None) -> None:
+    result = TrainStepResult({}, training_job_id=training_job_id)
+    outcome = JobOutcome("ended-job", "recording", "finished")
+    with pytest.raises(ValueError, match=r"outcome.*result.*job"):
+        PendingTrainingResult(data=None, result=result, ended=outcome)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("prepared_state", "prepared_job_id"),
+    [({"steps": 2}, "job-1"), ({"steps": 1}, "job-2"), ({"steps": 1}, None)],
+)
+def test_prepared_snapshot_must_match_its_training_result(
+    prepared_state: dict[str, int], prepared_job_id: str | None
+) -> None:
+    result = TrainStepResult({"steps": 1}, training_job_id="job-1")
+    prepared = PreparedCommit(prepared_state, 0, 0, training_job_id=prepared_job_id)
+    with pytest.raises(ValueError, match=r"prepared.*match.*result"):
+        PreparedTrainingResult(data=None, result=result, prepared_commit=prepared)
+
+
+@pytest.mark.unit
+def test_prepared_training_result_requires_a_state_mapping() -> None:
+    with pytest.raises(TypeError, match=r"state.*mapping"):
+        PreparedTrainingResult(
+            data=None,
+            result=TrainStepResult(None),
+            prepared_commit=PreparedCommit({}, 0, 0),
+        )
+
+
+@pytest.mark.unit
+def test_annotation_after_preparation_preserves_the_cached_commit() -> None:
+    with one_pair_records() as records, closing(preparing_trainer(records)) as trainer:
+        make_samples(trainer)
+        result = trainer.run_once()
+        assert result is not None
+        prepared = trainer.prepare_commit(result)
+        annotated = trainer.add_commit_metrics(result, {"provider_request_id": "request-1"})
+        assert annotated.metrics["provider_request_id"] == "request-1"
+        assert prepared.metrics is not None and "provider_request_id" not in prepared.metrics
+        assert trainer.prepare_commit(annotated) is prepared
+        trainer.commit(prepared)
+        assert trainer.algorithm_state_dict() == result.state
+        finish(trainer)
 
 
 @pytest.mark.unit

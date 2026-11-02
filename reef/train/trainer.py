@@ -73,7 +73,8 @@ class PendingTrainingResult:
     """A completed submission or job update awaiting its durable scenario commit.
 
     Values: ``result`` is TrainStepResult. ``data`` is the reserved JobData for a submission or None for a polled
-    job update. ``ended`` is a JobOutcome only for a polled job end, otherwise None. ``consumed_ids`` is None,
+    job update. ``ended`` is a JobOutcome only for a polled job end, otherwise None. When set,
+    ``ended.job_id == result.training_job_id``. ``consumed_ids`` is None,
     or ``data.request`` exists and ``consumed_ids == frozenset({data.request.id})`` for a skipped instruction.
     ``earlier_results`` is an
     ordered, possibly empty tuple of TrainStepResult values replaced by metric annotation; duplicates are allowed.
@@ -94,6 +95,8 @@ class PendingTrainingResult:
             raise TypeError("a pending result needs TrainStepResult")
         if self.ended is not None and (not isinstance(self.ended, JobOutcome) or self.data is not None):
             raise ValueError("only a polled job update can carry its job outcome")
+        if self.ended is not None and self.ended.job_id != self.result.training_job_id:
+            raise ValueError("ended outcome must name the training result's job")
         if self.consumed_ids is not None and (
             self.data is None
             or not isinstance(self.consumed_ids, frozenset)
@@ -116,10 +119,12 @@ class PendingTrainingResult:
 class PreparedTrainingResult(PendingTrainingResult):
     """A pending result whose commit snapshot has been prepared.
 
-    Values: every PendingTrainingResult invariant holds, and ``prepared_commit`` is PreparedCommit. It is the
-    cached snapshot from the first preparation; later annotation retains that snapshot as it retains result
-    identities. Purpose: Trainer.prepare_commit makes it after acknowledgment. Retrying preparation returns that
-    exact snapshot; Trainer.commit reads it only after scenario settlement and then clears the pending phase.
+    Values: every PendingTrainingResult invariant holds. ``prepared_commit`` is PreparedCommit and
+    ``result.state`` is a mapping. ``prepared_commit.algorithm_state == result.state`` and
+    ``prepared_commit.training_job_id == result.training_job_id``. The snapshot's metrics remain cached across
+    annotations and need not equal ``result.metrics``.
+    Purpose: Trainer.prepare_commit makes it after acknowledgment. Retrying preparation returns that exact
+    snapshot; Trainer.commit reads it only after scenario settlement and then clears the pending phase.
     """
 
     prepared_commit: PreparedCommit = field(kw_only=True)
@@ -128,6 +133,12 @@ class PreparedTrainingResult(PendingTrainingResult):
         super().__post_init__()
         if not isinstance(self.prepared_commit, PreparedCommit):
             raise TypeError("prepared_commit must be PreparedCommit")
+        if not isinstance(self.result.state, Mapping):
+            raise TypeError("a prepared training result needs a state mapping")
+        if self.prepared_commit.algorithm_state != self.result.state:
+            raise ValueError("prepared state must match the training result state")
+        if self.prepared_commit.training_job_id != self.result.training_job_id:
+            raise ValueError("prepared job ID must match the training result job ID")
 
 
 @dataclass(frozen=True)
