@@ -25,6 +25,7 @@ from reef.storage.data import DataStore
 from reef.storage.postgres import postgres_url, validate_postgres_schema
 from reef.storage.records import RecordRetention
 from reef.storage.scenario import ScenarioStorage
+from reef.storage.segments import SegmentStore
 from reef.storage.tasks import TaskFileStore
 
 
@@ -262,6 +263,15 @@ class ServiceConfig:
         public_path=("storage", "task_file_backend"),
         help="Store of the files of generated tasks: local, or a TaskFileStore plugin reference.",
     )
+    #: Unset, ``local``, or a ``SegmentStore`` plugin: ``package.module:ClassName`` or module and config.
+    segment_backend: str | Mapping[str, Any] | None = config_option(
+        None,
+        public_path=("storage", "segment_backend"),
+        help=(
+            "Store of the segment files that keep the content of trajectory items and record trajectories outside "
+            "the data store's database: unset (keep it in the database), local, or a SegmentStore plugin reference."
+        ),
+    )
     task_file_dir: str = config_option(
         ".reef/task-files",
         public_path=("storage", "task_file_dir"),
@@ -424,6 +434,10 @@ class ServiceConfig:
             raise ValueError(
                 "storage.data_store: postgres uses storage.record_database_url, so it needs record_backend: postgres"
             )
+        if self.segment_backend not in (None, "local"):
+            if isinstance(self.segment_backend, str) and ":" not in self.segment_backend:
+                raise ValueError("storage.segment_backend must be local or 'package.module:ClassName'")
+            SegmentStore.reference(self.segment_backend, setting="storage.segment_backend")
         if self.task_file_backend != "local":
             if isinstance(self.task_file_backend, str) and ":" not in self.task_file_backend:
                 raise ValueError("storage.task_file_backend must be local or 'package.module:ClassName'")
