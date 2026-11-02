@@ -618,12 +618,11 @@ Run and serve modes
 ~~~~~~~~~~~~~~~~~~~~~~~
 
 ``reef-native -p`` runs one turn; runs use it. ``reef-native serve`` is
-one resident process that follows the scenario's active release (`Serve the harness as
-a resident process
-<../user-guide/evolve-your-harness.rst#serve-the-harness-as-a-resident-process>`__):
+one resident process that follows the scenario's active release:
 
 - It mounts each new release between two steps, and keeps the current tree
-  when a new one fails to load.
+  when a new one fails to load. With ``--follow pinned``, it mounts only the
+  release that ``reef-native mount <release_id>`` names.
 - Its model calls carry the scenario, the token and the ``release`` tag.
 - Tree code runs with the user's privileges; only tool calls are confined,
   with ``REEF_NATIVE_ENFORCE=bwrap``.

@@ -302,10 +302,9 @@ split of the scenario's imported tasks:
 - The eval split is the evaluation's task source. The stage needs a scorer
   and task directories (see `Task directories`_).
 
-Upload tasks as task items whose metadata names the scenario in the ``train``
-or ``eval`` split (`Create task items
-<../reference/http-api.rst#create-task-items>`__), or import them with the
-deployment's ``task-import`` section.
+Upload the tasks as in `Offline: learn from uploaded tasks`_ (`Create task
+items <../reference/http-api.rst#create-task-items>`__), or import them with
+the deployment's ``task-import`` section.
 
 Evaluation: the publication policy
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -415,7 +414,7 @@ The deployment's ``evolution.adapter`` decides the agent; ``GET
 .. code:: bash
 
    pip install reef-client
-   reef-client harness connect --reef http://127.0.0.1:8900
+   reef-client harness connect --reef http://127.0.0.1:8901
 
 .. list-table::
    :header-rows: 1
@@ -501,25 +500,6 @@ release again. Clients install the active release at their next sync:
 activation, and `Train from an artifact
 <operate.rst#train-from-an-artifact>`__ describes how to make the steps train
 from another release.
-
-Serve the harness as a resident process
----------------------------------------
-
-The native agent can run as one process that follows the scenario's active
-release and mounts each new one between two steps:
-
-.. code:: bash
-
-   mkdir -p reef-harness/native
-   printf '{"api": "openai", "base_url": "http://127.0.0.1:8900", "api_key": "%s", "model": "qwen3-8b"}\n' \
-     "${REEF_TOKEN:-reef-no-token}" > reef-harness/native/models.json
-   reef-native serve --tree ./reef-harness --scenario harness-evolve-demo &
-   reef-native turn --tree ./reef-harness -p "fix the failing test in auth.py"
-
-``--follow pinned`` waits for ``reef-native mount <release_id>`` instead of
-mounting each new active release. The process runs tree code with your privileges, outside
-the evaluation's sandbox. See `Run and serve modes
-<../developer-guide/harness-adapters.rst#run-and-serve-modes>`__.
 
 Choose or write a method
 ------------------------
