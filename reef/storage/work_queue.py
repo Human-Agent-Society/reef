@@ -66,9 +66,10 @@ class WorkItem:
     - ``progress`` is a tuple of JSON objects in the order a worker added them.
     - ``result`` is set exactly when ``state`` is ``finished``; ``error`` is a non-empty string set exactly when
       ``state`` is ``failed``, or the last retryable error of a ``queued`` item.
-    - ``metadata`` is a JSON object of facts about the item that a reader of the item records after it exists
-      (``WorkQueue.set_metadata``), such as the experiment run that records a training job. It is not an input of
-      the work, so no worker reads it.
+    - ``metadata`` is a JSON object of facts about the item that are not inputs of the work, so no worker reads it.
+      A reader of the item records one after the item exists (``WorkQueue.set_metadata``), such as the experiment
+      run that records a training job. A store can record one when it adds the item, such as the automatic retry
+      count of a serving request (``ServedModelsWriter.request``).
     - ``created_sequence`` and ``changed_sequence`` are positive integers; ``changed_sequence`` increases at each
       change.
 
