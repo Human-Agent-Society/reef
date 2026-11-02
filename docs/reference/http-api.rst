@@ -1774,7 +1774,7 @@ artifacts}``, **newest first**. Each row is one artifact of one component:
 +-----------------------+------------------------------------------------------+
 | ``component``         | the component whose content it is                    |
 +-----------------------+------------------------------------------------------+
-| ``parent_artifact_id``| the previous artifact of this component, or null     |
+| ``parent_artifact_id`` | the artifact this one derives from, or null           |
 +-----------------------+------------------------------------------------------+
 | ``operation``         | ``creation`` for the creation artifact,              |
 |                       | ``training``, ``import``, ``sync``, or ``recovery``  |
@@ -1798,6 +1798,13 @@ artifacts}``, **newest first**. Each row is one artifact of one component:
 |                       | read. The creation row: ``{kind: "default",          |
 |                       | inputs}`` or ``{kind: "item", item, uri, version}``  |
 +-----------------------+------------------------------------------------------+
+
+``parent_artifact_id`` describes derivation within the scenario. A training
+output follows that component's training start; a harness sync follows its
+previously active artifact. Creation and ordinary imports have no local
+parent, so the field is null. Import provenance remains in ``source``,
+including ``source.item`` when importing an artifact-library item; importing
+from another scenario does not create a cross-scenario parent link.
 
 The list holds artifacts only. A training step that made no artifact, such
 as a rejected or skipped step, a job submission or a job's end, has no row;
@@ -2124,7 +2131,7 @@ send the row's ``artifact_id`` to ``POST /reef/scenarios/{scenario}/activate``.
 
 ``GET /reef/harness/artifacts`` lists only the harness component's artifacts.
 A weights update does not create another harness artifact. Each row's
-``parent_artifact_id`` identifies the previous artifact of that component.
+``parent_artifact_id`` identifies the artifact from which it derives, when known.
 Every listed artifact can be requested through ``?artifact_id=``.
 
 The older ``/reef/harness/releases`` catalog also includes training steps
