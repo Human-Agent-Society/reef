@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 from tests.support.task_service_stubs import task_for
 
-from reef.artifact import ArtifactRef
+from reef.artifact import SnapshotRef
 from reef.core import AgentRecord, RequestType
 from reef.core.job_data import TaskSample
 from reef.core.reports import ReportValidationError
@@ -349,7 +349,7 @@ def test_a_restart_reads_the_store_back_and_trains_the_tasks_that_no_durable_com
         commit=CommitRecord(
             scenario="offline",
             step=1,
-            artifact_ref=ArtifactRef("content:1", "release:1", "base"),
+            snapshot=SnapshotRef("release:1", "base"),
             checkpoint=True,
             algorithm_state={},
             high_water_sequence=0,

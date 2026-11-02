@@ -164,7 +164,7 @@ class ServedModelsPublisher(ServiceWorker):
         ]
         beside: dict[str, JsonValue] = {
             artifact_id: {
-                "selection": cast(dict[str, JsonValue], current.artifact_selection(served.release).to_dict()),
+                "selection": cast(dict[str, JsonValue], served.selection.to_dict()),
                 "component": served.component,
             }
             for artifact_id, served in current.served_beside().items()

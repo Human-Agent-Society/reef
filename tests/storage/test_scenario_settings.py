@@ -10,8 +10,8 @@ from contextlib import closing
 import pytest
 from sqlalchemy import select
 
-from reef.core.artifact_ref import ArtifactRef
 from reef.core.serving_config import ServingConfig
+from reef.core.snapshot import SnapshotRef
 from reef.storage.commits import CommitHistoryError, CommitRecord
 from reef.storage.postgres import POSTGRES_SCHEMA_VERSION, PostgresRecordDatabase, PostgresScenarioStorage
 from reef.storage.scenario import ScenarioSettings
@@ -24,7 +24,7 @@ def committed(step: int = 1) -> CommitRecord:
     return CommitRecord(
         scenario="math",
         step=step,
-        artifact_ref=ArtifactRef(f"content:{step}", f"release:{step}", "base"),
+        snapshot=SnapshotRef(f"release:{step}", "base"),
         checkpoint=True,
         algorithm_state={"step": step},
         consumed_ids=frozenset({f"record-{step}"}),

@@ -62,7 +62,7 @@ class SpindleFullTrainingComponent(TinkerJobComponent):
         if base_model != self._revision.repo:
             raise ValueError(f"the base model {base_model} is not the repo of the base {self._revision.uri}")
         #: The content ID of the base's files, read from the Hub at the first import.
-        self.base_content_id: str | None = None
+        self.base_checksum: str | None = None
         super().__init__(base_model, config, client, sampler=sampler, score_centering=config.score_centering_settings)
 
     @property
@@ -121,7 +121,7 @@ class SpindleFullTrainingComponent(TinkerJobComponent):
             weights = HuggingFaceRevisionFiles(revision.repo, revision.commit).paths()
             if "config.json" not in weights or not any(path.endswith(".safetensors") for path in weights):
                 raise ValueError(f"{revision.uri} holds no full weights: config.json and safetensors")
-        elif files.content_id() != self.base_files_id():
+        elif files.checksum() != self.base_files_id():
             raise ValueError(
                 f"the {self.name} training component trains only its base {self._revision.uri}: an import of full "
                 "weights holds the base's files, or a manifest of a full-parameter checkpoint of it"
@@ -139,6 +139,6 @@ class SpindleFullTrainingComponent(TinkerJobComponent):
 
     def base_files_id(self) -> str:
         """The content ID of the base's files on the Hub, listed once."""
-        if self.base_content_id is None:
-            self.base_content_id = HuggingFaceRevisionFiles(self._revision.repo, self._revision.commit).content_id()
-        return self.base_content_id
+        if self.base_checksum is None:
+            self.base_checksum = HuggingFaceRevisionFiles(self._revision.repo, self._revision.commit).checksum()
+        return self.base_checksum

@@ -7,10 +7,10 @@ from pathlib import Path
 from typing import Any
 
 from reef.artifact import Artifact, DefaultStart
-from reef.core.artifact_ref import RootSource
 from reef.core.evaluation import PolicyModel
 from reef.core.job_data import JobData
 from reef.core.served_models import ServedArtifact
+from reef.core.snapshot import RootSource
 from reef.inference.http import InferenceProxyRuntime
 from reef.runtime.interfaces import InferenceBackend
 from reef.runtime.jobs import JobStatus, ReleaseFormat, SavedCheckpoint, ScenarioRoot, TrainingComponent, TrainingJob
@@ -160,7 +160,7 @@ class StubInferenceRuntime(InferenceProxyRuntime):
         return self.answers_each_release
 
     def artifact_model(self, artifact: Artifact) -> PolicyModel:
-        return PolicyModel("base", artifact.ref.release_id)
+        return PolicyModel("base", artifact.ref.revision)
 
     def served_artifact_on_request(self, artifact: Artifact) -> ServedArtifact:
         return ServedArtifact(artifact.artifact_id, self.base_url, f"sampler:{artifact.artifact_id}")
@@ -173,7 +173,7 @@ class StubInferenceRuntime(InferenceProxyRuntime):
     def serve(self, artifact: Artifact) -> str:
         path = artifact.local_path
         marker = None if path is None else Path(path) / VERSION_FILE
-        version = marker.read_text() if marker is not None and marker.is_file() else artifact.ref.release_id
+        version = marker.read_text() if marker is not None and marker.is_file() else artifact.ref.revision
         self.served = version
         return version
 

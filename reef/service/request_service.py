@@ -16,7 +16,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from reef.artifact.artifact import Artifact, ArtifactConflict, ArtifactError, ArtifactNotFound, ArtifactRef
+from reef.artifact.artifact import Artifact, ArtifactConflict, ArtifactError, ArtifactNotFound
 from reef.core.errors import ReefError
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.requirements import required_by
@@ -26,8 +26,8 @@ from reef.harness.sync import HarnessFiles, import_files, layer_install, merge_t
 from reef.harness.tree import HarnessTree, validate_tree
 from reef.harness.tree.checks import clip_record_value
 from reef.scenario.release_files import component_files
-from reef.scenario.scenario import Scenario
-from reef.service.release_page import before_release_id, build_release_page, build_running_step_page, result_of
+from reef.scenario.scenario import SNAPSHOT_ROW_KEYS, Scenario
+from reef.service.release_page import before_artifact_id, build_release_page, build_running_step_page, result_of
 from reef.service.request_page import STATE_WORDS, build_request_page, request_state, settled_step
 from reef.service.wire import (
     SCENARIO_HEADER,
@@ -104,9 +104,6 @@ class RequestService:
     def __init__(self, dispatcher: Dispatcher, *, inference_url: str | None = None) -> None:
         self._dispatcher = dispatcher
         self.inference_url = None if inference_url is None else inference_url.rstrip("/")
-        # The harness head of a scenario with several components, by scenario step and active release: it is
-        # read on every inference answer and changes only when a commit lands.
-        self.harness_heads: dict[str, tuple[int, str, str]] = {}
 
     @property
     def dispatcher(self) -> Dispatcher:
@@ -172,6 +169,7 @@ class RequestService:
             payload=with_request_tags(normalized, parsed),
             agent_record_id=record_id,
             references=references,
+            artifact_id=normalized.get("artifact_id"),
         )
 
     def harness_manifest(
@@ -212,14 +210,8 @@ class RequestService:
                 "the client installs the files in"
             )
         scenario = self._file_scenario(headers)
-        if artifact_id is not None:
-            if release_id is not None:
-                raise ValueError("give artifact_id or the legacy release_id, not both")
-            _, selected = scenario.resolve_artifact(artifact_id, scenario.surface.files_component)
-            release_id = selected.ref.release_id
-        manifest = self._harness_manifest_for_scenario(
-            scenario, release_id or self.harness_release_id(scenario), source=form != "rendered"
-        )
+        selected = self.harness_artifact(scenario, artifact_id, release_id)
+        manifest = self.harness_manifest_for_artifact(scenario, selected, source=form != "rendered")
         if form == "client" and service_url is not None and root is not None:
             descriptor = self.harness_descriptor(scenario)
             served = self._dispatcher.recipe.harness_served_model(scenario.name, str(scenario.surface.files_component))
@@ -251,7 +243,7 @@ class RequestService:
         send ``base_release_id`` instead. The files become the tree that
         ``reef.harness.sync.import_files`` reads against the base, and
         ``merge_trees`` puts the client's changes on the tree of the active
-        release (``harness_release_id``), not on the training start: a kept
+        artifact, not on the training start: a kept
         tree that the activation rule held stays inactive, so a sync never
         serves a change that waits for review. A file that the active tree
         and the client both changed in a way its part's ``merge`` refuses
@@ -259,7 +251,7 @@ class RequestService:
         validation raises ``ValueError`` naming every problem. A sync that
         changes nothing publishes nothing. Otherwise the merged tree becomes
         the active release and the harness trainer's training start in one
-        ``"sync"`` commit (``ScenarioCommitter.sync_release``). The answer
+        ``"sync"`` commit (``ScenarioCommitter.sync_artifact``). The answer
         names the active release after the sync, the release it was merged
         onto, whether it changed, whether it merged onto a newer release than
         the base, the tree's paths, and the client's paths no part takes.
@@ -269,33 +261,27 @@ class RequestService:
             isinstance(path, str) and isinstance(text, str) for path, text in files.items()
         ):
             raise ValueError("files must map each path under the adapter's roots to the file's text")
-        base_artifact_id = payload.get("base_artifact_id")
-        base = payload.get("base_release_id")
         scenario = self._file_scenario(headers)
-        if base_artifact_id is not None:
-            if not isinstance(base_artifact_id, str) or not base_artifact_id:
-                raise ValueError("base_artifact_id must be the artifact the client installed")
-            if base is not None:
-                raise ValueError("give base_artifact_id or the legacy base_release_id, not both")
-            _, selected = scenario.resolve_artifact(base_artifact_id, scenario.surface.files_component)
-            base = selected.ref.release_id
-        if not isinstance(base, str) or not base:
-            raise ValueError("base_artifact_id must be the artifact the client installed")
-        descriptor = self.harness_descriptor(scenario)
         component = scenario.surface.files_component
         if component is None:
             raise ArtifactNotFound(f"scenario {scenario.name!r} serves no harness component")
-        current_id = scenario.repository.require_current_artifact().release_id
-        active_id = self.harness_release_id(scenario)
-        active_manifest = self._harness_manifest_for_scenario(scenario, active_id, source=True)
+        if payload.get("base_artifact_id") is None and payload.get("base_release_id") is None:
+            raise ValueError("base_artifact_id must be the artifact the client installed")
+        base_artifact = self.harness_artifact(
+            scenario, payload.get("base_artifact_id"), payload.get("base_release_id")
+        )
+        base_artifact_id = scenario.surface.component_artifact(base_artifact, component).artifact_id
+        descriptor = self.harness_descriptor(scenario)
+        expected_selection = scenario.artifact_selection()
+        active_id = expected_selection.components[component]
+        _, active_artifact = scenario.resolve_artifact(active_id, component)
+        active_manifest = self.harness_manifest_for_artifact(scenario, active_artifact, source=True)
         active = HarnessTree(active_manifest["files"])
-        if base == active_id:
+        if base_artifact_id == active_id:
             base_tree = active
-            base_artifact_id = active_manifest["artifact_id"]
         else:
-            base_manifest = self._harness_manifest_for_scenario(scenario, base, source=True)
+            base_manifest = self.harness_manifest_for_artifact(scenario, base_artifact, source=True)
             base_tree = HarnessTree(base_manifest["files"])
-            base_artifact_id = base_manifest["artifact_id"]
         imported = import_files(files, base_tree, descriptor)
         merge = merge_trees(base_tree, active, imported.tree, descriptor.layout)
         if merge.tree is None:
@@ -306,19 +292,24 @@ class RequestService:
                 for path, location in located
             ]
             raise ArtifactConflict(
-                f"release {active_id} and your files both changed {', '.join(named)} since release {base}: "
+                f"artifact {active_id} and your files both changed {', '.join(named)} since artifact {base_artifact_id}: "
                 "make each one match one side, or drop yours with sync --discard, then sync again"
             )
         tree = merge.tree
         answer = {
             "parent_artifact_id": active_manifest["artifact_id"],
-            "parent_release_id": active_id,
+            "parent_release_id": active_manifest["release_id"],
             "merged": base_tree != active,
             "files": sorted(tree.files),
             "ignored": list(imported.ignored),
         }
         if tree == active:
-            return {**answer, "artifact_id": active_manifest["artifact_id"], "release_id": active_id, "changed": False}
+            return {
+                **answer,
+                "artifact_id": active_manifest["artifact_id"],
+                "release_id": active_manifest["release_id"],
+                "changed": False,
+            }
         validation = validate_tree(tree, descriptor)
         if not validation.passed:
             raise ValueError(f"the synced harness fails validation: {validation.message()}")
@@ -327,11 +318,11 @@ class RequestService:
         tree.write(directory)
         artifact = Artifact.local(directory)
         try:
-            published = self._dispatcher.sync_release(
+            published = self._dispatcher.sync_artifact(
                 scenario.name,
                 artifact,
                 component=component,
-                expected_release_id=current_id,
+                expected_selection=expected_selection,
                 metrics={
                     "sync": {
                         "files": len(tree.files),
@@ -344,8 +335,14 @@ class RequestService:
             )
         finally:
             artifact.discard()
-        manifest = self._harness_manifest_for_scenario(scenario, published.release_id, source=True)
-        return {**answer, "artifact_id": manifest["artifact_id"], "release_id": published.release_id, "changed": True}
+        _, selected = scenario.resolve_artifact(published.artifact_id, published.component)
+        manifest = self.harness_manifest_for_artifact(scenario, selected, source=True)
+        return {
+            **answer,
+            "artifact_id": manifest["artifact_id"],
+            "release_id": manifest["release_id"],
+            "changed": True,
+        }
 
     @staticmethod
     def harness_descriptor(scenario: Scenario) -> AdapterDescriptor:
@@ -375,10 +372,33 @@ class RequestService:
         return scenario.trainer_for(scenario.surface.files_component)
 
     @staticmethod
-    def _harness_manifest_for_scenario(
-        scenario: Scenario, release_id: str | None = None, *, source: bool = False
+    def harness_artifact(scenario: Scenario, artifact_id: object, legacy_revision: object) -> Artifact:
+        """The release that holds the harness a client names.
+
+        A client names it by ``artifact_id``, or by ``legacy_revision``, the
+        release ID of an older client. When both are None, it is the active
+        harness. Raise ``ValueError`` when both are given or one is not a
+        non-empty string.
+        """
+        if artifact_id is not None and legacy_revision is not None:
+            raise ValueError("give artifact_id or the legacy release_id, not both")
+        for name, value in (("artifact_id", artifact_id), ("release_id", legacy_revision)):
+            if value is not None and (not isinstance(value, str) or not value):
+                raise ValueError(f"{name} must be a non-empty string")
+        if isinstance(legacy_revision, str):
+            return scenario.release_queries.artifact_for_version(legacy_revision)
+        component = scenario.surface.files_component
+        if not isinstance(artifact_id, str):
+            if component is None:
+                raise ArtifactNotFound(f"scenario {scenario.name!r} serves no harness component")
+            artifact_id = scenario.artifact_selection().components[component]
+        _, selected = scenario.resolve_artifact(artifact_id, component)
+        return selected
+
+    @staticmethod
+    def harness_manifest_for_artifact(
+        scenario: Scenario, artifact: Artifact, *, source: bool = False
     ) -> dict[str, Any]:
-        artifact, evaluation_metrics = scenario.release_queries.artifact_with_metrics(release_id)
         tree = scenario.surface.files
         component = scenario.surface.files_component
         if tree is None or component is None:
@@ -390,113 +410,44 @@ class RequestService:
         files = component_files(scenario.surface, artifact, component) if source else tree.read_files(artifact)
         if files is None:
             raise ArtifactNotFound(
-                f"scenario {scenario.name!r} serves no files: release {artifact.ref.release_id!r} holds no "
+                f"scenario {scenario.name!r} serves no files: snapshot {artifact.ref.revision!r} holds no "
                 "harness tree. A root release made from the default start holds the recipe's evolution.seed, so an empty seed serves "
                 "nothing until a step publishes a tree."
             )
         artifact_id = scenario.surface.component_artifact(artifact, component).artifact_id
-        row = next((row for row in scenario.artifacts() if row["artifact_id"] == artifact_id), None)
+        catalog = scenario.artifacts()
+        row = next((row for row in catalog if row["artifact_id"] == artifact_id), None)
         manifest = {
             "artifact_id": artifact_id,
             "parent_artifact_id": None if row is None else row["parent_artifact_id"],
             # These fields keep installed reef-client versions working during migration.
-            "release_id": artifact.ref.release_id,
-            "parent_release_id": artifact.ref.parent_release_id,
-            "content_id": artifact.ref.content_id,
+            "release_id": artifact.ref.revision,
+            "parent_release_id": artifact.ref.parent_revision,
             "files": dict(files),
-            "evaluation": evaluation_metrics,
+            "evaluation": None if row is None or row["operation"] != "training" else row.get("metrics"),
             # The union over the chain, not this evaluation's list: a release whose request named nothing still installs an earlier extension.
-            "requires": required_by(list(reversed(scenario.releases())), artifact.ref.release_id),
+            "requires": required_by(list(reversed(catalog)), artifact_id),
         }
         components = artifact.materialize().components
         if components is not None:
-            manifest["components"] = components.artifact_ids(artifact.ref.release_id)
+            manifest["components"] = components.artifact_ids(artifact.ref.revision)
         return manifest
 
-    @staticmethod
-    def harness_lineage(scenario: Scenario) -> tuple[list[dict[str, Any]], str | None]:
-        """The catalog rows a client pulls, newest first, and the release of the active harness artifact.
-
-        A row names the harness artifact it holds or ran on: ``artifact_id``
-        and ``component`` from ``Scenario.artifacts``, with ``active`` and
-        ``activated``. ``active`` is true on exactly one row, the row that
-        made the active harness artifact. In a scenario of several
-        components, a release that minted no harness artifact (another
-        component's step, an activation) is not listed. A listed row names
-        the release that minted its artifact as ``release_id`` and the
-        release that minted its parent's harness artifact as
-        ``parent_release_id``; the ids it had are kept beside them as
-        ``composed_release_id`` and ``composed_parent_release_id``. A step
-        that made no artifact is listed when the harness trainer made it. The
-        commits that only follow a training job, its submission and the end of
-        a job whose checkpoint row holds the step, carry no step metrics and are
-        not listed.
-        """
-        files_component = scenario.surface.files_component
-        single = scenario.surface.single
-        harness = [row for row in scenario.artifact_rows() if single or row["component"] == files_component]
-        by_release = {row["release_id"]: row for row in harness}
-        by_artifact = {row["artifact_id"]: row for row in harness}
-        manifests = scenario.release_queries.manifests(scenario.scenario_step)
-
-        def artifact_of(release_id: str | None) -> dict[str, Any] | None:
-            """The harness artifact that the release ``release_id`` binds, or ``None`` when it is not known."""
-            if release_id is None or release_id in by_release:
-                return None if release_id is None else by_release[release_id]
-            return by_artifact.get((manifests.get(release_id) or {}).get(str(files_component)))
-
-        kept: list[dict[str, Any]] = []
-        for row in scenario.releases():
-            metrics = row.get("metrics") or {}
-            job = metrics.get("training_job")
-            if isinstance(job, Mapping) and (
-                job.get("event") == "submitted" or not set(metrics) - {"training_job", "training_request"}
-            ):
-                continue
-            if row["checkpoint"] and row["release_id"] not in by_release:
-                continue
-            if not row["checkpoint"] and row.get("component") not in (None, files_component):
-                continue
-            artifact = artifact_of(row["release_id"])
-            if artifact is None:
-                continue
-            listed = {
-                **row,
-                "artifact_id": artifact["artifact_id"],
-                "component": artifact["component"],
-                "active": row["checkpoint"] and artifact["active"],
-                "activated": artifact["activated"],
-            }
-            if artifact["release_id"] != row["release_id"]:
-                listed["composed_release_id"] = row["release_id"]
-                listed["release_id"] = artifact["release_id"]
-            parent = artifact_of(artifact["parent_release_id"])
-            if parent is not None and parent["release_id"] != row["parent_release_id"]:
-                listed["composed_parent_release_id"] = row["parent_release_id"]
-                listed["parent_release_id"] = parent["release_id"]
-            kept.append(listed)
-        return kept, next((row["release_id"] for row in harness if row["active"]), None)
-
     @classmethod
-    def harness_rows(cls, scenario: Scenario) -> list[dict[str, Any]]:
-        """The catalog rows a client pulls, newest first; see ``harness_lineage``."""
-        rows, _ = cls.harness_lineage(scenario)
+    def legacy_harness_rows(cls, scenario: Scenario) -> list[dict[str, Any]]:
+        """Serialize old release selectors only for the legacy harness catalog endpoint."""
+        rows = []
+        for row in scenario.harness_snapshot_rows():
+            snapshot, selected, parent = row["snapshot"], row["artifact_snapshot"], row["parent_snapshot"]
+            listed = {key: value for key, value in row.items() if key not in SNAPSHOT_ROW_KEYS}
+            listed["release_id"] = selected.revision
+            listed["parent_release_id"] = snapshot.parent_revision if parent is None else parent.revision
+            if selected.revision != snapshot.revision:
+                listed["composed_release_id"] = snapshot.revision
+            if parent is not None and parent.revision != snapshot.parent_revision:
+                listed["composed_parent_release_id"] = snapshot.parent_revision
+            rows.append(listed)
         return rows
-
-    def harness_release_id(self, scenario: Scenario) -> str:
-        """The release that a client pulls: the release that minted the active harness artifact."""
-        current = scenario.repository.require_current_artifact().release_id
-        if scenario.surface.single or scenario.surface.files_component is None:
-            return current
-        step = scenario.scenario_step
-        cached = self.harness_heads.get(scenario.name)
-        if cached is not None and cached[0] == step and cached[1] == current:
-            return cached[2]
-        _, head = self.harness_lineage(scenario)
-        if head is None:
-            head = current
-        self.harness_heads[scenario.name] = (step, current, head)
-        return head
 
     def harness_artifacts(self, headers: Mapping[str, str]) -> dict[str, Any]:
         """The harness artifacts, oldest first, addressed by artifact ID; operation history stays separate."""
@@ -513,19 +464,19 @@ class RequestService:
         training row carries the metrics of the step that published it, so an
         update is a decision over numbers rather than a blind pull. A scenario
         with several components lists the releases that changed the pulled
-        tree (see ``harness_lineage``); the others stay addressable by id.
+        tree (see ``Scenario.harness_rows``); the others stay addressable by id.
         Same read-only rules as ``harness_manifest``.
         """
         scenario = self._file_scenario(headers)
         return {
             "scenario": scenario.name,
-            "releases": list(reversed(self.harness_rows(scenario))),
+            "releases": list(reversed(self.legacy_harness_rows(scenario))),
         }
 
     def harness_step_records(self, headers: Mapping[str, str], step: int, relative: str | None) -> dict[str, Any]:
         """Raw retained files for a catalog row; presentation belongs to the caller."""
         scenario = self._file_scenario(headers)
-        rows = list(reversed(self.harness_rows(scenario)))
+        rows = list(reversed(scenario.harness_rows()))
         if not 0 <= step < len(rows):
             raise ArtifactNotFound(f"scenario {scenario.name!r} has no step {step}")
         directory = (rows[step].get("metrics") or {}).get("step_record")
@@ -554,7 +505,7 @@ class RequestService:
         An unknown step raises ArtifactNotFound naming the range.
         """
         scenario = self._file_scenario(headers)
-        rows = list(reversed(self.harness_rows(scenario)))
+        rows = list(reversed(scenario.harness_rows()))
         if step == len(rows):
             # The next step, while a request runs it: the catalog has no row yet, so the page says so and links the
             # request's page, which follows the step live.
@@ -565,12 +516,12 @@ class RequestService:
             raise ArtifactNotFound(
                 f"scenario {scenario.name!r} has no step {step}: the catalog holds steps 0 to {len(rows) - 1}"
             )
-        before = before_release_id(rows[step])
+        before = before_artifact_id(rows[step])
         component = scenario.surface.files_component
         before_files: Mapping[str, str] | None = None
         if before is not None and component is not None:
             try:
-                artifact, _ = scenario.release_queries.artifact_with_metrics(before)
+                _, artifact = scenario.resolve_artifact(before, component)
                 before_files = component_files(scenario.surface, artifact, component)
             except ArtifactError:
                 before_files = None
@@ -601,7 +552,7 @@ class RequestService:
         """
         scenario = self._file_scenario(headers)
         # The step a request settled as counts the catalog rows, the ones the release page opens.
-        rows = list(reversed(self.harness_rows(scenario)))
+        rows = list(reversed(scenario.harness_rows()))
         record = instruction_view(scenario, record_id, rows)
         progress = self.step_progress(scenario)
         reserved = self.files_trainer(scenario).pending_job_data
@@ -622,7 +573,7 @@ class RequestService:
         ArtifactNotFound naming it.
         """
         scenario = self._file_scenario(headers)
-        rows = list(reversed(self.harness_rows(scenario)))
+        rows = list(reversed(scenario.harness_rows()))
         record = instruction_view(scenario, record_id, rows)
         step = settled_step(rows, record_id)
         if step is not None:
@@ -681,7 +632,6 @@ class RequestService:
         payload: Mapping[str, Any],
         *,
         agent_record_id: str | None = None,
-        artifact_ref: ArtifactRef | None = None,
     ) -> AgentRecord:
         normalized_payload, references = normalize_request_payload(parsed.request_type, payload)
         normalized_payload = with_request_tags(normalized_payload, parsed)
@@ -691,7 +641,7 @@ class RequestService:
             payload=normalized_payload,
             agent_record_id=agent_record_id,
             references=references,
-            artifact_ref=artifact_ref,
+            artifact_id=normalized_payload.get("artifact_id"),
         )
         try:
             return self._dispatcher.accept_record(item)

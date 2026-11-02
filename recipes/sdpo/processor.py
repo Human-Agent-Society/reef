@@ -72,13 +72,10 @@ class SDPOGrouping(ReportGrouping):
             return GroupDecision.INCOMPLETE
         if not isinstance(key, int):
             raise TypeError("SDPO step must be an integer")
-        releases = {
-            None if member.ends[0].artifact_ref is None else member.ends[0].artifact_ref.release_id
-            for member in members
-        }
+        releases = {member.ends[0].artifact_id for member in members}
         reason = ""
         if None in releases or len(releases) != 1:
-            reason = "missing_or_mixed_release_ids"
+            reason = "missing_or_mixed_artifact_ids"
         reports = [(member, parsed) for member in members if isinstance(parsed := member.parsed_report, SDPOReport)]
         for group in range(self.groups_per_step):
             siblings = [sibling_request(member) for member, parsed in reports if parsed.group == group]
@@ -162,13 +159,13 @@ class SDPOSamples(ReportSamples):
         messages, tools = call.messages, call.tools
         if not messages or messages[-1].get("role") != "user":
             raise ValueError("SDPO's reprompt template needs a request that ends with the user's question")
-        artifact_ref = context.ends[0].artifact_ref
+        artifact_id = context.ends[0].artifact_id
         return sample.with_metadata(
             sdpo={
                 "step": parsed.step,
                 "group": parsed.group,
                 "rollout": parsed.rollout,
-                "release_id": None if artifact_ref is None else artifact_ref.release_id,
+                "artifact_id": artifact_id,
                 "messages": messages,
                 "tools": tools,
                 "response": call.reply,

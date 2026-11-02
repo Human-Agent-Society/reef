@@ -165,7 +165,7 @@
        "commit_hash": "c-a",
        "group": "p0",
        "parent_hash": "p0",
-       "release_id": null,
+       "artifact_id": "wv-1",
        "run_id": "run-1",
        "status": "improved"
       }
@@ -187,7 +187,7 @@
        "commit_hash": "c-b",
        "group": "p0",
        "parent_hash": "p0",
-       "release_id": null,
+       "artifact_id": "wv-1",
        "run_id": "run-1",
        "status": "improved"
       }
@@ -231,7 +231,7 @@
        "commit_hash": "c-c",
        "group": "__coral_root__",
        "parent_hash": null,
-       "release_id": null,
+       "artifact_id": "wv-1",
        "run_id": "run-1",
        "status": "improved"
       }
@@ -253,7 +253,7 @@
        "commit_hash": "c-d",
        "group": "__coral_root__",
        "parent_hash": null,
-       "release_id": null,
+       "artifact_id": "wv-1",
        "run_id": "run-1",
        "status": "improved"
       }
@@ -569,7 +569,7 @@
          "role": "user"
         }
        ],
-       "release_id": "slime-v3",
+       "artifact_id": "slime-v3",
        "response": "Answer from s0r0",
        "rollout": 0,
        "step": 0,
@@ -607,7 +607,8 @@
       "report-s0r0"
      ],
      "training": {
-      "distill_sample_weight": 0.0
+      "distill_sample_weight": 0.0,
+      "artifact_id": "slime-v3"
      }
     },
     {
@@ -622,7 +623,7 @@
          "role": "user"
         }
        ],
-       "release_id": "slime-v3",
+       "artifact_id": "slime-v3",
        "response": "Answer from s0r1",
        "rollout": 1,
        "step": 0,
@@ -660,7 +661,8 @@
       "report-s0r1"
      ],
      "training": {
-      "distill_sample_weight": 1.0
+      "distill_sample_weight": 1.0,
+      "artifact_id": "slime-v3"
      }
     }
    ],
@@ -699,7 +701,7 @@
          "role": "user"
         }
        ],
-       "release_id": "slime-v3",
+       "artifact_id": "slime-v3",
        "response": "Answer from s2r0",
        "rollout": 0,
        "step": 2,
@@ -737,7 +739,8 @@
       "report-s2r0"
      ],
      "training": {
-      "distill_sample_weight": 0.0
+      "distill_sample_weight": 0.0,
+      "artifact_id": "slime-v3"
      }
     },
     {
@@ -752,7 +755,7 @@
          "role": "user"
         }
        ],
-       "release_id": "slime-v3",
+       "artifact_id": "slime-v3",
        "response": "Answer from s2r1",
        "rollout": 1,
        "step": 2,
@@ -790,7 +793,8 @@
       "report-s2r1"
      ],
      "training": {
-      "distill_sample_weight": 1.0
+      "distill_sample_weight": 1.0,
+      "artifact_id": "slime-v3"
      }
     }
    ],
@@ -927,7 +931,7 @@
      "recipe": {
       "tttd": {
        "group": 0,
-       "release_id": "v1",
+       "artifact_id": "v1",
        "rollout": 0,
        "step": 1
       }
@@ -937,14 +941,16 @@
       "i-1-0-0",
       "r-1-0-0"
      ],
-     "training": {}
+     "training": {
+      "artifact_id": "v1"
+     }
     },
     {
      "group": "0",
      "recipe": {
       "tttd": {
        "group": 0,
-       "release_id": "v1",
+       "artifact_id": "v1",
        "rollout": 1,
        "step": 1
       }
@@ -954,14 +960,16 @@
       "i-1-0-1",
       "r-1-0-1"
      ],
-     "training": {}
+     "training": {
+      "artifact_id": "v1"
+     }
     },
     {
      "group": "1",
      "recipe": {
       "tttd": {
        "group": 1,
-       "release_id": "v1",
+       "artifact_id": "v1",
        "rollout": 0,
        "step": 1
       }
@@ -971,14 +979,16 @@
       "i-1-1-0",
       "r-1-1-0"
      ],
-     "training": {}
+     "training": {
+      "artifact_id": "v1"
+     }
     },
     {
      "group": "1",
      "recipe": {
       "tttd": {
        "group": 1,
-       "release_id": "v1",
+       "artifact_id": "v1",
        "rollout": 1,
        "step": 1
       }
@@ -988,7 +998,9 @@
       "i-1-1-1",
       "r-1-1-1"
      ],
-     "training": {}
+     "training": {
+      "artifact_id": "v1"
+     }
     }
    ],
    "released": [

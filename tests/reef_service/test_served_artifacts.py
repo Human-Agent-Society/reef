@@ -29,11 +29,11 @@ class ReleaseEcho(InferenceHandler):
     """Answer each call with the release it was given, so a test sees which release answered."""
 
     def __init__(self) -> None:
-        self.release_ids: list[str] = []
+        self.artifact_ids: list[str] = []
 
     async def inference(self, artifact, path, payload):
         del path, payload
-        self.release_ids.append(artifact.ref.release_id)
+        self.artifact_ids.append(artifact.artifact_id)
         return {"choices": [{"message": {"content": "ok"}}]}
 
 
@@ -78,7 +78,7 @@ def two_artifacts(tmp_path):
     answering_each_release(runtime)
     train(value, 1)
     train(value, 2)
-    newest, older, _ = value.get_or_create_scenario("math").artifact_rows()
+    newest, older, _ = value.get_or_create_scenario("math").artifacts()
     return value, runtime, backend_factory, newest, older
 
 
@@ -102,7 +102,7 @@ def test_a_served_artifact_answers_at_its_url_while_the_default_url_answers_from
     async def run() -> None:
         value, _, _, newest, older = two_artifacts(tmp_path)
         served = value.serve("math", older["artifact_id"])
-        assert (served.artifact_id, served.release_id) == (older["artifact_id"], older["release_id"])
+        assert served.artifact_id == older["artifact_id"]
         wait_for_serving(value)
         # The artifact served beside the active one has its own row, under the runtime's model name for it.
         rows = value.coordination.served_models.read_scenario("math")
@@ -125,11 +125,11 @@ def test_a_served_artifact_answers_at_its_url_while_the_default_url_answers_from
                 f"/reef/scenarios/math/artifacts/{newest['artifact_id']}/v1/chat/completions", json=CHAT
             )
             assert active.status == 200
-            assert handler.release_ids == [newest["release_id"], older["release_id"], newest["release_id"]]
+            assert handler.artifact_ids == [newest["artifact_id"], older["artifact_id"], newest["artifact_id"]]
             # The record names the release that answered.
             record_id = beside.headers["x-reef-agent-record-id"]
             record = value.get_or_create_scenario("math").records.get("math", record_id)
-            assert record.artifact_ref.release_id == older["release_id"]
+            assert record.artifact_id == older["artifact_id"]
 
             missing = await client.post("/reef/scenarios/math/artifacts/missing/v1/chat/completions", json=CHAT)
             assert missing.status == 404
@@ -154,8 +154,8 @@ def test_an_activation_leaves_the_served_artifacts_and_stop_serving_ends_one(tmp
     # Serving the active artifact keeps it serving after another activation.
     value.serve("math", newest["artifact_id"])
     value.activate("math", older["artifact_id"])
-    assert scenario.current_artifact_ref().release_id == older["release_id"]
-    assert scenario.served_beside()[newest["artifact_id"]].release.release_id == newest["release_id"]
+    assert scenario.serving_artifact_id() == older["artifact_id"]
+    assert scenario.served_beside()[newest["artifact_id"]].selection.components == {"weights": newest["artifact_id"]}
     rows = {row["artifact_id"]: row for row in value.list_artifacts("math")}
     assert (rows[newest["artifact_id"]]["served"], rows[newest["artifact_id"]]["active"]) == (True, False)
     assert (rows[older["artifact_id"]]["served"], rows[older["artifact_id"]]["active"]) == (False, True)
@@ -165,7 +165,7 @@ def test_an_activation_leaves_the_served_artifacts_and_stop_serving_ends_one(tmp
     assert len(scenario.store.history()) == steps
 
     stopped = value.stop_serving("math", newest["artifact_id"])
-    assert (stopped.artifact_id, stopped.release.release_id) == (newest["artifact_id"], newest["release_id"])
+    assert stopped.artifact_id == newest["artifact_id"]
     assert [record.operation for record in scenario.store.history()[-3:]] == ["serve", "activate", "stop_serving"]
     assert newest["artifact_id"] not in scenario.served_beside()
     with pytest.raises(ArtifactNotFound):
@@ -193,7 +193,7 @@ def test_the_served_artifacts_survive_a_restart(tmp_path) -> None:
         coordination=memory_coordination(),
     )
     scenario = restarted.get_or_create_scenario("math")
-    assert scenario.served_beside()[older["artifact_id"]].release.release_id == older["release_id"]
+    assert scenario.served_beside()[older["artifact_id"]].selection.components == {"weights": older["artifact_id"]}
     assert [row["artifact_id"] for row in restarted.list_artifacts("math") if row["served"]] == [older["artifact_id"]]
     restarted.close()
 
@@ -202,7 +202,7 @@ def test_the_served_artifacts_survive_a_restart(tmp_path) -> None:
 def test_a_runtime_that_answers_only_from_its_loaded_release_refuses_a_serve(tmp_path) -> None:
     value, _, _ = dispatcher(tmp_path)
     train(value, 1)
-    older = value.get_or_create_scenario("math").artifact_rows()[-1]
+    older = value.get_or_create_scenario("math").artifacts()[-1]
     scenario = value.get_or_create_scenario("math")
     steps = len(scenario.store.history())
     with pytest.raises(ReefError, match="answers only from the release it has loaded"):

@@ -27,7 +27,7 @@ from reef.harness import TaskResult
 from reef.harness.adapters import get_adapter
 from reef.harness.tasks.model_binding import ModelBinding
 from reef.harness.tree import HarnessTree
-from reef.train.backend import ComponentReleases
+from reef.train.backend import ComponentArtifacts
 
 
 def run_requests(evaluator, *pairings):
@@ -63,9 +63,9 @@ def load(monkeypatch, tmp_path):
     purge_example_modules()
 
 
-def releases_of(recipe) -> ComponentReleases:
+def releases_of(recipe) -> ComponentArtifacts:
     """A commit history whose head is the recipe's seed, as a new scenario's root release is."""
-    return ComponentReleases(TreeReleases(recipe.seed), "harness")
+    return ComponentArtifacts(TreeReleases(recipe.seed), "harness")
 
 
 @pytest.fixture

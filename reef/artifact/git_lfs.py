@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import shutil
@@ -15,13 +16,16 @@ from typing import Any, Self
 from urllib.parse import urlsplit
 
 from reef.artifact.artifact import (
+    ARTIFACT_ID_METADATA_KEY,
     Artifact,
     ArtifactConflict,
     ArtifactMaterializationError,
     ArtifactNotFound,
     ArtifactPublicationError,
-    ArtifactRef,
     ArtifactSourceError,
+    SnapshotRef,
+    artifact_components,
+    content_metadata,
 )
 from reef.artifact.composite import link_or_copy
 from reef.artifact.git_client import GitClient
@@ -405,14 +409,12 @@ class _ArtifactManifest:
     @staticmethod
     def text(
         *,
-        content_id: str,
-        parent_release_id: str | None,
+        parent_revision: str | None,
         source: Mapping[str, object],
         metadata: Mapping[str, object],
     ) -> str:
         manifest = {
-            "content_id": content_id,
-            "parent_release_id": parent_release_id,
+            "parent_revision": parent_revision,
             "source": dict(source),
             "metadata": dict(metadata),
         }
@@ -421,18 +423,21 @@ class _ArtifactManifest:
     def write(
         self,
         *,
-        content_id: str,
-        parent_release_id: str | None,
+        parent_revision: str | None,
         source: Mapping[str, object],
         metadata: Mapping[str, object],
     ) -> None:
         write_fresh(
             self._workspace.clone_dir / _MANIFEST,
-            self.text(content_id=content_id, parent_release_id=parent_release_id, source=source, metadata=metadata),
+            self.text(parent_revision=parent_revision, source=source, metadata=metadata),
         )
 
-    def read(self, version: str) -> Mapping[str, object]:
-        raw = self._workspace.show_file(version, _MANIFEST)
+    def read(self, version: str, *, local: bool = False) -> Mapping[str, object]:
+        raw = (
+            self._workspace.git("show", f"{version}:{_MANIFEST}")
+            if local
+            else self._workspace.show_file(version, _MANIFEST)
+        )
         try:
             manifest = json.loads(raw)
         except json.JSONDecodeError as exc:
@@ -441,19 +446,17 @@ class _ArtifactManifest:
             raise ArtifactSourceError(f"invalid artifact manifest at {version}")
         return manifest
 
-    def artifact_ref(self, version: str) -> ArtifactRef:
-        manifest = self.read(version)
+    def snapshot(self, version: str, *, local: bool = False) -> SnapshotRef:
+        manifest = self.read(version, local=local)
         try:
-            content_id = manifest["content_id"]
-            if not isinstance(content_id, str):
-                raise TypeError("content_id must be a string")
-            parent_release_id = manifest.get("parent_release_id")
-            if parent_release_id is not None and not isinstance(parent_release_id, str):
-                raise TypeError("parent_release_id must be a string or null")
-            return ArtifactRef(
-                content_id=content_id,
-                release_id=self._workspace.fetch_version(version),
-                parent_release_id=parent_release_id,
+            parent_revision = manifest.get("parent_revision", manifest.get("parent_release_id"))
+            if parent_revision is not None and not isinstance(parent_revision, str):
+                raise TypeError("parent_revision must be a string or null")
+            return SnapshotRef(
+                revision=(
+                    self._workspace.git("rev-parse", version) if local else self._workspace.fetch_version(version)
+                ),
+                parent_revision=parent_revision,
             )
         except (KeyError, TypeError) as exc:
             raise ArtifactSourceError(f"invalid artifact manifest at {version}") from exc
@@ -481,6 +484,7 @@ class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
         _check_tools()
         encoded = base64.urlsafe_b64encode(scenario.encode()).decode().rstrip("=")
         self.refs = refs
+        self.artifact_ref_prefix = f"{refs.fixed}artifacts/{encoded}/"
         self.ref_name = refs.scenario(encoded)
         self.work_dir = Path(work_dir)
         self.cache_dir = Path(cache_dir)
@@ -527,17 +531,79 @@ class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
             git_config=git_config,
         )
 
-    def resolve_release(self, release_id: str) -> ArtifactRef:
-        selector = release_id.removeprefix("git+lfs://")
+    def resolve_snapshot(self, revision: str) -> SnapshotRef:
+        selector = revision.removeprefix("git+lfs://")
         resolved_release = self._workspace.ls_remote(self.refs.release(selector))
         if resolved_release is None:
             try:
                 resolved_release = self._workspace.fetch_version(selector)
             except ArtifactPublicationError as exc:
-                raise ArtifactNotFound(f"release does not exist: {release_id}") from exc
-        return self._manifest.artifact_ref(resolved_release)
+                raise ArtifactNotFound(f"release does not exist: {revision}") from exc
+        return self._manifest.snapshot(resolved_release)
 
-    def register(self, root: Artifact, *, metadata: Mapping[str, object]) -> ArtifactRef:
+    def artifact_ref_name(self, artifact_id: str) -> str:
+        """The Git ref that binds ``artifact_id`` to its snapshot commit in this scenario."""
+        return self.artifact_ref_prefix + hashlib.sha256(artifact_id.encode()).hexdigest()
+
+    def stored_snapshot(self, commit: str) -> Artifact:
+        """The snapshot ``commit``, fetched already, with its metadata and without its files."""
+        manifest = self._manifest.read(commit, local=True)
+        metadata = manifest.get("metadata", {})
+        if not isinstance(metadata, Mapping):
+            raise ArtifactSourceError(f"invalid artifact metadata at {commit}")
+        return Artifact(self._manifest.snapshot(commit, local=True), None, metadata=metadata)
+
+    def artifact_content(self, ref: SnapshotRef, artifact_id: str) -> tuple[object, dict[str, object]]:
+        """The Git file objects and the metadata of the artifact, read without fetching weight bytes."""
+        commit = ref.revision
+        snapshot = self.stored_snapshot(commit)
+        components = artifact_components(snapshot)
+        if artifact_id not in components:
+            raise ArtifactNotFound(f"storage snapshot does not contain artifact {artifact_id!r}")
+        component = components[artifact_id]
+        manifest = snapshot.components
+        prefix = "" if component is None or manifest is None or manifest.single else f"{component}/"
+        files: dict[str, str] = {}
+        for entry in self._workspace.git("ls-tree", "-r", "-z", commit).split("\0"):
+            if not entry:
+                continue
+            descriptor, path = entry.split("\t", 1)
+            if path in (_MANIFEST, ".gitattributes") or not path.startswith(prefix):
+                continue
+            files[path.removeprefix(prefix)] = descriptor
+        return files, content_metadata(snapshot, component)
+
+    def bind_artifact_id(self, artifact_id: str, ref: SnapshotRef) -> SnapshotRef | None:
+        """Push the immutable binding ref of ``artifact_id`` unless it exists; fetch an existing one for comparison."""
+        ref_name = self.artifact_ref_name(artifact_id)
+        existing = self._workspace.ls_remote(ref_name)
+        if existing is None:
+            try:
+                self._workspace.force_push_with_lease(f"--force-with-lease={ref_name}:", f"{ref.revision}:{ref_name}")
+                return None
+            except ArtifactPublicationError:
+                existing = self._workspace.ls_remote(ref_name)
+                if existing is None:
+                    raise
+        if existing != ref.revision:
+            self._workspace.fetch_version(existing)
+        return self._manifest.snapshot(existing, local=True)
+
+    def index_snapshot(self, ref: SnapshotRef) -> None:
+        """Add immutable ID bindings for a previously stored Git snapshot."""
+        with self._workspace.lock:
+            self._workspace.fetch_version(ref.revision)
+            self.bind_artifact_ids(self.stored_snapshot(ref.revision))
+
+    def artifact_snapshot(self, artifact_id: str) -> SnapshotRef:
+        with self._workspace.lock:
+            commit = self._workspace.ls_remote(self.artifact_ref_name(artifact_id))
+            if commit is None:
+                raise ArtifactNotFound(f"repository has no artifact {artifact_id!r}")
+            self._workspace.fetch_version(commit)
+            return self._manifest.snapshot(commit, local=True)
+
+    def register(self, root: Artifact, *, metadata: Mapping[str, object]) -> SnapshotRef:
         """Commit the files of ``root`` with no parent and push the commit to the scenario's ref.
 
         A ref that exists already refuses the unrelated commit, so the first registration wins and a later one
@@ -549,22 +615,27 @@ class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
         with self._workspace.lock:
             existing = self._workspace.ls_remote(self.ref_name)
             if existing is not None:
-                return self._manifest.artifact_ref(existing)
+                self._workspace.fetch_version(existing)
+                self.bind_artifact_ids(self.stored_snapshot(existing))
+                return self._manifest.snapshot(existing)
             self._workspace.orphan_checkout()
             self._workspace.replace_tree(root.local_path)
             self._workspace.write_lfs_attributes()
             self._manifest.write(
-                content_id=root.ref.content_id, parent_release_id=None, source={"kind": "root"}, metadata=metadata
+                parent_revision=None,
+                source={"kind": "root"},
+                metadata={**root.storage_metadata, **dict(metadata)},
             )
             # Identical roots registered in the same second still need distinct release IDs.
             commit = self._workspace.commit(f"register scenario {uuid.uuid4().hex}")
+            self.bind_artifact_ids(self.stored_snapshot(commit))
             try:
                 self._workspace.push(f"{commit}:{self.ref_name}")
             except ArtifactPublicationError:
                 existing = self._workspace.ls_remote(self.ref_name)
                 if existing is None:
                     raise
-                return self._manifest.artifact_ref(existing)
+                return self._manifest.snapshot(existing)
             paths = tuple(
                 path
                 for path in self._workspace.git("ls-files", "-z").split("\0")
@@ -576,7 +647,7 @@ class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
                 paths,
                 {".gitattributes": _LFS_ATTRIBUTES, _MANIFEST: (self._workspace.clone_dir / _MANIFEST).read_text()},
             )
-            return self._manifest.artifact_ref(commit)
+            return self._manifest.snapshot(commit)
 
     def metadata(self) -> Mapping[str, object] | None:
         version = self._workspace.ls_remote(self.ref_name)
@@ -586,22 +657,22 @@ class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
         metadata = manifest.get("metadata", {})
         if not isinstance(metadata, Mapping):
             raise ArtifactSourceError(f"invalid artifact metadata at {version}")
-        return dict(metadata)
+        return {key: value for key, value in metadata.items() if key != ARTIFACT_ID_METADATA_KEY}
 
-    def current(self) -> ArtifactRef:
+    def current(self) -> SnapshotRef:
         version = self._workspace.ls_remote(self.ref_name)
         if version is None:
             raise ArtifactNotFound("repository has no current artifact")
-        return self._manifest.artifact_ref(version)
+        return self._manifest.snapshot(version)
 
-    def materialize(self, ref: ArtifactRef) -> Artifact:
-        destination = self.cache_dir / ref.release_id
+    def materialize(self, ref: SnapshotRef) -> Artifact:
+        destination = self.cache_dir / ref.revision
         if destination.is_dir():
             return Artifact(ref, None, local_path=destination, metadata=materialized_metadata(destination))
-        temporary = Path(tempfile.mkdtemp(prefix=f".{ref.release_id}-", dir=self.cache_dir))
+        temporary = Path(tempfile.mkdtemp(prefix=f".{ref.revision}-", dir=self.cache_dir))
         checkout = temporary / "artifact"
         try:
-            self._workspace.clone_for_materialize(checkout, ref.release_id)
+            self._workspace.clone_for_materialize(checkout, ref.revision)
             git_metadata = checkout / ".git"
             if git_metadata.is_dir():
                 shutil.rmtree(git_metadata)
@@ -613,40 +684,39 @@ class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
                 if not destination.is_dir():
                     raise
         except ArtifactPublicationError as exc:
-            raise ArtifactMaterializationError(f"failed to materialize artifact {ref.release_id}: {exc}") from exc
+            raise ArtifactMaterializationError(f"failed to materialize artifact {ref.revision}: {exc}") from exc
         finally:
             shutil.rmtree(temporary, ignore_errors=True)
         if not destination.is_dir():
-            raise ArtifactMaterializationError(f"artifact cache was not created: {ref.release_id}")
+            raise ArtifactMaterializationError(f"artifact cache was not created: {ref.revision}")
         return Artifact(ref, None, local_path=destination, metadata=materialized_metadata(destination))
 
     def publish(
         self,
         artifact: Artifact,
         *,
-        expected_parent: ArtifactRef,
+        expected_parent: SnapshotRef,
         advance_head: bool = True,
-    ) -> ArtifactRef:
+    ) -> SnapshotRef:
         if artifact.local_path is None or not artifact.local_path.is_dir():
             raise ArtifactPublicationError("artifact ref must contain an existing local artifact directory")
         with self._workspace.lock:
             current = self._workspace.ls_remote(self.ref_name)
-            if current != expected_parent.release_id:
-                raise ArtifactConflict(f"repository is at {current}, not expected parent {expected_parent.release_id}")
+            if current != expected_parent.revision:
+                raise ArtifactConflict(f"repository is at {current}, not expected parent {expected_parent.revision}")
             files = {
                 ".gitattributes": _LFS_ATTRIBUTES,
                 _MANIFEST: _ArtifactManifest.text(
-                    content_id=artifact.ref.content_id,
-                    parent_release_id=expected_parent.release_id,
+                    parent_revision=expected_parent.revision,
                     source={"kind": "training"},
-                    metadata=artifact.metadata,
+                    metadata=artifact.storage_metadata,
                 ),
             }
             paths = tuple(path for path in self._workspace.source_files(artifact.local_path) if path not in files)
             linked = any((artifact.local_path / path).is_symlink() for path in paths)
             if linked:
                 # A symlinked tree is published by its targets' bytes, which only a copy into the work tree resolves.
-                self._workspace.checkout(expected_parent.release_id)
+                self._workspace.checkout(expected_parent.revision)
                 self._workspace.replace_tree(artifact.local_path)
                 for path, text in files.items():
                     write_fresh(self._workspace.clone_dir / path, text)
@@ -655,42 +725,43 @@ class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
                 commit = self._workspace.commit_files(
                     artifact.local_path,
                     paths,
-                    parent=expected_parent.release_id,
-                    carried_from=self.cache_dir / expected_parent.release_id,
+                    parent=expected_parent.revision,
+                    carried_from=self.cache_dir / expected_parent.revision,
                     files=files,
                     message="publish artifact",
                 )
+            self.bind_artifact_ids(self.stored_snapshot(commit))
             if not advance_head:
                 # A pending release lives under the releases namespace; the scenario's ref and the head stay put.
                 self._workspace.push(f"+{commit}:{self.refs.release(commit)}")
                 if not linked:
                     self._cache_release(commit, artifact.local_path, paths, files)
-                return self._manifest.artifact_ref(commit)
+                return self._manifest.snapshot(commit)
             try:
                 self._workspace.force_push_with_lease(
-                    f"--force-with-lease={self.ref_name}:{expected_parent.release_id}",
+                    f"--force-with-lease={self.ref_name}:{expected_parent.revision}",
                     f"{commit}:{self.ref_name}",
                 )
             except ArtifactPublicationError as exc:
                 current = self._workspace.ls_remote(self.ref_name)
-                if current != expected_parent.release_id:
-                    raise ArtifactConflict(f"repository advanced from {expected_parent.release_id}") from exc
+                if current != expected_parent.revision:
+                    raise ArtifactConflict(f"repository advanced from {expected_parent.revision}") from exc
                 raise
             if not linked:
                 self._cache_release(commit, artifact.local_path, paths, files)
-            return self._manifest.artifact_ref(commit)
+            return self._manifest.snapshot(commit)
 
-    def _cache_release(self, release_id: str, source: Path, paths: Sequence[str], files: Mapping[str, str]) -> None:
+    def _cache_release(self, revision: str, source: Path, paths: Sequence[str], files: Mapping[str, str]) -> None:
         """Fill a just-published release's cache entry from the staged tree it was committed from.
 
         The staged files hold the committed bytes, so the entry links them
         instead of cloning the release and pulling its LFS objects back. An
         entry that cannot be filled is cloned by the first ``materialize``.
         """
-        destination = self.cache_dir / release_id
+        destination = self.cache_dir / revision
         if destination.is_dir():
             return
-        temporary = Path(tempfile.mkdtemp(prefix=f".{release_id}-", dir=self.cache_dir))
+        temporary = Path(tempfile.mkdtemp(prefix=f".{revision}-", dir=self.cache_dir))
         tree = temporary / "artifact"
         try:
             tree.mkdir()
@@ -705,26 +776,26 @@ class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
         finally:
             shutil.rmtree(temporary, ignore_errors=True)
 
-    def commit_release(self, ref: ArtifactRef, *, expected_parent: ArtifactRef) -> None:
+    def commit_release(self, ref: SnapshotRef, *, expected_parent: SnapshotRef) -> None:
         with self._workspace.lock:
-            staged = self.resolve_release(ref.release_id)
-            if staged != ref or ref.parent_release_id != expected_parent.release_id:
+            staged = self.resolve_snapshot(ref.revision)
+            if staged != ref or ref.parent_revision != expected_parent.revision:
                 raise ArtifactPublicationError("committed release differs from its staged identity or parent")
             current = self._workspace.ls_remote(self.ref_name)
-            if current == ref.release_id:
+            if current == ref.revision:
                 return
-            if current != expected_parent.release_id:
+            if current != expected_parent.revision:
                 raise ArtifactConflict("repository head changed before the staged release was committed")
             try:
                 self._workspace.force_push_with_lease(
-                    f"--force-with-lease={self.ref_name}:{expected_parent.release_id}",
-                    f"{ref.release_id}:{self.ref_name}",
+                    f"--force-with-lease={self.ref_name}:{expected_parent.revision}",
+                    f"{ref.revision}:{self.ref_name}",
                 )
             except ArtifactPublicationError as exc:
                 current = self._workspace.ls_remote(self.ref_name)
-                if current == ref.release_id:
+                if current == ref.revision:
                     return
-                if current != expected_parent.release_id:
+                if current != expected_parent.revision:
                     raise ArtifactConflict("repository head changed while committing a staged release") from exc
                 raise
 
