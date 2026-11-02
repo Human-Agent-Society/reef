@@ -511,9 +511,16 @@ class Trainer:
             # Another samples process can have stored the samples of later records since this trainer loaded;
             # the records that stored samples consumed never form a record set again.
             self.consumed_record_ids.update(self._pipeline.store.consumed_record_ids())
+            before_records = self._data_offset
+            before_samples = self._pipeline.stored_sample_count
             self.read_records()
             stored = self._pipeline.produce()
-            return ProducedSamples(changed=stored, background=self._pipeline.background_jobs_running())
+            return ProducedSamples(
+                changed=stored,
+                background=self._pipeline.background_jobs_running(),
+                records_read=self._data_offset - before_records,
+                samples_created=self._pipeline.stored_sample_count - before_samples,
+            )
 
     def read_records(self) -> None:
         """Push every record after the record cursor into the pipeline and move the cursor. The samples service
