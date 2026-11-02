@@ -102,7 +102,10 @@ Both ways feed the same training step (4 to 8).
      - every adapter with an npm ``install``
    * - Recipes
      - ACE, ReasoningBank, GEPA (AIME example)
-     - GEPA with ``TrainTaskJobData``, Meta-Harness (Terminal-Bench example)
+     - GEPA with ``TrainTaskJobData``
+
+A method can also learn from neither. Meta-Harness searches against fixed
+evaluation tasks, and a training request starts each step (`Step data`_).
 
 Quickstart
 ----------
@@ -273,6 +276,10 @@ Step data
 
 A step starts when ``pipeline.sample2job.config.job_samples`` traces wait
 (default 1). One trace is one scored report, with every model call it names.
+In ``manual`` mode (``recipe.config.training_mode: manual``), a training
+request starts each step instead: ``POST /reef/train`` with a ``text`` that
+the method reads as an instruction (`Manual training
+<../reference/http-api.rst#manual-training>`__). The step needs no trace.
 To learn from inference traffic without reports, name the inference stage;
 each call is then one unscored trace:
 
@@ -530,9 +537,9 @@ The deployment names one method in ``evolution.method``:
      - A reflection model rewrites one file from a minibatch's feedback.
      - ``compare``, mean
    * - `Meta-Harness <../../recipes/meta_harness/README.md>`__
-     - A model reads every earlier candidate and its scores, and writes a new
-       tree.
-     - ``compare``
+     - On each training request, a model reads every earlier candidate and its
+       scores, and writes a new tree.
+     - ``compare``, mean
    * - `ACE <../../recipes/ace/README.md>`__
      - A reflector and a curator edit a playbook in ``rules.md``.
      - ``none``
