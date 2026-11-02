@@ -317,7 +317,7 @@ class Surface:
         before = previous.materialize().components
         if current is None or before is None or name not in current.entries or name not in before.entries:
             return True
-        return current.artifact_ids(artifact.ref.revision)[name] != before.artifact_ids(previous.ref.revision)[name]
+        return current.artifact_id(name, artifact.ref.revision) != before.artifact_id(name, previous.ref.revision)
 
     def activate(
         self,

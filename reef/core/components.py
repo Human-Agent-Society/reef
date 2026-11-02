@@ -100,12 +100,17 @@ class ReleaseComponents:
     def names(self) -> tuple[str, ...]:
         return tuple(self.entries)
 
+    def artifact_id(self, name: str, revision: str) -> str:
+        """The artifact ID of component ``name`` in the snapshot ``revision``.
+
+        It is the entry's explicit ID, or the revision-based ID of a legacy entry. Raise ``KeyError`` for an
+        unknown ``name``.
+        """
+        return self.entries[name].artifact_id or legacy_artifact_id(revision, name, single=self.single)
+
     def artifact_ids(self, revision: str) -> dict[str, str]:
-        """Return explicit component IDs, with revision-based IDs only for legacy entries lacking an ID."""
-        return {
-            name: entry.artifact_id or legacy_artifact_id(revision, name, single=self.single)
-            for name, entry in self.entries.items()
-        }
+        """The artifact ID of each component in the snapshot ``revision`` (``artifact_id``), in declaration order."""
+        return {name: self.artifact_id(name, revision) for name in self.entries}
 
     def carried_from(self, revision: str) -> ReleaseComponents:
         """This manifest as a later release carries it forward: every entry names its artifact explicitly."""

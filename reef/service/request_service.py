@@ -93,7 +93,7 @@ def instruction_view(scenario: Scenario, request_id: str, rows: Sequence[Mapping
     }
 
 
-#: The keys of a ``harness_history`` row that hold private storage locators.
+#: The keys of a ``Scenario.harness_history`` row that hold private storage locators.
 SNAPSHOT_ROW_KEYS = frozenset({"snapshot", "artifact_snapshot", "parent_snapshot"})
 
 
@@ -437,72 +437,19 @@ class RequestService:
             manifest["components"] = components.artifact_ids(artifact.ref.revision)
         return manifest
 
-    @staticmethod
-    def harness_history(scenario: Scenario) -> list[dict[str, Any]]:
-        """Return harness publication and training rows, newest first, with private storage locators.
-
-        Each row identifies its harness artifact and its component parent. Other
-        components' publications and job-submission events do not add harness rows.
-        Storage locators support legacy HTTP serialization only.
-        """
-        with scenario.release_queries.publication_lock:
-            component = scenario.surface.files_component
-            harness = [
-                row for row in scenario.artifact_rows() if scenario.surface.single or row["component"] == component
-            ]
-            by_snapshot = {row["snapshot"].revision: row for row in harness}
-            by_artifact = {row["artifact_id"]: row for row in harness}
-            manifests = scenario.release_queries.manifests(scenario.scenario_step)
-
-            def artifact_of(revision: str | None) -> dict[str, Any] | None:
-                if revision is None or revision in by_snapshot:
-                    return None if revision is None else by_snapshot[revision]
-                return by_artifact.get((manifests.get(revision) or {}).get(str(component)))
-
-            parents = {row["artifact_id"]: row["parent_artifact_id"] for row in scenario.artifacts()}
-            kept: list[dict[str, Any]] = []
-            for row in scenario.release_queries.snapshot_rows(scenario.scenario_step):
-                metrics = row.get("metrics") or {}
-                job = metrics.get("training_job")
-                if isinstance(job, Mapping) and (
-                    job.get("event") == "submitted" or not set(metrics) - {"training_job", "training_request"}
-                ):
-                    continue
-                if row["checkpoint"] and row["snapshot"].revision not in by_snapshot:
-                    continue
-                if not row["checkpoint"] and row.get("component") not in (None, component):
-                    continue
-                artifact = artifact_of(row["snapshot"].revision)
-                if artifact is None:
-                    continue
-                parent = artifact_of(artifact["snapshot"].parent_revision)
-                kept.append(
-                    {
-                        **row,
-                        "artifact_id": artifact["artifact_id"],
-                        "parent_artifact_id": parents[artifact["artifact_id"]],
-                        "component": artifact["component"],
-                        "active": row["checkpoint"] and artifact["active"],
-                        "activated": artifact["activated"],
-                        "artifact_snapshot": artifact["snapshot"],
-                        "parent_snapshot": None if parent is None else parent["snapshot"],
-                    }
-                )
-            return kept
-
     @classmethod
     def harness_rows(cls, scenario: Scenario) -> list[dict[str, Any]]:
         """Return artifact-addressed harness history for pages and step records, without storage locators."""
         return [
             {key: value for key, value in row.items() if key not in SNAPSHOT_ROW_KEYS}
-            for row in cls.harness_history(scenario)
+            for row in scenario.harness_history()
         ]
 
     @classmethod
     def legacy_harness_rows(cls, scenario: Scenario) -> list[dict[str, Any]]:
         """Serialize old release selectors only for the legacy harness catalog endpoint."""
         rows = []
-        for row in cls.harness_history(scenario):
+        for row in scenario.harness_history():
             snapshot, selected, parent = row["snapshot"], row["artifact_snapshot"], row["parent_snapshot"]
             listed = {key: value for key, value in row.items() if key not in SNAPSHOT_ROW_KEYS}
             listed["release_id"] = selected.revision

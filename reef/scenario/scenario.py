@@ -448,6 +448,56 @@ class Scenario:
                 for row in self.artifact_rows()
             )
 
+    def harness_history(self) -> list[dict[str, Any]]:
+        """Return harness publication and training rows, newest first, with private storage locators.
+
+        Each row identifies its harness artifact and its component parent. Other
+        components' publications and job-submission events do not add harness rows.
+        Storage locators support legacy HTTP serialization only.
+        """
+        with self.release_queries.publication_lock:
+            component = self.surface.files_component
+            harness = [row for row in self.artifact_rows() if self.surface.single or row["component"] == component]
+            by_snapshot = {row["snapshot"].revision: row for row in harness}
+            by_artifact = {row["artifact_id"]: row for row in harness}
+            manifests = self.release_queries.manifests(self._committer.step)
+
+            def artifact_of(revision: str | None) -> dict[str, Any] | None:
+                if revision is None or revision in by_snapshot:
+                    return None if revision is None else by_snapshot[revision]
+                return by_artifact.get((manifests.get(revision) or {}).get(str(component)))
+
+            parents = {row["artifact_id"]: row["parent_artifact_id"] for row in self.artifacts()}
+            kept: list[dict[str, Any]] = []
+            for row in self.release_queries.snapshot_rows(self._committer.step):
+                metrics = row.get("metrics") or {}
+                job = metrics.get("training_job")
+                if isinstance(job, Mapping) and (
+                    job.get("event") == "submitted" or not set(metrics) - {"training_job", "training_request"}
+                ):
+                    continue
+                if row["checkpoint"] and row["snapshot"].revision not in by_snapshot:
+                    continue
+                if not row["checkpoint"] and row.get("component") not in (None, component):
+                    continue
+                artifact = artifact_of(row["snapshot"].revision)
+                if artifact is None:
+                    continue
+                parent = artifact_of(artifact["snapshot"].parent_revision)
+                kept.append(
+                    {
+                        **row,
+                        "artifact_id": artifact["artifact_id"],
+                        "parent_artifact_id": parents[artifact["artifact_id"]],
+                        "component": artifact["component"],
+                        "active": row["checkpoint"] and artifact["active"],
+                        "activated": artifact["activated"],
+                        "artifact_snapshot": artifact["snapshot"],
+                        "parent_snapshot": None if parent is None else parent["snapshot"],
+                    }
+                )
+            return kept
+
     def current_artifact_ref(self) -> SnapshotRef:
         """The private storage or local-view locator of the current component selection."""
         return self._artifact_chain.current
