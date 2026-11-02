@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import suppress
+from dataclasses import replace
 from pathlib import Path
 from threading import Thread
 from types import SimpleNamespace
@@ -11,11 +12,14 @@ from types import SimpleNamespace
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from tests.support._policy_recipe import TestPolicyRecipe
+from tests.support._trajectories import policy_trajectory
 from tests.support.artifact_versions import ImportingComponent
-from tests.support.runtime_stubs import runtime_bindings
+from tests.support.harness_steps import IdleMethod, harness_recipe
+from tests.support.runtime_stubs import StubTrainingComponent, runtime_bindings
 
 from reef.artifact import InMemoryRepositoryBackend
 from reef.artifact.sources import ArtifactSources
+from reef.core.job_data import JobData
 from reef.dispatcher import Dispatcher
 from reef.dispatcher.data_sync_worker import DataSyncWorker
 from reef.dispatcher.samples import LocalSampleProducers
@@ -24,8 +28,11 @@ from reef.dispatcher.store_changes import StoreChanges, StoreChangesWatcher
 from reef.dispatcher.work_retention import EndedWorkSweeper
 from reef.evaluation.rollout_worker import EvaluationRolloutWorker
 from reef.execution.workers import SERVICE_COMPONENTS, ServiceWorker, service_components
+from reef.recipe import CompositeRecipe, Recipe
 from reef.record2sample.service import RECORD_SELECTION_KIND, SAMPLES_QUEUE, SamplesWorker, request_selection
+from reef.runtime.jobs import TrainingJob
 from reef.service import assembly
+from reef.service import components as component_apps
 from reef.service.app import create_data_app
 from reef.service.components import build_component_app
 from reef.service.data_service import DataJob, DataWorker
@@ -35,8 +42,9 @@ from reef.service.deploy.service_config import ServiceConfig
 from reef.storage.sql_coordination import memory_coordination, open_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.storage.work_queue import NewWork
+from reef.train.harness_backend.component import HarnessTrainingComponent
 from reef.train.instructions import InstructionQueue
-from reef.train.job_queue import JOBS_QUEUE
+from reef.train.job_queue import JOBS_QUEUE, JobQueueComponent, TrainingJobWorker
 
 MEMORY_BACKEND = "tests.support.artifact_backend_plugin:MemoryArtifactBackend"
 TOKEN = "service-token"
@@ -81,6 +89,103 @@ def test_a_process_runs_the_workers_of_its_own_services_only(tmp_path: Path) -> 
         service_components({"control", "router"})
     with pytest.raises(ValueError, match="one or more"):
         service_components(frozenset())
+
+
+def test_the_training_service_runs_queued_jobs_without_opening_scenario_stores(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = replace(settings(tmp_path), task_file_dir=str(tmp_path / "task-files"))
+    component = StubTrainingComponent(tmp_path / "checkpoints")
+    recipe = Recipe(training_component=component)
+    monkeypatch.setattr(assembly, "_serving_recipe", lambda selected, settings, environ: recipe)
+    trajectory = policy_trajectory("sample", (1, 2), (1,), (-0.1,), 1.0, artifact_id="v1")
+    coordination = assembly.open_service_coordination(config)
+    view = JobQueueComponent(component, coordination.work_queue, owns_component=False)
+    view.submit(
+        TrainingJob("one", component.name, component.base_start, JobData("data", (trajectory,)), {}, scenario="math")
+    )
+
+    async def run() -> None:
+        app = build_component_app("training", config, environ={})
+        async with TestClient(TestServer(app)) as client:
+            assert (await client.get("/healthz")).status == 200
+            deadline = asyncio.get_running_loop().time() + 5
+            while view.status("one").state != "finished":
+                assert asyncio.get_running_loop().time() < deadline, "the training service did not finish its job"
+                await asyncio.sleep(0.01)
+            assert len(view.status("one").checkpoints) == 1
+            assert coordination.control_lease.current() is None
+            assert not Path(config.task_file_dir).exists()
+            assert not (tmp_path / "work").exists()
+            assert not (tmp_path / "cache").exists()
+        assert component.closed
+
+    try:
+        asyncio.run(run())
+    finally:
+        coordination.close()
+
+
+@pytest.mark.parametrize("failure_stage", ["thread", "worker"])
+def test_a_training_worker_start_failure_closes_its_component_and_queue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure_stage: str
+) -> None:
+    component = StubTrainingComponent()
+    recipe = Recipe(training_component=component)
+    coordination = memory_coordination()
+    monkeypatch.setattr(assembly, "_serving_recipe", lambda selected, settings, environ: recipe)
+    monkeypatch.setattr(component_apps, "open_service_coordination", lambda settings: coordination)
+    threads: list[Thread | None] = []
+    start = TrainingJobWorker.start
+    failure = RuntimeError("worker startup failed")
+
+    def fail_start(worker: TrainingJobWorker) -> None:
+        start(worker)
+        threads.append(worker.thread)
+        raise failure
+
+    def fail_thread_start(thread: Thread) -> None:
+        threads.append(thread)
+        raise failure
+
+    if failure_stage == "thread":
+        monkeypatch.setattr(Thread, "start", fail_thread_start)
+    else:
+        monkeypatch.setattr(TrainingJobWorker, "start", fail_start)
+    with pytest.raises(RuntimeError) as raised:
+        build_component_app("training", settings(tmp_path), environ={})
+    assert raised.value is failure
+    assert component.closed
+    assert all(thread is not None and not thread.is_alive() for thread in threads)
+    with pytest.raises(ReefError, match="closed"):
+        coordination.work_queue.items(JOBS_QUEUE)
+
+
+def test_the_training_service_keeps_composite_harness_evaluation_on_the_served_endpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = replace(settings(tmp_path), served_url="http://reef-control:8000")
+    recipe = CompositeRecipe(components={"harness": harness_recipe(tmp_path, IdleMethod()), "records": Recipe()})
+    monkeypatch.setattr(assembly, "_serving_recipe", lambda selected, settings, environ: recipe)
+    bindings = []
+    start = TrainingJobWorker.start
+
+    def observe_start(worker: TrainingJobWorker) -> None:
+        component = worker.component
+        assert isinstance(component, HarnessTrainingComponent)
+        bindings.append(component.steps.recipe.model_binding("math"))
+        start(worker)
+
+    monkeypatch.setattr(TrainingJobWorker, "start", observe_start)
+
+    async def run() -> None:
+        async with TestClient(TestServer(build_component_app("training", config, environ={}))) as client:
+            assert (await client.get("/healthz")).status == 200
+
+    asyncio.run(run())
+    assert len(bindings) == 1
+    assert bindings[0].base_url == "http://reef-control:8000/reef/scenarios/math/components/harness/evaluation"
+    assert bindings[0].api_key is None
 
 
 @pytest.mark.parametrize("failure_stage", ["jobs", "start"])
