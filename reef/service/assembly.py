@@ -55,6 +55,7 @@ from reef.storage.observer import ObservedScenarioStorage
 from reef.storage.postgres import PostgresScenarioStorage
 from reef.storage.records import RecordRetention
 from reef.storage.scenario import ScenarioStorage
+from reef.storage.segments import LocalSegmentStore, SegmentStore
 from reef.storage.sql_coordination import open_coordination
 from reef.storage.sql_data import PostgresDataStore, SQLiteDataStore
 from reef.storage.sqlite import SQLiteScenarioStorage
@@ -294,8 +295,20 @@ def default_served_url(host: str, port: int) -> str:
     return f"http://[{bound}]:{port}" if literal.version == 6 else f"http://{bound}:{port}"
 
 
+def build_segment_store(settings: ServiceConfig) -> SegmentStore | None:
+    """The segment store that ``storage.segment_backend`` names, in ``<agent_record_dir>/segments``, or None."""
+    directory = Path(settings.agent_record_dir) / "segments"
+    if settings.segment_backend is None:
+        return None
+    if settings.segment_backend == "local":
+        return LocalSegmentStore(directory)
+    reference = SegmentStore.reference(settings.segment_backend, setting="storage.segment_backend")
+    return SegmentStore.referenced_class(reference).from_config(reference.config, directory=directory)
+
+
 def build_data_store(settings: ServiceConfig, task_files: TaskFileStore) -> DataStore:
-    """The data store that ``storage.data_store`` names, sharing ``task_files`` without owning it.
+    """The data store that ``storage.data_store`` names, sharing ``task_files`` without owning it, and owning the
+    segment store of ``storage.segment_backend``.
 
     Unset follows ``storage.record_backend``: ``postgres`` uses ``storage.record_database_url`` and the schema
     ``reef_data``, and ``sqlite`` or a plugin record backend uses ``sqlite``, in ``<agent_record_dir>/data``.
@@ -304,16 +317,25 @@ def build_data_store(settings: ServiceConfig, task_files: TaskFileStore) -> Data
     choice = settings.data_store
     if choice is None:
         choice = "postgres" if settings.record_backend == "postgres" else "sqlite"
-    if choice == "postgres":
-        return PostgresDataStore(
-            _require_non_empty(settings.record_database_url, "reef.record_database_url"), task_files
+    segments = build_segment_store(settings)
+    try:
+        if choice == "postgres":
+            return PostgresDataStore(
+                _require_non_empty(settings.record_database_url, "reef.record_database_url"),
+                task_files,
+                segments=segments,
+            )
+        if choice == "sqlite":
+            return SQLiteDataStore(directory / "data", task_files, segments)
+        reference = DataStore.reference(choice, setting="storage.data_store")
+        return DataStore.referenced_class(reference).from_config(
+            reference.config, directory=directory, task_files=task_files, segments=segments
         )
-    if choice == "sqlite":
-        return SQLiteDataStore(directory / "data", task_files)
-    reference = DataStore.reference(choice, setting="storage.data_store")
-    return DataStore.referenced_class(reference).from_config(
-        reference.config, directory=directory, task_files=task_files
-    )
+    except BaseException:
+        # The data store owns the segment store after it exists. Until then, this code closes it.
+        if segments is not None:
+            segments.close()
+        raise
 
 
 def open_service_coordination(settings: ServiceConfig) -> Coordination:

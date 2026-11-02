@@ -734,6 +734,43 @@ To use another database or schema, or your own store, name a subclass of
 The task file store keeps the files of task items, apart from the files of each
 scenario.
 
+Keep large content in segment files
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The data store's database grows with each trajectory and each record item.
+With ``storage.segment-backend``, a SQL data store keeps that content in
+segment files instead. A segment is one JSON Lines file per owner. The
+database keeps the place of each line, and a read fetches only the lines that
+it needs.
+
+- The content of each new trajectory item goes to a segment when the item is
+  created. One ``create`` call writes one segment.
+- Every 5 minutes, the data service moves the content that the database still
+  holds into segments: the messages of record items, and trajectory items from
+  before you set the backend. It moves an owner's content when at least 64 MiB
+  of it waits, oldest first, in segments of at least 64 MiB.
+- A segment that no item uses for 24 hours is deleted.
+
+``local`` keeps the segments in ``<agent-record-dir>/segments``. Only the
+services of one host can share this directory. To share segments between
+hosts, name a subclass of ``reef.storage.segments.SegmentStore``, for example
+a store in object storage:
+
+.. code-block:: yaml
+
+   storage:
+     segment-backend:
+       module: my_package.segments:ObjectStoreSegmentStore
+       config:
+         bucket: reef-data
+
+Reef calls ``from_config(config, directory=...)`` with
+``<agent-record-dir>/segments``, which a remote store can use as a local cache.
+The `Python segment store contract
+<../reference/python-api.rst#segment-stores>`__ gives the necessary behavior.
+Keep the backend set after you set it: a data store without it cannot read
+content that it moved, and it raises an error for such an item.
+
 When Reef opens a scenario for the first time after an upgrade, it moves the
 scenario's uploaded trajectories and tasks into the data store. They become
 items of the owner with the scenario's name, which the scenario uses in their
