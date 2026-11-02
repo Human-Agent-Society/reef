@@ -526,6 +526,10 @@ The deployment names one method in ``evolution.method``:
    * - `ReasoningBank <../../recipes/reasoning_bank/README.md>`__
      - Judged successes and failures become memory skills.
      - ``none``
+   * - `Skill library <../../recipes/skill_library/README.md>`__
+     - Scored runs become procedural skills; a replay of the run's task decides
+       which skills from failed runs stay.
+     - ``compare``, wins
    * - `Reefine <../../recipes/beta/reefine/README.md>`__ (beta)
      - A coding agent answers plain-language requests.
      - ``floor``

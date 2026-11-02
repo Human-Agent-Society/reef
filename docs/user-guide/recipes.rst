@@ -116,6 +116,11 @@ recipe reads it out of the traffic it already serves.
      - ``recipes/reasoning_bank/``
      - `ReasoningBank <../../recipes/reasoning_bank/README.md>`__
      - `online deployment <../../recipes/reasoning_bank/examples/serve.yaml>`__
+   * - Skill library
+     - harness skills: procedures checked by replay
+     - ``recipes/skill_library/``
+     - `Skill library <../../recipes/skill_library/README.md>`__
+     - `deployment with replays <../../recipes/skill_library/examples/serve.yaml>`__
 
 How a recipe is selected
 ------------------------
