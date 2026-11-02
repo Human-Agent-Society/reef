@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 from reef.core.errors import ReefError
-from reef.core.values import require_text
+from reef.core.values import JsonValue, require_text
 
 logger = logging.getLogger(__name__)
 
@@ -33,9 +33,6 @@ WorkState = Literal["queued", "assigned", "running", "finished", "failed"]
 WORK_STATES: tuple[WorkState, ...] = ("queued", "assigned", "running", "finished", "failed")
 FINAL_STATES: frozenset[str] = frozenset({"finished", "failed"})
 HELD_STATES: frozenset[str] = frozenset({"assigned", "running"})
-
-#: JSON-compatible values that a work item carries.
-JsonValue = None | bool | int | float | str | list["JsonValue"] | dict[str, "JsonValue"]
 
 
 class WorkConflict(ReefError):

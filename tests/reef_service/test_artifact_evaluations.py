@@ -422,6 +422,8 @@ def test_a_scenario_activation_overrides_the_deployment_rule_and_applies_again_a
                 "artifact_evaluation": None,
                 "activation": None,
                 "effective_activation": {"module": "never", "config": {}},
+                "serving_config": {},
+                "effective_serving_config": {"weights": {}},
             }
             rule = {"module": "always", "config": {"review_kinds": ["skill"]}}
             response = await client.post("/reef/scenarios/s/update", headers=AUTH, json={"activation": rule})

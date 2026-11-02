@@ -205,7 +205,7 @@ def test_an_inference_worker_resumes_expired_startup_and_keeps_completed_work_re
             assert completed.result and control.coordination.served_models.read_scenario("math")
             with pytest.raises(WorkLeaseLost):
                 control.coordination.served_models.complete_request(
-                    abandoned, "previous-process", {}, stop_delay_seconds=0
+                    abandoned, "previous-process", {}, serving_config={}, stop_delay_seconds=0
                 )
             assert not await asyncio.to_thread(worker.run_once)
             assert await (await client.get(STATUS)).json() == ready

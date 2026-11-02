@@ -11,6 +11,7 @@ import pytest
 from sqlalchemy import select
 
 from reef.core.artifact_ref import ArtifactRef
+from reef.core.serving_config import ServingConfig
 from reef.storage.commits import CommitHistoryError, CommitRecord
 from reef.storage.postgres import POSTGRES_SCHEMA_VERSION, PostgresRecordDatabase, PostgresScenarioStorage
 from reef.storage.scenario import ScenarioSettings
@@ -52,6 +53,7 @@ def test_settings_default_replace_and_stay_per_scenario(open_storage):
         training_mode="manual",
         artifact_evaluation=EVALUATION,
         activation={"module": "evaluated", "config": {"min_mean_score": 0.5}},
+        serving_config=ServingConfig({"weights": {"temperature": 0.6, "min_replicas": 1}}),
     )
     storage.write_settings("math", settings)
     assert open_storage().read_settings("math") == settings
