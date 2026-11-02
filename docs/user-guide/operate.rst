@@ -498,7 +498,11 @@ with the queue, the item ID, the scenario and the error.
 
 After ownership changes, completed selections return to starting. The new
 owner opens its runtime, adopts retained engines, and activates the selections
-before it publishes routes again. This status is not a continuous engine
+before it publishes routes again. Until then, a scenario's requests get
+``inference_starting``. A runtime whose engines keep running without the
+owner process, such as remote endpoints, sets ``engines_outlive_owner``. Then
+the routes stay while the new owner activates the selections, and requests go
+on without a gap. This status is not a continuous engine
 health check. Runtime backends still control cancellation of engine calls
 that were already in progress when a worker lost its lease.
 

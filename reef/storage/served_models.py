@@ -173,12 +173,15 @@ class ServedModelsWriter(ServedModels):
         worker_id: str,
         *,
         stop_delay_seconds: float,
+        keep_routes: bool,
         now: float | None = None,
     ) -> None:
         """Queue completed current selections again after an inference owner takes over.
 
         ``owner`` is a held item of the inference-owner queue and kind, in the same attempt.
-        Remove current selections' old routes and schedule cleanup after the finite, non-negative delay.
+        Without ``keep_routes``, remove current selections' old routes and schedule cleanup after the finite,
+        non-negative delay. With ``keep_routes`` (``InferenceRuntime.engines_outlive_owner``), the routes stay until
+        the queued selections replace them.
         Failed, unfinished, and withdrawn requests keep their state.
         """
 

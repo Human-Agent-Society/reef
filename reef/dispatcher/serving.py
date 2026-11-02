@@ -128,10 +128,15 @@ class ServingWorker(QueueWorker):
             return False
         if self.recovery_routes is None:
             previous = tuple(self.routes.all_served())
-            self.routes.recover_completed(self.owner.item, self.worker_id, stop_delay_seconds=self.stop_delay_seconds)
+            keep_routes = self.owner.runtime.engines_outlive_owner
+            self.routes.recover_completed(
+                self.owner.item, self.worker_id, stop_delay_seconds=self.stop_delay_seconds, keep_routes=keep_routes
+            )
             self.recovery_routes = previous
             logger.info(
-                "requeued the serving of every scenario; %d routes from before wait for adoption", len(previous)
+                "requeued the serving of every scenario; %d routes from before wait for adoption%s",
+                len(previous),
+                ", and serve meanwhile" if keep_routes else "",
             )
         for stop in self.routes.due_stops(time.time()):
             payload: dict[str, JsonValue] = {"served": dict(stop.served.to_json()), "stop_after": stop.stop_after}

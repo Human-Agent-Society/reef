@@ -644,6 +644,14 @@ class InferenceRuntime(AdapterWeightRuntime):
         Other service processes build the same runtime without opening it. The default has no engine to open.
         """
 
+    @property
+    def engines_outlive_owner(self) -> bool:
+        """Whether the engines at the ``served_models`` URLs keep serving after the inference owner process stops, as
+        remote endpoints do. Then a new owner keeps the routes while it serves each scenario again, so requests go on
+        without a gap. The default is False: an engine that the owner process ran stops with it, so a new owner
+        removes the routes first, and requests get 503 ``inference_starting`` until it serves again."""
+        return False
+
     def adopt(self, served: ServedArtifact) -> None:
         """Take over ``served``, which a ``served_models`` row names for this runtime's engine, from before this
         runtime existed (an inference worker restart): when the engine still serves it, the next activation of the same
