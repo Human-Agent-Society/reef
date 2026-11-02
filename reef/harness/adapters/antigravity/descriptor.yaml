@@ -1,0 +1,50 @@
+# Antigravity CLI (agy), driven headless per episode.
+#
+# ANTIGRAVITY_CONFIG_DIR and GEMINI_CLI_HOME relocate configuration into
+# the episode root.
+# agy is invoked headless with:
+#   agy -p "{prompt}" --output-format json --dangerously-skip-permissions --mode auto
+name: antigravity
+binary: agy
+argv: ["-p", "{prompt}", "--output-format", "json", "--dangerously-skip-permissions", "--mode", "auto"]
+env:
+  ANTIGRAVITY_CONFIG_DIR: "{root}/antigravity"
+  GEMINI_CLI_HOME: "{root}/antigravity"
+  DISABLE_TELEMETRY: "1"
+client_env:
+  DISABLE_TELEMETRY: "1"
+client_args: ["--dangerously-skip-permissions"]
+client_version_args: ["--version", "-v", "-V"]
+host_env:
+  GEMINI_API_KEY: ""
+  HOME: "{home}"
+files:
+  config:
+    primary:
+      path: "antigravity/settings.json"
+      defaults:
+        enableTelemetry: false
+        trustedWorkspaces: ["{root}"]
+  rules: "antigravity/AGENTS.md"
+  agent_command: "antigravity/commands/{name}.md"
+  skill: "antigravity/skills/{name}/SKILL.md"
+  code_extension: "antigravity/plugins/{name}/plugin.json"
+trajectory:
+  format: antigravity-session-jsonl
+  path: "antigravity"
+cleanup_whitelist:
+  - "antigravity/**"
+quirks: reef.harness.adapters.antigravity.quirks
+model_binding:
+  gemini:
+    - target: primary
+      data:
+        model: "{model}"
+  openai:
+    - target: primary
+      data:
+        model: "{model}"
+  anthropic:
+    - target: primary
+      data:
+        model: "{model}"
