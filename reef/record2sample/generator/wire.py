@@ -6,7 +6,7 @@ import math
 from collections.abc import Mapping
 from pathlib import Path
 
-from reef.core.records_types import AgentRecord, RequestType, decode_record_artifact_id
+from reef.core.records_types import AgentRecord, RequestType, stored_record_artifact_id
 from reef.core.tasks import HarborTask, HarborTaskError
 from reef.harness.tasks.rollouts import RolloutTurn, TaskRollout
 from reef.record2sample.generator.designer import DesignerRequest
@@ -92,7 +92,7 @@ def source_records_from_document(fields: Mapping[str, object], *, scenario: str)
                 payload=payload,
                 created_at=float(created_at),
                 references=tuple(checked_string_list(record, "references", label="a source record")),
-                artifact_id=decode_record_artifact_id(record.get("artifact_id", record.get("artifact_ref")), payload),
+                artifact_id=stored_record_artifact_id(record, payload),
             )
         )
     return tuple(records)

@@ -27,7 +27,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Mapping
 
-from reef.core.records_types import AgentRecord, decode_record_artifact_id
+from reef.core.records_types import AgentRecord, stored_record_artifact_id
 from reef.storage.data import DataStore, NewItem, StoredItem
 from reef.storage.data_queue import DATA_QUEUE, RECORD_COPY_KIND
 from reef.storage.item_kinds import copied_record
@@ -99,7 +99,8 @@ def copy_records(records: RecordStore, data: DataStore, owner: str, scenario: st
         if existing is not None and existing.kind == "record" and isinstance(existing.content, Mapping):
             previous = dict(existing.content)
             if "artifact_ref" in previous:
-                previous["artifact_id"] = decode_record_artifact_id(previous.pop("artifact_ref"), record.payload)
+                previous["artifact_id"] = stored_record_artifact_id(previous, record.payload)
+                previous.pop("artifact_ref")
                 if previous == item.content:
                     # Immutable archives keep their original digest on a copy retry.
                     item = NewItem(item.item_id, existing.content, item.metadata)

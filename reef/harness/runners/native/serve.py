@@ -256,6 +256,14 @@ class _Pending:
         self.result: dict[str, Any] = {}
         self._done = threading.Event()
 
+    def fetch(self, client: ArtifactClient) -> dict[str, Any]:
+        """The manifest to mount: the queued one, or the one Reef answers for ``artifact_id``."""
+        return self.manifest if self.manifest is not None else client.fetch(self.artifact_id)
+
+    def redundant(self, mounted: str | None) -> bool:
+        """Whether the mount would change nothing; a queued mount always runs."""
+        return False
+
     def settle(self, result: Mapping[str, Any]) -> None:
         self.result = dict(result)
         self._done.set()
@@ -264,6 +272,22 @@ class _Pending:
         if not self._done.wait(timeout_s):
             return {"mounted": False, "artifact_id": self.artifact_id, "error": f"no mount within {timeout_s:.0f} s"}
         return self.result
+
+
+class _LegacyPending(_Pending):
+    """A mount that a legacy harness revision header named.
+
+    ``artifact_id`` holds that revision until ``fetch`` resolves it to the artifact ID. A head that resolves to
+    the mounted artifact is ``redundant``.
+    """
+
+    def fetch(self, client: ArtifactClient) -> dict[str, Any]:
+        manifest = client.fetch_legacy(self.artifact_id)
+        self.artifact_id = str(manifest["artifact_id"])
+        return manifest
+
+    def redundant(self, mounted: str | None) -> bool:
+        return self.artifact_id == mounted
 
 
 # -- the process -------------------------------------------------------------------------------------------
@@ -515,7 +539,7 @@ class Server(ServeState, ArtifactUpdateListener):
 
     def mount(self, artifact_id: str) -> dict[str, Any]:
         """A manual mount: queue the release and answer once it landed or failed."""
-        pending = self._enqueue(artifact_id, "release")
+        pending = self._enqueue(_Pending(artifact_id, "release"))
         self._drain_if_idle()
         return pending.wait(self.turn_timeout_s + 5.0)
 
@@ -528,11 +552,18 @@ class Server(ServeState, ArtifactUpdateListener):
             return
         # Only the id is queued here: the caller may be the proxy's relay thread, and the manifest fetch belongs
         # to the thread that mounts, so an inference answer is never held behind a round trip to reef.
-        self._enqueue(artifact_id, "release")
+        self._enqueue(_Pending(artifact_id, "release"))
         self._drain_if_idle()
 
-    def _enqueue(self, artifact_id: str, source: str) -> _Pending:
-        pending = _Pending(artifact_id, source)
+    def new_legacy_head(self, revision: str) -> None:
+        """A head that a legacy response header named: queued like ``new_head``; the mount resolves its artifact."""
+        if self.follow == "pinned":
+            self._log.write("artifact/available", {"release_id": revision})
+            return
+        self._enqueue(_LegacyPending(revision, "release"))
+        self._drain_if_idle()
+
+    def _enqueue(self, pending: _Pending) -> _Pending:
         with self._state_lock:
             previous, self._pending = self._pending, pending
         if previous is not None:
@@ -564,7 +595,7 @@ class Server(ServeState, ArtifactUpdateListener):
 
     def _mount_manifest(self, pending: _Pending) -> dict[str, Any]:
         try:
-            manifest = pending.manifest if pending.manifest is not None else self.client.fetch(pending.artifact_id)
+            manifest = pending.fetch(self.client)
             tree = tree_of(manifest)
         except (ServeError, ArtifactClientError) as exc:
             self._log.write(
@@ -576,6 +607,8 @@ class Server(ServeState, ArtifactUpdateListener):
                 # that names this head announces it again, so the mount is retried at the interval, not forgotten.
                 self._watch.forget(pending.artifact_id)
             return {"mounted": False, "artifact_id": pending.artifact_id, "error": str(exc)}
+        if pending.redundant(self._artifact_id):
+            return {"mounted": True, "artifact_id": pending.artifact_id, "error": None}
         parent = manifest.get("parent_artifact_id")
         failure = self._mount(
             tree,

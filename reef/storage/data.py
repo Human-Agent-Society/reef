@@ -21,7 +21,7 @@ from typing import Any, Literal, Self, get_args
 
 from reef.core.errors import ReefError
 from reef.core.plugins import Plugin, PluginConfigError
-from reef.core.records_types import AgentRecord, RequestType, decode_record_artifact_id
+from reef.core.records_types import AgentRecord, RequestType, stored_record_artifact_id
 from reef.core.trajectory_index import TrajectoryIndex
 from reef.storage.item_kinds import ITEM_KIND_RULES, check_artifact_content, json_digest, task_partition
 from reef.storage.segments import SegmentStore
@@ -437,9 +437,7 @@ class MemoryDataStore(DataStore):
                         request_type=RequestType.INFERENCE,
                         payload=content["payload"],
                         agent_record_id=item.item_id,
-                        artifact_id=decode_record_artifact_id(
-                            content.get("artifact_id", content.get("artifact_ref")), content["payload"]
-                        ),
+                        artifact_id=stored_record_artifact_id(content, content["payload"]),
                     )
                 )
             result.append(created)

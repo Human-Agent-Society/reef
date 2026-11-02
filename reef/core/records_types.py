@@ -96,3 +96,11 @@ def decode_record_artifact_id(value: object, payload: Mapping[str, object]) -> s
     if identity is not None and (not isinstance(identity, str) or not identity):
         raise ValueError("a record artifact_id must be a nonempty string or null")
     return identity
+
+
+def stored_record_artifact_id(record: Mapping[str, object], payload: Mapping[str, object]) -> str | None:
+    """The artifact ID of a stored or uploaded record mapping ``record`` with ``payload``.
+
+    It reads ``artifact_id``, or the ``artifact_ref`` of an older record, with ``decode_record_artifact_id``.
+    """
+    return decode_record_artifact_id(record.get("artifact_id", record.get("artifact_ref")), payload)

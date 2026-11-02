@@ -24,7 +24,7 @@ from typing import Any
 
 from reef.core.evaluation import ARTIFACT_KINDS
 from reef.core.job_data import TrajectorySample
-from reef.core.records_types import AgentRecord, RequestType, decode_record_artifact_id
+from reef.core.records_types import AgentRecord, RequestType, stored_record_artifact_id
 from reef.storage.tasks import TaskFileStore
 
 #: Prefixes the task file partition of an owner. A scenario name never contains ``/``, so no scenario's partition
@@ -62,7 +62,6 @@ def copied_record(item_id: str, content: Mapping[str, Any], origin: str, scenari
         raise ValueError(f"a record item's content has exactly the keys {', '.join(sorted(RECORD_CONTENT_KEYS))}")
     record_id, request_type, payload = content["agent_record_id"], content["request_type"], content["payload"]
     created_at, references = content["created_at"], content["references"]
-    artifact = content.get("artifact_id", content.get("artifact_ref"))
     if not isinstance(record_id, str) or item_id != f"{origin}/{record_id}":
         raise ValueError(f"a record item made in scenario {origin!r} has the ID {origin}/<agent_record_id>")
     if request_type not in (RequestType.INFERENCE.value, RequestType.REPORT.value):
@@ -84,7 +83,7 @@ def copied_record(item_id: str, content: Mapping[str, Any], origin: str, scenari
         payload=payload,
         created_at=float(created_at),
         references=copied,
-        artifact_id=decode_record_artifact_id(artifact, payload),
+        artifact_id=stored_record_artifact_id(content, payload),
     )
 
 

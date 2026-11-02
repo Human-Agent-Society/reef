@@ -47,6 +47,10 @@ class ArtifactUpdateListener(ABC):
     @abstractmethod
     def new_head(self, artifact_id: str, source: str) -> None: ...
 
+    @abstractmethod
+    def new_legacy_head(self, revision: str) -> None:
+        """A head that an older Reef service named by its harness ``revision``; the mount resolves its artifact."""
+
 
 class EventWriter(ABC):
     """Where the watch logs: the serve process's event log."""
@@ -141,6 +145,8 @@ class HeadWatch(ReleaseObserver):
         self._interval_s = interval_s
         self._mounted = mounted
         self._announced: str | None = None
+        #: The last harness revision that a legacy response header named.
+        self._observed_revision: str | None = None
         self._failure = ""
         self._failure_timed_out = False
         self._lock = threading.Lock()
@@ -178,15 +184,16 @@ class HeadWatch(ReleaseObserver):
             raise
 
     def observe(self, revision: str) -> None:
-        """Resolve a legacy harness revision header; modern model-artifact headers never reach this observer.
+        """Queue the head that a legacy harness revision header names, once per revision, without a request.
 
-        The lookup blocks the proxy thread on purpose: the mount must be queued before the agent's next step.
-        Only an older Reef service, which sends no ``x-reef-artifact-id`` header, reaches this path.
+        Only an older Reef service, which sends no ``x-reef-artifact-id`` header, reaches this path. The mount
+        resolves the revision on the thread that mounts, before the agent's next step.
         """
-        try:
-            self._consider(str(self._client.fetch_legacy(revision)["artifact_id"]), "response")
-        except Exception as exc:
-            self._log.write("artifact/poll-failed", {"error": f"{type(exc).__name__}: {exc}"[:600], "retry_in_s": 0})
+        with self._lock:
+            if revision == self._observed_revision:
+                return
+            self._observed_revision = revision
+        self._listener.new_legacy_head(revision)
 
     def poll_once(self) -> bool:
         """One poll and its consequence; False when Reef did not answer."""

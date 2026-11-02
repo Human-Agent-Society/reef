@@ -459,6 +459,9 @@ def test_a_poll_that_times_out_retries_at_the_interval_and_a_reef_that_is_down_b
         def new_head(self, artifact_id: str, source: str) -> None:
             self.heads.append((artifact_id, source))
 
+        def new_legacy_head(self, revision: str) -> None:
+            self.heads.append((revision, "legacy"))
+
     events: list[dict[str, Any]] = []
 
     class _Log(serve.EventWriter):
