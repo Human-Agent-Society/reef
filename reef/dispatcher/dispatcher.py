@@ -981,13 +981,16 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
             self.background_threads.idle_unload_thread.join()
         for worker in local_workers:
             worker.thread.join()
+        errors: list[BaseException] = []
         # The service workers stop after the local cycles, so that the publisher releases the control lease only
         # when no cycle of this instance can commit any more.
-        self.workers.stop()
+        try:
+            self.workers.stop()
+        except BaseException as exc:
+            errors.append(exc)
         if self.background_threads.metrics_thread is not None:
             self.background_threads.metrics_thread.join()
             self.record_operational_metrics()
-        errors: list[BaseException] = []
         replaced = self.local_workers.take_replaced()
         for scenario in (*replaced, *self.registry.loaded_scenarios()):
             # Use scenario.close(), not records.close(). The processors must
