@@ -56,7 +56,7 @@ class EchoHandler(InferenceHandler):
 class FixedSamplingHandler(EchoHandler):
     """An engine served at a fixed temperature, which refuses a reasoning effort it does not know."""
 
-    def request_payload(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+    def request_payload(self, payload: Mapping[str, Any], *, serving_config: Mapping[str, Any]) -> dict[str, Any]:
         if payload.get("reasoning_effort") not in (None, "low"):
             raise ValueError(f"reasoning_effort {payload['reasoning_effort']!r} is not served")
         return {**payload, "temperature": 0.6}

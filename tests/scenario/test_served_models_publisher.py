@@ -56,6 +56,7 @@ class Registry:
                 }
             ),
             served_beside=dict,
+            served_serving_config=lambda: {"temperature": 0.6},
         )
 
     def loaded_scenarios(self) -> tuple[SimpleNamespace, ...]:
@@ -114,6 +115,7 @@ def test_control_queues_the_selected_artifact_without_publishing_a_ready_route()
         "selection": Registry(runtime).scenario.artifact_selection().to_dict(),
         "aliases": ["release-1"],
         "beside": {},
+        "serving_config": {"temperature": 0.6},
     }
     assert store.served_models.read_scenario("math") == {}
     assert publisher.run_once(now=100.5)

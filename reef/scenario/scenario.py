@@ -19,6 +19,8 @@ from reef.core.components import RECORDS_COMPONENT
 from reef.core.errors import ReefError
 from reef.core.reports import ReportBase
 from reef.core.served_models import ScenarioModel
+from reef.core.serving_config import ServingConfig
+from reef.core.values import JsonValue
 from reef.observability.commits import CommitExperimentObserver
 from reef.observability.operations import OperationMetrics
 from reef.runtime.interfaces import InferenceRuntime
@@ -112,6 +114,7 @@ class Scenario:
         self._name = name
         self._binding = binding
         self._surface = binding.surface
+        self._serving_config = ServingConfig()
         self._store = store
         self._closed = False
         #: Every trainer of this scenario with the component it evolves, in recipe order.
@@ -156,6 +159,39 @@ class Scenario:
         An artifact made before the change keeps the decision it got.
         """
         self._committer.activation_rule = rule
+
+    @property
+    def serving_config(self) -> ServingConfig:
+        """The serving fields that this scenario sets over the deployment's values (RFC #1097)."""
+        return self._serving_config
+
+    def effective_serving_config(self, config: ServingConfig) -> dict[str, dict[str, JsonValue]]:
+        """The serving fields of each component that has some, with their effective values under ``config``.
+
+        Only the component that the scenario's inference runtime serves (``Surface.loader_component``) has serving
+        fields; ``InferenceRuntime.serving_config`` gives them. ``ValueError`` when ``config`` sets a field of
+        another component, or a field or value that the runtime refuses.
+        """
+        component = self._surface.loader_component
+        runtime = self._binding.runtime
+        effective: dict[str, dict[str, JsonValue]] = {}
+        if component is not None and runtime is not None and runtime.serves_requests:
+            effective[component] = runtime.serving_config(config.component(component))
+        unknown = sorted(set(config.overrides) - set(effective))
+        if unknown:
+            raise ValueError(f"no serving fields for components {unknown}: the scenario serves {sorted(effective)}")
+        return effective
+
+    def set_serving_config(self, config: ServingConfig) -> None:
+        """Serve with ``config`` from the next serving request on; ``ValueError`` as ``effective_serving_config``
+        gives, and then the scenario keeps its config."""
+        self.effective_serving_config(config)
+        self._serving_config = config
+
+    def served_serving_config(self) -> dict[str, JsonValue]:
+        """The override that a serving request carries to inference: the one of the served component."""
+        component = self._surface.loader_component
+        return {} if component is None else self._serving_config.component(component)
 
     @property
     def report_type(self) -> type[ReportBase] | None:
