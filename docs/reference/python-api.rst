@@ -879,6 +879,11 @@ A backend shares no release between scenarios. It must:
   and metadata across publications and restarts. Reject an attempt to bind it
   to different content. The inherited ``resolve_artifact(artifact_id)``
   materializes that snapshot and returns the artifact's component.
+- Implement ``bind_artifact_id(artifact_id, ref)`` and ``artifact_content(ref, artifact_id)``.
+  The first binds an unbound ID to a stored snapshot and returns any earlier binding; a binding never
+  changes. The second returns a value that is equal for two snapshots exactly when they hold the same
+  files and metadata for the artifact. The inherited ``bind_artifact_ids(snapshot)`` uses both, and
+  raises ``ArtifactConflict`` for an ID that names other content. Call it before a head moves.
 - Implement ``index_snapshot(ref)`` to add ID bindings for older stored snapshots.
   Recovery calls it before resolving artifacts from legacy records. Repeated
   calls preserve existing bindings; conflicting bindings raise ``ArtifactConflict``.

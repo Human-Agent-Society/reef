@@ -93,7 +93,7 @@ class ArtifactClient:
         _, catalog = self._request("GET", "/reef/harness/artifacts")
         rows = catalog.get("artifacts") if isinstance(catalog, Mapping) else None
         if not isinstance(rows, list):
-            raise ArtifactClientError("the release catalog carries no releases list")
+            raise ArtifactClientError("the artifact catalog carries no artifacts list")
         return [dict(row) for row in rows if isinstance(row, Mapping)]
 
     def poll(self) -> str | None:

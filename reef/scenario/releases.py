@@ -14,7 +14,7 @@ from typing import Any
 from reef.artifact.artifact import Artifact, ArtifactError, ArtifactNotFound, SnapshotRef
 from reef.artifact.release_chain import ArtifactReleaseChain
 from reef.core.artifact_selection import ArtifactSelection
-from reef.core.components import validate_component_name
+from reef.core.components import legacy_artifact_id, validate_component_name
 from reef.core.snapshot import RootSource
 from reef.storage.commits import CommitRecord, active_record
 from reef.storage.scenario import ScenarioStore
@@ -267,18 +267,17 @@ class ScenarioReleases:
             return tuple(reversed(listed))
 
     def bound_artifact_ids(self, revision: str, components: tuple[str, ...], scenario_step: int) -> dict[str, str]:
-        """The ``artifact_id`` of each of ``components`` that the release ``revision`` binds, as the records name it.
+        """The ``artifact_id`` of each of ``components`` that the snapshot ``revision`` binds, as the records name it.
 
-        With one component, the artifact of a release is the one that it made: its ``revision``. For the creation,
-        it is the artifact that the scenario started from. With several components, it is the release's manifest
-        entry. A component that no known manifest names is left out.
+        ``components`` are all the components of the scenario. A snapshot with a known manifest gives its entries;
+        a component that the manifest does not name is left out. A flat legacy snapshot of a one-component scenario
+        has no manifest; its artifact ID is ``legacy_artifact_id``. Otherwise, the result is empty.
         """
         manifest = self.manifests(scenario_step).get(revision)
         if manifest is not None:
             return {name: manifest[name] for name in components if name in manifest}
-        # Legacy flat records used their storage revision as the artifact ID.
         if len(components) == 1:
-            return {components[0]: revision}
+            return {components[0]: legacy_artifact_id(revision, None)}
         return {}
 
     def served_beside(self, scenario_step: int, components: tuple[str, ...]) -> Mapping[str, ServedBesideArtifact]:

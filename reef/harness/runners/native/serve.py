@@ -247,22 +247,53 @@ class _Conversation:
 
 
 class _Pending:
-    """One queued release mount and the answer whoever queued it waits for; the manifest is fetched when it lands."""
+    """One queued harness mount and the answer whoever queued it waits for; the manifest is fetched when it lands.
 
-    def __init__(self, artifact_id: str, source: str, manifest: Mapping[str, Any] | None = None) -> None:
+    Values: exactly one of ``artifact_id`` and ``revision`` is set when the mount is queued. ``revision`` is a
+    legacy harness revision that an older Reef service named; ``fetch`` resolves it and sets ``artifact_id``.
+    ``identity`` names the mount in status and logs with whichever of the two is known.
+    """
+
+    def __init__(
+        self,
+        artifact_id: str | None,
+        source: str,
+        manifest: Mapping[str, Any] | None = None,
+        *,
+        revision: str | None = None,
+    ) -> None:
+        if (artifact_id is None) == (revision is None):
+            raise ValueError("a pending mount names exactly one of artifact_id and revision")
         self.manifest: dict[str, Any] | None = None if manifest is None else dict(manifest)
         self.source = source
         self.artifact_id = artifact_id
+        self.revision = revision
         self.result: dict[str, Any] = {}
         self._done = threading.Event()
 
-    def fetch(self, client: ArtifactClient) -> dict[str, Any]:
-        """The manifest to mount: the queued one, or the one Reef answers for ``artifact_id``."""
-        return self.manifest if self.manifest is not None else client.fetch(self.artifact_id)
+    @property
+    def identity(self) -> dict[str, str]:
+        """``{"artifact_id": ...}`` once known, else ``{"release_id": revision}``."""
+        if self.artifact_id is not None:
+            return {"artifact_id": self.artifact_id}
+        return {"release_id": str(self.revision)}
 
-    def redundant(self, mounted: str | None) -> bool:
-        """Whether the mount would change nothing; a queued mount always runs."""
-        return False
+    def fetch(self, client: ArtifactClient) -> dict[str, Any]:
+        """The manifest to mount: the queued one, or the one Reef answers for ``artifact_id`` or ``revision``."""
+        if self.manifest is not None:
+            return self.manifest
+        if self.artifact_id is not None:
+            return client.fetch(self.artifact_id)
+        manifest = client.fetch_legacy(str(self.revision))
+        self.artifact_id = str(manifest["artifact_id"])
+        return manifest
+
+    def changes_nothing(self, mounted: str | None) -> bool:
+        """True for a mount named by ``revision`` that resolved to the ``mounted`` artifact.
+
+        A mount named by its artifact ID always runs, so an operator can mount the same artifact again.
+        """
+        return self.revision is not None and self.artifact_id == mounted
 
     def settle(self, result: Mapping[str, Any]) -> None:
         self.result = dict(result)
@@ -270,24 +301,8 @@ class _Pending:
 
     def wait(self, timeout_s: float) -> dict[str, Any]:
         if not self._done.wait(timeout_s):
-            return {"mounted": False, "artifact_id": self.artifact_id, "error": f"no mount within {timeout_s:.0f} s"}
+            return {"mounted": False, **self.identity, "error": f"no mount within {timeout_s:.0f} s"}
         return self.result
-
-
-class _LegacyPending(_Pending):
-    """A mount that a legacy harness revision header named.
-
-    ``artifact_id`` holds that revision until ``fetch`` resolves it to the artifact ID. A head that resolves to
-    the mounted artifact is ``redundant``.
-    """
-
-    def fetch(self, client: ArtifactClient) -> dict[str, Any]:
-        manifest = client.fetch_legacy(self.artifact_id)
-        self.artifact_id = str(manifest["artifact_id"])
-        return manifest
-
-    def redundant(self, mounted: str | None) -> bool:
-        return self.artifact_id == mounted
 
 
 # -- the process -------------------------------------------------------------------------------------------
@@ -388,7 +403,7 @@ class Server(ServeState, ArtifactUpdateListener):
                 "parent_artifact_id": self._parent_artifact_id,
                 "follow": self.follow,
                 "files": len(self._tree.files),
-                "pending_mount": None if self._pending is None else self._pending.artifact_id,
+                "pending_mount": None if self._pending is None else next(iter(self._pending.identity.values())),
                 "sessions": len(self._conversations),
                 "socket": str(self.socket_path),
                 "self_tools": self.self_tools,
@@ -560,7 +575,7 @@ class Server(ServeState, ArtifactUpdateListener):
         if self.follow == "pinned":
             self._log.write("artifact/available", {"release_id": revision})
             return
-        self._enqueue(_LegacyPending(revision, "release"))
+        self._enqueue(_Pending(None, "release", revision=revision))
         self._drain_if_idle()
 
     def _enqueue(self, pending: _Pending) -> _Pending:
@@ -570,8 +585,8 @@ class Server(ServeState, ArtifactUpdateListener):
             previous.settle(
                 {
                     "mounted": False,
-                    "artifact_id": previous.artifact_id,
-                    "error": f"superseded by {pending.artifact_id}",
+                    **previous.identity,
+                    "error": f"superseded by {next(iter(pending.identity.values()))}",
                 }
             )
         return pending
@@ -600,14 +615,14 @@ class Server(ServeState, ArtifactUpdateListener):
         except (ServeError, ArtifactClientError) as exc:
             self._log.write(
                 "harness/mount-failed",
-                {"artifact_id": pending.artifact_id, "source": pending.source, "error": str(exc)},
+                {**pending.identity, "source": pending.source, "error": str(exc)},
             )
-            if isinstance(exc, ArtifactClientError) and exc.timed_out:
+            if isinstance(exc, ArtifactClientError) and exc.timed_out and pending.artifact_id is not None:
                 # Reef is busy (an evolve step holds the manifest as it holds the catalog), not gone: the next poll
                 # that names this head announces it again, so the mount is retried at the interval, not forgotten.
                 self._watch.forget(pending.artifact_id)
-            return {"mounted": False, "artifact_id": pending.artifact_id, "error": str(exc)}
-        if pending.redundant(self._artifact_id):
+            return {"mounted": False, **pending.identity, "error": str(exc)}
+        if pending.changes_nothing(self._artifact_id):
             return {"mounted": True, "artifact_id": pending.artifact_id, "error": None}
         parent = manifest.get("parent_artifact_id")
         failure = self._mount(

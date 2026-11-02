@@ -28,7 +28,7 @@ from reef.artifact import (
 from reef.artifact.composite import compose_release
 from reef.artifact.git_client import GitClient
 from reef.artifact.git_lfs import HUB_REFS, same_file, token_config
-from reef.core.artifact_selection import ArtifactSelection
+from reef.core.artifact_selection import ArtifactSelection, legacy_selection_locators
 from reef.core.plugins import PluginConfigError
 from reef.core.snapshot import SnapshotRef, encode_snapshot_ref
 
@@ -762,12 +762,12 @@ def test_legacy_selection_rebuilds_missing_artifact_index(tmp_path: Path, fake_g
         )
     initial = backend.register(root, metadata={})
     ids = {name: root.component(name).artifact_id for name in ("weights", "harness")}
-    legacy = ArtifactSelection.from_dict(
-        {
-            name: {"artifact_id": artifact_id, "ref": {**encode_snapshot_ref(initial), "content_id": "obsolete"}}
-            for name, artifact_id in ids.items()
-        }
-    )
+    stored = {
+        name: {"artifact_id": artifact_id, "ref": {**encode_snapshot_ref(initial), "content_id": "obsolete"}}
+        for name, artifact_id in ids.items()
+    }
+    legacy = ArtifactSelection.from_dict(stored)
+    assert legacy == ArtifactSelection(ids), "an older stored selection decodes to a plain selection"
     # Older repositories have snapshots but no independent ID index.
     if isinstance(backend, InMemoryRepositoryBackend):
         backend._storage.artifacts.clear()
@@ -779,6 +779,10 @@ def test_legacy_selection_rebuilds_missing_artifact_index(tmp_path: Path, fake_g
             run_git("update-ref", "-d", ref, cwd=tmp_path / "artifacts.git")
     with pytest.raises(ArtifactNotFound):
         backend.resolve_artifact(ids["weights"])
+    # Recovery indexes the snapshots that the older selection named, as the scenario factory does.
+    for locator in set(legacy_selection_locators(stored).values()):
+        backend.index_snapshot(locator)
+        backend.index_snapshot(locator)
     repository = Repository(backend, initial)
     old_view = SnapshotRef("selection:legacy-cache-key", None)
     repository.remember_selection(old_view, legacy)
@@ -787,7 +791,7 @@ def test_legacy_selection_rebuilds_missing_artifact_index(tmp_path: Path, fake_g
     assert {name: restored.component(name).artifact_id for name in ids} == ids
     assert (restored.component("harness").local_path / "rules.md").read_text() == "rules"
     assert legacy.to_dict() == ids
-    assert repository.selection(restored, tuple(ids)).to_dict() == ids
+    assert repository.selection(restored.ref, tuple(ids)).to_dict() == ids
     # Subsequent recovery uses only IDs, even when the persisted view key is old.
     recovered = Repository(backend, initial)
     recovered.remember_selection(old_view, ArtifactSelection.from_dict(legacy.to_dict()))

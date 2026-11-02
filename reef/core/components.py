@@ -37,13 +37,13 @@ def validate_component_name(name: object) -> str:
     return name
 
 
-def legacy_artifact_id(revision: str, component: str, *, single: bool) -> str:
-    """Recover an old component ID from its snapshot revision when the manifest has no explicit ID.
+def legacy_artifact_id(revision: str, component: str | None) -> str:
+    """The artifact ID that an older snapshot ``revision`` gave a component without an explicit ID.
 
-    Legacy flat artifacts used the revision itself. Legacy multi-component
-    snapshots used ``<revision>:<component>``. New artifacts store independent IDs.
+    It is ``revision`` for a flat snapshot or a snapshot of one component (``component`` is None), and
+    ``<revision>:<component>`` for a component of a multi-component snapshot. New artifacts store explicit IDs.
     """
-    return revision if single else f"{revision}:{component}"
+    return revision if component is None else f"{revision}:{component}"
 
 
 @dataclass(frozen=True)
@@ -106,7 +106,7 @@ class ReleaseComponents:
         It is the entry's explicit ID, or the revision-based ID of a legacy entry. Raise ``KeyError`` for an
         unknown ``name``.
         """
-        return self.entries[name].artifact_id or legacy_artifact_id(revision, name, single=self.single)
+        return self.entries[name].artifact_id or legacy_artifact_id(revision, None if self.single else name)
 
     def artifact_ids(self, revision: str) -> dict[str, str]:
         """The artifact ID of each component in the snapshot ``revision`` (``artifact_id``), in declaration order."""

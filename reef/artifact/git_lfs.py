@@ -16,6 +16,7 @@ from typing import Any, Self
 from urllib.parse import urlsplit
 
 from reef.artifact.artifact import (
+    ARTIFACT_ID_METADATA_KEY,
     Artifact,
     ArtifactConflict,
     ArtifactMaterializationError,
@@ -552,8 +553,9 @@ class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
             raise ArtifactSourceError(f"invalid artifact metadata at {commit}")
         return Artifact(self._manifest.snapshot(commit, local=True), None, metadata=metadata)
 
-    def artifact_contents(self, commit: str, artifact_id: str) -> tuple[dict[str, str], dict[str, object]]:
-        """Return Git file objects and component metadata for comparison without fetching weight bytes."""
+    def artifact_content(self, ref: SnapshotRef, artifact_id: str) -> tuple[object, dict[str, object]]:
+        """The Git file objects and the metadata of the artifact, read without fetching weight bytes."""
+        commit = ref.revision
         snapshot = self.stored_snapshot(commit)
         components = artifact_components(snapshot)
         if artifact_id not in components:
@@ -571,35 +573,27 @@ class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
             files[path.removeprefix(prefix)] = descriptor
         return files, content_metadata(snapshot, component)
 
-    def bind_artifact_ids(self, commit: str) -> None:
-        """Persist immutable, scenario-scoped ID bindings before advancing a publication head.
-
-        Repeating a binding with identical files and metadata succeeds. A
-        conflicting binding raises ``ArtifactConflict`` and never overwrites
-        the existing ref. Partial writes are safe to repeat after a failure.
-        """
-        for artifact_id in artifact_components(self.stored_snapshot(commit)):
-            ref_name = self.artifact_ref_name(artifact_id)
-            existing = self._workspace.ls_remote(ref_name)
-            if existing is None:
-                try:
-                    self._workspace.force_push_with_lease(f"--force-with-lease={ref_name}:", f"{commit}:{ref_name}")
-                    continue
-                except ArtifactPublicationError:
-                    existing = self._workspace.ls_remote(ref_name)
-                    if existing is None:
-                        raise
-            if existing == commit:
-                continue
+    def bind_artifact_id(self, artifact_id: str, ref: SnapshotRef) -> SnapshotRef | None:
+        """Push the immutable binding ref of ``artifact_id`` unless it exists; fetch an existing one for comparison."""
+        ref_name = self.artifact_ref_name(artifact_id)
+        existing = self._workspace.ls_remote(ref_name)
+        if existing is None:
+            try:
+                self._workspace.force_push_with_lease(f"--force-with-lease={ref_name}:", f"{ref.revision}:{ref_name}")
+                return None
+            except ArtifactPublicationError:
+                existing = self._workspace.ls_remote(ref_name)
+                if existing is None:
+                    raise
+        if existing != ref.revision:
             self._workspace.fetch_version(existing)
-            if self.artifact_contents(existing, artifact_id) != self.artifact_contents(commit, artifact_id):
-                raise ArtifactConflict(f"artifact {artifact_id!r} already names different files or metadata")
+        return self._manifest.snapshot(existing, local=True)
 
     def index_snapshot(self, ref: SnapshotRef) -> None:
         """Add immutable ID bindings for a previously stored Git snapshot."""
         with self._workspace.lock:
             self._workspace.fetch_version(ref.revision)
-            self.bind_artifact_ids(ref.revision)
+            self.bind_artifact_ids(self.stored_snapshot(ref.revision))
 
     def artifact_snapshot(self, artifact_id: str) -> SnapshotRef:
         with self._workspace.lock:
@@ -622,7 +616,7 @@ class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
             existing = self._workspace.ls_remote(self.ref_name)
             if existing is not None:
                 self._workspace.fetch_version(existing)
-                self.bind_artifact_ids(existing)
+                self.bind_artifact_ids(self.stored_snapshot(existing))
                 return self._manifest.snapshot(existing)
             self._workspace.orphan_checkout()
             self._workspace.replace_tree(root.local_path)
@@ -634,7 +628,7 @@ class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
             )
             # Identical roots registered in the same second still need distinct release IDs.
             commit = self._workspace.commit(f"register scenario {uuid.uuid4().hex}")
-            self.bind_artifact_ids(commit)
+            self.bind_artifact_ids(self.stored_snapshot(commit))
             try:
                 self._workspace.push(f"{commit}:{self.ref_name}")
             except ArtifactPublicationError:
@@ -663,7 +657,7 @@ class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
         metadata = manifest.get("metadata", {})
         if not isinstance(metadata, Mapping):
             raise ArtifactSourceError(f"invalid artifact metadata at {version}")
-        return {key: value for key, value in metadata.items() if key != "artifact_id"}
+        return {key: value for key, value in metadata.items() if key != ARTIFACT_ID_METADATA_KEY}
 
     def current(self) -> SnapshotRef:
         version = self._workspace.ls_remote(self.ref_name)
@@ -736,7 +730,7 @@ class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
                     files=files,
                     message="publish artifact",
                 )
-            self.bind_artifact_ids(commit)
+            self.bind_artifact_ids(self.stored_snapshot(commit))
             if not advance_head:
                 # A pending release lives under the releases namespace; the scenario's ref and the head stay put.
                 self._workspace.push(f"+{commit}:{self.refs.release(commit)}")

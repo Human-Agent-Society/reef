@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
+from reef.core.components import legacy_artifact_id
 from reef.core.snapshot import decode_snapshot_ref
 
 
@@ -88,7 +89,7 @@ def decode_record_artifact_id(value: object, payload: Mapping[str, object]) -> s
     """
     if isinstance(value, Mapping):
         ref = decode_snapshot_ref(value)
-        identity = payload.get("artifact_id", ref.revision)
+        identity = payload.get("artifact_id", legacy_artifact_id(ref.revision, None))
     elif value is None:
         identity = payload.get("artifact_id")
     else:

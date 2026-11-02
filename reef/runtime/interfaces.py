@@ -28,7 +28,7 @@ from pathlib import Path
 from threading import Lock
 from typing import Any, Literal
 
-from reef.artifact.artifact import Artifact, is_local_snapshot
+from reef.artifact.artifact import Artifact
 from reef.core.errors import InferenceUnavailable, ReefError
 from reef.core.evaluation import ArtifactKind, PolicyModel
 from reef.core.served_models import ServedArtifact
@@ -448,7 +448,7 @@ class InferenceArtifact:
     @classmethod
     def from_artifact(cls, artifact: Artifact) -> InferenceArtifact:
         """Copy identity and available path; only unpublished local artifacts permit unstamped tokens."""
-        return cls(artifact.artifact_id, artifact.local_path, not is_local_snapshot(artifact.ref.revision))
+        return cls(artifact.artifact_id, artifact.local_path, not artifact.ref.local)
 
 
 class InferenceHandler(ABC):

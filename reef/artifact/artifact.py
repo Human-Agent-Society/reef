@@ -8,7 +8,7 @@ from dataclasses import replace
 from pathlib import Path
 from types import MappingProxyType
 
-from reef.core.components import COMPONENTS_METADATA_KEY, ReleaseComponents, release_components
+from reef.core.components import COMPONENTS_METADATA_KEY, ReleaseComponents, legacy_artifact_id, release_components
 from reef.core.errors import ReefError
 
 # Re-export the pure identity types while keeping ``reef.core`` independent of
@@ -16,6 +16,7 @@ from reef.core.errors import ReefError
 from reef.core.snapshot import LOCAL_SNAPSHOT_PREFIX, SnapshotRef, decode_snapshot_ref, encode_snapshot_ref
 
 __all__ = [
+    "ARTIFACT_ID_METADATA_KEY",
     "LOCAL_SNAPSHOT_PREFIX",
     "SNAPSHOT_METADATA_KEYS",
     "Artifact",
@@ -32,18 +33,14 @@ __all__ = [
     "content_metadata",
     "decode_snapshot_ref",
     "encode_snapshot_ref",
-    "is_local_snapshot",
 ]
 
 #: Files a repository adds to a materialized release; a release with nothing else holds no weights.
 REPOSITORY_FILES = frozenset({".git", ".gitattributes", "reef-artifact.json"})
+#: The stored metadata key of a flat artifact's ID; ``Artifact`` reads it into ``artifact_id`` and writes it back.
+ARTIFACT_ID_METADATA_KEY = "artifact_id"
 #: Metadata keys that describe a snapshot, not the content of the artifact it holds.
-SNAPSHOT_METADATA_KEYS = frozenset({"artifact_id", COMPONENTS_METADATA_KEY, "scenario_commit_record"})
-
-
-def is_local_snapshot(revision: str) -> bool:
-    """True when ``revision`` names a process-local artifact without durable bytes."""
-    return revision.startswith(LOCAL_SNAPSHOT_PREFIX)
+SNAPSHOT_METADATA_KEYS = frozenset({COMPONENTS_METADATA_KEY, "scenario_commit_record"})
 
 
 class ArtifactError(ReefError):
@@ -100,7 +97,7 @@ class Artifact:
         self._repository = repository
         self._local_path = None if local_path is None else Path(local_path)
         self._metadata = dict(metadata or {})
-        stored_identity = self._metadata.pop("artifact_id", None)
+        stored_identity = self._metadata.pop(ARTIFACT_ID_METADATA_KEY, None)
         if stored_identity is not None and (not isinstance(stored_identity, str) or not stored_identity):
             raise ValueError("stored artifact_id must be a non-empty string")
         if artifact_id is not None and (not isinstance(artifact_id, str) or not artifact_id):
@@ -131,9 +128,9 @@ class Artifact:
         metadata = dict(self._metadata)
         manifest = self.components
         if manifest is not None:
-            metadata["components"] = manifest.carried_from(self.ref.revision).to_dict()
+            metadata[COMPONENTS_METADATA_KEY] = manifest.carried_from(self.ref.revision).to_dict()
         if self._artifact_id is not None:
-            metadata["artifact_id"] = self._artifact_id
+            metadata[ARTIFACT_ID_METADATA_KEY] = self._artifact_id
         return metadata
 
     @property
@@ -154,10 +151,10 @@ class Artifact:
             return materialized._artifact_id
         manifest = materialized.components
         if manifest is None:
-            return self.ref.revision
+            return legacy_artifact_id(self.ref.revision, None)
         if not manifest.single:
             raise ArtifactNotFound(
-                f"release {self.ref.revision!r} holds components {list(manifest.names)}; name one of them"
+                f"snapshot {self.ref.revision!r} holds components {list(manifest.names)}; name one of them"
             )
         return next(iter(manifest.artifact_ids(self.ref.revision).values()))
 
@@ -178,11 +175,11 @@ class Artifact:
         if manifest is None:
             return materialized
         if name not in manifest.entries:
-            raise ArtifactNotFound(f"release {self.ref.revision!r} binds no component {name!r}")
+            raise ArtifactNotFound(f"snapshot {self.ref.revision!r} binds no component {name!r}")
         if manifest.single:
             return materialized
         if materialized.local_path is None:
-            raise ArtifactMaterializationError(f"release {self.ref.revision!r} has no local component directories")
+            raise ArtifactMaterializationError(f"snapshot {self.ref.revision!r} has no local component directories")
         entry = manifest.entries[name]
         directory = materialized.local_path / manifest.relative_path(name)
         # A component the base seeded nothing for has no directory in the
@@ -211,10 +208,10 @@ class Artifact:
         """Create an unpublished artifact with a fresh ID that staging and publication preserve."""
         token = uuid.uuid4().hex
         stored_metadata = dict(metadata or {})
-        stored_metadata.pop("artifact_id", None)
+        stored_metadata.pop(ARTIFACT_ID_METADATA_KEY, None)
         manifest = release_components(stored_metadata)
         if manifest is None:
-            stored_metadata["artifact_id"] = f"artifact:{token}"
+            stored_metadata[ARTIFACT_ID_METADATA_KEY] = f"artifact:{token}"
         else:
             manifest = ReleaseComponents(
                 {
@@ -222,7 +219,7 @@ class Artifact:
                     for name, entry in manifest.entries.items()
                 }
             )
-            stored_metadata["components"] = manifest.to_dict()
+            stored_metadata[COMPONENTS_METADATA_KEY] = manifest.to_dict()
         return cls(
             SnapshotRef(revision=f"{LOCAL_SNAPSHOT_PREFIX}{token}", parent_revision=None),
             repository,

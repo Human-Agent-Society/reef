@@ -8,6 +8,7 @@ from pathlib import Path
 from threading import Lock
 
 from reef.artifact.artifact import (
+    ARTIFACT_ID_METADATA_KEY,
     Artifact,
     ArtifactConflict,
     ArtifactMaterializationError,
@@ -70,7 +71,7 @@ class InMemoryRepositoryBackend(StagedReleaseRepositoryBackend):
     def index_snapshot(self, ref: SnapshotRef) -> None:
         """Add immutable ID bindings for a previously stored snapshot."""
         with self._storage.lock:
-            self.bind_artifact_ids(ref)
+            self.bind_artifact_ids(self.materialize(ref))
 
     def artifact_snapshot(self, artifact_id: str) -> SnapshotRef:
         with self._storage.lock:
@@ -79,8 +80,7 @@ class InMemoryRepositoryBackend(StagedReleaseRepositoryBackend):
             raise ArtifactNotFound(f"repository has no artifact {artifact_id!r}")
         return ref
 
-    def artifact_content(self, ref: SnapshotRef, artifact_id: str) -> tuple[str, dict[str, object]]:
-        """The checksum of the files and the metadata of the artifact ``artifact_id`` in the snapshot ``ref``."""
+    def artifact_content(self, ref: SnapshotRef, artifact_id: str) -> tuple[object, dict[str, object]]:
         snapshot = self.materialize(ref)
         component = artifact_components(snapshot)[artifact_id]
         files = snapshot if component is None else snapshot.component(component)
@@ -88,20 +88,12 @@ class InMemoryRepositoryBackend(StagedReleaseRepositoryBackend):
             raise ArtifactPublicationError("stored artifacts require local files")
         return directory_checksum(files.local_path), content_metadata(snapshot, component)
 
-    def bind_artifact_ids(self, ref: SnapshotRef) -> None:
-        """Bind each artifact ID in the snapshot ``ref`` while the caller holds the storage lock.
-
-        Raise ``ArtifactConflict``, and bind nothing, when an ID is bound to different files or metadata.
-        """
-        identities = artifact_components(self.materialize(ref))
-        for artifact_id in identities:
-            existing = self._storage.artifacts.get(artifact_id)
-            if existing is not None and self.artifact_content(existing, artifact_id) != self.artifact_content(
-                ref, artifact_id
-            ):
-                raise ArtifactConflict(f"artifact {artifact_id!r} already names different files or metadata")
-        for artifact_id in identities:
-            self._storage.artifacts.setdefault(artifact_id, ref)
+    def bind_artifact_id(self, artifact_id: str, ref: SnapshotRef) -> SnapshotRef | None:
+        """Bind ``artifact_id`` while the caller holds the storage lock."""
+        existing = self._storage.artifacts.get(artifact_id)
+        if existing is None:
+            self._storage.artifacts[artifact_id] = ref
+        return existing
 
     def register(self, root: Artifact, *, metadata: Mapping[str, object]) -> SnapshotRef:
         if root.local_path is None or not root.local_path.is_dir():
@@ -112,7 +104,7 @@ class InMemoryRepositoryBackend(StagedReleaseRepositoryBackend):
             ref = self._storage.copy_artifact(root.local_path, parent_revision=None)
             stored_metadata = {**root.storage_metadata, **dict(metadata)}
             self._storage.metadata[ref.revision] = stored_metadata
-            self.bind_artifact_ids(ref)
+            self.bind_artifact_ids(self.materialize(ref))
             self._current = ref
             self._metadata = dict(stored_metadata)
             return ref
@@ -120,7 +112,7 @@ class InMemoryRepositoryBackend(StagedReleaseRepositoryBackend):
     def metadata(self) -> Mapping[str, object] | None:
         if self._current is None:
             return None
-        return {key: value for key, value in (self._metadata or {}).items() if key != "artifact_id"}
+        return {key: value for key, value in (self._metadata or {}).items() if key != ARTIFACT_ID_METADATA_KEY}
 
     def current(self) -> SnapshotRef:
         if self._current is None:
@@ -153,7 +145,7 @@ class InMemoryRepositoryBackend(StagedReleaseRepositoryBackend):
                 parent_revision=current.revision,
             )
             self._storage.metadata[ref.revision] = artifact.storage_metadata
-            self.bind_artifact_ids(ref)
+            self.bind_artifact_ids(self.materialize(ref))
             # advance_head=False mints a pending release the head does not move to.
             if advance_head:
                 self._current = ref

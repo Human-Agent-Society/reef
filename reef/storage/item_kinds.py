@@ -95,7 +95,7 @@ def check_artifact_content(content: Mapping[str, Any], *, made_by_scenario: bool
     ``kind`` is an ``ArtifactKind``; a client's item has a ``source_uri`` and no ``component``, and an item that a
     scenario made has a ``component``.
     """
-    if set(content) not in (ARTIFACT_CONTENT_KEYS, ARTIFACT_CONTENT_KEYS | {"content_id"}):
+    if set(content) != ARTIFACT_CONTENT_KEYS:
         raise ValueError(f"an artifact item's content holds exactly {sorted(ARTIFACT_CONTENT_KEYS)}")
     for key in sorted(content):
         value = content[key]
@@ -115,9 +115,12 @@ class ItemKindRules(ABC):
     Values: ``kind`` is the kind, one of ``ITEM_KINDS``. ``stored_digest(owner, item_id, content, metadata,
     task_files)`` checks ``content``, the content of the new item ``item_id`` of ``owner`` with the created
     ``metadata``, against the kind's rules, and returns the digest of the content that the store keeps. It raises
-    ``ValueError`` for content that breaks the rules.
+    ``ValueError`` for content that breaks the rules. ``current_content(content)`` is ``content`` in the current
+    format; an older stored format maps to the same value as its current equivalent. ``matches_stored(content,
+    digest)`` is whether stored ``content`` in an older format has the current content with ``digest``.
 
-    Purpose: ``ITEM_KIND_RULES`` holds one per kind; ``prepared_items`` calls it for each item of a create.
+    Purpose: ``ITEM_KIND_RULES`` holds one per kind; ``prepared_items`` calls it for each item of a create, and a
+    create compares a retry with ``matches_stored``.
     """
 
     @property
@@ -128,6 +131,14 @@ class ItemKindRules(ABC):
     def stored_digest(
         self, owner: str, item_id: str, content: object, metadata: Mapping[str, Any], task_files: TaskFileStore
     ) -> str: ...
+
+    def current_content(self, content: Mapping[str, Any] | Path) -> Mapping[str, Any] | Path:
+        """``content`` unchanged: this kind has one format."""
+        return content
+
+    def matches_stored(self, content: object, digest: str) -> bool:
+        """False: without older formats, only an equal digest matches."""
+        return False
 
 
 class JsonItemRules(ItemKindRules):
@@ -140,6 +151,12 @@ class JsonItemRules(ItemKindRules):
             raise ValueError(f"{self.kind} item {item_id!r} needs a JSON object as its content")
         self.check_json(item_id, content, metadata)
         return json_digest(content)
+
+    def matches_stored(self, content: object, digest: str) -> bool:
+        if not isinstance(content, Mapping):
+            return False
+        current = self.current_content(content)
+        return current is not content and isinstance(current, Mapping) and json_digest(current) == digest
 
     @abstractmethod
     def check_json(self, item_id: str, content: Mapping[str, Any], metadata: Mapping[str, Any]) -> None:
@@ -160,6 +177,17 @@ class RecordRules(JsonItemRules):
 
     kind = "record"
 
+    def current_content(self, content: Mapping[str, Any] | Path) -> Mapping[str, Any] | Path:
+        """An older record names its artifact by ``artifact_ref``; the current one by ``artifact_id``."""
+        if not isinstance(content, Mapping) or "artifact_ref" not in content:
+            return content
+        payload = content.get("payload")
+        if not isinstance(payload, Mapping):
+            return content  # Malformed content: ``check_json`` rejects it.
+        current = {key: value for key, value in content.items() if key != "artifact_ref"}
+        current["artifact_id"] = stored_record_artifact_id(content, payload)
+        return current
+
     def check_json(self, item_id: str, content: Mapping[str, Any], metadata: Mapping[str, Any]) -> None:
         origin = metadata["origin"]["scenario"]
         copied_record(item_id, content, origin, origin)
@@ -170,6 +198,12 @@ class ArtifactRules(JsonItemRules):
     ``origin``."""
 
     kind = "artifact"
+
+    def current_content(self, content: Mapping[str, Any] | Path) -> Mapping[str, Any] | Path:
+        """An older artifact item also held an unused ``content_id``."""
+        if not isinstance(content, Mapping) or "content_id" not in content:
+            return content
+        return {key: value for key, value in content.items() if key != "content_id"}
 
     def check_json(self, item_id: str, content: Mapping[str, Any], metadata: Mapping[str, Any]) -> None:
         check_artifact_content(content, made_by_scenario="origin" in metadata)

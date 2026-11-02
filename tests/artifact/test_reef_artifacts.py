@@ -165,7 +165,7 @@ def test_artifact_stages_serving_versions_and_publishes_checkpoints(tmp_path: Pa
     )
     (candidate_dir / "model.txt").write_text("mutated")
 
-    assert staged.ref.revision.startswith("local:")
+    assert staged.ref.local
     lazy = Artifact(staged.ref, repository)
     assert lazy.materialize().local_path.joinpath("model.txt").read_text() == "trained"
 

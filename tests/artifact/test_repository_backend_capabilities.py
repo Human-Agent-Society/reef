@@ -35,6 +35,12 @@ class BasicBackend(RepositoryBackend):
     def artifact_snapshot(self, artifact_id: str) -> SnapshotRef:
         return self.delegate.artifact_snapshot(artifact_id)
 
+    def bind_artifact_id(self, artifact_id: str, ref: SnapshotRef) -> SnapshotRef | None:
+        return self.delegate.bind_artifact_id(artifact_id, ref)
+
+    def artifact_content(self, ref: SnapshotRef, artifact_id: str) -> tuple[object, dict[str, object]]:
+        return self.delegate.artifact_content(ref, artifact_id)
+
     def register(self, root: Artifact, *, metadata: Mapping[str, object]) -> SnapshotRef:
         return self.delegate.register(root, metadata=metadata)
 

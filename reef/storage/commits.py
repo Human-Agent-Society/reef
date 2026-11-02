@@ -14,9 +14,9 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, Literal, get_args
 
-from reef.core.artifact_selection import ArtifactSelection
+from reef.core.artifact_selection import ArtifactSelection, legacy_selection_locators
 from reef.core.errors import ReefError
-from reef.core.snapshot import SELECTION_VIEW_PREFIX, RootSource, SnapshotRef, decode_snapshot_ref, encode_snapshot_ref
+from reef.core.snapshot import RootSource, SnapshotRef, decode_snapshot_ref, encode_snapshot_ref
 
 
 @dataclass(frozen=True)
@@ -194,6 +194,9 @@ class CommitRecord:
     components: Mapping[str, str] | None = None
     #: Complete component selection for a locally materialized view. These IDs survive cache loss.
     selection: ArtifactSelection | None = None
+    #: The storage snapshots that an older record's ``selection`` named, by component; empty for the current
+    #: format. ``from_dict`` reads them for recovery, and ``to_dict`` does not write them.
+    legacy_locators: Mapping[str, SnapshotRef] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.selection is not None:
@@ -201,7 +204,7 @@ class CommitRecord:
                 raise CommitHistoryError("commit record selection must be an ArtifactSelection")
             if self.components is not None and self.components != self.selection.artifact_ids:
                 raise CommitHistoryError("commit record components must match its selection")
-        if self.snapshot.revision.startswith(SELECTION_VIEW_PREFIX) and self.selection is None:
+        if self.snapshot.selection_view and self.selection is None:
             raise CommitHistoryError("a materialized selection requires its component artifact IDs")
         if not isinstance(self.scenario, str) or not self.scenario:
             raise CommitHistoryError("commit record scenario must be a non-empty string")
@@ -391,6 +394,7 @@ class CommitRecord:
         try:
             snapshot = decode_snapshot_ref(raw_ref)
             selection = None if value.get("selection") is None else ArtifactSelection.from_dict(value["selection"])
+            legacy_locators = {} if value.get("selection") is None else legacy_selection_locators(value["selection"])
         except ValueError as exc:
             raise CommitHistoryError(f"commit record {exc}") from exc
         try:
@@ -420,6 +424,7 @@ class CommitRecord:
             component=value.get("component"),
             components=value.get("components"),
             selection=selection,
+            legacy_locators=legacy_locators,
         )
 
     def __eq__(self, other: object) -> bool:

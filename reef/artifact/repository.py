@@ -25,7 +25,7 @@ from reef.artifact.artifact import (
     artifact_components,
 )
 from reef.artifact.composite import compose_release, link_or_copy
-from reef.core.artifact_selection import ArtifactSelection, LegacyArtifactSelection
+from reef.core.artifact_selection import ArtifactSelection
 from reef.core.components import validate_component_name
 from reef.core.plugins import Plugin
 from reef.core.snapshot import SELECTION_VIEW_PREFIX
@@ -84,6 +84,37 @@ class RepositoryBackend(ArtifactRepository):
         return snapshot if component is None else snapshot.component(component)
 
     @abstractmethod
+    def bind_artifact_id(self, artifact_id: str, ref: SnapshotRef) -> SnapshotRef | None:
+        """Bind ``artifact_id`` to the stored snapshot ``ref`` unless it is bound already.
+
+        Return the snapshot that ``artifact_id`` was bound to before, or None when this call bound it. A binding
+        never changes.
+        """
+
+    @abstractmethod
+    def artifact_content(self, ref: SnapshotRef, artifact_id: str) -> tuple[object, dict[str, object]]:
+        """A value of the files, and the metadata (``content_metadata``), of the artifact ``artifact_id`` in ``ref``.
+
+        Two snapshots give equal values for an artifact exactly when they hold the same files and metadata for it.
+        """
+
+    def bind_artifact_ids(self, snapshot: Artifact) -> None:
+        """Bind each artifact ID in the stored ``snapshot`` to it, before a head moves to it.
+
+        ``snapshot`` needs its metadata, not its files. An ID bound to a snapshot with the same content keeps that
+        binding. Raise ``ArtifactConflict`` for an ID bound to other content. IDs bound before a failure stay
+        bound, so a repeated call completes the rest.
+        """
+        for artifact_id in artifact_components(snapshot):
+            bound = self.bind_artifact_id(artifact_id, snapshot.ref)
+            if (
+                bound is not None
+                and bound != snapshot.ref
+                and self.artifact_content(bound, artifact_id) != self.artifact_content(snapshot.ref, artifact_id)
+            ):
+                raise ArtifactConflict(f"artifact {artifact_id!r} already names different files or metadata")
+
+    @abstractmethod
     def index_snapshot(self, ref: SnapshotRef) -> None:
         """Bind the component IDs in an older snapshot for lookup by artifact ID.
 
@@ -112,7 +143,7 @@ class RepositoryBackend(ArtifactRepository):
 
     @abstractmethod
     def resolve_snapshot(self, revision: str) -> SnapshotRef:
-        """The release that the release ID ``revision`` names in this repository.
+        """The stored snapshot that the backend revision ``revision`` names in this repository.
 
         Raise ``ArtifactNotFound`` for a release the repository does not hold.
         """
@@ -519,11 +550,16 @@ class Repository(ArtifactRepository):
         """Resolve an artifact reference to an Artifact materialized at a local path."""
         return self.materialize(ref)
 
-    def selection(self, artifact: Artifact, names: tuple[str, ...]) -> ArtifactSelection:
-        """Return the component IDs in a stored snapshot or a materialized selection."""
-        selected = self.selections.get(artifact.ref.revision)
+    def selection(self, ref: SnapshotRef, names: tuple[str, ...]) -> ArtifactSelection:
+        """The artifact ID of each of ``names`` in the snapshot ``ref``.
+
+        A selection view answers from the selection it was composed from, without materializing; a stored
+        snapshot is materialized and answers from its components.
+        """
+        selected = self.selections.get(ref.revision)
         if selected is not None:
             return selected
+        artifact = self.resolve(ref)
         return ArtifactSelection({name: artifact.component(name).artifact_id for name in names})
 
     def select(self, selection: ArtifactSelection) -> Artifact:
@@ -559,16 +595,8 @@ class Repository(ArtifactRepository):
             return artifact
 
     def remember_selection(self, ref: SnapshotRef, selection: ArtifactSelection) -> None:
-        """Recover ID bindings and register a recorded view without composing its files."""
-        if isinstance(selection, LegacyArtifactSelection):
-            for locator in set(selection.locators.values()):
-                self.backend.index_snapshot(locator)
-            for name, locator in selection.locators.items():
-                artifact = self.backend.materialize(locator).component(name)
-                if artifact.artifact_id != selection.components[name]:
-                    raise ArtifactPublicationError("legacy selection does not match its stored component")
-            selection = ArtifactSelection(selection.components)
-        if not ref.revision.startswith(SELECTION_VIEW_PREFIX):
+        """Register the recorded selection view ``ref`` without composing its files; other snapshots need nothing."""
+        if not ref.selection_view:
             return
         existing = self.selections.get(ref.revision)
         if existing is not None and existing != selection:
@@ -607,7 +635,7 @@ class Repository(ArtifactRepository):
         return self.register_staged(step, composed, destination, parent=parent)
 
     def register_staged(self, step: int, source: Artifact, destination: Path, *, parent: SnapshotRef) -> Artifact:
-        """Record the tree staged at ``destination`` as a local release carrying ``source``'s content id and metadata."""
+        """Record the tree staged at ``destination`` as a local snapshot with ``source``'s artifact IDs and metadata."""
         staged = Artifact(
             SnapshotRef(
                 revision=f"{LOCAL_SNAPSHOT_PREFIX}{self._process_id}:{uuid.uuid4().hex}:{step}",

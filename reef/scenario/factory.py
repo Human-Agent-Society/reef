@@ -24,7 +24,7 @@ from reef.artifact.repository import (
     StagedReleaseRepositoryBackend,
 )
 from reef.artifact.sources import SourceFiles
-from reef.core.artifact_selection import ArtifactSelection
+from reef.core.artifact_selection import ArtifactSelection, legacy_selection_locators
 from reef.core.components import COMPONENTS_METADATA_KEY, RECORDS_COMPONENT, ReleaseComponents, release_components
 from reef.core.errors import ReefError
 from reef.core.snapshot import RootSource
@@ -344,6 +344,7 @@ class ScenarioFactory:
         # What served after the artifact head's commit; the commit history's activations come after it.
         served_at_head = served_artifact_ref(registration, checkpoint_head=checkpoint_head)
         start_artifact = backend.resolve_snapshot(start_artifact.revision)
+        # A root registered before artifact IDs existed has no bindings yet; indexing a bound root changes nothing.
         backend.index_snapshot(start_artifact)
         checkpoint_step = 0 if checkpoint is None else checkpoint.step
         runtime = self._recipe.runtime
@@ -375,14 +376,22 @@ class ScenarioFactory:
                 checkpoint_artifact=checkpoint_head,
                 local_dir=self._local_artifact_dir,
             )
-            if registration.get("active_selection") is not None:
-                repository.remember_selection(
-                    served_at_head, ArtifactSelection.from_dict(registration["active_selection"])
-                )
-            for record in committed_records(store, head_record):
+            active_selection = registration.get("active_selection")
+            records = committed_records(store, head_record)
+            # Older selections name the storage snapshots of their artifacts; index them, so the IDs resolve.
+            legacy_locators = {
+                *(() if active_selection is None else legacy_selection_locators(active_selection).values()),
+                *(locator for record in records for locator in record.legacy_locators.values()),
+            }
+            for locator in legacy_locators:
+                backend.index_snapshot(locator)
+            if active_selection is not None:
+                repository.remember_selection(served_at_head, ArtifactSelection.from_dict(active_selection))
+            for record in records:
                 if record.selection is not None:
                     repository.remember_selection(record.snapshot, record.selection)
                 elif record.snapshot.durable:
+                    # Only an older record has no selection: current records bind their IDs when they publish.
                     backend.index_snapshot(record.snapshot)
             repository.synchronize_checkpoint()
             # Traffic must not reach a recovered scenario before its committed
@@ -390,9 +399,7 @@ class ScenarioFactory:
             if self._activates_runtime:
                 surface.activate(Artifact(current_artifact, repository), runtime)
 
-            root_artifacts = repository.selection(
-                repository.resolve(start_artifact), surface.names or (RECORDS_COMPONENT,)
-            )
+            root_artifacts = repository.selection(start_artifact, surface.names or (RECORDS_COMPONENT,))
             training_artifacts = root_artifacts
             for record in committed_records(store, head_record):
                 training_artifacts = training_starts(training_artifacts, record)

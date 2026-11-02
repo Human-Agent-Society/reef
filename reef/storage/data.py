@@ -23,7 +23,7 @@ from reef.core.errors import ReefError
 from reef.core.plugins import Plugin, PluginConfigError
 from reef.core.records_types import AgentRecord, RequestType, stored_record_artifact_id
 from reef.core.trajectory_index import TrajectoryIndex
-from reef.storage.item_kinds import ITEM_KIND_RULES, check_artifact_content, json_digest, task_partition
+from reef.storage.item_kinds import ITEM_KIND_RULES, task_partition
 from reef.storage.segments import SegmentStore
 from reef.storage.tasks import SPLIT_NAMES, TaskFileStore
 
@@ -343,16 +343,12 @@ def check_query(owner: str, kind: object, scenario: object, after: object, limit
 
 
 def item_digest_matches(item: StoredItem, digest: str) -> bool:
-    """Compare a create's canonical digest without rewriting an immutable legacy artifact item.
+    """Whether the stored ``item`` has the content of a create with ``digest``.
 
-    Older artifact items included an unused content_id. Ignore only that field
-    for a retry; every other content field must still match.
+    A stored item in an older format matches the current content that it maps to
+    (``ItemKindRules.matches_stored``), so a retry never rewrites an immutable item.
     """
-    if item.digest == digest:
-        return True
-    if item.metadata["kind"] == "artifact" and item.content is not None and "content_id" in item.content:
-        return json_digest({key: value for key, value in item.content.items() if key != "content_id"}) == digest
-    return False
+    return item.digest == digest or ITEM_KIND_RULES[item.metadata["kind"]].matches_stored(item.content, digest)
 
 
 def prepared_items(
@@ -360,8 +356,8 @@ def prepared_items(
 ) -> list[tuple[NewItem, dict[str, Any], str]]:
     """Check a ``create`` call and return each item with its created metadata and digest.
 
-    Each item's content follows the rules of its kind (``ITEM_KIND_RULES``). Legacy artifact input loses its
-    obsolete ``content_id`` before hashing and storage. A task directory is copied into the
+    Each item's content follows the rules of its kind (``ITEM_KIND_RULES``), in the current format
+    (``ItemKindRules.current_content``). A task directory is copied into the
     owner's task file partition, so its digest names stored files. The copy happens before the store checks for
     conflicts; files are kept by digest, so a refused call leaves at most an unused copy. Raise ``ValueError`` for
     an invalid owner, ID, metadata or content, or for an ID given twice.
@@ -375,12 +371,8 @@ def prepared_items(
             raise ValueError(f"item {item.item_id!r} is given twice")
         seen.add(item.item_id)
         metadata = created_metadata(owner, item.metadata)
-        if metadata["kind"] == "artifact" and isinstance(item.content, Mapping) and "content_id" in item.content:
-            check_artifact_content(item.content, made_by_scenario="origin" in metadata)
-            item = NewItem(
-                item.item_id, {key: value for key, value in item.content.items() if key != "content_id"}, item.metadata
-            )
         rules = ITEM_KIND_RULES[metadata["kind"]]
+        item = NewItem(item.item_id, rules.current_content(item.content), item.metadata)
         prepared.append((item, metadata, rules.stored_digest(owner, item.item_id, item.content, metadata, task_files)))
     return prepared
 

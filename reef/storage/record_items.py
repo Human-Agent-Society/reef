@@ -25,9 +25,8 @@ so it has no record item of its own.
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
 
-from reef.core.records_types import AgentRecord, stored_record_artifact_id
+from reef.core.records_types import AgentRecord
 from reef.storage.data import DataStore, NewItem, StoredItem
 from reef.storage.data_queue import DATA_QUEUE, RECORD_COPY_KIND
 from reef.storage.item_kinds import copied_record
@@ -90,22 +89,10 @@ def copy_records(records: RecordStore, data: DataStore, owner: str, scenario: st
     page = records.replay_page(scenario, after_sequence=after_sequence, limit=RECORD_PAGE_SIZE)
     if not page:
         return after_sequence
-    items = []
-    for _, record in page:
-        if is_record_copy(data, owner, scenario, record):
-            continue
-        item = record_item(record)
-        existing = data.read(owner, item.item_id)
-        if existing is not None and existing.kind == "record" and isinstance(existing.content, Mapping):
-            previous = dict(existing.content)
-            if "artifact_ref" in previous:
-                previous["artifact_id"] = stored_record_artifact_id(previous, record.payload)
-                previous.pop("artifact_ref")
-                if previous == item.content:
-                    # Immutable archives keep their original digest on a copy retry.
-                    item = NewItem(item.item_id, existing.content, item.metadata)
-        items.append(item)
-    data.create(owner, items)
+    data.create(
+        owner,
+        [record_item(record) for _, record in page if not is_record_copy(data, owner, scenario, record)],
+    )
     return page[-1][0]
 
 

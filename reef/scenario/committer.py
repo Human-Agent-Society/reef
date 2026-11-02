@@ -17,21 +17,14 @@ from pathlib import Path
 from threading import RLock
 from typing import Any, Literal
 
-from reef.artifact.artifact import (
-    Artifact,
-    ArtifactConflict,
-    ArtifactNotFound,
-    ArtifactPublicationError,
-    SnapshotRef,
-    is_local_snapshot,
-)
+from reef.artifact.artifact import Artifact, ArtifactConflict, ArtifactNotFound, ArtifactPublicationError, SnapshotRef
 from reef.artifact.release_chain import ArtifactReleaseChain, ReleaseNotRestorable
 from reef.artifact.sources import SourceFiles
 from reef.core.activation import MadeArtifact
 from reef.core.artifact_selection import ArtifactSelection
 from reef.core.components import COMPONENTS_METADATA_KEY, ComponentEntry, ReleaseComponents, validate_component_name
 from reef.core.errors import CommitPending, ReefError
-from reef.core.snapshot import SELECTION_VIEW_PREFIX, RootSource
+from reef.core.snapshot import RootSource
 from reef.observability.base import TrainingExperimentContext
 from reef.observability.commits import CommitExperimentObserver
 from reef.scenario.binding import ScenarioBinding
@@ -257,7 +250,7 @@ class ScenarioCommitter:
         recovered_active: Mapping[str, str] = {}
         if active is None and self._artifacts.current != queries.creation_artifact:
             repository = self._artifacts.repository
-            recovered_active = repository.selection(repository.resolve(self._artifacts.current), names).artifact_ids
+            recovered_active = repository.selection(self._artifacts.current, names).artifact_ids
         trainers = {component_trainer.component: component_trainer for component_trainer in self.trainers}
         status: dict[str, dict[str, str | None]] = {}
         for name in names:
@@ -411,7 +404,7 @@ class ScenarioCommitter:
             surface.validate(release)
             return release
         repository = self._artifacts.repository
-        components = dict(repository.selection(active, self.component_names()).components)
+        components = dict(repository.selection(active.ref, self.component_names()).components)
         components[selected.component] = selected.artifact_id
         cached = set(repository.selections)
         target = repository.select(ArtifactSelection(components))
@@ -446,11 +439,10 @@ class ScenarioCommitter:
             selection = (
                 previous.selection
                 if previous is not None and previous.selection is not None
-                else repository.selection(repository.resolve(ref), self.component_names())
+                else repository.selection(ref, self.component_names())
             )
             current_ref = self._artifacts.current
-            current = repository.resolve(current_ref)
-            if repository.selection(current, self.component_names()).artifact_ids == selection.artifact_ids:
+            if repository.selection(current_ref, self.component_names()).artifact_ids == selection.artifact_ids:
                 return selection.artifact_ids
             cached = set(repository.selections)
             target = repository.select(selection)
@@ -461,7 +453,7 @@ class ScenarioCommitter:
                 else:
                     surface.validator.validate(target)
             except BaseException:
-                if target.ref.revision.startswith(SELECTION_VIEW_PREFIX) and target.ref.revision not in cached:
+                if target.ref.selection_view and target.ref.revision not in cached:
                     repository.discard(target)
                 raise
             self._activate(target)
@@ -665,9 +657,7 @@ class ScenarioCommitter:
             ):
                 raise ArtifactConflict(f"scenario {self._name!r} is running a step; sync again when it ends")
             current_ref, checkpoint = self._artifacts.current, self._artifacts.checkpoint
-            current_selection = self._artifacts.repository.selection(
-                Artifact(current_ref, self._artifacts.repository), self.component_names()
-            )
+            current_selection = self._artifacts.repository.selection(current_ref, self.component_names())
             if current_selection != expected_selection:
                 raise ArtifactConflict(
                     f"scenario {self._name!r} changed its active artifacts during the sync; sync again"
@@ -1089,10 +1079,10 @@ class ScenarioCommitter:
 
     def recorded_selection(self, ref: SnapshotRef) -> ArtifactSelection | None:
         """Record component identities for durable artifacts independently of storage snapshot identities."""
-        if is_local_snapshot(ref.revision):
+        if ref.local:
             return None
         repository = self._artifacts.repository
-        return repository.selection(repository.resolve(ref), self.component_names())
+        return repository.selection(ref, self.component_names())
 
     def append_operation_record(
         self,

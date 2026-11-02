@@ -37,9 +37,19 @@ class SnapshotRef:
             raise ValueError("snapshot parent_revision must be a nonempty string or null")
 
     @property
+    def local(self) -> bool:
+        """True for a process-local snapshot: staged or unpublished, with no durable bytes."""
+        return self.revision.startswith(LOCAL_SNAPSHOT_PREFIX)
+
+    @property
+    def selection_view(self) -> bool:
+        """True for a local view composed from an ``ArtifactSelection``."""
+        return self.revision.startswith(SELECTION_VIEW_PREFIX)
+
+    @property
     def durable(self) -> bool:
-        """True when ``revision`` names backend storage, not a process-local view."""
-        return not self.revision.startswith((LOCAL_SNAPSHOT_PREFIX, SELECTION_VIEW_PREFIX))
+        """True when ``revision`` names backend storage: neither ``local`` nor ``selection_view``."""
+        return not self.local and not self.selection_view
 
 
 def encode_snapshot_ref(ref: SnapshotRef) -> dict[str, object]:

@@ -505,8 +505,9 @@ class Scenario:
     def artifact_selection(self, ref: SnapshotRef | None = None) -> ArtifactSelection:
         """Return the complete component-to-artifact-ID mapping for independent serving workers."""
         with self.release_queries.publication_lock:
-            artifact = Artifact(self.current_artifact_ref() if ref is None else ref, self.repository)
-            return self.repository.selection(artifact, self._committer.component_names())
+            return self.repository.selection(
+                self.current_artifact_ref() if ref is None else ref, self._committer.component_names()
+            )
 
     def resume_training_starts(self) -> None:
         """Give each trainer the training start of a ``train_from`` record that its own training commits do not hold yet."""

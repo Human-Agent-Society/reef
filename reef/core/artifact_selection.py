@@ -41,48 +41,37 @@ class ArtifactSelection:
 
     @classmethod
     def from_dict(cls, value: object) -> ArtifactSelection:
-        """Decode current selections or retain legacy locators for index migration."""
+        """Decode a stored selection; an older entry ``{"artifact_id", "ref"}`` gives its ``artifact_id``."""
         if not isinstance(value, Mapping):
             raise ValueError("an artifact selection must be an object")
         components: dict[str, str] = {}
-        locators: dict[str, SnapshotRef] = {}
         for name, entry in value.items():
             if not isinstance(name, str):
                 raise ValueError("an artifact selection requires component names")
-            if isinstance(entry, str):
-                components[name] = entry
-            elif isinstance(entry, Mapping):
-                artifact_id, ref = entry.get("artifact_id"), entry.get("ref")
-                if not isinstance(artifact_id, str) or not isinstance(ref, Mapping):
-                    raise ValueError("a legacy selected artifact requires artifact_id and ref")
-                components[name] = artifact_id
-                locators[name] = decode_snapshot_ref(ref)
-            else:
-                raise ValueError("an artifact selection requires artifact IDs")
-        if locators:
-            return LegacyArtifactSelection(components, locators)
+            artifact_id = entry.get("artifact_id") if isinstance(entry, Mapping) else entry
+            if not isinstance(artifact_id, str):
+                raise ValueError("an artifact selection maps component names to artifact IDs")
+            components[name] = artifact_id
         return cls(components)
 
 
-@dataclass(frozen=True)
-class LegacyArtifactSelection(ArtifactSelection):
-    """A decoded selection with durable locators for some or all components.
+def legacy_selection_locators(value: object) -> dict[str, SnapshotRef]:
+    """The durable storage snapshot that each entry of an older stored selection ``value`` recorded, by component.
 
-    ``locators`` is a nonempty mapping whose keys occur in ``components``.
-    Each value names durable storage, never a local or composed view.
-    Recovery uses these locators to index artifacts from older records.
-    Serialization emits only the inherited component IDs.
+    The current format records no locators, so the result is empty for it. Recovery indexes these snapshots, so
+    their artifacts resolve by ID. Raise ``ValueError`` for a malformed entry or a locator of a local view.
     """
-
-    locators: Mapping[str, SnapshotRef]
-
-    def __post_init__(self) -> None:
-        super().__post_init__()
-        if not isinstance(self.locators, Mapping) or not self.locators:
-            raise ValueError("a legacy selection requires storage locators")
-        for name, ref in self.locators.items():
-            if name not in self.components or not isinstance(ref, SnapshotRef):
-                raise ValueError("legacy locators must name selected components")
-            if not ref.durable:
-                raise ValueError("a legacy selected artifact requires durable storage")
-        object.__setattr__(self, "locators", MappingProxyType(dict(self.locators)))
+    if not isinstance(value, Mapping):
+        raise ValueError("an artifact selection must be an object")
+    locators: dict[str, SnapshotRef] = {}
+    for name, entry in value.items():
+        if not isinstance(entry, Mapping):
+            continue
+        ref = entry.get("ref")
+        if not isinstance(ref, Mapping):
+            raise ValueError("a legacy selected artifact requires artifact_id and ref")
+        locator = decode_snapshot_ref(ref)
+        if not locator.durable:
+            raise ValueError("a legacy selected artifact requires durable storage")
+        locators[str(name)] = locator
+    return locators

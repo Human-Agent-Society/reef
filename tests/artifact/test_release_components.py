@@ -457,7 +457,7 @@ def test_selections_restore_and_recover_without_publishing_artifacts(tmp_path: P
             assert scenario.repository.require_checkpoint_artifact() == checkpoint
             scenario.commit(TrainStepResult(state={}))
             active = scenario.current_artifact_ref()
-            assert active.revision.startswith("selection:")
+            assert active.selection_view
 
         # The next process has no materialized views. Only operation records and original artifact bytes survive.
         shutil.rmtree(tmp_path / "staged")
@@ -519,7 +519,7 @@ def test_concurrent_first_readers_share_one_selection_view(tmp_path: Path, monke
     backend = InMemoryRepositoryBackend("agent", directory=tmp_path / "repository")
     initial = backend.register(root, metadata=root.metadata)
     repository = Repository(backend, initial, current_artifact=initial)
-    selection = repository.selection(repository.resolve(initial), (WEIGHTS, HARNESS))
+    selection = repository.selection(initial, (WEIGHTS, HARNESS))
     reference = repository.select(selection).ref
     recovered = Repository(backend, initial, current_artifact=initial)
     recovered.remember_selection(reference, selection)
