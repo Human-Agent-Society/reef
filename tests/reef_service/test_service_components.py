@@ -116,8 +116,9 @@ class Changes(StoreChanges):
 
 
 @pytest.mark.unit
-def test_control_learns_of_records_samples_and_jobs_that_other_processes_add() -> None:
-    sequence = {"math": 3}
+@pytest.mark.parametrize("initial_sequence", [0, 3])
+def test_control_learns_of_records_samples_and_jobs_that_other_processes_add(initial_sequence) -> None:
+    sequence = {"math": initial_sequence}
     scenario = SimpleNamespace(name="math", records=SimpleNamespace(last_sequence=lambda name: sequence[name]))
     registry = SimpleNamespace(loaded_scenarios=lambda: (scenario,))
     queue = memory_coordination().work_queue
@@ -125,15 +126,16 @@ def test_control_learns_of_records_samples_and_jobs_that_other_processes_add() -
     watcher = StoreChangesWatcher(registry, queue, changes)
 
     watcher.run_once()
-    assert changes.records == [] and changes.samples == []  # a scenario seen first asks for samples when it loads
+    first_records = [] if initial_sequence == 0 else ["math"]
+    assert changes.records == first_records and changes.samples == []
     sequence["math"] = 5
     request_selection(queue, "math", "weights")
     item = queue.take(SAMPLES_QUEUE, "samples-1", [RECORD_SELECTION_KIND])
     queue.finish(SAMPLES_QUEUE, item.id, "samples-1", {"changed": True, "background": False})
     watcher.run_once()
-    assert changes.records == ["math"] and changes.samples == ["math"]
+    assert changes.records == [*first_records, "math"] and changes.samples == ["math"]
     watcher.run_once()
-    assert changes.records == ["math"] and changes.samples == ["math"]
+    assert changes.records == [*first_records, "math"] and changes.samples == ["math"]
     # A training instruction that another process queued wakes control once.
     InstructionQueue(queue).of("math").file("one", {"text": "train"})
     watcher.run_once()
@@ -198,8 +200,7 @@ def test_reef_serve_names_one_service_with_component() -> None:
 
 
 @pytest.mark.unit
-def test_a_process_without_control_loads_a_scenario_without_activating_it(tmp_path: Path) -> None:
-    # The engines are control's: a process that loads a scenario for its reads or its samples loads no weights.
+def test_control_and_data_load_a_scenario_without_activating_its_engine(tmp_path: Path) -> None:
     initial = tmp_path / "initial"
     initial.mkdir()
     (initial / "model.txt").write_text("w0")
@@ -221,15 +222,14 @@ def test_a_process_without_control_loads_a_scenario_without_activating_it(tmp_pa
         control.get_or_create_scenario("math")
     finally:
         control.close()
-    activated = list(component.inference.activated)
-    assert activated, "control activates the scenario it loads"
+    assert component.inference.activated == []
     data = dispatcher(frozenset({"data"}))
     try:
         with data.locked_scenario("math") as current:
             assert current.name == "math"
     finally:
         data.close()
-    assert component.inference.activated == activated
+    assert component.inference.activated == []
 
 
 @pytest.mark.unit
