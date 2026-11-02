@@ -1,3 +1,4 @@
+import logging
 import sqlite3
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -7,9 +8,11 @@ from dataclasses import dataclass
 import pytest
 
 from reef.core.served_models import ScenarioModel, ScheduledStop, ServedArtifact
+from reef.execution.workers import ItemFailed, QueueWorker, WorkerStopped
 from reef.storage.control_lease import ControlLease
 from reef.storage.marks import Marks
 from reef.storage.served_models import (
+    AUTOMATIC_RETRIES,
     INFERENCE_OWNER_QUEUE,
     SERVING_KIND,
     SERVING_QUEUE,
@@ -159,6 +162,57 @@ def test_a_request_reuses_the_queued_item_of_its_key_and_ended_items_go_after_th
     queue.take("data", "w1", ["record_copy"], now=6)
     third = queue.request("data", "s", "record_copy", "record_copy:s", {}, now=7)
     assert third.id not in (first.id, second.id)
+
+
+class FailingWorker(QueueWorker):
+    """A worker whose every item ends with ``error``."""
+
+    def __init__(self, queue: WorkQueue, error: Exception) -> None:
+        super().__init__(queue, "jobs", ["training_job:tinker"], worker_id="w")
+        self.error = error
+
+    def run_item(self, item, lease_lost):
+        raise self.error
+
+
+def warnings_of(caplog) -> list[str]:
+    return [record.getMessage() for record in caplog.records if record.levelno == logging.WARNING]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("error", "attempts", "state"),
+    [
+        (ItemFailed("bad input"), 2, "failed"),
+        (ValueError("bad input"), 2, "failed"),
+        (RuntimeError("engine down"), 2, "queued"),
+        (RuntimeError("engine down"), 1, "failed"),
+        (WorkerStopped(), 1, "failed"),
+    ],
+)
+def test_a_worker_logs_one_warning_for_each_item_that_fails_for_good(caplog, error, attempts, state):
+    with closing(SQLiteCoordinationDatabase(None)) as database:
+        queue = SQLWorkQueue(database, max_attempts={"jobs": attempts})
+        queue.add(job("a"))
+        with caplog.at_level(logging.WARNING, logger="reef.execution.workers"):
+            assert FailingWorker(queue, error).run_once()
+        item = queue.get("jobs", "a")
+        assert item.state == state
+        assert warnings_of(caplog) == (
+            [f"work item jobs/a of scenario s failed: {item.error}"] if state == "failed" else []
+        )
+
+
+@pytest.mark.unit
+def test_a_worker_logs_an_expired_item_that_has_no_attempts_left(caplog):
+    with closing(SQLiteCoordinationDatabase(None)) as database:
+        queue = SQLWorkQueue(database, lease_seconds=10, max_attempts={"jobs": 1})
+        queue.add(job("a"), now=0)
+        queue.take("jobs", "stopped-worker", ["training_job:tinker"], now=0)
+        with caplog.at_level(logging.WARNING, logger="reef.execution.workers"):
+            assert not FailingWorker(queue, ItemFailed("unused")).run_once()
+        assert queue.get("jobs", "a").state == "failed"
+        assert warnings_of(caplog) == ["work item jobs/a of scenario s failed: the worker's lease expired"]
 
 
 @pytest.mark.unit
@@ -463,12 +517,20 @@ def test_failed_serving_retries_only_on_explicit_request_and_old_control_cannot_
     item = queue.take(SERVING_QUEUE, "worker", [SERVING_KIND], now=1)
     queue.fail(SERVING_QUEUE, item.id, "worker", "cannot start", retryable=False, now=2)
     assert table.request("s", payload, control_lease_number=lease.number, now=3).state == "failed"
-    retried = table.request("s", payload, control_lease_number=lease.number, retry_failed=True, now=4)
+    with pytest.raises(ValueError, match="automatic_retries"):
+        table.request("s", payload, control_lease_number=lease.number, retry_failed=True, automatic_retries=-1)
+    retried = table.request(
+        "s", payload, control_lease_number=lease.number, retry_failed=True, automatic_retries=2, now=4
+    )
     assert retried.id != item.id and retried.state == "queued"
+    assert retried.metadata == {AUTOMATIC_RETRIES: 2}
+    # Only a retry of the same payload records the count.
+    other = table.request("s", {"artifact_id": "b"}, control_lease_number=lease.number, automatic_retries=3, now=5)
+    assert other.metadata == {}
     stores.lease.acquire("new-control", now=11)
     with pytest.raises(ControlLeaseConflict):
         table.request("s", {}, control_lease_number=lease.number, now=12)
-    assert table.current_request("s").id == retried.id
+    assert table.current_request("s").id == other.id
 
 
 @pytest.mark.unit

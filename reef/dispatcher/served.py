@@ -15,9 +15,35 @@ from reef.scenario.registry import ScenarioRegistry
 from reef.scenario.scenario import Scenario
 from reef.storage.control_lease import ControlLease, ControlLeaseState
 from reef.storage.coordination import Coordination
-from reef.storage.work_queue import JsonValue
+from reef.storage.served_models import AUTOMATIC_RETRIES
+from reef.storage.work_queue import JsonValue, WorkItem, clock
 
 logger = logging.getLogger(__name__)
+
+#: The wait after the first failure of a serving request before control retries it by itself. It equals the default
+#: work lease and is twice the default control lease, so the leases of the services that a restart ended have expired
+#: when the retry starts.
+FIRST_RETRY_DELAY_SECONDS = 60.0
+#: The longest wait between automatic retries. A failure that every retry repeats costs at most 24 startups a day,
+#: and a cause that goes away heals within an hour.
+MAX_RETRY_DELAY_SECONDS = 3600.0
+
+
+def automatic_retry_count(request: WorkItem) -> int:
+    """The number of automatic retries in a row that ``request``, a serving request, continues:
+    ``metadata[AUTOMATIC_RETRIES]``, or 0 without the key. Raise ``ReefError`` for a value that is no non-negative
+    int."""
+    count = request.metadata.get(AUTOMATIC_RETRIES, 0)
+    if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+        raise ReefError(f"serving request {request.id} has an invalid automatic retry count {count!r}")
+    return count
+
+
+def retry_delay_seconds(retries: int) -> float:
+    """The wait after the failure of a serving request with ``retries`` automatic retries before control retries it:
+    ``min(FIRST_RETRY_DELAY_SECONDS * 2 ** retries, MAX_RETRY_DELAY_SECONDS)`` for an int ``retries`` from 0."""
+    # The exponent stops at 64, far beyond the cap, so that the float stays finite.
+    return min(FIRST_RETRY_DELAY_SECONDS * 2.0 ** min(retries, 64), MAX_RETRY_DELAY_SECONDS)
 
 
 def wait_for_control_lease(
@@ -70,6 +96,10 @@ class ServedModelsPublisher(ServiceWorker):
     ``registry`` owns the scenarios; ``coordination`` stores requests and the lease.
     ``instance`` stops control work after lease loss. ``stop_delay_seconds`` bounds route draining.
     The positive ``interval_seconds`` is shorter than the control lease.
+
+    A serving request states the selection that a scenario should serve, so its failure is not final: each round
+    retries a failed current request of the desired payload once ``retry_delay_seconds`` of its automatic retry count
+    passed after it ended (``publish``).
     """
 
     def __init__(
@@ -146,16 +176,47 @@ class ServedModelsPublisher(ServiceWorker):
         }
 
     def publish(self, current: Scenario, *, now: float | None = None, retry_failed: bool = False) -> None:
-        """Queue the selected release. Repeated publication of the same selection changes nothing."""
+        """Queue the desired payload of ``current`` at ``now`` while this instance holds the lease.
+
+        Let ``failed`` be the scenario's current request when it failed with the desired payload, ``n`` its
+        ``automatic_retry_count`` and ``t`` its ``ended_at``. Then:
+
+        - ``retry_failed`` true (a person activates or restores): a new request retries ``failed`` at once, with
+          the count 0.
+        - ``retry_failed`` false and ``now >= t + retry_delay_seconds(n)``: a new request retries ``failed``, with
+          the count ``n + 1``.
+        - otherwise ``failed`` stays the current request.
+
+        Without ``failed``, a desired payload that equals the current request's changes nothing, and another
+        payload replaces it with a new request.
+        """
+        moment = clock(now)
         with self.lock:
-            if self.held:
-                self.coordination.served_models.request(
+            if not self.held:
+                return
+            desired = self.desired(current.name)
+            retries = 0
+            if not retry_failed:
+                failed = self.coordination.served_models.current_request(current.name)
+                if failed is not None and failed.state == "failed" and failed.ended_at is not None:
+                    count = automatic_retry_count(failed)
+                    if moment >= failed.ended_at + retry_delay_seconds(count):
+                        retry_failed, retries = True, count + 1
+            request = self.coordination.served_models.request(
+                current.name,
+                desired,
+                control_lease_number=self.lease_number,
+                stop_delay_seconds=self.stop_delay_seconds,
+                retry_failed=retry_failed,
+                automatic_retries=retries,
+                now=moment,
+            )
+            if retries and automatic_retry_count(request) == retries:
+                logger.info(
+                    "scenario %s: control retries its failed serving request as %s, automatic retry %d",
                     current.name,
-                    self.desired(current.name),
-                    control_lease_number=self.lease_number,
-                    stop_delay_seconds=self.stop_delay_seconds,
-                    retry_failed=retry_failed,
-                    now=now,
+                    request.id,
+                    retries,
                 )
 
     def withdraw(self, scenario: str, *, now: float | None = None) -> None:
@@ -171,7 +232,8 @@ class ServedModelsPublisher(ServiceWorker):
                 )
 
     def run_once(self, *, now: float | None = None) -> bool:
-        """Renew the lease and reconcile serving requests; return whether this instance holds the lease."""
+        """Renew the lease and publish every loaded scenario, which retries the failed requests that are due;
+        return whether this instance holds the lease."""
         moment = time.time() if now is None else now
         state = self.coordination.control_lease.acquire(self.instance_id, now=moment)
         if state is None:
@@ -187,4 +249,13 @@ class ServedModelsPublisher(ServiceWorker):
         return True
 
 
-__all__ = ["ControlInstance", "ServedModelsPublisher", "take_control_lease", "wait_for_control_lease"]
+__all__ = [
+    "FIRST_RETRY_DELAY_SECONDS",
+    "MAX_RETRY_DELAY_SECONDS",
+    "ControlInstance",
+    "ServedModelsPublisher",
+    "automatic_retry_count",
+    "retry_delay_seconds",
+    "take_control_lease",
+    "wait_for_control_lease",
+]
