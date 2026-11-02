@@ -60,7 +60,7 @@ from reef.core.tasks import HarborTask, read_harbor_task
 from reef.pipeline_context import PipelineContext
 from reef.recipe.generated_tasks import GeneratedTaskSamples, GeneratedTaskSettings
 from reef.recipe.generated_tasks.generator import FailedTask, HeldOutTask, RejectedTask, RolledOutTask
-from reef.recipe.generated_tasks.processor import GenerationJob
+from reef.recipe.generated_tasks.processor import GenerationJob, complete_generation_count
 from reef.recipe.generated_tasks.results import TaskRolloutResult, rollout_results
 from reef.record2sample.generator import DuplicateTask, GeneratorError, WrittenTask
 from reef.record2sample.generator.harbor import ORACLE_TIMEOUT_S
@@ -169,6 +169,94 @@ def test_a_cancelled_generation_stops_its_agent_and_takes_no_session(tmp_path: P
         assert author.stopped.is_set(), "the cancellation reached the agent's thread"
     assert [path.name for path in author.work_dirs] == ["00000-000", "00001-000"], "a rerun is a new generation"
     assert cursor(tmp_path) == {"next_generation": 2, "next_position": 0}, "the session is taken again"
+
+
+class GatheringStandIn(StandInAuthor):
+    """The stand-in, which writes its task only once ``limit`` tasks are being written at once, and keeps the most
+    written at once."""
+
+    def __init__(self, limit: int) -> None:
+        super().__init__()
+        self.limit = limit
+        self.lock = threading.Lock()
+        self.running = 0
+        self.most = 0
+        self.full = threading.Event()
+
+    def author(
+        self,
+        source: SessionSource,
+        work_dir: Path,
+        checks: CandidateChecks,
+        *,
+        tags: Mapping[str, str],
+        stop: threading.Event,
+        variant: TaskVariant | None = None,
+    ) -> AuthoredTask:
+        with self.lock:
+            self.running += 1
+            self.most = max(self.most, self.running)
+            if self.running == self.limit:
+                self.full.set()
+        try:
+            self.full.wait(10)
+            return super().author(source, work_dir, checks, tags=tags, stop=stop, variant=variant)
+        finally:
+            with self.lock:
+                self.running -= 1
+
+
+def test_tasks_are_written_at_once_up_to_the_concurrency_and_keep_their_order(tmp_path: Path) -> None:
+    stand_in = GatheringStandIn(limit=3)
+    generator = autoenvscaling(tmp_path, stand_in, source_count=5, count=5, concurrency=3)
+    tasks = asyncio.run(generator.generate(REQUEST))
+    assert stand_in.full.is_set() and stand_in.most == 3, "three tasks were written at once, and never more"
+    assert [task.name for task in tasks] == [f"harbor-00000-{index:03d}-autoenvscaling" for index in range(5)]
+    assert [task.source_agent_record_ids[1] for task in tasks] == [f"session-{number}" for number in range(1, 6)]
+    assert cursor(tmp_path) == {"next_generation": 1, "next_position": 5}
+
+
+class OutageStandIn(TaskAuthor):
+    """The first session's task is an outage once the second session's task is being written; that one runs until
+    it is stopped."""
+
+    def __init__(self) -> None:
+        self.sources: list[str] = []
+        self.second = threading.Event()
+        self.stopped = threading.Event()
+
+    def author(
+        self,
+        source: SessionSource,
+        work_dir: Path,
+        checks: CandidateChecks,
+        *,
+        tags: Mapping[str, str],
+        stop: threading.Event,
+        variant: TaskVariant | None = None,
+    ) -> AuthoredTask:
+        self.sources.append(source.record_id)
+        if source.record_id == "session-1":
+            self.second.wait(10)
+            raise AuthorError("the agent could not run: the sandbox did not start")
+        self.second.set()
+        if stop.wait(10):
+            self.stopped.set()
+        raise AuthorError("the agent's run was stopped")
+
+
+def test_an_outage_starts_no_further_task_and_stops_the_running_ones_after_it(tmp_path: Path) -> None:
+    stand_in = OutageStandIn()
+    generator = autoenvscaling(tmp_path, stand_in, source_count=4, count=4, concurrency=2)
+    with pytest.raises(AuthorError, match="the author could not rebuild session-1"):
+        asyncio.run(generator.generate(REQUEST))
+    assert stand_in.stopped.wait(10), "the task being written after the outage was stopped"
+    assert sorted(stand_in.sources) == ["session-1", "session-2"], "no task started after the outage"
+    asyncio.run(generator.record_results((), generation=0))
+    document = report(tmp_path)
+    assert document["error"].startswith("the author could not rebuild session-1")
+    assert [(entry["position"], entry["stage"]) for entry in document["proposals"]] == [(0, "outage")]
+    assert cursor(tmp_path)["next_position"] == 1, "the stopped task's session is taken again"
 
 
 def test_a_task_the_authoring_checks_refuse_is_refused_and_names_the_last_call(tmp_path: Path) -> None:
@@ -571,6 +659,9 @@ def test_from_config_builds_the_author_and_keeps_one_state_directory_for_each_sc
         ({"author": "prompt", "agent_api": "anthropic"}, "agent_api openai or responses"),
         ({"max_model_calls": 0}, "max_model_calls must be positive"),
         ({"count": 0}, "count and max_checks must be positive"),
+        ({"concurrency": 0}, "concurrency must be a positive integer"),
+        ({"concurrency": True}, "concurrency must be a positive integer"),
+        ({"concurrency": "2"}, "concurrency must be a positive integer"),
         ({"band_low": 0.8}, "band_low must not exceed band_high"),
         ({"band_high": 1.5}, r"band_high must be in \[0, 1\]"),
         ({"band_low": "low"}, "band_low must be a number"),
@@ -704,6 +795,25 @@ def test_a_round_of_the_generated_task_recipe_runs_autoenvscaling_end_to_end(tmp
     assert service.rollout_requests == [], "the training component runs the training rollouts"
     assert generation.task_store is not None and len(generation.task_store.tasks(split="train")) == 2
     assert [task["band"] for task in report(tmp_path)["tasks"]] == ["inside", "inside"]
+
+
+def test_an_outage_that_makes_no_task_leaves_the_round_incomplete_so_a_restart_gives_it_back(tmp_path: Path) -> None:
+    service = StandInGenerator(tmp_path / "tasks")
+    stand_in = StandInAuthor(unreachable=("session-1", "session-2"))
+    generator = autoenvscaling(tmp_path, stand_in, service, count=2)
+    session = SQLiteScenarioStorage(tmp_path / "records").open("autoenvscaling")
+    context = PipelineContext("autoenvscaling", task_storage=session.tasks, samples=TrainerSamples(session.samples))
+    generation = GeneratedTaskSamples(
+        context,
+        GeneratedTaskSettings(rounds=1, description=DESCRIPTION, generation_attempts=2),
+        task_generator=generator,
+        generator_service=service,
+    )
+    outcome = asyncio.run(generation.run(GenerationJob(receipt="generation-00000", generation=0)))
+    generation.close()
+    assert not outcome.is_complete and "the sandbox did not start" in outcome.error
+    assert [call["source"] for call in stand_in.calls] == ["session-1", "session-2"], "one session for each attempt"
+    assert generation.task_store is not None and complete_generation_count(generation.task_store) == 0
 
 
 def test_a_task_whose_calibration_rollouts_cannot_run_leaves_the_generation_complete(tmp_path: Path) -> None:

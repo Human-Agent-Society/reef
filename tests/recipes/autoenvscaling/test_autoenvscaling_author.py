@@ -8,6 +8,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -188,6 +189,40 @@ def test_a_repository_snapshot_holds_the_base_commit_alone(tmp_path: Path) -> No
     log = subprocess.run(["git", "rev-list", "--all"], cwd=snapshot, check=True, capture_output=True, text=True).stdout
     assert len(log.split()) == 1 and later not in log
     assert repository_snapshot(source, tmp_path / "cache") == snapshot
+
+
+def test_tasks_written_at_once_build_a_repository_snapshot_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def git(*arguments: str) -> str:
+        command = ["git", "-c", "user.name=t", "-c", "user.email=t@t", *arguments]
+        return subprocess.run(command, cwd=tmp_path / "origin", check=True, capture_output=True, text=True).stdout
+
+    (tmp_path / "origin").mkdir()
+    git("init", "-q")
+    (tmp_path / "origin" / "base.txt").write_text("base")
+    git("add", "base.txt")
+    git("commit", "-q", "-m", "base")
+    source = SessionSource(
+        "r",
+        "sessions",
+        Repository(url=f"file://{tmp_path / 'origin'}", commit=git("rev-parse", "HEAD").strip(), path="/app"),
+    )
+    run = subprocess.run
+    clones: list[str] = []
+
+    def slow_clone(command: list[str], **options: object) -> subprocess.CompletedProcess[bytes]:
+        if command[1] == "clone":
+            clones.append(command[-1])
+            # Both tasks reach the snapshot before either clone ends.
+            time.sleep(0.5)
+        return run(command, **options)  # type: ignore[call-overload]
+
+    monkeypatch.setattr(subprocess, "run", slow_clone)
+    with ThreadPoolExecutor(2) as pool:
+        snapshots = list(pool.map(lambda _: repository_snapshot(source, tmp_path / "cache"), range(2)))
+    assert len(clones) == 1 and snapshots[0] == snapshots[1]
+    assert (snapshots[0] / "base.txt").read_text() == "base"
 
 
 def test_a_repository_snapshot_starts_no_gc_that_could_prune_it_while_it_is_copied(

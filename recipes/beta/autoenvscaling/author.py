@@ -65,6 +65,9 @@ RECORD_READ_TIMEOUT_SECONDS = 120.0
 # The prompt Designer reads the session from its prompt: the eval's session budget.
 PROMPT_SESSION_CHARS = 240_000
 GIT_TIMEOUT_SECONDS = 1800.0
+# One lock for each repository snapshot, by its cache path; the second lock guards the first's dict.
+SNAPSHOT_LOCKS: dict[Path, threading.Lock] = {}
+SNAPSHOT_LOCKS_LOCK = threading.Lock()
 # What git says when a clone finds no repository: deleted, private (it asks for credentials) or a wrong URL.
 MISSING_REPOSITORY_ERRORS = (
     "repository not found",
@@ -652,48 +655,56 @@ def repository_snapshot(source: SessionSource, cache_dir: Path) -> Path:
     target = cache_dir / f"{hashlib.sha256(repository.url.encode()).hexdigest()[:8]}-{repository.commit}"
     if target.is_dir():
         return target
-    # The snapshot is built beside its place and moved there once complete, so a partial one is never used.
-    partial = target.with_name(target.name + ".partial")
-    shutil.rmtree(partial, ignore_errors=True)
-
-    def git(*arguments: str, cwd: Path | None = None) -> None:
-        # A repository that asks for credentials fails at once instead of waiting on a prompt.
-        subprocess.run(
-            ["git", *arguments],
-            cwd=cwd,
-            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
-            stdin=subprocess.DEVNULL,
-            check=True,
-            capture_output=True,
-            timeout=GIT_TIMEOUT_SECONDS,
-        )
-
-    try:
-        git("clone", "-q", "--filter=blob:none", "--no-checkout", "--", repository.url, str(partial))
-        git("checkout", "-q", repository.commit, cwd=partial)
-        shutil.rmtree(partial / ".git")
-        git("init", "-q", cwd=partial)
-        # No gc and no auto maintenance (Git 2.54 runs it after a commit even with gc.auto=0) while the agent copies
-        # the snapshot.
-        no_upkeep = ("-c", "gc.auto=0", "-c", "maintenance.auto=false")
-        git(*no_upkeep, "add", "-A", cwd=partial)
-        commit = (*no_upkeep, "-c", "user.name=reef", "-c", "user.email=reef@localhost", "commit")
-        git(*commit, "-qm", "base commit", cwd=partial)
-        partial.rename(target)
-    except subprocess.CalledProcessError as exc:
-        stderr = exc.stderr.decode(errors="replace").strip() if exc.stderr else ""
-        failure = f"{' '.join(exc.cmd)} failed for {repository.url}: {stderr[-500:]}"
-        step = exc.cmd[1]
-        if step == "clone" and any(error in stderr.lower() for error in MISSING_REPOSITORY_ERRORS):
-            raise SourceError(f"the repository {repository.url} is not there: {failure}") from exc
-        if step == "checkout" and not any(error in stderr.lower() for error in NETWORK_ERRORS):
-            raise SourceError(f"{repository.url} has no commit {repository.commit} to check out: {failure}") from exc
-        raise AuthorError(failure) from exc
-    except (subprocess.TimeoutExpired, OSError) as exc:
-        raise AuthorError(f"the snapshot of {repository.url} at {repository.commit} failed: {exc}") from exc
-    finally:
+    # Tasks written at once build each snapshot once: the second waits for the first, then finds it.
+    with SNAPSHOT_LOCKS_LOCK:
+        lock = SNAPSHOT_LOCKS.setdefault(target, threading.Lock())
+    with lock:
+        if target.is_dir():
+            return target
+        # The snapshot is built beside its place and moved there once complete, so a partial one is never used.
+        partial = target.with_name(target.name + ".partial")
         shutil.rmtree(partial, ignore_errors=True)
-    return target
+
+        def git(*arguments: str, cwd: Path | None = None) -> None:
+            # A repository that asks for credentials fails at once instead of waiting on a prompt.
+            subprocess.run(
+                ["git", *arguments],
+                cwd=cwd,
+                env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+                stdin=subprocess.DEVNULL,
+                check=True,
+                capture_output=True,
+                timeout=GIT_TIMEOUT_SECONDS,
+            )
+
+        try:
+            git("clone", "-q", "--filter=blob:none", "--no-checkout", "--", repository.url, str(partial))
+            git("checkout", "-q", repository.commit, cwd=partial)
+            shutil.rmtree(partial / ".git")
+            git("init", "-q", cwd=partial)
+            # No gc and no auto maintenance (Git 2.54 runs it after a commit even with gc.auto=0) while the agent copies
+            # the snapshot.
+            no_upkeep = ("-c", "gc.auto=0", "-c", "maintenance.auto=false")
+            git(*no_upkeep, "add", "-A", cwd=partial)
+            commit = (*no_upkeep, "-c", "user.name=reef", "-c", "user.email=reef@localhost", "commit")
+            git(*commit, "-qm", "base commit", cwd=partial)
+            partial.rename(target)
+        except subprocess.CalledProcessError as exc:
+            stderr = exc.stderr.decode(errors="replace").strip() if exc.stderr else ""
+            failure = f"{' '.join(exc.cmd)} failed for {repository.url}: {stderr[-500:]}"
+            step = exc.cmd[1]
+            if step == "clone" and any(error in stderr.lower() for error in MISSING_REPOSITORY_ERRORS):
+                raise SourceError(f"the repository {repository.url} is not there: {failure}") from exc
+            if step == "checkout" and not any(error in stderr.lower() for error in NETWORK_ERRORS):
+                raise SourceError(
+                    f"{repository.url} has no commit {repository.commit} to check out: {failure}"
+                ) from exc
+            raise AuthorError(failure) from exc
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            raise AuthorError(f"the snapshot of {repository.url} at {repository.commit} failed: {exc}") from exc
+        finally:
+            shutil.rmtree(partial, ignore_errors=True)
+        return target
 
 
 def write_inputs(reef: ReefClient, source: SessionSource | None, work_dir: Path, variant: TaskVariant | None) -> None:

@@ -38,6 +38,7 @@ from recipes.beta.autoenvscaling import (
 )
 from recipes.beta.autoenvscaling import author as author_module
 from recipes.beta.autoenvscaling import generator as generator_module
+from recipes.beta.autoenvscaling.author_credentials import CredentialHeld
 from recipes.beta.autoenvscaling.checks import PassRateBand
 from recipes.beta.autoenvscaling.generator import ParentTask
 from recipes.beta.autoenvscaling.sources import Repository, SessionSource
@@ -130,6 +131,48 @@ def test_a_generation_closed_again_after_a_crash_adds_its_parent_once(tmp_path: 
     asyncio.run(restarted.record_results(results, generation=0))
     assert [parent["name"] for parent in parents(tmp_path)] == [NAMES[0]]
     assert not restarted.open_path(0).exists()
+
+
+class TokenHoldingStandIn(StandInAuthor):
+    """The stand-in, whose variants hold the run's Claude Code token."""
+
+    def author(
+        self,
+        source: SessionSource,
+        work_dir: Path,
+        checks: CandidateChecks,
+        *,
+        tags: Mapping[str, str],
+        stop: threading.Event,
+        variant: TaskVariant | None = None,
+    ) -> AuthoredTask:
+        if variant is not None:
+            raise CredentialHeld("the agent's task held the run's token")
+        return super().author(source, work_dir, checks, tags=tags, stop=stop, variant=variant)
+
+
+@pytest.mark.parametrize(
+    ("failing", "is_varied"),
+    [(StandInAuthor(unreachable=("session-1",)), False), (TokenHoldingStandIn(), True)],
+    ids=["outage", "credential"],
+)
+def test_an_outage_leaves_the_parent_its_slot_and_a_held_token_takes_it(
+    tmp_path: Path, failing: StandInAuthor, is_varied: bool
+) -> None:
+    generator = autoenvscaling(tmp_path, StandInAuthor(), count=2, is_adaptive=True, variant_share=0.5)
+    asyncio.run(generator.record_results(run_tasks(generator, (1.0, 1.0), (0.5, 0.5)), generation=0))
+    failed = autoenvscaling(tmp_path, failing, count=2, is_adaptive=True, variant_share=0.5)
+    if is_varied:
+        assert asyncio.run(failed.generate(REQUEST)) == (), "a held token ends the generation empty"
+    else:
+        with pytest.raises(AuthorError, match="the sandbox did not start"):
+            asyncio.run(failed.generate(REQUEST))
+    assert parents(tmp_path)[0]["varied"] is is_varied
+    stand_in = StandInAuthor()
+    again = autoenvscaling(tmp_path, stand_in, count=2, is_adaptive=True, variant_share=0.5)
+    asyncio.run(again.generate(REQUEST))
+    varied = [call["variant"].parent for call in stand_in.calls if call["variant"] is not None]
+    assert varied == ([] if is_varied else [NAMES[0]]), "the next generation varies a parent the outage left"
 
 
 def test_a_restart_keeps_the_parents_and_a_parent_is_varied_once(tmp_path: Path) -> None:
