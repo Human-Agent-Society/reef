@@ -304,6 +304,26 @@ read_opencode_session = OpencodeSessionReader()
 
 
 @register_trajectory_reader
+class AntigravitySessionReader(TrajectoryReader):
+    """Read Antigravity session JSONL trees: every transcript.jsonl under ``path``."""
+
+    format = "antigravity-session-jsonl"
+
+    def __call__(self, path: Path) -> tuple[dict[str, Any], ...]:
+        events = []
+        for event in _read_jsonl_tree(path, "antigravity session"):
+            if event.get("source") == "MODEL" or event.get("type") == "PLANNER_RESPONSE":
+                event = {"role": "assistant", **event}
+            elif event.get("type") == "USER_INPUT":
+                event = {"role": "user", **event}
+            events.append(event)
+        return tuple(events)
+
+
+read_antigravity_session = AntigravitySessionReader()
+
+
+@register_trajectory_reader
 class NativeSessionReader(TrajectoryReader):
     """Read the native harness session tree: every ``*.jsonl`` under ``path``, in order, like a pi session."""
 

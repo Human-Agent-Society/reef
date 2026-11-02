@@ -1,0 +1,49 @@
+# Google Antigravity CLI (agy), driven headless per run.
+#
+# ANTIGRAVITY_CONFIG_DIR and GEMINI_CLI_HOME relocate configuration into
+# the run root.
+# agy is invoked headless with:
+#   agy -p "{task}" --output-format json --dangerously-skip-permissions --mode auto
+name: antigravity
+binary: agy
+install:
+  kind: npm
+  package: "@google/antigravity"
+  version: "1.0.0"
+  binary_path: "node_modules/.bin/agy"
+renderer: reef.harness.adapters.antigravity.render:AntigravityAdapterRenderer
+evolve:
+  rules: antigravity/AGENTS.md
+  skill: antigravity/skills/{name}/SKILL.md
+  command: antigravity/commands/{name}.md
+  extension: antigravity/plugins/{name}/plugin.json
+dirs:
+  antigravity: ANTIGRAVITY_CONFIG_DIR
+sessions:
+  format: antigravity-session-jsonl
+  path: antigravity
+run:
+  task:
+    argv: ["-p", "{task}", "--output-format", "json", "--dangerously-skip-permissions", "--mode", "auto"]
+    env:
+      DISABLE_TELEMETRY: "1"
+      GEMINI_CLI_HOME: "{root}/antigravity"
+config:
+  primary:
+    path: "antigravity/settings.json"
+    defaults:
+      enableTelemetry: false
+      trustedWorkspaces: ["{root}"]
+model:
+  gemini:
+    - target: primary
+      data:
+        model: "{model}"
+  openai:
+    - target: primary
+      data:
+        model: "{model}"
+  anthropic:
+    - target: primary
+      data:
+        model: "{model}"
