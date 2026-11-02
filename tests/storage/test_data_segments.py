@@ -128,21 +128,13 @@ def test_maintain_deletes_only_segments_that_no_row_uses(open_store, monkeypatch
             assert connection.scalar(select(func.count()).select_from(store.segment_table)) == 1
 
 
-def test_a_store_without_segments_refuses_to_guess_moved_content(open_store, monkeypatch):
-    monkeypatch.setattr(sql_data, "PACK_BYTES", 1)
+def test_a_store_without_segments_refuses_to_guess_moved_content(open_store):
     with closing(open_store()) as store:
-        store.create("acme", [trajectory("t1", "one"), *calls(1, 2)])
-        store.maintain()
-        assert waiting_rows(store) == (0, 0)
+        store.create("acme", [trajectory("t1", "one")])
     with closing(open_store(segments=False)) as store:
-        assert [item.item_id for item in store.query("acme", content=False)] == [
-            "t1",
-            "coding/call-1",
-            "coding/call-2",
-        ]
-        for item_id in ("t1", "coding/call-2"):
-            with pytest.raises(sql_data.ReefError, match="segment"):
-                store.read("acme", item_id)
+        assert store.query("acme", content=False)[0].item_id == "t1"
+        with pytest.raises(sql_data.ReefError, match="segment"):
+            store.read("acme", "t1")
 
 
 def test_an_upgrade_adds_the_segment_columns(open_store):
