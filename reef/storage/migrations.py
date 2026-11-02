@@ -223,6 +223,15 @@ def migrate_data_segments(connection: Connection, items: Table, nodes: Table) ->
         index.create(connection)
 
 
+def migrate_data_indexes(connection: Connection, items: Table) -> None:
+    """Create each index of ``items`` that the table does not have yet, such as ``data_item_by_kind``.
+
+    Run in the caller's schema transaction, after ``create_all``, which makes no index for a table that exists.
+    """
+    for index in items.indexes:
+        index.create(connection, checkfirst=True)
+
+
 def migrate_data_trajectories(connection: Connection, items: Table, nodes: Table) -> None:
     """Give each stored record item with a message list its trajectory node, in ``nodes`` (RFC #1054).
 
