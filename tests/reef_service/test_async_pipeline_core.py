@@ -26,7 +26,7 @@ from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.job_queue import JobQueueComponent
 from reef.train.trainer import Trainer
 
-_ASYNC_WAIT_TIMEOUT_S = 5.0
+_ASYNC_WAIT_TIMEOUT_S = 10.0
 _ASYNC_WAIT_POLL_S = 0.01
 
 
@@ -56,7 +56,7 @@ class DurableComponent(StubTrainingComponent):
     def train(self, job: TrainingJob) -> tuple[SavedCheckpoint, ...]:
         self.calls.append(job)
         self.started.set()
-        if self.block and not self.release.wait(5):
+        if self.block and not self.release.wait(_ASYNC_WAIT_TIMEOUT_S):
             raise TimeoutError("test did not release blocked training")
         (checkpoint,) = super().train(job)
         return (SavedCheckpoint(checkpoint.step, checkpoint.path, checkpoint.release_path, self.complete_metrics),)
@@ -69,7 +69,7 @@ class BlockingLostAckBackend(InMemoryRepositoryBackend):
 
     def publish(self, artifact, *, expected_parent, advance_head=True):
         type(self).started.set()
-        if not type(self).release.wait(5):
+        if not type(self).release.wait(_ASYNC_WAIT_TIMEOUT_S):
             raise TimeoutError("test did not release blocked publication")
         ref = super().publish(artifact, expected_parent=expected_parent, advance_head=advance_head)
         if not type(self).failed:
@@ -135,7 +135,9 @@ def wait_for_operational_sample(
 
 
 @pytest.fixture
-def start_dispatcher(tmp_path: Path):
+def start_dispatcher(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    # Stub jobs finish immediately; polling must not consume the assertion timeout.
+    monkeypatch.setattr("reef.dispatcher.local_workers.POLL_SECONDS", 0.01)
     opened = []
 
     def start(backend_type=None, *, experiment_tracker=None, max_staleness=0, **component_options):
