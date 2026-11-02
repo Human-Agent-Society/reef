@@ -9,7 +9,8 @@ See `Evolve your harness <../user-guide/evolve-your-harness.rst>`__ for the
 evolution workflow and a runnable example.
 
 A method provides ``propose`` and ``evaluate``. A custom selection plugin is
-optional:
+optional, and so is a backend subclass for a method that carries search state
+between steps:
 
 .. code:: python
 
@@ -17,6 +18,8 @@ optional:
    def evaluate(task, result) -> float: ...
    class SelectionFactory(CandidatePluginFactory):  # optional
        def build(self, candidate_backend) -> CandidateEvaluationPlugin: ...
+   class SearchBackend(CordisBackend):  # optional
+       def initial_state(self) -> Mapping[str, Any]: ...
 
 Propose a change
 ~~~~~~~~~~~~~~~~
@@ -277,6 +280,36 @@ scenario's candidate backend. Python callers can also supply a factory
 instance. A ``CandidateEvaluationPlugin`` must both evaluate and select;
 a selector alone is insufficient. Keep publication in the candidate
 selection flow so Reef can revert a rejected change.
+
+Carry search state across steps
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A method that searches remembers something between steps: GEPA an archive of
+scored candidates, Meta-Harness a population. Put that state in
+``algorithm_state``, not in a store of your own. Reef commits it in the same
+record as the composition, so the two advance together or not at all, and
+hands it back to the recipe's ``build`` on restart.
+
+To hold it there, subclass ``CordisBackend``, construct it in a
+``CordisRecipe`` subclass's ``build`` in place of the stock backend, and
+override five hooks:
+
+- ``initial_state`` seeds your key. Reef calls it only for a fresh scenario;
+  a recovered one replaces the whole mapping with the committed version.
+- ``prepare_step`` restores your object from the ``state`` argument, keeps a
+  snapshot, and puts your key back into the returned state. Snapshot first:
+  it is what ``abort_step`` restores.
+- ``settle_step`` puts your key into the settled result's state, which stays
+  speculative until the commit lands.
+- ``abort_step`` restores the snapshot when a step is dropped, so that step's
+  state never reaches the commit log.
+- ``commit_applied`` installs the committed state and writes any file mirror
+  of it. Reef calls it only after the commit record is durable; that file is a
+  mirror, never the source you read back.
+
+``recipes/gepa/backend.py`` is the smallest complete example, the five hooks
+and nothing else; ``recipes/meta_harness/backend.py`` stages a population
+beside the candidate composition and installs it only in ``commit_applied``.
 
 Untrusted input
 ~~~~~~~~~~~~~~~
