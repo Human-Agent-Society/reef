@@ -7,7 +7,7 @@ import pytest
 
 from reef.runtime.interfaces import UpstreamStatusError
 from reef.tinker.checkpoint import TinkerCheckpoint
-from reef.tinker.sampling import TinkerSDKSampler
+from reef.tinker.sampling import SampleResult, TinkerSampler, TinkerSDKSampler, sample_chat, split_reasoning
 from reef.train.tinker_backend.client import TinkerSDKClient
 from reef.train.tinker_backend.config import TinkerConfig
 from reef.train.tinker_backend.losses import ImportanceSamplingLoss, TinkerCustomLoss, TokenRow
@@ -97,6 +97,11 @@ class Service:
     def create_rest_client(self):
         return self
 
+    def get_server_capabilities(self):
+        self.events.append(("capabilities",))
+        models = [SimpleNamespace(model_name="Qwen/Qwen3-8B", max_context_length=40960)]
+        return SimpleNamespace(supported_models=models)
+
     def get_weights_info_by_tinker_path(self, path):
         self.weights_info_paths.append(path)
         # Spindle refuses a sampler path at weights_info with a 400.
@@ -183,6 +188,7 @@ def sampler(client):
     value.base_client = client.base_client
     value.tokenizer = None
     value.clients = {}
+    value.context_lengths = {}
     return value
 
 
@@ -477,3 +483,83 @@ def test_the_metrics_of_several_optimizer_steps_combine_by_their_suffixes():
         "seed": 2.0,
     }
     assert combined_step_metrics([{"loss:mean": 1.0}, {"loss:mean": 3.0}]) == {"loss:mean": 2.0}
+
+
+class TextSampler(TinkerSampler):
+    """Renders a fixed prompt and samples fixed tokens; each token id decodes to its text in ``VOCABULARY``."""
+
+    VOCABULARY = {
+        1: "<|im_start|>assistant\n",
+        2: "<think>\n",
+        3: "<think>\n\n</think>\n\n",
+        10: "plan",
+        11: "</think>",
+        12: '\n\n{"commands": []}',
+    }
+
+    def __init__(self, prompt, reply, window):
+        self.prompt, self.reply, self.window = prompt, reply, window
+        self.params = None
+
+    def render(self, messages, *, template_kwargs):
+        return list(self.prompt)
+
+    def decode(self, tokens):
+        return "".join(self.VOCABULARY[token] for token in tokens)
+
+    def sample(self, sampler_path, prompt, params, *, topk_logprobs):
+        self.params = dict(params)
+        return SampleResult(tuple(self.reply), tuple(-0.1 for _ in self.reply), "stop")
+
+    def close(self):
+        return
+
+    def context_window(self):
+        return self.window
+
+
+def chat(sampler, **options):
+    payload = {"model": "m", "messages": [{"role": "user", "content": "go"}], **options}
+    return sample_chat(sampler, None, payload, model="m", runtime_load_id="start")
+
+
+def test_a_request_without_max_tokens_may_use_the_rest_of_the_context():
+    # An agent such as terminus-2 sends no max_tokens; a fixed 1024 cut its longer replies off mid-answer.
+    sampler = TextSampler([1, 3], [12], window=4096)
+    chat(sampler)
+    assert sampler.params["max_tokens"] == 4096 - 2
+    chat(sampler, max_tokens=50)
+    assert sampler.params["max_tokens"] == 50, "a request's own limit wins"
+    unknown = TextSampler([1, 3], [12], window=None)
+    chat(unknown)
+    assert unknown.params["max_tokens"] == 1024, "a sampler that does not know the context keeps the old default"
+
+
+def test_a_prompt_that_fills_the_context_is_a_context_length_error():
+    with pytest.raises(UpstreamStatusError, match=r"^context_length_exceeded") as refused:
+        chat(TextSampler([1, 3, 3, 3], [12], window=4))
+    assert refused.value.status == 400
+
+
+def test_the_sdk_sampler_reads_the_models_context_length_once(sampler):
+    assert sampler.context_window() == 40960
+    assert sampler.context_window() == 40960
+    assert [event for event in sampler._service.events if event[0] == "capabilities"] == [("capabilities",)]
+
+
+def test_thinking_rides_reasoning_content_and_the_answer_is_the_content():
+    thinking = chat(TextSampler([1, 2], [10, 11, 12], window=4096))
+    message = thinking["choices"][0]["message"]
+    assert message == {"role": "assistant", "content": '{"commands": []}', "reasoning_content": "plan"}
+    assert thinking["training"]["tokens"] == [1, 2, 10, 11, 12], "the capture keeps every sampled token"
+    assert thinking["training"]["response_message"] == message
+    direct = chat(TextSampler([1, 3], [12], window=4096))["choices"][0]["message"]
+    assert direct == {"role": "assistant", "content": '\n\n{"commands": []}'}, "thinking off: no reasoning field"
+
+
+def test_reasoning_split_follows_sglangs_qwen3_parser():
+    assert split_reasoning("plan</think>\n\nanswer", is_pre_opened=True) == ("plan", "answer")
+    assert split_reasoning("<think>plan</think>answer", is_pre_opened=False) == ("plan", "answer")
+    assert split_reasoning("plan<tool_call>{}", is_pre_opened=True) == ("plan", "<tool_call>{}")
+    assert split_reasoning("cut off while thinking", is_pre_opened=True) == ("cut off while thinking", "")
+    assert split_reasoning("answer", is_pre_opened=False) == (None, "answer")
