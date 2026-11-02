@@ -335,11 +335,11 @@ def failed_training_step(status: Mapping[str, Any], step: int) -> dict[str, Any]
             not isinstance(failure, Mapping)
             or not isinstance(failure.get("reason"), str)
             or not failure["reason"]
-            or not isinstance(failure.get("artifact_ids", failure.get("release_ids")), list)
+            or not isinstance(failure.get("artifact_ids"), list)
         ):
             raise RuntimeError(f"Reef returned invalid processor status: {status!r}")
         if failure.get("step") == step:
-            return {**failure, "artifact_ids": failure.get("artifact_ids", failure.get("release_ids"))}
+            return dict(failure)
     return None
 
 

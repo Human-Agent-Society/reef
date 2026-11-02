@@ -82,10 +82,11 @@ class TrajectorySample:
             return named
         records = self.metadata.get("records")
         last = records[-1] if isinstance(records, list) and records else None
-        payload = last.get("payload") if isinstance(last, Mapping) else None
-        recorded = last.get("artifact_id") if isinstance(last, Mapping) else None
-        if recorded is None and isinstance(payload, Mapping):
-            recorded = payload.get("artifact_id")
+        if not isinstance(last, Mapping):
+            return None
+        payload = last.get("payload")
+        # A trajectory stored before records carried ``artifact_id`` names the artifact in the payload only.
+        recorded = last.get("artifact_id") or (payload.get("artifact_id") if isinstance(payload, Mapping) else None)
         return recorded if isinstance(recorded, str) and recorded else None
 
     def with_metadata(self, **fields: Any) -> TrajectorySample:

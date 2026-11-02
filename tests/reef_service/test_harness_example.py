@@ -24,6 +24,7 @@ from tests.support.config_helpers import load_harness_deployment as load_config
 from tests.support.harness_service import backend_step, seed_root
 from tests.support.harness_steps import COMPONENT, TreeReleases, harness_backend
 
+from reef.core.snapshot import SnapshotRef
 from reef.evaluation.activation import AlwaysActivate
 from reef.evaluation.harness import NoEvaluationPolicy
 from reef.harness.adapters import get_adapter
@@ -39,6 +40,7 @@ from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.recipe.registry import build_named_recipe
 from reef.service.assembly import _serving_recipe, _upstream_runtime
 from reef.service.deploy.service_config import service_config_from_mapping
+from reef.storage.commits import CommitRecord
 from reef.storage.sqlite import SQLiteRecordStore
 from reef.train.backend import ComponentArtifacts
 from reef.train.harness_backend.state import HarnessState
@@ -571,14 +573,37 @@ def session_events(session: str, release: str, stages, tool: str | None = None) 
 
 
 def write_commits(directory: Path, *commits: dict) -> None:
-    """Replace the commits of one scenario database with the given JSON objects, at steps 1, 2, ..."""
+    """Replace the commits of one scenario database with stored records at steps 1, 2, ...
+
+    Each of ``commits`` gives the fields that differ from a complete record. A commit with a legacy
+    ``artifact_ref`` is stored in the ``reef-commit/6`` format.
+    """
+    stored = []
+    for commit in commits:
+        training = commit.get("operation", "training") == "training"
+        base = CommitRecord(
+            scenario="x",
+            step=commit["step"],
+            snapshot=SnapshotRef("storage:base", None),
+            checkpoint=training,
+            algorithm_state={} if training else None,
+            high_water_sequence=0,
+            high_water_offset=0,
+        ).to_dict()
+        if "artifact_ref" in commit:
+            base.pop("snapshot")
+            base["record"] = "reef-commit/6"
+            commit = {**commit, "artifact_ref": {"kind": "artifact", "content_id": "c", **commit["artifact_ref"]}}
+        if "snapshot" in commit:
+            commit = {**commit, "snapshot": {"kind": "snapshot", **commit["snapshot"]}}
+        stored.append({**base, **commit})
     database = directory / "x.sqlite3"
     SQLiteRecordStore(database).close()
     with closing(sqlite3.connect(database)) as connection, connection:
         connection.execute("DELETE FROM scenario_commit")
         connection.executemany(
             "INSERT INTO scenario_commit (step, commit_json) VALUES (?, ?)",
-            [(step, json.dumps(commit)) for step, commit in enumerate(commits, start=1)],
+            [(step, json.dumps(commit)) for step, commit in enumerate(stored, start=1)],
         )
 
 
@@ -712,6 +737,8 @@ def test_replay_uses_component_ids_from_current_commits_and_native_events(
         "step": 2,
         "recorded_at": 1060.0,
         "operation": "activate",
+        # An activation that carries the manifest names the component it changed.
+        **({"component": "harness"} if identity_field == "components" else {}),
         "snapshot": {"revision": "storage:seed", "parent_revision": None},
         identity_field: {"harness": "artifact:seed", "weights": "artifact:weights"},
     }

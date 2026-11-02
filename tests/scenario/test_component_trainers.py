@@ -204,7 +204,7 @@ def _training_components(scenario: Scenario) -> list[str]:
     """The component of each training job that ended, newest first: one per step."""
     return [
         row["component"]
-        for row in scenario.releases()
+        for row in scenario.snapshot_rows()
         if row["operation"] == "training"
         and (row.get("metrics") or {}).get("training_job", {}).get("event") in ("finished", "failed")
     ]
@@ -1053,7 +1053,7 @@ def test_an_activation_of_the_creation_after_a_rejected_first_step(dispatchers: 
         _append_records(scenario, step)
         assert _commit_step(scenario, HARNESS) is not None
     assert scenario.current_artifact_ref().revision != creation
-    assert next(row for row in scenario.releases() if row["operation"] == "creation")["restorable"] is True
+    assert next(row for row in scenario.snapshot_rows() if row["operation"] == "creation")["restorable"] is True
     scenario.activate(component_id(scenario, scenario.repository.start_artifact.revision, HARNESS), HARNESS)
     assert component_files(scenario, scenario.current_artifact_ref())[HARNESS] == "harness seed"
 
@@ -1201,7 +1201,7 @@ def test_each_components_step_reaches_the_tracker_under_its_name(dispatchers: _D
     assert [event.context.component for event in tracker.events] == [HARNESS] * 3 + [WEIGHTS] * 3
     assert [event.context.backend for event in tracker.events] == [HARNESS] * 3 + [WEIGHTS] * 3
     assert [event.context.step for event in tracker.events] == [1, 2, 3, 4, 5, 6]
-    assert [row.get("component") for row in scenario.releases()] == [WEIGHTS] * 3 + [HARNESS] * 3 + [None]
+    assert [row.get("component") for row in scenario.snapshot_rows()] == [WEIGHTS] * 3 + [HARNESS] * 3 + [None]
 
 
 @pytest.mark.unit

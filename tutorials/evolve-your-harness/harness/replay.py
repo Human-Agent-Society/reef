@@ -16,6 +16,8 @@ import sys
 from contextlib import closing
 from pathlib import Path
 
+from reef.storage.commits import CommitRecord
+
 TUTORIAL = Path(__file__).resolve().parent.parent
 WORK = TUTORIAL / "work"
 RELEASE_FILE = ".reef-harness-release"
@@ -74,31 +76,28 @@ def collect(work: Path) -> dict:
     for path in sorted((work / "agent-record").glob("*.sqlite3")) if (work / "agent-record").is_dir() else []:
         with closing(sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)) as connection:
             rows = connection.execute("SELECT commit_json FROM scenario_commit ORDER BY step").fetchall()
-        commits.extend(json.loads(text) for (text,) in rows)
-    commits.sort(key=lambda row: row.get("recorded_at") or 0)
+        # ``CommitRecord`` reads every stored record format, also the formats of older runs.
+        commits.extend(CommitRecord.from_dict(json.loads(text)) for (text,) in rows)
+    commits.sort(key=lambda commit: commit.recorded_at)
     releases = [{"artifact_id": "seed", "step": 0, "kind": "seed", "files": seed_files, "diff": None, "result": None}]
     previous = seed_files
     # The tree of each release by id, so an activation or a new training start shows the tree it names.
     files_by_snapshot: dict[str, dict] = {"seed": seed_files}
-    for row in commits:
-        metrics = row.get("metrics") or {}
-        operation = row.get("operation")
-        legacy_ref = row.get("artifact_ref") or {}
-        snapshot = row.get("snapshot") or {}
-        revision = snapshot.get("revision", legacy_ref.get("release_id"))
-        parent_revision = snapshot.get("parent_revision", legacy_ref.get("parent_release_id"))
-        artifact_id = (row.get("selection") or row.get("components") or {}).get("harness")
-        if artifact_id is None and legacy_ref:
-            artifact_id = legacy_ref.get("release_id")
+    for commit in commits:
+        metrics = commit.metrics or {}
+        operation = commit.operation
+        revision, parent_revision = commit.snapshot.revision, commit.snapshot.parent_revision
+        # A record of one flat component names its artifact by its storage revision.
+        artifact_id = (commit.artifact_ids or {}).get("harness", revision)
         if operation in ("activate", "train_from"):
             # Not a step: a person activated a release or set the training start. The row carries no state.
             named = files_by_snapshot.get(revision, previous)
             releases.append(
                 {
                     "artifact_id": artifact_id,
-                    "step": row.get("step"),
+                    "step": commit.step,
                     "kind": operation,
-                    "recorded_at": row.get("recorded_at"),
+                    "recorded_at": commit.recorded_at,
                     "patch": [],
                     "result": None,
                     "files": named,
@@ -120,10 +119,10 @@ def collect(work: Path) -> dict:
         releases.append(
             {
                 "artifact_id": artifact_id if published else None,
-                "step": row.get("step"),
+                "step": commit.step,
                 "kind": "published" if published else ("skipped" if metrics.get("skipped") else "rejected"),
                 "skipped": metrics.get("skipped"),
-                "recorded_at": row.get("recorded_at"),
+                "recorded_at": commit.recorded_at,
                 "summary": metrics.get("method_summary"),
                 "patch": sorted(patch),
                 "result": {

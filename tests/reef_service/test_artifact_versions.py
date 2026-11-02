@@ -316,7 +316,7 @@ def test_older_versions_and_version_catalog_survive_restart(tmp_path) -> None:
 
     restarted, _ = restart(tmp_path, backend_factory)
     recovered = restarted.get_or_create_scenario("math")
-    assert [version["operation"] for version in recovered.releases()] == [*(["training"] * 9), "creation"]
+    assert [version["operation"] for version in recovered.snapshot_rows()] == [*(["training"] * 9), "creation"]
     assert recovered.artifacts() == scenario.artifacts()
 
 

@@ -151,7 +151,8 @@ class ReefGatewayMiddleware(AsgiApp):
                     if lowered.endswith(RECORD_ID_RESPONSE_HEADER):
                         record_id = bytes(raw_value).decode("latin-1")
                     elif lowered.endswith(ARTIFACT_ID_RESPONSE_HEADER):
-                        artifact_id = bytes(raw_value).decode("latin-1")
+                        # An empty header names no artifact; the journal must not fail on the response path.
+                        artifact_id = bytes(raw_value).decode("latin-1") or None
             elif message.get("type") == "http.response.body":
                 body_tail.extend(message.get("body", b""))
             await send(message)

@@ -159,7 +159,7 @@ def test_release_reads_remain_live_during_local_training(local_scenario) -> None
     scenario.commit(_prepare(scenario))
     _finish(scenario)
     current_ref = scenario.current_artifact_ref()
-    expected_releases = scenario.releases()
+    expected_releases = scenario.snapshot_rows()
     backend.block = True
     _queue_batch(scenario, 2)
     writer_started = Event()
@@ -176,7 +176,7 @@ def test_release_reads_remain_live_during_local_training(local_scenario) -> None
             assert writer_started.wait(2), "writer did not start"
             # A queued writer must wait on the operation lock without first
             # taking the publication lock and starving the read-side callers.
-            catalog = executor.submit(scenario.releases)
+            catalog = executor.submit(scenario.snapshot_rows)
             latest = executor.submit(scenario.release_queries.artifact_with_metrics)
             historical = executor.submit(scenario.release_queries.artifact_with_metrics, initial_ref.revision)
             version = executor.submit(scenario.release_queries.artifact_for_version, current_ref.revision)
@@ -237,7 +237,7 @@ def test_release_reads_wait_for_complete_publication(local_scenario, monkeypatch
 
     def read_catalog():
         readers_started[0].set()
-        return scenario.releases()
+        return scenario.snapshot_rows()
 
     def read_latest():
         readers_started[1].set()
@@ -280,7 +280,7 @@ def test_release_reads_wait_for_complete_publication(local_scenario, monkeypatch
     # The listing marks the active artifact; an activation adds no row.
     assert len(catalog) == (9 if operation == "commit" else 6)
     active = catalog[0] if operation == "commit" else catalog[-1]
-    assert active["release_id"] == current_ref.revision
+    assert active["snapshot"].revision == current_ref.revision
     assert active["operation"] == ("training" if operation == "commit" else "creation")
     assert sum(row["active"] for row in catalog) == 1 and active["active"] is True
     artifact, metrics = latest

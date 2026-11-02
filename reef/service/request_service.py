@@ -18,7 +18,7 @@ from typing import Any
 
 from reef.artifact.artifact import Artifact, ArtifactConflict, ArtifactError, ArtifactNotFound
 from reef.core.errors import ReefError
-from reef.core.records_types import AgentRecord, RequestType
+from reef.core.records_types import AgentRecord, RequestType, decode_record_artifact_id
 from reef.core.requirements import required_by
 from reef.dispatcher import Dispatcher
 from reef.harness.adapters.descriptor import AdapterDescriptor
@@ -173,6 +173,7 @@ class RequestService:
             payload=with_request_tags(normalized, parsed),
             agent_record_id=record_id,
             references=references,
+            artifact_id=decode_record_artifact_id(None, normalized),
         )
 
     def harness_manifest(
@@ -696,7 +697,6 @@ class RequestService:
         payload: Mapping[str, Any],
         *,
         agent_record_id: str | None = None,
-        artifact_id: str | None = None,
     ) -> AgentRecord:
         normalized_payload, references = normalize_request_payload(parsed.request_type, payload)
         normalized_payload = with_request_tags(normalized_payload, parsed)
@@ -706,7 +706,7 @@ class RequestService:
             payload=normalized_payload,
             agent_record_id=agent_record_id,
             references=references,
-            artifact_id=artifact_id,
+            artifact_id=decode_record_artifact_id(None, normalized_payload),
         )
         try:
             return self._dispatcher.accept_record(item)

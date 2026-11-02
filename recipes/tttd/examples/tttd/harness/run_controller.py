@@ -150,7 +150,7 @@ class ReefTrainingStatusClient(TrainingStatusReader):
                 raise RuntimeError(f"Reef status for scenario {scenario!r} has an invalid processor failure")
             failed_step = failure.get("step")
             reason = failure.get("reason")
-            versions = failure.get("artifact_ids", failure.get("release_ids"))
+            versions = failure.get("artifact_ids")
             if (
                 not isinstance(failed_step, int)
                 or isinstance(failed_step, bool)

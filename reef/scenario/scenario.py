@@ -426,17 +426,10 @@ class Scenario:
         """The newest durable commit made by ``component``'s trainer, read from the commit history without waiting on a commit."""
         return self._committer.last_record_for(component)
 
-    def releases(self) -> tuple[dict[str, Any], ...]:
-        """Legacy release catalog serialization, newest first; new callers use artifacts or artifact selections."""
+    def snapshot_rows(self) -> tuple[dict[str, Any], ...]:
+        """One row per committed snapshot, with its ``SnapshotRef`` (``ScenarioReleases.snapshot_rows``)."""
         with self.release_queries.publication_lock:
-            return tuple(
-                {
-                    **{key: value for key, value in row.items() if key != "snapshot"},
-                    "release_id": row["snapshot"].revision,
-                    "parent_release_id": row["snapshot"].parent_revision,
-                }
-                for row in self.release_queries.snapshot_rows(self._committer.step)
-            )
+            return tuple(self.release_queries.snapshot_rows(self._committer.step))
 
     def artifact_rows(self) -> tuple[dict[str, Any], ...]:
         """Internal artifact catalog, including the storage locators needed to materialize each artifact."""

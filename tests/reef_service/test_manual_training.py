@@ -735,7 +735,7 @@ def test_a_stored_hybrid_mode_loads_the_scenario_with_the_recipe_default(tmp_pat
 def _committed_row(dispatcher, text):
     """The metrics of the step that answered the instruction ``text``, newest first; a job's submission names the
     instruction too, and is passed over."""
-    for row in dispatcher.get_or_create_scenario("s").releases():
+    for row in dispatcher.get_or_create_scenario("s").snapshot_rows():
         metrics = row.get("metrics") or {}
         if metrics.get("training_job", {}).get("event") == "submitted":
             continue
@@ -1019,7 +1019,7 @@ class _InstructionJobRecipe(WeightTrainingRecipe):
 
 def _job_events(dispatcher):
     """The (instruction text, job event) of every committed row, oldest first."""
-    rows = reversed(dispatcher.get_or_create_scenario("s").releases())
+    rows = reversed(dispatcher.get_or_create_scenario("s").snapshot_rows())
     return [
         (metrics.get("training_request", {}).get("text"), metrics["training_job"]["event"])
         for row in rows
@@ -1062,7 +1062,7 @@ def test_a_job_trainer_runs_each_instruction_as_a_job_and_a_failed_job_does_not_
         (job.data.request.text, [source_record_id(sample) for sample in job.data.samples])
         for job in component.submitted
     ] == [("one", ["a"]), ("two", ["b"])]
-    releases = dispatcher.get_or_create_scenario("s").releases()
+    releases = dispatcher.get_or_create_scenario("s").snapshot_rows()
     failed = next(
         row["metrics"] for row in releases if row.get("metrics", {}).get("training_job", {}).get("event") == "failed"
     )

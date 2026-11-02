@@ -216,19 +216,12 @@ def requires_of(items):
 
 
 def installed_artifact():
-    """Read the installed artifact ID; resolve older installation metadata at the service boundary."""
+    """The ID of the installed artifact, or None when nothing is installed. Install again to replace an older install."""
     try:
         metadata = json.loads((INSTALL_ROOT / RELEASE_FILE).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    if metadata.get("artifact_id") is not None:
-        return metadata["artifact_id"]
-    revision = metadata.get("release_id")
-    if revision is None:
-        return None
-    query = urlencode({"form": "source", "release_id": revision})
-    manifest = service_client().get(f"/reef/harness?{query}", extra_headers=scenario_headers())
-    return manifest["artifact_id"]
+    return metadata.get("artifact_id")
 
 
 def unmet(items):
@@ -456,7 +449,7 @@ def demo(mode):
     record_path = WORK / f"{mode}-{stamp}.json"
     record = {"mode": mode, "model": MODEL, "scenario": SCENARIO, "request": text, "started_at": time.time()}
     installed_before = installed_artifact()
-    say(f"installed before the ask: release {installed_before}")
+    say(f"installed before the ask: artifact {installed_before}")
     before = len(training_rows(catalog_rows(client)))
     started = time.monotonic()
     record["request_id"] = ask(text)

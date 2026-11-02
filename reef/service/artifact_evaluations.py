@@ -71,13 +71,17 @@ ACTIVATION_RETRY_SECONDS = 1.0
 
 @dataclass(frozen=True)
 class NewArtifact:
-    """An artifact that a commit made: the scenario, the artifact's ID, and the component whose artifact it is, or
-    None for a scenario with one component. ``NewArtifacts`` makes it; ``ArtifactEvaluations``
-    evaluates it with the scenario's settings."""
+    """An artifact that a training commit published: the scenario, the artifact's ID, the component whose artifact
+    it is (None for a scenario with one component), and ``revision``, the storage revision of the commit's snapshot.
+
+    ``NewArtifacts`` makes it. ``ArtifactEvaluations`` evaluates it with the scenario's settings when the commit
+    made the artifact, and skips a component that the snapshot carried from an earlier commit.
+    """
 
     scenario: str
     artifact_id: str
     component: str | None
+    revision: str
 
 
 class NewArtifacts(RecordObserver):
@@ -97,15 +101,16 @@ class NewArtifacts(RecordObserver):
         # names one that exists, and a person who imports an artifact decides what to do with it.
         if not commit.trained_artifact:
             return
+        revision = commit.snapshot.revision
         selected = commit.artifact_ids
         if selected is None:
             # Legacy flat commits used their storage revision as their artifact identity.
-            self.queue.put(NewArtifact(commit.scenario, commit.snapshot.revision, commit.component))
+            self.queue.put(NewArtifact(commit.scenario, revision, commit.component, revision))
             return
-        changed = selected if commit.component is None else {commit.component: selected[commit.component]}
-        for name, artifact_id in changed.items():
+        names = tuple(selected) if commit.component is None else (commit.component,)
+        for name in names:
             component = None if len(selected) == 1 and commit.component is None else name
-            self.queue.put(NewArtifact(commit.scenario, artifact_id, component))
+            self.queue.put(NewArtifact(commit.scenario, selected[name], component, revision))
 
     def close(self) -> None:
         self.queue.put(None)
@@ -343,9 +348,20 @@ class ArtifactEvaluations:
                 logger.exception("could not queue the evaluation of artifact %s of %s", new.artifact_id, new.scenario)
 
     def evaluate_new(self, new: NewArtifact) -> StoredEvaluation | None:
-        """Queue the evaluation of ``new`` with its scenario's settings; None when the scenario has none."""
+        """Queue the evaluation of ``new`` with its scenario's settings.
+
+        Return None when the scenario has no settings, or when the artifact catalog lists ``new`` at an earlier
+        snapshot: the commit carried that component, and it was evaluated when it was made.
+        """
         stored = self.dispatcher.stored_settings(new.scenario).artifact_evaluation
         if stored is None:
+            return None
+        with self.dispatcher.locked_scenario(new.scenario) as current:
+            made = any(
+                row["artifact_id"] == new.artifact_id and row["snapshot"].revision == new.revision
+                for row in current.artifact_rows()
+            )
+        if not made:
             return None
         settings = ArtifactEvaluationSettings.from_json(stored)
         if settings.component is None and new.component is not None:

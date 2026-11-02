@@ -9,6 +9,7 @@ from types import MappingProxyType
 from typing import Any, Literal
 
 from reef.core.evaluation import UpdateCandidate
+from reef.harness.tree.tree import normalized_path, require_text
 
 
 @dataclass(frozen=True)
@@ -56,9 +57,8 @@ class ArtifactTextFiles:
     """One committed component artifact's ID and text files.
 
     Values: ``artifact_id`` is the non-empty opaque ID of the component artifact; ``files`` maps
-    each relative POSIX path to its decoded text. Paths have nonempty segments,
-    with no dot, dot-dot, or backslash segments. The mapping is immutable
-    and excludes repository metadata.
+    each tree path (``reef.harness.tree.normalized_path``) to its UTF-8 text. The mapping is
+    immutable and excludes repository metadata.
     Purpose: ``CommittedArtifacts`` makes it; a harness step builds its
     head from ``files``.
     """
@@ -70,17 +70,9 @@ class ArtifactTextFiles:
         if not isinstance(self.artifact_id, str) or not self.artifact_id:
             raise ValueError("ArtifactTextFiles.artifact_id must be a non-empty string")
         if not isinstance(self.files, Mapping):
-            raise ValueError("artifact text files must be a mapping")
-        for path, text in self.files.items():
-            if (
-                not isinstance(path, str)
-                or not path
-                or "\\" in path
-                or any(part in ("", ".", "..") for part in path.split("/"))
-                or not isinstance(text, str)
-            ):
-                raise ValueError("artifact text files map relative paths to strings")
-        object.__setattr__(self, "files", MappingProxyType(dict(self.files)))
+            raise TypeError("artifact text files must be a mapping")
+        files = {normalized_path(path): require_text(path, text) for path, text in self.files.items()}
+        object.__setattr__(self, "files", MappingProxyType(files))
 
 
 class CommittedArtifacts(ABC):

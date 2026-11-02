@@ -53,8 +53,6 @@ class AgentRecord:
     artifact_id: str | None = None
 
     def __post_init__(self) -> None:
-        if self.artifact_id is None:
-            object.__setattr__(self, "artifact_id", decode_record_artifact_id(None, self.payload))
         if self.artifact_id is not None and (not isinstance(self.artifact_id, str) or not self.artifact_id):
             raise ValueError("a record artifact_id must be a nonempty string or null")
 
