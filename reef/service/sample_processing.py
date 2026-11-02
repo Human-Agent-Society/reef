@@ -29,6 +29,12 @@ def processing_item(item: WorkItem) -> dict[str, JsonValue]:
     }
 
 
+def get_processing(dispatcher: Dispatcher, scenario: str, task_id: str) -> dict[str, JsonValue] | None:
+    """Return one task of the scenario, or None when the task is unknown or belongs to another scenario."""
+    item = dispatcher.queue.get(SAMPLES_QUEUE, task_id)
+    return None if item is None or item.scenario != scenario else processing_item(item)
+
+
 def list_processing(
     dispatcher: Dispatcher,
     scenario: str,

@@ -2558,7 +2558,7 @@ Times are Unix seconds. Unavailable fields are null.
 Processing counts describe the completed attempt only; they exclude earlier failed attempts.
 ``records_read`` includes records that replay read but the pipeline ignored.
 ``samples_created`` counts new inserts, excluding duplicate writes.
-Legacy results and stores without counting support report null counts.
+Legacy results report null counts.
 ``changed`` can also mean a new training instruction, without new samples.
 ``background=true`` means work remained active when the task finished; later tasks check it.
 

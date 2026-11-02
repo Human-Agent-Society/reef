@@ -344,10 +344,7 @@ class WorkQueue(ABC):
         Exclude sequences at or above ``before_sequence`` when given. The limit is 1 to 1000;
         the cursor is positive. Raise ValueError for an invalid state, limit, or cursor.
         """
-        if state is not None and state not in WORK_STATES:
-            raise ValueError("unknown work state")
-        if not 1 <= limit <= 1000 or (before_sequence is not None and before_sequence < 1):
-            raise ValueError("limit must be 1 to 1000 and before must be positive")
+        check_page(state, before_sequence, limit)
         rows = self.items(queue, scenario=scenario)
         return tuple(
             item
@@ -362,6 +359,14 @@ class WorkQueue(ABC):
         for item in self.items(queue, scenario=scenario):
             counts[item.state] += 1
         return counts
+
+
+def check_page(state: str | None, before_sequence: int | None, limit: int) -> None:
+    """Raise ValueError for an unknown state, a limit outside 1 to 1000, or a cursor below 1 (``WorkQueue.page``)."""
+    if state is not None and state not in WORK_STATES:
+        raise ValueError("unknown work state")
+    if not 1 <= limit <= 1000 or (before_sequence is not None and before_sequence < 1):
+        raise ValueError("limit must be 1 to 1000 and before must be positive")
 
 
 def clock(now: float | None) -> float:
@@ -423,6 +428,7 @@ __all__ = [
     "WorkLeaseLost",
     "WorkQueue",
     "WorkState",
+    "check_page",
     "clock",
     "is_finite_time",
 ]

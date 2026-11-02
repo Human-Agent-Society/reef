@@ -322,8 +322,8 @@ def test_record_samples_belong_to_their_trainer_and_consume_their_records(storag
         samples = session.samples
         samples.add_trajectories((("upload", trajectory("u")),))
         grid = (("a:r1:0", trajectory("a1")), ("a:r2:0", trajectory("a2")))
-        assert samples.save_record_samples("a", "a:r1", ("r1", "i1", "r2"), grid) == (True, 2)
-        assert samples.save_record_samples("a", "a:r1", ("r1", "i1", "r2"), grid) == (False, 0)
+        assert samples.add_record_samples("a", "a:r1", ("r1", "i1", "r2"), grid) == 2
+        assert samples.add_record_samples("a", "a:r1", ("r1", "i1", "r2"), grid) == 0
         samples.add_record_samples("b", None, ("r3",), (("b:r3:0", trajectory("b")),))
         with pytest.raises(SampleConflict, match="other content"):
             samples.add_record_samples("a", "a:r1", ("r1",), (("a:r1:0", trajectory("other")),))

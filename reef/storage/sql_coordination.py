@@ -84,6 +84,7 @@ from reef.storage.work_queue import (
     WorkItem,
     WorkLeaseLost,
     WorkQueue,
+    check_page,
     clock,
 )
 
@@ -1278,10 +1279,7 @@ class SQLWorkQueue(WorkQueue):
         before_sequence: int | None = None,
         limit: int = 50,
     ) -> tuple[WorkItem, ...]:
-        if state is not None and state not in WORK_STATES:
-            raise ValueError("unknown work state")
-        if not 1 <= limit <= 1000 or (before_sequence is not None and before_sequence < 1):
-            raise ValueError("limit must be 1 to 1000 and before must be positive")
+        check_page(state, before_sequence, limit)
         conditions = [self.table.c.queue == queue, self.table.c.scenario == scenario]
         if state is not None:
             conditions.append(self.table.c.state == state)

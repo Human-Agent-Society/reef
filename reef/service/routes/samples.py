@@ -4,10 +4,9 @@ import asyncio
 
 from aiohttp import web
 
-from reef.record2sample.service import SAMPLES_QUEUE
 from reef.service.request_service import RequestService
 from reef.service.routes.payload import read_object
-from reef.service.sample_processing import list_processing, processing_item
+from reef.service.sample_processing import get_processing, list_processing
 from reef.service.samples import MAX_SAMPLES_PER_PAGE, change_buffer, list_samples, read_buffer
 
 
@@ -43,10 +42,12 @@ def register_sample_reads(app: web.Application, *, request_service: RequestServi
         return web.json_response(listing)
 
     async def processing_detail(request: web.Request) -> web.Response:
-        item = await asyncio.to_thread(dispatcher.queue.get, SAMPLES_QUEUE, request.match_info["task_id"])
-        if item is None or item.scenario != request.match_info["scenario"]:
+        task = await asyncio.to_thread(
+            get_processing, dispatcher, request.match_info["scenario"], request.match_info["task_id"]
+        )
+        if task is None:
             raise web.HTTPNotFound(text="sample processing task not found")
-        return web.json_response(processing_item(item))
+        return web.json_response(task)
 
     app.router.add_get("/reef/scenarios/{scenario}/samples", samples)
     app.router.add_get("/reef/scenarios/{scenario}/sample-processing", processing)
