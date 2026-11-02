@@ -3,10 +3,9 @@ Troubleshooting
 
 Symptoms, their usual cause, and the fix. Each entry names where to look.
 
-.. page::
-   :for: anyone whose deployment, request, or learning step did not do what they expected
-   :needs: access to the deployment's logs, ``reef.run-dir/*.log`` (``.reef/run/`` by default; the tutorials use ``work/reef.log``)
-   :outcome: the cause found, or the right log to read
+:For: anyone whose deployment, request, or learning step did not do what they expected
+:Before you start: access to the deployment's logs, ``reef.run-dir/*.log`` (``.reef/run/`` by default; the tutorials use ``work/reef.log``)
+:You will have: the cause found, or the right log to read
 
 Starting Reef
 -------------

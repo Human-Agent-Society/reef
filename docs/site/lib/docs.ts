@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import langJson from "@shikijs/langs/json";
@@ -6,7 +6,20 @@ import langPython from "@shikijs/langs/python";
 import langShellscript from "@shikijs/langs/shellscript";
 import langShellsession from "@shikijs/langs/shellsession";
 import langYaml from "@shikijs/langs/yaml";
-import { RstToHtmlCompiler } from "rst-compiler";
+import {
+  RstDefinitionList,
+  RstDefinitionListItem,
+  type RstDirective,
+  type RstDirectiveGenerator,
+  RstFieldList,
+  RstFieldListItem,
+  type RstGeneratorState,
+  type RstNode,
+  type RstNodeGenerator,
+  RstParagraph,
+  RstStrongEmphasis,
+  RstToHtmlCompiler,
+} from "rst-compiler";
 import { createHighlighterCoreSync } from "shiki/core";
 import { createJavaScriptRegexEngine } from "shiki/engine/javascript";
 
@@ -246,13 +259,6 @@ function highlightedHtml(code: string, language: string) {
   return html.replace(/\n/g, "&#10;");
 }
 
-// Inline markup inside figure labels and reference rows: the directive bodies
-// below are raw text, so the only markup honored is the double-backquote
-// literal, converted after HTML-escaping the rest of the line.
-function inlineHtml(value: string) {
-  return escapeHtml(value).replace(/``([^`]+)``/g, '<code class="literal">$1</code>');
-}
-
 // Connector glyphs are fixed-size inline SVG, never authored characters: they
 // do not scale with any viewBox, so the ASCII-only source rule and the
 // body-size label rule both hold. CSS rotates them when a figure stacks.
@@ -268,98 +274,141 @@ function arrowSvg(kind: "next" | "loop") {
   );
 }
 
-// `.. flow::` is the lifecycle figure: one stage per body line as
-// `Title :: caption` (caption optional, `Title*` for the emphasis tint), and
-// `:loop:` draws the labeled return arrow. Stages are DOM text in flex cards,
-// so labels hold their size and the strip reflows to a vertical stack on
-// narrow screens instead of scaling down the way generated SVG text does.
-function flowHtml(node: { rawBodyText: string; config: { getField(name: string): string | null } | null }) {
-  const stages = node.rawBodyText
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .map((line) => {
-      const [head, ...rest] = line.split("::");
-      const caption = rest.join("::").trim();
-      const emphasized = head.trim().endsWith("*");
-      const title = emphasized ? head.trim().slice(0, -1).trim() : head.trim();
-      const captionHtml = caption ? `<span class="fig-flow-caption">${inlineHtml(caption)}</span>` : "";
-      return (
-        `<div class="fig-flow-stage${emphasized ? " fig-emphasis" : ""}">` +
-        `<span class="fig-flow-title">${inlineHtml(title)}</span>${captionHtml}</div>`
-      );
-    });
-  const loop = node.config?.getField("loop");
-  const loopHtml = loop
-    ? `<div class="fig-flow-loop">${arrowSvg("loop")}<span>${inlineHtml(loop)}</span></div>`
-    : "";
-  return (
-    `<figure class="fig fig-flow"><div class="fig-flow-track">${stages.join(arrowSvg("next"))}</div>` +
-    `${loopHtml}</figure>`
-  );
+// The items of the definition lists in a container, and its fields; an Error
+// naming the page for any other child, which the site would not show.
+function containerParts(node: RstDirective, sourcePath: string) {
+  const items: RstDefinitionListItem[] = [];
+  const fields: RstFieldListItem[] = [];
+  for (const child of node.children) {
+    if (child instanceof RstDefinitionList) {
+      items.push(...child.children.filter((item) => item instanceof RstDefinitionListItem));
+    } else if (child instanceof RstFieldList) {
+      fields.push(...child.children.filter((item) => item instanceof RstFieldListItem));
+    } else {
+      throw new Error(`${sourcePath}: a ${node.initContentText} container holds a definition list, not ${child.nodeType}`);
+    }
+  }
+  return { items, fields };
 }
 
-// `.. config::` is reference rows: `key | description` or
-// `key | default | description` per body line. Each key gets an id, so rows
-// are deep-linkable without spending headings on them.
-function configHtml(rawBodyText: string) {
-  const rows = rawBodyText
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .map((line) => {
-      const parts = line.split("|").map((part) => part.trim());
-      const [key, fallback, description] =
-        parts.length >= 3 ? [parts[0], parts[1], parts.slice(2).join(" | ")] : [parts[0], "", parts[1] ?? ""];
-      const id = `cfg-${key.toLowerCase().replace(/[^a-z0-9_.-]+/g, "-")}`;
-      const fallbackHtml = fallback ? `<span class="config-default">${inlineHtml(fallback)}</span>` : "";
-      return (
-        `<div class="config-row" id="${escapeHtml(id)}"><code class="config-key">${inlineHtml(key)}</code>` +
-        `<span class="config-desc">${fallbackHtml}${inlineHtml(description)}</span></div>`
-      );
-    });
-  return `<div class="config-card">${rows.join("")}</div>`;
+// `.. container:: flow` is the lifecycle figure: a definition list with one
+// stage per item (a bold term for the emphasis tint), and an optional `:Loop:`
+// field for the labeled return arrow. GitHub shows the list as it is. Stages
+// are DOM text in flex cards, so labels hold their size and the strip reflows
+// to a vertical stack on narrow screens.
+function writeFlow(generatorState: RstGeneratorState, node: RstDirective, sourcePath: string) {
+  const { items, fields } = containerParts(node, sourcePath);
+  const loop = fields.find((field) => field.nameText === "Loop");
+  if (fields.length !== (loop ? 1 : 0)) throw new Error(`${sourcePath}: a flow takes no field but :Loop:`);
+  generatorState.writeLine('<figure class="fig fig-flow"><div class="fig-flow-track">');
+  items.forEach((item, index) => {
+    if (index > 0) generatorState.writeLine(arrowSvg("next"));
+    const [first] = item.term;
+    const emphasized = item.term.length === 1 && first instanceof RstStrongEmphasis;
+    generatorState.writeLine(`<div class="fig-flow-stage${emphasized ? " fig-emphasis" : ""}">`);
+    generatorState.writeLine('<span class="fig-flow-title">');
+    // A bold term keeps its text in the node itself, not in children.
+    if (emphasized) generatorState.writeLine(escapeHtml(first.textContent));
+    else generatorState.writeLineVisitor(() => generatorState.visitNodes(item.term));
+    generatorState.writeLine('</span><span class="fig-flow-caption">');
+    visitInline(generatorState, item.definition);
+    generatorState.writeLine("</span></div>");
+  });
+  generatorState.writeLine("</div>");
+  if (loop) {
+    generatorState.writeLine(`<div class="fig-flow-loop">${arrowSvg("loop")}<span>`);
+    visitInline(generatorState, loop.body);
+    generatorState.writeLine("</span></div>");
+  }
+  generatorState.writeLine("</figure>");
 }
 
-// The page brief additionally honors RST's `text <target>`__ link form, so a
-// prerequisite can point at the page that satisfies it. The href is emitted
-// verbatim; markdown.tsx resolves it against the source path like any link.
-function briefHtml(value: string) {
-  return inlineHtml(value).replace(/`([^`<]+?) &lt;([^&]+?)&gt;`__/g, '<a href="$2">$1</a>');
+// `.. container:: config` is reference rows: a definition list whose term is
+// the key as a literal, with the default as an optional classifier
+// (``key`` : default). Each key gets an id, so rows are deep-linkable without
+// spending headings on them.
+function writeConfig(generatorState: RstGeneratorState, node: RstDirective, sourcePath: string) {
+  const { items, fields } = containerParts(node, sourcePath);
+  if (fields.length) throw new Error(`${sourcePath}: a config container takes no field`);
+  generatorState.writeLine('<div class="config-card">');
+  for (const item of items) {
+    const key = item.term.map((text) => text.textContent).join("");
+    const id = `cfg-${key.toLowerCase().replace(/[^a-z0-9_.-]+/g, "-")}`;
+    generatorState.writeLine(
+      `<div class="config-row" id="${escapeHtml(id)}"><code class="config-key">${escapeHtml(key)}</code>`,
+    );
+    generatorState.writeLine('<span class="config-desc">');
+    for (const classifier of item.classifiers) {
+      generatorState.writeLine('<span class="config-default">');
+      generatorState.writeLineVisitor(() => generatorState.visitNodes(classifier));
+      generatorState.writeLine("</span>");
+    }
+    visitInline(generatorState, item.definition);
+    generatorState.writeLine("</span></div>");
+  }
+  generatorState.writeLine("</div>");
 }
 
-// `.. page::` is the brief under a page's lede: who the page is for, what to
-// have ready, and what the reader has at the end. Three fields, no body; a
-// page that carries none of them renders nothing.
-function pageBriefHtml(node: { config: { getField(name: string): string | null } | null }) {
-  const rows = (
-    [
-      ["For", "for"],
-      ["Before you start", "needs"],
-      ["You will have", "outcome"],
-    ] as const
-  )
-    .map(([label, field]) => [label, node.config?.getField(field)?.replace(/\s+/g, " ").trim() ?? ""] as const)
-    .filter(([, value]) => value);
-  if (!rows.length) return "";
-  const cells = rows.map(([label, value]) => `<dt>${label}</dt><dd>${briefHtml(value)}</dd>`).join("");
-  return `<dl class="page-brief">${cells}</dl>`;
+// The page brief is a plain RST field list whose fields are these labels, so
+// GitHub renders it as a table: who the page is for, what to have ready, and
+// what the reader has at the end. Any other field list renders as usual.
+const PAGE_BRIEF_FIELDS = new Set(["For", "Before you start", "You will have"]);
+
+// A body of one paragraph writes its inline content without the <p>: a page
+// takes its first <p> as its description, and the brief can come before it.
+function visitInline(generatorState: RstGeneratorState, nodes: ReadonlyArray<RstNode>) {
+  const [first] = nodes;
+  if (nodes.length === 1 && first instanceof RstParagraph) {
+    generatorState.writeLineVisitor(() => generatorState.visitNodes(first.children));
+  } else {
+    generatorState.visitNodes(nodes);
+  }
 }
 
 function compileRst(content: string, sourcePath: string) {
   const compiler = new RstToHtmlCompiler();
-  // The bodies of these directives are DSL or hand-built markup, not RST, so
-  // the parser must hand them over verbatim the way it does for code blocks.
-  compiler.usePlugin({
-    onBeforeParse(parserOptions) {
-      parserOptions.directivesWithRawText.push("flow", "diagram", "config", "page");
+  const fieldList = compiler.nodeGenerators.get("FieldList") as RstNodeGenerator<"FieldList">;
+  compiler.useNodeGenerator({
+    nodeType: "FieldList",
+    generate(generatorState, node) {
+      const items = node.children.filter((child) => child instanceof RstFieldListItem);
+      if (items.length !== node.children.length || !items.every((item) => PAGE_BRIEF_FIELDS.has(item.nameText))) {
+        fieldList.generate(generatorState, node);
+        return;
+      }
+      generatorState.writeLine('<dl class="page-brief">');
+      for (const item of items) {
+        generatorState.writeLine(`<dt>${escapeHtml(item.nameText)}</dt>`);
+        generatorState.writeLine("<dd>");
+        visitInline(generatorState, item.body);
+        generatorState.writeLine("</dd>");
+      }
+      generatorState.writeLine("</dl>");
     },
   });
+  // A figure of a `-light.svg` with a `-dark.svg` beside it shows the one that
+  // matches the theme. The RST names only the light file, which is what GitHub
+  // renders; every other figure renders as usual.
+  const figure = compiler.directiveGenerators.get("figure") as RstDirectiveGenerator;
   compiler.useDirectiveGenerator({
-    directives: ["page"],
+    directives: ["figure"],
     generate(generatorState, node) {
-      const html = pageBriefHtml(node);
-      if (html) generatorState.writeLine(html);
+      const light = node.initContentText;
+      const dark = light.replace(/-light\.svg$/, "-dark.svg");
+      if (dark === light || !existsSync(join(docsRoot, dirname(sourcePath), dark))) {
+        figure.generate(generatorState, node);
+        return;
+      }
+      const alt = escapeHtml(node.config?.getField("alt")?.replace(/\s+/g, " ").trim() ?? "");
+      generatorState.writeLine('<figure class="fig fig-diagram">');
+      generatorState.writeLine(`<img class="fig-light" src="${escapeHtml(light)}" alt="${alt}">`);
+      generatorState.writeLine(`<img class="fig-dark" src="${escapeHtml(dark)}" alt="${alt}">`);
+      if (node.children.length) {
+        generatorState.writeLine("<figcaption>");
+        visitInline(generatorState, node.children);
+        generatorState.writeLine("</figcaption>");
+      }
+      generatorState.writeLine("</figure>");
     },
   });
   compiler.useDirectiveGenerator({
@@ -375,40 +424,21 @@ function compileRst(content: string, sourcePath: string) {
       );
     },
   });
+  // A walkthrough is `.. container:: steps` around an ordinary enumerated
+  // list: the compiler writes `<div class="container steps">`, and CSS
+  // counters draw the numbered circles and the connector line.
+  const container = compiler.directiveGenerators.get("container") as RstDirectiveGenerator;
   compiler.useDirectiveGenerator({
-    directives: ["flow"],
+    directives: ["container"],
     generate(generatorState, node) {
-      generatorState.writeLine(flowHtml(node));
-    },
-  });
-  // `.. diagram::` is the escape hatch for genuinely spatial figures: the body
-  // is hand-built HTML over the fig-node/fig-group/fig-edge primitives in
-  // globals.css, passed through inside the shared figure chrome.
-  compiler.useDirectiveGenerator({
-    directives: ["diagram"],
-    generate(generatorState, node) {
-      const caption = node.config?.getField("caption");
-      generatorState.writeLine('<figure class="fig fig-diagram">');
-      generatorState.writeLine(node.rawBodyText);
-      if (caption) generatorState.writeLine(`<figcaption>${inlineHtml(caption)}</figcaption>`);
-      generatorState.writeLine("</figure>");
-    },
-  });
-  compiler.useDirectiveGenerator({
-    directives: ["config"],
-    generate(generatorState, node) {
-      generatorState.writeLine(configHtml(node.rawBodyText));
-    },
-  });
-  // `.. steps::` is a walkthrough wrapper around an ordinary RST enumerated
-  // list: the body compiles as usual and CSS counters draw the numbered
-  // circles and connector line, so code blocks inside keep the shiki path.
-  compiler.useDirectiveGenerator({
-    directives: ["steps"],
-    generate(generatorState, node) {
-      generatorState.writeLine('<div class="steps">');
-      generatorState.visitNodes(node.children);
-      generatorState.writeLine("</div>");
+      const kind = node.initContentText.trim();
+      if (kind === "flow") {
+        writeFlow(generatorState, node, sourcePath);
+      } else if (kind === "config") {
+        writeConfig(generatorState, node, sourcePath);
+      } else {
+        container.generate(generatorState, node);
+      }
     },
   });
 

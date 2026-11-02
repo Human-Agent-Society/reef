@@ -1,5 +1,5 @@
 Guidance-TTT: train the guide, keep the executor frozen
-=====================================================
+=======================================================
 
 Guidance-TTT trains a small model to propose improvements to a candidate
 program. A frozen execution model turns each proposal into code. A task judge
@@ -28,16 +28,30 @@ These tasks cover packing, numerical solvers, planning, and GPU kernels.
 How one step runs
 -----------------
 
-.. flow::
-   :loop: use the committed guidance adapter for the next search step
+.. container:: flow
 
-   Select parents :: PUCT selects one archived candidate per group
-   Write guidance :: the trainable model reads the problem, summary, and score
-   Execute guidance :: the frozen model reads the parent code and proposed change
-   Judge candidates :: the task evaluator checks correctness and measures performance
-   Report rewards :: each reward references the guidance receipt and grid coordinate
-   Update the guide :: the TTTD recipe trains and publishes the guidance LoRA adapter
-   Commit the archive :: the controller saves the matching search state
+   Select parents
+       PUCT selects one archived candidate per group
+
+   Write guidance
+       the trainable model reads the problem, summary, and score
+
+   Execute guidance
+       the frozen model reads the parent code and proposed change
+
+   Judge candidates
+       the task evaluator checks correctness and measures performance
+
+   Report rewards
+       each reward references the guidance receipt and grid coordinate
+
+   Update the guide
+       the TTTD recipe trains and publishes the guidance LoRA adapter
+
+   Commit the archive
+       the controller saves the matching search state
+
+   :Loop: use the committed guidance adapter for the next search step
 
 The guidance model sees the parent's canonical summary, not its source code.
 The executor sees the source code and the new guidance. It returns a complete

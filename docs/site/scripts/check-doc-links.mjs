@@ -43,29 +43,13 @@ function plainHeading(value) {
     .trim();
 }
 
-// Headings are all this check needs, but a page may use the site's custom
-// directives (docs/site/lib/docs.ts). Register them as no-ops so compiling for
-// anchors never fails on a directive the bare compiler does not know.
-const RAW_TEXT_DIRECTIVES = ["flow", "diagram", "config", "page"];
-const PASSTHROUGH_DIRECTIVES = ["code", "code-block", ...RAW_TEXT_DIRECTIVES];
-
+// Headings are all this check needs, so code blocks compile to nothing.
 function compileForHeadings(source) {
   const compiler = new RstToHtmlCompiler();
-  compiler.usePlugin({
-    onBeforeParse(parserOptions) {
-      parserOptions.directivesWithRawText.push(...RAW_TEXT_DIRECTIVES);
-    },
-  });
   compiler.useDirectiveGenerator({
-    directives: PASSTHROUGH_DIRECTIVES,
+    directives: ["code", "code-block"],
     generate(generatorState) {
       generatorState.writeLine("");
-    },
-  });
-  compiler.useDirectiveGenerator({
-    directives: ["steps"],
-    generate(generatorState, node) {
-      generatorState.visitNodes(node.children);
     },
   });
   return compiler.compile(source.replace(/\r\n/g, "\n")).body;
@@ -116,6 +100,20 @@ function validateLink(file, href) {
     const fragment = decodeURIComponent(rawFragment);
     if (!documentHeadings(target).has(fragment)) failures.push(`missing anchor: ${display}`);
   }
+}
+
+// GitHub renders RST with docutils and prints a directive it does not know as
+// source text, so a page uses only docutils directives that the site renders.
+// This runs first: the compiler below stops at a directive it does not know.
+const githubDirectives = new Set(["code", "code-block", "container", "figure", "image", "list-table", "warning"]);
+const unknownDirectives = filesWithExtension(docsRoot, ".rst").flatMap((file) =>
+  [...readFileSync(file, "utf8").matchAll(/^\s*\.\. ([a-z-]+)::/gm)]
+    .filter((match) => !githubDirectives.has(match[1]))
+    .map((match) => `${relative(repoRoot, file)} -> .. ${match[1]}::`),
+);
+if (unknownDirectives.length) {
+  console.error(`Directives GitHub does not render:\n${unknownDirectives.join("\n")}`);
+  process.exit(1);
 }
 
 const markdownFiles = filesWithExtension(repoRoot, ".md");
