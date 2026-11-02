@@ -186,7 +186,7 @@ check what its instruction does not state. A pass-rate band marks the tasks the
 Reasoning Agent can reach. The deployment selects it as the generator of the
 generated-task stages in its ``pipeline`` section, and the built-in
 generated-task recipe runs the tasks and trains on them (see `generated tasks
-<../reference/configuration.rst#generated-tasks>`__). With ``author: prompt``,
+<../reference/configuration.rst#generated-tasks>`__). With ``designer: prompt``,
 the generator service's one-reply prompt Designer rebuilds the same sessions as
 the baseline.
 

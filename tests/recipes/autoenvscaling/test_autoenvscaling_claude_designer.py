@@ -1,4 +1,4 @@
-"""Claude Code as AutoEnvScaling's author: its run, its check command and gateway, its task's sources, and the token.
+"""Claude Code as AutoEnvScaling's Designer: its run, its check command and gateway, its task's sources, and the token.
 
 No test runs Claude Code or a sandbox: a scripted E2B session stands in for both, and runs the agent's
 ``task_check`` commands against the real loopback gateway.
@@ -38,21 +38,21 @@ from tests.recipes.autoenvscaling.autoenvscaling_stubs import (
 from tests.support.task_service_stubs import task_for
 
 from recipes.beta.autoenvscaling import task_check
-from recipes.beta.autoenvscaling.author import (
+from recipes.beta.autoenvscaling.check_gateway import CheckGateway
+from recipes.beta.autoenvscaling.claude_designer import CLAUDE_CHECK_TEXT, DESIGNER_TOOLS, ClaudeCodeDesigner
+from recipes.beta.autoenvscaling.designer import (
     AGENT_PROMPT,
     REBUILD_RULES_TEXT,
     VARIANT_INPUTS_TEXT,
     VARIANT_PROMPT,
     AgentTools,
-    AuthoredTask,
-    AuthorError,
     CandidateChecks,
+    DesignedTask,
+    DesignerOutage,
     TaskVariant,
-    VariantAuthor,
+    VariantDesigner,
 )
-from recipes.beta.autoenvscaling.author_credentials import CredentialChecks, CredentialHeld, rename_holding
-from recipes.beta.autoenvscaling.check_gateway import CheckGateway
-from recipes.beta.autoenvscaling.claude_author import AUTHOR_TOOLS, CLAUDE_CHECK_TEXT, ClaudeCodeAuthor
+from recipes.beta.autoenvscaling.designer_credentials import CredentialChecks, CredentialHeld, rename_holding
 from recipes.beta.autoenvscaling.generator import AutoEnvScalingGenerator
 from reef.core.plugins import PluginConfigError
 from reef.core.tasks import write_harbor_task
@@ -102,7 +102,7 @@ def result_json(subtype: str = "success", is_error: bool = False, **fields: obje
 
 
 def checked(arguments: Sequence[str], environ: Mapping[str, str]) -> str:
-    """What the agent's ``python3 "$REEF_AUTHOR_CHECK" ...`` prints."""
+    """What the agent's ``python3 "$REEF_DESIGNER_CHECK" ...`` prints."""
     output = io.StringIO()
     with contextlib.redirect_stdout(output):
         task_check.main(list(arguments), environ)
@@ -231,8 +231,8 @@ def cached_repositories(cache_dir: Path) -> Path:
     return cache_dir
 
 
-def claude_code(tmp_path: Path, reef_url: str, session: E2BSession, *, max_turns: int = 40) -> ClaudeCodeAuthor:
-    return ClaudeCodeAuthor(
+def claude_code(tmp_path: Path, reef_url: str, session: E2BSession, *, max_turns: int = 40) -> ClaudeCodeDesigner:
+    return ClaudeCodeDesigner(
         reef_url=reef_url,
         token="reef-token",
         claude_token=TOKEN,
@@ -244,11 +244,11 @@ def claude_code(tmp_path: Path, reef_url: str, session: E2BSession, *, max_turns
     )
 
 
-def authored_in(
+def designed_in(
     tmp_path: Path, reef_url: str, session: E2BSession, checks: CandidateChecks | None = None
-) -> AuthoredTask:
+) -> DesignedTask:
     """Claude Code's run on the first stand-in session, in ``tmp_path / "run"``."""
-    return claude_code(tmp_path, reef_url, session).author(
+    return claude_code(tmp_path, reef_url, session).design(
         source_of(sources(1)[0]),
         tmp_path / "run",
         checks if checks is not None else NoChecks(1),
@@ -283,7 +283,7 @@ class CountingChecks(CandidateChecks):
 
 def test_runs_pinned_claude_headless_with_token_in_environment(tmp_path: Path, reef_url: str) -> None:
     session = ScriptedClaudeSession()
-    authored = authored_in(tmp_path, reef_url, session)
+    designed = designed_in(tmp_path, reef_url, session)
     root = tmp_path / "run"
     argv, env = session.argv, session.launch_env
     assert argv[:3] == ["claude", "-p", AGENT_PROMPT]
@@ -291,19 +291,21 @@ def test_runs_pinned_claude_headless_with_token_in_environment(tmp_path: Path, r
         ("--output-format", "json"),
         ("--model", "opus"),
         ("--max-turns", "40"),
-        ("--tools", AUTHOR_TOOLS),
-        ("--allowedTools", AUTHOR_TOOLS),
+        ("--tools", DESIGNER_TOOLS),
+        ("--allowedTools", DESIGNER_TOOLS),
     ):
         assert argv[argv.index(option) + 1] == value
     assert "--disable-slash-commands" in argv and "--strict-mcp-config" in argv
-    # The author passes the token in env; the executor owns the sandbox wrapper command.
+    # The Designer passes the token in env; the executor owns the sandbox wrapper command.
     assert env["CLAUDE_CODE_OAUTH_TOKEN"] == TOKEN
     assert not any(TOKEN in value for value in argv)
     assert not any(name.startswith("ANTHROPIC_") for name in env)
     assert env["CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"] == "1" and env["DISABLE_ERROR_REPORTING"] == "1"
     assert env["CLAUDE_CONFIG_DIR"] == f"{root}/claude" and env["HOME"] == f"{root}/home"
     assert env["BASH_DEFAULT_TIMEOUT_MS"] == env["BASH_MAX_TIMEOUT_MS"] == "600000"
-    assert env["REEF_AUTHOR_CHECK"] == f"{root}/tools/task_check.py" and env["REEF_AUTHOR_URL"].startswith("http://")
+    assert env["REEF_DESIGNER_CHECK"] == f"{root}/tools/task_check.py" and env["REEF_DESIGNER_URL"].startswith(
+        "http://"
+    )
     assert session.writable == [root / "claude", root / "home"]
     assert argv[argv.index("--plugin-dir") + 1] == f"{root}/plugin"
     plugin = root / "plugin"
@@ -320,8 +322,8 @@ def test_runs_pinned_claude_headless_with_token_in_environment(tmp_path: Path, r
     # No model binding: the settings point Claude Code at no other endpoint.
     assert "env" not in json.loads((root / "claude" / "settings.json").read_text())
     transcript = f"claude/projects/-home-user-reef-run-workspace/{SESSION_ID}.jsonl"
-    assert authored.record_ids == () and authored.transcript == transcript and (root / transcript).is_file()
-    assert "port.txt" in authored.reply
+    assert designed.record_ids == () and designed.transcript == transcript and (root / transcript).is_file()
+    assert "port.txt" in designed.reply
     # Of Claude Code's own files only the transcripts, the rules and the settings stay.
     assert sorted(path.name for path in (root / "claude").iterdir()) == ["projects", "settings.json"]
     assert not (root / "home").exists() and not (root / "inputs" / "repo").exists()
@@ -335,21 +337,21 @@ def test_task_check_script_waits_and_rechecks(tmp_path: Path) -> None:
     gateway = CheckGateway(tools)
     gateway.start()
     deadline = str(int((time.time() + 3600) * 1000))
-    environ = {"REEF_AUTHOR_URL": gateway.base_url, "REEF_AUTHOR_DEADLINE_MS": deadline}
+    environ = {"REEF_DESIGNER_URL": gateway.base_url, "REEF_DESIGNER_DEADLINE_MS": deadline}
     try:
-        first = checked([], {**environ, "REEF_AUTHOR_FINISH_SECONDS": "60"})
+        first = checked([], {**environ, "REEF_DESIGNER_FINISH_SECONDS": "60"})
         assert "state: running\ncheck_id: 1\n" in first and "--wait 1` to wait" in first
         assert "Remaining time:" in first and "Finish now" not in first
         # Asked again while the check runs, the command waits for that one and starts no other.
-        assert "check_id: 1\n" in checked([], {**environ, "REEF_AUTHOR_FINISH_SECONDS": "60"})
+        assert "check_id: 1\n" in checked([], {**environ, "REEF_DESIGNER_FINISH_SECONDS": "60"})
         release.set()
-        done = checked(["--wait", "1"], {**environ, "REEF_AUTHOR_FINISH_SECONDS": "60"})
+        done = checked(["--wait", "1"], {**environ, "REEF_DESIGNER_FINISH_SECONDS": "60"})
         assert '"state": "done"' in done and '"passed": true' in done and held.count == 1
         assert "check_id must name a check this run started" in checked(
-            ["--wait", "7"], {**environ, "REEF_AUTHOR_FINISH_SECONDS": "60"}
+            ["--wait", "7"], {**environ, "REEF_DESIGNER_FINISH_SECONDS": "60"}
         )
         # A check that ends while the command waits gives its result in the same call.
-        quick = checked([], {**environ, "REEF_AUTHOR_FINISH_SECONDS": "7200"})
+        quick = checked([], {**environ, "REEF_DESIGNER_FINISH_SECONDS": "7200"})
         assert '"check": 2' in quick and '"passed": true' in quick and "Finish now" in quick
     finally:
         gateway.stop()
@@ -362,9 +364,9 @@ def test_task_check_script_stops_waiting_at_the_run_deadline(tmp_path: Path, mon
     gateway.start()
     past = str(int((time.time() - 1) * 1000))
     environ = {
-        "REEF_AUTHOR_URL": gateway.base_url,
-        "REEF_AUTHOR_DEADLINE_MS": past,
-        "REEF_AUTHOR_FINISH_SECONDS": "60",
+        "REEF_DESIGNER_URL": gateway.base_url,
+        "REEF_DESIGNER_DEADLINE_MS": past,
+        "REEF_DESIGNER_FINISH_SECONDS": "60",
     }
     try:
         started = time.monotonic()
@@ -509,9 +511,9 @@ def test_claude_vary_gives_claude_code_the_parent_and_the_variant_rules(tmp_path
     )
     variant = TaskVariant(parent="t-0", parent_dir=parent_dir, direction="simpler", pass_rate=0.125, rollouts=8)
     session = ScriptedClaudeSession()
-    author = claude_code(tmp_path, reef_url, session)
-    assert isinstance(author, VariantAuthor)
-    authored = author.vary(
+    designer = claude_code(tmp_path, reef_url, session)
+    assert isinstance(designer, VariantDesigner)
+    designed = designer.vary(
         source_of(sources(1)[0]), tmp_path / "run", NoChecks(1), tags={}, stop=threading.Event(), variant=variant
     )
     root = tmp_path / "run"
@@ -520,17 +522,17 @@ def test_claude_vary_gives_claude_code_the_parent_and_the_variant_rules(tmp_path
     assert VARIANT_INPUTS_TEXT.strip() in rules and CLAUDE_CHECK_TEXT.strip() in rules
     assert (root / "inputs" / "parent" / "instruction.md").is_file()
     assert "(t-0) is 0.12 over 8 rollouts" in (root / "inputs" / "variant.md").read_text()
-    assert authored.record_ids == () and "port.txt" in authored.reply
+    assert designed.record_ids == () and "port.txt" in designed.reply
 
 
-def test_adaptive_config_builds_claude_code_as_a_variant_author(tmp_path: Path) -> None:
+def test_adaptive_config_builds_claude_code_as_a_variant_designer(tmp_path: Path) -> None:
     generator = AutoEnvScalingGenerator.from_config(
-        generating_config(tmp_path, author_harness="claude-code", adaptive=True, count=2),
+        generating_config(tmp_path, designer_harness="claude-code", adaptive=True, count=2),
         scenario="one",
         environ={"E2B_API_KEY": "e2b-test", "CLAUDE_CODE_OAUTH_TOKEN": TOKEN},
     )
-    assert generator.is_adaptive and isinstance(generator.author, ClaudeCodeAuthor)
-    assert generator.variant_author is generator.author
+    assert generator.is_adaptive and isinstance(generator.designer, ClaudeCodeDesigner)
+    assert generator.variant_designer is generator.designer
 
 
 @pytest.mark.parametrize(
@@ -550,10 +552,10 @@ def test_max_turns_keeps_workspace_and_model_error_is_outage(
 ) -> None:
     session = ScriptedClaudeSession(stdout=stdout or "not json", exit_code=exit_code, stderr="boom")
     if error:
-        with pytest.raises(AuthorError, match=error):
-            authored_in(tmp_path, reef_url, session)
+        with pytest.raises(DesignerOutage, match=error):
+            designed_in(tmp_path, reef_url, session)
     else:
-        assert "port.txt" in authored_in(tmp_path, reef_url, session).reply
+        assert "port.txt" in designed_in(tmp_path, reef_url, session).reply
     assert session.is_closed.is_set()
 
 
@@ -563,9 +565,9 @@ def test_timeout_keeps_the_task_and_names_the_newest_transcript(tmp_path: Path, 
     older.write_text("{}\n")
     os.utime(older, (time.time() - 3600, time.time() - 3600))
     session = ScriptedClaudeSession(is_timeout=True)
-    authored = authored_in(tmp_path, reef_url, session)
-    assert "port.txt" in authored.reply and authored.record_ids == ()
-    assert authored.transcript == f"claude/projects/-home-user-reef-run-workspace/{SESSION_ID}.jsonl"
+    designed = designed_in(tmp_path, reef_url, session)
+    assert "port.txt" in designed.reply and designed.record_ids == ()
+    assert designed.transcript == f"claude/projects/-home-user-reef-run-workspace/{SESSION_ID}.jsonl"
     assert session.is_closed.is_set()
 
 
@@ -574,16 +576,16 @@ def test_token_never_reaches_errors_logs_run_dir_or_task(
 ) -> None:
     caplog.set_level(logging.DEBUG)
     failing = ScriptedClaudeSession(stdout=result_json(result=f"API Error: 401 {TOKEN} was refused"), leak=TOKEN)
-    with pytest.raises(AuthorError) as raised:
-        authored_in(tmp_path / "failing", reef_url, failing)
+    with pytest.raises(DesignerOutage) as raised:
+        designed_in(tmp_path / "failing", reef_url, failing)
     assert TOKEN not in str(raised.value) and "[redacted] was refused" in str(raised.value)
     run_dir = tmp_path / "failing" / "run"
     assert not files_holding(run_dir, TOKEN)
     assert files_holding(run_dir, "[redacted]") == [str(next(run_dir.glob(f"claude/projects/*/{SESSION_ID}.jsonl")))]
 
     holding = ScriptedClaudeSession(task_leak=TOKEN)
-    with pytest.raises(AuthorError, match="held the run's Claude Code token"):
-        authored_in(tmp_path / "holding", reef_url, holding)
+    with pytest.raises(DesignerOutage, match="held the run's Claude Code token"):
+        designed_in(tmp_path / "holding", reef_url, holding)
     assert not files_holding(tmp_path / "holding" / "run", TOKEN)
     assert "[redacted]" in (tmp_path / "holding" / "run" / "workspace" / "task" / "instruction.md").read_text()
     assert not any(TOKEN in record.getMessage() for record in caplog.records)
@@ -596,8 +598,8 @@ def test_token_never_reaches_errors_logs_run_dir_or_task(
 )
 def test_cut_error_text_keeps_no_part_of_the_token(tmp_path: Path, reef_url: str, stdout: str, stderr: str) -> None:
     session = ScriptedClaudeSession(stdout=stdout, exit_code=1, stderr=stderr)
-    with pytest.raises(AuthorError) as raised:
-        authored_in(tmp_path, reef_url, session)
+    with pytest.raises(DesignerOutage) as raised:
+        designed_in(tmp_path, reef_url, session)
     assert "[redacted]" in str(raised.value) and not holds_part_of_token(str(raised.value))
 
 
@@ -606,8 +608,8 @@ def test_result_fields_are_redacted_in_the_log_and_the_error(
 ) -> None:
     caplog.set_level(logging.DEBUG)
     session = ScriptedClaudeSession(stdout=result_json(f"odd-{TOKEN}", num_turns=f"many-{TOKEN}"))
-    with pytest.raises(AuthorError, match=r"error \(odd-\[redacted\]\)") as raised:
-        authored_in(tmp_path, reef_url, session)
+    with pytest.raises(DesignerOutage, match=r"error \(odd-\[redacted\]\)") as raised:
+        designed_in(tmp_path, reef_url, session)
     assert TOKEN not in str(raised.value)
     [ended] = [record.getMessage() for record in caplog.records if "ended with" in record.getMessage()]
     assert "many-[redacted] turns" in ended and TOKEN not in ended
@@ -618,18 +620,18 @@ def test_launch_error_and_close_warning_are_redacted(
 ) -> None:
     caplog.set_level(logging.DEBUG)
     session = ScriptedClaudeSession(launch_error=f"no process: env {TOKEN}", close_error=f"still up: {TOKEN}")
-    with pytest.raises(AuthorError, match=r"could not run: no process: env \[redacted\]") as raised:
-        authored_in(tmp_path, reef_url, session)
+    with pytest.raises(DesignerOutage, match=r"could not run: no process: env \[redacted\]") as raised:
+        designed_in(tmp_path, reef_url, session)
     assert TOKEN not in str(raised.value)
     [warning] = [record.getMessage() for record in caplog.records if record.levelno == logging.WARNING]
     assert "did not stop" in warning and "still up: [redacted]" in warning and TOKEN not in warning
 
 
 def test_a_name_holding_the_token_is_renamed(tmp_path: Path, reef_url: str) -> None:
-    authored = authored_in(tmp_path, reef_url, ScriptedClaudeSession(session_name=TOKEN, is_timeout=True))
+    designed = designed_in(tmp_path, reef_url, ScriptedClaudeSession(session_name=TOKEN, is_timeout=True))
     run_dir = tmp_path / "run"
-    assert authored.transcript == "claude/projects/-home-user-reef-run-workspace/[redacted].jsonl"
-    assert (run_dir / authored.transcript).is_file()
+    assert designed.transcript == "claude/projects/-home-user-reef-run-workspace/[redacted].jsonl"
+    assert (run_dir / designed.transcript).is_file()
     assert not [path for path in run_dir.rglob("*") if TOKEN in str(path)]
 
 
@@ -651,7 +653,7 @@ def test_check_and_admission_refuse_a_task_link_to_the_token(tmp_path: Path, ree
     checks = CountingChecks()
     session = ScriptedClaudeSession(checks=([],), link_leak=TOKEN)
     with pytest.raises(CredentialHeld):
-        authored_in(tmp_path, reef_url, session, checks)
+        designed_in(tmp_path, reef_url, session, checks)
     [output] = session.check_outputs
     assert "holds this run's credential" in output and checks.count == 0
     workspace = tmp_path / "run" / "workspace"
@@ -671,8 +673,8 @@ def test_task_holding_token_ends_generation_with_stage_credential(tmp_path: Path
 def test_check_refuses_task_holding_token(tmp_path: Path, reef_url: str) -> None:
     checks = CountingChecks()
     session = ScriptedClaudeSession(checks=([],), task_leak=TOKEN)
-    with pytest.raises(AuthorError, match="not admitted"):
-        authored_in(tmp_path, reef_url, session, checks)
+    with pytest.raises(DesignerOutage, match="not admitted"):
+        designed_in(tmp_path, reef_url, session, checks)
     [output] = session.check_outputs
     assert "holds this run's credential" in output and TOKEN not in output
     assert checks.count == 0, "the generator service never saw the task"
@@ -681,24 +683,24 @@ def test_check_refuses_task_holding_token(tmp_path: Path, reef_url: str) -> None
 @pytest.mark.parametrize(
     ("fields", "environ", "message"),
     [
-        ({"author_harness": "cursor"}, {}, "author_harness must be one of"),
-        ({"claude_model": "opus"}, {}, "claude_model and claude_token_env need author_harness: claude-code"),
-        ({"author_harness": "claude-code", "author": "prompt"}, {}, "needs author: agent"),
-        ({"author_harness": "claude-code"}, {}, "needs a Claude Code OAuth token in CLAUDE_CODE_OAUTH_TOKEN"),
+        ({"designer_harness": "cursor"}, {}, "designer_harness must be one of"),
+        ({"claude_model": "opus"}, {}, "claude_model and claude_token_env need designer_harness: claude-code"),
+        ({"designer_harness": "claude-code", "designer": "prompt"}, {}, "needs designer: agent"),
+        ({"designer_harness": "claude-code"}, {}, "needs a Claude Code OAuth token in CLAUDE_CODE_OAUTH_TOKEN"),
         (
-            {"author_harness": "claude-code"},
+            {"designer_harness": "claude-code"},
             {"CLAUDE_CODE_OAUTH_TOKEN": " "},
             "OAuth token in CLAUDE_CODE_OAUTH_TOKEN",
         ),
         (
-            {"author_harness": "claude-code", "claude_token_env": "OWNER_TOKEN"},
+            {"designer_harness": "claude-code", "claude_token_env": "OWNER_TOKEN"},
             {"OWNER_TOKEN": "sk-ant-api03-leak-me"},
             "OWNER_TOKEN must hold a Claude Code OAuth token",
         ),
-        ({"author_harness": "claude-code", "claude_model": ""}, {"CLAUDE_CODE_OAUTH_TOKEN": TOKEN}, "claude_model"),
+        ({"designer_harness": "claude-code", "claude_model": ""}, {"CLAUDE_CODE_OAUTH_TOKEN": TOKEN}, "claude_model"),
         *(
             (
-                {"author_harness": "claude-code", "agent_sandbox_options": {"env_from": [name]}},
+                {"designer_harness": "claude-code", "agent_sandbox_options": {"env_from": [name]}},
                 {"CLAUDE_CODE_OAUTH_TOKEN": TOKEN, name: "http://elsewhere"},
                 f"must not forward {name}",
             )
@@ -711,13 +713,13 @@ def test_check_refuses_task_holding_token(tmp_path: Path, reef_url: str) -> None
             )
         ),
         (
-            {"author_harness": "claude-code", "agent_sandbox_options": {"env_from": ["CLAUDE_CODE_OAUTH_TOKEN"]}},
+            {"designer_harness": "claude-code", "agent_sandbox_options": {"env_from": ["CLAUDE_CODE_OAUTH_TOKEN"]}},
             {"CLAUDE_CODE_OAUTH_TOKEN": TOKEN},
             "must not forward CLAUDE_CODE_OAUTH_TOKEN",
         ),
         (
             {
-                "author_harness": "claude-code",
+                "designer_harness": "claude-code",
                 "claude_token_env": "OWNER_TOKEN",
                 "agent_sandbox_options": {"env_from": ["OWNER_TOKEN"]},
             },
@@ -725,7 +727,7 @@ def test_check_refuses_task_holding_token(tmp_path: Path, reef_url: str) -> None
             "must not forward OWNER_TOKEN",
         ),
         (
-            {"author_harness": "claude-code", "agent_sandbox_options": {"env_from": ["SAVED"]}},
+            {"designer_harness": "claude-code", "agent_sandbox_options": {"env_from": ["SAVED"]}},
             {"CLAUDE_CODE_OAUTH_TOKEN": TOKEN, "SAVED": f"key={TOKEN}"},
             "must not forward SAVED",
         ),
@@ -743,12 +745,12 @@ def test_claude_config_refusals(
 
 def test_env_from_refuses_every_variable_the_run_sets(tmp_path: Path, reef_url: str) -> None:
     session = ScriptedClaudeSession()
-    authored_in(tmp_path / "probe", reef_url, session)
+    designed_in(tmp_path / "probe", reef_url, session)
     names = sorted(session.launch_env)
     assert {"HOME", "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB", "DISABLE_ERROR_REPORTING"} <= set(names)
     environ = {"E2B_API_KEY": "e2b-test", "CLAUDE_CODE_OAUTH_TOKEN": TOKEN, "OWNER_SETTING": "1"}
     for name in names:
-        fields = {"author_harness": "claude-code", "agent_sandbox_options": {"env_from": [name]}}
+        fields = {"designer_harness": "claude-code", "agent_sandbox_options": {"env_from": [name]}}
         with pytest.raises(PluginConfigError, match=f"must not forward {name}"):
             AutoEnvScalingGenerator.from_config(
                 generating_config(tmp_path, **fields),
@@ -756,31 +758,33 @@ def test_env_from_refuses_every_variable_the_run_sets(tmp_path: Path, reef_url: 
                 environ={**environ, name: TOKEN if name == "CLAUDE_CODE_OAUTH_TOKEN" else "0"},
             )
     # A variable of the deployment's own still reaches the sandbox.
-    fields = {"author_harness": "claude-code", "agent_sandbox_options": {"env_from": ["OWNER_SETTING"]}}
+    fields = {"designer_harness": "claude-code", "agent_sandbox_options": {"env_from": ["OWNER_SETTING"]}}
     generator = AutoEnvScalingGenerator.from_config(
         generating_config(tmp_path, **fields), scenario="one", environ=environ
     )
-    assert isinstance(generator.author, ClaudeCodeAuthor)
-    assert dict(generator.author.executor.env) == {"OWNER_SETTING": "1"}
+    assert isinstance(generator.designer, ClaudeCodeDesigner)
+    assert dict(generator.designer.executor.env) == {"OWNER_SETTING": "1"}
 
 
 def test_claude_config_builds_claude_code_on_the_agent_settings(tmp_path: Path) -> None:
     generator = AutoEnvScalingGenerator.from_config(
-        generating_config(tmp_path, author_harness="claude-code", claude_token_env="OWNER_TOKEN", max_model_calls=80),
+        generating_config(
+            tmp_path, designer_harness="claude-code", claude_token_env="OWNER_TOKEN", max_model_calls=80
+        ),
         scenario="one",
         environ={"E2B_API_KEY": "e2b-test", "OWNER_TOKEN": f"{TOKEN}\n", "REEF_TOKEN": "reef-token"},
     )
-    author = generator.author
-    assert isinstance(author, ClaudeCodeAuthor)
-    assert (author.claude_token, author.model, author.max_turns) == (TOKEN, "opus", 80)
-    assert author.reef.token == "reef-token" and author.cache_dir == tmp_path / "state" / "one" / "repositories"
+    designer = generator.designer
+    assert isinstance(designer, ClaudeCodeDesigner)
+    assert (designer.claude_token, designer.model, designer.max_turns) == (TOKEN, "opus", 80)
+    assert designer.reef.token == "reef-token" and designer.cache_dir == tmp_path / "state" / "one" / "repositories"
 
 
 def test_stop_signal_closes_claude_sandbox(tmp_path: Path, reef_url: str) -> None:
     stop = threading.Event()
     session = ScriptedClaudeSession(stop=stop)
-    with pytest.raises(AuthorError, match="stopped"):
-        claude_code(tmp_path, reef_url, session).author(
+    with pytest.raises(DesignerOutage, match="stopped"):
+        claude_code(tmp_path, reef_url, session).design(
             source_of(sources(1)[0]), tmp_path / "run", NoChecks(1), tags={}, stop=stop
         )
     assert session.is_closed.is_set()

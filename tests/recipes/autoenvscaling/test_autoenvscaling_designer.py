@@ -1,4 +1,4 @@
-"""AutoEnvScaling's authors: the agent's tools, gateway and run outcomes, the prompt Designer's one call, and the sources."""
+"""AutoEnvScaling's Designers: the agent's tools, gateway and run outcomes, the prompt Designer's one call, and the sources."""
 
 from __future__ import annotations
 
@@ -26,16 +26,16 @@ from tests.recipes.autoenvscaling.autoenvscaling_stubs import (
 from tests.support.task_service_stubs import DOCUMENT
 
 from recipes.beta.autoenvscaling import (
-    AuthorError,
     CandidateChecks,
-    PromptAuthor,
+    DesignerOutage,
+    PromptDesigner,
     Repository,
     SessionSource,
     SourceError,
     load_sources,
     render_session,
 )
-from recipes.beta.autoenvscaling.author import (
+from recipes.beta.autoenvscaling.designer import (
     BEHAVIOUR_RULES_TEXT,
     REBUILD_RULES_TEXT,
     AgentTools,
@@ -156,7 +156,7 @@ def test_only_a_model_failure_with_the_budget_unspent_is_an_outage(
     message = {"role": "assistant", "stopReason": stop_reason, "errorMessage": "usage limit reached"}
     session = ScriptedSession([{"type": "message", "message": message}])
     if is_outage:
-        with pytest.raises(AuthorError, match=f"ended with {stop_reason}: usage limit reached"):
+        with pytest.raises(DesignerOutage, match=f"ended with {stop_reason}: usage limit reached"):
             run_agent(tmp_path, session, calls, threading.Event())
     else:
         run_agent(tmp_path, session, calls, threading.Event())
@@ -166,7 +166,7 @@ def test_only_a_model_failure_with_the_budget_unspent_is_an_outage(
 def test_a_stop_signal_closes_the_sandbox_and_ends_the_run(tmp_path: Path) -> None:
     stop = threading.Event()
     session = ScriptedSession([], stop=stop)
-    with pytest.raises(AuthorError, match="stopped"):
+    with pytest.raises(DesignerOutage, match="stopped"):
         run_agent(tmp_path, session, ModelCalls(5), stop)
     assert session.is_closed.is_set()
 
@@ -255,7 +255,7 @@ def test_a_repository_snapshot_starts_no_gc_that_could_prune_it_while_it_is_copi
     [
         ("nowhere", "3f2c1ab", SourceError, "does not appear to be a git repository"),
         ("origin", "0123456789abcdef0123456789abcdef01234567", SourceError, "has no commit"),
-        ("network", "3f2c1ab", AuthorError, "Failed to connect"),
+        ("network", "3f2c1ab", DesignerOutage, "Failed to connect"),
     ],
 )
 def test_a_missing_repository_or_commit_is_a_bad_source_and_a_network_failure_an_outage(
@@ -283,7 +283,7 @@ def test_the_prompt_designer_asks_once_with_the_session_cut_to_its_budget(tmp_pa
     reply = fenced(DOCUMENT)
     reef, calls = serving_reef(reply)
     try:
-        author = PromptAuthor(
+        designer = PromptDesigner(
             reef_url=f"http://127.0.0.1:{reef.server_address[1]}",
             token="token",
             scenario="autoenvscaling",
@@ -291,7 +291,7 @@ def test_the_prompt_designer_asks_once_with_the_session_cut_to_its_budget(tmp_pa
             api=api,
             session_chars=2000,
         )
-        authored = author.author(
+        designed = designer.design(
             source_of(sources(1)[0]),
             tmp_path / "run",
             NoChecks(1),
@@ -315,11 +315,11 @@ def test_the_prompt_designer_asks_once_with_the_session_cut_to_its_budget(tmp_pa
     assert "[BEGIN recorded session" in prompt and f"[user] {USER_REQUEST.strip()}" in prompt
     # The session is cut to its budget: the tool result keeps its first characters only.
     assert "[... cut to fit the session budget]" in prompt and "y" * 1000 not in prompt
-    assert authored.record_ids == ("rec-1",) and authored.reply == reply
+    assert designed.record_ids == ("rec-1",) and designed.reply == reply
     assert (tmp_path / "run" / "reply.md").read_text() == reply
 
 
-def test_the_behaviour_rule_reaches_both_authors_and_is_absent_when_off(tmp_path: Path) -> None:
+def test_the_behaviour_rule_reaches_both_designers_and_is_absent_when_off(tmp_path: Path) -> None:
     rule = "TESTS CHECK BEHAVIOUR"
     assert rule in BEHAVIOUR_RULES_TEXT
     assert BEHAVIOUR_RULES_TEXT in agent_files(tmp_path / "on", has_behaviour_rule=True, checks=NoChecks(1))
@@ -328,7 +328,7 @@ def test_the_behaviour_rule_reaches_both_authors_and_is_absent_when_off(tmp_path
     reef, calls = serving_reef(fenced(DOCUMENT))
     try:
         for has_behaviour_rule in (True, False):
-            PromptAuthor(
+            PromptDesigner(
                 reef_url=f"http://127.0.0.1:{reef.server_address[1]}",
                 token="token",
                 scenario="autoenvscaling",
@@ -336,7 +336,7 @@ def test_the_behaviour_rule_reaches_both_authors_and_is_absent_when_off(tmp_path
                 api="openai",
                 session_chars=2000,
                 has_behaviour_rule=has_behaviour_rule,
-            ).author(
+            ).design(
                 source_of(sources(1)[0]),
                 tmp_path / f"prompt-{has_behaviour_rule}",
                 NoChecks(1),

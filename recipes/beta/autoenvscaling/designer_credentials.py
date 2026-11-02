@@ -1,4 +1,4 @@
-"""Credential checks and redaction for Claude Code author runs."""
+"""Credential checks and redaction for Claude Code Designer runs."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import os
 import shutil
 from pathlib import Path
 
-from recipes.beta.autoenvscaling.author import AuthorError, CandidateChecks, workspace_reply
+from recipes.beta.autoenvscaling.designer import CandidateChecks, DesignerOutage, workspace_reply
 
 REDACTED = "[redacted]"
 #: Retain rendered configuration and transcripts, but remove account state.
@@ -17,10 +17,10 @@ TOKEN_REFUSAL = (
 )
 
 
-class CredentialHeld(AuthorError):
+class CredentialHeld(DesignerOutage):
     """The agent's task held the run's Claude Code token, so it is not admitted.
 
-    Values: the message names no token. Purpose: :meth:`ClaudeCodeAuthor.author` raises it once the run's directory
+    Values: the message names no token. Purpose: :meth:`ClaudeCodeDesigner.design` raises it once the run's directory
     is redacted; the generator ends the generation with stage ``credential``, since the token may have left the
     sandbox.
     """
@@ -71,7 +71,7 @@ class CredentialChecks(CandidateChecks):
 
     Values: ``checks`` implements CandidateChecks; ``token`` is a non-empty string.
     The wrapper copies the delegate's check limit and review mode at construction.
-    Purpose: ClaudeCodeAuthor supplies this wrapper to AgentTools. A contaminated
+    Purpose: ClaudeCodeDesigner supplies this wrapper to AgentTools. A contaminated
     task returns ``ran: false`` without consuming the delegate's check budget.
     Other tasks return the delegate's result unchanged; delegate errors propagate.
     """

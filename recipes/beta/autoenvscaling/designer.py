@@ -1,13 +1,13 @@
-"""The author: who rebuilds one recorded session as a Harbor task, a coding agent by default.
+"""The Designer: who rebuilds one recorded session as a Harbor task, a coding agent by default.
 
-:class:`TaskAuthor` hands its task back as a Designer's reply, so every author's task is admitted the same way.
-:class:`AgentAuthor` is pi, Reefine's pinned coding agent, in a cloud sandbox (E2B or Modal). It reads the session, the repository at
+:class:`TaskDesigner` hands its task back as a Designer's reply, so every Designer's task is admitted the same way.
+:class:`AgentDesigner` is pi, Reefine's pinned coding agent, in a cloud sandbox (E2B or Modal). It reads the session, the repository at
 the base commit and its checkout path under ``../inputs/``, writes the task under ``./task/``, and checks it with its
 one tool, ``task_check``. Its model calls and checks go through a loopback gateway (:class:`RecordingGateway`) that
-holds the credentials and records each model call on Reef. :class:`PromptAuthor` is the baseline: the generator
+holds the credentials and records each model call on Reef. :class:`PromptDesigner` is the baseline: the generator
 service's one-reply prompt Designer, one recorded model call whose reply is the task.
 
-A variant of a seeded parent has no session: a :class:`SeedVariantAuthor` writes it with ``vary_seed``, and the agent
+A variant of a seeded parent has no session: a :class:`SeedVariantDesigner` writes it with ``vary_seed``, and the agent
 then reads the parent and ``variant.md`` alone, by the seed rules (:data:`SEED_AGENT_RULES`).
 """
 
@@ -55,7 +55,7 @@ from reef.train import harness_backend
 
 logger = logging.getLogger(__name__)
 
-TOOLS_EXTENSION = Path(__file__).with_name("author_tools.ts")
+TOOLS_EXTENSION = Path(__file__).with_name("designer_tools.ts")
 #: Where the agent's tools land in its harness tree.
 TOOLS_PATH = "extensions/autoenvscaling-tools.ts"
 # The agent is told to finish, with the best task it has, this long before its time runs out.
@@ -254,12 +254,12 @@ PROMPT_TEXT = """Rebuild the recorded coding-agent session below as ONE Harbor t
 
 
 def rebuild_rules(has_behaviour_rule: bool) -> str:
-    """The rules both authors write a task by: the rebuild rules, and the behaviour rule unless it is off."""
+    """The rules both Designers write a task by: the rebuild rules, and the behaviour rule unless it is off."""
     return f"{REBUILD_RULES_TEXT}\n{BEHAVIOUR_RULES_TEXT}" if has_behaviour_rule else REBUILD_RULES_TEXT
 
 
 def agent_rules(checks: CandidateChecks, has_behaviour_rule: bool, extra_rules: str, is_seeded: bool) -> str:
-    """The rules of an agent author's run, which ``checks`` checks: :data:`AGENT_RULES` for a run from a session, or
+    """The rules of an agent Designer's run, which ``checks`` checks: :data:`AGENT_RULES` for a run from a session, or
     :data:`SEED_AGENT_RULES` for a variant of a seeded parent (``is_seeded``). ``extra_rules`` extends the inputs
     they name, such as :data:`VARIANT_INPUTS_TEXT` for a variant from a session. The behaviour rule is in them unless
     ``has_behaviour_rule`` is off, and the review text when the checks review the tests."""
@@ -282,20 +282,20 @@ def agent_rules(checks: CandidateChecks, has_behaviour_rule: bool, extra_rules: 
 
 
 def agent_prompt(variant: TaskVariant | None, is_seeded: bool) -> str:
-    """The prompt of an agent author's run: rebuild the session, or write a ``variant`` of its parent, from the
+    """The prompt of an agent Designer's run: rebuild the session, or write a ``variant`` of its parent, from the
     session or, for a seeded parent (``is_seeded``), from the parent alone. A seeded run always has a variant."""
     if variant is None:
         return AGENT_PROMPT
     return (SEED_VARIANT_PROMPT if is_seeded else VARIANT_PROMPT).format(direction=variant.direction)
 
 
-class AuthorError(RuntimeError):
-    """The author could not run: its session could not be read, its repository fetched, its agent run or its model
+class DesignerOutage(RuntimeError):
+    """The Designer could not run: its session could not be read, its repository fetched, its agent run or its model
     call answered."""
 
 
 class SourceError(ValueError):
-    """A source the author cannot rebuild: its record is gone or holds no session, or its repository or base commit
+    """A source the Designer cannot rebuild: its record is gone or holds no session, or its repository or base commit
     is not there. A data error, not an outage."""
 
 
@@ -312,9 +312,9 @@ class TaskVariant:
     is a non-boolean number in [0, 1]; ``rollouts`` is a positive, non-boolean integer.
     The rate represents the mean reward over that many rollouts of the parent. ``seed_task`` is empty for a parent
     from a session, or the Harbor task name of the seed (its directory name) that a seeded parent comes from.
-    Purpose: the generator makes one for a variant slot of an adaptive generation; ``VariantAuthor.vary`` puts the
+    Purpose: the generator makes one for a variant slot of an adaptive generation; ``VariantDesigner.vary`` puts the
     parent and the pass rate in the agent's inputs and asks for a task that keeps the parent's requirements.
-    ``SeedVariantAuthor.vary_seed`` does so for a seeded parent, without a session. The generator names
+    ``SeedVariantDesigner.vary_seed`` does so for a seeded parent, without a session. The generator names
     ``seed_task`` in the variant's metadata.
     """
 
@@ -345,13 +345,13 @@ class TaskVariant:
 
 
 @dataclass(frozen=True)
-class AuthoredTask:
-    """The author's task as a Designer's reply, and where the model calls that wrote it are kept.
+class DesignedTask:
+    """The Designer's task as a Designer's reply, and where the model calls that wrote it are kept.
 
     Values: ``reply`` is the task in a Designer's reply form. ``record_ids`` are the receipts of the model calls
     that Reef recorded, in order. ``transcript`` is the path, relative to the run's directory, of the transcript
-    of an author whose model calls Reef does not record (Claude Code's own session file), or ``""``.
-    Purpose: an author's ``author`` returns it; the generator admits ``reply`` and names the task's sources from
+    of a Designer whose model calls Reef does not record (Claude Code's own session file), or ``""``.
+    Purpose: a Designer's ``design`` returns it; the generator admits ``reply`` and names the task's sources from
     ``record_ids``, or from ``transcript`` when no call was recorded.
     """
 
@@ -376,16 +376,16 @@ class CandidateChecks(ABC):
         """The check's result for the agent, a JSON object; ``ran`` is false when the check could not run."""
 
 
-class TaskAuthor(ABC):
-    """An implementation that rebuilds any valid SessionSource as one AuthoredTask.
+class TaskDesigner(ABC):
+    """An implementation that rebuilds any valid SessionSource as one DesignedTask.
 
-    ``author`` reads a session and writes run files to a new work directory. It returns
-    the task reply and ordered model receipts, or raises SourceError or AuthorError.
+    ``design`` reads a session and writes run files to a new work directory. It returns
+    the task reply and ordered model receipts, or raises SourceError or DesignerOutage.
     Implementations may use CandidateChecks; tags label model calls and stop requests cancellation.
     """
 
     @abstractmethod
-    def author(
+    def design(
         self,
         source: SessionSource,
         work_dir: Path,
@@ -393,17 +393,17 @@ class TaskAuthor(ABC):
         *,
         tags: Mapping[str, str],
         stop: threading.Event,
-    ) -> AuthoredTask:
-        """Rebuild source; raise SourceError for an unusable source or AuthorError for an outage."""
+    ) -> DesignedTask:
+        """Rebuild source; raise SourceError for an unusable source or DesignerOutage for an outage."""
 
 
-class VariantAuthor(TaskAuthor):
-    """A task author that also accepts every valid TaskVariant without a ``seed_task`` through ``vary``.
+class VariantDesigner(TaskDesigner):
+    """A Designer that also accepts every valid TaskVariant without a ``seed_task`` through ``vary``.
 
-    ``vary`` has the same output, checks, cancellation and failure contract as ``author``.
+    ``vary`` has the same output, checks, cancellation and failure contract as ``design``.
     Its additional input is a parent from the supplied session. The returned task keeps
     the parent's requirements, extended for harder or reduced for simpler.
-    The adaptive generator accepts only authors implementing this interface.
+    The adaptive generator accepts only Designers implementing this interface.
     """
 
     @abstractmethod
@@ -416,17 +416,17 @@ class VariantAuthor(TaskAuthor):
         tags: Mapping[str, str],
         stop: threading.Event,
         variant: TaskVariant,
-    ) -> AuthoredTask:
+    ) -> DesignedTask:
         """Write a variant from source and variant, returning its reply and model receipts."""
 
 
-class SeedVariantAuthor(VariantAuthor):
-    """A variant author that also varies a seeded parent, which has no session, through ``vary_seed``.
+class SeedVariantDesigner(VariantDesigner):
+    """A variant Designer that also varies a seeded parent, which has no session, through ``vary_seed``.
 
     ``vary_seed`` has the same output, checks, cancellation and failure contract as ``vary``. Its input is a
     TaskVariant with a ``seed_task``, and it raises ``ValueError`` for one without. It reads no session and no
     repository: only the parent and its pass rate. The returned task keeps the parent's domain, harder or simpler.
-    A generator with seed tasks accepts only authors implementing this interface.
+    A generator with seed tasks accepts only Designers implementing this interface.
     """
 
     @abstractmethod
@@ -438,7 +438,7 @@ class SeedVariantAuthor(VariantAuthor):
         tags: Mapping[str, str],
         stop: threading.Event,
         variant: TaskVariant,
-    ) -> AuthoredTask:
+    ) -> DesignedTask:
         """Write a variant of a seeded parent from variant alone, returning its reply and model receipts."""
 
 
@@ -482,9 +482,9 @@ def session_text(reef: ReefClient, source: SessionSource, *, budget_chars: int =
     except ReefClientError as exc:
         if exc.status == 404:
             raise SourceError(f"Reef holds no record {source.record_id} in {source.scenario}") from exc
-        raise AuthorError(f"the session {source.record_id} could not be read from Reef: {exc}") from exc
+        raise DesignerOutage(f"the session {source.record_id} could not be read from Reef: {exc}") from exc
     except (OSError, ValueError) as exc:
-        raise AuthorError(f"the session {source.record_id} could not be read from Reef: {exc}") from exc
+        raise DesignerOutage(f"the session {source.record_id} could not be read from Reef: {exc}") from exc
     if not body["payload"].get("messages"):
         raise SourceError(f"the record {source.record_id} holds no session messages")
     return untrusted_text(render_session(body["payload"], budget_chars=budget_chars), "recorded session")
@@ -568,7 +568,7 @@ class AgentTools(AgentTool):
     Under ``lock``, ``results`` maps consecutive positive check IDs to None while
     running or their result dictionaries when done. ``running_id`` is None or
     the sole unfinished check ID. Construction starts with no session or check results.
-    Purpose: author gateways use this object to serialize checks and retain results.
+    Purpose: Designer gateways use this object to serialize checks and retain results.
 
     ``/check`` with no arguments starts a check on a thread of its own (the workspace pulled from the sandbox,
     then the candidate checks) and answers ``state: running`` with its ``check_id``; while one runs, it answers
@@ -649,7 +649,7 @@ def repository_snapshot(source: SessionSource, cache_dir: Path) -> Path:
     clone and a checkout.
 
     Raises :class:`SourceError` when the repository is not there (deleted, private or a wrong URL) or has no such
-    commit, and :class:`AuthorError` when git timed out or the network failed.
+    commit, and :class:`DesignerOutage` when git timed out or the network failed.
     """
     repository = source.repository
     target = cache_dir / f"{hashlib.sha256(repository.url.encode()).hexdigest()[:8]}-{repository.commit}"
@@ -699,9 +699,9 @@ def repository_snapshot(source: SessionSource, cache_dir: Path) -> Path:
                 raise SourceError(
                     f"{repository.url} has no commit {repository.commit} to check out: {failure}"
                 ) from exc
-            raise AuthorError(failure) from exc
+            raise DesignerOutage(failure) from exc
         except (subprocess.TimeoutExpired, OSError) as exc:
-            raise AuthorError(f"the snapshot of {repository.url} at {repository.commit} failed: {exc}") from exc
+            raise DesignerOutage(f"the snapshot of {repository.url} at {repository.commit} failed: {exc}") from exc
         finally:
             shutil.rmtree(partial, ignore_errors=True)
         return target
@@ -717,7 +717,7 @@ def write_inputs(reef: ReefClient, source: SessionSource | None, work_dir: Path,
     None ``source`` without a ``variant`` that names a ``seed_task``, and for a ``source`` with one.
     """
     if source is None and (variant is None or not variant.seed_task):
-        raise ValueError("an author's run without a session needs a variant of a seeded parent")
+        raise ValueError("a Designer's run without a session needs a variant of a seeded parent")
     if source is not None and variant is not None and variant.seed_task:
         raise ValueError("a variant of a seeded parent takes no session")
     inputs = work_dir / "inputs"
@@ -751,7 +751,7 @@ def write_inputs(reef: ReefClient, source: SessionSource | None, work_dir: Path,
             )
 
 
-class AgentAuthor(SeedVariantAuthor):
+class AgentDesigner(SeedVariantDesigner):
     """pi in a cloud sandbox, its model calls recorded on the Reef at ``reef_url`` under ``scenario``.
 
     ``reef_url`` and ``token`` also read the source sessions; ``cache_dir`` keeps the repository snapshots.
@@ -785,7 +785,7 @@ class AgentAuthor(SeedVariantAuthor):
         self.has_behaviour_rule = has_behaviour_rule
         self.descriptor = get_adapter("pi")
 
-    def author(
+    def design(
         self,
         source: SessionSource,
         work_dir: Path,
@@ -793,7 +793,7 @@ class AgentAuthor(SeedVariantAuthor):
         *,
         tags: Mapping[str, str],
         stop: threading.Event,
-    ) -> AuthoredTask:
+    ) -> DesignedTask:
         return self.write_task(source, work_dir, checks, tags=tags, stop=stop)
 
     def vary(
@@ -805,7 +805,7 @@ class AgentAuthor(SeedVariantAuthor):
         tags: Mapping[str, str],
         stop: threading.Event,
         variant: TaskVariant,
-    ) -> AuthoredTask:
+    ) -> DesignedTask:
         return self.write_task(source, work_dir, checks, tags=tags, stop=stop, variant=variant)
 
     def vary_seed(
@@ -816,7 +816,7 @@ class AgentAuthor(SeedVariantAuthor):
         tags: Mapping[str, str],
         stop: threading.Event,
         variant: TaskVariant,
-    ) -> AuthoredTask:
+    ) -> DesignedTask:
         return self.write_task(None, work_dir, checks, tags=tags, stop=stop, variant=variant)
 
     def write_task(
@@ -828,7 +828,7 @@ class AgentAuthor(SeedVariantAuthor):
         tags: Mapping[str, str],
         stop: threading.Event,
         variant: TaskVariant | None = None,
-    ) -> AuthoredTask:
+    ) -> DesignedTask:
         """pi's task from ``source``, or with ``variant`` a variant of its parent; a ``source`` of None is a variant
         of a seeded parent, written from the parent alone (:func:`write_inputs`)."""
         inputs = work_dir / "inputs"
@@ -861,7 +861,7 @@ class AgentAuthor(SeedVariantAuthor):
         finally:
             # The run's copy of the repository is large and the same as the cache; the task and pi's session stay.
             shutil.rmtree(inputs / "repo", ignore_errors=True)
-        return AuthoredTask(reply=workspace_reply(task_dir), record_ids=tuple(calls.receipts))
+        return DesignedTask(reply=workspace_reply(task_dir), record_ids=tuple(calls.receipts))
 
     def run(
         self,
@@ -876,24 +876,24 @@ class AgentAuthor(SeedVariantAuthor):
         is_seeded: bool = False,
     ) -> None:
         """pi in a sandbox over the workspace until it stops, its time runs out or ``stop`` is set; ``extra_rules`` extends
-        the authoring rules and ``prompt`` states the task to write. With ``is_seeded`` the authoring rules are the
+        the Designer's rules and ``prompt`` states the task to write. With ``is_seeded`` the Designer's rules are the
         seed rules (:func:`agent_rules`): the inputs hold no session.
 
-        Raises :class:`AuthorError` when the run could not start or was stopped, and when the model failed with
+        Raises :class:`DesignerOutage` when the run could not start or was stopped, and when the model failed with
         the budget unspent: an outage (a spent plan, a lost sign-in) must not pass for the agent's failure.
         """
         if stop.is_set():
-            raise AuthorError("the agent's run was stopped before it started")
+            raise DesignerOutage("the agent's run was stopped before it started")
         executor, binary = self.executor.for_program(AdapterProgram(self.descriptor))
         rules = agent_rules(tools.checks, self.has_behaviour_rule, extra_rules, is_seeded)
         agent_tree = HarnessTree({"rules.md": rules, TOOLS_PATH: TOOLS_EXTENSION.read_text(encoding="utf-8")})
         binding = ModelBinding(base_url=gateway.base_url, model=self.upstream.model, api=self.upstream.api)
         env = {
-            "REEF_AUTHOR_URL": gateway.base_url,
-            "REEF_AUTHOR_DEADLINE_MS": str(int((time.time() + self.timeout_seconds) * 1000)),
-            "REEF_AUTHOR_FINISH_SECONDS": str(FINISH_SECONDS),
+            "REEF_DESIGNER_URL": gateway.base_url,
+            "REEF_DESIGNER_DEADLINE_MS": str(int((time.time() + self.timeout_seconds) * 1000)),
+            "REEF_DESIGNER_FINISH_SECONDS": str(FINISH_SECONDS),
             # The task_check tool's description says when the check also reviews the tests.
-            "REEF_AUTHOR_REVIEWS": "1" if tools.checks.is_reviewing else "0",
+            "REEF_DESIGNER_REVIEWS": "1" if tools.checks.is_reviewing else "0",
         }
         started = time.monotonic()
         ended = "timed out"
@@ -921,8 +921,8 @@ class AgentAuthor(SeedVariantAuthor):
             trajectory = []
         except ProgramLaunchError as exc:
             if stop.is_set():
-                raise AuthorError("the agent's run was stopped") from exc
-            raise AuthorError(f"the agent could not run: {exc}") from exc
+                raise DesignerOutage("the agent's run was stopped") from exc
+            raise DesignerOutage(f"the agent could not run: {exc}") from exc
         finally:
             finished.set()
             if session is not None:
@@ -947,7 +947,7 @@ class AgentAuthor(SeedVariantAuthor):
             if not isinstance(message, Mapping) or message.get("role") != "assistant":
                 continue
             if message.get("stopReason") in ("error", "aborted") and not calls.is_spent:
-                raise AuthorError(
+                raise DesignerOutage(
                     f"the agent's model call ended with {message.get('stopReason')}: "
                     f"{str(message.get('errorMessage') or '')[:500]}"
                 )
@@ -999,7 +999,7 @@ class ModelReplies:
         return DesignerAnswer(text=text, record_id=record_id)
 
 
-class PromptAuthor(TaskAuthor):
+class PromptDesigner(TaskDesigner):
     """The generator service's one-reply prompt Designer on the session: one call through the Reef at ``reef_url``,
     recorded under ``scenario``, whose reply is the task.
 
@@ -1027,7 +1027,7 @@ class PromptAuthor(TaskAuthor):
         self.session_chars = session_chars
         self.has_behaviour_rule = has_behaviour_rule
 
-    def author(
+    def design(
         self,
         source: SessionSource,
         work_dir: Path,
@@ -1035,7 +1035,7 @@ class PromptAuthor(TaskAuthor):
         *,
         tags: Mapping[str, str],
         stop: threading.Event,
-    ) -> AuthoredTask:
+    ) -> DesignedTask:
         repository = source.repository
         prompt = PROMPT_TEXT.format(
             repository=REPOSITORY_TEXT.format(url=repository.url, commit=repository.commit, path=repository.path),
@@ -1048,8 +1048,8 @@ class PromptAuthor(TaskAuthor):
                 scenario=self.scenario, model=self.model, system=SYSTEM_PROMPT, prompt=prompt, tags=tags
             )
         except (DesignerError, ValueError) as exc:
-            raise AuthorError(f"the Designer's call failed: {exc}") from exc
+            raise DesignerOutage(f"the Designer's call failed: {exc}") from exc
         # A reply without text is an empty reply, which admission refuses against the receipt.
         work_dir.mkdir(parents=True)
         (work_dir / "reply.md").write_text(answer.text, encoding="utf-8")
-        return AuthoredTask(reply=answer.text, record_ids=(answer.record_id,))
+        return DesignedTask(reply=answer.text, record_ids=(answer.record_id,))

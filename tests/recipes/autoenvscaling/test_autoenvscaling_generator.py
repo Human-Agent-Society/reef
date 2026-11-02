@@ -22,7 +22,7 @@ from tests.recipes.autoenvscaling.autoenvscaling_stubs import (
     REQUEST,
     RefusingGenerator,
     ScriptedRollouts,
-    StandInAuthor,
+    StandInDesigner,
     autoenvscaling,
     cursor,
     fenced,
@@ -37,23 +37,23 @@ from tests.recipes.autoenvscaling.autoenvscaling_stubs import (
 from tests.support.task_service_stubs import DOCUMENT, StandInGenerator
 
 from recipes.beta.autoenvscaling import (
-    AgentAuthor,
-    AuthoredTask,
-    AuthorError,
+    AgentDesigner,
     AutoEnvScalingGenerator,
     CalibrationCheck,
     CandidateChecks,
+    DesignedTask,
+    DesignerOutage,
     GeneratorChecks,
-    PromptAuthor,
+    PromptDesigner,
     SessionSource,
-    TaskAuthor,
     TaskCheck,
+    TaskDesigner,
     admitted_task,
 )
 from recipes.beta.autoenvscaling import generator as generator_module
 from recipes.beta.autoenvscaling import workspace_reply
-from recipes.beta.autoenvscaling.author import AgentTools, TaskVariant
 from recipes.beta.autoenvscaling.checks import CheckResult, PassRateBand
+from recipes.beta.autoenvscaling.designer import AgentTools, TaskVariant
 from reef.core import AgentRecord, RequestType
 from reef.core.plugins import PluginConfigError
 from reef.core.tasks import HarborTask, read_harbor_task
@@ -77,14 +77,14 @@ def e2b_package(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_a_generation_rebuilds_the_next_sessions_and_admits_each_task(tmp_path: Path) -> None:
-    author = StandInAuthor()
+    designer = StandInDesigner()
     service = StandInGenerator(tmp_path / "tasks")
-    tasks = asyncio.run(autoenvscaling(tmp_path, author, service).generate(REQUEST))
+    tasks = asyncio.run(autoenvscaling(tmp_path, designer, service).generate(REQUEST))
 
-    assert [call["source"] for call in author.calls] == ["session-1", "session-2", "session-1"]
-    assert author.calls[0]["tags"] == {"role": "designer", "generation": "0", "index": "0"}
-    assert author.calls[0]["work_dir"] == tmp_path / "state" / "runs" / "00000-000"
-    assert author.calls[0]["check"] == {
+    assert [call["source"] for call in designer.calls] == ["session-1", "session-2", "session-1"]
+    assert designer.calls[0]["tags"] == {"role": "designer", "generation": "0", "index": "0"}
+    assert designer.calls[0]["work_dir"] == tmp_path / "state" / "runs" / "00000-000"
+    assert designer.calls[0]["check"] == {
         "check": 1,
         "ran": True,
         "passed": True,
@@ -110,14 +110,14 @@ def test_a_generation_rebuilds_the_next_sessions_and_admits_each_task(tmp_path: 
 
 
 def test_a_restarted_generator_continues_with_the_next_session_and_generation(tmp_path: Path) -> None:
-    author = StandInAuthor()
-    first = autoenvscaling(tmp_path, author, source_count=3, count=2)
+    designer = StandInDesigner()
+    first = autoenvscaling(tmp_path, designer, source_count=3, count=2)
     asyncio.run(first.generate(REQUEST))
     asyncio.run(first.record_results((), generation=0))
-    again = autoenvscaling(tmp_path, author, source_count=3, count=2)
+    again = autoenvscaling(tmp_path, designer, source_count=3, count=2)
     tasks = asyncio.run(again.generate(REQUEST))
     # The walk cycles: positions 2 and 3 are the third session and the first.
-    assert [call["source"] for call in author.calls] == ["session-1", "session-2", "session-3", "session-1"]
+    assert [call["source"] for call in designer.calls] == ["session-1", "session-2", "session-3", "session-1"]
     assert [task.name for task in tasks] == [
         "harbor-00001-000-autoenvscaling",
         "harbor-00001-001-autoenvscaling",
@@ -125,15 +125,15 @@ def test_a_restarted_generator_continues_with_the_next_session_and_generation(tm
     assert cursor(tmp_path) == {"next_generation": 2, "next_position": 4}
 
 
-class BlockingAuthor(TaskAuthor):
-    """An author whose run lasts until it is stopped."""
+class BlockingDesigner(TaskDesigner):
+    """A Designer whose run lasts until it is stopped."""
 
     def __init__(self) -> None:
         self.started = threading.Event()
         self.stopped = threading.Event()
         self.work_dirs: list[Path] = []
 
-    def author(
+    def design(
         self,
         source: SessionSource,
         work_dir: Path,
@@ -142,36 +142,36 @@ class BlockingAuthor(TaskAuthor):
         tags: Mapping[str, str],
         stop: threading.Event,
         variant: TaskVariant | None = None,
-    ) -> AuthoredTask:
+    ) -> DesignedTask:
         self.work_dirs.append(work_dir)
         self.started.set()
         if stop.wait(10):
             self.stopped.set()
-        raise AuthorError("the agent's run was stopped")
+        raise DesignerOutage("the agent's run was stopped")
 
 
 def test_a_cancelled_generation_stops_its_agent_and_takes_no_session(tmp_path: Path) -> None:
-    author = BlockingAuthor()
-    generator = autoenvscaling(tmp_path, author)
+    designer = BlockingDesigner()
+    generator = autoenvscaling(tmp_path, designer)
 
     async def cancelled() -> None:
         generation = asyncio.ensure_future(generator.generate(REQUEST))
-        await asyncio.to_thread(author.started.wait, 10)
+        await asyncio.to_thread(designer.started.wait, 10)
         generation.cancel()
         with pytest.raises(asyncio.CancelledError):
             await generation
-        await asyncio.to_thread(author.stopped.wait, 10)
+        await asyncio.to_thread(designer.stopped.wait, 10)
 
     for _ in range(2):
-        author.started.clear()
-        author.stopped.clear()
+        designer.started.clear()
+        designer.stopped.clear()
         asyncio.run(cancelled())
-        assert author.stopped.is_set(), "the cancellation reached the agent's thread"
-    assert [path.name for path in author.work_dirs] == ["00000-000", "00001-000"], "a rerun is a new generation"
+        assert designer.stopped.is_set(), "the cancellation reached the agent's thread"
+    assert [path.name for path in designer.work_dirs] == ["00000-000", "00001-000"], "a rerun is a new generation"
     assert cursor(tmp_path) == {"next_generation": 2, "next_position": 0}, "the session is taken again"
 
 
-class GatheringStandIn(StandInAuthor):
+class GatheringStandIn(StandInDesigner):
     """The stand-in, which writes its task only once ``limit`` tasks are being written at once, and keeps the most
     written at once."""
 
@@ -183,7 +183,7 @@ class GatheringStandIn(StandInAuthor):
         self.most = 0
         self.full = threading.Event()
 
-    def author(
+    def design(
         self,
         source: SessionSource,
         work_dir: Path,
@@ -192,7 +192,7 @@ class GatheringStandIn(StandInAuthor):
         tags: Mapping[str, str],
         stop: threading.Event,
         variant: TaskVariant | None = None,
-    ) -> AuthoredTask:
+    ) -> DesignedTask:
         with self.lock:
             self.running += 1
             self.most = max(self.most, self.running)
@@ -200,7 +200,7 @@ class GatheringStandIn(StandInAuthor):
                 self.full.set()
         try:
             self.full.wait(10)
-            return super().author(source, work_dir, checks, tags=tags, stop=stop, variant=variant)
+            return super().design(source, work_dir, checks, tags=tags, stop=stop, variant=variant)
         finally:
             with self.lock:
                 self.running -= 1
@@ -216,7 +216,7 @@ def test_tasks_are_written_at_once_up_to_the_concurrency_and_keep_their_order(tm
     assert cursor(tmp_path) == {"next_generation": 1, "next_position": 5}
 
 
-class OutageStandIn(TaskAuthor):
+class OutageStandIn(TaskDesigner):
     """The first session's task is an outage once the second session's task is being written; that one runs until
     it is stopped."""
 
@@ -225,7 +225,7 @@ class OutageStandIn(TaskAuthor):
         self.second = threading.Event()
         self.stopped = threading.Event()
 
-    def author(
+    def design(
         self,
         source: SessionSource,
         work_dir: Path,
@@ -234,37 +234,37 @@ class OutageStandIn(TaskAuthor):
         tags: Mapping[str, str],
         stop: threading.Event,
         variant: TaskVariant | None = None,
-    ) -> AuthoredTask:
+    ) -> DesignedTask:
         self.sources.append(source.record_id)
         if source.record_id == "session-1":
             self.second.wait(10)
-            raise AuthorError("the agent could not run: the sandbox did not start")
+            raise DesignerOutage("the agent could not run: the sandbox did not start")
         self.second.set()
         if stop.wait(10):
             self.stopped.set()
-        raise AuthorError("the agent's run was stopped")
+        raise DesignerOutage("the agent's run was stopped")
 
 
 def test_an_outage_starts_no_further_task_and_stops_the_running_ones_after_it(tmp_path: Path) -> None:
     stand_in = OutageStandIn()
     generator = autoenvscaling(tmp_path, stand_in, source_count=4, count=4, concurrency=2)
-    with pytest.raises(AuthorError, match="the author could not rebuild session-1"):
+    with pytest.raises(DesignerOutage, match="the Designer could not rebuild session-1"):
         asyncio.run(generator.generate(REQUEST))
     assert stand_in.stopped.wait(10), "the task being written after the outage was stopped"
     assert sorted(stand_in.sources) == ["session-1", "session-2"], "no task started after the outage"
     asyncio.run(generator.record_results((), generation=0))
     document = report(tmp_path)
-    assert document["error"].startswith("the author could not rebuild session-1")
+    assert document["error"].startswith("the Designer could not rebuild session-1")
     assert [(entry["position"], entry["stage"]) for entry in document["proposals"]] == [(0, "outage")]
     assert cursor(tmp_path)["next_position"] == 1, "the stopped task's session is taken again"
 
 
 def test_a_task_the_authoring_checks_refuse_is_refused_and_names_the_last_call(tmp_path: Path) -> None:
-    author = StandInAuthor(has_tmux=False)
+    designer = StandInDesigner(has_tmux=False)
     service = StandInGenerator(tmp_path / "tasks")
-    generator = autoenvscaling(tmp_path, author, service, count=1)
+    generator = autoenvscaling(tmp_path, designer, service, count=1)
     assert run_tasks(generator) == ()
-    check = author.calls[0]["check"]
+    check = designer.calls[0]["check"]
     assert check["stage"] == "authoring" and "does not install tmux" in check["errors"]
     assert service.checks == [], "a candidate the authoring checks refuse never reaches Harbor"
     asyncio.run(generator.record_results((), generation=0))
@@ -274,18 +274,18 @@ def test_a_task_the_authoring_checks_refuse_is_refused_and_names_the_last_call(t
 
 
 def test_sessions_without_a_task_are_recorded_by_stage_and_an_outage_ends_the_generation(tmp_path: Path) -> None:
-    author = StandInAuthor(unusable=("session-1",), unreachable=("session-3",))
+    designer = StandInDesigner(unusable=("session-1",), unreachable=("session-3",))
     service = StandInGenerator(tmp_path / "tasks")
-    generator = autoenvscaling(tmp_path, author, service, source_count=4, count=4)
+    generator = autoenvscaling(tmp_path, designer, service, source_count=4, count=4)
     results = run_tasks(generator)
     assert [result.task.name for result in results] == ["harbor-00000-001-autoenvscaling"]
-    assert [call["source"] for call in author.calls] == ["session-1", "session-2", "session-3"]
+    assert [call["source"] for call in designer.calls] == ["session-1", "session-2", "session-3"]
     asyncio.run(generator.record_results(results, generation=0))
 
     document = report(tmp_path)
     assert (
         document["error"]
-        == "the author could not rebuild session-3: the agent could not run: the sandbox did not start"
+        == "the Designer could not rebuild session-3: the agent could not run: the sandbox did not start"
     )
     assert [(entry["position"], entry["stage"]) for entry in document["proposals"]] == [
         (0, "source"),
@@ -299,7 +299,7 @@ def test_sessions_without_a_task_are_recorded_by_stage_and_an_outage_ends_the_ge
     assert document["next_position"] == 3 and cursor(tmp_path)["next_position"] == 3, "the outage's session is taken"
 
     silent = StandInGenerator(tmp_path / "silent")
-    generator = autoenvscaling(tmp_path / "silent", StandInAuthor(receipts=()), silent, count=1)
+    generator = autoenvscaling(tmp_path / "silent", StandInDesigner(receipts=()), silent, count=1)
     assert run_tasks(generator) == ()
     asyncio.run(generator.record_results((), generation=0))
     [proposal] = report(tmp_path / "silent")["proposals"]
@@ -321,21 +321,21 @@ class RefusingCheck(TaskCheck):
 
 def test_validation_runs_the_checks_in_order_on_a_written_copy_and_removes_it(tmp_path: Path) -> None:
     service = StandInGenerator(tmp_path / "tasks")
-    generator = autoenvscaling(tmp_path, StandInAuthor(), service, count=1)
+    generator = autoenvscaling(tmp_path, StandInDesigner(), service, count=1)
     (item,) = asyncio.run(generator.generate(REQUEST))
     assert asyncio.run(generator.validate(item)).is_valid
     assert service.checks[-1] == tmp_path / "tasks" / NAMES[0]
     assert service.deleted[-1] == NAMES[0] and not (tmp_path / "tasks" / NAMES[0]).exists()
 
     further = RefusingCheck()
-    generator = autoenvscaling(tmp_path / "further", StandInAuthor(), task_checks=(further,), count=1)
+    generator = autoenvscaling(tmp_path / "further", StandInDesigner(), task_checks=(further,), count=1)
     (item,) = asyncio.run(generator.generate(REQUEST))
     assert asyncio.run(generator.validate(item)).errors == ("the verifier checks the wording of the change",)
     assert further.runs == [NAMES[0]]
 
     refusing = StandInGenerator(tmp_path / "refusing", is_solvable=False)
     further = RefusingCheck()
-    generator = autoenvscaling(tmp_path / "refusing", StandInAuthor(), refusing, task_checks=(further,), count=1)
+    generator = autoenvscaling(tmp_path / "refusing", StandInDesigner(), refusing, task_checks=(further,), count=1)
     (item,) = asyncio.run(generator.generate(REQUEST))
     assert asyncio.run(generator.validate(item)).errors == ("oracle check refused: the oracle scored 0",)
     assert further.runs == [], "a check that found a defect ends the validation"
@@ -344,7 +344,7 @@ def test_validation_runs_the_checks_in_order_on_a_written_copy_and_removes_it(tm
 
 def test_a_staged_copy_of_the_same_task_passes_validation_and_stays_staged(tmp_path: Path) -> None:
     service = StandInGenerator(tmp_path / "tasks")
-    generator = autoenvscaling(tmp_path, StandInAuthor(), service, count=1)
+    generator = autoenvscaling(tmp_path, StandInDesigner(), service, count=1)
     (item,) = asyncio.run(generator.generate(REQUEST))
     staged = asyncio.run(service.write_task(item))
     assert asyncio.run(generator.validate(item)).is_valid
@@ -353,7 +353,7 @@ def test_a_staged_copy_of_the_same_task_passes_validation_and_stays_staged(tmp_p
 
 def test_a_duplicate_is_invalid(tmp_path: Path) -> None:
     service = StandInGenerator(tmp_path / "tasks")
-    generator = autoenvscaling(tmp_path, StandInAuthor(), service, count=1)
+    generator = autoenvscaling(tmp_path, StandInDesigner(), service, count=1)
     (item,) = asyncio.run(generator.generate(REQUEST))
     asyncio.run(service.write_task(replace(item, name="harbor-copy")))
     assert asyncio.run(generator.validate(item)).errors == ("refused: duplicate of a task already under the root",)
@@ -362,7 +362,7 @@ def test_a_duplicate_is_invalid(tmp_path: Path) -> None:
 def test_a_check_that_cannot_run_raises_and_the_report_names_it(tmp_path: Path) -> None:
     # Two candidate checks, then the first task's check; the second task's check cannot run.
     service = StandInGenerator(tmp_path / "tasks", check_fail_after=3)
-    generator = autoenvscaling(tmp_path, StandInAuthor(), service, count=2)
+    generator = autoenvscaling(tmp_path, StandInDesigner(), service, count=2)
     first, second = asyncio.run(generator.generate(REQUEST))
     assert asyncio.run(generator.validate(first)).is_valid
     asyncio.run(service.write_task(first))
@@ -389,7 +389,7 @@ def test_the_band_keeps_a_task_that_ran_only_when_its_pass_rate_is_inside_it(
     tmp_path: Path, training: tuple[float, ...], band: dict[str, float | None], position: str
 ) -> None:
     service = StandInGenerator(tmp_path / "tasks")
-    generator = autoenvscaling(tmp_path, StandInAuthor(), service, count=1, **band)
+    generator = autoenvscaling(tmp_path, StandInDesigner(), service, count=1, **band)
     asyncio.run(generator.record_results(run_tasks(generator, training), generation=0))
     document = report(tmp_path)
     pass_rate = sum(training) / len(training)
@@ -413,7 +413,7 @@ def test_the_band_keeps_a_task_that_ran_only_when_its_pass_rate_is_inside_it(
 @pytest.mark.unit
 def test_eval_tasks_are_held_out_without_a_band_measurement_or_failure(tmp_path: Path) -> None:
     service = StandInGenerator(tmp_path / "tasks")
-    generator = autoenvscaling(tmp_path, StandInAuthor(), service, count=1)
+    generator = autoenvscaling(tmp_path, StandInDesigner(), service, count=1)
     (generated,) = asyncio.run(generator.generate(REQUEST))
     assert asyncio.run(generator.validate(generated)).is_valid
     asyncio.run(generator.record_results((HeldOutTask(generated),), generation=0))
@@ -426,7 +426,7 @@ def test_eval_tasks_are_held_out_without_a_band_measurement_or_failure(tmp_path:
 
 def test_the_results_name_where_each_refused_task_stopped(tmp_path: Path) -> None:
     service = StandInGenerator(tmp_path / "tasks")
-    generator = autoenvscaling(tmp_path, StandInAuthor(), service)
+    generator = autoenvscaling(tmp_path, StandInDesigner(), service)
     first, second, third = asyncio.run(generator.generate(REQUEST))
     assert asyncio.run(generator.validate(first)).is_valid
     assert asyncio.run(generator.validate(third)).is_valid
@@ -450,13 +450,13 @@ def test_the_results_name_where_each_refused_task_stopped(tmp_path: Path) -> Non
 
 
 def test_a_request_with_source_records_is_refused_and_named_in_the_report(tmp_path: Path) -> None:
-    author = StandInAuthor()
-    generator = autoenvscaling(tmp_path, author)
+    designer = StandInDesigner()
+    generator = autoenvscaling(tmp_path, designer)
     record = AgentRecord.create(scenario="autoenvscaling", request_type=RequestType.INFERENCE, payload={})
     with pytest.raises(ValueError, match="takes its sessions from its sources file"):
         asyncio.run(generator.generate(TaskGenerationRequest((record,), DESCRIPTION)))
     asyncio.run(generator.record_results((), generation=0))
-    assert author.calls == [] and "not from source records" in report(tmp_path)["error"]
+    assert designer.calls == [] and "not from source records" in report(tmp_path)["error"]
     assert cursor(tmp_path) == {"next_generation": 1, "next_position": 0}
 
 
@@ -598,14 +598,14 @@ def test_a_prompt_designer_generation_admits_its_reply_and_reports_against_its_c
     reef, calls = serving_reef(fenced(DOCUMENT))
     service = StandInGenerator(tmp_path / "tasks")
     try:
-        author = PromptAuthor(
+        designer = PromptDesigner(
             reef_url=f"http://127.0.0.1:{reef.server_address[1]}",
             token="token",
             scenario="autoenvscaling",
             model="designer",
             api="openai",
         )
-        generator = autoenvscaling(tmp_path, author, service, count=1, band_low=None, band_high=None)
+        generator = autoenvscaling(tmp_path, designer, service, count=1, band_low=None, band_high=None)
         results = run_tasks(generator, (1.0, 1.0))
         asyncio.run(generator.record_results(results, generation=0))
     finally:
@@ -622,26 +622,26 @@ def test_a_prompt_designer_generation_admits_its_reply_and_reports_against_its_c
     assert report(tmp_path)["proposals"][0]["designer_record_id"] == "rec-1"
 
 
-def test_from_config_builds_the_author_and_keeps_one_state_directory_for_each_scenario(tmp_path: Path) -> None:
+def test_from_config_builds_the_designer_and_keeps_one_state_directory_for_each_scenario(tmp_path: Path) -> None:
     environ = {"E2B_API_KEY": "e2b-test", "DESIGNER_TOKEN": "designer-token"}
     generator = AutoEnvScalingGenerator.from_config(
         generating_config(tmp_path, agent_token_env="DESIGNER_TOKEN", count=2, band_high=None),
         scenario="one",
         environ=environ,
     )
-    assert isinstance(generator.author, AgentAuthor) and generator.author.upstream.api_key == "designer-token"
-    assert generator.author.cache_dir == tmp_path / "state" / "one" / "repositories"
+    assert isinstance(generator.designer, AgentDesigner) and generator.designer.upstream.api_key == "designer-token"
+    assert generator.designer.cache_dir == tmp_path / "state" / "one" / "repositories"
     assert generator.state_dir == tmp_path / "state" / "one" and generator.count == 2
     assert (generator.band.low, generator.band.high) == (0.25, None)
     assert [source.record_id for source in generator.sources] == ["session-1", "session-2"]
 
     prompt = AutoEnvScalingGenerator.from_config(
-        generating_config(tmp_path, author="prompt", agent_api="responses", behaviour_rule=False),
+        generating_config(tmp_path, designer="prompt", agent_api="responses", behaviour_rule=False),
         scenario="two",
         environ={},
     )
-    assert isinstance(prompt.author, PromptAuthor) and prompt.author.replies.api == "responses"
-    assert generator.author.has_behaviour_rule and not prompt.author.has_behaviour_rule
+    assert isinstance(prompt.designer, PromptDesigner) and prompt.designer.replies.api == "responses"
+    assert generator.designer.has_behaviour_rule and not prompt.designer.has_behaviour_rule
     with pytest.raises(PluginConfigError, match="an E2B sandbox needs an API key"):
         AutoEnvScalingGenerator.from_config(generating_config(tmp_path), scenario="three", environ={})
 
@@ -653,10 +653,10 @@ def test_from_config_builds_the_author_and_keeps_one_state_directory_for_each_sc
         ({"generator_url": "${endpoints.generator}"}, "generator_url"),
         ({"state_dir": ""}, "state_dir and a sources_path"),
         ({"sources_path": "/no/such/sources.json"}, "No such file"),
-        ({"author": "human"}, "author must be one of"),
+        ({"designer": "human"}, "designer must be one of"),
         ({"agent_reef_url": "${endpoints.designer}"}, "agent_model and agent_reef_url"),
         ({"agent_api": "grpc"}, "api must be one of"),
-        ({"author": "prompt", "agent_api": "anthropic"}, "agent_api openai or responses"),
+        ({"designer": "prompt", "agent_api": "anthropic"}, "agent_api openai or responses"),
         ({"max_model_calls": 0}, "max_model_calls must be positive"),
         ({"count": 0}, "count and max_checks must be positive"),
         ({"concurrency": 0}, "concurrency must be a positive integer"),
@@ -689,7 +689,7 @@ def configured_report(
         scenario="autoenvscaling",
         environ={"E2B_API_KEY": "e2b-test"},
     )
-    monkeypatch.setattr(generator, "author", StandInAuthor())
+    monkeypatch.setattr(generator, "designer", StandInDesigner())
     asyncio.run(generator.record_results(run_tasks(generator, *training), generation=0))
     return generator, json.loads((generator.state_dir / "generation-00000.json").read_text())
 
@@ -774,7 +774,7 @@ def test_from_config_refuses_a_calibration_that_cannot_run(
 
 def test_a_round_of_the_generated_task_recipe_runs_autoenvscaling_end_to_end(tmp_path: Path) -> None:
     service = StandInGenerator(tmp_path / "tasks", rewards={"plain": 0.5})
-    generator = autoenvscaling(tmp_path, StandInAuthor(), service, count=2)
+    generator = autoenvscaling(tmp_path, StandInDesigner(), service, count=2)
     session = SQLiteScenarioStorage(tmp_path / "records").open("autoenvscaling")
     context = PipelineContext("autoenvscaling", task_storage=session.tasks, samples=TrainerSamples(session.samples))
     generation = GeneratedTaskSamples(
@@ -799,7 +799,7 @@ def test_a_round_of_the_generated_task_recipe_runs_autoenvscaling_end_to_end(tmp
 
 def test_an_outage_that_makes_no_task_leaves_the_round_incomplete_so_a_restart_gives_it_back(tmp_path: Path) -> None:
     service = StandInGenerator(tmp_path / "tasks")
-    stand_in = StandInAuthor(unreachable=("session-1", "session-2"))
+    stand_in = StandInDesigner(unreachable=("session-1", "session-2"))
     generator = autoenvscaling(tmp_path, stand_in, service, count=2)
     session = SQLiteScenarioStorage(tmp_path / "records").open("autoenvscaling")
     context = PipelineContext("autoenvscaling", task_storage=session.tasks, samples=TrainerSamples(session.samples))
@@ -828,7 +828,7 @@ def test_a_task_whose_calibration_rollouts_cannot_run_leaves_the_generation_comp
         min_std=0.1,
         band=PassRateBand(0.25, 0.75),
     )
-    generator = autoenvscaling(tmp_path, StandInAuthor(), service, count=2, calibration=check)
+    generator = autoenvscaling(tmp_path, StandInDesigner(), service, count=2, calibration=check)
     session = SQLiteScenarioStorage(tmp_path / "records").open("autoenvscaling")
     context = PipelineContext("autoenvscaling", task_storage=session.tasks, samples=TrainerSamples(session.samples))
     generation = GeneratedTaskSamples(
@@ -869,20 +869,20 @@ def test_the_example_selects_the_generated_task_recipe_and_builds_the_generator(
     # reef serve publishes the generator's endpoint when it starts the services.
     config = {**section["config"], "generator_url": "http://127.0.0.1:8910"}
     generator = AutoEnvScalingGenerator.from_config(config, scenario="autoenvscaling", environ=os.environ)
-    assert isinstance(generator.author, AgentAuthor)
+    assert isinstance(generator.designer, AgentDesigner)
     assert generator.state_dir == tmp_path / "generations" / "autoenvscaling"
-    assert generator.author.upstream.api_key == "designer-token" and generator.author.upstream.model == "gpt-6-sol"
+    assert generator.designer.upstream.api_key == "designer-token" and generator.designer.upstream.model == "gpt-6-sol"
 
 
 def test_a_generation_closes_after_a_later_one_started_and_after_a_restart(tmp_path: Path) -> None:
     service = StandInGenerator(tmp_path / "tasks", rewards={"plain": 0.5})
-    generator = autoenvscaling(tmp_path, StandInAuthor(), service, count=1)
+    generator = autoenvscaling(tmp_path, StandInDesigner(), service, count=1)
     (first,) = asyncio.run(generator.generate(TaskGenerationRequest((), DESCRIPTION, generation=0)))
     assert asyncio.run(generator.validate(first)).is_valid
     (second,) = asyncio.run(generator.generate(TaskGenerationRequest((), DESCRIPTION, generation=1)))
     asyncio.run(generator.record_results((RolledOutTask(second, (0.5, 0.5)),), generation=1))
     assert report(tmp_path, 1)["tasks"][0]["name"] == second.name
-    restarted = autoenvscaling(tmp_path, StandInAuthor(), service, count=1)
+    restarted = autoenvscaling(tmp_path, StandInDesigner(), service, count=1)
     asyncio.run(restarted.record_results((RolledOutTask(first, (0.5, 0.5)),), generation=0))
     document = report(tmp_path, 0)
     assert [task["band"] for task in document["tasks"]] == ["inside"]
@@ -892,7 +892,7 @@ def test_a_generation_closes_after_a_later_one_started_and_after_a_restart(tmp_p
 
 
 def test_a_task_that_could_not_run_is_an_outage_in_the_report(tmp_path: Path) -> None:
-    generator = autoenvscaling(tmp_path, StandInAuthor(), StandInGenerator(tmp_path / "tasks"), count=1)
+    generator = autoenvscaling(tmp_path, StandInDesigner(), StandInGenerator(tmp_path / "tasks"), count=1)
     (item,) = asyncio.run(generator.generate(REQUEST))
     failure = FailedTask(item, "the sandbox provider is down", True)
     asyncio.run(generator.record_results((failure,), generation=0))
@@ -901,7 +901,7 @@ def test_a_task_that_could_not_run_is_an_outage_in_the_report(tmp_path: Path) ->
 
 def test_the_generator_refuses_a_band_whose_low_exceeds_its_high(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="band_low must not exceed band_high"):
-        autoenvscaling(tmp_path, StandInAuthor(), band_low=0.8, band_high=0.2)
+        autoenvscaling(tmp_path, StandInDesigner(), band_low=0.8, band_high=0.2)
 
 
 def test_from_config_gives_the_calibration_the_configured_band(tmp_path: Path) -> None:

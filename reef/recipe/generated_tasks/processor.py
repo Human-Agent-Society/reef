@@ -76,7 +76,7 @@ DELIVERY_RECEIPT = "delivery"
 
 
 def split_source_ids(task: HarborTask) -> tuple[str, ...]:
-    """The source record ids that place a task in a split: its sources without the author's own record."""
+    """The source record ids that place a task in a split: its sources without the Designer's own record."""
     designer_record_id = task.metadata.get("designer_record_id")
     return tuple(record_id for record_id in task.source_agent_record_ids if record_id != designer_record_id)
 

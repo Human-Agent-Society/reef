@@ -207,7 +207,7 @@ reviews each task's tests and refuses a task whose tests check what its
 instruction does not state. A pass-rate band marks the tasks the Reasoning Agent
 can reach. The deployment selects it as the generator of the generated-task
 stages in its `pipeline` section, and the built-in generated-task recipe runs
-the tasks and trains on them. With `author: prompt`, the generator service's
+the tasks and trains on them. With `designer: prompt`, the generator service's
 one-reply prompt Designer rebuilds the same sessions as the baseline.
 
 [Reefine](beta/reefine/README.md) is beta under `recipes/beta/reefine/`. It

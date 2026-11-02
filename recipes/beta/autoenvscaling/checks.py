@@ -31,7 +31,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Literal
 
-from recipes.beta.autoenvscaling.author import ModelReplies
+from recipes.beta.autoenvscaling.designer import ModelReplies
 from reef.core.prompts import untrusted_text
 from reef.core.tasks import HarborTask
 from reef.harness.tasks.rollouts import TaskRollout, rewards_of

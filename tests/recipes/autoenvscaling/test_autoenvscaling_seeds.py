@@ -18,7 +18,7 @@ from tests.recipes.autoenvscaling.autoenvscaling_stubs import (
     ScriptedExecutor,
     ScriptedRollouts,
     ScriptedSession,
-    StandInAuthor,
+    StandInDesigner,
     cursor,
     generating_config,
     report,
@@ -28,31 +28,35 @@ from tests.recipes.autoenvscaling.autoenvscaling_stubs import (
     stand_in_e2b_package,
     write_workspace_task,
 )
-from tests.recipes.autoenvscaling.test_autoenvscaling_claude_author import TOKEN, ClaudeExecutor, ScriptedClaudeSession
+from tests.recipes.autoenvscaling.test_autoenvscaling_claude_designer import (
+    TOKEN,
+    ClaudeExecutor,
+    ScriptedClaudeSession,
+)
 from tests.support.task_service_stubs import DOCUMENT, StandInGenerator
 
 from recipes.beta.autoenvscaling import (
-    AgentAuthor,
-    AuthoredTask,
-    AuthorError,
+    AgentDesigner,
     AutoEnvScalingGenerator,
     CalibrationCheck,
     CandidateChecks,
-    ClaudeCodeAuthor,
+    ClaudeCodeDesigner,
     ContaminationCheck,
+    DesignedTask,
+    DesignerOutage,
     ReviewCheck,
-    SeedVariantAuthor,
+    SeedVariantDesigner,
     SessionSource,
-    TaskAuthor,
+    TaskDesigner,
     TaskVariant,
     admitted_task,
 )
-from recipes.beta.autoenvscaling import author as author_module
-from recipes.beta.autoenvscaling import claude_author as claude_author_module
+from recipes.beta.autoenvscaling import claude_designer as claude_designer_module
+from recipes.beta.autoenvscaling import designer as designer_module
 from recipes.beta.autoenvscaling import load_sources, workspace_reply
-from recipes.beta.autoenvscaling.author import SEED_VARIANT_PROMPT, VARIANT_INPUTS_TEXT, agent_prompt, agent_rules
 from recipes.beta.autoenvscaling.checks import PassRateBand
-from recipes.beta.autoenvscaling.claude_author import CLAUDE_CHECK_TEXT
+from recipes.beta.autoenvscaling.claude_designer import CLAUDE_CHECK_TEXT
+from recipes.beta.autoenvscaling.designer import SEED_VARIANT_PROMPT, VARIANT_INPUTS_TEXT, agent_prompt, agent_rules
 from recipes.beta.autoenvscaling.generator import (
     REPOSITORY_TASK_CONFIG,
     GenerationCursor,
@@ -104,7 +108,7 @@ def write_seeds(root: Path, count: int, config: Mapping[str, Mapping[str, object
     return root
 
 
-class SeedAuthor(SeedVariantAuthor):
+class SeedDesigner(SeedVariantDesigner):
     """Writes a task as the agent would, from a session or, without one, from the parent alone; it checks the task
     once through the generator's checks and returns two receipts. ``sources``, ``variants`` and ``checks`` keep
     what each run got and what its check answered."""
@@ -114,7 +118,7 @@ class SeedAuthor(SeedVariantAuthor):
         self.variants: list[TaskVariant | None] = []
         self.checks: list[dict[str, object]] = []
 
-    def author(
+    def design(
         self,
         source: SessionSource,
         work_dir: Path,
@@ -122,7 +126,7 @@ class SeedAuthor(SeedVariantAuthor):
         *,
         tags: Mapping[str, str],
         stop: threading.Event,
-    ) -> AuthoredTask:
+    ) -> DesignedTask:
         return self.write(source, work_dir, checks, tags=tags, variant=None)
 
     def vary(
@@ -134,7 +138,7 @@ class SeedAuthor(SeedVariantAuthor):
         tags: Mapping[str, str],
         stop: threading.Event,
         variant: TaskVariant,
-    ) -> AuthoredTask:
+    ) -> DesignedTask:
         return self.write(source, work_dir, checks, tags=tags, variant=variant)
 
     def vary_seed(
@@ -145,7 +149,7 @@ class SeedAuthor(SeedVariantAuthor):
         tags: Mapping[str, str],
         stop: threading.Event,
         variant: TaskVariant,
-    ) -> AuthoredTask:
+    ) -> DesignedTask:
         return self.write(None, work_dir, checks, tags=tags, variant=variant)
 
     def write(
@@ -156,13 +160,13 @@ class SeedAuthor(SeedVariantAuthor):
         *,
         tags: Mapping[str, str],
         variant: TaskVariant | None,
-    ) -> AuthoredTask:
+    ) -> DesignedTask:
         self.sources.append(None if source is None else source.record_id)
         self.variants.append(variant)
         port = 8000 + 100 * int(tags["generation"]) + int(tags["index"])
         task_dir = write_workspace_task(work_dir / "workspace" / "task", port)
         self.checks.append(checks.check(task_dir))
-        return AuthoredTask(workspace_reply(task_dir), ("agent-1", "agent-2"))
+        return DesignedTask(workspace_reply(task_dir), ("agent-1", "agent-2"))
 
 
 class ScriptedOracle(StandInGenerator):
@@ -179,7 +183,7 @@ class ScriptedOracle(StandInGenerator):
 
 def seeded(
     tmp_path: Path,
-    author: TaskAuthor,
+    designer: TaskDesigner,
     service: StandInGenerator | None = None,
     *,
     seed_count: int = 2,
@@ -193,7 +197,7 @@ def seeded(
     return AutoEnvScalingGenerator(
         scenario="autoenvscaling",
         service=service if service is not None else StandInGenerator(tmp_path / "tasks"),
-        author=author,
+        designer=designer,
         sources=load_sources(sources_file(tmp_path, source_count)) if source_count else (),
         state_dir=tmp_path / "state",
         count=count,
@@ -210,12 +214,12 @@ def parents(tmp_path: Path) -> list[dict[str, object]]:
 
 
 def test_seeds_fill_the_slots_after_variants_and_before_sessions_once_each(tmp_path: Path) -> None:
-    author = SeedAuthor()
-    generator = seeded(tmp_path, author, source_count=2, count=3)
+    designer = SeedDesigner()
+    generator = seeded(tmp_path, designer, source_count=2, count=3)
     seeds = generator.seeds
     first = run_tasks(generator, (1.0, 1.0), (0.5, 0.5), (0.5, 0.5))
-    # The seeds take their slots as they are; only the session's slot runs the author.
-    assert author.sources == ["session-1"]
+    # The seeds take their slots as they are; only the session's slot runs the Designer.
+    assert designer.sources == ["session-1"]
     assert [result.task.metadata.get("seed_task") for result in first] == [seeds[0].name, seeds[1].name, None]
     assert first[0].task.name == NAMES[0] and first[0].task.instruction == seeds[0].instruction
     assert first[0].task.source_agent_record_ids == (seed_record_id(seeds[0]),)
@@ -234,8 +238,8 @@ def test_seeds_fill_the_slots_after_variants_and_before_sessions_once_each(tmp_p
 
     # The seed above the band is varied first; no seed is taken again, so the sessions fill the rest.
     second = asyncio.run(generator.generate(REQUEST))
-    assert author.sources == ["session-1", None, "session-2", "session-1"]
-    variant = author.variants[1]
+    assert designer.sources == ["session-1", None, "session-2", "session-1"]
+    variant = designer.variants[1]
     assert variant is not None and (variant.parent, variant.seed_task) == (NAMES[0], seeds[0].name)
     assert [task.metadata.get("seed_task") for task in second] == [seeds[0].name, None, None]
 
@@ -250,7 +254,7 @@ def test_seeds_fill_the_slots_after_variants_and_before_sessions_once_each(tmp_p
 )
 def test_a_seed_is_admitted_by_its_build_and_its_no_op_solution_failing(tmp_path: Path, result: OracleResult) -> None:
     service = ScriptedOracle(tmp_path / "tasks", result)
-    generator = seeded(tmp_path, SeedAuthor(), service, seed_count=1)
+    generator = seeded(tmp_path, SeedDesigner(), service, seed_count=1)
     [task] = asyncio.run(generator.generate(REQUEST))
     assert asyncio.run(generator.validate(task)).is_valid
     asyncio.run(generator.record_results((RolledOutTask(task, (0.5, 0.5)),), generation=0))
@@ -281,7 +285,7 @@ def test_a_seed_is_admitted_by_its_build_and_its_no_op_solution_failing(tmp_path
     ids=("no-build", "nop-passes"),
 )
 def test_a_seed_whose_environment_does_not_build_is_refused(tmp_path: Path, result: OracleResult, error: str) -> None:
-    generator = seeded(tmp_path, SeedAuthor(), ScriptedOracle(tmp_path / "tasks", result), seed_count=1)
+    generator = seeded(tmp_path, SeedDesigner(), ScriptedOracle(tmp_path / "tasks", result), seed_count=1)
     [task] = asyncio.run(generator.generate(REQUEST))
     validation = asyncio.run(generator.validate(task))
     assert not validation.is_valid and error in validation.errors[0]
@@ -310,7 +314,12 @@ def test_a_seed_skips_the_review_and_the_calibration(tmp_path: Path) -> None:
             {"reference": "a reference task about something else"}, n=5, tasks_path="refs"
         )
         generator = seeded(
-            tmp_path, SeedAuthor(), service, seed_count=1, task_checks=(contamination, review), calibration=calibration
+            tmp_path,
+            SeedDesigner(),
+            service,
+            seed_count=1,
+            task_checks=(contamination, review),
+            calibration=calibration,
         )
         [task] = asyncio.run(generator.generate(REQUEST))
         assert asyncio.run(generator.validate(task)).is_valid
@@ -323,8 +332,8 @@ def test_a_seed_skips_the_review_and_the_calibration(tmp_path: Path) -> None:
 
 
 def test_a_seed_outside_the_band_becomes_a_seeded_parent(tmp_path: Path) -> None:
-    author = SeedAuthor()
-    generator = seeded(tmp_path, author)
+    designer = SeedDesigner()
+    generator = seeded(tmp_path, designer)
     seeds = generator.seeds
     asyncio.run(generator.record_results(run_tasks(generator, (1.0, 1.0), (0.5, 0.5)), generation=0))
     [parent] = parents(tmp_path)
@@ -337,8 +346,8 @@ def test_a_seed_outside_the_band_becomes_a_seeded_parent(tmp_path: Path) -> None
 
     # The variant has no session; it falls below the band, so it becomes a parent of the same seed.
     second = run_tasks(generator, (0.0, 0.0))
-    assert author.sources == [None]
-    [variant] = author.variants
+    assert designer.sources == [None]
+    [variant] = designer.variants
     assert variant is not None and (variant.parent, variant.seed_task) == (NAMES[0], seeds[0].name)
     [result] = second
     assert (result.task.metadata["parent_task"], result.task.metadata["seed_task"]) == (NAMES[0], seeds[0].name)
@@ -355,7 +364,7 @@ def test_a_seed_outside_the_band_becomes_a_seeded_parent(tmp_path: Path) -> None
 
 
 def test_the_split_puts_a_seed_variant_with_its_seed(tmp_path: Path) -> None:
-    generator = seeded(tmp_path, SeedAuthor())
+    generator = seeded(tmp_path, SeedDesigner())
     first = run_tasks(generator, (1.0, 1.0), (0.5, 0.5))
     asyncio.run(generator.record_results(first, generation=0))
     [variant] = asyncio.run(generator.generate(REQUEST))
@@ -392,7 +401,7 @@ def test_a_seed_from_an_earlier_runs_session_task_keeps_its_session_and_is_a_see
     write_harbor_task(earlier, tmp_path / "earlier-run")
     # Its reference solution scores 0.25: the seed check admits it, the oracle check would not.
     service = ScriptedOracle(tmp_path / "tasks", OracleResult(False, "the reference solution scored 0.25", 0.25))
-    generator = seeded(tmp_path, SeedAuthor(), service, source_count=1)
+    generator = seeded(tmp_path, SeedDesigner(), service, source_count=1)
     generator.seeds = seed_tasks(tmp_path / "earlier-run")
     seed, session_task = asyncio.run(generator.generate(REQUEST))
     seed_id = seed_record_id(generator.seeds[0])
@@ -412,14 +421,14 @@ def test_a_seed_from_an_earlier_runs_session_task_keeps_its_session_and_is_a_see
 
 @pytest.mark.parametrize("is_cancelled", [False, True], ids=("raises", "cancelled"))
 def test_an_attempt_that_raises_or_is_cancelled_takes_no_seed(tmp_path: Path, is_cancelled: bool) -> None:
-    class FailingSessionAuthor(SeedAuthor):
+    class FailingSessionDesigner(SeedDesigner):
         """Its session slot raises an error the generator does not catch, or lasts until it is cancelled."""
 
         def __init__(self) -> None:
             super().__init__()
             self.started = threading.Event()
 
-        def author(
+        def design(
             self,
             source: SessionSource,
             work_dir: Path,
@@ -427,14 +436,14 @@ def test_an_attempt_that_raises_or_is_cancelled_takes_no_seed(tmp_path: Path, is
             *,
             tags: Mapping[str, str],
             stop: threading.Event,
-        ) -> AuthoredTask:
+        ) -> DesignedTask:
             self.started.set()
             if not is_cancelled:
                 raise OSError("disk full while copying the snapshot")
             stop.wait(10)
-            raise AuthorError("the agent's run was stopped")
+            raise DesignerOutage("the agent's run was stopped")
 
-    failing = FailingSessionAuthor()
+    failing = FailingSessionDesigner()
     generator = seeded(tmp_path, failing, seed_count=1, source_count=1)
 
     async def attempt() -> None:
@@ -449,14 +458,14 @@ def test_an_attempt_that_raises_or_is_cancelled_takes_no_seed(tmp_path: Path, is
     assert failing.started.is_set(), "the seed's slot came first, then the session's failed"
     assert cursor(tmp_path) == {"next_generation": 1, "next_position": 0, "next_seed": 0}
     # The recipe's next attempt takes the seed again.
-    retried = asyncio.run(seeded(tmp_path, SeedAuthor(), seed_count=1, source_count=1).generate(REQUEST))
+    retried = asyncio.run(seeded(tmp_path, SeedDesigner(), seed_count=1, source_count=1).generate(REQUEST))
     assert [task.metadata.get("seed_task") for task in retried] == ["tmax-0", None]
     assert cursor(tmp_path) == {"next_generation": 2, "next_position": 1, "next_seed": 1}
 
 
 def test_a_seed_variant_runs_the_task_checks_not_the_seed_check(tmp_path: Path) -> None:
     service = ScriptedOracle(tmp_path / "tasks", OracleResult(True, "", oracle_reward=1.0, nop_reward=0.0))
-    generator = seeded(tmp_path, SeedAuthor(), service)
+    generator = seeded(tmp_path, SeedDesigner(), service)
     asyncio.run(generator.record_results(run_tasks(generator, (1.0, 1.0), (0.5, 0.5)), generation=0))
     [variant] = asyncio.run(generator.generate(REQUEST))
     assert variant.metadata["seed_task"] == generator.seeds[0].name
@@ -470,8 +479,8 @@ def test_a_seed_variant_runs_the_task_checks_not_the_seed_check(tmp_path: Path) 
 
 
 def test_an_eval_seed_is_held_out_and_never_varied(tmp_path: Path) -> None:
-    author = SeedAuthor()
-    generator = seeded(tmp_path, author)
+    designer = SeedDesigner()
+    generator = seeded(tmp_path, designer)
     held_out, trained = asyncio.run(generator.generate(REQUEST))
     for task in (held_out, trained):
         assert asyncio.run(generator.validate(task)).is_valid
@@ -481,7 +490,7 @@ def test_an_eval_seed_is_held_out_and_never_varied(tmp_path: Path) -> None:
     assert report(tmp_path)["proposals"][0]["stage"] == "held_out"
     assert [parent["name"] for parent in parents(tmp_path)] == [trained.name]
     asyncio.run(generator.generate(REQUEST))
-    assert [variant.parent for variant in author.variants if variant is not None] == [trained.name]
+    assert [variant.parent for variant in designer.variants if variant is not None] == [trained.name]
 
 
 def files_under(root: Path, *folders: str) -> dict[str, str]:
@@ -520,9 +529,9 @@ def test_a_seed_variant_gets_only_the_parent_and_variant_md_and_the_parents_envi
     def refused(*arguments: object) -> str:
         raise AssertionError("a seeded run reads no session and takes no repository snapshot")
 
-    monkeypatch.setattr(author_module, "session_text", refused)
-    monkeypatch.setattr(author_module, "repository_snapshot", refused)
-    monkeypatch.setattr(claude_author_module, "repository_snapshot", refused)
+    monkeypatch.setattr(designer_module, "session_text", refused)
+    monkeypatch.setattr(designer_module, "repository_snapshot", refused)
+    monkeypatch.setattr(claude_designer_module, "repository_snapshot", refused)
     parent = read_harbor_task(write_harbor_task(seed_task(0), tmp_path / "parents"))
     variant = TaskVariant(
         parent=parent.name,
@@ -533,10 +542,10 @@ def test_a_seed_variant_gets_only_the_parent_and_variant_md_and_the_parents_envi
         seed_task=parent.name,
     )
     session: SnapshotSession | SnapshotClaudeSession
-    author: AgentAuthor | ClaudeCodeAuthor
+    designer: AgentDesigner | ClaudeCodeDesigner
     if harness == "pi":
         session = SnapshotSession([])
-        author = AgentAuthor(
+        designer = AgentDesigner(
             reef_url="http://127.0.0.1:9",
             token=None,
             scenario="autoenvscaling",
@@ -549,7 +558,7 @@ def test_a_seed_variant_gets_only_the_parent_and_variant_md_and_the_parents_envi
         )
     else:
         session = SnapshotClaudeSession()
-        author = ClaudeCodeAuthor(
+        designer = ClaudeCodeDesigner(
             reef_url="http://127.0.0.1:9",
             token=None,
             claude_token=TOKEN,
@@ -561,7 +570,7 @@ def test_a_seed_variant_gets_only_the_parent_and_variant_md_and_the_parents_envi
         )
     run = tmp_path / "run"
     checks = NoChecks(1)
-    author.vary_seed(run, checks, tags={}, stop=threading.Event(), variant=variant)
+    designer.vary_seed(run, checks, tags={}, stop=threading.Event(), variant=variant)
 
     assert {name for name in session.seen if name.startswith("inputs/")} == {
         "inputs/variant.md",
@@ -581,12 +590,12 @@ def test_a_seed_variant_gets_only_the_parent_and_variant_md_and_the_parents_envi
         assert CLAUDE_CHECK_TEXT in (run / "plugin" / "rules.md").read_text()
     assert session.argv[session.argv.index("-p") + 1] == SEED_VARIANT_PROMPT.format(direction="simpler")
     with pytest.raises(ValueError, match="needs a variant of a seeded parent"):
-        author.vary_seed(
+        designer.vary_seed(
             tmp_path / "other", checks, tags={}, stop=threading.Event(), variant=replace(variant, seed_task="")
         )
     source = SessionSource("session-1", "s", Repository("https://example.com/r.git", "abc1234", "/app"))
     with pytest.raises(ValueError, match="a variant of a seeded parent takes no session"):
-        author.vary(source, tmp_path / "third", checks, tags={}, stop=threading.Event(), variant=variant)
+        designer.vary(source, tmp_path / "third", checks, tags={}, stop=threading.Event(), variant=variant)
 
 
 @pytest.mark.parametrize("is_reviewing", [True, False])
@@ -601,8 +610,8 @@ def test_the_seed_rules_name_no_session_with_the_review_on_or_off(
 
 
 def test_a_seed_variant_task_has_no_history_step(tmp_path: Path) -> None:
-    author = SeedAuthor()
-    generator = seeded(tmp_path, author, source_count=1)
+    designer = SeedDesigner()
+    generator = seeded(tmp_path, designer, source_count=1)
     parent = read_harbor_task(write_harbor_task(seed_task(0), tmp_path / "parents"))
     variant = TaskVariant(
         parent=parent.name,
@@ -615,7 +624,7 @@ def test_a_seed_variant_task_has_no_history_step(tmp_path: Path) -> None:
     seed_id = seed_record_id(parent)
     seeded_variant = asyncio.run(generator.rebuilt(None, 0, variant=variant, source_record_id=seed_id))
     assert HISTORY_MARK not in seeded_variant.environment["Dockerfile"]
-    assert author.checks[0]["passed"] is True, "the agent's own check admits the task without the step"
+    assert designer.checks[0]["passed"] is True, "the agent's own check admits the task without the step"
     session_task = asyncio.run(generator.rebuilt(generator.sources[0], 1))
     assert HISTORY_MARK in session_task.environment["Dockerfile"]
     with pytest.raises(ValueError, match="variant of a seeded parent"):
@@ -648,8 +657,8 @@ def test_the_session_rules_and_prompts_are_unchanged(tmp_path: Path) -> None:
 
 
 def test_a_seeds_only_generation_ends_when_seeds_and_parents_run_out(tmp_path: Path) -> None:
-    author = SeedAuthor()
-    generator = seeded(tmp_path, author, count=4)
+    designer = SeedDesigner()
+    generator = seeded(tmp_path, designer, count=4)
     first = run_tasks(generator, (1.0, 1.0), (0.5, 0.5))
     assert len(first) == 2, "two seeds and no session: the generation ends after the seeds"
     asyncio.run(generator.record_results(first, generation=0))
@@ -662,10 +671,10 @@ def test_a_seeds_only_generation_ends_when_seeds_and_parents_run_out(tmp_path: P
 
 
 def test_a_restart_continues_with_the_next_seed(tmp_path: Path) -> None:
-    generator = seeded(tmp_path, SeedAuthor(), seed_count=3, source_count=1)
+    generator = seeded(tmp_path, SeedDesigner(), seed_count=3, source_count=1)
     first = asyncio.run(generator.generate(REQUEST))
     assert [task.metadata["seed_task"] for task in first] == ["tmax-0", "tmax-1"]
-    restarted = seeded(tmp_path, SeedAuthor(), seed_count=3, source_count=1)
+    restarted = seeded(tmp_path, SeedDesigner(), seed_count=3, source_count=1)
     second = asyncio.run(restarted.generate(REQUEST))
     assert second[0].metadata["seed_task"] == "tmax-2" and "seed_task" not in second[1].metadata
     assert cursor(tmp_path) == {"next_generation": 2, "next_position": 1, "next_seed": 3}
@@ -760,18 +769,18 @@ def test_a_variants_seed_task_is_empty_or_a_task_name(seed_task: object) -> None
         )
 
 
-def test_seeds_and_seeded_parents_need_an_author_that_varies_seeds(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="seed tasks need a SeedVariantAuthor"):
-        seeded(tmp_path, StandInAuthor())
-    generator = seeded(tmp_path, SeedAuthor())
+def test_seeds_and_seeded_parents_need_a_designer_that_varies_seeds(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="seed tasks need a SeedVariantDesigner"):
+        seeded(tmp_path, StandInDesigner())
+    generator = seeded(tmp_path, SeedDesigner())
     asyncio.run(generator.record_results(run_tasks(generator, (1.0, 1.0), (0.5, 0.5)), generation=0))
     assert [parent["seed_task"] for parent in parents(tmp_path)] == [generator.seeds[0].name]
-    # Without seeds, the state's seeded parents still need an author that can vary them.
-    with pytest.raises(ValueError, match="seeded parents, which need a SeedVariantAuthor"):
+    # Without seeds, the state's seeded parents still need a Designer that can vary them.
+    with pytest.raises(ValueError, match="seeded parents, which need a SeedVariantDesigner"):
         AutoEnvScalingGenerator(
             scenario="autoenvscaling",
             service=StandInGenerator(tmp_path / "tasks"),
-            author=StandInAuthor(),
+            designer=StandInDesigner(),
             sources=load_sources(sources_file(tmp_path, 1)),
             state_dir=tmp_path / "state",
             count=2,
@@ -794,14 +803,14 @@ def test_a_seed_variant_keeps_its_seeds_time_and_machine(tmp_path: Path) -> None
         "verifier": {"timeout_sec": 600.0},
         "environment": {"cpus": 1, "memory_mb": 2048, "storage_mb": 4096, "gpus": 0},
     }
-    generator = seeded(tmp_path, SeedAuthor(), seed_config=limits)
+    generator = seeded(tmp_path, SeedDesigner(), seed_config=limits)
     asyncio.run(generator.record_results(run_tasks(generator, (1.0, 1.0), (0.5, 0.5)), generation=0))
     [variant] = asyncio.run(generator.generate(REQUEST))
     assert variant.metadata["seed_task"] == generator.seeds[0].name
     for section, values in limits.items():
         for key, value in values.items():
             assert variant.config[section][key] == value, (section, key)
-    # The rest of the authored config stays: the parent sets no network mode or build timeout.
+    # The rest of the Designer's config stays: the parent sets no network mode or build timeout.
     assert variant.config["environment"]["network_mode"] == REPOSITORY_TASK_CONFIG["environment"]["network_mode"]
 
 
