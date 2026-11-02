@@ -9,10 +9,10 @@ from aiohttp import web
 from aiohttp.test_utils import TestServer
 
 from recipes.openclawrl.turns import main_turn_message, turn_request_messages
-from reef.artifact import Artifact, ArtifactRef
+from reef.artifact import Artifact
 from reef.inference.chat import ReasoningStreamSplitter
 from reef.inference.sglang.chat import NativeStreamCapture, SGLangGenerateClient, SGLangInferenceHandler
-from reef.runtime.interfaces import inference_aborted
+from reef.runtime.interfaces import InferenceArtifact, inference_aborted
 from reef.service.streaming import stream_record
 
 
@@ -226,17 +226,14 @@ def test_handler_chat_template_kwargs_must_not_carry_tools() -> None:
         SGLangInferenceHandler("http://engine", model_path="model", chat_template_kwargs={"tools": []})
 
 
-def _artifact(tmp_path) -> Artifact:
+def _artifact(tmp_path) -> InferenceArtifact:
     checkpoint = tmp_path / "checkpoint"
     checkpoint.mkdir()
-    return Artifact.local(checkpoint)
+    return InferenceArtifact.from_artifact(Artifact.local(checkpoint))
 
 
-def _live_artifact() -> Artifact:
-    return Artifact(
-        ArtifactRef(content_id="live-test", release_id="live:engine:6", parent_release_id="checkpoint"),
-        None,
-    )
+def _live_artifact() -> InferenceArtifact:
+    return InferenceArtifact("artifact:engine:6")
 
 
 @pytest.mark.unit

@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 SCENARIO_HEADER = b"x-reef-scenario"
 RECORD_ID_RESPONSE_HEADER = b"x-reef-agent-record-id"
-RELEASE_ID_RESPONSE_HEADER = b"x-reef-release-id"
+ARTIFACT_ID_RESPONSE_HEADER = b"x-reef-artifact-id"
 
 #: CORAL identity headers (stamped upstream by CoralGatewayMiddleware) and the
 #: reef tag names they map to. Tag values are opaque to reef; these names are
@@ -136,11 +136,11 @@ class ReefGatewayMiddleware(AsgiApp):
         # -- response side: capture the reef receipt ------------------------
         status_code = 0
         record_id: str | None = None
-        release_id: str | None = None
+        artifact_id: str | None = None
         body_tail = bytearray()  # receipt + usage extraction after the stream ends
 
         async def send_wrapper(message: dict) -> None:
-            nonlocal status_code, record_id, release_id
+            nonlocal status_code, record_id, artifact_id
             if message.get("type") == "http.response.start":
                 status_code = message.get("status", 0)
                 for raw_name, raw_value in message.get("headers", []):
@@ -150,8 +150,9 @@ class ReefGatewayMiddleware(AsgiApp):
                     # llm_provider-x-reef-agent-record-id).
                     if lowered.endswith(RECORD_ID_RESPONSE_HEADER):
                         record_id = bytes(raw_value).decode("latin-1")
-                    elif lowered.endswith(RELEASE_ID_RESPONSE_HEADER):
-                        release_id = bytes(raw_value).decode("latin-1")
+                    elif lowered.endswith(ARTIFACT_ID_RESPONSE_HEADER):
+                        # An empty header names no artifact; the journal must not fail on the response path.
+                        artifact_id = bytes(raw_value).decode("latin-1") or None
             elif message.get("type") == "http.response.body":
                 body_tail.extend(message.get("body", b""))
             await send(message)
@@ -172,7 +173,7 @@ class ReefGatewayMiddleware(AsgiApp):
                 path=scope.get("path", ""),
                 status_code=status_code,
                 agent_record_id=record_id,
-                release_id=release_id,
+                artifact_id=artifact_id,
                 prompt_tokens=usage.get("prompt_tokens"),
                 completion_tokens=usage.get("completion_tokens"),
                 tags=tags,

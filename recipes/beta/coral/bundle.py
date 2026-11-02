@@ -79,7 +79,7 @@ def build_result_bundle(
                 "status": report.status,
                 "inference_calls": len(calls),
                 "inference_record_ids": [c.agent_record_id for c in calls if c.agent_record_id],
-                "release_ids": sorted({c.release_id for c in calls if c.release_id}),
+                "artifact_ids": sorted({c.artifact_id for c in calls if c.artifact_id}),
                 "prompt_tokens": sum(c.prompt_tokens or 0 for c in calls),
                 "completion_tokens": sum(c.completion_tokens or 0 for c in calls),
             }
@@ -88,7 +88,7 @@ def build_result_bundle(
     # --- run-level accounting ----------------------------------------------
     total_prompt = sum(r.prompt_tokens or 0 for r in records)
     total_completion = sum(r.completion_tokens or 0 for r in records)
-    revisions = sorted({r.release_id for r in records if r.release_id})
+    revisions = sorted({r.artifact_id for r in records if r.artifact_id})
 
     return {
         "run_id": run_id,

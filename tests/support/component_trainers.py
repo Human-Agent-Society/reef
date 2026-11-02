@@ -11,7 +11,7 @@ from typing import Any
 from tests.support._threshold_processor import ThresholdJobData, threshold_pipeline
 from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent
 
-from reef.artifact import ArtifactRef, DefaultStart, InMemoryRepositoryBackend
+from reef.artifact import DefaultStart, InMemoryRepositoryBackend, SnapshotRef
 from reef.core import AgentRecord, RequestType
 from reef.core.activation import ActivationRule
 from reef.dispatcher import Dispatcher
@@ -347,7 +347,7 @@ def _repository(tmp_path: Path):
     return InMemoryRepositoryBackend.factory(directory=tmp_path / "repository")
 
 
-def component_files(scenario: Scenario, ref: ArtifactRef) -> dict[str, str]:
+def component_files(scenario: Scenario, ref: SnapshotRef) -> dict[str, str]:
     """The text of each component's ``<component>.txt`` in the release ``ref``."""
     head = scenario.repository.materialize(ref)
     return {
@@ -408,3 +408,12 @@ def _dispatcher(
         components=components,
     )
     return dispatcher, backends
+
+
+def component_id(scenario: Scenario, revision: str, component: str) -> str:
+    """Read a component identity from a test's stored snapshot or composed view."""
+    selection = scenario.repository.selections.get(revision)
+    if selection is not None:
+        return selection.components[component]
+    ref = scenario.repository.backend.resolve_snapshot(revision)
+    return scenario.repository.resolve(ref).component(component).artifact_id

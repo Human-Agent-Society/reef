@@ -20,7 +20,7 @@ Client to Reef
     client installed. ``merge_trees`` then puts the client's changes on the
     active release, which may have moved on since that release. The service
     commits the merged tree as a ``"sync"``: it becomes the active release
-    and the training start (``ScenarioCommitter.sync_release``).
+    and the training start (``ScenarioCommitter.sync_artifact``).
 
 For a tree whose files are each in the form their render writes,
 ``import_files(render_tree(tree))`` is the tree again.

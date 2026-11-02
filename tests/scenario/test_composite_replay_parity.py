@@ -33,7 +33,7 @@ from tests.support.component_trainers import (
 from tests.support.samples_service import make_samples
 
 from recipes.tttd import TTTDGroupedRolloutReport, TTTDJobData, TTTDSamples, TTTDSettings
-from reef.artifact import ArtifactRef, InMemoryRepositoryBackend
+from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher
 from reef.execution.jobs import SupportsReceipt
@@ -415,7 +415,7 @@ def _tttd_inference(record_id: str, release: str) -> AgentRecord:
         scenario="agent",
         request_type=RequestType.INFERENCE,
         agent_record_id=record_id,
-        artifact_ref=ArtifactRef(content_id=f"c-{release}", release_id=release, parent_release_id=None),
+        artifact_id=release,
         payload={"tokens": [1, 2], "loss_mask": [0, 1], "rollout_log_probs": [-0.2]},
     )
 
@@ -474,5 +474,5 @@ def test_a_tttd_step_failed_on_two_releases_stays_failed_after_a_reload(tmp_path
     of it."""
     live = _tttd_failed_step(tmp_path / "live", reload=False)
     rebuilt = _tttd_failed_step(tmp_path / "rebuilt", reload=True)
-    assert live[1] == [{"step": 0, "reason": "mixed_release_ids", "release_ids": ["rel-1", "rel-2"]}]
+    assert live[1] == [{"step": 0, "reason": "mixed_artifact_ids", "artifact_ids": ["rel-1", "rel-2"]}]
     assert live[2] is None and rebuilt == live

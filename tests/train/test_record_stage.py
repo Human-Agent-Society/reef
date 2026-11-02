@@ -15,7 +15,7 @@ from tests.support.samples_service import make_samples
 from tests.support.task_service_stubs import task_for
 from tests.train.test_record_stage_job_data_parity import counting_jobs, inference, report
 
-from reef.artifact import ArtifactRef
+from reef.artifact import SnapshotRef
 from reef.core import AgentRecord, RequestType
 from reef.core.errors import ManualBufferRefused
 from reef.core.job_data import JobOutcome
@@ -453,7 +453,7 @@ def test_each_trainer_skips_only_the_samples_that_its_own_component_trained() ->
         commit=CommitRecord(
             scenario="s",
             step=1,
-            artifact_ref=ArtifactRef("content:1", "release:1", "base"),
+            snapshot=SnapshotRef("release:1", "base"),
             checkpoint=True,
             algorithm_state={},
             high_water_sequence=0,
