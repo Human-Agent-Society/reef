@@ -65,6 +65,7 @@ from reef.storage.marks import Marks, check_mark_name
 from reef.storage.migrations import migrate_work_item_columns
 from reef.storage.postgres import postgres_url, validate_postgres_schema
 from reef.storage.served_models import (
+    AUTOMATIC_RETRIES,
     INFERENCE_OWNER_QUEUE,
     SERVING_KIND,
     SERVING_QUEUE,
@@ -406,11 +407,14 @@ class SQLServedModels(ServedModelsWriter):
         control_lease_number: int,
         stop_delay_seconds: float = 0.0,
         retry_failed: bool = False,
+        automatic_retries: int = 0,
         now: float | None = None,
     ) -> WorkItem:
         require_text(scenario, "scenario")
         if not math.isfinite(stop_delay_seconds) or stop_delay_seconds < 0:
             raise ValueError("stop_delay_seconds must be finite and non-negative")
+        if isinstance(automatic_retries, bool) or not isinstance(automatic_retries, int) or automatic_retries < 0:
+            raise ValueError("automatic_retries must be a non-negative integer")
         moment = clock(now)
         table = self.tables.work_item
         with (
@@ -419,12 +423,12 @@ class SQLServedModels(ServedModelsWriter):
         ):
             self.checked(connection, control_lease_number)
             current = self.request_in(connection, scenario)
-            if (
-                current is not None
-                and canonical_json(dict(current.payload)) == canonical_json(dict(payload))
-                and not (retry_failed and current.state == "failed")
-            ):
-                return current
+            # Whether the new item retries the failed current item of the same payload.
+            retried = False
+            if current is not None and canonical_json(dict(current.payload)) == canonical_json(dict(payload)):
+                if not (retry_failed and current.state == "failed"):
+                    return current
+                retried = True
             waiting = connection.execute(
                 select(table).where(
                     table.c.queue == SERVING_QUEUE,
@@ -450,6 +454,9 @@ class SQLServedModels(ServedModelsWriter):
                 sequence,
                 moment,
             )
+            if retried and automatic_retries:
+                metadata = canonical_json({AUTOMATIC_RETRIES: automatic_retries})
+                item = self.work.save(connection, counter, item, moment, metadata_json=metadata)
             if payload:
                 return item
             self.replace_routes(connection, served_counter, scenario, {}, moment + stop_delay_seconds)

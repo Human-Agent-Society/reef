@@ -18,6 +18,9 @@ SERVING_QUEUE = "serving"
 SERVING_KIND = "serve"
 STOP_SERVING_KIND = "stop_serving"
 INFERENCE_OWNER_QUEUE = "inference-owner"
+#: The metadata key of a serving request that control made to retry a failed request by itself: the number of such
+#: retries of the same payload in a row, a positive int. A request without the key has the count 0.
+AUTOMATIC_RETRIES = "automatic_retries"
 
 
 class ControlLeaseConflict(ReefError):
@@ -100,11 +103,15 @@ class ServedModelsWriter(ServedModels):
         control_lease_number: int,
         stop_delay_seconds: float = 0.0,
         retry_failed: bool = False,
+        automatic_retries: int = 0,
         now: float | None = None,
     ) -> WorkItem:
         """Select ``payload`` for ``scenario`` under the control lease and return its serving work.
 
         An unchanged payload returns the current item, except a failed item when ``retry_failed`` is true.
+        A new item that retries a failed item of the same payload records the non-negative int
+        ``automatic_retries`` as ``metadata[AUTOMATIC_RETRIES]`` when it is positive. Every other new item has no
+        such key, so its count is 0.
         A new request cancels earlier queued work and gets a new ID. Held work finishes without publishing.
         All serving work shares one serial key, because runtimes can share an engine across scenarios.
         An empty payload withdraws the routes immediately and records a completed request.
@@ -167,6 +174,7 @@ class ServedModelsWriter(ServedModels):
 
 
 __all__ = [
+    "AUTOMATIC_RETRIES",
     "INFERENCE_OWNER_QUEUE",
     "SERVING_KIND",
     "SERVING_QUEUE",

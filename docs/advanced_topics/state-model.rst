@@ -52,7 +52,7 @@ Serving and training use separate selections:
 - The active selection supplies the default routes. ``activate`` replaces
   one selected artifact and leaves every trainer's start unchanged. Inference
   uses the selection that completed startup; a failed load remains visible
-  in startup status.
+  in startup status until control retries it.
 - Each trainer has a training start: the artifact its next job or evolve
   step starts from. It begins at the creation artifact and moves to its own
   newest output after training. ``train-from`` selects an existing artifact
