@@ -45,11 +45,10 @@ def test_a_record_item_keeps_the_record_and_says_where_it_came_from():
     assert item.metadata == {
         "kind": "record",
         "scenarios": {"math": "train"},
-        "origin": {"scenario": "math", "release_id": "rel-1", "artifact_id": "artifact-1"},
+        "origin": {"scenario": "math", "artifact_id": "artifact-1"},
     }
     assert record_item(record("r1", score=1.0)).metadata["origin"] == {
         "scenario": "math",
-        "release_id": None,
         "artifact_id": None,
     }
 

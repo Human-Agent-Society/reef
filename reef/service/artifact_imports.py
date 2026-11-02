@@ -46,7 +46,7 @@ class ArtifactImports:
     ) -> dict[str, Any]:
         """Import the files ``uri`` names into ``component`` of ``scenario``, by reference or as a copy.
 
-        Return ``{scenario, component, artifact_id, release_id, content_id}``. The import's ``source`` is ``{uri,
+        Return ``{scenario, component, artifact_id}``. The import's ``source`` is ``{uri,
         version}``, and also ``item``, ``item_id``, when the URI came from that artifact item. Before any file is
         read, raise ``UnknownScenario`` for an unknown scenario and ``ValueError`` for a component that cannot take
         the import (``Dispatcher.import_target``). The layout check then runs on the source, before anything is
@@ -64,8 +64,6 @@ class ArtifactImports:
             "scenario": scenario,
             "component": imported.component,
             "artifact_id": imported.artifact_id,
-            "release_id": imported.release_id,
-            "content_id": imported.content_id,
         }
 
     def import_item(

@@ -82,18 +82,21 @@ def check_scenarios(value: object, kind: ItemKind) -> dict[str, str]:
 
 
 def check_origin(value: object) -> dict[str, str | None]:
-    """Return ``value`` as a record's ``origin``: ``{scenario, release_id, artifact_id}``.
+    """Return ``{scenario, artifact_id}``, accepting the former ``release_id`` field on older input.
 
-    ``scenario`` is a valid scenario name. ``release_id`` and ``artifact_id`` are non-empty strings, or null for a
-    record that names no release or no artifact, such as an imported record. Raise ``ValueError`` otherwise.
+    ``scenario`` is a valid scenario name. ``artifact_id`` is a non-empty string, or null when a record names no
+    artifact. A legacy release ID is validated and discarded. Raise ``ValueError`` for other shapes.
     """
-    if not isinstance(value, Mapping) or set(value) != {"scenario", "release_id", "artifact_id"}:
-        raise ValueError("metadata.origin must be {scenario, release_id, artifact_id}")
+    if not isinstance(value, Mapping) or set(value) not in (
+        {"scenario", "artifact_id"},
+        {"scenario", "release_id", "artifact_id"},
+    ):
+        raise ValueError("metadata.origin must be {scenario, artifact_id}")
     check_owner(value["scenario"])
     for key in ("release_id", "artifact_id"):
-        if value[key] is not None and not (isinstance(value[key], str) and value[key]):
+        if value.get(key) is not None and not (isinstance(value[key], str) and value[key]):
             raise ValueError(f"metadata.origin.{key} must be a non-empty string or null")
-    return {key: value[key] for key in ("scenario", "release_id", "artifact_id")}
+    return {key: value[key] for key in ("scenario", "artifact_id")}
 
 
 def created_metadata(owner: str, metadata: Mapping[str, Any]) -> dict[str, Any]:
@@ -101,7 +104,7 @@ def created_metadata(owner: str, metadata: Mapping[str, Any]) -> dict[str, Any]:
 
     ``kind`` is required. ``owner``, when given, must be ``owner``; it is set when it is missing. ``scenarios``
     defaults to ``{}``. ``origin`` is required for a record; an artifact may have one, with a non-null
-    ``release_id`` and ``artifact_id``, when a scenario made it (``reef.storage.artifact_items``); any other kind
+    ``artifact_id``, when a scenario made it (``reef.storage.artifact_items``); any other kind
     refuses it. Other keys are kept as they are. Raise ``ValueError`` for metadata that breaks these rules.
     """
     if not isinstance(metadata, Mapping):
@@ -118,8 +121,8 @@ def created_metadata(owner: str, metadata: Mapping[str, Any]) -> dict[str, Any]:
         created["origin"] = check_origin(metadata.get("origin"))
     elif kind == "artifact" and "origin" in metadata:
         origin = check_origin(metadata["origin"])
-        if origin["release_id"] is None or origin["artifact_id"] is None:
-            raise ValueError("an artifact item's metadata.origin names its release_id and artifact_id")
+        if origin["artifact_id"] is None:
+            raise ValueError("an artifact item's metadata.origin names its artifact_id")
         created["origin"] = origin
     elif "origin" in metadata:
         raise ValueError(f"only a record or an artifact has metadata.origin, not a {kind}")
