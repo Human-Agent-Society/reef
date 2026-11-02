@@ -790,6 +790,12 @@ stores`_).
        a call that no stored call names as parent; its calls are
        ``reef.core.trajectory_index.trajectory_calls`` of the path from the
        root. Reports and unknown IDs are left out.
+   * - ``groups(owner, *, kind, key, before=None, limit=1000)``
+     - The ``ItemGroup`` values of the owner's items of ``kind`` by the string
+       under the metadata ``key``: ``value`` (``None`` without a string),
+       ``item_count``, ``first_sequence``, ``last_sequence`` and the first
+       item's ``metadata``. Newest first, below ``before`` when given. The
+       default reads every page of ``query``; the SQL stores group in SQL.
    * - ``maintain()``
      - The store's periodic work. The data service calls it every 5 minutes.
        It changes no item. The default does nothing.

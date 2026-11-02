@@ -201,6 +201,24 @@ def test_a_task_item_keeps_its_directory_in_the_owners_partition(store, tmp_path
         store.task_path(store.create("acme", [trajectory("t1")])[0])
 
 
+def test_groups_count_the_items_of_each_metadata_value_newest_first(store):
+    store.create("acme", [trajectory("a1", set_id="a", set_name="A"), trajectory("a2", set_id="a")])
+    store.create("acme", [trajectory("n1"), trajectory("b1", set_id="b", set_name="B"), trajectory("x", set_id=7)])
+    store.create("acme", calls(1))
+    store.create("other", [trajectory("o1", set_id="a")])
+    groups = store.groups("acme", kind="trajectory", key="set_id")
+    assert [(group.value, group.item_count, group.metadata.get("set_name")) for group in groups] == [
+        ("b", 1, "B"),
+        (None, 2, None),
+        ("a", 2, "A"),
+    ]
+    assert groups[2].last_sequence == groups[2].first_sequence + 1
+    assert store.groups("acme", kind="trajectory", key="set_id", limit=2) == groups[:2]
+    assert store.groups("acme", kind="trajectory", key="set_id", before=groups[1].first_sequence) == groups[2:]
+    with pytest.raises(ValueError, match="key"):
+        store.groups("acme", kind="trajectory", key="set.id")
+
+
 def test_query_arguments_are_checked(store):
     for arguments, reason in [({"kind": "dataset"}, "kind"), ({"after": -1}, "after"), ({"limit": 0}, "limit")]:
         with pytest.raises(ValueError, match=reason):

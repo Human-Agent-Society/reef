@@ -43,6 +43,8 @@ from sqlalchemy import (
     UniqueConstraint,
     and_,
     bindparam,
+    case,
+    cast,
     create_engine,
     delete,
     exists,
@@ -51,6 +53,7 @@ from sqlalchemy import (
     select,
     update,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Connection, Engine, RowMapping
@@ -67,18 +70,20 @@ from reef.storage.data import (
     MAX_QUERY_LIMIT,
     DataStore,
     ItemConflict,
+    ItemGroup,
     ItemKind,
     ItemNotFound,
     NewItem,
     RecordLink,
     StoredItem,
+    check_groups,
     check_owner,
     check_query,
     patched_metadata,
     prepared_items,
 )
 from reef.storage.item_kinds import task_partition
-from reef.storage.migrations import migrate_data_segments, migrate_data_trajectories
+from reef.storage.migrations import migrate_data_indexes, migrate_data_segments, migrate_data_trajectories
 from reef.storage.postgres import postgres_url, validate_postgres_schema
 from reef.storage.segments import SegmentLine, SegmentPartition, SegmentStore, segment_lines
 from reef.storage.sql_records import (
@@ -135,6 +140,7 @@ def data_tables(metadata: MetaData, *, sqlite: bool) -> tuple[Table, Table, Tabl
         Column("segment_length", BigInteger, nullable=True),
         UniqueConstraint("owner", "item_id"),
         Index("data_item_by_segment", "owner", "segment_id"),
+        Index("data_item_by_kind", "owner", "kind", "sequence"),
         # SQLite reuses the largest rowid after a delete without it; other dialects ignore the option.
         sqlite_autoincrement=sqlite,
     )
@@ -205,6 +211,39 @@ class SQLDataStore(DataStore):
         Sequence order is then commit order, so a reader that pages with ``after`` misses no item. The default
         does nothing, for a store whose transactions already run one at a time.
         """
+
+    @abstractmethod
+    def metadata_string(self, key: str) -> ColumnElement[str]:
+        """The string under ``key`` in the ``metadata_json`` of an item row, or NULL when the value there is not a
+        string. ``key`` passes ``GROUP_KEY``."""
+
+    def groups(
+        self, owner: str, *, kind: ItemKind, key: str, before: int | None = None, limit: int = MAX_QUERY_LIMIT
+    ) -> tuple[ItemGroup, ...]:
+        check_groups(owner, kind, key, before, limit)
+        items = self.items_table
+        values = (
+            select(items.c.sequence, self.metadata_string(key).label("value"))
+            .where(items.c.owner == owner, items.c.kind == kind)
+            .subquery()
+        )
+        first = func.min(values.c.sequence)
+        statement = select(values.c.value, func.count(), first, func.max(values.c.sequence)).group_by(values.c.value)
+        if before is not None:
+            statement = statement.having(first < before)
+        with self.transaction() as connection:
+            found = connection.execute(statement.order_by(first.desc()).limit(limit)).all()
+            metadata = {
+                int(sequence): json.loads(text)
+                for sequence, text in connection.execute(
+                    select(items.c.sequence, items.c.metadata_json).where(
+                        items.c.owner == owner, items.c.sequence.in_([int(row[2]) for row in found])
+                    )
+                )
+            }
+        return tuple(
+            ItemGroup(value, int(count), int(low), int(high), metadata[int(low)]) for value, count, low, high in found
+        )
 
     @contextmanager
     def pack_lock(self, owner: str) -> Iterator[bool]:
@@ -633,6 +672,7 @@ class SQLiteDataStore(SQLDataStore):
             self.connection.exec_driver_sql("BEGIN IMMEDIATE")
             metadata.create_all(self.connection)
             migrate_data_segments(self.connection, self.items_table, self.nodes_table)
+            migrate_data_indexes(self.connection, self.items_table)
             migrate_data_trajectories(self.connection, self.items_table, self.nodes_table)
 
     @classmethod
@@ -670,6 +710,11 @@ class SQLiteDataStore(SQLDataStore):
         )
         # A row comes back only when this statement inserted one; rowcount is not reliable with RETURNING.
         return connection.execute(statement).first() is not None
+
+    def metadata_string(self, key: str) -> ColumnElement[str]:
+        path = f"$.{key}"
+        metadata = self.items_table.c.metadata_json
+        return case((func.json_type(metadata, path) == "text", func.json_extract(metadata, path)))
 
     def close(self) -> None:
         with self.lock:
@@ -721,6 +766,7 @@ class PostgresDataStore(SQLDataStore):
             connection.execute(CreateSchema(schema, if_not_exists=True))
             metadata.create_all(connection)
             migrate_data_segments(connection, self.items_table, self.nodes_table)
+            migrate_data_indexes(connection, self.items_table)
             migrate_data_trajectories(connection, self.items_table, self.nodes_table)
 
     @classmethod
@@ -751,6 +797,10 @@ class PostgresDataStore(SQLDataStore):
         )
         # A row comes back only when this statement inserted one; rowcount is not reliable with RETURNING.
         return connection.execute(statement).first() is not None
+
+    def metadata_string(self, key: str) -> ColumnElement[str]:
+        metadata = cast(self.items_table.c.metadata_json, JSONB)
+        return case((func.jsonb_typeof(metadata[key]) == "string", metadata[key].astext))
 
     @contextmanager
     def pack_lock(self, owner: str) -> Iterator[bool]:
