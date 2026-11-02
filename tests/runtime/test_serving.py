@@ -10,7 +10,7 @@ import pytest
 from tests.support.runtime_stubs import RunningEngines
 
 from reef.artifact import REFERENCE_FILE, DownloadedSnapshot, HuggingFaceRevision, HuggingFaceSource
-from reef.artifact.artifact import Artifact, ArtifactRef
+from reef.artifact.artifact import Artifact, SnapshotRef
 from reef.core.errors import ReefError
 from reef.core.weight_layout import ADAPTER_DIR
 from reef.runtime.deployment import InferenceService
@@ -135,8 +135,8 @@ def saved_full_weights(path: Path) -> Path:
     return path
 
 
-def release(path: Path, content_id: str) -> Artifact:
-    return Artifact(ArtifactRef(content_id, f"release-{content_id}", None), None, local_path=path)
+def release(path: Path, artifact_id: str) -> Artifact:
+    return Artifact(SnapshotRef(artifact_id, None), None, local_path=path)
 
 
 @pytest.fixture
@@ -159,7 +159,7 @@ def test_the_engines_start_serving_the_base_model_under_a_fresh_version(serving,
     assert serving.served_weight_kind == "model_adapter"
 
 
-def test_each_release_loads_under_a_new_version_and_the_same_content_loads_nothing(serving, engines, tmp_path):
+def test_each_artifact_loads_under_a_new_version_and_the_same_artifact_loads_nothing(serving, engines, tmp_path):
     checkpoint = saved_adapter(tmp_path / "job-1")
     version = serving.activate_checkpoint(release(checkpoint, "c1"), scenario="math")
     assert engines.events[-4:] == [
@@ -169,7 +169,7 @@ def test_each_release_loads_under_a_new_version_and_the_same_content_loads_nothi
         "resume",
     ]
     assert serving.serving_adapter_runtime_load_id("math") == version
-    # The committer activates the staged release, then the published one with the same content.
+    # Repeating the same artifact does not reload the adapter.
     calls = len(engines.events)
     assert serving.activate_checkpoint(release(checkpoint, "c1"), scenario="math") == version
     assert len(engines.events) == calls
@@ -261,7 +261,7 @@ def test_shutdown_closes_admission_and_the_service_that_owns_the_engines(engines
     assert serving.inference_admission_status["open"] is False
 
 
-def test_full_weights_load_under_a_new_version_and_the_same_content_loads_nothing(engines, tmp_path):
+def test_full_weights_load_under_a_new_version_and_the_same_artifact_loads_nothing(engines, tmp_path):
     serving = opened(FullWeightServingRuntime(RunningEngines(engines), Handler(), model_path="Qwen/Qwen3-8B"))
     initial = serving.base_version
     assert not serving.per_scenario_adapters and not serving.shared_by_training_scenarios
@@ -275,6 +275,28 @@ def test_full_weights_load_under_a_new_version_and_the_same_content_loads_nothin
     assert len(engines.events) == calls
     rolled_back = serving.activate_checkpoint(release(saved_full_weights(tmp_path / "step-0"), "w0"))
     assert rolled_back not in (initial, version)
+
+
+@pytest.mark.parametrize("adapter", [False, True])
+def test_weight_load_reuse_follows_artifact_identity_across_storage_snapshots(engines, tmp_path, adapter):
+    if adapter:
+        serving = opened(AdapterServingRuntime(RunningEngines(engines), Handler(), adapter_capacity=2))
+        path = saved_adapter(tmp_path / "weights")
+    else:
+        serving = opened(FullWeightServingRuntime(RunningEngines(engines), Handler()))
+        path = saved_full_weights(tmp_path / "weights")
+    first = Artifact(SnapshotRef("snapshot:one", None), None, local_path=path, artifact_id="a")
+    same = Artifact(SnapshotRef("snapshot:two", None), None, local_path=path, artifact_id="a")
+    other = Artifact(SnapshotRef("snapshot:three", None), None, local_path=path, artifact_id="b")
+    try:
+        version = serving.activate_checkpoint(first, scenario="math")
+        calls = len(engines.events)
+        assert serving.activate_checkpoint(same, scenario="math") == version
+        assert len(engines.events) == calls
+        assert serving.activate_checkpoint(other, scenario="math") != version
+        assert len(engines.events) > calls
+    finally:
+        serving.shutdown()
 
 
 def test_a_release_that_refers_to_a_revision_loads_the_revisions_snapshot(engines, tmp_path, monkeypatch):
@@ -447,7 +469,7 @@ def test_recovery_that_replaces_no_engine_loads_nothing(engines, tmp_path):
 def test_a_restarted_runtime_takes_over_the_adapter_the_engines_kept_and_stops_a_replaced_one(engines, tmp_path):
     first = opened(AdapterServingRuntime(RunningEngines(engines), Handler(), adapter_capacity=2))
     checkpoint = saved_adapter(tmp_path / "math")
-    artifact = Artifact(ArtifactRef("m", "release-m", None), None, local_path=checkpoint, artifact_id="artifact-m")
+    artifact = Artifact(SnapshotRef("release-m", None), None, local_path=checkpoint, artifact_id="artifact-m")
     version = first.activate_checkpoint(artifact, scenario="math")
     served = first.served_artifact("artifact-m", "math")
     assert served is not None and served.model_name == adapter_name("math", version)
@@ -472,7 +494,7 @@ def test_a_restarted_runtime_takes_over_the_adapter_the_engines_kept_and_stops_a
 def test_a_value_the_engines_did_not_keep_loads_again(tmp_path):
     first = opened(AdapterServingRuntime(RunningEngines(Engines()), Handler(), adapter_capacity=2))
     artifact = Artifact(
-        ArtifactRef("m", "release-m", None), None, local_path=saved_adapter(tmp_path / "m"), artifact_id="artifact-m"
+        SnapshotRef("release-m", None), None, local_path=saved_adapter(tmp_path / "m"), artifact_id="artifact-m"
     )
     first.activate_checkpoint(artifact, scenario="math")
     served = first.served_artifact("artifact-m", "math")

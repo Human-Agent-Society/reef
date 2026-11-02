@@ -25,11 +25,10 @@ from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from reef.artifact.artifact import Artifact
 from reef.core.values import JsonValue
 from reef.inference.http import HttpInferenceHandler, RequestHeadersFactory
 from reef.inference.provider_protocol import SSE_DONE, SSEFrameDecoder, frame_data, usage_of
-from reef.runtime.interfaces import InferenceStream
+from reef.runtime.interfaces import InferenceArtifact, InferenceStream
 
 CHAT_COMPLETIONS_PATH = "/v1/chat/completions"
 ANTHROPIC_MESSAGES_PATH = "/v1/messages"
@@ -101,7 +100,7 @@ class NativeGenerateClient(ABC):
         """The native request body for ``prompt_ids``, asking for the sampled tokens' log-probs."""
 
     @abstractmethod
-    def parse(self, artifact: Artifact, response: Mapping[str, Any]) -> CapturedGeneration:
+    def parse(self, artifact: InferenceArtifact, response: Mapping[str, Any]) -> CapturedGeneration:
         """Validate one buffered native response and read the exact sample out of it."""
 
     @abstractmethod
@@ -675,7 +674,7 @@ class TokenNativeChatHandler(HttpInferenceHandler):
 
     # -- Buffered requests ------------------------------------------------------
 
-    async def inference(self, artifact: Artifact, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+    async def inference(self, artifact: InferenceArtifact, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         if path == ANTHROPIC_COUNT_TOKENS_PATH:
             return self._anthropic_count_tokens(artifact, payload)
         if path not in {CHAT_COMPLETIONS_PATH, ANTHROPIC_MESSAGES_PATH}:
@@ -687,7 +686,7 @@ class TokenNativeChatHandler(HttpInferenceHandler):
         response, provider_response = await self._complete(artifact, call)
         return provider_response if call.anthropic else response
 
-    async def _complete(self, artifact: Artifact, call: ChatCall) -> tuple[dict[str, Any], dict[str, Any]]:
+    async def _complete(self, artifact: InferenceArtifact, call: ChatCall) -> tuple[dict[str, Any], dict[str, Any]]:
         """Run one buffered generation; return the OpenAI-shaped response and the provider-shaped one."""
         native = await super().inference(
             artifact,
@@ -801,7 +800,9 @@ class TokenNativeChatHandler(HttpInferenceHandler):
         frames.extend(relay.writer.finish(provider_response, output_tokens=output_tokens))
         return provider_response, frames
 
-    async def inference_stream(self, artifact: Artifact, path: str, payload: dict[str, Any]) -> InferenceStream:
+    async def inference_stream(
+        self, artifact: InferenceArtifact, path: str, payload: dict[str, Any]
+    ) -> InferenceStream:
         """Stream the buffered result as one burst of protocol frames.
 
         The engine is asked for a buffered generation, so the exact sample is
@@ -834,7 +835,7 @@ class TokenNativeChatHandler(HttpInferenceHandler):
 
     # -- Anthropic Messages -----------------------------------------------------
 
-    def _anthropic_count_tokens(self, artifact: Artifact, payload: Mapping[str, Any]) -> dict[str, Any]:
+    def _anthropic_count_tokens(self, artifact: InferenceArtifact, payload: Mapping[str, Any]) -> dict[str, Any]:
         """Count the exact templated input."""
         request = self._anthropic_request({**payload, "max_tokens": 1})
         return {"input_tokens": len(self._render_prompt(request))}

@@ -28,7 +28,6 @@ from dataclasses import dataclass, replace
 from typing import Any, Literal, cast
 
 from reef.artifact.artifact import Artifact
-from reef.core.components import made_artifact_id
 from reef.core.errors import CommitPending, ReefError
 from reef.core.evaluation import (
     ArtifactEvaluationRequest,
@@ -72,13 +71,17 @@ ACTIVATION_RETRY_SECONDS = 1.0
 
 @dataclass(frozen=True)
 class NewArtifact:
-    """An artifact that a commit made: the scenario, the artifact's ID, and the component whose artifact it is, or
-    None for a scenario with one component. ``NewArtifacts`` makes it; ``ArtifactEvaluations``
-    evaluates it with the scenario's settings."""
+    """An artifact that a training commit published: the scenario, the artifact's ID, the component whose artifact
+    it is (None for a scenario with one component), and ``revision``, the storage revision of the commit's snapshot.
+
+    ``NewArtifacts`` makes it. ``ArtifactEvaluations`` evaluates it with the scenario's settings when the commit
+    made the artifact, and skips a component that the snapshot carried from an earlier commit.
+    """
 
     scenario: str
     artifact_id: str
     component: str | None
+    revision: str
 
 
 class NewArtifacts(RecordObserver):
@@ -98,14 +101,16 @@ class NewArtifacts(RecordObserver):
         # names one that exists, and a person who imports an artifact decides what to do with it.
         if not commit.trained_artifact:
             return
-        if commit.components is None:
-            self.queue.put(NewArtifact(commit.scenario, commit.artifact_ref.release_id, commit.component))
+        revision = commit.snapshot.revision
+        selected = commit.artifact_ids
+        if selected is None:
+            # Legacy flat commits used their storage revision as their artifact identity.
+            self.queue.put(NewArtifact(commit.scenario, revision, commit.component, revision))
             return
-        # With several components, the release made the artifact of each component that it gave a new artifact_id.
-        release_id = commit.artifact_ref.release_id
-        for name, artifact_id in commit.components.items():
-            if artifact_id == made_artifact_id(release_id, name, single=False):
-                self.queue.put(NewArtifact(commit.scenario, artifact_id, name))
+        names = tuple(selected) if commit.component is None else (commit.component,)
+        for name in names:
+            component = None if len(selected) == 1 and commit.component is None else name
+            self.queue.put(NewArtifact(commit.scenario, selected[name], component, revision))
 
     def close(self) -> None:
         self.queue.put(None)
@@ -343,9 +348,20 @@ class ArtifactEvaluations:
                 logger.exception("could not queue the evaluation of artifact %s of %s", new.artifact_id, new.scenario)
 
     def evaluate_new(self, new: NewArtifact) -> StoredEvaluation | None:
-        """Queue the evaluation of ``new`` with its scenario's settings; None when the scenario has none."""
+        """Queue the evaluation of ``new`` with its scenario's settings.
+
+        Return None when the scenario has no settings, or when the artifact catalog lists ``new`` at an earlier
+        snapshot: the commit carried that component, and it was evaluated when it was made.
+        """
         stored = self.dispatcher.stored_settings(new.scenario).artifact_evaluation
         if stored is None:
+            return None
+        with self.dispatcher.locked_scenario(new.scenario) as current:
+            made = any(
+                row["artifact_id"] == new.artifact_id and row["snapshot"].revision == new.revision
+                for row in current.artifact_rows()
+            )
+        if not made:
             return None
         settings = ArtifactEvaluationSettings.from_json(stored)
         if settings.component is None and new.component is not None:
@@ -413,7 +429,7 @@ class ArtifactEvaluations:
         if component not in kinds:
             raise ValueError(f"the artifacts of scenario {current.name!r} hold no component {component!r}")
         if artifact_id is None:
-            active = Artifact(current.current_artifact_ref(), current.repository)
+            active = Artifact(current.current_snapshot(), current.repository)
             artifact_id = current.surface.component_artifact(active, component).artifact_id
         request = settings.request(artifact_id, component)
         kind = kinds[component]

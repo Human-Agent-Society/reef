@@ -161,7 +161,7 @@ def make_policy_trajectory(
     tokens = field("tokens")
     loss_mask = field("loss_mask")
     rollout_log_probs = field("rollout_log_probs")
-    artifact_id = payload.get("artifact_id") or training.get("artifact_id")
+    artifact_id = item.artifact_id or training.get("artifact_id")
     topk_indices = field("topk_indices") or ()
     topk_log_probs = field("topk_log_probs") or ()
     return make_trajectory((item,), reward).with_training(

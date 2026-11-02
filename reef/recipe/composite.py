@@ -37,10 +37,10 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from reef.artifact.repository import DefaultStart
-from reef.core.artifact_ref import RootSource
 from reef.core.components import validate_component_name
 from reef.core.plugins import PluginConfigError
 from reef.core.reports import ReportBase, ReportValidationError
+from reef.core.snapshot import RootSource
 from reef.evaluation.activation import activation_reference
 from reef.harness.tasks.model_binding import ModelBinding
 from reef.observability import ExperimentLogger
@@ -54,7 +54,7 @@ from reef.storage.records import RecordStore
 from reef.storage.samples import SampleStore, TrainerSamples
 from reef.storage.tasks import TaskStorage, TaskStore
 from reef.surface.base import ComponentSurface, Surface
-from reef.train.backend import CommittedReleases, ComponentReleases
+from reef.train.backend import CommittedArtifacts, ComponentArtifacts
 from reef.train.trainer import ComponentTrainer
 
 #: Metric prefixes experiment tracking keeps for itself; a component's metrics are prefixed with its name.
@@ -350,7 +350,7 @@ class CompositeRecipe(Recipe):
         algorithm_states: Mapping[str, Mapping[str, Any] | None],
         experiment_logger: ExperimentLogger | None = None,
         task_storage: TaskStorage | None = None,
-        releases: CommittedReleases | None = None,
+        releases: CommittedArtifacts | None = None,
         samples: SampleStore | None = None,
         root: ScenarioRoot | None = None,
     ) -> tuple[ComponentTrainer, ...]:
@@ -365,7 +365,7 @@ class CompositeRecipe(Recipe):
                 algorithm_state=algorithm_states.get(component),
                 experiment_logger=experiment_logger,
                 task_storage=None if task_storage is None else ComponentTaskStorage(task_storage, component),
-                releases=None if releases is None else ComponentReleases(releases, component),
+                releases=None if releases is None else ComponentArtifacts(releases, component),
                 samples=None if samples is None else TrainerSamples(samples, component),
                 root=None if root is None else component_root(root, component),
             )

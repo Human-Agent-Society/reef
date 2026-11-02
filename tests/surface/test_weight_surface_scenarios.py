@@ -35,4 +35,4 @@ def test_the_loader_activates_releases_through_the_runtime_for_its_scenario(tmp_
     assert WeightLoader().activate(saved, runtime) == "inc:3"
     assert runtime.scenarios == ["math", None]
     # A runtime that serves no weights binds nothing: the release names what serves.
-    assert WeightLoader("math").activate(saved, None) == saved.ref.release_id
+    assert WeightLoader("math").activate(saved, None) == saved.ref.revision

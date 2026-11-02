@@ -25,8 +25,8 @@ from tests.support.chat_templates import CharTemplate
 from tests.support.slime_component import FakeTrainGroup, RecordingBatchProcessor, checkpoint_storage, finished
 
 from reef.artifact import Artifact, ModelDirectory
-from reef.core.artifact_ref import RootSource
 from reef.core.job_data import TaskSample, TrajectorySample
+from reef.core.snapshot import RootSource
 from reef.core.trajectories import trajectory_reward
 from reef.core.weight_layout import ADAPTER_DIR
 from reef.runtime.durable_files import write_json
