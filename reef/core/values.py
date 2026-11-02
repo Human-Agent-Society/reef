@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+#: JSON-compatible values: what ``json.loads`` gives, with the keys of every object strings.
+JsonValue = None | bool | int | float | str | list["JsonValue"] | dict[str, "JsonValue"]
+
 
 def require_text(value: object, name: str) -> str:
     """``value`` when it is a non-empty string without surrounding spaces; else ``ValueError`` naming ``name``."""
@@ -10,4 +13,4 @@ def require_text(value: object, name: str) -> str:
     return value
 
 
-__all__ = ["require_text"]
+__all__ = ["JsonValue", "require_text"]

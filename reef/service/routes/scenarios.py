@@ -149,8 +149,8 @@ def register_scenario_writes(
 
     async def update_scenario(request: web.Request) -> web.Response:
         payload = await read_object(request)
-        if not payload or set(payload) - {"training_mode", "artifact_evaluation", "activation"}:
-            raise ValueError("expected training_mode, artifact_evaluation or activation settings")
+        if not payload or set(payload) - {"training_mode", "artifact_evaluation", "activation", "serving_config"}:
+            raise ValueError("expected training_mode, artifact_evaluation, activation or serving_config settings")
         if "training_mode" in payload and payload["training_mode"] not in ("auto", "manual"):
             raise ValueError("expected training_mode 'auto' or 'manual'")
         name = request.match_info["scenario"]
@@ -164,6 +164,10 @@ def register_scenario_writes(
         }
         if changes:
             result.update(await asyncio.to_thread(evaluations.configure, name, changes))
+        if "serving_config" in payload:
+            result.update(
+                await asyncio.to_thread(request_service.dispatcher.set_serving_config, name, payload["serving_config"])
+            )
         return web.json_response(result)
 
     async def delete_scenario(request: web.Request) -> web.Response:
