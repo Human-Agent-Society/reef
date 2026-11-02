@@ -64,6 +64,8 @@ class ScenarioReleases:
         self.creation_read_failed_at: int | None = None
         #: The scenario step that ``served_beside`` last read, and what it returned then.
         self.served_read: tuple[int, Mapping[str, ServedBesideArtifact]] | None = None
+        #: The scenario step and current revision that ``manifests`` last read, and what it returned then.
+        self.manifests_read: tuple[int, str, dict[str, Mapping[str, str]]] | None = None
 
     @property
     def creation_artifact(self) -> SnapshotRef:
@@ -164,7 +166,11 @@ class ScenarioReleases:
         A training record that made a release and an activation that
         published one carry their manifest; the creation's is read from the
         release. Without a durable journal, the current snapshot supplies its own manifest.
+        Each ``scenario_step`` and current revision is read once.
         """
+        current_revision = self._artifacts.current.revision
+        if self.manifests_read is not None and self.manifests_read[:2] == (scenario_step, current_revision):
+            return self.manifests_read[2]
         known: dict[str, Mapping[str, str]] = {}
         creation = self.creation_components(scenario_step)
         if creation is not None:
@@ -176,6 +182,7 @@ class ScenarioReleases:
             current = self._artifacts.resolve(self._artifacts.current)
             if current.components is not None:
                 known[current.ref.revision] = current.components.artifact_ids(current.ref.revision)
+        self.manifests_read = (scenario_step, current_revision, known)
         return known
 
     def active_components(self, scenario_step: int) -> Mapping[str, str] | None:
@@ -237,7 +244,7 @@ class ScenarioReleases:
             active = self.active_components(scenario_step) or self.bound_artifact_ids(
                 self._artifacts.current.revision, components, scenario_step
             )
-            activated = {name: self.activated_artifacts(name, scenario_step) for name in components}
+            activated = self.activated_artifacts(scenario_step, components)
             seen: set[tuple[str, str]] = set()
             listed: list[dict[str, Any]] = []
             for row in reversed(made):
@@ -299,20 +306,22 @@ class ScenarioReleases:
         self.served_read = (scenario_step, served)
         return served
 
-    def activated_artifacts(self, component: str, scenario_step: int) -> set[str]:
-        """The ``artifact_id`` values that ``component`` has served: the creation's, and each activating record's."""
-        creation = self.creation_components(scenario_step) or {}
-        served = {
-            bound[component]
-            for record in self.records()
-            if record.activates
-            for bound in [self.bound_artifact_ids(record.snapshot.revision, (component,), scenario_step)]
-            if component in bound
-        }
-        current = self.active_components(scenario_step) or {}
-        if component in current:
-            served.add(current[component])
-        return served | ({creation[component]} if component in creation else set())
+    def activated_artifacts(self, scenario_step: int, components: tuple[str, ...]) -> dict[str, set[str]]:
+        """The ``artifact_id`` values that each of ``components`` has served.
+
+        These are the creation's, each activating record's, and the active ones. ``components`` are all the
+        components of the scenario, so a one-component tuple means a flat scenario.
+        """
+        served: dict[str, set[str]] = {name: set() for name in components}
+        selections = [self.creation_components(scenario_step) or {}, self.active_components(scenario_step) or {}]
+        for record in self.records():
+            if record.activates:
+                selections.append(self.bound_artifact_ids(record.snapshot.revision, components, scenario_step))
+        for selection in selections:
+            for name, artifact_id in selection.items():
+                if name in served:
+                    served[name].add(artifact_id)
+        return served
 
     @staticmethod
     def artifact_row(
