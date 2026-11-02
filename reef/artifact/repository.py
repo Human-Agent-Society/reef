@@ -24,6 +24,7 @@ from reef.artifact.artifact import (
     ArtifactRepository,
 )
 from reef.artifact.composite import compose_release, link_or_copy
+from reef.core.artifact_selection import ArtifactSelection, SelectedArtifact
 from reef.core.components import validate_component_name
 from reef.core.plugins import Plugin
 
@@ -376,6 +377,8 @@ class Repository(ArtifactRepository):
         # single "latest local" slot would make an older snapshot dangle as
         # soon as the next release is staged.
         self._local_artifacts: dict[str, Artifact] = {}
+        self.selections: dict[str, ArtifactSelection] = {}
+        self.selection_lock = Lock()
         self._process_id = uuid.uuid4().hex
         self._temporary_directory = None
         if local_dir is None:
@@ -482,11 +485,81 @@ class Repository(ArtifactRepository):
         local = self._local_artifacts.get(ref.release_id)
         if local is not None and local.ref == ref:
             return local
+        selection = self.selections.get(ref.release_id)
+        if selection is not None:
+            materialized = self.select(selection)
+            if materialized.ref != ref:
+                raise ArtifactPublicationError("stored selection does not match its materialized view")
+            return materialized
         return self.backend.materialize(ref).with_repository(self)
 
     def resolve(self, ref: ArtifactRef) -> Artifact:
         """Resolve an artifact reference to an Artifact materialized at a local path."""
         return self.materialize(ref)
+
+    def selection(self, artifact: Artifact, names: tuple[str, ...]) -> ArtifactSelection:
+        """Return the existing artifacts in ``artifact``, with durable locators for every component in ``names``.
+
+        A materialized selection keeps its original locators, so a later selection never points at a local cache.
+        A stored tree uses its own locator for every component it contains.
+        """
+        selected = self.selections.get(artifact.ref.release_id)
+        if selected is not None:
+            return selected
+        return ArtifactSelection(
+            {name: SelectedArtifact(artifact.component(name).artifact_id, artifact.ref) for name in names}
+        )
+
+    def select(self, selection: ArtifactSelection) -> Artifact:
+        """Materialize existing component artifacts as a local view without publishing or moving any storage head.
+
+        The deterministic private cache key lets an operation record name the view during recovery. Its complete
+        selection must be persisted with that record; the cache key alone cannot recover its files.
+        """
+        if len(selection.components) == 1:
+            name, selected = next(iter(selection.components.items()))
+            artifact = self.resolve(selected.ref)
+            if artifact.component(name).artifact_id != selected.artifact_id:
+                raise ArtifactPublicationError(f"storage does not contain selected artifact {selected.artifact_id!r}")
+            return artifact
+        # Readers can materialize the same recovered view concurrently. Only its first reader builds the tree.
+        # This lock is separate from head movement, which never waits for file I/O.
+        with self.selection_lock:
+            digest = hashlib.sha256(json.dumps(selection.to_dict(), sort_keys=True).encode()).hexdigest()
+            cache_key = f"selection:{digest}"
+            cached = self._local_artifacts.get(cache_key)
+            if cached is not None:
+                return cached
+            components: dict[str, Artifact] = {}
+            for name, selected in selection.components.items():
+                component = self.resolve(selected.ref).component(name)
+                if component.artifact_id != selected.artifact_id:
+                    raise ArtifactPublicationError(
+                        f"storage does not contain selected artifact {selected.artifact_id!r}"
+                    )
+                components[name] = component
+            destination = self.local_root / self._process_id / digest
+            composed = compose_release(components, directory=destination)
+            artifact = Artifact(
+                ArtifactRef(composed.ref.content_id, cache_key, None),
+                self,
+                local_path=destination,
+                metadata=composed.metadata,
+            )
+            self._local_artifacts[cache_key] = artifact
+            self.selections[cache_key] = selection
+            return artifact
+
+    def remember_selection(self, ref: ArtifactRef, selection: ArtifactSelection) -> None:
+        """Register a recorded selection for later materialization, without opening every historical view."""
+        if len(selection.components) == 1:
+            if self.select(selection).ref != ref:
+                raise ArtifactPublicationError("stored selection does not match its artifact")
+            return
+        digest = hashlib.sha256(json.dumps(selection.to_dict(), sort_keys=True).encode()).hexdigest()
+        if ref.release_id != f"selection:{digest}":
+            raise ArtifactPublicationError("stored selection does not match its cache key")
+        self.selections[ref.release_id] = selection
 
     def stage(
         self,
@@ -574,6 +647,7 @@ class Repository(ArtifactRepository):
     def discard(self, artifact: Artifact) -> None:
         if self._local_artifacts.get(artifact.ref.release_id) is artifact:
             self._local_artifacts.pop(artifact.ref.release_id, None)
+            self.selections.pop(artifact.ref.release_id, None)
         path = artifact.local_path
         artifact.discard()
         if path is not None:

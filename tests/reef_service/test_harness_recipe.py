@@ -1071,10 +1071,10 @@ def test_never_activation_keeps_the_kept_tree_inactive_until_activated(tmp_path:
         assert record.operation == "training" and record.activated is False and record.checkpoint is True
         assert scenario.current_artifact_ref() == head_before
         row = scenario.artifacts()[0]
-        assert row["release_id"] == row["artifact_id"] == record.artifact_ref.release_id
+        assert row["artifact_id"] == record.artifact_ref.release_id
         assert row["active"] is False
         tree = scenario.surface.files
-        held_files = tree.read_files(scenario.release_queries.artifact_for_version(row["release_id"]))
+        held_files = tree.read_files(scenario.resolve_artifact(row["artifact_id"])[1])
         assert any("marker" in text for text in held_files.values())
         served_files = tree.read_files(scenario.release_queries.artifact_with_metrics()[0])
         assert not any("marker" in text for text in served_files.values())
@@ -1090,7 +1090,7 @@ def test_never_activation_keeps_the_kept_tree_inactive_until_activated(tmp_path:
                     "/reef/scenarios/review/activate", json={"artifact_id": row["artifact_id"]}
                 )
                 assert activated.status == 200
-                assert (await activated.json())["release_id"] == row["release_id"]
+                assert (await activated.json())["artifact_id"] == row["artifact_id"]
                 missing = await client.post("/reef/scenarios/review/activate", json={"artifact_id": "missing"})
                 assert missing.status == 404
                 listed = await client.get("/reef/scenarios/review/artifacts")
@@ -1153,14 +1153,14 @@ def test_a_harness_trainer_evolves_the_tree_it_was_told_to_train_from(tmp_path: 
             result = run_step(scenario, suffix)
             assert result.artifact is not None
         second, first = scenario.artifacts()[:2]
-        assert second["active"] and "marker r2" in rules_of(scenario, second["release_id"])
+        assert second["active"] and "marker r2" in rules_of(scenario, second["artifact_id"])
 
         started = dispatcher.train_from("start", first["artifact_id"])
         assert (started.artifact_id, started.component) == (first["artifact_id"], first["component"])
         # What serves stays the second release.
-        assert scenario.current_artifact_ref().release_id == second["release_id"]
+        assert scenario.current_artifact_ref().release_id == second["artifact_id"]
         record = scenario.store.history()[-1]
-        assert (record.operation, record.artifact_ref.release_id) == ("train_from", first["release_id"])
+        assert (record.operation, record.artifact_ref.release_id) == ("train_from", first["artifact_id"])
     finally:
         dispatcher.close()
 
@@ -1169,13 +1169,13 @@ def test_a_harness_trainer_evolves_the_tree_it_was_told_to_train_from(tmp_path: 
     try:
         scenario = restarted.get_or_create_scenario("start")
         assert scenario is not None
-        assert scenario.current_artifact_ref().release_id == second["release_id"]
+        assert scenario.current_artifact_ref().release_id == second["artifact_id"]
         # The next step evolves the first release's tree: r3 joins r1, and r2 is not there. It publishes on the
         # chain tip, the second release.
         result = run_step(scenario, "3")
         assert result.artifact is not None
         newest = last_made(scenario)
-        assert newest.made_artifact and newest.artifact_ref.parent_release_id == second["release_id"]
+        assert newest.made_artifact and newest.artifact_ref.parent_release_id == second["artifact_id"]
         evolved = rules_of(scenario, newest.artifact_ref.release_id)
         assert "marker r1" in evolved and "marker r3" in evolved and "marker r2" not in evolved
     finally:

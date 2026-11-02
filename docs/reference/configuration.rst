@@ -1836,7 +1836,7 @@ whose ``parameters`` hold ``dataset`` is one job:
 
 .. code:: json
 
-   {"text": "GRPO on the prompts", "session": "s", "release_id": "r",
+   {"text": "GRPO on the prompts", "session": "s", "artifact_id": "artifact-1",
     "parameters": {"dataset": {"path": "/data/prompts.jsonl", "epochs": 1}, "save_interval": 10}}
 
 ``dataset.path`` is an absolute path, on the Ray cluster, to a JSONL file in
@@ -2215,8 +2215,9 @@ id, so a restart or a second Reef host produces the same ids. The span carries:
   ``gen_ai.usage.input_tokens``, ``gen_ai.usage.output_tokens`` and
   ``gen_ai.response.finish_reasons`` from the provider request and response,
   following the OpenTelemetry GenAI semantic conventions.
-* ``reef.release_id``, ``reef.content_id`` and ``reef.artifact_id``: the
-  release and the artifact that answered the request, when the record names them.
+* ``reef.artifact_id``: the artifact that answered the request.
+  ``reef.release_id`` and ``reef.content_id`` remain legacy storage diagnostics
+  when the record carries them; clients must not use them as artifact identities.
 * ``reef.tags``: the ``x-reef-tag-*`` request tags.
 
 A feedback record becomes a ``feedback`` span inside the trace of the first

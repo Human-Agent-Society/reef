@@ -545,6 +545,16 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
             self.scenario_committed(current)
             return changed
 
+    def restore(self, scenario: str, step: int) -> Mapping[str, str]:
+        """Restore the complete selection at a recorded scenario step and queue its serving startup."""
+        with self.registry.lock_for(scenario):
+            current = self.registry.require(scenario)
+            selection = current.restore(step)
+            if self.publisher is not None:
+                self.publisher.publish(current, retry_failed=True)
+            self.scenario_committed(current)
+            return selection
+
     def stop_serving(self, scenario: str, artifact_id: str) -> ServedBesideArtifact:
         """Stop serving ``artifact_id`` beside the active release of ``scenario``; the active release stays."""
         with self.registry.lock_for(scenario):
