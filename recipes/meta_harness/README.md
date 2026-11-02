@@ -1,12 +1,12 @@
 # Meta-Harness
 
-Meta-Harness is full-history search over a fixed model's harness. This method
-represents every candidate as a complete Reef harness tree, so the same search
-works with any Reef adapter and any run scorer. `MetaHarness` has no
+Meta-Harness is full-history search over a fixed model's harness. Each step,
+a proposer reads every earlier candidate with its scores on fixed evaluation
+tasks, and writes one complete harness tree. Reef evaluates that tree and
+keeps it only when its mean score beats the served tree's. The method
+represents every candidate as a complete Reef harness tree, so the same
+search works with any Reef adapter and any run scorer. `MetaHarness` has no
 Harbor, Terminal-Bench, Terminus, or coding-agent dependency.
-
-The method is a Reef harness evolution method (`Method`) in the standard
-layout:
 
 ```text
 meta_harness/
@@ -19,24 +19,46 @@ meta_harness/
   results/             the selected harness of the reported comparison
 ```
 
-`MetaHarness` makes one model call per step. Upstream's proposer is a coding
-agent that reads the whole search as files; [`agent/`](agent/README.md) runs
-that proposer as a method made of prompts, on the deployment's coding agent.
+`MetaHarness` makes one model call per step, and the prompt holds an excerpt
+of the history. Upstream's proposer is a coding agent that reads the whole
+search as files; [`agent/`](agent/README.md) runs that proposer as a method
+made of prompts, on the deployment's coding agent.
 
 Reef owns tree validation, adapter rendering, model binding, run
 execution, timeouts, residue policy, finite-score checks, the score cache,
 selection, publication, and scenario commits. Meta-Harness adds the proposal:
 what the proposer model sees and how its reply becomes a candidate.
 
+## How a step starts
+
+The search learns from the evaluation tasks, not from traffic or uploaded
+tasks. So a training request starts each step: the deployment trains in
+`manual` mode, and each `POST /reef/train` runs one step. The request's
+`text` is an instruction that the proposer reads, such as "Propose the next
+candidate of the search." The number of requests is the number of steps;
+upstream's `--iterations` is the same count.
+
+```bash
+curl -f http://127.0.0.1:8901/reef/train \
+  -H "Authorization: Bearer $REEF_TOKEN" -H "x-reef-scenario: <scenario>" \
+  -H "Content-Type: application/json" \
+  -d '{"text": "Propose the next candidate of the search.", "session": "", "release_id": ""}'
+```
+
+The steps of the queued requests run one after another. See [Manual
+training](../../docs/reference/http-api.rst#manual-training) for the route.
+
 ## Configuration
 
 A deployment names the method in `evolution.method` of Reef's harness
-evolution recipe, and selects with the `compare` policy on means:
+evolution recipe, trains in `manual` mode, and selects with the `compare`
+policy on means:
 
 ```yaml
 recipe:
   implementation: reef.recipe.harness:HarnessEvolutionRecipe
   config:
+    training_mode: manual
     evolution:
       adapter: pi
       seed: seed                 # the first tree, a directory
@@ -44,8 +66,6 @@ recipe:
         module: recipes.meta_harness:MetaHarness
         config:
           mode: full_history
-          max_candidates: 20
-          max_target_runs: 42
       models:
         proposer:
           url: https://api.openai.com
@@ -79,11 +99,9 @@ class RolloutScore(TaskScorer):
 | `mode` | `full_history` | `full_history` lets the proposer branch from any candidate; `incumbent_only`, the greedy control, from the served one only |
 | `model` | `proposer` | the `evolution.models` binding that proposes; `served` is refused |
 | `components` | every part of the adapter's tree | the parts of the adapter's tree (the `evolve` section of its `adapter.yaml`) whose files a proposal may change; the method refuses a name the tree does not have |
-| `max_candidates` | `0` (no limit) | the candidates the method proposes |
-| `max_target_runs` | `0` (no limit) | the evaluation runs after which the method proposes nothing |
 | `max_files` | `32` | the files of one proposed tree |
-| `max_traces` | `16` | the traces whose record files one prompt shows |
-| `trace_chars` | `4000` | the characters one prompt shows of one trace's record files |
+| `max_runs` | `16` | the evaluation runs whose records one prompt shows |
+| `run_chars` | `4000` | the characters one prompt shows of one run's records |
 
 The method refuses to run when `evolution.models` does not declare `model`:
 the harness under test must not propose its own improvements.
@@ -98,12 +116,12 @@ these items, as data:
   files, the parent it branched from, the proposer's hypothesis and changes,
   its outcome (served, selected, rejected, or undecided), and its scores on
   the evaluation tasks.
-- Excerpts of the run records that the history keeps, and of the step's
-  own traces. The step's traces come first. Then the candidates take turns,
-  the served one first and the others newest first, each with its lowest
-  scores first. A long record keeps its beginning and its end.
+- Excerpts of the records of their evaluation runs, at most `max_runs`. The
+  candidates take turns, the served one first and the others newest first,
+  each with its failed runs and then its lowest scores first. A long record
+  keeps its beginning and its end.
 - The latest replies that proposed no candidate, and why.
-- The person's instruction, on a step that answers a training request.
+- The text of the training request that started the step.
 - The parts of the adapter's tree: each part's path, format and render path,
   and what its file holds, with the parts a proposal may change.
 
@@ -120,7 +138,7 @@ still refuse an otherwise valid file.
 A proposed tree becomes the step's candidate. The history keeps it with the
 proposer's hypothesis, changes, and parent, so the next step shows it.
 
-## Selection and budgets
+## Selection
 
 Select with `policy: compare` and `statistic: mean`. The candidate is
 published when its mean score is strictly higher than the head's; a run
@@ -131,15 +149,10 @@ next evaluation. This reproduces upstream's frontier: it keeps the highest recor
 mean, and a tie keeps the current choice. The seed runs once with the first
 candidate, and then each candidate runs once.
 
-The budgets count the history: `max_candidates` counts the trees the method
-proposed, and `max_target_runs` counts the evaluation runs that completed.
-A spent budget ends the search before the model call; the last evaluation may
-pass `max_target_runs`. Zero turns a budget off. Reef's own `max_steps`,
+Keep the evaluation suite fixed, so that the scores of all candidates stay
+comparable: do not combine this method with task collection. Reef's own
 `max_model_calls_per_step`, executor, timeout, and residue options apply as
 usual.
-
-Keep the evaluation suite fixed, so that the scores of all candidates stay
-comparable: do not combine this method with task collection.
 
 ## State and commits
 
@@ -149,10 +162,10 @@ committed with each step, is `state/attempts.jsonl`: one line per reply that
 proposed no candidate.
 
 The history keeps an attempt whose step never committed, such as an
-evaluation or a commit that failed. A retry of that step does not count the
-attempt's tree, does not show it, and does not refuse it as a known tree. If
-the proposer returns it again, the cache scores it; only the runs that
-could not run are run again.
+evaluation or a commit that failed. A retry of that step does not show the
+attempt's tree and does not refuse it as a known tree. If the proposer
+returns it again, the cache scores it; only the runs that could not run are
+run again.
 
 ## Terminus 2 code evolution
 
