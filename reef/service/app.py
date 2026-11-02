@@ -12,11 +12,11 @@ from aiohttp import web
 
 from reef.artifact.sources import ArtifactSources
 from reef.dispatcher import Dispatcher
-from reef.dispatcher.served import PublishedEngines
 from reef.runtime.interfaces import FixedEngineClients, InferenceHandler
 from reef.service.artifact_evaluations import ArtifactEvaluations
 from reef.service.artifact_imports import ArtifactImports
 from reef.service.cors import configure_browser_access
+from reef.service.engine_clients import DeploymentEngineClients
 from reef.service.harness_imports import QueuedImports
 from reef.service.inference_service import InferenceReplica, ServedModelsCache
 from reef.service.request_service import RequestService
@@ -135,7 +135,7 @@ def create_app(
     ``harness_inference_url`` is ``harness.inference_url``: where a client's harness layer sends its model calls.
 
     The app runs the inference routes in the same process (``reef.service.inference_service``): they read
-    ``served_models`` and reach each row's engine through the runtime that control serves it with, or through
+    ``served_models`` and reach each row's engine through the runtime that inference serves it with, or through
     ``inference_handler`` when the caller gives one.
     """
     publisher = dispatcher.publisher
@@ -145,7 +145,15 @@ def create_app(
     replica = InferenceReplica(
         ServedModelsCache(dispatcher.coordination.served_models),
         dispatcher.record_storage,
-        PublishedEngines(publisher) if inference_handler is None else FixedEngineClients(inference_handler),
+        (
+            DeploymentEngineClients(
+                runtime,
+                provider_key=None if runtime is None else runtime.provider_key,
+                timeout_seconds=300.0 if runtime is None else runtime.inference_timeout_s,
+            )
+            if inference_handler is None
+            else FixedEngineClients(inference_handler)
+        ),
         timeout_seconds=300.0 if runtime is None else runtime.inference_timeout_s,
         for_codex=dispatcher.recipe.harness_adapter == "codex",
     )

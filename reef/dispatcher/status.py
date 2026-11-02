@@ -82,7 +82,7 @@ class TrainingStatus:
         block: dict[str, Any] = {
             **current.commit_status,
             # The artifact that answers the scenario's requests now: the one that served_models names.
-            "served_artifact_id": current.serving_artifact_id(),
+            "served_artifact_id": current.served_artifact_id(),
             "job_data_ready": job_data_ready,
             "training_mode": stepping_trainer.pipeline.training_mode,
             "processor": processor,

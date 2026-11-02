@@ -20,6 +20,7 @@ from reef.execution.workers import ServiceWorker
 from reef.record2sample.service import RECORD_SELECTION_KIND, SAMPLES_QUEUE
 from reef.scenario.registry import ScenarioRegistry
 from reef.scenario.scenario import Scenario
+from reef.storage.served_models import SERVING_KIND, SERVING_QUEUE
 from reef.storage.work_queue import WorkQueue
 from reef.train.instructions import INSTRUCTIONS_QUEUE
 from reef.train.job_queue import JOBS_QUEUE
@@ -43,7 +44,7 @@ class StoreChanges(ABC):
 
     @abstractmethod
     def job_changed(self, scenario: str) -> None:
-        """A training job of ``scenario`` saved a checkpoint or ended."""
+        """A training job changed, or inference finished startup for ``scenario``."""
 
     @abstractmethod
     def instructions_added(self, scenario: str) -> None:
@@ -57,7 +58,7 @@ class StoreChangesWatcher(ServiceWorker):
     change; ``interval_seconds`` is the time between rounds. ``record_sequences`` holds the newest record sequence
     seen for each loaded scenario, ``queue_sequence`` the newest ``changed_sequence`` read from the samples queue,
     ``jobs_sequence`` the newest one read from the jobs queue, and ``instruction_sequence`` the newest one read from
-    the instructions queue.
+    the instructions queue. ``serving_sequence`` tracks startup completions that release training's wait.
 
     Purpose: the dispatcher of a control instance runs it.
     """
@@ -75,6 +76,7 @@ class StoreChangesWatcher(ServiceWorker):
         self.queue_sequence = 0
         self.jobs_sequence = 0
         self.instruction_sequence = 0
+        self.serving_sequence = 0
         self.stopped = threading.Event()
         self.thread: threading.Thread | None = None
 
@@ -109,9 +111,9 @@ class StoreChangesWatcher(ServiceWorker):
             self.record_sequences.pop(name)
         for name, current in loaded.items():
             newest = current.records.last_sequence(name)
-            seen = self.record_sequences.get(name)
-            # A scenario seen for the first time asks for a selection when it loads.
-            if seen is not None and newest > seen:
+            seen = self.record_sequences.get(name, 0)
+            # Records can arrive after the load's selection and before this watcher's first observation.
+            if newest > seen:
                 self.changes.records_added(current)
             self.record_sequences[name] = newest
         while changed := self.queue.read_changes(SAMPLES_QUEUE, self.queue_sequence):
@@ -137,6 +139,16 @@ class StoreChangesWatcher(ServiceWorker):
             for scenario in sorted({item.scenario for item in changed if item.state == "queued"}):
                 self.changes.instructions_added(scenario)
             self.instruction_sequence = changed[-1].changed_sequence
+        while changed := self.queue.read_changes(SERVING_QUEUE, self.serving_sequence):
+            for scenario in sorted(
+                {
+                    item.scenario
+                    for item in changed
+                    if item.kind == SERVING_KIND and item.state == "finished" and item.result
+                }
+            ):
+                self.changes.job_changed(scenario)
+            self.serving_sequence = changed[-1].changed_sequence
 
 
 __all__ = ["StoreChanges", "StoreChangesWatcher"]

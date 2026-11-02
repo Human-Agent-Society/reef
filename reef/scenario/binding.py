@@ -8,6 +8,7 @@ from reef.core.activation import ActivationRule
 from reef.core.reports import ReportBase
 from reef.runtime.interfaces import InferenceRuntime
 from reef.runtime.jobs import TrainingComponent
+from reef.storage.served_models import ServedModels
 from reef.surface.base import Surface
 
 
@@ -29,3 +30,7 @@ class ScenarioBinding:
     report_type: type[ReportBase] | None = None
     #: The training component of a weight-training recipe, which its trainer submits jobs to.
     training_component: TrainingComponent | None = None
+    #: Standalone scenarios activate their runtime directly. Service scenarios leave activation to inference.
+    activates_runtime: bool = True
+    #: The actual serving routes, or None for a standalone scenario that activates its own runtime.
+    served_models: ServedModels | None = None

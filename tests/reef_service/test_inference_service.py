@@ -17,6 +17,7 @@ from reef.inference.http import HttpInferenceHandler
 from reef.runtime.interfaces import EngineClients, InferenceHandler
 from reef.service.inference_service import RECORD_HEADER, RELEASE_HEADER, build_inference_app
 from reef.storage.commits import CommitRecord
+from reef.storage.served_models import SERVING_KIND, SERVING_QUEUE
 from reef.storage.sql_coordination import memory_coordination
 from reef.storage.sqlite import SQLiteScenarioStorage
 
@@ -139,3 +140,154 @@ async def ask_failing(tmp_path: Path, *, engine_url: str | None, refuse_records:
 def test_an_answer_without_its_record_is_never_returned_and_a_dead_engine_is_a_bad_gateway(tmp_path: Path) -> None:
     assert asyncio.run(ask_failing(tmp_path / "records", engine_url=None, refuse_records=True)) == 503
     assert asyncio.run(ask_failing(tmp_path / "engine", engine_url="http://127.0.0.1:9", refuse_records=False)) == 502
+
+
+@pytest.mark.unit
+def test_startup_status_follows_work_and_a_retry_remains_starting(tmp_path: Path) -> None:
+    async def check() -> None:
+        coordination = memory_coordination()
+        storage = SQLiteScenarioStorage(tmp_path / "records")
+        table, queue = coordination.served_models, coordination.work_queue
+        lease = coordination.control_lease.acquire("control")
+        item = table.request(
+            "math",
+            {
+                "artifact_id": "release-1",
+                "release_id": "release-1",
+                "aliases": ["release-1:weights"],
+                "beside": {"release-0": {"component": "weights", "release_id": "release-0"}},
+            },
+            control_lease_number=lease.number,
+        )
+        app = build_inference_app(table, storage, Engines(), tokens=TOKEN)
+        try:
+            async with TestClient(TestServer(app)) as client:
+                path = "/reef/scenarios/math/inference/status"
+                assert (await client.get(path)).status == 401
+                before = table.current_request("math")
+                response = await client.get(path, headers=HEADERS)
+                assert await response.json() == {"artifact_id": "release-1", "state": "pending", "error": None}
+                assert response.headers["Cache-Control"] == "no-store"
+                assert table.current_request("math") == before
+                alias = await client.get(path + "?model=release-1:weights", headers=HEADERS)
+                assert (await alias.json())["artifact_id"] == "release-1"
+                beside = await client.get(path + "?model=release-0", headers=HEADERS)
+                assert (await beside.json())["artifact_id"] == "release-0"
+                assert (await client.get(path + "?model=unknown", headers=HEADERS)).status == 404
+
+                response = await client.post("/v1/chat/completions", headers=HEADERS, json={"model": "any"})
+                assert response.status == 503
+                assert response.headers["Retry-After"] == "30"
+                assert (await response.json())["error"]["type"] == "inference_starting"
+
+                taken = queue.take(SERVING_QUEUE, "worker", [SERVING_KIND])
+                assert taken.id == item.id
+                assert (await (await client.get(path, headers=HEADERS)).json())["state"] == "starting"
+                queue.start(SERVING_QUEUE, taken.id, "worker")
+                queue.fail(SERVING_QUEUE, taken.id, "worker", "temporary failure", retryable=True)
+                assert table.current_request("math").state == "queued"
+                assert (await (await client.get(path, headers=HEADERS)).json())["state"] == "starting"
+
+                taken = queue.take(SERVING_QUEUE, "worker", [SERVING_KIND])
+                queue.start(SERVING_QUEUE, taken.id, "worker")
+                table.complete_request(
+                    taken,
+                    "worker",
+                    {ACTIVE: ServedArtifact("release-1", "http://engine", "math")},
+                    stop_delay_seconds=60,
+                )
+                response = await client.get(path, headers=HEADERS)
+                assert await response.json() == {"artifact_id": "release-1", "state": "ready", "error": None}
+        finally:
+            storage.close()
+            coordination.close()
+
+    asyncio.run(check())
+
+
+@pytest.mark.unit
+def test_startup_failure_is_safe_and_withdrawal_is_not_starting(tmp_path: Path) -> None:
+    async def check() -> None:
+        coordination = memory_coordination()
+        storage = SQLiteScenarioStorage(tmp_path / "records")
+        table, queue = coordination.served_models, coordination.work_queue
+        lease = coordination.control_lease.acquire("control")
+        table.request("math", {"artifact_id": "release-1"}, control_lease_number=lease.number)
+        taken = queue.take(SERVING_QUEUE, "worker", [SERVING_KIND])
+        queue.fail(SERVING_QUEUE, taken.id, "worker", "private startup diagnostic", retryable=False)
+        app = build_inference_app(table, storage, Engines(), tokens=TOKEN)
+        try:
+            async with TestClient(TestServer(app)) as client:
+                response = await client.get("/reef/scenarios/math/inference/status", headers=HEADERS)
+                status = await response.json()
+                assert status == {
+                    "artifact_id": "release-1",
+                    "state": "failed",
+                    "error": "The inference engine did not start. Check the service logs.",
+                }
+                response = await client.post("/v1/chat/completions", headers=HEADERS, json={"model": "any"})
+                assert response.status == 503
+                assert "Retry-After" not in response.headers
+                assert (await response.json())["error"]["type"] == "inference_start_failed"
+                table.request("math", {}, control_lease_number=lease.number)
+                assert (await client.get("/reef/scenarios/math/inference/status", headers=HEADERS)).status == 404
+                assert (await client.get("/reef/scenarios/unknown/inference/status", headers=HEADERS)).status == 404
+                response = await client.post("/v1/chat/completions", headers=HEADERS, json={"model": "any"})
+                assert response.status == 404
+        finally:
+            storage.close()
+            coordination.close()
+
+    asyncio.run(check())
+
+
+@pytest.mark.unit
+def test_startup_status_does_not_guess_readiness_when_the_store_fails(tmp_path: Path, monkeypatch) -> None:
+    async def check() -> None:
+        coordination = memory_coordination()
+        storage = SQLiteScenarioStorage(tmp_path / "records")
+
+        def unavailable(scenario: str):
+            raise OSError("private database diagnostic")
+
+        monkeypatch.setattr(coordination.served_models, "current_request", unavailable)
+        app = build_inference_app(coordination.served_models, storage, Engines(), tokens=TOKEN)
+        try:
+            async with TestClient(TestServer(app)) as client:
+                response = await client.get("/reef/scenarios/math/inference/status", headers=HEADERS)
+                assert response.status == 503
+                assert await response.text() == "Inference startup status is unavailable."
+        finally:
+            storage.close()
+            coordination.close()
+
+    asyncio.run(check())
+
+
+@pytest.mark.unit
+def test_a_ready_old_route_does_not_make_its_replacement_ready(tmp_path: Path) -> None:
+    async def check() -> None:
+        coordination = memory_coordination()
+        storage = SQLiteScenarioStorage(tmp_path / "records")
+        table = coordination.served_models
+        lease = coordination.control_lease.acquire("control")
+        try:
+            async with TestServer(engine_app()) as engine:
+                table.write(
+                    ScenarioModel("math", ACTIVE),
+                    ServedArtifact("release-1", str(engine.make_url("/")), "math-v1"),
+                    control_lease_number=lease.number,
+                )
+                table.request("math", {"artifact_id": "release-2"}, control_lease_number=lease.number)
+                app = build_inference_app(table, storage, Engines(), tokens=TOKEN)
+                async with TestClient(TestServer(app)) as client:
+                    response = await client.get("/reef/scenarios/math/inference/status", headers=HEADERS)
+                    assert await response.json() == {"artifact_id": "release-2", "state": "pending", "error": None}
+                    response = await client.post("/v1/chat/completions", headers=HEADERS, json={"model": "any"})
+                    assert response.status == 200
+                    assert response.headers[RELEASE_HEADER] == "release-1"
+        finally:
+            storage.close()
+            coordination.close()
+
+    asyncio.run(check())

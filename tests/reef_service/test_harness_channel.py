@@ -84,6 +84,15 @@ async def served(dispatcher: Dispatcher) -> AsyncIterator[TestClient]:
     client = TestClient(TestServer(create_app(dispatcher, inference_handler=EchoInference())))
     await client.start_server()
     try:
+        deadline = asyncio.get_running_loop().time() + UPDATE_TIMEOUT_S
+        while True:
+            response = await client.get("/reef/scenarios/delivery/inference/status")
+            status = await response.json()
+            if response.status == 200 and status["state"] == "ready":
+                break
+            if asyncio.get_running_loop().time() >= deadline:
+                pytest.fail(f"inference did not start: {status}")
+            await asyncio.sleep(UPDATE_POLL_S)
         yield client
     finally:
         await client.close()
