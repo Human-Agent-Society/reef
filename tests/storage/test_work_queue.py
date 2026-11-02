@@ -659,3 +659,20 @@ def test_replacing_an_artifact_at_the_same_endpoint_does_not_stop_that_endpoint(
     assert table.is_referenced(previous) and table.due_stops(100) == ()
     table.request("s", {}, control_lease_number=lease.number, stop_delay_seconds=10, now=2)
     assert not table.is_referenced(previous) and table.due_stops(12) == (ScheduledStop(current, 12),)
+
+
+@pytest.mark.unit
+def test_queue_pages_and_counts_are_scoped_and_newest_first(open_coordination):
+    queue = open_coordination().queue
+    first = queue.add(job("a", serial_key=None), now=0)
+    second = queue.add(job("b", serial_key=None), now=0)
+    queue.add(job("other", scenario="other", serial_key=None), now=0)
+    queue.cancel("jobs", "a", "stopped")
+    assert [item.id for item in queue.page("jobs", scenario="s", limit=1)] == ["b"]
+    assert [item.id for item in queue.page("jobs", scenario="s", before_sequence=second.created_sequence)] == ["a"]
+    assert queue.page("jobs", scenario="s", before_sequence=first.created_sequence) == ()
+    assert [item.id for item in queue.page("jobs", scenario="s", state="failed")] == ["a"]
+    assert queue.counts("jobs", scenario="s") == {"queued": 1, "assigned": 0, "running": 0, "finished": 0, "failed": 1}
+    for kwargs in ({"state": "missing"}, {"limit": 0}, {"before_sequence": 0}):
+        with pytest.raises(ValueError):
+            queue.page("jobs", scenario="s", **kwargs)
