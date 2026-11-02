@@ -3,10 +3,9 @@ Operate a deployment
 
 What to check while a deployment runs, how to read and steer its release chain, how to keep an eye on training, and what survives a restart.
 
-.. page::
-   :for: whoever runs a Reef deployment
-   :needs: a running deployment from `Evolve your model <evolve-your-model.rst>`__ or `Evolve your harness <evolve-your-harness.rst>`__, its URL and token
-   :outcome: the routine checks, the version operations, and the recovery rules
+:For: whoever runs a Reef deployment
+:Before you start: a running deployment from `Evolve your model <evolve-your-model.rst>`__ or `Evolve your harness <evolve-your-harness.rst>`__, its URL and token
+:You will have: the routine checks, the version operations, and the recovery rules
 
 The examples use ``REEF_URL`` and ``REEF_TOKEN`` as in `HTTP API <../reference/http-api.rst>`__.
 
