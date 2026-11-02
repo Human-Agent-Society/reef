@@ -18,7 +18,14 @@ from reef.core.config import config_option
 from reef.core.plugins import PluginConfigError
 from reef.core.trajectories import trajectory_reward
 from reef.pipeline_context import PipelineContext
-from reef.record2sample import GroupDecision, Record2Sample, ReportContext, ReportGrouping, ReportSamples
+from reef.record2sample import (
+    GroupDecision,
+    Record2Sample,
+    ReportContext,
+    ReportGrouping,
+    ReportSamples,
+    SkippedReport,
+)
 from reef.record2sample.assembly import SampleAssembly, SampleAssemblySettings
 from reef.sample2job import Sample2Job, Sample2JobSettings
 from reef.train.types import JobData, Sample, TrajectorySample, trajectories
@@ -134,7 +141,7 @@ class TTTDSamples(ReportSamples):
     ) -> Self:
         return cls(context, TTTDSettings.parse(config, plugin_class=cls))
 
-    def make_sample(self, context: ReportContext) -> TrajectorySample:
+    def make_sample(self, context: ReportContext) -> TrajectorySample | SkippedReport:
         parsed: Any = context.parsed_report
         if parsed is None:
             raise ValueError("TTTD requires the recipe's report schema")
@@ -144,6 +151,8 @@ class TTTDSamples(ReportSamples):
                 f"this scenario trains on {self.groups_per_step}x{self.rollouts_per_group}"
             )
         sample = self.assembly.build(context, context.require_score())
+        if isinstance(sample, SkippedReport):
+            return sample
         return sample.with_metadata(
             tttd={
                 "step": parsed.step,

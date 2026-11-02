@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from typing import Any, Self
 
 from reef.pipeline_context import PipelineContext
-from reef.record2sample import Record2Sample, ReportContext, ReportGrouping, ReportSamples
+from reef.record2sample import Record2Sample, ReportContext, ReportGrouping, ReportSamples, SkippedReport
 from reef.record2sample.assembly import SampleAssembly, SampleAssemblySettings
 from reef.sample2job import Sample2Job, Sample2JobSettings
 from reef.train.pipeline import TrainingPipeline
@@ -37,7 +37,7 @@ class ThresholdSamples(ReportSamples):
     ) -> Self:
         return cls(context, SampleAssemblySettings.parse(config, plugin_class=cls))
 
-    def make_sample(self, context: ReportContext) -> TrajectorySample:
+    def make_sample(self, context: ReportContext) -> TrajectorySample | SkippedReport:
         return self.assembly.build(context, context.require_score())
 
 
