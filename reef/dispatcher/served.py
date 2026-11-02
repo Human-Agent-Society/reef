@@ -6,6 +6,7 @@ import logging
 import threading
 import time
 from abc import ABC, abstractmethod
+from typing import cast
 
 from reef.core.errors import ReefError
 from reef.core.served_models import CACHE_SECONDS
@@ -131,12 +132,15 @@ class ServedModelsPublisher(ServiceWorker):
             status["active"] for status in current.artifact_status().values() if status["active"] is not None
         ]
         beside: dict[str, JsonValue] = {
-            artifact_id: {"release_id": served.release.release_id, "component": served.component}
+            artifact_id: {
+                "selection": cast(dict[str, JsonValue], current.artifact_selection(served.release).to_dict()),
+                "component": served.component,
+            }
             for artifact_id, served in current.served_beside().items()
         }
         return {
             "artifact_id": current.serving_artifact_id(),
-            "release_id": current.current_artifact_ref().release_id,
+            "selection": cast(dict[str, JsonValue], current.artifact_selection().to_dict()),
             "aliases": aliases,
             "beside": beside,
         }

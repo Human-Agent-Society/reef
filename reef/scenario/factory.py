@@ -25,6 +25,7 @@ from reef.artifact.repository import (
 )
 from reef.artifact.sources import SourceFiles
 from reef.core.artifact_ref import RootSource
+from reef.core.artifact_selection import ArtifactSelection
 from reef.core.components import COMPONENTS_METADATA_KEY, RECORDS_COMPONENT, ReleaseComponents, release_components
 from reef.core.errors import ReefError
 from reef.observability import ExperimentTracker, NullExperimentTracker
@@ -370,6 +371,13 @@ class ScenarioFactory:
                 checkpoint_artifact=checkpoint_head,
                 local_dir=self._local_artifact_dir,
             )
+            if registration.get("active_selection") is not None:
+                repository.remember_selection(
+                    served_at_head, ArtifactSelection.from_dict(registration["active_selection"])
+                )
+            for record in committed_records(store, head_record):
+                if record.selection is not None:
+                    repository.remember_selection(record.artifact_ref, record.selection)
             repository.synchronize_checkpoint()
             # Traffic must not reach a recovered scenario before its committed
             # head is servable; a failed activation leaves the scenario unloaded.

@@ -90,6 +90,7 @@ class _FakeReef(ThreadingHTTPServer):
         self.delay_s = 0.0
         self.hang_manifest_s = 0.0  # the next manifest read sleeps this long once, as behind a step's lock
         self.polls = 0
+        self.artifact_header = False
         threading.Thread(target=self.serve_forever, daemon=True).start()
 
     @property
@@ -173,6 +174,7 @@ class _Handler(BaseHTTPRequestHandler):
                 {"choices": [{"message": message}]},
                 x_reef_agent_record_id=f"r-{len(reef.requests)}",
                 x_reef_release_id=reef.head,
+                **({"x_reef_artifact_id": "weights-artifact"} if reef.artifact_header else {}),
             )
         else:
             self._json(404, {"error": {"message": "no route"}})
@@ -797,10 +799,14 @@ def test_validation_refuses_a_tree_tool_with_a_self_tools_name() -> None:
 # -- the pieces on their own -------------------------------------------------------------------------------
 
 
-def test_the_capture_proxy_tags_calls_live_and_drains_each_capture_with_its_tags(reef: _FakeReef) -> None:
+@pytest.mark.parametrize("artifact_header", [False, True])
+def test_the_capture_proxy_tags_calls_live_and_drains_each_capture_with_its_tags(
+    reef: _FakeReef, artifact_header
+) -> None:
     import urllib.request
 
     reef.release("r1", {})
+    reef.artifact_header = artifact_header
     seen: list[str] = []
 
     class Observer(ReleaseObserver):
@@ -830,7 +836,7 @@ def test_the_capture_proxy_tags_calls_live_and_drains_each_capture_with_its_tags
         second = [(capture["receipt"], capture["tags"]) for capture in proxy.drain()]
     finally:
         proxy.stop()
-    assert seen == ["r1", "r1", "r1"]
+    assert seen == ([] if artifact_header else ["r1", "r1", "r1"])
     tags = [(r["headers"].get("x-reef-tag-release"), r["headers"].get("x-reef-tag-trial")) for r in reef.requests]
     assert tags == [("r1", None), ("r1", "t1"), ("r1", None)]
     assert {r["headers"]["authorization"] for r in reef.requests} == {"Bearer tok"}
