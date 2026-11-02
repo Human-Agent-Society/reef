@@ -13,6 +13,7 @@ This module defines the item values, the metadata rules, the ``DataStore`` plugi
 from __future__ import annotations
 
 import copy
+import re
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -211,6 +212,40 @@ class StoredItem:
         return self.metadata["scenarios"]
 
 
+#: A metadata key that ``DataStore.groups`` can group by: 1 to 64 letters, digits and underscores.
+GROUP_KEY = re.compile(r"[A-Za-z0-9_]{1,64}")
+
+
+@dataclass(frozen=True)
+class ItemGroup:
+    """The items of one owner and kind that have one value under one metadata key.
+
+    Values: ``value`` is the string under the key, or None for the items whose metadata has no string there.
+    ``item_count`` is a positive int. ``first_sequence`` and ``last_sequence`` are the smallest and the largest
+    sequence of the group's items, so ``first_sequence <= last_sequence``. ``metadata`` is the metadata of the item at
+    ``first_sequence``.
+
+    Purpose: ``DataStore.groups`` returns it. A client lists the sets of items that an owner uploaded, such as the
+    trajectories of one file (``set_id``), without reading each item.
+    """
+
+    value: str | None
+    item_count: int
+    first_sequence: int
+    last_sequence: int
+    metadata: Mapping[str, Any]
+
+    def __post_init__(self) -> None:
+        if self.value is not None and not isinstance(self.value, str):
+            raise ValueError("a group's value is a string or None")
+        for name in ("item_count", "first_sequence", "last_sequence"):
+            number = getattr(self, name)
+            if isinstance(number, bool) or not isinstance(number, int) or number < 1:
+                raise ValueError(f"a group's {name} is a positive int")
+        if self.first_sequence > self.last_sequence:
+            raise ValueError("a group's first_sequence is at most its last_sequence")
+
+
 @dataclass(frozen=True)
 class RecordLink:
     """The place of one record item in its owner's trajectory tree (RFC #1054).
@@ -262,6 +297,9 @@ class DataStore(Plugin, ABC):
       with a message list to its ``RecordLink``. The store links such an item into a trajectory when it creates
       it, by the rule of ``reef.core.trajectory_index`` among the earlier record items of the same origin scenario,
       and the link never changes; a deleted ancestor is skipped. Other IDs are left out.
+    * ``groups(owner, kind, key, before, limit)`` groups the items of ``owner`` and ``kind`` by the string under
+      ``key`` in their metadata (``ItemGroup``). It returns the groups whose ``first_sequence`` is below ``before``,
+      when given, newest first, at most ``limit``.
     * ``maintain()`` does the store's periodic work, such as moving content into segments. It changes no item.
       The data service calls it every few minutes. The default does nothing.
 
@@ -321,12 +359,45 @@ class DataStore(Plugin, ABC):
     @abstractmethod
     def record_links(self, owner: str, item_ids: Sequence[str]) -> dict[str, RecordLink]: ...
 
+    def groups(
+        self, owner: str, *, kind: ItemKind, key: str, before: int | None = None, limit: int = MAX_QUERY_LIMIT
+    ) -> tuple[ItemGroup, ...]:
+        """The groups of the items of ``owner`` and ``kind`` by ``key``. The default reads every page of ``query``
+        without content; a store can read the groups at once."""
+        check_groups(owner, kind, key, before, limit)
+        found: dict[str | None, ItemGroup] = {}
+        after = 0
+        while page := self.query(owner, kind=kind, after=after, content=False):
+            for item in page:
+                value = item.metadata.get(key)
+                value = value if isinstance(value, str) else None
+                group = found.get(value)
+                found[value] = (
+                    ItemGroup(value, 1, item.sequence, item.sequence, item.metadata)
+                    if group is None
+                    else replace(group, item_count=group.item_count + 1, last_sequence=item.sequence)
+                )
+            after = page[-1].sequence
+        newest = sorted(found.values(), key=lambda group: group.first_sequence, reverse=True)
+        return tuple(group for group in newest if before is None or group.first_sequence < before)[:limit]
+
     def maintain(self) -> None:
         """Do the store's periodic work. The default does nothing."""
 
     @abstractmethod
     def close(self) -> None:
         """Release the store's resources. A second call does nothing."""
+
+
+def check_groups(owner: str, kind: object, key: object, before: object, limit: object) -> None:
+    """Raise ``ValueError`` unless the arguments of ``DataStore.groups`` are valid."""
+    check_query(owner, kind, None, 0, limit)
+    if kind is None:
+        raise ValueError("groups need a kind")
+    if not isinstance(key, str) or not GROUP_KEY.fullmatch(key):
+        raise ValueError("key must be 1 to 64 letters, digits and underscores")
+    if before is not None and (isinstance(before, bool) or not isinstance(before, int) or before < 1):
+        raise ValueError("before must be a positive int")
 
 
 def check_query(owner: str, kind: object, scenario: object, after: object, limit: object) -> None:
