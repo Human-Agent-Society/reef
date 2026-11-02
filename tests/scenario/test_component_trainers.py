@@ -720,11 +720,13 @@ def test_a_weights_job_commits_while_the_harness_backend_is_away(tmp_path: Path,
     Each wake before then costs one attempt, and the job's commits and queue changes each wake the scenario, so
     the count of attempts depends on how the wakes group."""
     away = _AwayBackend(HARNESS, tmp_path / "candidates")
-    dispatcher, _ = dispatchers.open(backends={HARNESS: away}, training=WeightsJobComponent(tmp_path / "checkpoints"))
+    training = HeldJobs(tmp_path / "checkpoints")
+    dispatcher, _ = dispatchers.open(backends={HARNESS: away}, training=training)
     scenario = _scenario(dispatcher)
     for record in _records(1, scenario.serving_artifact_id()):
         dispatcher.accept_record(record)
     assert _wait_for(lambda: dispatcher.build_training_status()["error"] == "agent: RuntimeError: proposer away")
+    training.finish(_submitted(training, 1)[0])
     assert _wait_for(
         lambda: "finished" in [_job_event(row) for row in _scenario(dispatcher).store.history()],
         timeout_seconds=15,
@@ -1607,11 +1609,16 @@ def test_dispatcher_runs_the_weights_jobs_and_the_harness_on_their_own_workers(
     """Each trainer has its worker: the weights worker submits a job per batch and commits its checkpoint and end,
     and each job starts from the checkpoint of the job before it."""
     training = WeightsJobComponent(tmp_path / "checkpoints")
-    dispatcher, _ = dispatchers.open(training=training)
-    served = _scenario(dispatcher).serving_artifact_id()
+    dispatcher, _ = dispatchers.open(training=training, hold_local_cycles=True)
+    scenario = _loaded(dispatcher)
+    # Both trainers must observe the base weights before a job can replace them, so their samples stay trainable.
+    for component in (WEIGHTS, HARNESS):
+        assert scenario.prepare_training_step(component) is None
+    served = scenario.serving_artifact_id()
     for step in (1, 2):
         for record in _records(step, served):
             dispatcher.accept_record(record)
+    dispatcher.open_local_cycles()
 
     def both_trained_twice() -> bool:
         ended = _training_components(_scenario(dispatcher))
