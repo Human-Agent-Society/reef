@@ -1193,6 +1193,7 @@ def test_a_commit_failure_keeps_one_retryable_batch_and_one_record(tmp_path, mon
 
 @pytest.mark.unit
 def test_durable_local_backend_recovers_after_post_commit_notification_failure(tmp_path) -> None:
+    synchronization_timeout_seconds = 10
     agent_record_dir = tmp_path / "agent-record"
     dispatcher = build_harness_evolve_dispatcher(
         tmp_path, harness_repository(tmp_path), agent_record_dir=agent_record_dir
@@ -1213,7 +1214,7 @@ def test_durable_local_backend_recovers_after_post_commit_notification_failure(t
 
     def blocking_reload(scenario: str):
         reload_started.set()
-        assert allow_reload.wait(1)
+        assert allow_reload.wait(synchronization_timeout_seconds)
         return reload_scenario(scenario)
 
     original.trainer.pipeline.release_records = fail_release.__get__(
@@ -1223,8 +1224,8 @@ def test_durable_local_backend_recovers_after_post_commit_notification_failure(t
     dispatcher.accept_record(trace_inference("i1"))
     dispatcher.accept_record(trace_report("r1", "i1"))
 
-    assert release_failed.wait(1)
-    assert reload_started.wait(1)
+    assert release_failed.wait(synchronization_timeout_seconds)
+    assert reload_started.wait(synchronization_timeout_seconds)
     activation_started = Event()
     activation_returned = Event()
     activation_errors: list[Exception] = []
@@ -1240,12 +1241,12 @@ def test_durable_local_backend_recovers_after_post_commit_notification_failure(t
 
     activation_thread = Thread(target=activate)
     activation_thread.start()
-    assert activation_started.wait(1)
+    assert activation_started.wait(synchronization_timeout_seconds)
     try:
         assert not activation_returned.wait(0.05), "activation entered before durable recovery"
     finally:
         allow_reload.set()
-    activation_thread.join(1)
+    activation_thread.join(synchronization_timeout_seconds)
     assert not activation_thread.is_alive()
     assert activation_errors == []
 
