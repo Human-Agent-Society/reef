@@ -32,6 +32,7 @@ from reef.artifact.artifact import Artifact
 from reef.core.errors import InferenceUnavailable, ReefError
 from reef.core.evaluation import ArtifactKind, PolicyModel
 from reef.core.served_models import ServedArtifact
+from reef.core.values import JsonValue
 from reef.core.weight_layout import WEIGHT_LAYOUTS, WeightLayout
 from reef.surface.base import AdapterWeightRuntime
 
@@ -445,11 +446,29 @@ class InferenceHandler(ABC):
         (``ServedArtifact.model_name``). The default names it as the request's ``model``."""
         return {**payload, "model": model_name}
 
-    def request_payload(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+    def serving_config(self, override: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
+        """The request fields that a scenario may set (RFC #1097), with their effective values under ``override``.
+
+        ``override`` maps field names to the values that one scenario sets. The result maps each field that has a
+        value to its value: the override's value when it sets the field, else the handler's own value. A field with
+        neither value has no key. ``ValueError`` when ``override`` sets a field that the handler does not have, or a
+        value that the field does not take. The default handler has no field: it gives ``{}`` for an empty
+        ``override`` and refuses any other.
+        """
+        if override:
+            raise ValueError(f"{type(self).__name__} has no serving fields; got {sorted(override)}")
+        return {}
+
+    def request_payload(
+        self, payload: Mapping[str, Any], *, serving_config: Mapping[str, JsonValue]
+    ) -> dict[str, Any]:
         """The provider request body that the engine receives for the client's body ``payload``, before
         ``address_model``: a new dict, with the values that the handler sets itself, such as fixed sampling values.
-        The inference service sends it and records it. ``ValueError`` for a body that the handler refuses. The
-        default is ``payload`` unchanged."""
+
+        ``serving_config`` is the override of the scenario that the request is for, which its runtime's
+        ``serving_config`` accepted. The handler applies the fields of it that are its own and leaves the rest,
+        which the runtime applies to the engine. The inference service sends the body and records it.
+        ``ValueError`` for a body that the handler refuses. The default is ``payload`` unchanged."""
         return dict(payload)
 
     async def inference_stream(self, artifact: Artifact, path: str, payload: dict[str, Any]) -> InferenceStream:
@@ -569,6 +588,24 @@ class InferenceRuntime(AdapterWeightRuntime):
         except ValueError:
             # The base URL is no HTTP(S) URL that another process can call.
             return None
+
+    def serving_config(self, override: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
+        """The serving fields that a scenario may set (RFC #1097), with their effective values under ``override``.
+
+        As ``InferenceHandler.serving_config``, over the fields of the engine and of the handler: ``override`` maps
+        field names to one scenario's values, and the result maps each field that has a value to the override's
+        value, else the deployment's. ``ValueError`` names a field that neither has, or a value that its field does
+        not take. Control calls it without opening the runtime. The default has the handler's fields only.
+        """
+        return self.inference_handler.serving_config(override)
+
+    def apply_serving_config(self, scenario: str, override: Mapping[str, JsonValue]) -> None:
+        """Make the engine fields of ``override``, which ``serving_config`` accepted, hold for ``scenario``: for the
+        engine that serves it now, and for each engine that starts for it later. A field that ``override`` does not
+        set takes the deployment's value again. The inference worker calls it before each activation and when only
+        the override changed, so a second call with the same values changes nothing. The default has no engine
+        field and does nothing; the handler applies request fields to each request."""
+        return
 
     def open(self) -> None:
         """Open the engines before the inference worker adopts or activates artifacts. A second call does nothing.

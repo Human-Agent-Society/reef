@@ -107,6 +107,21 @@ subclass. Reef calls its ``from_config(upstream_url, *, model_path, timeout_s,
 **config)`` class method; arbitrary functions are not accepted. Handlers injected
 directly into ``create_app`` or ``build_app`` need only implement the inference methods.
 
+A scenario's `serving config <http-api.rst#serving-config>`__ reaches three
+methods. Each has a default for a handler or runtime without serving fields:
+
+- ``InferenceHandler.serving_config(override)`` and
+  ``InferenceRuntime.serving_config(override)`` return the effective value of
+  each serving field under one scenario's ``override``, and raise ``ValueError``
+  for a field or value that they do not take. Control calls the runtime's method
+  to check an update. The runtime's default gives its handler's fields.
+- ``InferenceHandler.request_payload(payload, *, serving_config)`` gets the
+  scenario's override with each request. It applies its own fields and leaves
+  the rest.
+- ``InferenceRuntime.apply_serving_config(scenario, override)`` applies the
+  engine fields. The inference worker calls it before each activation and when
+  only the override changed.
+
 Streaming handlers return ``InferenceStream``; its ``record_response`` and
 ``record_response_pending`` fields carry buffered or deferred recording state.
 Implementations and test doubles must initialize these fields through the
