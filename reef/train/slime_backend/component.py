@@ -94,7 +94,7 @@ from reef.train.slime_backend.rollout_group import (
     serving_session,
 )
 from reef.train.slime_backend.score_centering import ScoreCenteringSettings, settings_from_args
-from reef.train.task_rollouts import RolloutSettings, TaskJobRollouts, run_train_tasks, task_name
+from reef.train.task_rollouts import RolloutSettings, RolloutTokens, TaskJobRollouts, run_train_tasks, task_name
 
 #: A start directory's description of the weights a later job continues from.
 START_STATE = "start.json"
@@ -544,7 +544,9 @@ class SlimeJobRunner(SlimeJobs):
         if kept is not None:
             samples = JobData.from_dict(kept["samples"]).samples
             return TaskJobRollouts(
-                trajectories(JobData(job.data.data_id, samples)), RolloutScores.from_json(kept["scores"])
+                trajectories(JobData(job.data.data_id, samples)),
+                RolloutScores.from_json(kept["scores"]),
+                tuple(RolloutTokens(**item) for item in kept.get("tokens", [])),
             )
         if self.rollout_group is None:
             raise RuntimeError("this Slime component has no rollout engines, so it cannot roll tasks out")
@@ -566,7 +568,11 @@ class SlimeJobRunner(SlimeJobs):
             self.rollout_group.release()
         write_json(
             record,
-            {"samples": JobData(job.data.data_id, rollouts.samples).to_dict(), "scores": rollouts.scores.to_json()},
+            {
+                "samples": JobData(job.data.data_id, rollouts.samples).to_dict(),
+                "scores": rollouts.scores.to_json(),
+                "tokens": [asdict(item) for item in rollouts.tokens],
+            },
         )
         return rollouts
 
@@ -621,10 +627,7 @@ class SlimeJobRunner(SlimeJobs):
         rollout_metrics: dict[str, Any] = {}
         if "rollout" in job.parameters:
             rollouts = self.task_rollouts(job, directory, RolloutSettings.from_parameters(job.parameters))
-            rollout_metrics = {
-                "rollout_rewards": {name: list(values) for name, values in rollouts.rewards().items()},
-                "rollout_samples": len(rollouts.samples),
-            }
+            rollout_metrics = rollouts.metrics()
             if not rollouts.samples:
                 # No task has a group of two samples to compare, so the job trains nothing.
                 return rollout_metrics

@@ -25,7 +25,7 @@ import threading
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any, TextIO
 
@@ -42,7 +42,7 @@ from reef.tinker.sampling import TinkerSampler
 from reef.train.algos.registry import job_training
 from reef.train.algos.schedule import StepScheduling
 from reef.train.local_jobs import LocalJobComponent
-from reef.train.task_rollouts import RolloutSettings, TaskJobRollouts, run_train_tasks, task_name
+from reef.train.task_rollouts import RolloutSettings, RolloutTokens, TaskJobRollouts, run_train_tasks, task_name
 from reef.train.tinker_backend.client import TinkerClient
 from reef.train.tinker_backend.config import ScoreCentering, TinkerConfig, TinkerServiceConfig
 from reef.train.tinker_backend.preparation import prepare_tinker_job
@@ -318,7 +318,9 @@ class TinkerJobComponent(LocalJobComponent, ABC):
         if kept is not None:
             samples = JobData.from_dict(kept["samples"]).samples
             return TaskJobRollouts(
-                trajectories(JobData(job.data.data_id, samples)), RolloutScores.from_json(kept["scores"])
+                trajectories(JobData(job.data.data_id, samples)),
+                RolloutScores.from_json(kept["scores"]),
+                tuple(RolloutTokens(**item) for item in kept.get("tokens", [])),
             )
         if self._sampler is None:
             raise RuntimeError("this Tinker component has no sampler, so it cannot roll tasks out")
@@ -346,6 +348,7 @@ class TinkerJobComponent(LocalJobComponent, ABC):
             {
                 "samples": JobData(job.data.data_id, rollouts.samples).to_dict(),
                 "scores": rollouts.scores.to_json(),
+                "tokens": [asdict(item) for item in rollouts.tokens],
             },
         )
         return rollouts
@@ -377,10 +380,7 @@ class TinkerJobComponent(LocalJobComponent, ABC):
         rollout_metrics: dict[str, Any] = {}
         if parameters.rollout is not None:
             rollouts = self.task_rollouts(job, directory, start, parameters.rollout)
-            rollout_metrics = {
-                "rollout_rewards": {name: list(values) for name, values in rollouts.rewards().items()},
-                "rollout_samples": len(rollouts.samples),
-            }
+            rollout_metrics = rollouts.metrics()
             if not rollouts.samples:
                 # No task has a group of two samples to compare, so the job trains nothing.
                 return rollout_metrics
