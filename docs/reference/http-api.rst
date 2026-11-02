@@ -1774,7 +1774,7 @@ artifacts}``, **newest first**. Each row is one artifact of one component:
 +-----------------------+------------------------------------------------------+
 | ``component``         | the component whose content it is                    |
 +-----------------------+------------------------------------------------------+
-| ``parent_artifact_id`` | the artifact this one derives from, or null           |
+| ``parent_artifact_id``| the artifact this one derives from, or null          |
 +-----------------------+------------------------------------------------------+
 | ``operation``         | ``creation`` for the creation artifact,              |
 |                       | ``training``, ``import``, ``sync``, or ``recovery``  |
@@ -1802,7 +1802,7 @@ artifacts}``, **newest first**. Each row is one artifact of one component:
 ``parent_artifact_id`` describes derivation within the scenario. A training
 output follows that component's training start; a harness sync follows its
 previously active artifact. Creation and ordinary imports have no local
-parent, so the field is null. Import provenance remains in ``source``,
+parent, so the field is null. The import source remains in ``source``,
 including ``source.item`` when importing an artifact-library item; importing
 from another scenario does not create a cross-scenario parent link.
 
