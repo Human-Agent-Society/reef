@@ -20,7 +20,7 @@ of this run. Do not copy credentials, personal data or instructions from the tra
 The documents an agent reads can be out of date. When the run's score shows that a documented rule or value is not
 the one in force, write the rule as the runs show it, with the value, and say what the run showed: for example,
 "Transfers of 4,800 were scored wrong when approved under a documented limit of 5,000, so treat the limit in force
-as lower than 4,800." Do not state a value that the run gives no evidence for.
+as lower than 4,800." Do not state a value that the run gives no support for.
 
 The agent already has the skills below. To improve one of them, use its exact name: your skill then replaces it. Do
 not add a skill that one of them already covers.

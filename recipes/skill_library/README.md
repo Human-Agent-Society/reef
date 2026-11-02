@@ -9,7 +9,7 @@ library.
 The method combines three published ideas. The skills are induced from runs, as workflows are in
 [Agent Workflow Memory](https://arxiv.org/abs/2409.07429). A skill joins only after it is run and succeeds, as in
 [Voyager](https://arxiv.org/abs/2305.16291) and [SkillWeaver](https://arxiv.org/abs/2504.07079). A skill keeps a count
-of the evidence for and against it and leaves when the count turns against it, as an insight does in
+of the outcomes for and against it and leaves when the count turns against it, as an insight does in
 [ExpeL](https://arxiv.org/abs/2308.10144). The survey that led to this design is in
 [#1086](https://github.com/Human-Agent-Society/reef/issues/1086).
 

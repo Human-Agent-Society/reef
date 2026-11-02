@@ -11,7 +11,10 @@ import re
 from dataclasses import asdict
 from pathlib import Path
 
+import pytest
 import yaml
+
+pytest.importorskip("hypothesis")
 from hypothesis import given
 from hypothesis import strategies as st
 

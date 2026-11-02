@@ -43,7 +43,7 @@ from reef.train.harness_backend.workspace import StepOutput
 
 PI = get_adapter("pi")
 EXAMPLE = Path(__file__).resolve().parents[3] / "recipes" / "skill_library" / "examples" / "serve.yaml"
-TASK = "reconcile the ledger"
+TASK = "reconcile the account"
 
 
 class SkillScoredServices(Services):
