@@ -54,6 +54,7 @@ PULL_TIMEOUT_S = 900.0
 # run.sh polls the head every 5 s, but a poll that started during the evolve step waits behind the step's
 # lock until the client's 30 s timeout; the mount lands on the poll after that one.
 MOUNT_TIMEOUT_S = 120.0
+INFERENCE_TIMEOUT_S = 300.0
 
 WORK = Path(__file__).resolve().parent / "work"
 # run.sh copies serve.yaml's evolution.evaluation.tasks here; the recorded traffic and
@@ -71,7 +72,7 @@ def main():
     tasks = json.loads(TASKS_FILE.read_text())
     client = ReefClient(SERVICE_URL, token=TOKEN, timeout_s=300.0)
     # The inference routes serve only a scenario that exists: create it first.
-    client.post("/reef/scenarios", SCENARIO, {"name": SCENARIO})
+    create_scenario(client)
 
     before = steps_before(client)
     # record + report: the traffic the evolve steps learn from.
@@ -125,6 +126,23 @@ def main():
         print("(removed)" if text is None else text)
     # Every step this run triggered already has its result from the wait above, so there is nothing left to
     # wait for: the head this run pulled is the one a win left behind.
+
+
+def create_scenario(client):
+    """Create the scenario, or find it, and wait until inference serves its model.
+
+    Creation does not wait for the model to start, and a model call before then is HTTP 503.
+    """
+    client.post("/reef/scenarios", SCENARIO, {"name": SCENARIO})
+    deadline = time.monotonic() + INFERENCE_TIMEOUT_S
+    while time.monotonic() < deadline:
+        startup = client.get(f"/reef/scenarios/{SCENARIO}/inference/status")
+        if startup["state"] == "ready":
+            return
+        if startup["state"] == "failed":
+            raise SystemExit(f"inference did not start: {startup['error']}; check work/reef.log")
+        time.sleep(0.5)
+    raise SystemExit(f"inference did not start within {INFERENCE_TIMEOUT_S:.0f}s; check work/reef.log")
 
 
 def training_rows(client):
@@ -191,7 +209,7 @@ def pull():
     """
     client = ReefClient(SERVICE_URL, token=TOKEN, timeout_s=300.0)
     # Create the scenario if it does not exist yet: its base release is the seed tree.
-    client.post("/reef/scenarios", SCENARIO, {"name": SCENARIO})
+    create_scenario(client)
     manifest = head_manifest(client)
     shutil.rmtree(TREE_DIR, ignore_errors=True)
     binding = {"api": "openai", "base_url": SERVICE_URL, "api_key": TOKEN or NO_TOKEN_API_KEY, "model": MODEL}
