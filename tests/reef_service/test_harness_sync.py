@@ -37,7 +37,7 @@ MINE = {"plugin/rules.md": "Mine.\n", "plugin/skills/fix/SKILL.md": SKILL, "pi-a
 def test_a_clients_changes_merge_onto_the_head_and_the_next_step_evolves_them(tmp_path) -> None:
     async def run() -> None:
         async with served_client(channel_dispatcher(tmp_path, PATCHES[:1], seed=PI_SEED)) as client:
-            base = (await (await client.get("/reef/harness", headers=HEADERS)).json())["release_id"]
+            base = (await (await client.get("/reef/harness", headers=HEADERS)).json())["artifact_id"]
             body = {"files": MINE, "base_artifact_id": base}
             response = await client.post("/reef/harness/import", headers=HEADERS, json=body)
             assert response.status == 200
@@ -46,7 +46,7 @@ def test_a_clients_changes_merge_onto_the_head_and_the_next_step_evolves_them(tm
             assert imported["ignored"] == ["pi-agent/auth.json"]
             # The head serves the person's files, with the seed's config: the binding owns the config.
             source = await (await client.get("/reef/harness", params={"form": "source"}, headers=HEADERS)).json()
-            assert source["release_id"] == imported["release_id"]
+            assert source["artifact_id"] == imported["artifact_id"]
             assert source["files"] == {
                 "config/primary.json": PI_SEED.files["config/primary.json"],
                 "rules.md": "Mine.\n",
@@ -66,10 +66,10 @@ def test_a_clients_changes_merge_onto_the_head_and_the_next_step_evolves_them(tm
             other = SKILL.replace("name: fix", "name: other")
             on_seed = {"plugin/rules.md": "Answer briefly.\n", "plugin/skills/other/SKILL.md": other}
             response = await client.post(
-                "/reef/harness/import", headers=HEADERS, json={"files": on_seed, "base_release_id": base}
+                "/reef/harness/import", headers=HEADERS, json={"files": on_seed, "base_artifact_id": base}
             )
             merged = await response.json()
-            assert merged["merged"] is True and merged["parent_release_id"] == imported["release_id"]
+            assert merged["merged"] is True and merged["parent_artifact_id"] == imported["artifact_id"]
             # A line that both sides changed since the seed is refused by the file's name; a client names its base.
             conflicting = {**on_seed, "plugin/rules.md": "Theirs.\n"}
             for files, stale, status, named in (
@@ -77,12 +77,12 @@ def test_a_clients_changes_merge_onto_the_head_and_the_next_step_evolves_them(tm
                 (MINE, None, 400, "base_artifact_id"),
             ):
                 refused = await client.post(
-                    "/reef/harness/import", headers=HEADERS, json={"files": files, "base_release_id": stale}
+                    "/reef/harness/import", headers=HEADERS, json={"files": files, "base_artifact_id": stale}
                 )
                 assert refused.status == status and named in await refused.text()
             # The next step builds on the merge: its method's patch applies to the person's files.
             evolved = await evaluated_step(client)
-            assert evolved["evaluation"]["head_release_id"] == merged["release_id"]
+            assert evolved["evaluation"]["head_artifact_id"] == merged["artifact_id"]
             source = await (await client.get("/reef/harness", params={"form": "source"}, headers=HEADERS)).json()
             assert (
                 source["files"]["skills/other/SKILL.md"] == other and source["files"]["rules.md"] == "marker rules\n"

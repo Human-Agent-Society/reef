@@ -90,8 +90,8 @@ Release
 -------
 
 An internal repository snapshot that stores artifact bytes and recovery
-metadata. Existing backend interfaces call its storage locator
-``release_id``. Callers use ``artifact_id`` instead. Activation and serving
+metadata. Backend interfaces locate it with ``SnapshotRef.revision``.
+Artifact callers use ``artifact_id``. Activation and serving
 change scenario state without publishing a snapshot. Older harness protocol
 fields with release names remain compatibility aliases.
 
@@ -328,10 +328,12 @@ Runtime load ID
 ---------------
 
 An engine-scoped ``<incarnation>:<sequence>`` token naming the concrete weight
-load that produced a span of generated tokens. It is a serving fence, not a
-publication or content identity. Reloading the same ``content_id`` can produce
-a new runtime load ID, for example when an older release is activated
-again. A restart invalidates runtime load IDs but not the release chain.
+load that produced a span of generated tokens. Reloading the same artifact can
+produce a new runtime load ID, for example when an older artifact is activated
+again. Saved-weight runtimes reuse a current load when its ``artifact_id``
+matches the requested artifact. Different artifact IDs can cause separate loads
+even when their files are identical. A restart invalidates runtime load IDs
+but preserves artifact identities.
 Runtime load IDs stay inside the engines and training; records name the
 artifact that answered by ``artifact_id``.
 

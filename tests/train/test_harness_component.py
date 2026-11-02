@@ -7,6 +7,7 @@ binary scores rules that hold the marker higher.
 from __future__ import annotations
 
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -27,7 +28,7 @@ from reef.harness.adapters import get_adapter
 from reef.harness.tree import HarnessTree, TreePatch
 from reef.recipe.harness import HarnessJobLoop
 from reef.runtime.jobs import JobStatus, TrainingJob
-from reef.train.backend import ComponentReleases
+from reef.train.backend import ComponentArtifacts
 from reef.train.harness_backend.backend import StepProgress
 from reef.train.harness_backend.component import (
     PROGRESS_FILE,
@@ -63,7 +64,7 @@ def job(component: HarnessTrainingComponent, name: str, *, start: str, previous:
         JobData(name, (recorded_trajectory(f"{name}-trace", {"messages": []}, 0.0),)),
         {
             "component": COMPONENT,
-            "head_release_id": "base",
+            "head_artifact_id": "base",
             "evaluation_tasks": None,
             "previous_job": previous,
         },
@@ -82,23 +83,31 @@ def ended(component: HarnessTrainingComponent, job_id: str, seconds: float = 30.
 
 
 @pytest.mark.unit
-def test_a_kept_tree_is_the_jobs_checkpoint_and_names_the_parts_it_changed(tmp_path: Path) -> None:
+@pytest.mark.parametrize("legacy_start", [False, True])
+def test_a_kept_tree_is_the_jobs_checkpoint_and_names_the_parts_it_changed(tmp_path: Path, legacy_start: bool) -> None:
     component = component_of(tmp_path, lambda workspace, services: MARKER)
     component.start_jobs()
     try:
-        component.submit(job(component, "one", start=seed_start(component, tmp_path)))
+        first = job(component, "one", start=seed_start(component, tmp_path))
+        if legacy_start:
+            parameters = dict(first.parameters)
+            parameters["head_release_id"] = parameters.pop("head_artifact_id")
+            first = replace(first, parameters=parameters)
+        component.submit(first)
         status = ended(component, "one")
         assert status.state == "finished" and status.metrics == {}
         (checkpoint,) = status.checkpoints
         # The step's metrics are the checkpoint's: the job's end carries none of its own.
         assert checkpoint.metrics["selected"] is True
+        assert checkpoint.metrics["head_artifact_id"] == "base"
+        assert "head_release_id" not in checkpoint.metrics
         assert checkpoint.path == checkpoint.release_path
         assert HarnessTree.read(Path(checkpoint.path)) == PI_SEED.apply(MARKER)
         # The next job starts from the checkpoint and continues the state after this job.
         component.submit(job(component, "two", start=checkpoint.path, previous="one"))
         second = ended(component, "two")
         assert second.state == "finished" and second.checkpoints == ()
-        assert second.metrics["skipped"] == UNCHANGED and second.metrics["head_release_id"] == "base"
+        assert second.metrics["skipped"] == UNCHANGED and second.metrics["head_artifact_id"] == "base"
         assert component.state_after("two")[0] == 2 and component.state_after(None)[0] == 0
     finally:
         component.close()
@@ -116,7 +125,7 @@ def test_a_checkpoint_commit_names_the_parts_that_its_tree_changed_from_the_jobs
     loop = HarnessJobLoop(
         component,
         scenario="demo",
-        releases=ComponentReleases(TreeReleases(PI_SEED), COMPONENT),
+        releases=ComponentArtifacts(TreeReleases(PI_SEED), COMPONENT),
         eval_samples=None,
         layout=get_adapter("pi").layout,
     )
@@ -200,7 +209,7 @@ def test_starts_and_jobs_are_checked_before_a_job_runs(tmp_path: Path) -> None:
     valid = job(component, "valid", start=seed_start(component, tmp_path))
     for name, value, message in (
         ("component", "", "names the scenario component"),
-        ("head_release_id", None, "names the release of its start"),
+        ("head_artifact_id", None, "names the artifact of its start"),
         ("evaluation_tasks", "t", "evaluation_tasks"),
         ("previous_job", "", "previous_job"),
     ):

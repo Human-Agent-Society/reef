@@ -9,7 +9,9 @@ from reef.service.inference_service import provider_response
 
 
 def _inference(payload) -> AgentRecord:
-    return AgentRecord.create(scenario="s", request_type=RequestType.INFERENCE, payload=payload)
+    return AgentRecord.create(
+        scenario="s", request_type=RequestType.INFERENCE, payload=payload, artifact_id=payload.get("artifact_id")
+    )
 
 
 def _turn(

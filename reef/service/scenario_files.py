@@ -43,7 +43,7 @@ def artifact_files(
     if not 1 <= expires_in_seconds <= MAX_DOWNLOAD_URL_SECONDS:
         raise ValueError(f"expires_in must be 1 to {MAX_DOWNLOAD_URL_SECONDS} seconds")
     with dispatcher.locked_scenario(scenario) as current:
-        selected, ref = current.artifact_release_ref(artifact_id, component)
+        selected, ref = current.artifact_snapshot(artifact_id, component)
         downloads = current.repository.file_downloads(ref, expires_in_seconds)
         # A release of several components keeps each one in a directory named after it.
         prefix = "" if current.surface.single else f"{selected}/"
