@@ -16,6 +16,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from tests.support._activation_rule_plugin import ComponentRule
 from tests.support._policy_recipe import TestPolicyRecipe
 from tests.support.artifact_versions import inference, report
+from tests.support.hang_report import hang_report, install_timeline
 from tests.support.harness_steps import IdleMethod, evolution_config
 from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, runtime_bindings
 
@@ -472,6 +473,12 @@ def test_build_dispatcher_requires_the_model_path(stub_repository, tmp_path) -> 
         build(tmp_path, model_path="")
 
 
+@pytest.fixture(autouse=True)
+def serving_timeline(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Record serving and training events, for the hang report of a wait that times out (temporary)."""
+    install_timeline(monkeypatch)
+
+
 class HeldJobComponent(StubTrainingComponent):
     """A component whose submitted jobs run until :meth:`finish_jobs` ends them."""
 
@@ -540,7 +547,7 @@ def test_status_reports_the_running_job_the_finished_jobs_and_the_served_adapter
             ):
                 return block
             await asyncio.sleep(0.01)
-        pytest.fail(f"status did not reach {finished_jobs} finished jobs: {block}")
+        pytest.fail(f"status did not reach {finished_jobs} finished jobs: {block}" + hang_report(dispatcher, "math"))
 
     async def run() -> None:
         async with TestClient(TestServer(create_app(dispatcher))) as client:

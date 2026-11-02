@@ -9,8 +9,8 @@ from threading import Event
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
 from tests.support._policy_recipe import TestPolicyRecipe
+from tests.support.hang_report import hang_report, install_timeline
 from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, runtime_bindings
-
 from tests.support.serving import wait_for_serving
 
 from reef.artifact import Artifact, ArtifactPublicationError, InMemoryRepositoryBackend
@@ -122,6 +122,12 @@ class OperationalExperimentTracker(RecordingExperimentTracker):
         return True
 
 
+@pytest.fixture(autouse=True)
+def serving_timeline(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Record serving and training events, for the hang report of a wait that times out (temporary)."""
+    install_timeline(monkeypatch)
+
+
 def wait_for_operational_sample(
     tracker: RecordingExperimentTracker, expected: Mapping[str, int]
 ) -> dict[str, float | int]:
@@ -194,7 +200,10 @@ def _wait_for_jobs(dispatcher: Dispatcher, finished_jobs: int) -> None:
         if status["finished_jobs"] == finished_jobs and status["training_job"] is None:
             return
         time.sleep(_ASYNC_WAIT_POLL_S)
-    pytest.fail(f"scenario did not finish {finished_jobs} jobs: {dispatcher.build_training_status()}")
+    pytest.fail(
+        f"scenario did not finish {finished_jobs} jobs: {dispatcher.build_training_status()}"
+        + hang_report(dispatcher, "math")
+    )
 
 
 def _hold_job_submission(monkeypatch: pytest.MonkeyPatch) -> tuple[Event, Event]:
