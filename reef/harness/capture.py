@@ -4,7 +4,8 @@ A harness that runs outside Reef's evaluation, such as a Harbor task run
 or the native serve process, reaches Reef through this proxy. It forwards to
 Reef with ``x-reef-scenario`` and the token, tags every call as
 ``x-reef-tag-<name>``, keeps the receipt each answer carries, and hands the
-release id an answer names to a ``ReleaseObserver``.
+legacy harness head to a ``ReleaseObserver``. Modern inference responses identify model artifacts instead;
+the harness watch polls its own catalog for updates.
 """
 
 from __future__ import annotations
@@ -40,7 +41,7 @@ def wait_for_proxy(port: int, timeout_s: float = 5.0) -> bool:
     return False
 
 
-#: The response header Reef sets on every inference answer of a file serving scenario: the head release id.
+#: Older file-serving services announce their harness head through this response header.
 RELEASE_HEADER = "x-reef-release-id"
 #: The paths Reef serves inference on; a receipt rides on each. The proxy matches the path with its query, and
 #: the Anthropic SDK posts /v1/messages?beta=true under beta headers, so that form is listed.
@@ -117,8 +118,10 @@ def observing_handler(base: type[BaseHTTPRequestHandler], observer: ReleaseObser
     class Handler(base):  # type: ignore[valid-type,misc]
         def _relay(self, response: Any, *args: Any) -> None:
             # Before the body reaches the agent: a head the answer names is queued by the time the agent reads it.
+            # Modern inference answers identify the model artifact, which need not be the harness artifact.
+            # Its update watch polls the harness catalog. Older file-serving services used the legacy header.
             release = response.getheader(RELEASE_HEADER)
-            if release:
+            if release and not response.getheader("x-reef-artifact-id"):
                 observer.observe(str(release))
             super()._relay(response, *args)
 

@@ -300,9 +300,7 @@ class ScenarioRegistry:
             current = loaded.get(name)
             row: dict[str, Any] = {"scenario": name, "loaded": current is not None}
             if current is not None:
-                ref = current.repository.require_current_artifact()
-                row["release_id"] = ref.release_id
-                row["content_id"] = ref.content_id
+                row["components"] = current.artifact_selection().artifact_ids
             if adapter is not None:
                 row["adapter"] = adapter
             rows.append(row)

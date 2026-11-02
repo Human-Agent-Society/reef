@@ -74,6 +74,8 @@ logger = logging.getLogger(__name__)
 #: The header that carries the ID of the request's record.
 RECORD_HEADER = "x-reef-agent-record-id"
 #: The header that carries the ID of the artifact that answered.
+ARTIFACT_HEADER = "x-reef-artifact-id"
+# Kept for clients deployed before artifact identity became the public contract.
 RELEASE_HEADER = "x-reef-release-id"
 #: The model routes that an inference replica answers.
 INFERENCE_PATHS = ("/v1/chat/completions", "/v1/responses", "/v1/messages", "/v1/messages/count_tokens")
@@ -140,8 +142,9 @@ class ServedModelsCache:
 class ArtifactRefs:
     """The release of each artifact that a replica serves, read once from the scenario's commit history.
 
-    The release of ``artifact_id`` is the newest committed release that binds it: one whose manifest
-    (``CommitRecord.components``) names it, or, with one component, the release whose ``release_id`` it is. An
+    A selection supplies the artifact's durable storage reference. Older commits supply the release whose
+    manifest (``CommitRecord.components``) names it, or whose ``release_id`` equals the artifact ID. Local
+    selection caches never enter inference records. An
     artifact that no commit binds, such as the artifact that a scenario started from, has no release here, and its
     records carry no ``artifact_ref``.
 
@@ -164,14 +167,20 @@ class ArtifactRefs:
             history = store.history()
         finally:
             store.close()
-        found = next(
-            (
-                commit.artifact_ref
-                for commit in reversed(history)
-                if artifact_id in (commit.components or {}).values() or commit.artifact_ref.release_id == artifact_id
-            ),
-            None,
-        )
+        found = None
+        for commit in reversed(history):
+            if commit.selection is not None:
+                selected = next(
+                    (item for item in commit.selection.components.values() if item.artifact_id == artifact_id), None
+                )
+                if selected is not None:
+                    found = selected.ref
+                    break
+            if not commit.artifact_ref.release_id.startswith("selection:") and (
+                artifact_id in (commit.components or {}).values() or commit.artifact_ref.release_id == artifact_id
+            ):
+                found = commit.artifact_ref
+                break
         self.known[key] = found
         return found
 
@@ -189,7 +198,9 @@ async def read_object(request: web.Request) -> dict[str, Any]:
 
 def upstream_artifact(served: ServedArtifact, ref: ArtifactRef | None) -> Artifact:
     """The artifact that the engine handler gets for its request headers: the release, or the artifact by its ID."""
-    return Artifact(ref or ArtifactRef(served.artifact_id, served.artifact_id, None), None)
+    return Artifact(
+        ref or ArtifactRef(served.artifact_id, served.artifact_id, None), None, artifact_id=served.artifact_id
+    )
 
 
 def provider_response(response: Mapping[str, Any]) -> dict[str, Any]:
@@ -418,7 +429,7 @@ class InferenceReplica:
                 raise web.HTTPConflict(text=INFERENCE_ABORT_ERROR)
             served, ref = await self.resolve(parsed.scenario, payload.get("model"), name=name, refresh=True)
         stamped = {**sent, "artifact_id": served.artifact_id}
-        reply_headers = {RELEASE_HEADER: served.artifact_id}
+        reply_headers = {ARTIFACT_HEADER: served.artifact_id, RELEASE_HEADER: served.artifact_id}
         if record:
             try:
                 reply_headers[RECORD_HEADER] = await asyncio.to_thread(self.record, parsed, stamped, response, ref)
@@ -452,8 +463,10 @@ class InferenceReplica:
         headers = {
             key: value
             for key, value in upstream.headers.items()
-            if key.lower() not in (RECORD_HEADER, RELEASE_HEADER, "content-length", "transfer-encoding")
+            if key.lower()
+            not in (RECORD_HEADER, ARTIFACT_HEADER, RELEASE_HEADER, "content-length", "transfer-encoding")
         }
+        headers[ARTIFACT_HEADER] = served.artifact_id
         headers[RELEASE_HEADER] = served.artifact_id
         content_type = next((value for key, value in headers.items() if key.lower() == "content-type"), "")
         response = web.StreamResponse(status=upstream.status, headers=headers)
@@ -608,6 +621,7 @@ def build_inference_app(
 
 
 __all__ = [
+    "ARTIFACT_HEADER",
     "INFERENCE_PATHS",
     "RECORD_HEADER",
     "RELEASE_HEADER",
