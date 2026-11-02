@@ -43,6 +43,10 @@ class NullInferenceRuntime(InferenceRuntime):
         self._model_path = model_path
 
     @property
+    def serves_requests(self) -> bool:
+        return False
+
+    @property
     def inference_handler(self) -> InferenceHandler:
         return self._handler
 

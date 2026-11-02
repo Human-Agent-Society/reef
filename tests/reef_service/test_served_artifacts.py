@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
@@ -37,7 +38,7 @@ class ReleaseEcho(InferenceHandler):
 
 
 class NamedInference(ImportingInference):
-    """An ``ImportingInference`` whose engine serves every scenario under one model name, so control writes the
+    """An ``ImportingInference`` whose engine serves every scenario under one model name, so inference writes the
     scenario's ``served_models`` rows and the inference routes answer."""
 
     def served_model_name(self, scenario: str) -> str:
@@ -81,6 +82,19 @@ def two_artifacts(tmp_path):
     return value, runtime, backend_factory, newest, older
 
 
+def wait_for_serving(value: Dispatcher) -> None:
+    """Wait until inference publishes the scenario's current selection, or report its startup failure."""
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        item = value.coordination.served_models.current_request("math")
+        if item is not None and item.state == "finished":
+            return
+        if item is not None and item.state == "failed":
+            raise AssertionError(f"inference startup failed: {item.error}")
+        time.sleep(0.01)
+    raise AssertionError("inference did not publish the selected artifact")
+
+
 @pytest.mark.unit
 def test_a_served_artifact_answers_at_its_url_while_the_default_url_answers_from_the_active_release(
     tmp_path,
@@ -89,6 +103,7 @@ def test_a_served_artifact_answers_at_its_url_while_the_default_url_answers_from
         value, _, _, newest, older = two_artifacts(tmp_path)
         served = value.serve("math", older["artifact_id"])
         assert (served.artifact_id, served.release_id) == (older["artifact_id"], older["release_id"])
+        wait_for_serving(value)
         # The artifact served beside the active one has its own row, under the runtime's model name for it.
         rows = value.coordination.served_models.read_scenario("math")
         assert rows[older["artifact_id"]] == ServedArtifact(
@@ -156,6 +171,7 @@ def test_an_activation_leaves_the_served_artifacts_and_stop_serving_ends_one(tmp
     with pytest.raises(ArtifactNotFound):
         value.stop_serving("math", newest["artifact_id"])
     # The active release still answers at its artifact's URL; the stopped artifact has no row.
+    wait_for_serving(value)
     rows = value.coordination.served_models.read_scenario("math")
     assert older["artifact_id"] in rows and newest["artifact_id"] not in rows
     value.close()

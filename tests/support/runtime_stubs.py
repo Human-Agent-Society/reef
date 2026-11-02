@@ -149,6 +149,7 @@ class StubInferenceRuntime(InferenceProxyRuntime):
     """
 
     def __init__(self, base_url: str = "http://inference-runtime", **kwargs) -> None:
+        kwargs.setdefault("model_path", "stub-model")
         super().__init__(base_url=base_url, **kwargs)
         self.activated: list[str] = []
         self.served: str | None = None
