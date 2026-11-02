@@ -1,0 +1,15 @@
+# What reef's proposer is told about Antigravity CLI.
+title: Antigravity
+command: >-
+  A person types an agent_command as /<id> in the session. Its text is a Markdown file describing the command instructions.
+tools: >-
+  read_file, edit_file, write_file, run_command, manage_task, send_message, schedule, invoke_subagent, define_subagent, manage_subagents, search_web, ask_question
+conversation_mode:
+  name: Antigravity
+  skill: >-
+    Antigravity injects the skill's SKILL.md into the context on demand via progressive disclosure.
+  escape: >-
+    Antigravity executes terminal commands via the run_command tool.
+config_keys: [model]
+config_example: >-
+  {"target": "primary", "data": {"model": "Gemini 3.8 Flash (High)"}}
