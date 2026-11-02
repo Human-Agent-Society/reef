@@ -1,13 +1,15 @@
-"""Meta-Harness: full-history search over complete harness trees.
+"""Meta-Harness: full-history search over complete harness trees, scored on fixed evaluation tasks.
 
-Each step gives one proposer model the search so far, read from the
-scenario's history: the seed and every tree the method proposed, each with its
-files, its parent, what the proposer said about it, its outcome and its scores
-on the evaluation tasks; excerpts of the run records and of the step's
-traces; and the files the adapter takes. The reply names any candidate as its
-parent and returns one complete tree. The step checks that tree and leaves it
-in ``workspace.harness`` as the candidate. A reply that is invalid, or that
-repeats a tree the history holds, leaves the head unchanged, so the step skips.
+A training request starts each step: the deployment trains in ``manual`` mode,
+and each ``POST /reef/train`` runs one step, its text an instruction the
+proposer reads. The step gives one proposer model the search so far, read from
+the scenario's history: the seed and every tree the method proposed, each with
+its files, its parent, what the proposer said about it, its outcome and its
+scores on the evaluation tasks; excerpts of the records of those runs; and the
+parts of the adapter's tree. The reply names any candidate as its parent and
+returns one complete tree. The step checks that tree and leaves it in
+``workspace.harness`` as the candidate. A refused reply (invalid, or a
+tree the history holds) leaves the head unchanged, so the step skips.
 
 A deployment selects with the ``compare`` policy and ``statistic: mean``. The
 incumbent's scores come from the score cache, not from new runs, so a
@@ -45,7 +47,7 @@ MODES = ("full_history", "incumbent_only")
 OUTCOMES = ("served", "selected", "rejected", "undecided")
 #: The fields of a proposer reply.
 REPLY_FIELDS = ("parent_id", "hypothesis", "changes", "files")
-#: The method's file in ``state/``: one JSON line per reply that proposed no candidate.
+#: The method's file in ``state/``: one JSON line per refused reply, with the reason.
 ATTEMPTS_FILE = "attempts.jsonl"
 #: How many of the latest such replies a prompt shows.
 RECENT_ATTEMPTS = 5
@@ -60,9 +62,8 @@ class MetaHarnessSettings(PluginSettings):
     Values: ``mode`` is one of ``MODES``. ``model`` names an
     ``evolution.models`` binding and is never ``served``. ``components`` are
     distinct parts of the adapter's tree, empty for every part.
-    ``max_candidates`` and ``max_target_runs`` are budgets ≥ 0, where 0
-    sets no limit. ``max_files`` ≥ 1, ``max_traces`` ≥ 0 and
-    ``trace_chars`` ≥ 1 bound one proposal and one prompt.
+    ``max_files`` ≥ 1, ``max_runs`` ≥ 0 and ``run_chars`` ≥ 1 bound one
+    proposal and one prompt.
     Purpose: ``MetaHarness.from_config`` parses it, and the method reads it
     in each step.
     """
@@ -74,13 +75,9 @@ class MetaHarnessSettings(PluginSettings):
     components: tuple[str, ...] = config_option(
         (), help="The parts of the tree a proposal may change; none means every part."
     )
-    max_candidates: int = config_option(0, help="The most candidates the method proposes. 0 sets no limit.")
-    max_target_runs: int = config_option(
-        0, help="Propose no candidate once the evaluations ran this many runs. 0 sets no limit."
-    )
     max_files: int = config_option(32, help="The most files of one proposed tree.")
-    max_traces: int = config_option(16, help="The most traces whose record files one prompt shows.")
-    trace_chars: int = config_option(4000, help="The most characters one prompt shows of one trace's record files.")
+    max_runs: int = config_option(16, help="The most evaluation runs whose records one prompt shows.")
+    run_chars: int = config_option(4000, help="The most characters one prompt shows of one run's records.")
 
     def __post_init__(self) -> None:
         if self.mode not in MODES:
@@ -92,11 +89,9 @@ class MetaHarnessSettings(PluginSettings):
         if len(set(self.components)) != len(self.components):
             raise ValueError("components must not repeat a part")
         for label, value, least in (
-            ("max_candidates", self.max_candidates, 0),
-            ("max_target_runs", self.max_target_runs, 0),
             ("max_files", self.max_files, 1),
-            ("max_traces", self.max_traces, 0),
-            ("trace_chars", self.trace_chars, 1),
+            ("max_runs", self.max_runs, 0),
+            ("run_chars", self.run_chars, 1),
         ):
             if value < least:
                 raise ValueError(f"{label} must be at least {least}")
@@ -161,26 +156,19 @@ class MetaHarness(Method):
         return cls(MetaHarnessSettings.parse(config, plugin_class=cls))
 
     def step(self, context: StepContext) -> None:
-        workspace, services = context.workspace, context.services
-        settings = self.settings
+        workspace, services, settings = context.workspace, context.services, self.settings
         host = workspace.host()
         layout = get_adapter(str(host["adapter"])).layout
         parts = settings.components or tuple(layout.parts)
         unsupported = [part for part in parts if part not in layout.parts]
         if unsupported:
             raise ValueError(f"the {host['adapter']} harness tree has no parts {unsupported}")
-        try:
-            proposer = services.models[settings.model]
-        except KeyError as exc:
+        if settings.model not in services.models:
             raise ValueError(
                 f"the Meta-Harness proposer model {settings.model!r} is not declared under evolution.models; "
                 "the harness under test must not propose its own improvements"
-            ) from exc
+            )
         history = workspace.history()
-        budget = self.spent_budget(history, workspace.step)
-        if budget is not None:
-            workspace.write_output(f"The {budget} budget is spent.", {"status": "budget_exhausted", "budget": budget})
-            return
         head = workspace.tree().checksum()
         tasks = workspace.tasks()
         members = search_population(
@@ -197,46 +185,35 @@ class MetaHarness(Method):
             "served_candidate_id": head,
             "evaluation_tasks": {task_id: task for task, task_id in task_ids.items()},
             "population": [member_json(member, task_ids) for member in members],
-            "traces": self.traces(workspace, history, members, task_ids),
+            "runs": self.run_excerpts(history, members, task_ids),
             "attempts": read_attempts(workspace)[-RECENT_ATTEMPTS:],
         }
         request = workspace.request()
         if request is not None:
             search_state["instruction"] = request.text
-        prompt = "\n\n".join(
-            (
-                PROPOSAL_PROMPT,
-                untrusted_text(json.dumps(search_state, indent=2, sort_keys=True, ensure_ascii=False), "search state"),
-            )
+        state_json = json.dumps(search_state, indent=2, sort_keys=True, ensure_ascii=False)
+        reply = services.models[settings.model].chat(
+            [
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": f"{PROPOSAL_PROMPT}\n\n{untrusted_text(state_json, 'search state')}"},
+            ]
         )
-        reply = proposer.chat([{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": prompt}])
         try:
             proposal = parse_proposal(reply)
             parent = next((member for member in members if member.record.tree == proposal["parent_id"]), None)
             if parent is None:
                 raise ValueError(f"parent_id must name a candidate of the population ({settings.mode} mode)")
             tree = self.checked_tree(proposal["files"], parent.tree, layout, parts, services)
+            # The head is a committed tree of the history, so a reply that returns it repeats a candidate too.
+            if any(
+                record.tree == tree.checksum() and not uncommitted(record, workspace.step)
+                for record in history.candidates.values()
+            ):
+                raise ValueError(f"the tree repeats candidate {tree.checksum()}")
         except ValueError as exc:
-            append_attempt(workspace, {"step": workspace.step, "status": "invalid", "error": str(exc)})
+            append_attempt(workspace, {"step": workspace.step, "status": "refused", "error": str(exc)})
             workspace.write_output(
-                f"The proposer's reply was invalid: {exc}", {"status": "invalid", "error": str(exc)}
-            )
-            return
-        candidate = tree.checksum()
-        # The head is a committed tree of the history, so it is known too.
-        known = {record.tree for record in history.candidates.values() if not uncommitted(record, workspace.step)}
-        if candidate in known:
-            append_attempt(
-                workspace,
-                {
-                    "step": workspace.step,
-                    "status": "duplicate",
-                    "candidate_id": candidate,
-                    "parent_id": parent.record.tree,
-                },
-            )
-            workspace.write_output(
-                f"The reply repeats candidate {candidate}.", {"status": "duplicate", "candidate_id": candidate}
+                f"The proposer's reply was refused: {exc}", {"status": "refused", "error": str(exc)}
             )
             return
         workspace.write_tree(tree)
@@ -248,25 +225,6 @@ class MetaHarness(Method):
         }
         summary = f"Hypothesis: {proposal['hypothesis']}\nChanges: {proposal['changes']}\nParent: {parent.record.tree}"
         workspace.write_output(summary, notes)
-
-    def spent_budget(self, history: History, step: int) -> str | None:
-        """The budget the search spent before ``step``: ``max_candidates`` or ``max_target_runs``, ``None``
-        while both last.
-
-        The counts read the history's records of the steps before ``step``. An
-        earlier attempt of ``step`` itself never committed, so a retry of the
-        step does not count it.
-        """
-        settings = self.settings
-        proposed = sum(
-            1 for record in history.candidates.values() if record.origin == "method" and not uncommitted(record, step)
-        )
-        if settings.max_candidates and proposed >= settings.max_candidates:
-            return "max_candidates"
-        task_runs = sum(1 for task_run in history.runs if task_run.step < step)
-        if settings.max_target_runs and task_runs >= settings.max_target_runs:
-            return "max_target_runs"
-        return None
 
     def checked_tree(
         self,
@@ -288,58 +246,38 @@ class MetaHarness(Method):
             raise ValueError(f"the tree fails validation: {validation.message()}")
         return tree
 
-    def traces(
-        self, workspace: Workspace, history: History, members: Sequence[Member], task_ids: Mapping[str, str]
+    def run_excerpts(
+        self, history: History, members: Sequence[Member], task_ids: Mapping[str, str]
     ) -> list[dict[str, Any]]:
-        """The traces a prompt shows, each with an excerpt of its record files: at most ``max_traces``.
+        """The evaluation runs a prompt shows, each with an excerpt of its records: at most ``max_runs``.
 
-        The step's own traces come first. Then the members' runs take
-        turns: the served member first and the others newest first, and each
-        member gives its lowest scores first, a failed run before any
-        score.
+        The members take turns, the served member first and the others newest
+        first, and each gives its failed runs and then its lowest scores
+        first, so the prompt shows where every candidate falls short.
         """
-        max_traces = self.settings.max_traces
-        shown: list[dict[str, Any]] = [
-            {
-                "source": trace.source,
-                "score": trace.score,
-                # A run keeps its trajectory files and its run.json in the history, not in the trace.
-                "record": excerpt(
-                    history.run_dir(trace.record) if trace.source == "run" else trace.directory,
-                    self.settings.trace_chars,
-                ),
-            }
-            for trace in workspace.traces()[:max_traces]
-        ]
         served = [member for member in members if member.outcome == "served"]
         others = [member for member in reversed(members) if member.outcome != "served"]
-        turns = itertools.zip_longest(
-            *(
-                sorted(
-                    member.runs,
-                    key=lambda task_run: (not task_run.score.is_failed, task_run.score.value or 0.0),
-                )
-                for member in (*served, *others)
-            )
+        worst_first = (
+            sorted(member.runs, key=lambda task_run: (not task_run.score.is_failed, task_run.score.value or 0.0))
+            for member in (*served, *others)
         )
-        for task_run in itertools.chain.from_iterable(turns):
-            if len(shown) >= max_traces:
-                break
-            if task_run is None:
-                continue
-            failure = None if task_run.failure is None else f"{task_run.failure.stage}: {task_run.failure.cause}"
-            shown.append(
-                {
-                    "source": "evaluation",
-                    "candidate_id": task_run.tree,
-                    "task": task_ids[task_run.task],
-                    "repeat": task_run.repeat,
-                    "score": task_run.score.to_json(),
-                    "failure": None if failure is None else clipped(failure, self.settings.trace_chars),
-                    "record": excerpt(history.run_dir(task_run.run_id), self.settings.trace_chars),
-                }
-            )
-        return shown
+        shown = (task_run for turn in itertools.zip_longest(*worst_first) for task_run in turn if task_run is not None)
+        limit = self.settings.run_chars
+        return [
+            {
+                "candidate_id": task_run.tree,
+                "task": task_ids[task_run.task],
+                "repeat": task_run.repeat,
+                "score": task_run.score.to_json(),
+                "failure": (
+                    None
+                    if task_run.failure is None
+                    else clipped(f"{task_run.failure.stage}: {task_run.failure.cause}", limit)
+                ),
+                "record": excerpt(history.run_dir(task_run.run_id), limit),
+            }
+            for task_run in itertools.islice(shown, self.settings.max_runs)
+        ]
 
 
 def search_population(
@@ -349,11 +287,10 @@ def search_population(
 
     ``head`` is the checksum of the tree the step builds on, which the history
     holds; it is always a member. In full history the seed and every tree the
-    method proposed before
-    ``step`` are members too. A tree that an earlier attempt of ``step``
-    proposed is not: that attempt never committed. Outcomes read the final
-    decision of each step before ``step``, the latest one the history holds
-    for it. The runs are those on ``tasks``.
+    method proposed before ``step`` are members too. A tree that an earlier
+    attempt of ``step`` proposed is not: that attempt never committed.
+    Outcomes read the final decision of each step before ``step``, the latest
+    one the history holds for it. The runs are those on ``tasks``.
     """
     decisions = {decision.step: decision for decision in history.decisions if decision.step < step}
     order = {task: index for index, task in enumerate(tasks)}
@@ -384,7 +321,7 @@ def uncommitted(record: CandidateRecord, step: int) -> bool:
     """Whether ``record`` is a tree that an earlier attempt of ``step`` proposed.
 
     The history keeps every attempt, and that attempt never committed: a retry
-    of ``step`` neither counts the tree, nor shows it, nor refuses it as known.
+    of ``step`` neither shows the tree nor refuses it as known.
     """
     return record.origin == "method" and record.step >= step
 
@@ -460,26 +397,17 @@ def append_attempt(workspace: Workspace, attempt: Mapping[str, Any]) -> None:
 def parse_proposal(reply: str) -> dict[str, Any]:
     """The proposal object in the reply: ``parent_id``, ``hypothesis``, ``changes`` and ``files``.
 
-    A Markdown code fence around the object is removed. ``ValueError`` when
-    the reply holds no such object.
+    The object is the text from the first ``{`` to the last ``}``, so a
+    Markdown fence or words around it do not matter. ``ValueError`` when the
+    reply holds no such object.
     """
-    text = reply.strip()
-    if text.startswith("```"):
-        first_line, separator, remainder = text.partition("\n")
-        if separator and first_line.removeprefix("```").strip().lower() in ("", "json"):
-            text = remainder
-        if text.rstrip().endswith("```"):
-            text = text.rstrip()[:-3].rstrip()
+    start, end = reply.find("{"), reply.rfind("}")
+    if start < 0 or end <= start:
+        raise ValueError("proposer response contains no JSON object")
     try:
-        value = json.loads(text)
-    except json.JSONDecodeError:
-        start, end = text.find("{"), text.rfind("}")
-        if start < 0 or end <= start:
-            raise ValueError("proposer response contains no JSON object") from None
-        try:
-            value = json.loads(text[start : end + 1])
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"proposer response is not valid JSON: {exc.msg}") from exc
+        value = json.loads(reply[start : end + 1])
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"proposer response is not valid JSON: {exc.msg}") from exc
     if not isinstance(value, Mapping):
         raise ValueError("proposer response must be a JSON object")
     unknown = set(value) - set(REPLY_FIELDS)
