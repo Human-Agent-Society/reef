@@ -354,6 +354,36 @@ def test_a_refused_sample_is_the_callers_400_and_an_overflow_names_the_context_l
         sampler.sample(None, [10, 11], {"max_tokens": 2}, topk_logprobs=0)
 
 
+POISONED = (
+    "Error code: 400 - {'detail': 'This SamplingClient is poisoned. We cannot run further operations against it. "
+    "Please create a new SamplingClient if you wish to continue. Failure reason: sampling client was idle too long.'}"
+)
+
+
+def test_a_poisoned_sampling_client_is_replaced_and_the_sample_retried_once(client, sampler):
+    # Tinker poisons a client that sat idle too long; a kept client then refused every later request.
+    sampler.base_client.refusal = BadRequestError(POISONED)
+    result = sampler.sample(None, [10, 11], {"max_tokens": 2}, topk_logprobs=0)
+    assert result.tokens == (20, 21)
+    assert sampler.base_client is client._service.sampler
+    assert [event for event in client._sdk.events if event[0] == "base_sampler"] == [("base_sampler", "Qwen/Qwen3-8B")]
+
+    poisoned = Sampler(client._sdk.events)
+    poisoned.refusal = BadRequestError(POISONED)
+    sampler.clients["tinker://run/sampler"] = poisoned
+    assert sampler.sample("tinker://run/sampler", [10, 11], {"max_tokens": 2}, topk_logprobs=0).tokens == (20, 21)
+    assert sampler.clients["tinker://run/sampler"] is client._service.sampler
+
+
+def test_a_client_poisoned_again_is_the_callers_400_after_one_retry(client, sampler):
+    sampler.base_client.refusal = BadRequestError(POISONED)
+    client._service.sampler.refusal = BadRequestError(POISONED)
+    with pytest.raises(UpstreamStatusError, match="SamplingClient is poisoned") as refused:
+        sampler.sample(None, [10, 11], {"max_tokens": 2}, topk_logprobs=0)
+    assert refused.value.status == 400
+    assert len([event for event in client._sdk.events if event[0] == "sample"]) == 2
+
+
 def test_frozen_base_logprobs_align_to_response_and_reject_missing_values(client):
     rows = [TokenRow((10, 11, 20, 21), (1, 1), (-0.25, -0.5), 2)]
     assert client._base_logprobs(rows) == [[-0.5, -0.7]]

@@ -82,6 +82,11 @@ class TinkerSampler(ABC):
     def close(self) -> None: ...
 
 
+#: Part of the message of Tinker's refusal on a sampling client that it poisoned, for example after the client sat idle
+#: too long. Only a new client samples again.
+POISONED_CLIENT = "SamplingClient is poisoned"
+
+
 class TinkerSDKSampler(TinkerSampler):
     """The SDK boundary for sampling; every request binds an immutable sampler path."""
 
@@ -144,31 +149,49 @@ class TinkerSDKSampler(TinkerSampler):
     def decode(self, tokens: Sequence[int]) -> str:
         return str(self.base_tokenizer().decode(list(tokens), skip_special_tokens=True))
 
-    def sample(
-        self, sampler_path: str | None, prompt: list[int], params: Mapping[str, Any], *, topk_logprobs: int
-    ) -> SampleResult:
+    def sampling_client(self, sampler_path: str | None) -> Any:
+        """The sampling client of ``sampler_path``, or of the base model for None, made at its first use."""
         if sampler_path is None:
-            sampler = self.base_sampler()
-        elif sampler_path in self.clients:
-            sampler = self.clients[sampler_path]
-        else:
+            return self.base_sampler()
+        if sampler_path not in self.clients:
             sampler = self._service.create_sampling_client(model_path=sampler_path)
             if sampler.get_base_model() != self._model:
                 raise ValueError("remote Tinker sampler checkpoint does not match the configured model")
             self.clients[sampler_path] = sampler
-        try:
-            result = sampler.sample(
-                prompt=self._sdk.ModelInput.from_ints(prompt),
-                num_samples=1,
-                sampling_params=self._sdk.SamplingParams(**params),
-                topk_sample_logprobs=topk_logprobs,
-            ).result(timeout=self._timeout_s)
-        except self._sdk.BadRequestError as exc:
-            # An overflow carries OpenAI's code and wording, which agents match to compact their history.
-            message = str(exc)
-            if "context window" in message:
-                message = f"context_length_exceeded: the prompt exceeds this model's maximum context length. {message}"
-            raise UpstreamStatusError(message, status=400) from exc
+        return self.clients[sampler_path]
+
+    def forget_client(self, sampler_path: str | None) -> None:
+        """Drop the kept sampling client of ``sampler_path``, so that the next use makes a new one."""
+        if sampler_path is None:
+            self.base_client = None
+        else:
+            self.clients.pop(sampler_path, None)
+
+    def sample(
+        self, sampler_path: str | None, prompt: list[int], params: Mapping[str, Any], *, topk_logprobs: int
+    ) -> SampleResult:
+        for attempt in range(2):
+            sampler = self.sampling_client(sampler_path)
+            try:
+                result = sampler.sample(
+                    prompt=self._sdk.ModelInput.from_ints(prompt),
+                    num_samples=1,
+                    sampling_params=self._sdk.SamplingParams(**params),
+                    topk_sample_logprobs=topk_logprobs,
+                ).result(timeout=self._timeout_s)
+                break
+            except self._sdk.BadRequestError as exc:
+                message = str(exc)
+                if POISONED_CLIENT in message and attempt == 0:
+                    # Tinker refuses every later call on a client that it poisoned, such as one left idle too long.
+                    self.forget_client(sampler_path)
+                    continue
+                # An overflow carries OpenAI's code and wording, which agents match to compact their history.
+                if "context window" in message:
+                    message = (
+                        f"context_length_exceeded: the prompt exceeds this model's maximum context length. {message}"
+                    )
+                raise UpstreamStatusError(message, status=400) from exc
         if len(result.sequences) != 1:
             raise ValueError("Tinker returned an unexpected number of sequences")
         sequence = result.sequences[0]
