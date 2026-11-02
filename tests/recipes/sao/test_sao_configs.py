@@ -420,6 +420,7 @@ def test_user_facing_example_deployments_are_discovered() -> None:
         "recipes/beta/reefine/examples/configs/deployment.yaml",
         "recipes/beta/reefine/examples/configs/serve.yaml",
         "recipes/reasoning_bank/examples/serve.yaml",
+        "recipes/skill_library/examples/serve.yaml",
         "tutorials/tinker/serve.yaml",
         "tutorials/evolve-your-harness/configs/deployment.yaml",
         "tutorials/evolve-your-harness/configs/serve-native.yaml",
