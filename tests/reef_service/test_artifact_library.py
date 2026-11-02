@@ -114,7 +114,6 @@ def test_a_scenarios_artifacts_enter_the_library_and_a_scenario_in_another_cell_
             item = await library_item(other_cell, item_id)
             assert item["metadata"]["origin"] == {
                 "scenario": "math",
-                "release_id": imported["release_id"],
                 "artifact_id": imported["artifact_id"],
             }
             assert item["metadata"]["scenarios"] == {}
@@ -131,7 +130,8 @@ def test_a_scenarios_artifacts_enter_the_library_and_a_scenario_in_another_cell_
             into = await other_cell.post("/reef/scenarios/other/artifacts", json={"item": item_id})
             assert into.status == 201, await into.text()
             receipt = await into.json()
-            assert receipt["content_id"] == directory_content_id(source)
+            copied = await library_item(client, f"other/{receipt['artifact_id']}")
+            assert copied["content"]["content_id"] == directory_content_id(source)
             listed = (await (await other_cell.get("/reef/scenarios/other/artifacts")).json())["artifacts"]
             assert listed[0]["source"] == {"uri": content["source_uri"], "version": "", "item": item_id}
             # The import is an artifact of "other", so it enters the library too.
@@ -198,18 +198,18 @@ def test_a_new_scenario_starts_from_an_artifact_item_of_its_owner(tmp_path: Path
                 assert answer == {
                     "scenario": name,
                     "owner": "acme",
-                    "release_id": started,
-                    "content_id": content_id,
+                    "components": {imported["component"]: started},
                     "artifact_id": started,
                 }
                 scenario = cells[name].get_or_create_scenario(name)
                 assert scenario is not None
+                assert scenario.repository.require_current_artifact().content_id == content_id
                 assert scenario.artifact_status() == {
                     imported["component"]: {"active": started, "training_start": started}
                 }
                 listed = (await (await client.get(f"/reef/scenarios/{name}/artifacts")).json())["artifacts"]
                 (root,) = [row for row in listed if row["artifact_id"] == started]
-                assert root["operation"] == "creation" and root["parent_release_id"] is None
+                assert root["operation"] == "creation" and root["parent_artifact_id"] is None
                 assert (root["source"]["kind"], root["source"]["item"]) == ("item", item)
                 # The root is the only release: no default start was written first.
                 assert len(scenario.releases()) == 1
@@ -219,7 +219,7 @@ def test_a_new_scenario_starts_from_an_artifact_item_of_its_owner(tmp_path: Path
                     "/reef/scenarios", json={"name": name, "owner": "acme", "artifact_id": "missing"}
                 )
                 assert again.status == 200, await again.text()
-                assert await again.json() == {key: value for key, value in answer.items() if key != "artifact_id"}
+                assert await again.json() == answer
 
     try:
         asyncio.run(run())

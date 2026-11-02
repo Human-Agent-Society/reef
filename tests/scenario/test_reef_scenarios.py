@@ -92,7 +92,7 @@ def test_scenario_metadata_round_trips() -> None:
     source = RootSource("default", inputs={"seed": "s"})
     metadata = scenario_metadata_for(name=scenario.name, source=source, scenario_step=scenario.scenario_step)
 
-    assert metadata["format"] == "reef-scenario/5"
+    assert metadata["format"] == "reef-scenario/6"
     # The registration is carried by the root release, so it names no start_artifact.
     assert "start_artifact" not in metadata
     assert metadata["source"] == {"kind": "default", "inputs": {"seed": "s"}}
@@ -331,6 +331,7 @@ def test_checkpoint_metadata_decodes_directly_to_commit_record(operation) -> Non
     )
     assert encoded == {
         **metadata,
+        "format": "reef-scenario/6",
         "operation": "training",
         "record_progress": {
             "high_water_sequence": 7,
@@ -395,7 +396,10 @@ def test_checkpoint_metadata_names_the_artifact_that_serves_after_a_held_step() 
         ({"start_artifact": None}, "after step zero requires start_artifact"),
         ({"source": {"kind": "base"}}, "a root source is"),
         # A scenario that an earlier Reef stored is refused, not read: it is created again.
-        ({"format": "reef-scenario/4"}, r"format 'reef-scenario/4'; this Reef reads only reef-scenario/5"),
+        (
+            {"format": "reef-scenario/4"},
+            r"format 'reef-scenario/4'; this Reef reads reef-scenario/6 and legacy reef-scenario/5",
+        ),
     ],
 )
 def test_checkpoint_metadata_rejects_invalid_recovery_state(changes, message) -> None:
@@ -486,7 +490,8 @@ def test_a_changed_default_start_neither_blocks_nor_changes_an_existing_scenario
         assert old.repository.start_artifact == old.current_artifact_ref() == old_root
         # The runtime serves the old scenario's own root.
         wait_for_serving(second, "old")
-        assert second.recipe.runtime.served == old_root.release_id
+        assert second.recipe.runtime.served == "old-model"
+        assert old.served_artifact_id() == old_root.release_id
         old_start = Path(JobLoopState.from_dict(old.trainer.state).start)
         assert (old_start / "model.txt").read_text() == "old-model"
         assert old.artifacts()[0]["source"] == {"kind": "default", "inputs": {"model": "old-model"}}
@@ -522,7 +527,10 @@ def test_a_scenario_stored_by_an_earlier_reef_is_refused_not_read(tmp_path) -> N
         backend_factory=backend_factory, scenario_storage=SQLiteScenarioStorage(), coordination=memory_coordination()
     )
     try:
-        with pytest.raises(ValueError, match=r"'reef-scenario/4'; this Reef reads only reef-scenario/5, so create"):
+        with pytest.raises(
+            ValueError,
+            match=r"'reef-scenario/4'; this Reef reads reef-scenario/6 and legacy reef-scenario/5, so create",
+        ):
             dispatcher.get_or_create_scenario("math")
     finally:
         dispatcher.close()

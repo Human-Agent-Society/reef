@@ -1,4 +1,4 @@
-"""The release and content identity of an artifact, and where a scenario's root release came from."""
+"""Private artifact storage locators and the source of a scenario's initial artifacts."""
 
 from __future__ import annotations
 
@@ -9,7 +9,13 @@ from typing import Any, Literal
 
 @dataclass(frozen=True)
 class ArtifactRef:
-    """Immutable binding from one release to its selected contents."""
+    """An internal storage locator, independent of the public artifact identity.
+
+    ``release_id`` locates an immutable repository snapshot or a process-local selection view. ``content_id``
+    identifies its bytes for storage and runtime caches. ``parent_release_id`` is its storage parent, if any.
+    Repository adapters and persisted recovery records use these values. Public callers select artifacts by
+    ``artifact_id`` and never need to construct or interpret this locator.
+    """
 
     content_id: str
     release_id: str

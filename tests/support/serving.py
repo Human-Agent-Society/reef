@@ -10,8 +10,8 @@ def wait_for_serving(dispatcher: Dispatcher, scenario: str = "math") -> None:
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline:
         item = dispatcher.coordination.served_models.current_request(scenario)
-        selected = dispatcher.get_or_create_scenario(scenario).current_artifact_ref().release_id
-        if item is not None and item.payload.get("release_id") == selected:
+        selected = dispatcher.get_or_create_scenario(scenario).artifact_selection().to_dict()
+        if item is not None and item.payload.get("selection") == selected:
             if item.state == "finished":
                 return
             if item.state == "failed":
