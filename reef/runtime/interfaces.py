@@ -471,7 +471,7 @@ class EngineClients(ABC):
     """The handlers that reach the engines that ``served_models`` names.
 
     Purpose: an inference replica asks for the handler of each ``ServedArtifact`` it serves; the deployment's
-    engine configuration, or the engines that a control process runs, decide which one it is.
+    engine configuration, or the engines that an inference process runs, decide which one it is.
     """
 
     @abstractmethod
@@ -516,6 +516,11 @@ class InferenceRuntime(AdapterWeightRuntime):
     # -- Requests
 
     @property
+    def serves_requests(self) -> bool:
+        """Whether this runtime supports model requests. False keeps offline training deployments out of startup."""
+        return True
+
+    @property
     def base_url(self) -> str:
         return self._base_url
 
@@ -554,7 +559,7 @@ class InferenceRuntime(AdapterWeightRuntime):
         outside this process: the engine's HTTP(S) ``base_url`` and ``served_model_name``.
 
         None when the engine has no such address or name, so an inference service cannot reach it without this
-        runtime; control then writes no ``served_models`` row for it.
+        runtime; startup then fails instead of publishing a route.
         """
         name = self.served_model_name(scenario)
         if not name:
@@ -566,16 +571,14 @@ class InferenceRuntime(AdapterWeightRuntime):
             return None
 
     def open(self) -> None:
-        """Take control of the engines, before control adopts or activates anything; a second call does nothing.
+        """Open the engines before the inference worker adopts or activates artifacts. A second call does nothing.
 
-        Only the process that runs control calls it. Every other process builds the same runtime and never opens
-        it, so it changes no engine and only sends requests through ``inference_handler``. The default does
-        nothing: a runtime that controls no engine has nothing to open.
+        Other service processes build the same runtime without opening it. The default has no engine to open.
         """
 
     def adopt(self, served: ServedArtifact) -> None:
         """Take over ``served``, which a ``served_models`` row names for this runtime's engine, from before this
-        runtime existed (a control restart): when the engine still serves it, the next activation of the same
+        runtime existed (an inference worker restart): when the engine still serves it, the next activation of the same
         artifact loads nothing. The default can tell nothing about the engine, so the next activation loads."""
         return
 

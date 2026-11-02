@@ -6,6 +6,7 @@ from threading import Barrier
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
+from tests.support.inference import wait_for_inference
 
 from reef.artifact import GitLFSRepositoryBackend, InMemoryRepositoryBackend
 from reef.core import RequestType
@@ -82,6 +83,7 @@ def test_inference_answers_a_created_scenario_and_never_creates_one(tmp_path, he
             assert dispatcher.registry.get_optional("scenario") is None
 
             dispatcher.get_or_create_scenario("scenario")
+            await wait_for_inference(client, "scenario")
             response = await client.post(
                 "/v1/chat/completions", headers={"x-reef-scenario": "scenario", **headers}, json=payload
             )
