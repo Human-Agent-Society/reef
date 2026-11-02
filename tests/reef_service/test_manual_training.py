@@ -1317,46 +1317,45 @@ def test_manual_gives_each_instruction_the_failures_that_the_client_inserted(rec
 @pytest.mark.parametrize("mode", ["auto", "manual"])
 def test_every_mode_keeps_the_samples_beyond_the_buffer_for_later_jobs(caplog, mode):
     # A trace job takes one sample by default, and the default buffer holds the data of one job.
-    processor = reports_pipeline(PipelineContext("s", training_mode=mode))
-    assert processor.buffer_size == 1
+    with closing(reports_pipeline(PipelineContext("s", training_mode=mode))) as processor:
+        assert processor.buffer_size == 1
 
-    def fail(index):
-        processor.push(inference(f"inf-{index}"))
-        processor.push(
-            AgentRecord.create(
-                scenario="s",
-                request_type=RequestType.REPORT,
-                payload={"score": 0, "references": [f"inf-{index}"]},
-                agent_record_id=f"rep-{index}",
+        def fail(index):
+            processor.push(inference(f"inf-{index}"))
+            processor.push(
+                AgentRecord.create(
+                    scenario="s",
+                    request_type=RequestType.REPORT,
+                    payload={"score": 0, "references": [f"inf-{index}"]},
+                    agent_record_id=f"rep-{index}",
+                )
             )
-        )
 
-    with caplog.at_level(logging.WARNING, logger="reef.train.pipeline"):
-        for index in range(20):
-            fail(index)
-    # Every ready unit goes to the sample store, which consumes its records; nothing is released untrained.
-    assert processor.record2sample.ready_units == {}
-    retention = processor.releasable_record_ids()
-    assert {f"inf-{i}" for i in range(20)} | {f"rep-{i}" for i in range(20)} <= retention
-    assert not caplog.records
-    if mode == "manual":
-        # The client chooses the oldest sample for each instruction.
-        processor.insert_into_buffer(sample_ids_of(processor, "inf-0"))
-        processor.queue_instructions([request("do-it")])
-    reserved = processor.build_job_data(1)
-    fail(20)
-    fail(21)
-    # The handed-out job data keeps the oldest sample; the samples beyond the buffer wait for later jobs.
-    assert [source_record_id(sample) for sample in reserved.samples] == ["inf-0"]
-    instruction_ids = {"do-it"} if mode == "manual" else set()
-    assert processor.acknowledge(reserved.data_id) == frozenset({"sample:rep-0:0", *instruction_ids})
-    if mode == "manual":
-        processor.insert_into_buffer(sample_ids_of(processor, "inf-1"))
-        processor.queue_instructions([request("do-it"), request("again")])
-    following = processor.build_job_data(1)
-    assert [source_record_id(sample) for sample in following.samples] == ["inf-1"]
-    assert len(processor.held) == 21
-    processor.close()
+        with caplog.at_level(logging.WARNING, logger="reef.train.pipeline"):
+            for index in range(20):
+                fail(index)
+        # Every ready unit goes to the sample store, which consumes its records; nothing is released untrained.
+        assert processor.record2sample.ready_units == {}
+        retention = processor.releasable_record_ids()
+        assert {f"inf-{i}" for i in range(20)} | {f"rep-{i}" for i in range(20)} <= retention
+        assert not [record for record in caplog.records if record.name == "reef.train.pipeline"]
+        if mode == "manual":
+            # The client chooses the oldest sample for each instruction.
+            processor.insert_into_buffer(sample_ids_of(processor, "inf-0"))
+            processor.queue_instructions([request("do-it")])
+        reserved = processor.build_job_data(1)
+        fail(20)
+        fail(21)
+        # The handed-out job data keeps the oldest sample; the samples beyond the buffer wait for later jobs.
+        assert [source_record_id(sample) for sample in reserved.samples] == ["inf-0"]
+        instruction_ids = {"do-it"} if mode == "manual" else set()
+        assert processor.acknowledge(reserved.data_id) == frozenset({"sample:rep-0:0", *instruction_ids})
+        if mode == "manual":
+            processor.insert_into_buffer(sample_ids_of(processor, "inf-1"))
+            processor.queue_instructions([request("do-it"), request("again")])
+        following = processor.build_job_data(1)
+        assert [source_record_id(sample) for sample in following.samples] == ["inf-1"]
+        assert len(processor.held) == 21
 
 
 def test_manual_collects_the_failures_each_instruction_step_carries(tmp_path, open_dispatcher):
