@@ -140,7 +140,10 @@ Three things to get right:
    the log probabilities with the weights of the job's start. Give Slime the
    serving engine's chat template arguments in
    ``training.options.apply-chat-template-kwargs``, for example
-   ``'{"enable_thinking": false}'``. A sample that cannot render does not
+   ``'{"enable_thinking": false}'``. A multi-turn rollout that the handler
+   served with ``rollout_continuation`` renders call by call; see
+   `Chat template arguments <../reference/configuration.rst#chat-template-arguments>`__.
+   A sample that cannot render does not
    train, and the job metric ``unrenderable_samples`` counts it.
 
 Keep the ``training.options`` mapping from the closest working config and change only what

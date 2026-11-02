@@ -509,7 +509,11 @@ and the new user or tool messages. The handler renders only the new messages
 and appends them to the previous call's tokens, so a template that rewrites
 earlier turns, as Qwen3's drops their reasoning, cannot change the prompt that
 the engine continues. A request without ``user`` renders as usual. A request
-that names a rollout but does not extend it is refused.
+that names a rollout but does not extend it is refused. A call that extends
+the previous call's tokens is a continued call. Each response says in its
+``meta_info.rollout_continuation`` whether the call was continued. Training
+renders a rollout whose later calls were all continued call by call, as the
+engine's prompt grew (see `Chat template arguments`_).
 
 A vLLM engine serving a training stack also needs Reef's connector, which
 stamps every sampled token with the weight version that produced it::
@@ -578,9 +582,22 @@ arguments that the engine renders with: the handler's
 
 A sample that cannot render, or that is longer than a limit of its stage,
 does not train. The job metric ``unrenderable_samples`` counts these samples.
-A chat template that drops the reasoning of earlier turns, as Qwen3's does,
-cannot render a multi-turn sample whose earlier trained turns carry
-reasoning.
+
+A multi-turn sample renders in one of two ways.
+
+A continued rollout renders call by call. A rollout is continued when every
+call after its first was a continued call under ``rollout_continuation``. The
+tokens are the first call's prompt, then each reply as the template renders a
+last message, then the new user and tool messages rendered on their own with
+the next generation prompt. The template never renders an earlier turn again,
+so its rules for earlier turns do not apply.
+
+Any other sample renders as one conversation. Each trained turn must then
+render as a prefix of the whole conversation. Qwen3's template breaks that in
+two cases: it drops the reasoning of the replies before the last user message,
+and it renders the think block of a reply without reasoning only when that
+reply is the last message. A sample with several trained turns and either case
+cannot render this way.
 
 Explicit file selection
 ~~~~~~~~~~~~~~~~~~~~~~~

@@ -4,6 +4,11 @@ The serving inference service returns no tokens and no log-probabilities. A trai
 renders each ATIF trajectory sample itself with its model's chat template (``render_trajectory``), and computes the
 log-probabilities that its objective needs with its own engine.
 
+A trajectory renders in one of two ways. A continued rollout renders call by call (``render_continued_trajectory``).
+A call is continued when the handler built its prompt from the previous call's exact tokens plus the new messages
+(``rollout_continuation``); a rollout is continued when every call after its first is continued (``continued_calls``).
+Every other trajectory renders as one conversation.
+
 ``ChatTemplate`` is the interface of a chat template, and ``TokenizerChatTemplate`` the one of a Hugging Face
 tokenizer. The message helpers bring provider messages into the form that chat templates expect.
 """
@@ -62,6 +67,68 @@ def normalize_tool_call(call: Mapping[str, Any]) -> dict[str, Any]:
     return normalized
 
 
+#: The content of the boundary turns that ``continuation_suffix_ids`` and ``continuation_reply_ids`` render before
+#: the messages they cut out.
+ROLLOUT_BOUNDARY_SENTINEL = "reef-rollout-boundary-7f3a9c"
+
+
+def continuation_suffix_ids(
+    tokenizer: Any, messages: Sequence[Mapping[str, Any]], **template_kwargs: Any
+) -> list[int]:
+    """The token IDs that a continued call appends after the sampled turn for the new ``messages``.
+
+    The result is ``messages`` rendered on their own, followed by the generation prompt of the next assistant turn.
+    The template renders a user turn and an assistant turn that both hold a sentinel, then ``messages``. The text
+    after the sentinel is the result. The template's rules for earlier turns, such as dropping their reasoning,
+    cannot reach it. The result begins with the tokens that end an assistant turn.
+    ``ValueError``: the template cannot render ``messages`` on their own.
+    """
+    boundary = [
+        {"role": "user", "content": ROLLOUT_BOUNDARY_SENTINEL},
+        {"role": "assistant", "content": ROLLOUT_BOUNDARY_SENTINEL},
+    ]
+    try:
+        rendered = tokenizer.apply_chat_template(
+            [*boundary, *messages], tokenize=False, add_generation_prompt=True, **template_kwargs
+        )
+    except Exception as exc:
+        raise ValueError(f"the chat template cannot render a rollout's new messages on their own: {exc}") from exc
+    if not isinstance(rendered, str) or rendered.count(ROLLOUT_BOUNDARY_SENTINEL) != 2:
+        raise ValueError("the chat template cannot render a rollout's new messages on their own")
+    suffix = rendered[rendered.rindex(ROLLOUT_BOUNDARY_SENTINEL) + len(ROLLOUT_BOUNDARY_SENTINEL) :]
+    return encoded_text(tokenizer, suffix, "a rollout's new messages")
+
+
+def continuation_reply_ids(tokenizer: Any, message: Mapping[str, Any], **template_kwargs: Any) -> list[int]:
+    """The token IDs of the assistant turn ``message`` as the template renders a last message.
+
+    The result starts after the generation prompt and ends with the tokens that end an assistant turn. The template
+    renders a user turn that holds a sentinel, once with the generation prompt and once with ``message`` after it.
+    The result is the text that the second render adds. The template's rules for earlier turns cannot reach it.
+    ``ValueError``: the second render does not start with the first.
+    """
+    boundary = [{"role": "user", "content": ROLLOUT_BOUNDARY_SENTINEL}]
+    try:
+        prompt = tokenizer.apply_chat_template(boundary, tokenize=False, add_generation_prompt=True, **template_kwargs)
+        turn = tokenizer.apply_chat_template(
+            [*boundary, message], tokenize=False, add_generation_prompt=False, **template_kwargs
+        )
+    except Exception as exc:
+        raise ValueError(f"the chat template cannot render a sampled turn on its own: {exc}") from exc
+    if not isinstance(prompt, str) or not isinstance(turn, str) or not turn.startswith(prompt) or turn == prompt:
+        raise ValueError("the chat template does not render the turn after its own generation prompt")
+    return encoded_text(tokenizer, turn[len(prompt) :], "a sampled turn")
+
+
+def encoded_text(tokenizer: Any, text: str, label: str) -> list[int]:
+    """The token IDs of ``text``, without added special tokens. ``ValueError``: the tokenizer gives no list of ints;
+    the message names ``label``."""
+    ids = tokenizer.encode(text, add_special_tokens=False)
+    if not isinstance(ids, list) or any(isinstance(token, bool) or not isinstance(token, int) for token in ids):
+        raise ValueError(f"the tokenizer must encode {label} to a list of token ids")
+    return [int(token) for token in ids]
+
+
 class ChatTemplate(ABC):
     """A model's chat template: messages and tools in, token IDs out.
 
@@ -75,6 +142,16 @@ class ChatTemplate(ABC):
     ) -> list[int]:
         """The token IDs of ``messages`` with ``tools``; with ``prompt``, followed by the generation prompt of the
         next assistant turn. ``ValueError``: the template cannot render them."""
+
+    @abstractmethod
+    def render_continuation(self, messages: Sequence[Mapping[str, Any]]) -> list[int]:
+        """The token IDs that a continued call appends after a sampled turn for the user and tool ``messages``
+        (``continuation_suffix_ids``). ``ValueError``: the template cannot render them on their own."""
+
+    @abstractmethod
+    def render_reply(self, message: Mapping[str, Any]) -> list[int]:
+        """The token IDs of the assistant turn ``message`` as the template renders a last message, after the
+        generation prompt (``continuation_reply_ids``). ``ValueError``: the template cannot render it on its own."""
 
     @abstractmethod
     def with_arguments(self, arguments: Mapping[str, Any]) -> ChatTemplate:
@@ -113,6 +190,12 @@ class TokenizerChatTemplate(ChatTemplate):
         except Exception as exc:
             raise ValueError(f"the chat template cannot render the conversation: {exc}") from exc
         return [int(token) for token in ids]
+
+    def render_continuation(self, messages: Sequence[Mapping[str, Any]]) -> list[int]:
+        return continuation_suffix_ids(self.tokenizer, list(messages), **self.template_kwargs)
+
+    def render_reply(self, message: Mapping[str, Any]) -> list[int]:
+        return continuation_reply_ids(self.tokenizer, dict(message), **self.template_kwargs)
 
 
 @dataclass(frozen=True)
@@ -164,6 +247,43 @@ def trained_turns(trajectory: Mapping[str, Any]) -> tuple[list[dict[str, Any]], 
     return conversation, trained
 
 
+def call_meta_info(payload: Mapping[str, Any]) -> Mapping[str, Any]:
+    """The ``meta_info`` of the recorded call ``payload``.
+
+    A chat completion carries it in its first choice. An Anthropic message carries it at the top of the response.
+    A response without one gives an empty mapping.
+    """
+    response = payload.get("response")
+    if not isinstance(response, Mapping):
+        return {}
+    choices = response.get("choices")
+    if isinstance(choices, list) and choices and isinstance(choices[0], Mapping):
+        meta = choices[0].get("meta_info")
+    else:
+        meta = response.get("meta_info")
+    return meta if isinstance(meta, Mapping) else {}
+
+
+def continued_calls(trajectory: Mapping[str, Any]) -> bool:
+    """Whether ``trajectory`` is a continued rollout.
+
+    It is one when it records two or more calls (``extra.reef.records``) and every call after the first has
+    ``meta_info.rollout_continuation`` true. The handler sets that flag on a call whose prompt extended the previous
+    call's tokens.
+    """
+    extra = trajectory.get("extra") or {}
+    reef = extra.get("reef") if isinstance(extra, Mapping) else None
+    records = reef.get("records") if isinstance(reef, Mapping) else None
+    if not isinstance(records, list) or len(records) < 2:
+        return False
+    return all(
+        isinstance(record, Mapping)
+        and isinstance(record.get("payload"), Mapping)
+        and call_meta_info(record["payload"]).get("rollout_continuation") is True
+        for record in records[1:]
+    )
+
+
 def render_trajectory(template: ChatTemplate, trajectory: Mapping[str, Any]) -> RenderedTrajectory:
     """Render an ATIF trajectory with ``template``, with every agent step trained that is not copied context.
 
@@ -173,10 +293,15 @@ def render_trajectory(template: ChatTemplate, trajectory: Mapping[str, Any]) -> 
     nothing and are left out. The loss mask covers the tokens after the first trained turn's generation prompt
     (``RenderedTrajectory``).
 
+    A continued rollout (``continued_calls``) renders call by call (``render_continued_trajectory``). Any other
+    trajectory renders as one conversation, and each trained turn must render as a prefix of it.
+
     ``ValueError``: ``is_copied_context`` is not a boolean; the trajectory has no agent step that trains, or its first
     trained step has no step before it; or the chat template does not render each trained turn as a prefix of the
     whole conversation (a template that drops earlier turns' reasoning does not).
     """
+    if continued_calls(trajectory):
+        return render_continued_trajectory(template, trajectory)
     conversation, trained = trained_turns(trajectory)
     tools = trajectory_tools(trajectory)
     conversation = conversation[: trained[-1] + 1]
@@ -197,6 +322,45 @@ def render_trajectory(template: ChatTemplate, trajectory: Mapping[str, Any]) -> 
     loss_mask = [0] * (len(tokens) - prompt_length)
     for start, end in spans:
         loss_mask[start - prompt_length : end - prompt_length] = [1] * (end - start)
+    return RenderedTrajectory(tokens, loss_mask)
+
+
+def render_continued_trajectory(template: ChatTemplate, trajectory: Mapping[str, Any]) -> RenderedTrajectory:
+    """Render a continued rollout call by call, as the engine's prompt grew.
+
+    The tokens start with the prompt of the first trained turn, rendered as one conversation. Each trained turn then
+    adds its reply, rendered on its own as a last message (``ChatTemplate.render_reply``). Between two trained
+    turns, the new user and tool messages add the tokens that the handler appended for them
+    (``ChatTemplate.render_continuation``). The handler renders those messages on their own, so the template's rules
+    for earlier turns never apply, and this function applies none either.
+
+    The tokens that end a reply appear once. The appended tokens start with their own copy of them, and the longest
+    copy that matches the end of the tokens so far is dropped. The handler drops the same copy after a sampled
+    end-of-turn token. A length-limited turn did not sample that token, but trains it, as the template adds it.
+    The loss mask is 1 on the replies and 0 elsewhere.
+
+    ``ValueError``: as ``trained_turns``; an agent step of copied context between two trained turns, which a
+    continued call cannot have sent; or the template cannot render a reply on its own.
+    """
+    conversation, trained = trained_turns(trajectory)
+    tools = trajectory_tools(trajectory)
+    conversation = conversation[: trained[-1] + 1]
+    tokens = template.render(conversation[: trained[0]], tools, prompt=True)
+    loss_mask: list[int] = []
+    for position, index in enumerate(trained):
+        if position:
+            between = conversation[trained[position - 1] + 1 : index]
+            if not between or any(message["role"] not in ("user", "tool") for message in between):
+                raise ValueError("rollout continuation renders only user and tool messages between two trained turns")
+            suffix = template.render_continuation(between)
+            overlap = next(
+                (size for size in range(min(len(tokens), len(suffix)), 0, -1) if tokens[-size:] == suffix[:size]), 0
+            )
+            tokens.extend(suffix[overlap:])
+            loss_mask.extend([0] * (len(suffix) - overlap))
+        reply = template.render_reply(conversation[index])
+        tokens.extend(reply)
+        loss_mask.extend([1] * len(reply))
     return RenderedTrajectory(tokens, loss_mask)
 
 

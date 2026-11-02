@@ -36,6 +36,15 @@ class CharTemplate(ChatTemplate):
             tokens += [ROLES[message["role"]], *(100 + ord(char) for char in message["content"])]
         return tokens + ([9] if prompt else [])
 
+    def render_continuation(self, messages: Sequence[Mapping[str, Any]]) -> list[int]:
+        """The new messages as ``render`` gives them, then the generation prompt; this template has no end-of-turn
+        token, so a continuation's suffix overlaps nothing."""
+        return self.render(messages, None, prompt=True)
+
+    def render_reply(self, message: Mapping[str, Any]) -> list[int]:
+        """The reply's characters: the generation prompt, token 9, is the assistant role token, already rendered."""
+        return [100 + ord(char) for char in message["content"]]
+
     def with_arguments(self, arguments: Mapping[str, Any]) -> ChatTemplate:
         """The same template, which records ``arguments``; the rendering ignores them."""
         self.arguments = dict(arguments)

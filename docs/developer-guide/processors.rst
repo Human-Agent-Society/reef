@@ -452,7 +452,9 @@ serving returns none. ``SampleAssembly.build`` makes a report's sample:
   call of the report's trajectories, and every reply trains.
 
 The training component renders each sample with the model's chat template
-(``reef.core.chat_rendering``). It computes the log probabilities that its
+(``reef.core.chat_rendering``). A rollout that the handler served with
+``rollout_continuation`` renders call by call; any other sample renders as
+one conversation. It computes the log probabilities that its
 objective needs with the weights of the job's start, the current weights.
 They are exact when ``max_staleness`` is 0 and an approximation above it.
 A stage can add what the component renders with:

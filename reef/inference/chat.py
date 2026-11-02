@@ -26,6 +26,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from reef.artifact.artifact import Artifact
+from reef.core.chat_rendering import continuation_suffix_ids
 from reef.core.values import JsonValue
 from reef.inference.http import HttpInferenceHandler, RequestHeadersFactory
 from reef.inference.provider_protocol import SSE_DONE, SSEFrameDecoder, frame_data, usage_of
@@ -489,7 +490,12 @@ def _argument_text(arguments: Any) -> str:
 
 @dataclass(frozen=True)
 class ChatCall:
-    """One validated chat request, rendered and ready for the engine's generate route."""
+    """One validated chat request, rendered and ready for the engine's generate route.
+
+    ``continued`` is true when ``prompt_ids`` are the previous call's exact tokens plus the new messages
+    (``rollout_continuation``), and false when they render the whole conversation. The response keeps the value in
+    its ``meta_info``, and training renders a continued rollout call by call.
+    """
 
     anthropic: bool
     payload: Mapping[str, Any]
@@ -497,6 +503,7 @@ class ChatCall:
     prompt_ids: list[int]
     sampling_params: dict[str, Any]
     tool_parser: Any
+    continued: bool
 
 
 def stream_ids() -> tuple[str, str, int]:
@@ -518,7 +525,6 @@ def template_kwargs_of(value: Any, label: str) -> dict[str, Any]:
 #: Rollouts whose latest call the handler keeps for continuation; the oldest is forgotten first.
 ROLLOUT_PREFIX_LIMIT = 1024
 #: A message content no chat template rewrites, used to find where a rendered assistant turn ends.
-ROLLOUT_BOUNDARY_SENTINEL = "reef-rollout-boundary-7f3a9c"
 
 
 @dataclass(frozen=True)
@@ -706,13 +712,15 @@ class TokenNativeChatHandler(HttpInferenceHandler):
         request = self._anthropic_request(payload) if anthropic else dict(payload)
         if request.get("n", 1) != 1:
             raise ValueError("token-native chat requires n=1")
+        prompt_ids, continued = self._prompt_ids(request)
         return ChatCall(
             anthropic=anthropic,
             payload=payload,
             request=request,
-            prompt_ids=self._prompt_ids(request),
+            prompt_ids=prompt_ids,
             sampling_params=self._client.sampling_params(request, self._sampling_defaults),
             tool_parser=self._configured_tool_parser(request),
+            continued=continued,
         )
 
     def _response_from_capture(self, call: ChatCall, captured: CapturedGeneration, tool_parser: Any) -> dict[str, Any]:
@@ -732,7 +740,8 @@ class TokenNativeChatHandler(HttpInferenceHandler):
             "index": 0,
             "message": message,
             "finish_reason": finish_reason,
-            "meta_info": dict(captured.public_meta),
+            # Training reads the flag from the record (reef.core.chat_rendering.continued_calls).
+            "meta_info": {**captured.public_meta, "rollout_continuation": call.continued},
         }
         if call.request.get("logprobs") is True:
             choice["logprobs"] = {"content": self._openai_logprobs(captured.output_ids, captured.rollout_log_probs)}
@@ -1143,13 +1152,14 @@ class TokenNativeChatHandler(HttpInferenceHandler):
             return rollout_id
         return None
 
-    def _prompt_ids(self, request: dict[str, Any]) -> list[int]:
-        """Render the prompt, or extend the rollout's previous call when the request continues one."""
+    def _prompt_ids(self, request: dict[str, Any]) -> tuple[list[int], bool]:
+        """The prompt and whether it continued the rollout's previous call. A request that continues one gets the
+        previous call's tokens plus the new messages; any other request renders the whole conversation."""
         rollout_id = self._rollout_id(request)
         prefix = None if rollout_id is None else self._rollout_prefixes.get(rollout_id)
         if prefix is None:
-            return self._render_prompt(request)
-        return self._continuation_prompt(request, prefix)
+            return self._render_prompt(request), False
+        return self._continuation_prompt(request, prefix), True
 
     def _continuation_prompt(self, request: Mapping[str, Any], prefix: RolloutPrefix) -> list[int]:
         """The previous call's exact tokens followed by the rendered new messages.
@@ -1185,25 +1195,13 @@ class TokenNativeChatHandler(HttpInferenceHandler):
         for key in ("model", "tools", "chat_template_kwargs"):
             if request.get(key) != prefix.request.get(key):
                 raise ValueError(f"rollout continuation cannot change {key}")
-        tokenizer = self._require_tokenizer()
         render_kwargs = {
             **self._chat_template_kwargs,
             **template_kwargs_of(request.get("chat_template_kwargs"), "chat_template_kwargs"),
         }
-        boundary = [
-            {"role": "user", "content": ROLLOUT_BOUNDARY_SENTINEL},
-            {"role": "assistant", "content": ROLLOUT_BOUNDARY_SENTINEL},
-        ]
-        rendered = tokenizer.apply_chat_template(
-            [*boundary, *self._template_messages(list(new_messages))],
-            tokenize=False,
-            add_generation_prompt=True,
-            **render_kwargs,
+        suffix_ids = continuation_suffix_ids(
+            self._require_tokenizer(), self._template_messages(list(new_messages)), **render_kwargs
         )
-        if not isinstance(rendered, str) or rendered.count(ROLLOUT_BOUNDARY_SENTINEL) != 2:
-            raise ValueError("the chat template cannot render a rollout's new messages on their own")
-        suffix = rendered[rendered.rindex(ROLLOUT_BOUNDARY_SENTINEL) + len(ROLLOUT_BOUNDARY_SENTINEL) :]
-        suffix_ids = integer_tokens(tokenizer.encode(suffix, add_special_tokens=False), "rollout continuation")
         if suffix_ids and suffix_ids[0] == prefix.tokens[-1]:
             suffix_ids = suffix_ids[1:]
         return [*prefix.tokens, *suffix_ids]

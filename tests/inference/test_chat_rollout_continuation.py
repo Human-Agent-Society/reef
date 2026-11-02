@@ -12,6 +12,9 @@ from aiohttp import web
 from aiohttp.test_utils import TestServer
 
 from reef.artifact import Artifact
+from reef.core import AgentRecord, RequestType
+from reef.core.chat_rendering import TokenizerChatTemplate, continued_calls, render_trajectory
+from reef.core.trajectories import make_trajectory
 from reef.inference import chat as chat_module
 from reef.inference.sglang.chat import SGLangInferenceHandler
 from reef.service.streaming import stream_record
@@ -151,6 +154,54 @@ def test_a_continuation_extends_the_sampled_tokens_with_only_the_new_messages(tm
     assert second["usage"]["prompt_tokens"] == len(engine.prompts[1])
     # The handler keeps the sampled ids to itself: serving returns no training tensors.
     assert "training" not in first and "training" not in second
+    # Each response says how its prompt was built, for the training side's rendering.
+    assert first["choices"][0]["meta_info"]["rollout_continuation"] is False
+    assert second["choices"][0]["meta_info"]["rollout_continuation"] is True
+
+
+def recorded(request: dict, response: dict, index: int) -> AgentRecord:
+    """The inference record of one call, as the inference service stores it."""
+    return AgentRecord.create(
+        scenario="s",
+        request_type=RequestType.INFERENCE,
+        agent_record_id=f"call-{index}",
+        payload={**request, "response": response},
+    )
+
+
+@pytest.mark.unit
+def test_training_renders_a_continued_rollout_as_the_engine_served_it(tmp_path) -> None:
+    """Rendering the recorded calls gives the engine's last prompt, then the turn it sampled."""
+    sampled = [[ord("a"), ord("b"), IM_END], [ord("c"), IM_END], [ord("d"), IM_END]]
+    # Plain-text replies take user messages; a tool result follows a reply with a tool call, which this tokenizer
+    # cannot sample. The user turns are the case that a template rewriting earlier turns breaks.
+    tool = {"role": "user", "content": "order A"}
+    user = {"role": "user", "content": "And the refund?"}
+
+    async def scenario():
+        async with ScriptedEngine([(ids, "stop") for ids in sampled]) as engine:
+            handler = engine.handler()
+            requests = [first_request()]
+            responses = [await handler.inference(artifact(tmp_path), "/v1/chat/completions", requests[0])]
+            for new_message in (tool, user):
+                # The client resends the reply as it got it, then the new message.
+                later = copy.deepcopy(requests[-1])
+                later["messages"] += [responses[-1]["choices"][0]["message"], new_message]
+                requests.append(later)
+                responses.append(await handler.inference(artifact(tmp_path), "/v1/chat/completions", later))
+        return engine, requests, responses
+
+    engine, requests, responses = run(scenario())
+    sample = make_trajectory(
+        [recorded(request, response, i) for i, (request, response) in enumerate(zip(requests, responses, strict=True))]
+    )
+    assert continued_calls(sample.trajectory)
+    rendered = render_trajectory(TokenizerChatTemplate(TOKENIZER), sample.trajectory)
+    # The template closes the last reply with the newline that follows its end-of-turn; the engine never sampled it.
+    assert rendered.tokens == [*engine.prompts[2], *sampled[2], NEWLINE]
+    prompt_length = len(engine.prompts[0])
+    trained = [token for token, flag in zip(rendered.tokens[prompt_length:], rendered.loss_mask, strict=True) if flag]
+    assert trained == [*sampled[0], NEWLINE, *sampled[1], NEWLINE, *sampled[2], NEWLINE]
 
 
 @pytest.mark.unit
@@ -348,3 +399,81 @@ def test_a_real_qwen3_template_keeps_every_sampled_token(tmp_path, truncated) ->
     # The second prompt keeps every token the first call sampled, so no sampled token is re-rendered.
     first_tokens = [*prompts[0], *outputs[0]]
     assert prompts[1][: len(first_tokens)] == first_tokens
+
+
+@pytest.mark.integration
+def test_a_real_qwen3_template_replays_a_continued_rollout_that_it_cannot_render_as_one_conversation(tmp_path) -> None:
+    """Three calls: a reply with reasoning, a user message, a reply without reasoning, a user message, a reply.
+
+    Rendered as one conversation, Qwen3's template drops the first reply's reasoning after the user message, and it
+    renders the second reply's think block only while that reply is last. Rendered call by call, the tokens are the
+    ones the engine served.
+    """
+    path = os.environ.get("REEF_TEST_QWEN_TOKENIZER")
+    if not path:
+        pytest.skip("Set REEF_TEST_QWEN_TOKENIZER to a local Qwen3 tokenizer for this check")
+    transformers = pytest.importorskip("transformers")
+    tokenizer = transformers.AutoTokenizer.from_pretrained(path, local_files_only=True)
+    sampled_text = [
+        "<think>\nCheck the order first.\n</think>\n\nI will check the order.<|im_end|>",
+        "<think>\n\n</think>\n\nThe order shipped yesterday.<|im_end|>",
+        "<think>\nNothing else to do.\n</think>\n\nYou are welcome.<|im_end|>",
+    ]
+    outputs = [tokenizer.encode(text, add_special_tokens=False) for text in sampled_text]
+    new_messages = [{"role": "user", "content": "Where is it now?"}, {"role": "user", "content": "Thanks."}]
+    prompts: list[list[int]] = []
+
+    async def scenario():
+        async def generate(request):
+            native = await request.json()
+            prompts.append(list(native["input_ids"]))
+            output_ids = outputs[len(prompts) - 1]
+            # SGLang's text leaves out special tokens; the sampled end-of-turn is not part of the reply's content.
+            return web.json_response(
+                {
+                    "text": tokenizer.decode(output_ids, skip_special_tokens=True),
+                    "meta_info": {
+                        "finish_reason": {"type": "stop"},
+                        "output_token_logprobs": [[-0.1, token] for token in output_ids],
+                        "weight_version": "weights-0",
+                    },
+                }
+            )
+
+        app = web.Application()
+        app.router.add_post("/generate", generate)
+        server = TestServer(app)
+        await server.start_server()
+        try:
+            handler = SGLangInferenceHandler(
+                str(server.make_url("")).rstrip("/"), model_path=path, tokenizer=tokenizer, rollout_continuation=True
+            )
+            requests = [first_request()]
+            responses = [await handler.inference(artifact(tmp_path), "/v1/chat/completions", requests[0])]
+            for new_message in new_messages:
+                later = copy.deepcopy(requests[-1])
+                later["messages"] += [responses[-1]["choices"][0]["message"], new_message]
+                requests.append(later)
+                responses.append(await handler.inference(artifact(tmp_path), "/v1/chat/completions", later))
+        finally:
+            await server.close()
+        return requests, responses
+
+    requests, responses = run(scenario())
+    assert responses[0]["choices"][0]["message"]["reasoning_content"] == "Check the order first."
+    assert "reasoning_content" not in responses[1]["choices"][0]["message"]
+    sample = make_trajectory(
+        [recorded(request, response, i) for i, (request, response) in enumerate(zip(requests, responses, strict=True))]
+    )
+    template = TokenizerChatTemplate(tokenizer, {"enable_thinking": True})
+    rendered = render_trajectory(template, sample.trajectory)
+    newline = tokenizer.encode("\n", add_special_tokens=False)
+    assert rendered.tokens == [*prompts[2], *outputs[2], *newline]
+    prompt_length = len(prompts[0])
+    trained = [token for token, flag in zip(rendered.tokens[prompt_length:], rendered.loss_mask, strict=True) if flag]
+    assert trained == [*outputs[0], *newline, *outputs[1], *newline, *outputs[2], *newline]
+    # Without the continuation marks the same calls render as one conversation, which this template cannot.
+    for record in sample.trajectory["extra"]["reef"]["records"][1:]:
+        record["payload"]["response"]["choices"][0]["meta_info"]["rollout_continuation"] = False
+    with pytest.raises(ValueError, match="prefix of the whole conversation"):
+        render_trajectory(template, sample.trajectory)

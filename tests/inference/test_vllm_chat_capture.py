@@ -125,6 +125,7 @@ def test_vllm_facade_answers_from_engine_ids_and_connector_stamps_without_retoke
             "request_id": "generate-tokens-1",
             "finish_reason": "stop",
             "usage": {"prompt_tokens": 2, "completion_tokens": 2, "total_tokens": 4},
+            "rollout_continuation": False,
         }
         assert [item["token"] for item in choice["logprobs"]["content"]] == ["<20>", "<21>"]
         assert "training" not in response, "serving returns no training tensors"
