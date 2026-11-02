@@ -231,10 +231,10 @@ def backend_step(
 
 
 async def wait_for_rows(scenario: Scenario, count: int, seconds: float = 30.0) -> list[dict[str, Any]]:
-    """The scenario's catalog, newest first, once it holds ``count`` rows; the trainer commits on its own thread."""
+    """Return the catalog once it holds ``count`` rows and the current training job has finished committing."""
     for _ in range(int(seconds / 0.05)):
         rows = catalog(scenario)
-        if len(rows) >= count:
+        if len(rows) >= count and not scenario.trainer.job_running and not scenario.trainer.has_pending_commit:
             return rows
         await asyncio.sleep(0.05)
     raise AssertionError(f"the catalog did not reach {count} rows in {seconds}s: {catalog(scenario)}")
