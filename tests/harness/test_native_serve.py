@@ -634,7 +634,7 @@ def test_the_serve_status_turn_and_mount_subcommands_run_end_to_end(tmp_path: Pa
         process.send_signal(signal.SIGTERM)
         stderr = process.communicate(timeout=30)[1]
     assert process.returncode == 0, stderr
-    assert "release r1 on" in stderr
+    assert "artifact r1 on" in stderr
     assert not socket_path.exists() and not (dest / "native" / "mounts").exists()
     # The run form and its flags are untouched behind the dispatch.
     version = subprocess.run([str(binary), "--version"], capture_output=True, text=True, env=env)

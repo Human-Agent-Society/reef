@@ -8,15 +8,16 @@ from dataclasses import replace
 from pathlib import Path
 from types import MappingProxyType
 
-from reef.core.components import ReleaseComponents, release_components
+from reef.core.components import COMPONENTS_METADATA_KEY, ReleaseComponents, release_components
 from reef.core.errors import ReefError
 
 # Re-export the pure identity types while keeping ``reef.core`` independent of
 # storage implementations.
-from reef.core.snapshot import SnapshotRef, decode_snapshot_ref, encode_snapshot_ref
+from reef.core.snapshot import LOCAL_SNAPSHOT_PREFIX, SnapshotRef, decode_snapshot_ref, encode_snapshot_ref
 
 __all__ = [
     "LOCAL_SNAPSHOT_PREFIX",
+    "SNAPSHOT_METADATA_KEYS",
     "Artifact",
     "ArtifactConflict",
     "ArtifactError",
@@ -27,17 +28,17 @@ __all__ = [
     "ArtifactSourceError",
     "ArtifactValidator",
     "SnapshotRef",
+    "artifact_components",
+    "content_metadata",
     "decode_snapshot_ref",
     "encode_snapshot_ref",
     "is_local_snapshot",
 ]
 
-#: Release prefix for process-local (staged, never published) artifacts.
-#: ``Artifact.local`` and repository staging both mint releases under it;
-#: ``is_local_snapshot`` is the shared predicate for recognizing them.
-LOCAL_SNAPSHOT_PREFIX = "local:"
 #: Files a repository adds to a materialized release; a release with nothing else holds no weights.
 REPOSITORY_FILES = frozenset({".git", ".gitattributes", "reef-artifact.json"})
+#: Metadata keys that describe a snapshot, not the content of the artifact it holds.
+SNAPSHOT_METADATA_KEYS = frozenset({"artifact_id", COMPONENTS_METADATA_KEY, "scenario_commit_record"})
 
 
 def is_local_snapshot(revision: str) -> bool:
@@ -106,7 +107,7 @@ class Artifact:
             raise ValueError("artifact_id must be a non-empty string")
         if artifact_id is not None and stored_identity is not None and artifact_id != stored_identity:
             raise ValueError("artifact_id differs from its stored identity")
-        self._artifact_id = artifact_id if artifact_id is not None else stored_identity
+        self._artifact_id = artifact_id or stored_identity
 
     @property
     def ref(self) -> SnapshotRef:
@@ -147,10 +148,10 @@ class Artifact:
         """
         if self._artifact_id is not None:
             return self._artifact_id
-        materialized = self if self.repository is None or self.local_path is not None else self.materialize()
+        # Provider calls can carry a ref without local files or a repository.
+        materialized = self if self.repository is None else self.materialize()
         if materialized._artifact_id is not None:
             return materialized._artifact_id
-        # Provider calls can carry a ref without local files or a repository.
         manifest = materialized.components
         if manifest is None:
             return self.ref.revision
@@ -248,3 +249,26 @@ class Artifact:
     def discard(self) -> None:
         if self._local_path is not None:
             shutil.rmtree(self._local_path, ignore_errors=True)
+
+
+def artifact_components(snapshot: Artifact) -> dict[str, str | None]:
+    """Map each artifact ID in ``snapshot`` to the name of its component.
+
+    A snapshot without a manifest holds one artifact, which maps to None.
+    """
+    manifest = snapshot.components
+    if manifest is None:
+        return {snapshot.artifact_id: None}
+    return {identity: name for name, identity in manifest.artifact_ids(snapshot.ref.revision).items()}
+
+
+def content_metadata(snapshot: Artifact, component: str | None) -> dict[str, object]:
+    """The metadata of one artifact in ``snapshot``: of ``component``, or of the whole snapshot when None.
+
+    The result excludes ``SNAPSHOT_METADATA_KEYS``, so two snapshots that hold
+    one artifact give equal results for it.
+    """
+    manifest = snapshot.components
+    if component is None or manifest is None:
+        return {key: value for key, value in snapshot.metadata.items() if key not in SNAPSHOT_METADATA_KEYS}
+    return dict(manifest.entries[component].metadata)

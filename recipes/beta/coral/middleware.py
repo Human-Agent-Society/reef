@@ -150,9 +150,7 @@ class ReefGatewayMiddleware(AsgiApp):
                     # llm_provider-x-reef-agent-record-id).
                     if lowered.endswith(RECORD_ID_RESPONSE_HEADER):
                         record_id = bytes(raw_value).decode("latin-1")
-                    elif lowered.endswith(ARTIFACT_ID_RESPONSE_HEADER) or (
-                        lowered.endswith(b"x-reef-release-id") and artifact_id is None
-                    ):
+                    elif lowered.endswith(ARTIFACT_ID_RESPONSE_HEADER):
                         artifact_id = bytes(raw_value).decode("latin-1")
             elif message.get("type") == "http.response.body":
                 body_tail.extend(message.get("body", b""))

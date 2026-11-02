@@ -123,9 +123,9 @@ class ArtifactClient:
 class HeadWatch(ReleaseObserver):
     """Compares every release id it hears of with the mounted one and notifies the listener of a new head once.
 
-    The poll runs on its own thread every ``interval_s``; a response header
-    is considered on the proxy's thread at once, before the answer reaches
-    the agent, so the mount is queued by the time the next step starts."""
+    The poll runs on its own thread every ``interval_s``. A legacy response
+    header wakes that thread at once, so the proxy never waits for a round
+    trip to Reef before the answer reaches the agent."""
 
     def __init__(
         self,
@@ -145,6 +145,7 @@ class HeadWatch(ReleaseObserver):
         self._failure_timed_out = False
         self._lock = threading.Lock()
         self._stop = threading.Event()
+        self._poll_now = threading.Event()
         self._thread: threading.Thread | None = None
 
     def mounted(self, artifact_id: str | None) -> None:
@@ -178,11 +179,8 @@ class HeadWatch(ReleaseObserver):
             raise
 
     def observe(self, revision: str) -> None:
-        """Resolve a legacy harness revision header; modern model-artifact headers never reach this observer."""
-        try:
-            self._consider(str(self._client.fetch_legacy(revision)["artifact_id"]), "response")
-        except Exception as exc:
-            self._log.write("artifact/poll-failed", {"error": f"{type(exc).__name__}: {exc}"[:600], "retry_in_s": 0})
+        """Poll now: a legacy harness revision header can name a new head; modern headers never reach this observer."""
+        self._poll_now.set()
 
     def poll_once(self) -> bool:
         """One poll and its consequence; False when Reef did not answer."""
@@ -197,7 +195,11 @@ class HeadWatch(ReleaseObserver):
     def _run(self) -> None:
         delay = 0.0
         backoff = self._interval_s
-        while not self._stop.wait(delay):
+        while True:
+            self._poll_now.wait(delay)
+            if self._stop.is_set():
+                return
+            self._poll_now.clear()
             if self.poll_once():
                 backoff = delay = self._interval_s
                 continue
@@ -216,6 +218,7 @@ class HeadWatch(ReleaseObserver):
 
     def stop(self) -> None:
         self._stop.set()
+        self._poll_now.set()
         if self._thread is not None:
             self._thread.join(timeout=5.0)
             self._thread = None

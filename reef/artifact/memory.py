@@ -14,6 +14,8 @@ from reef.artifact.artifact import (
     ArtifactNotFound,
     ArtifactPublicationError,
     SnapshotRef,
+    artifact_components,
+    content_metadata,
 )
 from reef.artifact.files import directory_checksum
 from reef.artifact.repository import CachedRepositoryBackendFactory, StagedReleaseRepositoryBackend
@@ -27,7 +29,8 @@ class _InMemoryStorage:
         self.refs: dict[str, SnapshotRef] = {}
         self.paths: dict[str, Path] = {}
         self.metadata: dict[str, dict[str, object]] = {}
-        self.artifacts: dict[str, Artifact] = {}
+        #: The snapshot that each artifact ID is bound to.
+        self.artifacts: dict[str, SnapshotRef] = {}
 
     def copy_artifact(self, source: Path, *, parent_revision: str | None) -> SnapshotRef:
         revision = uuid.uuid4().hex
@@ -69,44 +72,36 @@ class InMemoryRepositoryBackend(StagedReleaseRepositoryBackend):
         with self._storage.lock:
             self.bind_artifact_ids(ref)
 
-    def resolve_artifact(self, artifact_id: str) -> Artifact:
-        if not isinstance(artifact_id, str) or not artifact_id:
-            raise ValueError("artifact_id must be a non-empty string")
+    def artifact_snapshot(self, artifact_id: str) -> SnapshotRef:
         with self._storage.lock:
-            artifact = self._storage.artifacts.get(artifact_id)
-            if artifact is None:
-                raise ArtifactNotFound(f"repository has no artifact {artifact_id!r}")
-            return artifact
+            ref = self._storage.artifacts.get(artifact_id)
+        if ref is None:
+            raise ArtifactNotFound(f"repository has no artifact {artifact_id!r}")
+        return ref
+
+    def artifact_content(self, ref: SnapshotRef, artifact_id: str) -> tuple[str, dict[str, object]]:
+        """The checksum of the files and the metadata of the artifact ``artifact_id`` in the snapshot ``ref``."""
+        snapshot = self.materialize(ref)
+        component = artifact_components(snapshot)[artifact_id]
+        files = snapshot if component is None else snapshot.component(component)
+        if files.local_path is None:
+            raise ArtifactPublicationError("stored artifacts require local files")
+        return directory_checksum(files.local_path), content_metadata(snapshot, component)
 
     def bind_artifact_ids(self, ref: SnapshotRef) -> None:
-        """Index a stored snapshot while the caller holds the storage lock; reject changed ID bindings."""
-        snapshot = self.materialize(ref)
-        manifest = snapshot.components
-        artifacts = [snapshot] if manifest is None else [snapshot.component(name) for name in manifest.names]
-        identities = {artifact.artifact_id for artifact in artifacts}
-        if len(identities) != len(artifacts):
-            raise ArtifactPublicationError("one artifact ID cannot name several components in a snapshot")
-        for artifact in artifacts:
-            existing = self._storage.artifacts.get(artifact.artifact_id)
-            if existing is None:
-                continue
-            if existing.local_path is None or artifact.local_path is None:
-                raise ArtifactPublicationError("stored artifacts require local files")
-            existing_metadata, incoming_metadata = (
-                {
-                    key: value
-                    for key, value in item.metadata.items()
-                    if key not in ("artifact_id", "components", "scenario_commit_record")
-                }
-                for item in (existing, artifact)
-            )
-            if (
-                directory_checksum(existing.local_path) != directory_checksum(artifact.local_path)
-                or existing_metadata != incoming_metadata
+        """Bind each artifact ID in the snapshot ``ref`` while the caller holds the storage lock.
+
+        Raise ``ArtifactConflict``, and bind nothing, when an ID is bound to different files or metadata.
+        """
+        identities = artifact_components(self.materialize(ref))
+        for artifact_id in identities:
+            existing = self._storage.artifacts.get(artifact_id)
+            if existing is not None and self.artifact_content(existing, artifact_id) != self.artifact_content(
+                ref, artifact_id
             ):
-                raise ArtifactConflict(f"artifact {artifact.artifact_id!r} already names different files or metadata")
-        for artifact in artifacts:
-            self._storage.artifacts.setdefault(artifact.artifact_id, artifact)
+                raise ArtifactConflict(f"artifact {artifact_id!r} already names different files or metadata")
+        for artifact_id in identities:
+            self._storage.artifacts.setdefault(artifact_id, ref)
 
     def register(self, root: Artifact, *, metadata: Mapping[str, object]) -> SnapshotRef:
         if root.local_path is None or not root.local_path.is_dir():

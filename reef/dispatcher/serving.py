@@ -174,13 +174,14 @@ class ServingWorker(QueueWorker):
         if repository is None or repository.backend is not backend:
             repository = Repository(backend, backend.current(), local_dir=self.local_artifact_dir)
             self.repositories[item.scenario] = repository
-        if "selection" in item.payload:
-            selection = ArtifactSelection.from_dict(item.payload["selection"])
-            artifact = repository.select(selection)
-        else:
+
+        def selected_artifact(value: Mapping[str, object]) -> Artifact:
+            if "selection" in value:
+                return repository.select(ArtifactSelection.from_dict(value["selection"]))
             # Work queued before component selections carried a durable storage revision.
-            reference = backend.resolve_snapshot(require_text(item.payload.get("release_id"), "release_id"))
-            artifact = Artifact(reference, repository)
+            return Artifact(backend.resolve_snapshot(require_text(value.get("release_id"), "release_id")), repository)
+
+        artifact = selected_artifact(item.payload)
         surface = self.recipe.serving_surface(item.scenario)
         # Before the activation, so that an engine that starts for the artifact starts with the override.
         runtime.apply_serving_config(item.scenario, serving_config_of(item.payload))
@@ -204,13 +205,8 @@ class ServingWorker(QueueWorker):
                 raise ValueError("a beside artifact needs its release and component")
             component = require_text(value.get("component"), "component")
             if component == surface.loader_component:
-                if "selection" in value:
-                    beside_artifact = repository.select(ArtifactSelection.from_dict(value["selection"]))
-                else:
-                    ref = backend.resolve_snapshot(require_text(value.get("release_id"), "release_id"))
-                    beside_artifact = Artifact(ref, repository)
                 beside_model = runtime.served_artifact_on_request(
-                    surface.component_artifact(beside_artifact, component)
+                    surface.component_artifact(selected_artifact(value), component)
                 )
                 if beside_model is None:
                     raise ValueError("the inference runtime provides no route for a beside artifact")

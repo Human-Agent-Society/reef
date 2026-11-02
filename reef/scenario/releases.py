@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from threading import RLock
 from typing import Any
 
-from reef.artifact.artifact import Artifact, ArtifactError, ArtifactNotFound, SnapshotRef, is_local_snapshot
+from reef.artifact.artifact import Artifact, ArtifactError, ArtifactNotFound, SnapshotRef
 from reef.artifact.release_chain import ArtifactReleaseChain
 from reef.core.artifact_selection import ArtifactSelection
 from reef.core.components import validate_component_name
@@ -170,10 +170,8 @@ class ScenarioReleases:
         if creation is not None:
             known[self.creation_artifact.revision] = creation
         for record in self.records():
-            if record.selection is not None:
-                known[record.snapshot.revision] = record.selection.artifact_ids
-            elif record.components is not None:
-                known[record.snapshot.revision] = record.components
+            if record.artifact_ids is not None:
+                known[record.snapshot.revision] = record.artifact_ids
         if not self._store.durable and self._artifacts.current.revision not in known:
             current = self._artifacts.resolve(self._artifacts.current)
             if current.components is not None:
@@ -189,9 +187,7 @@ class ScenarioReleases:
                 manifest = artifact.components
                 return None if manifest is None else manifest.artifact_ids(artifact.ref.revision)
             return self.creation_components(scenario_step)
-        if record.selection is not None:
-            return record.selection.artifact_ids
-        return record.components
+        return record.artifact_ids
 
     def artifact_parents(self, scenario_step: int, components: tuple[str, ...]) -> dict[str, str | None]:
         """The parent artifact of each output, derived from that component's training start or synced active tree.
@@ -204,11 +200,7 @@ class ScenarioReleases:
         starts = dict(active)
         parents: dict[str, str | None] = dict.fromkeys(active.values())
         for record in self.records():
-            bound = (
-                record.selection.artifact_ids
-                if record.selection is not None
-                else record.components or self.bound_artifact_ids(record.snapshot.revision, components, scenario_step)
-            )
+            bound = record.artifact_ids or self.bound_artifact_ids(record.snapshot.revision, components, scenario_step)
             changed = components if record.component is None else (record.component,)
             if record.made_artifact:
                 for name in changed:
@@ -380,8 +372,7 @@ class ScenarioReleases:
         current = self._artifacts.current
         if current.revision == revision:
             # A logless scenario still publishes durable snapshots; local selection views have no stored bytes.
-            durable = not is_local_snapshot(current.revision) and not current.revision.startswith("selection:")
-            return current, durable
+            return current, current.durable
         return None
 
     def metrics_for_version(self, revision: str) -> Mapping[str, Any] | None:

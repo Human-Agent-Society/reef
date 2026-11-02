@@ -84,9 +84,9 @@ class ArtifactTextFiles:
 
 
 class CommittedArtifacts(ABC):
-    """The releases a scenario's commits recorded, read for one component at a time.
+    """The artifacts a scenario's commits recorded, read for one component at a time.
 
-    Purpose: a harness trainer reads the committed head here, as the release of
+    Purpose: a harness trainer reads the committed head here, as the artifact of
     its next job's start, and the scenario layer implements it over its commit
     history and artifact repository. A component's head is its training
     start: the release of the later of its newest ``train_from`` record and
@@ -97,7 +97,7 @@ class CommittedArtifacts(ABC):
 
     @abstractmethod
     def head(self, component: str) -> ArtifactTextFiles:
-        """``component``'s files in its head release."""
+        """``component``'s files in its head artifact."""
 
     @abstractmethod
     def artifact(self, artifact_id: str, component: str) -> ArtifactTextFiles:
@@ -108,13 +108,13 @@ class CommittedArtifacts(ABC):
 class ComponentArtifacts:
     """One component's view of a scenario's ``CommittedArtifacts``.
 
-    Values: ``releases`` is the scenario's reader, and ``component`` names a
-    component of the scenario's release, non-empty.
+    Values: ``artifacts`` is the scenario's reader, and ``component`` names a
+    component of the scenario, non-empty.
     Purpose: ``Recipe.build_trainers`` makes one per component and hands it
     to ``Recipe.build``; a harness trainer reads its head through it.
     """
 
-    releases: CommittedArtifacts
+    artifacts: CommittedArtifacts
     component: str
 
     def __post_init__(self) -> None:
@@ -122,10 +122,10 @@ class ComponentArtifacts:
             raise ValueError("ComponentArtifacts.component must be a non-empty string")
 
     def head(self) -> ArtifactTextFiles:
-        return self.releases.head(self.component)
+        return self.artifacts.head(self.component)
 
     def artifact(self, artifact_id: str) -> ArtifactTextFiles:
-        return self.releases.artifact(artifact_id, self.component)
+        return self.artifacts.artifact(artifact_id, self.component)
 
 
 __all__ = [

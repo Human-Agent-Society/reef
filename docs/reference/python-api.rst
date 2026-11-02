@@ -833,10 +833,12 @@ A backend shares no release between scenarios. It must:
   artifact IDs and ``metadata``, and make it the head in one atomic
   step. When the scenario has a head, also one that another caller registered
   first, store nothing and return that head.
-- Implement ``resolve_artifact(artifact_id)``. Return the component's files and
-  metadata, or raise ``ArtifactNotFound`` when this repository has no such ID.
-  The ID must keep naming the same files and metadata across publications and
-  restarts. Reject an attempt to bind it to different content.
+- Implement ``artifact_snapshot(artifact_id)``. Return the ``SnapshotRef`` of
+  the stored snapshot that holds the artifact, or raise ``ArtifactNotFound``
+  when this repository has no such ID. The ID must keep naming the same files
+  and metadata across publications and restarts. Reject an attempt to bind it
+  to different content. The inherited ``resolve_artifact(artifact_id)``
+  materializes that snapshot and returns the artifact's component.
 - Implement ``index_snapshot(ref)`` to add ID bindings for older stored snapshots.
   Recovery calls it before resolving artifacts from legacy records. Repeated
   calls preserve existing bindings; conflicting bindings raise ``ArtifactConflict``.

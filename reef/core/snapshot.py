@@ -6,6 +6,11 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+#: Revision prefix of a process-local snapshot: staged or unpublished, with no durable bytes.
+LOCAL_SNAPSHOT_PREFIX = "local:"
+#: Revision prefix of a local view composed from an ``ArtifactSelection``, with no durable bytes.
+SELECTION_VIEW_PREFIX = "selection:"
+
 
 @dataclass(frozen=True)
 class SnapshotRef:
@@ -15,6 +20,9 @@ class SnapshotRef:
     ``parent_revision`` is None for roots, otherwise a nonempty backend revision.
     Repository adapters construct these values for publication and recovery.
     Component selections use artifact IDs, never these storage keys.
+    A revision that starts with ``LOCAL_SNAPSHOT_PREFIX`` or
+    ``SELECTION_VIEW_PREFIX`` names a process-local view; every other revision
+    names durable storage (``durable``).
     """
 
     revision: str
@@ -27,6 +35,11 @@ class SnapshotRef:
             not isinstance(self.parent_revision, str) or not self.parent_revision
         ):
             raise ValueError("snapshot parent_revision must be a nonempty string or null")
+
+    @property
+    def durable(self) -> bool:
+        """True when ``revision`` names backend storage, not a process-local view."""
+        return not self.revision.startswith((LOCAL_SNAPSHOT_PREFIX, SELECTION_VIEW_PREFIX))
 
 
 def encode_snapshot_ref(ref: SnapshotRef) -> dict[str, object]:
@@ -42,10 +55,8 @@ def decode_snapshot_ref(value: Mapping[str, object]) -> SnapshotRef:
         revision, parent = value.get("release_id"), value.get("parent_release_id")
     else:
         raise ValueError("snapshot ref kind must be 'snapshot' or legacy 'artifact'")
-    if not isinstance(revision, str) or not revision:
-        raise ValueError("snapshot ref requires revision")
-    if parent is not None and (not isinstance(parent, str) or not parent):
-        raise ValueError("snapshot parent_revision must be a nonempty string or null")
+    if not isinstance(revision, str) or (parent is not None and not isinstance(parent, str)):
+        raise ValueError("snapshot ref revision and parent_revision must be strings")
     if "runtime_load_id" in value:
         raise ValueError("snapshot ref must not carry runtime_load_id")
     return SnapshotRef(revision, parent)
@@ -116,6 +127,8 @@ class RootSource:
 
 
 __all__ = [
+    "LOCAL_SNAPSHOT_PREFIX",
+    "SELECTION_VIEW_PREFIX",
     "RootSource",
     "SnapshotRef",
     "decode_snapshot_ref",

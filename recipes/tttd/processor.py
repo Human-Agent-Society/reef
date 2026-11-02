@@ -26,12 +26,6 @@ from reef.train.types import JobData, Sample, TrajectorySample, trajectories
 logger = logging.getLogger(__name__)
 
 
-def inference_artifact_id(context: ReportContext) -> str | None:
-    """The artifact that served the report's first inference, if the record names one."""
-    inference = context.ends[0]
-    return inference.artifact_id
-
-
 @dataclass(frozen=True)
 class TTTDSettings(SampleAssemblySettings):
     """The config of ``TTTDSamples``: the step grid, the sample assembly, and the staleness limit.
@@ -80,7 +74,7 @@ class TTTDGrouping(ReportGrouping):
             return GroupDecision.INCOMPLETE
         # 2. A step whose reports span artifacts is discarded
         #    wholesale — mixed-version rewards are not comparable.
-        versions = {artifact_id for member in members if (artifact_id := inference_artifact_id(member)) is not None}
+        versions = {member.ends[0].artifact_id for member in members} - {None}
         if len(versions) <= 1:
             return GroupDecision.READY
         if not isinstance(key, int):
@@ -155,7 +149,7 @@ class TTTDSamples(ReportSamples):
                 "step": parsed.step,
                 "group": parsed.group,
                 "rollout": parsed.rollout,
-                "artifact_id": inference_artifact_id(context),
+                "artifact_id": context.ends[0].artifact_id,
             }
         )
 

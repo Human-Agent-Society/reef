@@ -17,14 +17,21 @@ from pathlib import Path
 from threading import RLock
 from typing import Any, Literal
 
-from reef.artifact.artifact import Artifact, ArtifactConflict, ArtifactNotFound, ArtifactPublicationError, SnapshotRef
+from reef.artifact.artifact import (
+    Artifact,
+    ArtifactConflict,
+    ArtifactNotFound,
+    ArtifactPublicationError,
+    SnapshotRef,
+    is_local_snapshot,
+)
 from reef.artifact.release_chain import ArtifactReleaseChain, ReleaseNotRestorable
 from reef.artifact.sources import SourceFiles
 from reef.core.activation import MadeArtifact
 from reef.core.artifact_selection import ArtifactSelection
 from reef.core.components import COMPONENTS_METADATA_KEY, ComponentEntry, ReleaseComponents, validate_component_name
 from reef.core.errors import CommitPending, ReefError
-from reef.core.snapshot import RootSource
+from reef.core.snapshot import SELECTION_VIEW_PREFIX, RootSource
 from reef.observability.base import TrainingExperimentContext
 from reef.observability.commits import CommitExperimentObserver
 from reef.scenario.binding import ScenarioBinding
@@ -454,7 +461,7 @@ class ScenarioCommitter:
                 else:
                     surface.validator.validate(target)
             except BaseException:
-                if target.ref.revision.startswith("selection:") and target.ref.revision not in cached:
+                if target.ref.revision.startswith(SELECTION_VIEW_PREFIX) and target.ref.revision not in cached:
                     repository.discard(target)
                 raise
             self._activate(target)
@@ -1082,7 +1089,7 @@ class ScenarioCommitter:
 
     def recorded_selection(self, ref: SnapshotRef) -> ArtifactSelection | None:
         """Record component identities for durable artifacts independently of storage snapshot identities."""
-        if ref.revision.startswith("local:"):
+        if is_local_snapshot(ref.revision):
             return None
         repository = self._artifacts.repository
         return repository.selection(repository.resolve(ref), self.component_names())

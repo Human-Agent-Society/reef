@@ -8,7 +8,7 @@ and load only weights that a training job saved and Reef published: a
 release's files, when a scenario starts, when a release is committed, or
 when one is activated. No trainer holds a serving engine. ``ReleaseWeights``
 says where a release's files come from: the release itself
-(``ArtifactTextFiles``), or a service that the release names.
+(``ReleaseFiles``), or a service that the release names.
 
 ``AdapterServingRuntime`` serves each scenario its own PEFT adapter on one
 base model; ``FullWeightServingRuntime`` serves one scenario's full weights.
@@ -109,7 +109,7 @@ class ReleaseWeights(ConfiguredPlugin, ABC):
     releases give files of equal content. It raises ``ReefError`` when the
     release gives no files of ``layout``.
 
-    Purpose: the serving runtimes below call it at each load. ``ArtifactTextFiles``,
+    Purpose: the serving runtimes below call it at each load. ``ReleaseFiles``,
     the default, reads the release's own files. A training backend whose
     releases name weights on a service instead names the plugin that fetches
     them (``TrainingDeployment.engine_weights``).
@@ -119,7 +119,7 @@ class ReleaseWeights(ConfiguredPlugin, ABC):
     def weight_files(self, release: Path, layout: WeightLayout) -> WeightFiles: ...
 
 
-class ArtifactTextFiles(ReleaseWeights):
+class ReleaseFiles(ReleaseWeights):
     """The release's own files: the release directory for ``"full"``, its ``adapter/`` for ``"adapter"``.
 
     The files of a release that refers to a Hugging Face revision (``read_reference``, RFC #995) are that
@@ -156,7 +156,7 @@ class SavedWeightServingRuntime(InferenceRuntime):
     stamps the base model's version on them; before that, the runtime only sends requests, and an operation that
     changes the engines raises ``ReefError``.
     ``weights`` gives each release's weight files; the default is
-    ``ArtifactTextFiles``.
+    ``ReleaseFiles``.
     Runtime load IDs belong to one fresh incarnation, so a restart never
     reuses an ID for other weights. The base model serves under the first one,
     ``base_version``, and each load under the next unused one;
@@ -182,7 +182,7 @@ class SavedWeightServingRuntime(InferenceRuntime):
         weights: ReleaseWeights | None = None,
     ) -> None:
         super().__init__(base_url=engines.base_url, inference_timeout_s=inference_timeout_s)
-        self._weights = ArtifactTextFiles() if weights is None else weights
+        self._weights = ReleaseFiles() if weights is None else weights
         self._engines = engines
         self._opened: InferenceBackend | None = None
         self._handler = handler

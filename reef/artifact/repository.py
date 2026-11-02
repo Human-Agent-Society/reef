@@ -22,11 +22,13 @@ from reef.artifact.artifact import (
     ArtifactPublicationError,
     ArtifactRepository,
     SnapshotRef,
+    artifact_components,
 )
 from reef.artifact.composite import compose_release, link_or_copy
 from reef.core.artifact_selection import ArtifactSelection, LegacyArtifactSelection
 from reef.core.components import validate_component_name
 from reef.core.plugins import Plugin
+from reef.core.snapshot import SELECTION_VIEW_PREFIX
 
 
 @dataclass(frozen=True)
@@ -63,13 +65,23 @@ class RepositoryBackend(ArtifactRepository):
     """Durable storage bound to one scenario repository."""
 
     @abstractmethod
-    def resolve_artifact(self, artifact_id: str) -> Artifact:
-        """Materialize the immutable component named by ``artifact_id`` in this repository.
+    def artifact_snapshot(self, artifact_id: str) -> SnapshotRef:
+        """The stored snapshot that ``artifact_id`` is bound to in this repository.
 
-        Return that component's files and metadata without requiring a caller
-        to know a storage revision or component path. Raise ``ArtifactNotFound``
-        when this repository has no binding for the ID.
+        Raise ``ArtifactNotFound`` when this repository has no binding for the ID.
         """
+
+    def resolve_artifact(self, artifact_id: str) -> Artifact:
+        """Materialize the component that ``artifact_id`` names, without a caller knowing its snapshot or path.
+
+        Raise ``ArtifactNotFound`` when this repository has no binding for the ID.
+        """
+        snapshot = self.materialize(self.artifact_snapshot(artifact_id))
+        components = artifact_components(snapshot)
+        if artifact_id not in components:
+            raise ArtifactPublicationError(f"artifact binding does not contain {artifact_id!r}")
+        component = components[artifact_id]
+        return snapshot if component is None else snapshot.component(component)
 
     @abstractmethod
     def index_snapshot(self, ref: SnapshotRef) -> None:
@@ -527,7 +539,7 @@ class Repository(ArtifactRepository):
         # This lock is separate from head movement, which never waits for file I/O.
         with self.selection_lock:
             digest = hashlib.sha256(json.dumps(selection.to_dict(), sort_keys=True).encode()).hexdigest()
-            cache_key = f"selection:{digest}"
+            cache_key = f"{SELECTION_VIEW_PREFIX}{digest}"
             cached = self._local_artifacts.get(cache_key)
             if cached is not None:
                 return cached
@@ -556,7 +568,7 @@ class Repository(ArtifactRepository):
                 if artifact.artifact_id != selection.components[name]:
                     raise ArtifactPublicationError("legacy selection does not match its stored component")
             selection = ArtifactSelection(selection.components)
-        if not ref.revision.startswith("selection:"):
+        if not ref.revision.startswith(SELECTION_VIEW_PREFIX):
             return
         existing = self.selections.get(ref.revision)
         if existing is not None and existing != selection:

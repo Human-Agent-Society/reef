@@ -270,11 +270,8 @@ class OpenTelemetryRecordObserver(RecordObserver):
 
 def commit_artifact_attributes(commit: CommitRecord) -> dict[str, AttributeValue]:
     """Return component artifact IDs for a commit, including legacy flat records."""
-    if commit.selection is not None:
-        components = commit.selection.components
-    elif commit.components is not None:
-        components = commit.components
-    else:
+    components = commit.artifact_ids
+    if components is None:
         return {"reef.artifact_id": commit.snapshot.revision}
     attributes: dict[str, AttributeValue] = {
         f"reef.artifacts.{name}": artifact_id for name, artifact_id in components.items()

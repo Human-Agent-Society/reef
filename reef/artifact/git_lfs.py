@@ -23,6 +23,8 @@ from reef.artifact.artifact import (
     ArtifactPublicationError,
     ArtifactSourceError,
     SnapshotRef,
+    artifact_components,
+    content_metadata,
 )
 from reef.artifact.composite import link_or_copy
 from reef.artifact.git_client import GitClient
@@ -538,42 +540,27 @@ class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
                 raise ArtifactNotFound(f"release does not exist: {revision}") from exc
         return self._manifest.snapshot(resolved_release)
 
-    def snapshot_artifacts(self, commit: str) -> dict[str, str | None]:
-        """Map each artifact ID in ``commit`` to its component, or None for a flat legacy tree."""
+    def artifact_ref_name(self, artifact_id: str) -> str:
+        """The Git ref that binds ``artifact_id`` to its snapshot commit in this scenario."""
+        return self.artifact_ref_prefix + hashlib.sha256(artifact_id.encode()).hexdigest()
+
+    def stored_snapshot(self, commit: str) -> Artifact:
+        """The snapshot ``commit``, fetched already, with its metadata and without its files."""
         manifest = self._manifest.read(commit, local=True)
         metadata = manifest.get("metadata", {})
         if not isinstance(metadata, Mapping):
             raise ArtifactSourceError(f"invalid artifact metadata at {commit}")
-        artifact = Artifact(self._manifest.snapshot(commit, local=True), None, metadata=metadata)
-        components = artifact.components
-        if components is None:
-            return {artifact.artifact_id: None}
-        identities = components.artifact_ids(commit)
-        if len(set(identities.values())) != len(identities):
-            raise ArtifactPublicationError("one artifact ID cannot name several components in a snapshot")
-        return {identity: component for component, identity in identities.items()}
+        return Artifact(self._manifest.snapshot(commit, local=True), None, metadata=metadata)
 
-    def artifact_contents(self, commit: str, artifact_id: str) -> tuple[dict[str, str], Mapping[str, object]]:
+    def artifact_contents(self, commit: str, artifact_id: str) -> tuple[dict[str, str], dict[str, object]]:
         """Return Git file objects and component metadata for comparison without fetching weight bytes."""
-        entries = self.snapshot_artifacts(commit)
-        if artifact_id not in entries:
+        snapshot = self.stored_snapshot(commit)
+        components = artifact_components(snapshot)
+        if artifact_id not in components:
             raise ArtifactNotFound(f"storage snapshot does not contain artifact {artifact_id!r}")
-        metadata = self._manifest.read(commit, local=True).get("metadata", {})
-        if not isinstance(metadata, Mapping):
-            raise ArtifactSourceError(f"invalid artifact metadata at {commit}")
-        artifact = Artifact(self._manifest.snapshot(commit, local=True), None, metadata=metadata)
-        components = artifact.components
-        name = entries[artifact_id]
-        if components is None or name is None:
-            prefix = ""
-            component_metadata = {
-                key: value
-                for key, value in metadata.items()
-                if key not in ("artifact_id", "components", "scenario_commit_record")
-            }
-        else:
-            prefix = "" if components.single else f"{name}/"
-            component_metadata = dict(components.entries[name].metadata)
+        component = components[artifact_id]
+        manifest = snapshot.components
+        prefix = "" if component is None or manifest is None or manifest.single else f"{component}/"
         files: dict[str, str] = {}
         for entry in self._workspace.git("ls-tree", "-r", "-z", commit).split("\0"):
             if not entry:
@@ -582,7 +569,7 @@ class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
             if path in (_MANIFEST, ".gitattributes") or not path.startswith(prefix):
                 continue
             files[path.removeprefix(prefix)] = descriptor
-        return files, component_metadata
+        return files, content_metadata(snapshot, component)
 
     def bind_artifact_ids(self, commit: str) -> None:
         """Persist immutable, scenario-scoped ID bindings before advancing a publication head.
@@ -591,8 +578,8 @@ class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
         conflicting binding raises ``ArtifactConflict`` and never overwrites
         the existing ref. Partial writes are safe to repeat after a failure.
         """
-        for artifact_id in self.snapshot_artifacts(commit):
-            ref_name = self.artifact_ref_prefix + hashlib.sha256(artifact_id.encode()).hexdigest()
+        for artifact_id in artifact_components(self.stored_snapshot(commit)):
+            ref_name = self.artifact_ref_name(artifact_id)
             existing = self._workspace.ls_remote(ref_name)
             if existing is None:
                 try:
@@ -614,21 +601,13 @@ class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
             self._workspace.fetch_version(ref.revision)
             self.bind_artifact_ids(ref.revision)
 
-    def resolve_artifact(self, artifact_id: str) -> Artifact:
-        if not isinstance(artifact_id, str) or not artifact_id:
-            raise ValueError("artifact_id must be a non-empty string")
+    def artifact_snapshot(self, artifact_id: str) -> SnapshotRef:
         with self._workspace.lock:
-            ref_name = self.artifact_ref_prefix + hashlib.sha256(artifact_id.encode()).hexdigest()
-            commit = self._workspace.ls_remote(ref_name)
+            commit = self._workspace.ls_remote(self.artifact_ref_name(artifact_id))
             if commit is None:
                 raise ArtifactNotFound(f"repository has no artifact {artifact_id!r}")
             self._workspace.fetch_version(commit)
-            entries = self.snapshot_artifacts(commit)
-            if artifact_id not in entries:
-                raise ArtifactPublicationError(f"artifact binding does not contain {artifact_id!r}")
-            artifact = self.materialize(self._manifest.snapshot(commit, local=True))
-            component = entries[artifact_id]
-            return artifact if component is None else artifact.component(component)
+            return self._manifest.snapshot(commit, local=True)
 
     def register(self, root: Artifact, *, metadata: Mapping[str, object]) -> SnapshotRef:
         """Commit the files of ``root`` with no parent and push the commit to the scenario's ref.

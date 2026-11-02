@@ -16,7 +16,7 @@ from typing import Any, Literal, get_args
 
 from reef.core.artifact_selection import ArtifactSelection
 from reef.core.errors import ReefError
-from reef.core.snapshot import RootSource, SnapshotRef, decode_snapshot_ref, encode_snapshot_ref
+from reef.core.snapshot import SELECTION_VIEW_PREFIX, RootSource, SnapshotRef, decode_snapshot_ref, encode_snapshot_ref
 
 
 @dataclass(frozen=True)
@@ -201,7 +201,7 @@ class CommitRecord:
                 raise CommitHistoryError("commit record selection must be an ArtifactSelection")
             if self.components is not None and self.components != self.selection.artifact_ids:
                 raise CommitHistoryError("commit record components must match its selection")
-        if self.snapshot.revision.startswith("selection:") and self.selection is None:
+        if self.snapshot.revision.startswith(SELECTION_VIEW_PREFIX) and self.selection is None:
             raise CommitHistoryError("a materialized selection requires its component artifact IDs")
         if not isinstance(self.scenario, str) or not self.scenario:
             raise CommitHistoryError("commit record scenario must be a non-empty string")
@@ -299,6 +299,14 @@ class CommitRecord:
         object.__setattr__(self, "metrics", None if self.metrics is None else to_json_value(dict(self.metrics)))
         object.__setattr__(self, "consumed_ids", frozenset(self.consumed_ids))
         object.__setattr__(self, "components", None if self.components is None else dict(self.components))
+
+    @property
+    def artifact_ids(self) -> Mapping[str, str] | None:
+        """The artifact ID of each component that ``snapshot`` binds, from ``selection`` or ``components``.
+
+        None for a record that names no component IDs, such as a legacy flat release.
+        """
+        return self.selection.artifact_ids if self.selection is not None else self.components
 
     @property
     def made_artifact(self) -> bool:

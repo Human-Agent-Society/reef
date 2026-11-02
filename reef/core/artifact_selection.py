@@ -83,6 +83,6 @@ class LegacyArtifactSelection(ArtifactSelection):
         for name, ref in self.locators.items():
             if name not in self.components or not isinstance(ref, SnapshotRef):
                 raise ValueError("legacy locators must name selected components")
-            if ref.revision.startswith(("local:", "selection:")):
+            if not ref.durable:
                 raise ValueError("a legacy selected artifact requires durable storage")
         object.__setattr__(self, "locators", MappingProxyType(dict(self.locators)))

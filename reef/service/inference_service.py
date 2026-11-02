@@ -164,11 +164,6 @@ async def read_object(request: web.Request) -> dict[str, Any]:
     return payload
 
 
-def upstream_artifact(served: ServedArtifact) -> InferenceArtifact:
-    """Build a handler identity from the route, without inventing a storage snapshot."""
-    return InferenceArtifact(served.artifact_id)
-
-
 def provider_response(response: Mapping[str, Any]) -> dict[str, Any]:
     """``response`` as the client gets it and the record keeps it: without a ``training`` block, which an engine
     handler may return. Serving returns no training tensors; a training component computes the ones it needs. The
@@ -244,12 +239,18 @@ class InferenceReplica:
     def record(
         self, parsed: RequestHeaders, payload: Mapping[str, Any], response: Mapping[str, Any], artifact_id: str
     ) -> str:
-        """Append the record of one answered request; return its ID. ``payload`` names the artifact that answered
-        (``artifact_id``)."""
+        """Append the record of one request that the artifact ``artifact_id`` answered; return its ID.
+
+        The stored payload also names ``artifact_id``.
+        """
         item = AgentRecord.create(
             scenario=parsed.scenario,
             request_type=RequestType.INFERENCE,
-            payload={**with_request_tags(payload, parsed), "response": provider_response(response)},
+            payload={
+                **with_request_tags(payload, parsed),
+                "artifact_id": artifact_id,
+                "response": provider_response(response),
+            },
             artifact_id=artifact_id,
         )
         store = self.storage.open(parsed.scenario)
@@ -346,7 +347,9 @@ class InferenceReplica:
         handler = self.handler(served)
         try:
             return await asyncio.wait_for(
-                handler.inference(upstream_artifact(served), path, handler.address_model(payload, served.model_name)),
+                handler.inference(
+                    InferenceArtifact(served.artifact_id), path, handler.address_model(payload, served.model_name)
+                ),
                 timeout=self.timeout_seconds,
             )
         except (UpstreamStatusError, aiohttp.ClientError, TypeError, json.JSONDecodeError) as exc:
@@ -387,12 +390,11 @@ class InferenceReplica:
             if attempt == 1:
                 raise web.HTTPConflict(text=INFERENCE_ABORT_ERROR)
             served = await self.resolve(parsed.scenario, payload.get("model"), name=name, refresh=True)
-        stamped = {**sent, "artifact_id": served.artifact_id}
         reply_headers = {ARTIFACT_HEADER: served.artifact_id, RELEASE_HEADER: served.artifact_id}
         if record:
             try:
                 reply_headers[RECORD_HEADER] = await asyncio.to_thread(
-                    self.record, parsed, stamped, response, served.artifact_id
+                    self.record, parsed, sent, response, served.artifact_id
                 )
             except Exception as exc:
                 logger.exception("could not append the record of a request to %s", parsed.scenario)
@@ -414,7 +416,7 @@ class InferenceReplica:
         handler = self.handler(served)
         try:
             upstream = await handler.inference_stream(
-                upstream_artifact(served), path, handler.address_model(payload, served.model_name)
+                InferenceArtifact(served.artifact_id), path, handler.address_model(payload, served.model_name)
             )
         except (UpstreamStatusError, aiohttp.ClientError) as exc:
             raise web.HTTPBadGateway(text=f"the engine at {served.url} failed: {exc}") from exc
@@ -458,7 +460,7 @@ class InferenceReplica:
                         record_id = await asyncio.to_thread(
                             self.record,
                             parsed,
-                            {**payload, "artifact_id": served.artifact_id},
+                            payload,
                             captured,
                             served.artifact_id,
                         )
@@ -484,7 +486,7 @@ class InferenceReplica:
                     await asyncio.to_thread(
                         self.record,
                         parsed,
-                        {**payload, "artifact_id": served.artifact_id},
+                        payload,
                         captured,
                         served.artifact_id,
                     )

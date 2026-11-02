@@ -97,7 +97,7 @@ class NewArtifacts(RecordObserver):
         # names one that exists, and a person who imports an artifact decides what to do with it.
         if not commit.trained_artifact:
             return
-        selected = commit.selection.artifact_ids if commit.selection is not None else commit.components
+        selected = commit.artifact_ids
         if selected is None:
             # Legacy flat commits used their storage revision as their artifact identity.
             self.queue.put(NewArtifact(commit.scenario, commit.snapshot.revision, commit.component))

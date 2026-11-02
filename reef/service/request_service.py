@@ -93,6 +93,10 @@ def instruction_view(scenario: Scenario, request_id: str, rows: Sequence[Mapping
     }
 
 
+#: The keys of a ``harness_history`` row that hold private storage locators.
+SNAPSHOT_ROW_KEYS = frozenset({"snapshot", "artifact_snapshot", "parent_snapshot"})
+
+
 class RequestService:
     """The request handling of one service app over ``dispatcher``.
 
@@ -104,8 +108,6 @@ class RequestService:
     def __init__(self, dispatcher: Dispatcher, *, inference_url: str | None = None) -> None:
         self._dispatcher = dispatcher
         self.inference_url = None if inference_url is None else inference_url.rstrip("/")
-        # The harness head of a scenario with several components, by scenario step and active release: it is
-        # read on every inference answer and changes only when a commit lands.
 
     @property
     def dispatcher(self) -> Dispatcher:
@@ -211,17 +213,7 @@ class RequestService:
                 "the client installs the files in"
             )
         scenario = self._file_scenario(headers)
-        component = scenario.surface.files_component
-        if artifact_id is not None and release_id is not None:
-            raise ValueError("give artifact_id or the legacy release_id, not both")
-        if release_id is not None:
-            selected = scenario.release_queries.artifact_for_version(release_id)
-        else:
-            if artifact_id is None:
-                if component is None:
-                    raise ArtifactNotFound(f"scenario {scenario.name!r} serves no harness component")
-                artifact_id = scenario.artifact_selection().components[component]
-            _, selected = scenario.resolve_artifact(artifact_id, component)
+        selected = self.harness_artifact(scenario, artifact_id, release_id)
         manifest = self.harness_manifest_for_artifact(scenario, selected, source=form != "rendered")
         if form == "client" and service_url is not None and root is not None:
             descriptor = self.harness_descriptor(scenario)
@@ -272,23 +264,16 @@ class RequestService:
             isinstance(path, str) and isinstance(text, str) for path, text in files.items()
         ):
             raise ValueError("files must map each path under the adapter's roots to the file's text")
-        base_artifact_id = payload.get("base_artifact_id")
-        legacy_revision = payload.get("base_release_id")
         scenario = self._file_scenario(headers)
         component = scenario.surface.files_component
         if component is None:
             raise ArtifactNotFound(f"scenario {scenario.name!r} serves no harness component")
-        if base_artifact_id is not None:
-            if not isinstance(base_artifact_id, str) or not base_artifact_id:
-                raise ValueError("base_artifact_id must be the artifact the client installed")
-            if legacy_revision is not None:
-                raise ValueError("give base_artifact_id or the legacy base_release_id, not both")
-            _, base_artifact = scenario.resolve_artifact(base_artifact_id, component)
-        else:
-            if not isinstance(legacy_revision, str) or not legacy_revision:
-                raise ValueError("base_artifact_id must be the artifact the client installed")
-            base_artifact = scenario.release_queries.artifact_for_version(legacy_revision)
-            base_artifact_id = scenario.surface.component_artifact(base_artifact, component).artifact_id
+        if payload.get("base_artifact_id") is None and payload.get("base_release_id") is None:
+            raise ValueError("base_artifact_id must be the artifact the client installed")
+        base_artifact = self.harness_artifact(
+            scenario, payload.get("base_artifact_id"), payload.get("base_release_id")
+        )
+        base_artifact_id = scenario.surface.component_artifact(base_artifact, component).artifact_id
         descriptor = self.harness_descriptor(scenario)
         expected_selection = scenario.artifact_selection()
         active_id = expected_selection.components[component]
@@ -390,6 +375,30 @@ class RequestService:
         return scenario.trainer_for(scenario.surface.files_component)
 
     @staticmethod
+    def harness_artifact(scenario: Scenario, artifact_id: object, legacy_revision: object) -> Artifact:
+        """The release that holds the harness a client names.
+
+        A client names it by ``artifact_id``, or by ``legacy_revision``, the
+        release ID of an older client. When both are None, it is the active
+        harness. Raise ``ValueError`` when both are given or one is not a
+        non-empty string.
+        """
+        if artifact_id is not None and legacy_revision is not None:
+            raise ValueError("give artifact_id or the legacy release_id, not both")
+        for name, value in (("artifact_id", artifact_id), ("release_id", legacy_revision)):
+            if value is not None and (not isinstance(value, str) or not value):
+                raise ValueError(f"{name} must be a non-empty string")
+        if isinstance(legacy_revision, str):
+            return scenario.release_queries.artifact_for_version(legacy_revision)
+        component = scenario.surface.files_component
+        if not isinstance(artifact_id, str):
+            if component is None:
+                raise ArtifactNotFound(f"scenario {scenario.name!r} serves no harness component")
+            artifact_id = scenario.artifact_selection().components[component]
+        _, selected = scenario.resolve_artifact(artifact_id, component)
+        return selected
+
+    @staticmethod
     def harness_manifest_for_artifact(
         scenario: Scenario, artifact: Artifact, *, source: bool = False
     ) -> dict[str, Any]:
@@ -404,12 +413,13 @@ class RequestService:
         files = component_files(scenario.surface, artifact, component) if source else tree.read_files(artifact)
         if files is None:
             raise ArtifactNotFound(
-                f"scenario {scenario.name!r} serves no files: release {artifact.ref.revision!r} holds no "
+                f"scenario {scenario.name!r} serves no files: snapshot {artifact.ref.revision!r} holds no "
                 "harness tree. A root release made from the default start holds the recipe's evolution.seed, so an empty seed serves "
                 "nothing until a step publishes a tree."
             )
         artifact_id = scenario.surface.component_artifact(artifact, component).artifact_id
-        row = next((row for row in scenario.artifacts() if row["artifact_id"] == artifact_id), None)
+        catalog = scenario.artifacts()
+        row = next((row for row in catalog if row["artifact_id"] == artifact_id), None)
         manifest = {
             "artifact_id": artifact_id,
             "parent_artifact_id": None if row is None else row["parent_artifact_id"],
@@ -419,7 +429,7 @@ class RequestService:
             "files": dict(files),
             "evaluation": None if row is None or row["operation"] != "training" else row.get("metrics"),
             # The union over the chain, not this evaluation's list: a release whose request named nothing still installs an earlier extension.
-            "requires": required_by(list(reversed(scenario.artifacts())), artifact_id),
+            "requires": required_by(list(reversed(catalog)), artifact_id),
         }
         components = artifact.materialize().components
         if components is not None:
@@ -483,11 +493,7 @@ class RequestService:
     def harness_rows(cls, scenario: Scenario) -> list[dict[str, Any]]:
         """Return artifact-addressed harness history for pages and step records, without storage locators."""
         return [
-            {
-                key: value
-                for key, value in row.items()
-                if key not in {"snapshot", "artifact_snapshot", "parent_snapshot"}
-            }
+            {key: value for key, value in row.items() if key not in SNAPSHOT_ROW_KEYS}
             for row in cls.harness_history(scenario)
         ]
 
@@ -497,11 +503,7 @@ class RequestService:
         rows = []
         for row in cls.harness_history(scenario):
             snapshot, selected, parent = row["snapshot"], row["artifact_snapshot"], row["parent_snapshot"]
-            listed = {
-                key: value
-                for key, value in row.items()
-                if key not in {"snapshot", "artifact_snapshot", "parent_snapshot"}
-            }
+            listed = {key: value for key, value in row.items() if key not in SNAPSHOT_ROW_KEYS}
             listed["release_id"] = selected.revision
             listed["parent_release_id"] = snapshot.parent_revision if parent is None else parent.revision
             if selected.revision != snapshot.revision:

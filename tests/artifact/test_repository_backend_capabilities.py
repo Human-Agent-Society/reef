@@ -26,14 +26,14 @@ class BasicBackend(RepositoryBackend):
     def __init__(self, delegate: InMemoryRepositoryBackend) -> None:
         self.delegate = delegate
 
-    def resolve_snapshot(self, release_id: str) -> SnapshotRef:
-        return self.delegate.resolve_snapshot(release_id)
+    def resolve_snapshot(self, revision: str) -> SnapshotRef:
+        return self.delegate.resolve_snapshot(revision)
 
     def index_snapshot(self, ref: SnapshotRef) -> None:
         self.delegate.index_snapshot(ref)
 
-    def resolve_artifact(self, artifact_id: str) -> Artifact:
-        return self.delegate.resolve_artifact(artifact_id)
+    def artifact_snapshot(self, artifact_id: str) -> SnapshotRef:
+        return self.delegate.artifact_snapshot(artifact_id)
 
     def register(self, root: Artifact, *, metadata: Mapping[str, object]) -> SnapshotRef:
         return self.delegate.register(root, metadata=metadata)

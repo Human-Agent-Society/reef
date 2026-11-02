@@ -57,7 +57,7 @@ def test_the_head_is_the_latest_publish_and_a_step_that_published_nothing_keeps_
     try:
         # The release the scenario was created on is its root release.
         assert scenario.repository.resolve(scenario.repository.start_artifact).artifact_id == created
-        assert isinstance(scenario.trainer.job_loop_required().releases.releases, ScenarioArtifactFiles)
+        assert isinstance(scenario.trainer.job_loop_required().releases.artifacts, ScenarioArtifactFiles)
         # Before a publish the head is the release the scenario was created on, the one the catalog lists.
         assert releases.head(COMPONENT) == ArtifactTextFiles(created, dict(PI_SEED.files))
         assert releases.artifact(created, COMPONENT).files == PI_SEED.files

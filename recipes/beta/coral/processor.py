@@ -76,7 +76,7 @@ class CoralGrouping(ReportGrouping):
 
     def __init__(self, group_size: int) -> None:
         self.group_size = group_size
-        self.mixed_release_groups: dict[str, tuple[str, ...]] = {}
+        self.mixed_artifact_groups: dict[str, tuple[str, ...]] = {}
 
     def placement(self, context: ReportContext) -> tuple[Hashable | None, Hashable | None]:
         return sibling_group(context)
@@ -88,7 +88,7 @@ class CoralGrouping(ReportGrouping):
         if len(versions) <= 1:
             return GroupDecision.READY
         ordered = tuple(sorted(versions))
-        self.mixed_release_groups[str(key)] = ordered
+        self.mixed_artifact_groups[str(key)] = ordered
         logger.error(
             "CORAL sibling group %s discarded: %d attempts span artifacts %s",
             key,
@@ -101,7 +101,7 @@ class CoralGrouping(ReportGrouping):
         return {
             "discarded_groups": [
                 {"parent": parent, "reason": "mixed_artifact_ids", "artifact_ids": list(versions)}
-                for parent, versions in sorted(self.mixed_release_groups.items())
+                for parent, versions in sorted(self.mixed_artifact_groups.items())
             ],
         }
 

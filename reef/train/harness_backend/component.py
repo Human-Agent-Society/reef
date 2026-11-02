@@ -53,6 +53,14 @@ OUTCOME_FILE = "outcome.json"
 TREE_DIR = "tree"
 
 
+def head_artifact_id(parameters: Mapping[str, Any]) -> str:
+    """The artifact that a harness job starts from: ``head_artifact_id``, or ``head_release_id`` of an older job."""
+    head = parameters.get("head_artifact_id", parameters.get("head_release_id"))
+    if not isinstance(head, str) or not head:
+        raise ValueError("a harness job names the artifact of its start in parameters.head_artifact_id")
+    return head
+
+
 class HarnessSteps(ABC):
     """What the harness training component reads from its recipe to run the steps of a scenario component.
 
@@ -178,9 +186,7 @@ class HarnessTrainingComponent(LocalJobComponent):
         component = parameters.get("component")
         if not isinstance(component, str) or not component:
             raise ValueError("a harness job names the scenario component that it evolves in parameters.component")
-        head = parameters.get("head_artifact_id", parameters.get("head_release_id"))
-        if not isinstance(head, str) or not head:
-            raise ValueError("a harness job names the artifact of its start in parameters.head_artifact_id")
+        head_artifact_id(parameters)
         tasks = parameters.get("evaluation_tasks")
         if tasks is not None and (not isinstance(tasks, list) or not all(isinstance(task, str) for task in tasks)):
             raise ValueError("parameters.evaluation_tasks of a harness job must be a list of task paths or null")
@@ -275,10 +281,7 @@ class HarnessTrainingComponent(LocalJobComponent):
         component = str(parameters["component"])
         backend = self.backend_for(job.scenario, component)
         steps, state = self.state_after(parameters.get("previous_job"))
-        head = ArtifactTextFiles(
-            str(parameters.get("head_artifact_id", parameters.get("head_release_id"))),
-            dict(HarnessTree.read(Path(job.start)).files),
-        )
+        head = ArtifactTextFiles(head_artifact_id(parameters), dict(HarnessTree.read(Path(job.start)).files))
         tasks = parameters.get("evaluation_tasks")
         progress = self.steps.state_root(job.scenario, component) / PROGRESS_FILE
         try:

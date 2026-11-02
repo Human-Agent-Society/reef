@@ -46,9 +46,7 @@ def compose_release(components: Mapping[str, Artifact], *, directory: Path) -> A
         source = component.materialize()
         if source.local_path is None:
             raise ArtifactPublicationError(f"component {name!r} has no local content to compose")
-        metadata = {
-            key: value for key, value in source.metadata.items() if key not in (COMPONENTS_METADATA_KEY, "artifact_id")
-        }
+        metadata = {key: value for key, value in source.metadata.items() if key != COMPONENTS_METADATA_KEY}
         # Composition changes the layout, never the identity of its components.
         carried = source.artifact_id
         entries[name] = ComponentEntry(metadata=metadata, artifact_id=carried)

@@ -74,7 +74,12 @@ class ComponentEntry:
 
 @dataclass(frozen=True)
 class ReleaseComponents:
-    """The manifest of one release: which named components it binds, in declaration order."""
+    """The manifest of one release: which named components it binds, in declaration order.
+
+    Values: ``entries`` is a non-empty mapping from valid component names to
+    ``ComponentEntry`` values. No two entries have the same explicit
+    ``artifact_id``.
+    """
 
     entries: Mapping[str, ComponentEntry]
 
@@ -86,6 +91,9 @@ class ReleaseComponents:
             if not isinstance(entry, ComponentEntry):
                 raise ValueError(f"component {name!r} must be a ComponentEntry")
             validated[validate_component_name(name)] = entry
+        explicit = [entry.artifact_id for entry in validated.values() if entry.artifact_id is not None]
+        if len(set(explicit)) != len(explicit):
+            raise ValueError("one artifact ID cannot name several components of a release")
         object.__setattr__(self, "entries", MappingProxyType(validated))
 
     @property

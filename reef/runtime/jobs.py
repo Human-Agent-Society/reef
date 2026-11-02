@@ -407,7 +407,7 @@ class ReleaseLayout(ArtifactLayout):
     """The layout of the releases of ``component``: an import of the component it trains must meet it.
 
     ``check`` is ``component.check_release``. The releases resolve a reference when they hold weight files
-    (``release_format``), which the serving runtimes read through ``ArtifactTextFiles``. A weight recipe binds it on its
+    (``release_format``), which the serving runtimes read through ``ReleaseFiles``. A weight recipe binds it on its
     ``weights`` component.
     """
 

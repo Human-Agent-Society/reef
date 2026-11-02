@@ -382,7 +382,7 @@ class ScenarioFactory:
             for record in committed_records(store, head_record):
                 if record.selection is not None:
                     repository.remember_selection(record.snapshot, record.selection)
-                elif not record.snapshot.revision.startswith(("local:", "selection:")):
+                elif record.snapshot.durable:
                     backend.index_snapshot(record.snapshot)
             repository.synchronize_checkpoint()
             # Traffic must not reach a recovered scenario before its committed

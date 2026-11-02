@@ -127,7 +127,7 @@ class RemoteServingRuntimeConfig:
     ``inference_handler_config`` the request handler's own options.
     ``executor`` and ``executor_options`` select the engines' executor (the
     ``rollout`` role). ``weights`` is ``None``, which reads each release's own
-    files (``ArtifactTextFiles``), or a ``ReleaseWeights`` plugin reference.
+    files (``ReleaseFiles``), or a ``ReleaseWeights`` plugin reference.
     Purpose: the serving assembly writes the value from the deployment's
     ``inference`` settings and the training backend's engine weights;
     ``RemoteServingRuntimeFactory`` reads it.

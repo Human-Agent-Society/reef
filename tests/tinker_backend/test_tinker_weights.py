@@ -15,7 +15,7 @@ import pytest
 
 from reef.core.errors import ReefError
 from reef.core.plugins import PluginConfigError
-from reef.runtime.serving import ArtifactTextFiles
+from reef.runtime.serving import ReleaseFiles
 from reef.tinker.checkpoint import TinkerCheckpoint
 from reef.tinker.weights import TinkerSamplerWeights
 
@@ -129,5 +129,5 @@ def test_a_release_the_weights_cannot_give_is_refused(tmp_path, sdk, monkeypatch
 @pytest.mark.unit
 def test_a_release_without_an_adapter_gives_no_adapter_files(tmp_path):
     with pytest.raises(ReefError, match="holds no PEFT adapter in adapter/"):
-        ArtifactTextFiles().weight_files(tmp_path, "adapter")
-    assert ArtifactTextFiles().weight_files(tmp_path, "full").path == tmp_path
+        ReleaseFiles().weight_files(tmp_path, "adapter")
+    assert ReleaseFiles().weight_files(tmp_path, "full").path == tmp_path

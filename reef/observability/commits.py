@@ -111,23 +111,16 @@ def training_starts(source: ArtifactSelection, commit: CommitRecord) -> Artifact
         name = commit.component
     elif len(components) == 1:
         name = next(iter(components))
-    elif commit.selection is not None:
+    elif commit.artifact_ids is not None:
         # A single trainer can train a complete multi-component snapshot.
         # Its records have no trainer component and replace the whole start.
-        return commit.selection
-    elif commit.components is not None:
-        return ArtifactSelection(commit.components)
+        return ArtifactSelection(commit.artifact_ids)
     else:
         raise ValueError("a composite training-start change requires component artifact IDs")
     if name not in components:
         raise ValueError(f"unknown training component {name!r}")
-    if commit.selection is not None:
-        artifact_id = commit.selection.components[name]
-    elif commit.components is not None:
-        artifact_id = commit.components[name]
-    else:
-        artifact_id = commit.snapshot.revision
-    components[name] = artifact_id
+    # A legacy flat record names its artifact by its storage revision.
+    components[name] = commit.snapshot.revision if commit.artifact_ids is None else commit.artifact_ids[name]
     return ArtifactSelection(components)
 
 

@@ -123,7 +123,7 @@ def tree_of(manifest: Mapping[str, Any]) -> HarnessTree:
     try:
         return HarnessTree(dict(manifest.get("files") or {}))
     except (TypeError, ValueError) as exc:
-        raise ServeError(f"release {manifest.get('artifact_id')!r} carries no source tree: {exc}") from exc
+        raise ServeError(f"artifact {manifest.get('artifact_id')!r} carries no source tree: {exc}") from exc
 
 
 def read_artifact_info(dest: Path) -> dict[str, Any]:
@@ -385,7 +385,12 @@ class Server(ServeState, ArtifactUpdateListener):
         release_info = read_artifact_info(self.dest)
         legacy_manifest: Mapping[str, Any] | None = None
         if not release_info.get("artifact_id") and release_info.get("release_id"):
-            legacy_manifest = self.client.fetch_legacy(str(release_info["release_id"]))
+            try:
+                legacy_manifest = self.client.fetch_legacy(str(release_info["release_id"]))
+            except ArtifactClientError as exc:
+                raise ServeError(
+                    f"Reef answered no artifact for installed release {release_info['release_id']!r}: {exc}"
+                ) from exc
             release_info = dict(legacy_manifest)
         release = str(release_info["artifact_id"]) if release_info.get("artifact_id") else None
         parent = str(release_info["parent_artifact_id"]) if release_info.get("parent_artifact_id") else None
@@ -422,7 +427,7 @@ class Server(ServeState, ArtifactUpdateListener):
         failure = self._mount(stored, release, parent, source="boot", manifest=manifest)
         if failure is not None:
             self.stop()
-            raise ServeError(f"release {release} does not mount: {failure['error']}")
+            raise ServeError(f"artifact {release} does not mount: {failure['error']}")
         self._watch.start()
         self._socket_server = _SocketServer(self.socket_path, self)
         threading.Thread(target=self._socket_server.serve_forever, name="reef-native-socket", daemon=True).start()
@@ -503,7 +508,7 @@ class Server(ServeState, ArtifactUpdateListener):
                     except ArtifactClientError as exc:
                         return _error(str(exc))
                 if not isinstance(artifact_id, str) or not artifact_id:
-                    return _error("mount needs a artifact_id")
+                    return _error("mount needs an artifact_id")
                 return {"type": "control/result", "data": self.mount(artifact_id)}
             return _error(f"unknown control {control!r}; status or mount")
         return _error("request must carry turn or control")
@@ -617,7 +622,7 @@ class Server(ServeState, ArtifactUpdateListener):
             if artifact_id:
                 self._proxy.tags["artifact_id"] = artifact_id
             else:
-                self._proxy.tags.pop("release", None)
+                self._proxy.tags.pop("artifact_id", None)
             self._watch.mounted(artifact_id)
             if manifest is not None:
                 self._install(tree, manifest)
@@ -933,7 +938,7 @@ def serve_command(args: Any) -> int:
     except ServeError as exc:
         print(f"reef-native serve: {exc}", file=sys.stderr)
         return 2
-    print(f"reef-native serve: release {server.artifact_id} on {server.socket_path}", file=sys.stderr, flush=True)
+    print(f"reef-native serve: artifact {server.artifact_id} on {server.socket_path}", file=sys.stderr, flush=True)
     try:
         server.wait()
     finally:
