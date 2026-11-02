@@ -140,6 +140,10 @@ Routes
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/scenarios/{scenario}/samples``                                       | the scenario's training samples, in store order   |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/scenarios/{scenario}/sample-processing``                             | the scenario's sample processing tasks and counts |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/scenarios/{scenario}/sample-processing/{task_id}``                   | one sample processing task of the scenario        |
++----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/scenarios/{scenario}/buffer``                                        | the samples that the next job trains              |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/scenarios/{scenario}/buffer/insert``                                | add samples to the manual buffer; manual mode     |
