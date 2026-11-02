@@ -448,6 +448,7 @@ def build_dispatcher(
     experiment_tracker = None
     scenario_storage: ScenarioStorage | None = None
     data_store: DataStore | None = None
+    dispatcher: Dispatcher | None = None
     try:
         scenario_storage, task_files = open_scenario_storage(settings)
         data_store = build_data_store(settings, task_files)
@@ -525,18 +526,23 @@ def build_dispatcher(
             )
         return dispatcher
     except BaseException:
-        # The data store first: the scenario storage closes the task file store that it shares.
-        if data_store is not None:
+        if dispatcher is not None:
+            # The dispatcher owns these resources now; its workers must stop before their stores close.
             with suppress(Exception):
-                data_store.close()
-        if scenario_storage is not None:
-            with suppress(Exception):
-                scenario_storage.close()
-        close_runtimes(recipe.job_components(), recipe.runtime)
-        if experiment_tracker is not None:
-            with suppress(Exception):
-                experiment_tracker.close()
-        coordination.close()
+                dispatcher.close()
+        else:
+            # The data store first: the scenario storage closes the task file store that it shares.
+            if data_store is not None:
+                with suppress(Exception):
+                    data_store.close()
+            if scenario_storage is not None:
+                with suppress(Exception):
+                    scenario_storage.close()
+            close_runtimes(recipe.job_components(), recipe.runtime)
+            if experiment_tracker is not None:
+                with suppress(Exception):
+                    experiment_tracker.close()
+            coordination.close()
         raise
 
 
