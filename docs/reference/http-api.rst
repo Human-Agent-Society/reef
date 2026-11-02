@@ -1404,7 +1404,10 @@ returns 404.
   retries are part of this state.
 * ``ready``: startup succeeded and inference published the route.
 * ``failed``: startup ended with an error. ``error`` gives a safe message;
-  the service logs hold the diagnostic details.
+  the service logs hold the diagnostic details. Control retries a failed
+  startup by itself: 60 seconds after the failure, and then after a wait that
+  doubles at each failed retry, up to one hour. A retry returns the state to
+  ``pending``. Activate the active artifact again to retry at once.
 
 ``error`` is null in every other state. The status describes the selected
 artifact, even while an older route still serves requests. It is a startup
@@ -1950,8 +1953,9 @@ The body is ``{"artifact_id": "<id>", "component": "<name>"}``. Leave out
 component.
 
 The response accepts the selection. Poll `Startup status`_ before sending
-requests that require the new artifact. A repeated activation can retry a
-failed startup without writing another activation record.
+requests that require the new artifact. A repeated activation retries a
+failed startup at once without writing another activation record, and sets
+the wait of the automatic retries back to 60 seconds.
 
 Activation atomically replaces the selected artifact of ``component`` and
 appends an ``activate`` operation with the complete component mapping.
