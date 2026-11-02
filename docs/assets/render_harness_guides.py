@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
-"""Rebuild the figures of the harness developer guides: python3 docs/assets/render_harness_guides.py
+"""Rebuild the figures of the getting-started and harness guides: python3 docs/assets/render_harness_guides.py
 
 Writes, each in a light and a dark file:
 
+- reef-overview-*.svg: Reef between the harness and the model, for the
+  introduction;
+- harness-tutorial-overview-*.svg: what runs on your machine and what runs in
+  Reef, for the harness tutorial;
 - harness-method-step-*.svg: one training step from the method's view, for
   "Write a harness method";
 - harness-adapter-modes-*.svg: the three ways one adapter.yaml runs an agent,
@@ -255,7 +259,92 @@ def adapter_modes(theme: str, fonts) -> str:
     return "\n".join(o)
 
 
-FIGURES = {"harness-method-step": method_step, "harness-adapter-modes": adapter_modes}
+# Reef between the harness and the model: three boxes in a column, narrow enough to read at page width.
+OVERVIEW_W, OVERVIEW_H = 640, 536
+OVERVIEW_BOX = 560
+OVERVIEW_ROWS = (104, 264, 424)
+
+
+def reef_overview(theme: str, fonts) -> str:
+    p = THEMES[theme]
+    o = svg(
+        p,
+        fonts,
+        OVERVIEW_W,
+        OVERVIEW_H,
+        "Reef between the harness and the model. The harness sends requests and feedback to Reef, and gets answers "
+        "and a new harness tree back. Reef sends inference to the model, and loads new weights into it.",
+        "Where Reef runs",
+        "Between the harness and the model; it changes both.",
+        [("the harness", "machine"), ("Reef", "reef"), ("the model", "store")],
+    )
+    x = 40
+    boxes = [
+        ("machine", "The harness", "control loop, prompts, skills, tools"),
+        ("reef", "Reef", "serves, records, trains, evolves"),
+        ("store", "The model", "local engine or hosted API"),
+    ]
+    for row, (kind, title, line) in zip(OVERVIEW_ROWS, boxes, strict=True):
+        o.append(card(p, x, row, OVERVIEW_BOX, kind, title, line))
+    harness, reef, model = OVERVIEW_ROWS
+    arrow_x, label_x = x + 60, x + 96
+    o.append(pair(p, arrow_x, harness + BOX_H, reef))
+    middle = (harness + BOX_H + reef) // 2
+    o.append(write(label_x, middle - 4, "requests and feedback", BODY, p["ink"]))
+    o.append(write(label_x, middle + 16, "answers and a new harness tree", BODY, p["muted"]))
+    o.append(path(p, [(arrow_x, reef + BOX_H), (arrow_x, model)]))
+    o.append(write(label_x, (reef + BOX_H + model) // 2 + 5, "inference and new weights", BODY, p["ink"]))
+    o.append("</svg>")
+    return "\n".join(o)
+
+
+# What runs where in the harness tutorial: your machine on the left, Reef on the right.
+TUTORIAL_W, TUTORIAL_H = 1044, 364
+TUTORIAL_BOX = 330
+
+
+def harness_tutorial_overview(theme: str, fonts) -> str:
+    p = THEMES[theme]
+    o = svg(
+        p,
+        fonts,
+        TUTORIAL_W,
+        TUTORIAL_H,
+        "What runs where. On your machine, your agent keeps your own settings, rules and skills, and reef-client "
+        "installs and syncs Reef's version. It sends model calls and changed files to Reef, and gets answers and new "
+        "versions back. In Reef, a method proposes a new version, and the releases keep every version in Git.",
+        "What runs where",
+        "reef-client sits beside your agent; the method and the releases run in Reef.",
+        [("your machine", "machine"), ("Reef", "reef"), ("files", "store")],
+    )
+    top = 100
+    left, right = 56, TUTORIAL_W - 56 - TUTORIAL_BOX
+    rows = [top + 44, top + 44 + BOX_H + 18]
+    zone_bottom = rows[-1] + BOX_H + 20
+    o.append(zone(p, left - 16, top, left + TUTORIAL_BOX + 16, zone_bottom, "machine", p["tint"]))
+    o.append(cap(left, top + 26, "your machine", p["machine"]))
+    o.append(zone(p, right - 16, top, right + TUTORIAL_BOX + 16, zone_bottom, "reef", p["tint"]))
+    o.append(cap(right, top + 26, "Reef", p["reef"]))
+    o.append(card(p, left, rows[0], TUTORIAL_BOX, "machine", "Your agent", "with your own settings, rules and skills"))
+    o.append(card(p, left, rows[1], TUTORIAL_BOX, "machine", "reef-client", "installs and syncs Reef's version"))
+    o.append(card(p, right, rows[0], TUTORIAL_BOX, "reef", "Method", "proposes a new version"))
+    o.append(card(p, right, rows[1], TUTORIAL_BOX, "store", "Releases", "every version, in Git"))
+    start, end = left + TUTORIAL_BOX + 16, right - 16
+    center, middle = (start + end) // 2, (top + zone_bottom) // 2
+    o.append(path(p, [(start, middle - 12), (end, middle - 12)]))
+    o.append(write(center, middle - 24, "model calls, changed files", BODY, p["muted"], anchor="middle"))
+    o.append(path(p, [(end, middle + 12), (start, middle + 12)], p["muted"]))
+    o.append(write(center, middle + 36, "answers, new versions", BODY, p["muted"], anchor="middle"))
+    o.append("</svg>")
+    return "\n".join(o)
+
+
+FIGURES = {
+    "reef-overview": reef_overview,
+    "harness-tutorial-overview": harness_tutorial_overview,
+    "harness-method-step": method_step,
+    "harness-adapter-modes": adapter_modes,
+}
 
 
 def main() -> None:
