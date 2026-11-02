@@ -1,4 +1,4 @@
-"""Official Retail environment, scripted inference, and the real SAO assembly.
+"""Official Retail environment, scripted inference, and the real SAO sample assembly.
 
 Install recipes/sao/examples/servelearnbench to run this optional benchmark suite.
 Scripted responses test the harness contract, not model quality or GPU execution.
@@ -20,31 +20,32 @@ from reef_client import ReefClient, ReefClientError
 from servelearnbench import agent, llm, protocol
 from servelearnbench.scenarios import get_bundle, n_windows
 from servelearnbench.scoring import read_rows, setting_scores
+from tests.support._trajectories import policy_trajectory
 from tests.support.config_helpers import load_deployment
+from tests.support.conversations import conversation
 
 from recipes.sao.examples.servelearnbench import harness as reef_harness
-from recipes.sao.examples.servelearnbench.batching import BatchGrouping, RetailBatchReports
 from recipes.sao.examples.servelearnbench.harness import agent as reef_agent
 from recipes.sao.examples.servelearnbench.harness import campaign as campaign_results
 from recipes.sao.examples.servelearnbench.harness import config as campaign_config
 from recipes.sao.examples.servelearnbench.harness import report as reef_report
-from recipes.sao.examples.servelearnbench.recipe import RetailJobPlan, RetailSAORecipe
-from recipes.sao.processor import SAOJobData, SAOTasks
+from recipes.sao.processor import SAOJobData, SAOSamples
+from recipes.sao.recipe import SAORecipe
 from reef.core import AgentRecord, RequestType
-from reef.core.job_data import JobOutcome
+from reef.core.chat_rendering import TokenizerChatTemplate, render_trajectory
 from reef.core.reports import ScoredRolloutReport
+from reef.core.training_request import TrainingRequest
 from reef.core.trajectories import trajectory_reward
 from reef.pipeline_context import PipelineContext
-from reef.record2record import ReportContext
-from reef.record2task.assembly import SampleAssemblySettings
+from reef.record2sample.assembly import SampleAssemblySettings
 from reef.runtime.interfaces import TrainingMethod
 from reef.train.algos.registry import job_training
-from reef.train.algos.schedule import StepScheduling
-from reef.train.jobs import JobPlanContext
 from reef.train.pipeline import PipelineConfig, TrainingPipeline
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_job
+from reef.train.types import JobData
 
 EXAMPLE = Path(__file__).resolve().parents[3] / "recipes/sao/examples/servelearnbench"
+SCENARIO = "retail-test"
 
 
 def load_campaign(monkeypatch):
@@ -76,24 +77,28 @@ def bundle():
 
 
 def completion(name, arguments, index, finish_reason="tool_calls"):
+    """A chat completion as Reef's handler answers it: the reply message carries its role."""
     return {
+        "id": f"chatcmpl-{index}",
+        "object": "chat.completion",
+        "model": "reef",
         "choices": [
             {
+                "index": 0,
                 "finish_reason": finish_reason,
                 "message": {
+                    "role": "assistant",
                     "content": None,
                     "reasoning_content": "Scripted test response.",
                     "tool_calls": [
                         {
                             "id": f"call-{index}",
                             "type": "function",
-                            "function": {
-                                "name": name,
-                                "arguments": json.dumps(arguments),
-                            },
+                            "function": {"name": name, "arguments": json.dumps(arguments)},
                         }
                     ],
                 },
+                "meta_info": {},
             }
         ],
         "usage": {"prompt_tokens": 12, "completion_tokens": 4, "total_tokens": 16},
@@ -116,11 +121,54 @@ def ground_truth_responses(task):
     return responses
 
 
-def model_with_responses(responses):
+def model_with_responses(responses, artifact_id="artifact-0"):
+    """A ReefLLM over a client that answers ``responses`` in order and keeps a copy of each request body."""
     client = Mock(spec=ReefClient)
-    client.service_url = "http://reef.invalid"
-    client.inference_with_record.side_effect = [(response, f"receipt-{i}") for i, response in enumerate(responses)]
-    return reef_agent.ReefLLM(client, "retail-test", llm.ModelConfig(model="reef", max_tokens=512), 42)
+    client.service_url, client.token = "http://reef.invalid", None
+    client.requests = []
+
+    def post(path, scenario, payload, **_kwargs):
+        client.requests.append(copy.deepcopy(payload))
+        index = len(client.requests) - 1
+        return copy.deepcopy(responses[index]), {
+            "x-reef-agent-record-id": f"receipt-{index}",
+            "x-reef-release-id": artifact_id,
+        }
+
+    client.post.side_effect = post
+    return reef_agent.ReefLLM(client, SCENARIO, llm.ModelConfig(model="reef", max_tokens=512), 42)
+
+
+def manual_sao_pipeline(scenario=SCENARIO):
+    context = PipelineContext(scenario, report_type=ScoredRolloutReport, training_mode="manual")
+    return TrainingPipeline(
+        context,
+        record2sample=SAOSamples(context, SampleAssemblySettings(accept_multi_turn_policy_samples=True)),
+        sample2job=SAOJobData(context, None, 1),
+    )
+
+
+def instruction_request(campaign, instruction_id, epochs, artifact_id="artifact-0"):
+    """The queued instruction that the driver's ``POST /reef/train`` body makes."""
+    body = campaign.training_instruction(instruction_id, "train the batch", epochs, artifact_id)
+    return TrainingRequest.from_dict(
+        {key: value for key, value in body.items() if key != "agent_record_id"}, request_id=instruction_id
+    )
+
+
+def episode_records(model, responses):
+    """The inference records of the episode that ``model`` served, as the inference service stores them."""
+    return [
+        AgentRecord.create(
+            scenario=model.scenario,
+            request_type=RequestType.INFERENCE,
+            agent_record_id=receipt,
+            payload={**request, "artifact_id": artifact_id, "response": response},
+        )
+        for receipt, artifact_id, request, response in zip(
+            model.receipts, model.artifact_ids, model.reef.requests, responses, strict=True
+        )
+    ]
 
 
 def test_split_is_fixed_ordered_and_disjoint(bundle):
@@ -142,20 +190,23 @@ def test_configurable_episode_preserves_official_execution_and_scoring(bundle, c
     assert configured == official
 
 
-def test_configured_turn_cap_keeps_official_reward_and_all_receipts(bundle):
+def test_configured_turn_cap_keeps_official_reward_and_reports_the_last_call(bundle):
     task = next(t for t in bundle["serving"] if t.z["window"] == 1 and t.answer is None and t.actions)
     model = model_with_responses([completion("finish", {}, i, finish_reason="length") for i in range(20)])
     reward, trace, usage, _ = reef_agent.run_episode(model, bundle, task, max_steps=20)
     assert reward.reward == 0
-    assert usage["calls"] == len(model.receipts) == 20
+    assert usage["calls"] == len(model.receipts) == len(model.artifact_ids) == 20
     assert reef_report.episode_end_reason(trace) == "step_cap"
+    assert reef_report.episode_artifact_id(model) == "artifact-0"
     reef_report.report_episode(model, "capped-run", task.task_id, reward.reward, "step_cap")
-    assert model.reef.report.call_args.args[1]["references"] == model.receipts
+    payload = model.reef.report.call_args.args[1]
+    assert payload["references"] == [model.receipts[-1]]
+    assert payload["metadata"] == {"task": {"name": task.task_id}, "end_reason": "step_cap", "calls": 20}
     assert protocol.MAX_STEPS == 100
 
 
-@pytest.mark.parametrize("correct", [True, False])
-def test_official_reward_reaches_one_multi_turn_sao_sample(bundle, correct):
+def sao_sample_of_episode(campaign, bundle, correct):
+    """Run one scripted episode, report it, and make its SAO sample through the manual pipeline."""
     task = next(t for t in bundle["serving"] if t.z["window"] == 1 and t.answer is None and t.actions)
     responses = ground_truth_responses(task)
     if not correct:
@@ -176,39 +227,66 @@ def test_official_reward_reaches_one_multi_turn_sao_sample(bundle, correct):
     payload = model.reef.report.call_args.args[1]
     assert payload["score"] == reward.reward
     assert payload["feedback"] == protocol.score_line(reward.reward)
-    assert payload["references"] == model.receipts
-    assert set(payload["metadata"]) == {"task", "end_reason"}
+    assert payload["references"] == [model.receipts[-1]]
 
-    records = []
-    tokens = [10]
-    for i, receipt in enumerate(model.receipts):
-        if i:
-            tokens.append(200 + i)  # An observation is context, not an action.
-        tokens.append(20 + i)
-        records.append(
-            AgentRecord.create(
-                scenario=model.scenario,
-                request_type=RequestType.INFERENCE,
-                agent_record_id=receipt,
-                payload={
-                    "tokens": list(tokens),
-                    "loss_mask": [1],
-                    "rollout_log_probs": [-0.2],
-                    "runtime_load_id": "weights-0",
-                },
-            )
+    pipeline = manual_sao_pipeline()
+    for record in episode_records(model, responses):
+        pipeline.push(record)
+    pipeline.push(
+        AgentRecord.create(
+            scenario=model.scenario,
+            request_type=RequestType.REPORT,
+            agent_record_id=payload["agent_record_id"],
+            payload=payload,
         )
-    report = AgentRecord.create(
-        scenario=model.scenario,
-        request_type=RequestType.REPORT,
-        payload=payload,
-        references=tuple(model.receipts),
     )
-    tasks = SAOTasks(SampleAssemblySettings(accept_multi_turn_policy_samples=True))
-    sample = tasks.make_sample(ReportContext(report=report, score=reward.reward, inferences=tuple(records)))
+    pipeline.store_samples()
+    sample_ids = tuple(stored.sample_id for stored in pipeline.store.page())
+    assert sample_ids == (f"{payload['agent_record_id']}:0",)
+    pipeline.insert_into_buffer(sample_ids)
+    pipeline.queue_instructions([instruction_request(campaign, "instruction-1", 2)])
+    data = pipeline.build_job_data(1)
+    (sample,) = data.samples
     assert trajectory_reward(sample) == reward.reward
-    assert sample.training["action_mask"] == [1] + [x for _ in responses[1:] for x in (0, 1)]
-    assert sample.training["turn_count"] == len(responses)
+    assert sample.source_agent_record_ids == (*model.receipts, payload["agent_record_id"])
+    return data, len(responses)
+
+
+@pytest.mark.parametrize("correct", [True, False])
+def test_official_reward_reaches_one_multi_turn_sao_sample(bundle, monkeypatch, correct):
+    campaign = load_campaign(monkeypatch)
+    data, calls = sao_sample_of_episode(campaign, bundle, correct)
+    (sample,) = data.samples
+    # One trained agent step per model call: the benchmark resends each reply as Reef recorded it, so no
+    # reply comes back as copied context, and the tool results fold into the steps that called them.
+    agent_steps = [step for step in sample.trajectory["steps"] if step["source"] == "agent"]
+    assert len(agent_steps) == calls
+    assert not any(step.get("extra", {}).get("reef", {}).get("is_copied_context") for step in agent_steps)
+    assert sample.artifact_id == "artifact-0"
+    assert isinstance(sample.training["rollout_created_at"], float)
+    assert "tokens" not in sample.training  # The training component renders the sample.
+    method, scheduling = job_training({**data.request.parameters, "method": TrainingMethod("sao").to_dict()})
+    assert (method.objective, scheduling.epochs, scheduling.remainder) == ("sao", 2, "partial")
+
+
+def test_qwen3_template_renders_every_reply_of_a_tool_episode(bundle, monkeypatch):
+    path = os.environ.get("REEF_TEST_QWEN_TOKENIZER")
+    if not path:
+        pytest.skip("Set REEF_TEST_QWEN_TOKENIZER to a local Qwen3 tokenizer for this check")
+    transformers = pytest.importorskip("transformers")
+    campaign = load_campaign(monkeypatch)
+    data, calls = sao_sample_of_episode(campaign, bundle, True)
+    (sample,) = data.samples
+    template = TokenizerChatTemplate(transformers.AutoTokenizer.from_pretrained(path), {"enable_thinking": True})
+    rendered = render_trajectory(template, sample.trajectory)
+    assert 0 < sum(rendered.loss_mask) < len(rendered.loss_mask) < len(rendered.tokens)
+    # Each reply is one trained run of tokens; the observations between them are context.
+    runs = sum(
+        1
+        for index, flag in enumerate(rendered.loss_mask)
+        if flag and (index == 0 or not rendered.loss_mask[index - 1])
+    )
+    assert runs == calls
 
 
 @pytest.mark.parametrize(
@@ -217,7 +295,7 @@ def test_official_reward_reaches_one_multi_turn_sao_sample(bundle, correct):
 def test_context_overflow_is_scored_but_service_failure_aborts(bundle, status, body, scored):
     task = next(t for t in bundle["serving"] if t.z["window"] == 1)
     model = model_with_responses([])
-    model.reef.inference_with_record.side_effect = ReefClientError(status, body)
+    model.reef.post.side_effect = ReefClientError(status, body)
     if scored:
         reward, trace, _, _ = agent.run_episode(model, bundle, task)
         assert reward.reward == 0
@@ -228,84 +306,230 @@ def test_context_overflow_is_scored_but_service_failure_aborts(bundle, status, b
     model.reef.report.assert_not_called()
 
 
+def test_mixed_served_artifacts_fail_before_reporting():
+    model = model_with_responses([])
+    model.receipts, model.artifact_ids = ["a", "b"], ["artifact-0", "artifact-1"]
+    with pytest.raises(RuntimeError, match="exactly one"):
+        reef_report.episode_artifact_id(model)
+    model.reef.report.assert_not_called()
+
+
+def status_block(finished_jobs, *, running=False, open_admission=True, served=None, start=None):
+    """One scenario's block of GET /reef/status after ``finished_jobs`` jobs."""
+    served = f"artifact-{finished_jobs}" if served is None else served
+    return {
+        "scenario_step": 3 * finished_jobs,
+        "finished_jobs": finished_jobs,
+        "training_job": {"job_id": "job-running"} if running else None,
+        "served_artifact_id": served,
+        "training_mode": "manual",
+        "inference_admission": {"open": open_admission},
+        "artifacts": {"": {"active": served, "training_start": served if start is None else start}},
+    }
+
+
+def job_row(instruction_id, state="finished", error=None):
+    return {
+        "id": f"job-{instruction_id}",
+        "state": state,
+        "error": error,
+        "checkpoints": [],
+        "instruction": {"id": instruction_id},
+    }
+
+
+def reef_reads(statuses, jobs, sample_pages=()):
+    """A ReefClient mock whose GET answers the status blocks in turn, the job list, and the sample pages."""
+    client = Mock(spec=ReefClient)
+    client.service_url, client.token = "http://reef.invalid", None
+    remaining = list(statuses)
+    pages = list(sample_pages)
+
+    def get(path, **_kwargs):
+        if path == "/reef/status":
+            block = remaining.pop(0) if len(remaining) > 1 else remaining[0]
+            return {"error": block.get("error"), "scenarios": {SCENARIO: block}}
+        if path.endswith("/jobs"):
+            return {"scenario": SCENARIO, "jobs": list(jobs)}
+        if "/samples?" in path:
+            return pages.pop(0) if len(pages) > 1 else pages[0]
+        raise AssertionError(f"unexpected read {path}")
+
+    client.get.side_effect = get
+    return client
+
+
 def test_training_barrier_never_succeeds_on_timeout(monkeypatch):
     campaign = load_campaign(monkeypatch)
-    client = Mock(spec=ReefClient)
-    client.get.return_value = {"releases": [], "error": None}
+    client = reef_reads([status_block(0, running=True)], [])
     clock = iter([0, 0, 2, 2])
     monkeypatch.setattr(campaign.time, "monotonic", lambda: next(clock))
     monkeypatch.setattr(campaign.time, "sleep", lambda _: None)
-    with pytest.raises(TimeoutError, match="did not commit"):
-        campaign.wait_for_training(client, "retail", 1, 1)
+    with pytest.raises(TimeoutError, match="did not serve"):
+        campaign.wait_for_training(client, SCENARIO, "i1", 1, "artifact-0", 1)
 
 
-def test_saved_releases_wait_for_published_version_and_use_newest_commit(monkeypatch):
+def test_training_barrier_needs_the_finished_job_open_admission_and_the_served_checkpoint(monkeypatch):
     campaign = load_campaign(monkeypatch)
-    client = Mock(spec=ReefClient)
-    checkpoint = {
-        "operation": "training",
-        "metrics": {"training_job": {"event": "checkpoint", "job_id": "first", "step": 2}, "selected": True},
-    }
-    newest = {
-        **checkpoint,
-        "release_id": "second",
-        "metrics": {"selected": True, "training_job": {"event": "checkpoint", "job_id": "second", "step": 1}},
-    }
-    older = {**checkpoint, "release_id": "first"}
-    pending = {**checkpoint, "release_id": "pending", "pending": True}
-    submitted = {"operation": "training", "metrics": {"training_job": {"event": "submitted"}}}
-    finished = {"operation": "training", "metrics": {"training_job": {"event": "finished"}}}
-    # Recovered checkpoints may lack worker metrics, including actor_trained.
-    warmup = {
-        **checkpoint,
-        "metrics": {"selected": True, "training_job": {"event": "checkpoint", "job_id": "first", "step": 1}},
-    }
-    # Open admission alone is insufficient while an asynchronous job still runs.
-    states = iter([(True, 1), (False, 2), (True, 2)])
+    statuses = [
+        status_block(0, running=True, served="artifact-0"),
+        status_block(1, open_admission=False),
+        status_block(1, served="artifact-0"),  # The job finished; serving has not moved to its checkpoint yet.
+        status_block(1, start="artifact-0"),  # Serving moved, the trainer's start not yet.
+        status_block(1),
+    ]
+    client = reef_reads(statuses, [job_row("i1")])
+    monkeypatch.setattr(campaign.time, "sleep", lambda _: None)
+    result = campaign.wait_for_training(client, SCENARIO, "i1", 1, "artifact-0", 10)
+    assert result == {"job_id": "job-i1", "artifact_id": "artifact-1", "scenario_step": 3}
+    assert client.get.call_count == 10
 
-    def get(path):
-        if path.endswith("/releases"):
-            return {"releases": [finished, pending, newest, submitted, older, warmup, {"operation": "creation"}]}
-        open_for_inference, finished_jobs = next(states)
+
+@pytest.mark.parametrize(
+    "statuses,jobs,match",
+    [
+        ([{**status_block(0), "error": "optimizer failed"}], [], "optimizer failed"),
+        ([status_block(0, running=True)], [job_row("i1", "failed", "cuda out of memory")], "cuda out of memory"),
+        ([status_block(2)], [job_row("i1")], "Unexpected training job"),
+    ],
+)
+def test_training_failures_do_not_wait_for_timeout(monkeypatch, statuses, jobs, match):
+    campaign = load_campaign(monkeypatch)
+    client = reef_reads(statuses, jobs)
+    with pytest.raises(RuntimeError, match=match):
+        campaign.wait_for_training(client, SCENARIO, "i1", 1, "artifact-0", 10)
+
+
+def test_wait_for_samples_pages_the_store_until_every_report_has_a_sample(monkeypatch):
+    campaign = load_campaign(monkeypatch)
+    first = {"sample_id": "r1:0", "sequence": 1, "train_counts": {}}
+    second = {"sample_id": "r2:0", "sequence": 7, "train_counts": {"": 1}}
+    pages = [
+        {"samples": [first, {"sample_id": "other:0", "sequence": 2, "train_counts": {}}], "next": 2},
+        {"samples": [], "next": None},
+        {"samples": [first], "next": 2},
+        {"samples": [second], "next": None},
+    ]
+    client = reef_reads([status_block(0)], [], pages)
+    monkeypatch.setattr(campaign.time, "sleep", lambda _: None)
+    assert campaign.wait_for_samples(client, SCENARIO, ["r2", "r1"], 10) == [second, first]
+    assert [call.args[0] for call in client.get.call_args_list if "/samples?" in call.args[0]] == [
+        f"/reef/scenarios/{SCENARIO}/samples?after=0&limit=1000",
+        f"/reef/scenarios/{SCENARIO}/samples?after=2&limit=1000",
+        f"/reef/scenarios/{SCENARIO}/samples?after=0&limit=1000",
+        f"/reef/scenarios/{SCENARIO}/samples?after=2&limit=1000",
+    ]
+
+
+def test_train_batch_queues_a_batch_once_and_repeats_safely(monkeypatch):
+    campaign = load_campaign(monkeypatch)
+    model = model_with_responses([])
+    batch = [
+        {"task_id": "t1", "receipts": ["a1", "a2"], "reward": 1.0, "end_reason": "finish"},
+        {"task_id": "t2", "receipts": ["b1"], "reward": 0.0, "end_reason": "step_cap"},
+    ]
+    report_ids = [reef_report.report_id(SCENARIO, row["task_id"]) for row in batch]
+    instruction_id = campaign.training_instruction_id(SCENARIO, ["t1", "t2"])
+    waited = []
+    monkeypatch.setattr(campaign, "wait_for_training", lambda *args: waited.append(args) or {"job_id": "job"})
+
+    def samples(trained):
         return {
-            "error": None,
-            "scenarios": {
-                "retail": {
-                    "current_runtime_load_id": "v2" if open_for_inference else "v1",
-                    "inference_admission": {"open": open_for_inference},
-                    "finished_jobs": finished_jobs,
-                    "training_job": None if finished_jobs == 2 else {"job_id": "running"},
-                }
-            },
+            "samples": [
+                {"sample_id": f"{r}:0", "sequence": i, "train_counts": trained} for i, r in enumerate(report_ids)
+            ],
+            "next": None,
         }
 
-    client.get.side_effect = get
-    monkeypatch.setattr(campaign.time, "sleep", lambda _: None)
-    assert campaign.training_releases(client, "retail") == [older, newest]
-    release = campaign.wait_for_training(client, "retail", 2, 10)
-    assert release == {**newest, "runtime_load_id": "v2"}
-    client.get.side_effect = None
-    client.get.return_value = {"releases": [warmup]}
-    assert campaign.training_releases(client, "retail") == []
-    monkeypatch.setenv("SAO_WARMUP", "0")
-    assert campaign.training_releases(client, "retail") == [warmup]
+    def run(jobs, trained):
+        client = reef_reads([status_block(0)], jobs, [samples(trained)])
+        model.reef.report.reset_mock()
+        return client, campaign.train_batch(
+            client,
+            model,
+            SCENARIO,
+            batch,
+            instruction_id=instruction_id,
+            text="train",
+            epochs=2,
+            expected_jobs=1,
+            served_artifact_id="artifact-0",
+            timeout_seconds=10,
+        )
+
+    client, result = run([], {})
+    assert result == {"job_id": "job"}
+    assert [call.args[1]["references"] for call in model.reef.report.call_args_list] == [["a2"], ["b1"]]
+    assert [call.args[0] for call in client.post.call_args_list] == [
+        f"/reef/scenarios/{SCENARIO}/buffer/insert",
+        "/reef/train",
+    ]
+    assert client.post.call_args_list[0].args[2] == {"sample_ids": [f"{r}:0" for r in report_ids]}
+    assert client.post.call_args_list[1].args[2] == campaign.training_instruction(
+        instruction_id, "train", 2, "artifact-0"
+    )
+    assert waited[-1][2:] == (instruction_id, 1, "artifact-0", 10)
+    # After an interruption, the reports repeat with the same IDs and a batch whose job exists is not queued again.
+    client, _ = run([job_row(instruction_id)], {"": 1})
+    assert model.reef.report.call_count == 2
+    client.post.assert_not_called()
+    with pytest.raises(RuntimeError, match="trained outside"):
+        run([], {"": 1})
 
 
-def test_training_failure_does_not_wait_for_timeout(monkeypatch):
-    campaign = load_campaign(monkeypatch)
-    client = Mock(spec=ReefClient)
-    client.get.side_effect = [{"releases": []}, {"error": "optimizer failed"}]
-    with pytest.raises(RuntimeError, match="optimizer failed"):
-        campaign.wait_for_training(client, "retail", 1, 10)
+class FakeTraining:
+    """The training state that the driver reads: finished jobs by instruction, and the artifact each one serves."""
 
+    def __init__(self):
+        self.jobs: list[dict] = []
+        self.reports: list[str] = []
+        self.batches: list[list[str]] = []
 
-def test_mixed_weight_versions_fail_before_reporting():
-    model = model_with_responses([])
-    model.receipts = ["a", "b"]
-    model.reef.get.side_effect = [{"payload": {"runtime_load_id": version}} for version in ("v0", "v1")]
-    with pytest.raises(RuntimeError, match="exactly one"):
-        reef_report.episode_runtime_load_id(model)
-    model.reef.report.assert_not_called()
+    def status(self, *_args):
+        return status_block(len(self.jobs))
+
+    def listing(self, *_args):
+        return [job_row(job["instruction_id"]) for job in self.jobs]
+
+    def train_batch(
+        self,
+        client,
+        model,
+        scenario,
+        batch,
+        *,
+        instruction_id,
+        text,
+        epochs,
+        expected_jobs,
+        served_artifact_id,
+        timeout_seconds,
+    ):
+        assert expected_jobs == len(self.jobs) + 1
+        assert served_artifact_id == f"artifact-{len(self.jobs)}"
+        assert epochs == (2 if not self.jobs else 1)
+        for row in batch:
+            assert row["receipts"]
+            self.reports.append(row["task_id"])
+        self.batches.append([row["task_id"] for row in batch])
+        self.jobs.append({"instruction_id": instruction_id, "task_ids": self.batches[-1]})
+        return {
+            "job_id": f"job-{len(self.jobs)}",
+            "artifact_id": f"artifact-{len(self.jobs)}",
+            "scenario_step": 3 * len(self.jobs),
+        }
+
+    def install(self, monkeypatch, campaign):
+        client = Mock(spec=ReefClient)
+        client.service_url, client.token = "http://reef.invalid", None
+        monkeypatch.setattr(campaign, "ReefClient", lambda *args, **kwargs: client)
+        monkeypatch.setattr(campaign, "ensure_scenario", lambda client, scenario, *, trains: self.status())
+        monkeypatch.setattr(campaign, "scenario_status", self.status)
+        monkeypatch.setattr(campaign, "training_jobs", self.listing)
+        monkeypatch.setattr(campaign, "train_batch", self.train_batch)
+        monkeypatch.setattr(campaign, "episode_artifact_id", lambda model: f"artifact-{len(self.jobs)}")
+        monkeypatch.setenv("REEF_SERVICE_URL", client.service_url)
+        return client
 
 
 @pytest.mark.parametrize("method", ["blind", "oracle", "sao"])
@@ -315,16 +539,13 @@ def test_mixed_weight_versions_fail_before_reporting():
 def test_campaign_never_reports_test_tasks(bundle, monkeypatch, tmp_path, method, batch_size, smoke, windows_arg):
     monkeypatch.delenv("SAO_BATCH", raising=False)
     campaign = load_campaign(monkeypatch)
-    client = Mock(spec=ReefClient)
-    client.service_url, client.token = "http://reef.invalid", None
-    monkeypatch.setattr(campaign, "ReefClient", lambda *args, **kwargs: client)
-    releases, reports, phases, batches = [], [], [], []
-    monkeypatch.setattr(campaign, "training_releases", lambda *args: copy.deepcopy(releases))
-    monkeypatch.setattr(campaign, "episode_runtime_load_id", lambda model: f"v{len(releases)}")
+    training = FakeTraining()
+    training.install(monkeypatch, campaign)
+    phases = []
 
     def run_episode(model, bundle, task, extra_system, max_steps):
         assert max_steps == 20
-        phases.append((task.task_id, bool(extra_system), len(releases)))
+        phases.append((task.task_id, bool(extra_system), len(training.jobs)))
         model.receipts.append(f"receipt-{task.task_id}")
         return (
             type("Reward", (), {"reward": 1.0, "answer_detail": {}})(),
@@ -333,22 +554,7 @@ def test_campaign_never_reports_test_tasks(bundle, monkeypatch, tmp_path, method
             {},
         )
 
-    def report_episode(model, run_id, task_id, reward, end_reason, *, batch_task_ids):
-        if task_id == batch_task_ids[0]:
-            batches.append(batch_task_ids)
-        reports.append(task_id)
-        return {"status": "accepted"}
-
-    def wait_for_training(client, scenario, count, timeout):
-        assert len(batches) == count
-        assert len(reports) == sum(len(batch) for batch in batches)
-        releases.append({"operation": "training", "runtime_load_id": f"v{count}", "release_id": f"release-{count}"})
-        return releases[-1]
-
     monkeypatch.setattr(campaign, "run_episode", run_episode)
-    monkeypatch.setattr(campaign, "report_episode", report_episode)
-    monkeypatch.setattr(campaign, "wait_for_training", wait_for_training)
-    monkeypatch.setenv("REEF_SERVICE_URL", client.service_url)
     path = tmp_path / "results.jsonl"
     monkeypatch.setattr(
         sys,
@@ -385,24 +591,26 @@ def test_campaign_never_reports_test_tasks(bundle, monkeypatch, tmp_path, method
     serving_count = sum(n for _, n, _ in plan)
     test_count = sum(m for _, _, m in plan)
     trained = sum(n for _, n, _ in plan) if method == "sao" else 0
-    assert len(reports) == trained
-    assert set(reports).isdisjoint(row["task_id"] for row in episodes if row["phase"] == "test")
-    # Each episode sees the releases committed so far; a batch completes a
-    # release only within its window, and tests see the window's final count.
-    expected_versions: list[int] = []
-    released = 0
+    assert len(training.reports) == trained
+    assert set(training.reports).isdisjoint(row["task_id"] for row in episodes if row["phase"] == "test")
+    # Each episode sees the jobs finished so far; a batch completes a job only
+    # within its window, and tests see the window's final count.
+    expected_jobs: list[int] = []
+    finished = 0
     for _window, n, m in plan:
         for i in range(n):
-            expected_versions.append(released)
+            expected_jobs.append(finished)
             if method == "sao" and ((i + 1) % batch_size == 0 or i == n - 1):
-                released += 1
-        expected_versions += [released] * m
-    assert [row["training_releases_before"] for row in episodes] == expected_versions
+                finished += 1
+        expected_jobs += [finished] * m
+    assert [row["training_jobs_before"] for row in episodes] == expected_jobs
+    assert [row["artifact_id"] for row in episodes] == [f"artifact-{count}" for count in expected_jobs]
     assert [row["window"] for row in episodes] == [w for w, n, m in plan for _ in range(n + m)]
-    tails = [row for row in rows if row.get("type") == "untrained_tail"]
-    assert not tails
+    declared = [row for row in rows if row.get("type") == "batch_ready"]
+    assert [row["task_ids"] for row in declared] == training.batches
+    assert [row["epochs"] for row in declared] == ([2] + [1] * (len(declared) - 1) if declared else [])
     assert rows[-1]["partial_batch_tasks"] == (sum(n % batch_size for _, n, _ in plan) if method == "sao" else 0)
-    assert rows[-1]["training_releases"] == released
+    assert rows[-1]["training_jobs"] == finished
     assert rows[-1]["trained_tasks"] == trained
     assert rows[-1]["windows"] == windows
     assert rows[-1]["window_scores"] == {str(w): 100.0 for w in windows}
@@ -482,23 +690,25 @@ def test_inference_options_keep_native_numeric_types(monkeypatch):
     assert type(options["mem-fraction-static"]) is float
 
 
-def test_deployment_builds_declared_batch_pipeline(monkeypatch, tmp_path):
+def test_deployment_builds_the_manual_sao_pipeline(monkeypatch, tmp_path):
     for name in ("MODEL_DIR", "CHECKPOINT_DIR", "REEF_WORK"):
         monkeypatch.setenv(name, str(tmp_path / name))
     monkeypatch.setenv("REEF_PORT", "8900")
     monkeypatch.setenv("REEF_TOKEN", "test-token")
     monkeypatch.setenv("SAO_GPUS", "1")
     deployment = load_deployment(EXAMPLE / "serve.yaml")
-    stages = PipelineConfig.from_setting(
-        deployment["pipeline"], spec=RetailSAORecipe.pipeline_spec(), environ=os.environ
-    )
-    pipeline = stages.build(PipelineContext("retail", report_type=ScoredRolloutReport))
-    assert isinstance(pipeline.record2record, RetailBatchReports)
-    assert pipeline.record2record.grouping.max_batch_size == 64
-    assert pipeline.task2job.job_samples == 1
-    assert pipeline.task2job.buffer_size == 64
-    assert deployment["reef"]["warmup_steps"] == 1
-    assert str(deployment["reef"]["training_backend_options"]["num-critic-only-steps"]) == "1"
+    assert deployment["reef"]["training_mode"] == "manual"
+    assert deployment["reef"]["inference_handler_config"]["rollout_continuation"] is True
+    options = deployment["reef"]["training_backend_options"]
+    assert str(options["num-critic-only-steps"]) == "1"
+    # The actor computes the old-policy log-probabilities of each batch with the weights of the job's start.
+    assert "use-rollout-logprobs" not in options
+    stages = PipelineConfig.from_setting(deployment["pipeline"], spec=SAORecipe.pipeline_spec(), environ=os.environ)
+    pipeline = stages.build(PipelineContext("retail", report_type=ScoredRolloutReport, training_mode="manual"))
+    assert isinstance(pipeline.record2sample, SAOSamples)
+    assert pipeline.record2sample.assembly.settings.accept_multi_turn_policy_samples
+    assert isinstance(pipeline.sample2job, SAOJobData)
+    assert pipeline.sample2job.job_samples == 1
 
 
 @pytest.mark.parametrize(
@@ -506,24 +716,22 @@ def test_deployment_builds_declared_batch_pipeline(monkeypatch, tmp_path):
     [
         "batch_boundary",
         "partial_collection",
-        "partial_reports",
-        "committed_without_log",
+        "before_training",
+        "trained_without_log",
         "test",
-        "tail_report",
-        "tail_committed",
+        "tail_before_training",
+        "tail_trained_without_log",
     ],
 )
 def test_resume_matches_uninterrupted_campaign(bundle, monkeypatch, tmp_path, interruption):
     campaign = load_campaign(monkeypatch)
     monkeypatch.setenv("SAO_BATCH", "2")
-    client = Mock(spec=ReefClient)
-    client.service_url, client.token = "http://reef.invalid", None
-    monkeypatch.setattr(campaign, "ReefClient", lambda *args, **kwargs: client)
-    releases, accepted, sampled = [], {}, []
-    monkeypatch.setattr(campaign, "training_releases", lambda *args: copy.deepcopy(releases))
-    monkeypatch.setattr(campaign, "episode_runtime_load_id", lambda model: f"session-{session[0]}-v{len(releases)}")
-    session = [0]
+    training = FakeTraining()
+    training.install(monkeypatch, campaign)
+    sampled = []
     interrupted = [False]
+    accepted: dict[str, tuple] = {}
+    finished_train_batch = training.train_batch
 
     def run_episode(model, bundle, task, **kwargs):
         # Stop before the second collection or test task. Its predecessor is already durable.
@@ -540,34 +748,36 @@ def test_resume_matches_uninterrupted_campaign(bundle, monkeypatch, tmp_path, in
             {},
         )
 
-    def report_episode(model, run_id, task_id, reward, end_reason, *, batch_task_ids):
-        report = (tuple(model.receipts), reward, end_reason, tuple(batch_task_ids))
-        if task_id in accepted:
-            assert accepted[task_id] == report  # Idempotent retry must keep the original receipts.
-        else:
-            accepted[task_id] = report
+    def train_batch(client, model, scenario, batch, *, instruction_id, **kwargs):
+        tail = len(batch) == 1
+        for row in batch:
+            # A repeated batch keeps its reports: the same receipts, reward, ending and instruction.
+            report = (tuple(row["receipts"]), row["reward"], row["end_reason"], instruction_id)
+            assert accepted.setdefault(row["task_id"], report) == report
+        existing = next((job for job in training.jobs if job["instruction_id"] == instruction_id), None)
+        if existing is not None:
+            # The job of an interrupted batch finished: nothing trains again.
+            index = training.jobs.index(existing) + 1
+            return {"job_id": f"job-{index}", "artifact_id": f"artifact-{index}", "scenario_step": 3 * index}
         if (
-            interruption == "partial_reports" or (interruption == "tail_report" and len(accepted) == 3)
-        ) and not interrupted[0]:
+            interruption in ("before_training", "tail_before_training")
+            and not interrupted[0]
+            and tail == interruption.startswith("tail")
+        ):
             interrupted[0] = True
             raise RuntimeError("simulated interruption")
-        return {"status": "accepted"}
-
-    def wait_for_training(client, scenario, count, timeout):
-        if len(releases) < count:
-            assert len(accepted) == min(count * 2, 3)
-            releases.append({"operation": "training", "release_id": f"release-{count}"})
+        result = finished_train_batch(client, model, scenario, batch, instruction_id=instruction_id, **kwargs)
         if (
-            interruption == "committed_without_log" or (interruption == "tail_committed" and count == 2)
-        ) and not interrupted[0]:
+            interruption in ("trained_without_log", "tail_trained_without_log")
+            and not interrupted[0]
+            and tail == interruption.startswith("tail")
+        ):
             interrupted[0] = True
             raise RuntimeError("simulated interruption")
-        return {**releases[-1], "runtime_load_id": f"session-{session[0]}-v{count}"}
+        return result
 
     monkeypatch.setattr(campaign, "run_episode", run_episode)
-    monkeypatch.setattr(campaign, "report_episode", report_episode)
-    monkeypatch.setattr(campaign, "wait_for_training", wait_for_training)
-    monkeypatch.setenv("REEF_SERVICE_URL", client.service_url)
+    monkeypatch.setattr(campaign, "train_batch", train_batch)
     output = tmp_path / "results.jsonl"
     command = ["run.py", "--method", "sao", "--smoke", "--windows", "1", "--output", str(output)]
     monkeypatch.setattr(
@@ -578,24 +788,26 @@ def test_resume_matches_uninterrupted_campaign(bundle, monkeypatch, tmp_path, in
     else:
         with pytest.raises(RuntimeError, match="simulated interruption"):
             campaign.main()
-    session[0] += 1
     monkeypatch.setattr(sys, "argv", [*command, "--resume"])
     campaign.main()
     rows = [json.loads(line) for line in output.read_text().splitlines()]
     episodes = [row for row in rows if row.get("type") == "episode"]
     assert len(episodes) == len({row["task_id"] for row in episodes}) == 5
-    assert len(accepted) == 3 and len(releases) == 2
+    assert len(accepted) == 3 and len(training.jobs) == 2
     assert all(row["task_id"] not in accepted for row in episodes if row["phase"] == "test")
+    assert [row["instruction_id"] for row in rows if row.get("type") == "training"] == [
+        job["instruction_id"] for job in training.jobs
+    ]
     assert rows[-1]["test_score"] == 100.0
-    assert rows[-1]["training_releases"] == 2
+    assert rows[-1]["training_jobs"] == 2
     assert rows[-1]["trained_tasks"] == 3
     # Resuming a completed run neither samples nor reports again.
-    counts = (len(sampled), len(accepted), len(releases))
+    counts = (len(sampled), len(accepted), len(training.jobs))
     campaign.main()
-    assert (len(sampled), len(accepted), len(releases)) == counts
+    assert (len(sampled), len(accepted), len(training.jobs)) == counts
 
 
-def test_resume_rejects_changed_config_and_mismatched_checkpoints(monkeypatch, tmp_path):
+def test_resume_rejects_changed_config_and_mismatched_jobs(monkeypatch, tmp_path):
     campaign = load_campaign(monkeypatch)
     path = tmp_path / "results.jsonl"
     log = campaign_results.ResultLog(path, resume=False)
@@ -605,10 +817,13 @@ def test_resume_rejects_changed_config_and_mismatched_checkpoints(monkeypatch, t
     try:
         with pytest.raises(RuntimeError, match="configuration differs"):
             campaign.recover_campaign(log, client, model, {"seed": 43}, 1)
-        log.append({"type": "batch_ready", "task_ids": ["a"]})
-        log.append({"type": "training", "task_ids": ["a"], "release": {"release_id": "original"}})
-        monkeypatch.setattr(campaign, "training_releases", lambda *args: [{"release_id": "different"}])
+        log.append({"type": "batch_ready", "task_ids": ["a"], "instruction_id": "original"})
+        log.append({"type": "training", "task_ids": ["a"], "instruction_id": "original"})
+        monkeypatch.setattr(campaign, "training_jobs", lambda *args: [job_row("different")])
         with pytest.raises(RuntimeError, match="history disagree"):
+            campaign.recover_campaign(log, client, model, {"seed": 42}, 1)
+        monkeypatch.setattr(campaign, "training_jobs", lambda *args: [job_row("original"), job_row("extra")])
+        with pytest.raises(RuntimeError, match="does not match this campaign"):
             campaign.recover_campaign(log, client, model, {"seed": 42}, 1)
     finally:
         log.close()
@@ -626,77 +841,46 @@ def test_resume_discards_only_incomplete_final_json_line(tmp_path):
 
 
 @pytest.mark.parametrize("count", [64, 15, 12, 56, 57])
-def test_declared_batch_waits_for_every_task_and_keeps_tail_rewards(count):
-    context = PipelineContext("retail", report_type=ScoredRolloutReport)
-
-    def pipeline():
-        reports = RetailBatchReports.from_config({"max_batch_size": 64}, context=context, environ={})
-        tasks = SAOTasks(SampleAssemblySettings(accept_multi_turn_policy_samples=True))
-        jobs = SAOJobData(context, buffer_size=64, job_samples=1)
-        return TrainingPipeline(context, record2record=reports, record2task=tasks, task2job=jobs)
-
+def test_manual_batch_trains_every_declared_task_including_a_window_tail(monkeypatch, count):
+    campaign = load_campaign(monkeypatch)
+    pipeline = manual_sao_pipeline("retail")
     task_ids = [f"task-{index}" for index in range(count)]
-    records = []
-    active = pipeline()
     for index, task_id in enumerate(task_ids):
         model = model_with_responses([])
-        model.scenario = "retail"
-        model.receipts = [f"inference-{index}"]
-        reef_report.report_episode(model, "retail", task_id, float(index % 2), "finish", batch_task_ids=task_ids)
+        model.scenario, model.receipts = "retail", [f"inference-{index}"]
+        reef_report.report_episode(model, "retail", task_id, float(index % 2), "finish")
         payload = model.reef.report.call_args.args[1]
-        inference = AgentRecord.create(
-            scenario="retail",
-            request_type=RequestType.INFERENCE,
-            agent_record_id=model.receipts[0],
-            payload={"tokens": [10, 20], "loss_mask": [1], "rollout_log_probs": [-0.2], "runtime_load_id": "v0"},
+        pipeline.push(conversation(model.receipts[0], 1, scenario="retail"))
+        pipeline.push(
+            AgentRecord.create(
+                scenario="retail",
+                request_type=RequestType.REPORT,
+                agent_record_id=payload["agent_record_id"],
+                payload=payload,
+            )
         )
-        report = AgentRecord.create(
-            scenario="retail",
-            request_type=RequestType.REPORT,
-            agent_record_id=payload["agent_record_id"],
-            payload=payload,
-            references=tuple(model.receipts),
-        )
-        records.extend((inference, report))
-        active.push(inference)
-        active.push(report)
-        assert active.ready(1) == (index == count - 1)
-        if index == count // 2:
-            # Rebuild from persisted records halfway through collection.
-            active = pipeline()
-            for record in records:
-                active.push(record)
-            assert not active.ready(1)
-    data = active.build_job_data(1)
-    assert len(data.items) == count
-    assert [trajectory_reward(item) for item in data.items] == [float(index % 2) for index in range(count)]
-    prepared = prepare_slime_job(data, TrainingMethod("sao"), {}, StepScheduling(), step_size=64)
-    assert prepared.payload["external_step_sizes"] == [count]
-    assert prepared.metrics["optimizer_steps"] == 1
-    # First-job warmup repeats the exact rows, with a separate saved step per pass.
-    for warmup_steps in (0, 1, 3):
-        job_plan = RetailJobPlan(warmup_steps)
-        context = JobPlanContext(data, 0, None)
-        request = job_plan.next_job(context)
-        assert request == RetailJobPlan(warmup_steps).next_job(context)
-        method, scheduling = job_training(request.parameters)
-        repeated = prepare_slime_job(data, method, {}, scheduling, step_size=64).payload
-        assert repeated["external_step_sizes"] == [count] * (warmup_steps + 1)
-        assert repeated["samples"] == prepared.payload["samples"] * (warmup_steps + 1)
-        assert "advantages" not in repeated
-        assert request.parameters["save_interval"] == 1
-        later = job_plan.next_job(JobPlanContext(data, 1, JobOutcome("first", "slime", "finished")))
-        assert later.parameters["scheduling"]["epochs"] == 1
-    assert active.acknowledge(data.data_id)
-    assert not active.ready(1)
-
-
-@pytest.mark.parametrize("task_ids", [[], ["a", "a"], ["b"], list(map(str, range(65)))])
-def test_batch_membership_rejects_invalid_task_lists(task_ids):
-    report = AgentRecord.create(
-        scenario="retail",
-        request_type=RequestType.REPORT,
-        payload={"score": 1, "metadata": {"task": {"name": "a"}, "batch_task_ids": task_ids}},
+    pipeline.store_samples()
+    sample_ids = tuple(stored.sample_id for stored in pipeline.store.page())
+    assert len(sample_ids) == count
+    # The driver declares the whole batch: without an instruction nothing trains, with one the whole buffer does.
+    pipeline.insert_into_buffer(sample_ids)
+    assert not pipeline.ready(1)
+    instruction_id = campaign.training_instruction_id("retail", task_ids)
+    pipeline.queue_instructions([instruction_request(campaign, instruction_id, 1)])
+    data = pipeline.build_job_data(1)
+    assert data.data_id == f"retail:instruction:{instruction_id}"
+    assert [trajectory_reward(item) for item in data.samples] == [float(index % 2) for index in range(count)]
+    assert pipeline.acknowledge(data.data_id) >= {instruction_id}
+    assert pipeline.buffer() == ()
+    # The first job's warmup repeats the exact rows, one optimizer step of the whole batch per pass.
+    rows = tuple(
+        policy_trajectory(f"inference-{index}", (5, 1, 2), (1, 1), (-0.1, -0.2), float(index % 2), action_mask=(1, 1))
+        for index in range(count)
     )
-    with pytest.raises(ValueError, match="batch_task_ids"):
-        BatchGrouping(64).placement(ReportContext(report=report, score=1, inferences=()))
+    for warmup_steps in (0, 1, 3):
+        parameters = campaign.training_instruction("i", "train", warmup_steps + 1, "artifact-0")["parameters"]
+        method, scheduling = job_training({**parameters, "method": TrainingMethod("sao").to_dict()})
+        prepared = prepare_slime_job(JobData("retail:instruction:i", rows), method, {}, scheduling, step_size=64)
+        assert prepared.payload["external_step_sizes"] == [count] * (warmup_steps + 1)
+        assert len(prepared.payload["samples"]) == count * (warmup_steps + 1)
+        assert "advantages" not in prepared.payload

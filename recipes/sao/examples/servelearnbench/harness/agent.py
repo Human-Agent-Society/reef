@@ -2,7 +2,7 @@
 
 The benchmark's own environment, tools, budgets, and verifier run unchanged;
 only the model transport goes through Reef, and every call's inference
-receipt is kept for the episode's report.
+receipt and served artifact are kept for the episode's report and checks.
 """
 
 import uuid
@@ -53,10 +53,11 @@ def run_episode(
 class ReefLLM(llm.LLM):
     """An official LLM interface backed by one Reef scenario.
 
-    Each instance has a nonempty scenario, one ModelConfig, and ordered,
-    distinct receipts for the current episode. begin_episode resets receipts.
-    complete appends one receipt per successful, nonstreaming model call.
-    The official agent owns conversation history, tools, and termination.
+    Each instance has a nonempty scenario, one ModelConfig, and, for the
+    current episode, ordered distinct receipts and the served artifact of each
+    call, one entry per successful nonstreaming model call. begin_episode
+    resets both. The official agent owns conversation history, tools, and
+    termination.
     """
 
     def __init__(self, client: ReefClient, scenario: str, cfg: llm.ModelConfig, seed: int) -> None:
@@ -67,10 +68,12 @@ class ReefLLM(llm.LLM):
         self.cfg = cfg
         self.seed = seed
         self.receipts: list[str] = []
+        self.artifact_ids: list[str] = []
         self.episode_id = uuid.uuid4().hex
 
     def begin_episode(self) -> None:
         self.receipts.clear()
+        self.artifact_ids.clear()
         self.episode_id = uuid.uuid4().hex
 
     def complete(
@@ -101,15 +104,21 @@ class ReefLLM(llm.LLM):
         if tools:
             payload.update(tools=tools, parallel_tool_calls=False)
         try:
-            response, receipt = self.reef.inference_with_record(self.scenario, "/v1/chat/completions", payload)
+            response, headers = self.reef.post("/v1/chat/completions", self.scenario, payload)
         except ReefClientError as error:
             # Preserve the official agent's distinction between context-limit
             # HTTP errors (scored endings) and infrastructure failures (abort).
             response = httpx.Response(error.status, request=httpx.Request("POST", self.reef.service_url))
             raise APIStatusError(error.body, response=response, body=error.body) from error
+        # The receipt names the inference record; the release header names the artifact that answered.
+        receipt = headers.get("x-reef-agent-record-id")
+        artifact_id = headers.get("x-reef-release-id")
+        if not receipt or not artifact_id:
+            raise RuntimeError("Inference response has no receipt or served artifact header")
         if receipt in self.receipts:
             raise RuntimeError(f"Duplicate inference receipt: {receipt}")
         self.receipts.append(receipt)
+        self.artifact_ids.append(artifact_id)
         # This private accounting hook is the pinned benchmark's only usage
         # writer. Its agent uses the account to enforce the episode token cap.
         usage = response.get("usage")

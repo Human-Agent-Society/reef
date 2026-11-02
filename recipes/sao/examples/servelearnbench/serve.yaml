@@ -12,8 +12,8 @@ inference:
   handler-factory: reef.inference.sglang.chat.SGLangInferenceHandler
   handler-config:
     tool_call_parser: qwen25
-    # Each episode continues from its exact sampled tokens (the OpenAI user field names it).
-    episode_continuation: true
+    # Each episode continues from its exact sampled tokens (the OpenAI user field names the rollout).
+    rollout_continuation: true
     chat_template_kwargs:
       enable_thinking: true
   num-gpus: ${SAO_GPUS}
@@ -31,24 +31,20 @@ inference:
     tool-call-parser: qwen25
     reasoning-parser: qwen3
 recipe:
-  implementation: recipes.sao.examples.servelearnbench.recipe:RetailSAORecipe
+  implementation: recipes.sao.recipe:SAORecipe
   config:
-    warmup_steps: ${SAO_WARMUP}
+    # The campaign driver declares each training batch, including a window's smaller tail,
+    # and asks for the critic warmup passes on the first one (POST /reef/train).
+    training_mode: manual
 pipeline:
-  record2record:
-    module: recipes.sao.examples.servelearnbench.batching:RetailBatchReports
+  record2sample:
     config:
-      max_staleness: 1
-      max_batch_size: ${SAO_BATCH}
-  task2job:
-    config:
-      # One complete declared batch is an indivisible unit, even for a short tail.
-      job_samples: 1
-      buffer_size: ${SAO_BATCH}
-  record2task:
-    config:
+      # A report names the last call of an episode; the trainer renders every call and trains every reply.
       accept_multi_turn_policy_samples: true
-      realign_threshold: 0
+  sample2job:
+    config:
+      # Manual training trains the whole manual buffer; job_samples only has to be set.
+      job_samples: 1
 training:
   backend: slime
   ready-timeout: 1800
@@ -95,7 +91,6 @@ training:
     lr: "1e-6"
     lr-decay-style: constant
     loss-type: policy_loss
-    use-rollout-logprobs: true
     use-critic: true
     critic-lr: "5e-6"
     critic-steps-per-actor: "2"

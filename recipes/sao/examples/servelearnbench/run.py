@@ -1,11 +1,13 @@
 """Run the Retail L1 stream through Reef: every window in order, as the benchmark's runner does.
 
 For each window, serving tasks run in order. Each SAO batch, including the
-window tail, trains before the next batch starts. Held-out tests then run
-against the frozen weights and report nothing. The weights carry into
-the next window. The summary's ``test_score`` is the
-combined mean reward over every test task run, times 100. Official setting
-scores are reported separately for hidden and fully specified test tasks.
+window tail, trains before the next batch starts: the driver reports the
+batch's episodes, puts their samples into the scenario's manual training
+buffer, and queues one training instruction for them. Held-out tests then run
+against the frozen weights and report nothing. The weights carry into the
+next window. The summary's ``test_score`` is the combined mean reward over
+every test task run, times 100. Official setting scores are reported
+separately for hidden and fully specified test tasks.
 """
 
 import argparse
@@ -13,10 +15,11 @@ import json
 import os
 import time
 import urllib.error
+import uuid
 from pathlib import Path
 from urllib.parse import quote
 
-from reef_client import ReefClient, ReefClientError
+from reef_client import ReefClient
 from servelearnbench import llm, protocol
 from servelearnbench.methods.baselines import Oracle
 from servelearnbench.scenarios import get_bundle, n_windows
@@ -25,86 +28,177 @@ from servelearnbench.scoring import category
 from harness.agent import ReefLLM, run_episode
 from harness.campaign import ResultLog, category_scores
 from harness.config import training_config
-from harness.report import episode_end_reason, episode_runtime_load_id, report_episode
+from harness.report import episode_artifact_id, episode_end_reason, report_episode, report_id
 
 BENCHMARK_REVISION = "57aa919b5ae71d60c38a7ed559262447406f1e8b"
+#: The pause between two reads of the training state.
+POLL_SECONDS = 1.0
 
 
-def training_releases(client: ReefClient, scenario: str) -> list[dict]:
-    """Return selected actor-update checkpoints oldest first, excluding critic warmup and job lifecycle events."""
-    try:
-        response = client.get(f"/reef/scenarios/{quote(scenario, safe='')}/releases")
-    except ReefClientError as error:
-        if error.status == 404:
-            return []
-        raise
-    checkpoints = [
-        release
-        for release in reversed(response["releases"])
-        if release["operation"] == "training"
-        and (release.get("metrics") or {}).get("training_job", {}).get("event") == "checkpoint"
-    ]
-    if not checkpoints:
-        return []
-    first_job = checkpoints[0]["metrics"]["training_job"]["job_id"]
-    warmup = training_config()["SAO_WARMUP"]
-    # Recovered checkpoints can lack worker metrics. The durable job ID and
-    # checkpoint step still distinguish warmup from the first actor update.
-    return [
-        release
-        for release in checkpoints
-        if not release.get("pending", False)
-        and (release.get("metrics") or {}).get("selected") is True
-        and (
-            release["metrics"]["training_job"]["job_id"] != first_job
-            or release["metrics"]["training_job"]["step"] > warmup
-        )
-    ]
+def scenario_path(scenario: str, suffix: str) -> str:
+    return f"/reef/scenarios/{quote(scenario, safe='')}{suffix}"
 
 
-def wait_for_training(client: ReefClient, scenario: str, expected: int, timeout_seconds: float) -> dict:
-    """Wait for exactly expected commits, including serving-weight publication."""
+def scenario_status(client: ReefClient, scenario: str) -> dict:
+    """Return the scenario's block of ``GET /reef/status``; a recorded training error fails the campaign."""
+    status = client.get("/reef/status")
+    if status["error"]:
+        raise RuntimeError(f"Training failed: {status['error']}")
+    if scenario not in status["scenarios"]:
+        raise RuntimeError(f"Reef does not hold the scenario {scenario!r}")
+    return status["scenarios"][scenario]
+
+
+def training_jobs(client: ReefClient, scenario: str) -> list[dict]:
+    """Return the scenario's training jobs, oldest first."""
+    return client.get(scenario_path(scenario, "/jobs"))["jobs"]
+
+
+def instruction_jobs(jobs: list[dict]) -> dict[str, dict]:
+    """Return the jobs that training instructions made, by instruction ID, oldest first."""
+    return {job["instruction"]["id"]: job for job in jobs if job["instruction"] is not None}
+
+
+def ensure_scenario(client: ReefClient, scenario: str, *, trains: bool) -> dict:
+    """Create the scenario when it does not exist; return its status block. A training run needs manual mode."""
+    client.post("/reef/scenarios", scenario, {"name": scenario})
+    block = scenario_status(client, scenario)
+    if trains and block["training_mode"] != "manual":
+        raise RuntimeError("The campaign queues each batch's training itself; set recipe.config.training_mode: manual")
+    return block
+
+
+def training_instruction_id(scenario: str, task_ids: list[str]) -> str:
+    """The instruction ID of one declared batch; a resumed campaign queues the same instruction again."""
+    return uuid.uuid5(uuid.NAMESPACE_URL, f"servelearnbench:{scenario}:train:{','.join(task_ids)}").hex
+
+
+def training_instruction(instruction_id: str, text: str, epochs: int, served_artifact_id: str) -> dict:
+    """The ``POST /reef/train`` body that trains the manual buffer in ``epochs`` passes, one optimizer step each."""
+    return {
+        "agent_record_id": instruction_id,
+        "text": text,
+        "session": "servelearnbench",
+        "release_id": served_artifact_id,
+        "parameters": {"scheduling": {"epochs": epochs, "shuffle": False, "remainder": "partial"}},
+    }
+
+
+def wait_for_samples(client: ReefClient, scenario: str, report_ids: list[str], timeout_seconds: float) -> list[dict]:
+    """Wait until the sample store holds the sample of every report; return them in report order.
+
+    Reef makes one sample per report, with the ID ``<report id>:0``. A recorded
+    training error fails the wait.
+    """
+    wanted = {f"{value}:0": index for index, value in enumerate(report_ids)}
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        scenario_status(client, scenario)
+        found: dict[str, dict] = {}
+        after = 0
+        while True:
+            page = client.get(scenario_path(scenario, f"/samples?after={after}&limit=1000"))
+            found.update({row["sample_id"]: row for row in page["samples"] if row["sample_id"] in wanted})
+            if page["next"] is None:
+                break
+            after = page["next"]
+        if len(found) == len(wanted):
+            return sorted(found.values(), key=lambda row: wanted[row["sample_id"]])
+        if time.monotonic() >= deadline:
+            missing = sorted(set(wanted) - set(found))
+            raise TimeoutError(
+                f"Reef made no sample for {len(missing)} reports within {timeout_seconds}s: {missing[:3]}"
+            )
+        time.sleep(POLL_SECONDS)
+
+
+def wait_for_training(
+    client: ReefClient,
+    scenario: str,
+    instruction_id: str,
+    expected_jobs: int,
+    served_before: str,
+    timeout_seconds: float,
+) -> dict:
+    """Wait until the instruction's job finished and the scenario serves its checkpoint.
+
+    The scenario then counts ``expected_jobs`` finished jobs, runs no job,
+    admits inference again, and serves an artifact other than ``served_before``
+    that is also the trainer's training start. Return the job and that artifact.
+    """
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
         try:
-            releases = training_releases(client, scenario)
-            status = client.get("/reef/status")
+            block = scenario_status(client, scenario)
+            job = instruction_jobs(training_jobs(client, scenario)).get(instruction_id)
         except TimeoutError:
-            continue  # Registry reads can wait behind an in-flight update.
+            continue  # Status reads can wait behind an in-flight commit.
         except urllib.error.URLError as error:
             if isinstance(error.reason, TimeoutError):
                 continue
             raise
-        if status["error"]:
-            raise RuntimeError(f"Training failed: {status['error']}")
-        if len(releases) > expected:
-            raise RuntimeError("Unexpected training release; use a dedicated scenario for this run")
-        if len(releases) == expected:
-            current = status["scenarios"][scenario]
-            version = current["current_runtime_load_id"]
-            # Saved-artifact release rows do not carry runtime_load_id.
-            # Read the published version only after admission reopens.
-            if (
-                current["finished_jobs"] == expected
-                and current["training_job"] is None
-                and current["inference_admission"]["open"]
-                and isinstance(version, str)
-                and version
-            ):
-                return {**releases[-1], "runtime_load_id": version}
-        time.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
-    raise TimeoutError(f"Training did not commit release {expected} within {timeout_seconds}s")
+        if job is not None and job["state"] == "failed":
+            raise RuntimeError(f"Training job {job['id']} failed: {job['error']}")
+        if block["finished_jobs"] > expected_jobs:
+            raise RuntimeError("Unexpected training job; use a dedicated scenario for this run")
+        served = block["served_artifact_id"]
+        if (
+            job is not None
+            and job["state"] == "finished"
+            and block["finished_jobs"] == expected_jobs
+            and block["training_job"] is None
+            and block["inference_admission"]["open"]
+            and served != served_before
+            and all(row["active"] == row["training_start"] == served for row in block["artifacts"].values())
+        ):
+            return {"job_id": job["id"], "artifact_id": served, "scenario_step": block["scenario_step"]}
+        time.sleep(min(POLL_SECONDS, max(0.0, deadline - time.monotonic())))
+    raise TimeoutError(f"Training job {expected_jobs} did not serve its checkpoint within {timeout_seconds}s")
 
 
-def recover_campaign(log: ResultLog, client: ReefClient, model: ReefLLM, config: dict, timeout: float) -> None:
-    """Resume committed batches; replay identical reports for a fully collected pending batch."""
+def train_batch(
+    client: ReefClient,
+    model: ReefLLM,
+    scenario: str,
+    batch: list[dict],
+    *,
+    instruction_id: str,
+    text: str,
+    epochs: int,
+    expected_jobs: int,
+    served_artifact_id: str,
+    timeout_seconds: float,
+) -> dict:
+    """Report the batch's episodes, queue one training job for them, and wait for its checkpoint to serve.
+
+    Every step repeats safely after an interruption: a report and the
+    instruction keep their IDs, and a batch whose job exists is not queued
+    again.
+    """
+    for episode in batch:
+        model.receipts = list(episode["receipts"])
+        report_episode(model, scenario, episode["task_id"], episode["reward"], episode["end_reason"])
+    report_ids = [report_id(scenario, episode["task_id"]) for episode in batch]
+    samples = wait_for_samples(client, scenario, report_ids, timeout_seconds)
+    if instruction_id not in instruction_jobs(training_jobs(client, scenario)):
+        trained = [row["sample_id"] for row in samples if row["train_counts"]]
+        if trained:
+            raise RuntimeError(f"Samples of this batch trained outside the campaign: {trained[:3]}")
+        sample_ids = [row["sample_id"] for row in samples]
+        client.post(scenario_path(scenario, "/buffer/insert"), scenario, {"sample_ids": sample_ids})
+        client.post("/reef/train", scenario, training_instruction(instruction_id, text, epochs, served_artifact_id))
+    return wait_for_training(client, scenario, instruction_id, expected_jobs, served_artifact_id, timeout_seconds)
+
+
+def recover_campaign(log: ResultLog, client: ReefClient, model: ReefLLM, config: dict, timeout_seconds: float) -> None:
+    """Resume committed batches; finish a fully collected pending batch with its original reports."""
     if not log.rows or log.rows[0] != {"config": config}:
         raise RuntimeError(
             "Resume configuration differs from the saved run; keep the original model, paths, and settings"
         )
     boundary = 1
     pending: dict | None = None
-    recorded_releases = []
+    recorded_instructions = []
     for index, row in enumerate(log.rows[1:], 1):
         if row.get("type") == "batch_ready":
             if pending is not None:
@@ -113,36 +207,48 @@ def recover_campaign(log: ResultLog, client: ReefClient, model: ReefLLM, config:
         elif row.get("type") == "training":
             if pending is None or row["task_ids"] != pending["task_ids"]:
                 raise RuntimeError("Training result does not match its collected batch")
-            recorded_releases.append(row["release"]["release_id"])
+            recorded_instructions.append(row["instruction_id"])
             pending = None
             boundary = index + 1
-        elif (row.get("type") == "episode" and not row["trainable"]) or row.get("type") in (
-            "untrained_tail",
-            "summary",
-        ):
+        elif (row.get("type") == "episode" and not row["trainable"]) or row.get("type") == "summary":
             boundary = index + 1
-    releases = training_releases(client, model.scenario)
-    if [row["release_id"] for row in releases[: len(recorded_releases)]] != recorded_releases:
+    jobs = list(instruction_jobs(training_jobs(client, model.scenario)))
+    if jobs[: len(recorded_instructions)] != recorded_instructions:
         raise RuntimeError(
             "Saved results and restored Reef training history disagree; use the matching checkpoint and storage"
         )
-    if len(releases) < len(recorded_releases) or len(releases) > len(recorded_releases) + int(pending is not None):
+    if len(jobs) > len(recorded_instructions) + int(pending is not None):
         raise RuntimeError("Restored training progress does not match this campaign")
     if pending is None:
         # No report is sent until batch_ready is durable. Partial collection can be repeated safely.
         log.discard_after(boundary)
         return
-    tasks = pending["task_ids"]
     episodes = {row["task_id"]: row for row in log.rows if row.get("type") == "episode"}
-    batch = [episodes[task_id] for task_id in tasks]
-    if len(releases) == len(recorded_releases):
-        for row in batch:
-            model.receipts = list(row["receipts"])
-            report_episode(
-                model, model.scenario, row["task_id"], row["reward"], row["end_reason"], batch_task_ids=tasks
-            )
-    release = wait_for_training(client, model.scenario, len(recorded_releases) + 1, timeout)
-    log.append({"type": "training", "task_ids": tasks, "batch_size": len(tasks), "release": release})
+    result = train_batch(
+        client,
+        model,
+        model.scenario,
+        [episodes[task_id] for task_id in pending["task_ids"]],
+        instruction_id=pending["instruction_id"],
+        text=pending["text"],
+        epochs=pending["epochs"],
+        expected_jobs=len(recorded_instructions) + 1,
+        served_artifact_id=pending["served_artifact_id"],
+        timeout_seconds=timeout_seconds,
+    )
+    log.append(training_row(pending, result))
+
+
+def training_row(declared: dict, result: dict) -> dict:
+    """The result row of a declared batch: its tasks, instruction and passes, and the job and served artifact."""
+    return {
+        "type": "training",
+        "task_ids": declared["task_ids"],
+        "batch_size": len(declared["task_ids"]),
+        "instruction_id": declared["instruction_id"],
+        "epochs": declared["epochs"],
+        **result,
+    }
 
 
 def main() -> None:
@@ -233,7 +339,8 @@ def main() -> None:
     if args.check_only:
         return
     client = ReefClient(os.environ["REEF_SERVICE_URL"], token=os.environ.get("REEF_TOKEN"), timeout_s=60)
-    if not args.resume and training_releases(client, args.scenario):
+    scenario = ensure_scenario(client, args.scenario, trains=args.method == "sao")
+    if not args.resume and scenario["finished_jobs"]:
         raise RuntimeError("The scenario already trained; use --resume with its original directories")
     cfg = llm.ModelConfig(model="reef", reasoning_effort=None, max_tokens=args.max_tokens)
     model = ReefLLM(ReefClient(client.service_url, token=client.token, timeout_s=1800), args.scenario, cfg, args.seed)
@@ -242,7 +349,7 @@ def main() -> None:
     model_name = os.environ.get("REEF_MODEL_NAME") or Path(os.environ.get("MODEL_DIR", "reef")).name
     config = {
         "type": "config",
-        "campaign_format": 4,
+        "campaign_format": 5,
         "benchmark_revision": BENCHMARK_REVISION,
         "scenario": "retail_l1",
         "windows": windows,
@@ -256,6 +363,7 @@ def main() -> None:
         "micro_batch_size": settings["SAO_MICRO_BATCH"],
         "critic_only_batches": settings["SAO_WARMUP"],
         "warmup_policy": "reuse_first_batch",
+        "training_mode": "manual",
         "context_length": settings["SAO_CONTEXT"],
         "tail_policy": "train_partial_batch",
         "untrained_tail_tasks": 0,
@@ -283,18 +391,17 @@ def main() -> None:
         completed = {(row["phase"], row["task_id"]) for row in episodes}
         if len(completed) != len(episodes):
             raise RuntimeError("Saved results contain duplicate task results")
-        expected_releases = sum(row.get("type") == "training" for row in log.rows)
-        expected_version = None
-        if expected_releases:
-            release = wait_for_training(client, args.scenario, expected_releases, args.training_timeout)
-            expected_version = release["runtime_load_id"]
+        training_rows = [row for row in log.rows if row.get("type") == "training"]
+        expected_jobs = len(training_rows)
+        # The artifact that every episode must be served by: the last training's checkpoint, or the start.
+        expected_artifact = training_rows[-1]["artifact_id"] if training_rows else scenario["served_artifact_id"]
+        if scenario_status(client, args.scenario)["served_artifact_id"] != expected_artifact:
+            raise RuntimeError("Reef serves another artifact than the campaign's last training produced")
         if any(row.get("type") == "summary" for row in log.rows):
             print(json.dumps(log.rows[-1]), flush=True)
             return
-        if args.stop_after_batches is not None and expected_releases >= args.stop_after_batches:
-            print(
-                f"Already completed {expected_releases} batches; remove --stop-after-batches to continue", flush=True
-            )
+        if args.stop_after_batches is not None and expected_jobs >= args.stop_after_batches:
+            print(f"Already completed {expected_jobs} batches; remove --stop-after-batches to continue", flush=True)
             return
         for window in windows:
             serving, tests, test_timestamp = plan[window]
@@ -304,22 +411,18 @@ def main() -> None:
                     if (phase, task.task_id) in completed:
                         continue
                     model.begin_episode()
-                    releases_before = training_releases(client, args.scenario)
-                    if len(releases_before) != expected_releases:
+                    before = scenario_status(client, args.scenario)
+                    if before["finished_jobs"] != expected_jobs or before["training_job"] is not None:
                         raise RuntimeError("Unexpected model update outside the serving-task boundary")
                     extra = oracle.context(task, phase, window) if args.method == "oracle" else ""
                     started = time.monotonic()
                     reward, trace, usage, judge_usage = run_episode(
                         model, bundle, task, max_steps=args.max_steps, extra_system=extra
                     )
-                    if training_releases(client, args.scenario) != releases_before:
-                        raise RuntimeError("Model changed during an episode")
                     reason = episode_end_reason(trace)
-                    version = episode_runtime_load_id(model) if args.method == "sao" else None
-                    if args.method == "sao" and expected_version is None:
-                        expected_version = version
-                    if expected_version is not None and version != expected_version:
-                        raise RuntimeError("Episode did not use the latest committed training weights")
+                    artifact_id = episode_artifact_id(model)
+                    if artifact_id != expected_artifact:
+                        raise RuntimeError("Episode was not served by the latest committed training weights")
                     trainable = phase == "serving" and args.method == "sao"
                     row = {
                         "type": "episode",
@@ -339,8 +442,8 @@ def main() -> None:
                         "trace": trace,
                         "receipts": list(model.receipts),
                         "end_reason": reason,
-                        "training_releases_before": expected_releases,
-                        "runtime_load_id": version,
+                        "training_jobs_before": expected_jobs,
+                        "artifact_id": artifact_id,
                         "duration_seconds": time.monotonic() - started,
                         "trainable": trainable,
                     }
@@ -350,35 +453,39 @@ def main() -> None:
                         pending.append(row)
                         if len(pending) == args.batch_size or task_index == len(tasks) - 1:
                             task_ids = [episode["task_id"] for episode in pending]
+                            # The first job of the campaign repeats its batch for the critic warmup passes.
+                            epochs = warmup + 1 if expected_jobs == 0 else 1
+                            declared = {
+                                "type": "batch_ready",
+                                "window": window,
+                                "task_ids": task_ids,
+                                "instruction_id": training_instruction_id(args.scenario, task_ids),
+                                "text": f"Retail L1 window {window}: SAO on {len(task_ids)} serving tasks, "
+                                f"{epochs} passes",
+                                "epochs": epochs,
+                                "served_artifact_id": expected_artifact,
+                            }
                             # Persist the entire batch before any report can cause an update.
-                            log.append({"type": "batch_ready", "task_ids": task_ids})
-                            for episode in pending:
-                                model.receipts = list(episode["receipts"])
-                                report_episode(
-                                    model,
-                                    args.scenario,
-                                    episode["task_id"],
-                                    episode["reward"],
-                                    episode["end_reason"],
-                                    batch_task_ids=task_ids,
-                                )
-                            expected_releases += 1
-                            release = wait_for_training(
-                                client, args.scenario, expected_releases, args.training_timeout
+                            log.append(declared)
+                            result = train_batch(
+                                client,
+                                model,
+                                args.scenario,
+                                pending,
+                                instruction_id=declared["instruction_id"],
+                                text=declared["text"],
+                                epochs=epochs,
+                                expected_jobs=expected_jobs + 1,
+                                served_artifact_id=expected_artifact,
+                                timeout_seconds=args.training_timeout,
                             )
-                            expected_version = release["runtime_load_id"]
-                            log.append(
-                                {
-                                    "type": "training",
-                                    "task_ids": task_ids,
-                                    "batch_size": len(task_ids),
-                                    "release": release,
-                                }
-                            )
+                            expected_jobs += 1
+                            expected_artifact = result["artifact_id"]
+                            log.append(training_row(declared, result))
                             pending.clear()
-                            if args.stop_after_batches is not None and expected_releases >= args.stop_after_batches:
+                            if args.stop_after_batches is not None and expected_jobs >= args.stop_after_batches:
                                 print(
-                                    f"Stopped after {expected_releases} committed batches; continue with --resume",
+                                    f"Stopped after {expected_jobs} committed batches; continue with --resume",
                                     flush=True,
                                 )
                                 return
@@ -403,9 +510,9 @@ def main() -> None:
             "category_scores": category_scores(episodes),
             "window_category_scores": window_categories,
             "windows": windows,
-            "training_releases": expected_releases,
+            "training_jobs": expected_jobs,
             "critic_only_batches": warmup,
-            "actor_updates": expected_releases,
+            "actor_updates": expected_jobs,
             "smoke": args.smoke,
             "ending_counts": ending_counts,
             "trained_tasks": trained_total,

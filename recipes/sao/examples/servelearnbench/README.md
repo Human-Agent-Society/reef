@@ -121,10 +121,8 @@ The baseline and historical counts come from the [previous result report](https:
 ```text
 servelearnbench/
   run.sh          starts reef serve, then runs the campaign
-  run.py          the campaign: the ordered split, training batches, checkpoint resume, results.jsonl
-  batching.py     keeps each declared task batch together, including window tails
-  recipe.py       adds critic warmup passes before the first batch's normal SAO update
-  serve.yaml      the Reef stack: Qwen3-8B actor and critic, SAO, exact-token episodes
+  run.py          the campaign: the ordered split, one training job per batch, checkpoint resume, results.jsonl
+  serve.yaml      the Reef stack: Qwen3-8B actor and critic, SAO, manual training, exact-token episodes
   harness/
     config.py     shared batch, micro-batch, warmup, and context settings
     campaign.py   durable results and category scores
@@ -161,10 +159,13 @@ Task-level budget exhaustion and context overflow retain the official reward and
 The driver neither drops these trajectories by length nor adds value bootstrapping.
 An unassemblable training trajectory fails explicitly.
 
-Reef's chat handler serves each episode from its exact sampled token IDs (`inference.handler-config.episode_continuation`).
-A later call appends only the new observations and turn delimiters as masked context.
-This avoids Qwen3 history re-rendering, which otherwise removes earlier reasoning from the training mask.
+Reef's chat handler serves each episode from its exact sampled token IDs (`inference.handler-config.rollout_continuation`).
+A later call appends only the new observations and turn delimiters to the tokens the model produced.
 Blind, Oracle, and SAO use the same setting.
+The trainer renders a reported episode again from its recorded messages with the model's chat template, thinking on, and trains every reply.
+Qwen3's template renders the replies as prefixes of one conversation only while each reply's reasoning stays in the history, which the benchmark's agent loop keeps.
+The DIS ratio compares the current policy against old-policy log-probabilities that the actor computes with the weights at the job's start.
+The driver trains each batch before it samples the next one, so those are the weights that sampled the batch.
 
 ## Install and run
 
@@ -207,17 +208,17 @@ METHOD=blind bash recipes/sao/examples/servelearnbench/run.sh
 METHOD=oracle bash recipes/sao/examples/servelearnbench/run.sh
 ```
 
-Each trainable serving task submits one report containing every ordered inference receipt.
+Each trainable serving task submits one report against the episode's last inference receipt.
+Reef links the episode's calls by their shared conversation and trains every reply with the task's reward.
 The driver collects up to 64 tasks within one window, saves the batch, and submits its reports.
-Each report names the complete task list for its batch. The record stage waits for every declared task.
-The pipeline takes that complete group as one job; each trajectory keeps its own reward.
-The grouping does not create prompt comparison groups or change the SAO objective.
-It then waits for training and weight publication.
-Job submission and critic-only checkpoints do not count as completed actor updates.
-The driver waits for the actor checkpoint, the job's completion, and reopened inference admission.
-No task spans a weight update. Test tasks use the final published actor and never submit reports.
-Keep `save-interval: "1"` so each completed batch publishes weights.
-A training timeout or service error aborts the run.
+The scenario trains in manual mode (`recipe.config.training_mode`), so a report alone starts nothing.
+Reef makes one sample per report. The driver puts the batch's samples into the scenario's manual buffer and queues one training instruction for them (`POST /reef/train`).
+That job trains the whole buffer as one optimizer step, whatever the batch size; each trajectory keeps its own reward.
+The batch does not form prompt comparison groups and does not change the SAO objective.
+The driver then waits for the job to finish, for inference admission to reopen, and for the scenario to serve the job's checkpoint.
+No task spans a weight update. Test tasks use the served weights and never submit reports.
+Each job saves one checkpoint at its end, which Reef activates and serves.
+A training timeout, a failed job, or a service error aborts the run.
 
 The shared defaults are `SAO_BATCH=64`, `SAO_MICRO_BATCH=16`, `SAO_WARMUP=1`, and `SAO_CONTEXT=40960`.
 The launcher and result records use the same configuration.
@@ -226,9 +227,10 @@ The configured full batch must be divisible by the micro batch; this stack uses 
 A window tail uses its actual sample count. Its final micro-batch may be smaller than 16.
 For example, a 57-task tail uses micro-batches of 16, 16, 16, and 9. Loss normalization uses 57 samples.
 `SAO_WARMUP` adds critic-only passes over the first batch. It does not consume extra tasks or restart at window boundaries.
+The campaign's first instruction asks for `SAO_WARMUP + 1` passes over its batch (`scheduling.epochs`), and `num-critic-only-steps` keeps the actor fixed for the first `SAO_WARMUP` optimizer steps.
 Each warmup pass performs two critic updates and no actor update.
 The same first-batch trajectories then receive one normal SAO pass: two critic updates and one actor update.
-Tokens, rewards, and rollout log-probabilities stay unchanged. The training backend computes values and advantages again for each pass.
+Tokens and rewards stay unchanged. The training backend computes values and advantages again for each pass.
 The actor stays unchanged during warmup, so these trajectories still come from the current actor when normal training starts.
 With the default warmup of one, the first batch receives four critic updates in total and one actor update.
 Setting `SAO_WARMUP=0` skips the extra pass; larger values repeat critic warmup on that same first batch.
@@ -267,8 +269,10 @@ They need the benchmark installed and do not establish GPU training or benchmark
 For the exact-token history check, point Reef's handler test at a downloaded Qwen3 tokenizer:
 
 ```bash
-REEF_TEST_QWEN_TOKENIZER="$MODEL_DIR" python -m pytest tests/inference/test_chat_episode_continuation.py
+REEF_TEST_QWEN_TOKENIZER="$MODEL_DIR" python -m pytest tests/inference/test_chat_rollout_continuation.py tests/recipes/sao/test_servelearnbench.py
 ```
+
+The second file then also renders a scripted Retail episode with Qwen3's template and checks that every reply trains.
 
 For a GPU wiring check, allocate two GPUs, use Qwen3-0.6B, and use fresh directories.
 Use a short allocation, including a preemptable allocation when available:
@@ -284,17 +288,17 @@ This runs the first window only: three serving tasks and two test tasks.
 Smoke selects up to `max(2, 2 * SAO_BATCH - 1)` serving tasks to exercise a partial batch.
 Each task has at most 20 model calls, with at most 64 output tokens per call.
 The first two serving tasks warm up the critic, then train actor and critic using the same trajectories.
-The one-task tail also trains actor and critic. This smoke produces three checkpoints and two actor updates.
+The one-task tail also trains actor and critic. This smoke produces two checkpoints and two actor updates.
 The output explicitly marks the run as smoke. Do not compare its score with the 8B pilot.
 Restore `SAO_BATCH=64 SAO_MICRO_BATCH=16 SAO_WARMUP=1` and the 8B model for the pilot.
 
 ## Results and recovery limits
 
-`REEF_WORK/results.jsonl` contains configuration, scored episodes, committed training releases, and a summary.
-Episode rows include traces, token usage, inference receipts, ending reasons, and producing weight versions.
-Training rows record the actual `batch_size` and the actor checkpoint for each completed job.
-`training_releases` and `actor_updates` count actor updates; `critic_only_batches` counts extra warmup passes.
-Reef's release history also contains each critic-only checkpoint. Slime records progress between these checkpoints within the first job.
+`REEF_WORK/results.jsonl` contains configuration, scored episodes, declared batches, finished training jobs, and a summary.
+Episode rows include traces, token usage, inference receipts, ending reasons, and the served artifact.
+A `batch_ready` row declares a batch's tasks, its training instruction, and its passes before any report is sent.
+Training rows record the actual `batch_size`, the job, and the artifact that serves after it.
+`training_jobs` and `actor_updates` count actor updates; `critic_only_batches` counts extra warmup passes.
 The summary counts `partial_batch_tasks`; `untrained_tail_tasks` is zero.
 `test_score` is the combined mean of all test rewards, multiplied by 100; `window_scores` holds the same per window.
 These combined means mix categories and are not the official category scores.
@@ -318,12 +322,11 @@ bash recipes/sao/examples/servelearnbench/run.sh --windows 1 --resume
 ```
 
 Reef restores the model, optimizer, training progress, and inference weights from its saved state.
-The campaign checks its configuration and committed release IDs against that state.
+The campaign checks its configuration and its training instructions against Reef's job list.
 Completed batches and test tasks are skipped. An unreported partial batch is collected again.
 Its previous result rows are saved in `results.interrupted-*.jsonl` for inspection.
-A fully collected pending batch keeps its original receipts; identical reports can be sent again without duplicate training.
-A restart can assign a new runtime load ID to the same restored weights.
-The campaign accepts that ID only after checking the committed training history.
+A fully collected pending batch keeps its original receipts.
+Its reports and its instruction keep their IDs, so Reef accepts them again without training twice, and a batch whose job already finished is only recorded.
 
 Use `--stop-after-batches N` to stop after N completed jobs with actor updates.
 The first boundary includes both the extra warmup passes and the first normal SAO update.
@@ -334,10 +337,10 @@ bash recipes/sao/examples/servelearnbench/run.sh --smoke --max-steps 20 --max-to
 bash recipes/sao/examples/servelearnbench/run.sh --smoke --max-steps 20 --max-tokens 64 --resume
 ```
 
-Resume requires campaign format 4, which reuses the first batch after critic warmup.
+Resume requires campaign format 5, which declares each batch as one training instruction.
 Older campaigns cannot resume under this changed training schedule.
-The first job saves a checkpoint after every warmup pass and after its normal SAO pass.
-After a restart, Slime continues from the last saved pass. The driver keeps the same task reports and waits for the actor checkpoint.
+The first job saves one checkpoint at its end, after the warmup passes and the normal SAO pass.
+A restart during that job repeats its passes. The driver keeps the same task reports and waits for the checkpoint.
 The driver does not repair incomplete optimizer checkpoints.
 If Slime reports an ambiguous interrupted training job, follow the [backend recovery instructions](../../../../docs/user-guide/troubleshooting.rst).
 A fresh run still requires empty directories. Never start two Reef services on the same storage.
