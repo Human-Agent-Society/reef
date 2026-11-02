@@ -25,6 +25,7 @@ from tests.reef_service.test_harness_channel import HEADERS, PATCHES, channel_di
 from tests.reef_service.test_harness_channel import served as served_client
 from tests.support.harness_service import EchoInference
 from tests.support.harness_steps import PI_SEED
+from tests.support.serving import wait_for_serving
 
 from reef.harness.sync import TOKEN_PLACEHOLDER
 from reef.service.app import create_app
@@ -37,11 +38,11 @@ def test_a_clients_changes_merge_onto_the_head_and_the_next_step_evolves_them(tm
     async def run() -> None:
         async with served_client(channel_dispatcher(tmp_path, PATCHES[:1], seed=PI_SEED)) as client:
             base = (await (await client.get("/reef/harness", headers=HEADERS)).json())["release_id"]
-            body = {"files": MINE, "base_release_id": base}
+            body = {"files": MINE, "base_artifact_id": base}
             response = await client.post("/reef/harness/import", headers=HEADERS, json=body)
             assert response.status == 200
             imported = await response.json()
-            assert imported["changed"] is True and imported["parent_release_id"] == base
+            assert imported["changed"] is True and imported["parent_artifact_id"] == base
             assert imported["ignored"] == ["pi-agent/auth.json"]
             # The head serves the person's files, with the seed's config: the binding owns the config.
             source = await (await client.get("/reef/harness", params={"form": "source"}, headers=HEADERS)).json()
@@ -58,7 +59,7 @@ def test_a_clients_changes_merge_onto_the_head_and_the_next_step_evolves_them(tm
             }
             # The same files again publish nothing.
             again = await client.post(
-                "/reef/harness/import", headers=HEADERS, json={**body, "base_release_id": imported["release_id"]}
+                "/reef/harness/import", headers=HEADERS, json={**body, "base_artifact_id": imported["artifact_id"]}
             )
             assert (await again.json())["changed"] is False
             # A client still on the seed merges onto the head: its new skill joins the person's files.
@@ -73,7 +74,7 @@ def test_a_clients_changes_merge_onto_the_head_and_the_next_step_evolves_them(tm
             conflicting = {**on_seed, "plugin/rules.md": "Theirs.\n"}
             for files, stale, status, named in (
                 (conflicting, base, 409, "plugin/rules.md"),
-                (MINE, None, 400, "base_release_id"),
+                (MINE, None, 400, "base_artifact_id"),
             ):
                 refused = await client.post(
                     "/reef/harness/import", headers=HEADERS, json={"files": files, "base_release_id": stale}
@@ -133,6 +134,7 @@ def served(dispatcher) -> Iterator[str]:
     thread = threading.Thread(target=loop.run_forever, daemon=True)
     thread.start()
     try:
+        wait_for_serving(dispatcher, "delivery")
         yield f"http://127.0.0.1:{port}"
     finally:
         asyncio.run_coroutine_threadsafe(runner.cleanup(), loop).result(10)

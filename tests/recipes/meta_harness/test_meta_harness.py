@@ -1,9 +1,11 @@
-"""Meta-Harness on Reef's harness backend: the prompt it builds from the history, its checks, its budgets.
+"""Meta-Harness on Reef's harness backend: the prompt it builds from the history, and its checks.
 
-Steps run through the phases the trainer runs (``backend_step``) and are
-decided by ``compare`` on means, as a Meta-Harness deployment selects. The
-tasks run the fake pi binary, and ``MarkerScorer`` scores 1 when the rules
-carry the marker, so the seed and a tree without the marker score 0.
+Each step answers a training request, as in a deployment that trains in
+``manual`` mode, and runs through the phases the trainer runs
+(``backend_step``); ``compare`` on means decides it, as a Meta-Harness
+deployment selects. The tasks run the fake pi binary, and ``MarkerScorer``
+scores 1 when the rules carry the marker, so the seed and a tree without the
+marker score 0.
 """
 
 from __future__ import annotations
@@ -15,7 +17,6 @@ from typing import Any
 
 import pytest
 from tests.support._strategies import resolve_task_scorer
-from tests.support._trajectories import recorded_trajectory
 from tests.support.harness_methods import (
     ALTERNATE,
     IMPROVED,
@@ -47,16 +48,6 @@ from reef.train.harness_backend.state import HarnessState
 from reef.train.trainer import Trainer
 from reef.train.types import JobData, TrainStepResult
 
-#: One failing traffic trace of the task, with its report's feedback.
-SAMPLE = recorded_trajectory(
-    "trace-1",
-    {
-        "messages": [{"role": "user", "content": TASK}],
-        "response": {"choices": [{"message": {"role": "assistant", "content": "attempt"}}]},
-    },
-    0.0,
-    feedback="the attempt failed",
-)
 #: A tree without the marker: it scores 0 like the seed, so compare rejects it.
 LOSER = HarnessTree({"rules.md": "Answer quickly.\n"})
 
@@ -81,8 +72,10 @@ def run(
     policy: ComparePolicy | None = None,
     request: TrainingRequest | None = None,
 ) -> TrainStepResult:
-    """Step ``number`` on the failing trace, decided on means; a selected tree becomes the next release."""
-    data = JobData(f"demo:{number}", (SAMPLE,), request=request)
+    """Step ``number``, which answers ``request`` (else a request of its own), decided on means; a selected tree
+    becomes the next release."""
+    request = TrainingRequest("Propose the next candidate.", "", "", f"ask-{number}") if request is None else request
+    data = JobData(f"demo:instruction:{request.id}", (), request=request)
     result = backend_step(backend, data, state, ComparePolicy(backend, statistic="mean") if policy is None else policy)
     if result.artifact is not None and result.artifact.local_path is not None:
         releases.publish(f"r{number}", HarnessTree.read(result.artifact.local_path))
@@ -116,8 +109,8 @@ def test_a_step_proposes_a_complete_tree_and_the_history_keeps_what_the_proposer
         {},
         None,
     )
-    [traffic] = state["traces"]
-    assert traffic["source"] == "traffic" and "the attempt failed" in traffic["record"]
+    # The seed has not run yet, so the prompt shows no run.
+    assert state["runs"] == []
     # The history keeps the candidate with what the proposer said, and is the population of the next step.
     candidate = backend.history.candidates[IMPROVED.checksum()]
     assert (candidate.origin, candidate.notes["hypothesis"]) == ("method", "the marker helps")
@@ -125,7 +118,7 @@ def test_a_step_proposes_a_complete_tree_and_the_history_keeps_what_the_proposer
 
 def test_full_history_branches_from_a_rejected_candidate_and_reads_its_run_records(tmp_path: Path) -> None:
     chat = QueueChat(proposal_reply(SEED, LOSER), proposal_reply(LOSER, IMPROVED))
-    backend, releases = meta_harness_backend(tmp_path, chat, max_traces=3, trace_chars=300)
+    backend, releases = meta_harness_backend(tmp_path, chat, max_runs=2, run_chars=300)
 
     first = run(backend, releases, HarnessState().to_json(), 1)
     second = run(backend, releases, first.state, 2)
@@ -142,14 +135,10 @@ def test_full_history_branches_from_a_rejected_candidate_and_reads_its_run_recor
         {"t1": [0.0]},
         dict(LOSER.files),
     )
-    # The traffic first, then the runs in turns: the served tree's, then the newest candidate's.
-    traces = state["traces"]
-    assert [(trace["source"], trace.get("candidate_id")) for trace in traces] == [
-        ("traffic", None),
-        ("evaluation", SEED.checksum()),
-        ("evaluation", LOSER.checksum()),
-    ]
-    task_run = traces[2]
+    # The runs in turns: the served tree's, then the newest candidate's.
+    runs = state["runs"]
+    assert [task_run["candidate_id"] for task_run in runs] == [SEED.checksum(), LOSER.checksum()]
+    task_run = runs[1]
     assert (task_run["task"], task_run["repeat"], task_run["score"], task_run["failure"]) == ("t1", 0, 0.0, None)
     # The excerpt of the run's record directory: its record files, cut to trace_chars around a note.
     assert task_run["record"].startswith("--- run.json ---") and "characters left out" in task_run["record"]
@@ -166,10 +155,10 @@ def test_incumbent_only_branches_from_the_served_tree_and_shows_the_refused_repl
 
     error = "parent_id must name a candidate of the population (incumbent_only mode)"
     assert second.metrics["skipped"] == "the method left the head tree unchanged"
-    assert second.metrics["method_notes"] == {"status": "invalid", "error": error}
+    assert second.metrics["method_notes"] == {"status": "refused", "error": error}
     # The prompt shows the served tree alone, and the next one shows why the reply proposed nothing.
     assert [member["candidate_id"] for member in search_state(chat.prompts[1])["population"]] == [SEED.checksum()]
-    assert search_state(chat.prompts[2])["attempts"] == [{"step": 2, "status": "invalid", "error": error}]
+    assert search_state(chat.prompts[2])["attempts"] == [{"step": 2, "status": "refused", "error": error}]
     assert third.metrics["selected"] is True
 
 
@@ -182,7 +171,7 @@ def test_a_proposal_keeps_the_parent_files_of_the_parts_it_may_not_change(tmp_pa
     result = run(backend, releases, HarnessState().to_json(), 1)
 
     assert result.metrics["method_notes"] == {
-        "status": "invalid",
+        "status": "refused",
         "error": "a proposal may change only the files of the parts ['rules']",
     }
 
@@ -201,42 +190,23 @@ def test_an_invalid_or_repeated_tree_leaves_the_head_unchanged_and_joins_the_att
 
     assert all(result.metrics["skipped"] == "the method left the head tree unchanged" for result in results)
     notes = [result.metrics["method_notes"] for result in results]
-    assert notes[0] == {"status": "invalid", "error": "proposer response contains no JSON object"}
+    assert notes[0] == {"status": "refused", "error": "proposer response contains no JSON object"}
     assert notes[1]["error"].startswith("the tree fails validation: skills/empty/SKILL.md")
-    assert notes[2] == {"status": "duplicate", "candidate_id": SEED.checksum()}
+    assert notes[2] == {"status": "refused", "error": f"the tree repeats candidate {SEED.checksum()}"}
     attempts = [json.loads(line) for line in state["method_files"]["attempts.jsonl"].splitlines()]
-    assert [(attempt["step"], attempt["status"]) for attempt in attempts] == [
-        (1, "invalid"),
-        (2, "invalid"),
-        (3, "duplicate"),
-    ]
+    assert attempts == [{"step": number, **note} for number, note in enumerate(notes, start=1)]
     assert list(backend.history.candidates) == [SEED.checksum()] and not backend.history.runs
 
 
-@pytest.mark.parametrize(
-    ("settings", "budget"),
-    [({"max_candidates": 1}, "max_candidates"), ({"max_target_runs": 2}, "max_target_runs")],
-)
-def test_a_spent_budget_stops_the_search_before_a_model_call(tmp_path: Path, settings: dict, budget: str) -> None:
-    chat = QueueChat(proposal_reply(SEED, IMPROVED))
-    backend, releases = meta_harness_backend(tmp_path, chat, **settings)
-
-    first = run(backend, releases, HarnessState().to_json(), 1)
-    second = run(backend, releases, first.state, 2)
-
-    assert first.metrics["selected"] is True and len(chat.prompts) == 1
-    assert second.metrics["method_notes"] == {"status": "budget_exhausted", "budget": budget}
-
-
 def test_a_retried_step_proposes_again_the_tree_its_failed_attempt_proposed(tmp_path: Path) -> None:
-    """The history keeps the attempt that never committed: the retry neither counts it nor refuses it as known."""
+    """The history keeps the attempt that never committed: the retry neither shows it nor refuses it as known."""
 
     class FailingDecision(ComparePolicy):
         def decide(self, candidate, evaluation):
             raise RuntimeError("the decision is unavailable")
 
     chat = QueueChat(proposal_reply(SEED, IMPROVED), proposal_reply(SEED, IMPROVED))
-    backend, releases = meta_harness_backend(tmp_path, chat, max_candidates=1, max_target_runs=2)
+    backend, releases = meta_harness_backend(tmp_path, chat)
     with pytest.raises(RuntimeError, match="unavailable"):
         run(backend, releases, HarnessState().to_json(), 1, policy=FailingDecision(backend, statistic="mean"))
 
@@ -263,6 +233,8 @@ def test_the_reply_is_one_object_of_the_four_proposal_fields() -> None:
         ({"model": "served"}, "the served model never proposes"),
         ({"components": ["rules", "rules"]}, "components must not repeat a part"),
         ({"max_files": 0}, "max_files must be at least 1"),
+        ({"run_chars": 0}, "run_chars must be at least 1"),
+        ({"max_candidates": 4}, "unknown config fields: max_candidates"),
         ({"archive": "population"}, "unknown config fields: archive"),
     ],
 )
@@ -276,7 +248,10 @@ def test_a_proposer_model_that_the_deployment_does_not_declare_is_refused(tmp_pa
     # let a typo in evolution.models turn the harness under test into its own author.
     backend, _ = meta_harness_backend(tmp_path, QueueChat(), model="typo")
     with pytest.raises(ValueError, match=r"is not declared under evolution\.models"):
-        backend.prepare_step(JobData("demo:1", (SAMPLE,)), HarnessState().to_json(), 0, head=head_of(backend))
+        request = TrainingRequest("Propose the next candidate.", "", "", "ask-1")
+        backend.prepare_step(
+            JobData("demo:instruction:ask-1", (), request=request), HarnessState().to_json(), 0, head=head_of(backend)
+        )
 
 
 @pytest.mark.parametrize("adapter", ["pi", "opencode"])

@@ -36,13 +36,21 @@ so one tag must not be shared by concurrent or distinct conversations. Without
 the tag, the judging stage falls back to matching the transcripts that clients
 resend on later requests.
 
-.. flow::
-   :loop: the next session is served by the updated weights
+.. container:: flow
 
-   Traffic :: requests and responses recorded by Reef
-   Sessions :: turns correlated by session tag, with trace matching as a fallback
-   Judge* :: score each turn from the state that followed it
-   Step :: train the policy on judged turns
+   Traffic
+       requests and responses recorded by Reef
+
+   Sessions
+       turns correlated by session tag, with trace matching as a fallback
+
+   **Judge**
+       score each turn from the state that followed it
+
+   Step
+       train the policy on judged turns
+
+   :Loop: the next session is served by the updated weights
 
 How Reef implements it
 ----------------------
@@ -122,22 +130,49 @@ one optimizer step.
      config:
        global_batch_size: 16
 
-.. config::
+.. container:: config
 
-   pipeline.record2sample.config.session_ttl_s | 900.0 | idle time in seconds before a session expires
-   pipeline.record2sample.config.max_open_sessions | 4096 | ceiling on live sessions; the least recently active are evicted above it
-   pipeline.record2sample.config.prm_url | "" | the PRM's SGLang server. Empty is correlate-only mode: nothing is judged and nothing trains.
-   pipeline.record2sample.config.prm_tokenizer_path | "" | the PRM's tokenizer. Required when ``prm_url`` is set.
-   pipeline.record2sample.config.prm_m | 3 | judge votes per turn
-   pipeline.record2sample.config.prm_temperature | 0.6 | judge sampling temperature
-   pipeline.record2sample.config.prm_max_tokens | 8192 | judge generation budget
-   pipeline.record2sample.config.prm_timeout_s | 120.0 | per-judge timeout in seconds
-   pipeline.record2sample.config.prm_concurrency | 8 | turns judged at once
-   pipeline.record2sample.config.prm_max_hint_candidates | 3 | hint candidates collected per turn
-   pipeline.record2sample.config.max_staleness | 0 | accepted lag, in artifacts that the scenario served, between the producing and served artifact.
-   pipeline.sample2job.config.job_samples | required | judged turns per job. Set it to ``training.config.global_batch_size`` so that one job is one optimizer step.
-   training.config.global_batch_size | judged turns per optimizer step. Reef passes it to Slime as ``--global-batch-size``.
-   pipeline.sample2job.config.prm_record_file | "" | judged population, one JSON line per job; empty disables it
+   ``pipeline.record2sample.config.session_ttl_s`` : 900.0
+       idle time in seconds before a session expires
+
+   ``pipeline.record2sample.config.max_open_sessions`` : 4096
+       ceiling on live sessions; the least recently active are evicted above it
+
+   ``pipeline.record2sample.config.prm_url`` : ""
+       the PRM's SGLang server. Empty is correlate-only mode: nothing is judged and nothing trains.
+
+   ``pipeline.record2sample.config.prm_tokenizer_path`` : ""
+       the PRM's tokenizer. Required when ``prm_url`` is set.
+
+   ``pipeline.record2sample.config.prm_m`` : 3
+       judge votes per turn
+
+   ``pipeline.record2sample.config.prm_temperature`` : 0.6
+       judge sampling temperature
+
+   ``pipeline.record2sample.config.prm_max_tokens`` : 8192
+       judge generation budget
+
+   ``pipeline.record2sample.config.prm_timeout_s`` : 120.0
+       per-judge timeout in seconds
+
+   ``pipeline.record2sample.config.prm_concurrency`` : 8
+       turns judged at once
+
+   ``pipeline.record2sample.config.prm_max_hint_candidates`` : 3
+       hint candidates collected per turn
+
+   ``pipeline.record2sample.config.max_staleness`` : 0
+       accepted lag, in artifacts that the scenario served, between the producing and served artifact.
+
+   ``pipeline.sample2job.config.job_samples`` : required
+       judged turns per job. Set it to ``training.config.global_batch_size`` so that one job is one optimizer step.
+
+   ``training.config.global_batch_size``
+       judged turns per optimizer step. Reef passes it to Slime as ``--global-batch-size``.
+
+   ``pipeline.sample2job.config.prm_record_file`` : ""
+       judged population, one JSON line per job; empty disables it
 
 Reef checks the stage config when it loads the recipe. An unknown key or an
 invalid value stops the deployment at startup. A stage key in

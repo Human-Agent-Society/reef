@@ -8,10 +8,9 @@ explains the stages, what a recipe writes for each, the job size, the training
 modes, the task generation contract, and the path a record takes to a job.
 Storage owns deletion.
 
-.. page::
-   :for: recipe authors writing the stages of a method, and anyone reading ``reef/train/pipeline.py``
-   :needs: the stage hooks from `Python API <../reference/python-api.rst#pipeline-stages>`__
-   :outcome: which stages a method needs, what it writes, and what it never writes
+:For: recipe authors writing the stages of a method, and anyone reading ``reef/train/pipeline.py``
+:Before you start: the stage hooks from `Python API <../reference/python-api.rst#pipeline-stages>`__
+:You will have: which stages a method needs, what it writes, and what it never writes
 
 The two stages
 --------------

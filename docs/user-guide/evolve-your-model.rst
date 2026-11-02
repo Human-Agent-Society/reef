@@ -94,16 +94,31 @@ overrides, and log locations.
 What to review
 --------------
 
-.. config::
+.. container:: config
 
-   inference.model-path | a local HF model directory or a repo id, downloaded on start
-   recipe.implementation | the recipe this deployment serves; its fields live in ``recipe.config``
-   reef.token | the bearer token the service accepts
-   training.config.num_gpus | example-specific GPU count passed to Slime topology flags; some examples set the flags directly
-   pipeline.sample2job.config.job_samples | the fewest samples of one job; required for a weight recipe
-   training.config.global_batch_size | samples in one optimizer step
-   training.config.checkpoint_dir | where checkpoints land, with the ``storage.artifact-*`` paths
-   training.options | GPU layout, optimizer, sequence length, loss settings
+   ``inference.model-path``
+       a local HF model directory or a repo id, downloaded on start
+
+   ``recipe.implementation``
+       the recipe this deployment serves; its fields live in ``recipe.config``
+
+   ``reef.token``
+       the bearer token the service accepts
+
+   ``training.config.num_gpus``
+       example-specific GPU count passed to Slime topology flags; some examples set the flags directly
+
+   ``pipeline.sample2job.config.job_samples``
+       the fewest samples of one job; required for a weight recipe
+
+   ``training.config.global_batch_size``
+       samples in one optimizer step
+
+   ``training.config.checkpoint_dir``
+       where checkpoints land, with the ``storage.artifact-*`` paths
+
+   ``training.options``
+       GPU layout, optimizer, sequence length, loss settings
 
 Three things to get right:
 

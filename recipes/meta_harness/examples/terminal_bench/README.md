@@ -92,15 +92,16 @@ export REEF_PROPOSER_API_KEY=...
 export REEF_PROPOSER_MODEL=gpt-5.6-sol
 export E2B_API_KEY=...
 
-# Small live wiring check: one task, one repeat, one candidate.
+# Small live wiring check: one task, one repeat, one step.
 ./run.sh --task extract-elf --iterations 1 --repeats 1
 
-# The full suite, two repeats, up to four new candidates.
+# The full suite, two repeats, four steps.
 ./run.sh
 ```
 
 Repeat `--task NAME` to select tasks from the [manifest](harness/tasks.json);
-omit it for the full suite. Use `--iterations` and `--repeats` for smaller runs.
+omit it for the full suite. `--iterations` sets the steps the search takes in
+all (default 4), and `--repeats` the repeats of each task.
 Replace model names as needed, retaining the target's `openai/` provider prefix.
 The proposer URL and key default to the target's; the target URL defaults to
 `https://api.openai.com`. Unauthenticated endpoints can omit keys.
@@ -117,24 +118,24 @@ Sandbox `egress_hosts` enables networking, not hostname filtering; see the
 SQLite storage, and Git LFS artifacts without an HTTP listener. Terminus calls
 the model endpoint directly.
 
-Each round renders the head release's tree for Terminus and records one
-run of it with its verifier report, rotating tasks by committed step. The
-method proposes a candidate from the search history. Reef evaluates it on the
-selected suite against the incumbent's cached scores, adds it to the history,
-and commits the step with the serving state.
+`terminal_bench.yaml` trains in `manual` mode, so a training request starts
+each step, as `POST /reef/train` does in a deployment. For each step,
+`run.py` queues one request with the dispatcher's `accept_instruction`, the
+call behind that route, and commits the step's job. The method proposes a
+candidate from the search history. Reef evaluates it on the selected suite
+against the incumbent's cached scores, adds it to the history, and commits
+the step with the serving state.
+
 Runs and evaluations use Reef's executor, timeout, residue policy, and
 finite-score checks. Failed evaluation runs score zero; run launch
 failures stop the run. Infrastructure failures are not automatically replaced.
-Before each run, `run.py` asks the method whether a budget is spent, so no
-run feeds a step that would propose nothing.
 
-Defaults allow four evaluated candidates and eight proposal attempts, including
-invalid or duplicate proposals: at most 890 evaluation runs (the seed and
-four candidates, each on 89 tasks with 2 repeats) plus eight feedback
-runs. Smaller runs scale the evaluation budget. A failed commit keeps its
-runs in the history, and its retry reuses them; a candidate that a retry
-proposes in place of the failed one costs extra. These are search limits, not
-billing caps.
+Each step costs one proposer call and, for a valid new candidate, one
+evaluation: 178 runs on the full suite with 2 repeats (89 tasks). The first
+evaluation also runs the seed. A refused proposal, invalid or a repeat, still takes
+a step, as in upstream, and evaluates nothing. A failed commit keeps its runs
+in the history, and its retry reuses them; a candidate that a retry proposes
+in place of the failed one costs extra.
 
 ## The terminus adapter
 
@@ -238,11 +239,14 @@ run runs, not on what the tree holds.
 ## Resume and output
 
 Repeat the same command to resume `work/<campaign-id>/` (or under `REEF_WORK`).
-Tasks, seed, models, and search settings determine the id. Run only one driver
-per directory.
+Tasks, seed, models, and search settings determine the id; the step count
+does not, so a larger `--iterations` continues the same search. Run only one
+driver per directory.
 
-Committed Reef state is authoritative. Restarts reuse recorded runs and
-replay pending reports. Failed commits cannot advance search or its summary.
+Committed Reef state is authoritative. Each request has the ID of its step,
+so a restart finds the request of an unfinished step instead of queueing a
+second one, and finishes the job that a previous process started. Failed
+commits cannot advance search or its summary.
 
 - `harness/`: the search history (every candidate tree, its runs and their
   records, and each step's decision) and one record per step, which holds the
@@ -264,9 +268,10 @@ replay pending reports. Failed commits cannot advance search or its summary.
   could not run, which runs again. The baseline's scores
   arrive with the first candidate's evaluation. As in the comparison, the
   baseline and each candidate run once.
-- **Proposals:** one feedback run, the complete population, and bounded
-  excerpts of the run records feed the method's prompt, not an upstream
-  tool-using coding agent that reads the trial files.
+- **Proposals:** the complete population and bounded excerpts of its
+  evaluation run records feed the method's prompt, not an upstream tool-using
+  coding agent that reads the trial files. [`agent/`](../../agent/README.md)
+  runs that coding agent as the proposer.
 - **Requests:** Chat Completions/LiteLLM for the target; Responses with default
   reasoning for the proposer. The comparison uses Responses and `xhigh`, plus
   request and verifier adaptations not installed here.

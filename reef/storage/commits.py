@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, get_args
 
 from reef.core.artifact_ref import ArtifactRef, RootSource, decode_artifact_ref, encode_artifact_ref
+from reef.core.artifact_selection import ArtifactSelection
 from reef.core.errors import ReefError
 
 
@@ -61,7 +62,7 @@ def parse_record_progress(value: object, *, context: str) -> RecordProgress:
     )
 
 
-RECORD_KIND = "reef-commit/5"
+RECORD_KIND = "reef-commit/6"
 
 
 class CommitHistoryError(ReefError):
@@ -82,7 +83,7 @@ def to_json_value(value: Any) -> Any:
 #: What a commit record does: a training step, the activation of an artifact, a trainer's new training start, an
 #: import, a sync of a person's tree that is active and the training start at once, or the start or the end of
 #: serving an artifact beside the active release.
-CommitOperation = Literal["training", "activate", "train_from", "import", "sync", "serve", "stop_serving"]
+CommitOperation = Literal["training", "activate", "restore", "train_from", "import", "sync", "serve", "stop_serving"]
 
 
 @dataclass(frozen=True, kw_only=True, eq=False)
@@ -97,6 +98,9 @@ class CommitRecord:
     ``None`` or a non-empty name, and ``components`` is ``None`` or a
     mapping of non-empty component names to non-empty artifact ids
     (``ReleaseComponents.artifact_ids``).
+    ``selection`` is None for stored artifacts or an ``ArtifactSelection``
+    containing every durable locator needed to rebuild a local view. When
+    ``components`` is present, it equals the selection's artifact ids.
     ``high_water_sequence`` and ``high_water_offset`` are non-negative ints.
     Each operation adds its own conditions:
 
@@ -109,13 +113,15 @@ class CommitRecord:
       ``training_job_id`` are the
       trainer's state and the step's outcome. ``component`` names the
       trainer in a scenario of several components.
-    - ``"activate"``: ``artifact_ref`` is the release that is active after
-      the activation. In a scenario of one component it is the release that
-      made the activated artifact, as that row records it, and
-      ``component`` and ``components`` are ``None``. In a scenario of
-      several components it is a release that the activation published:
-      ``component`` names the activated component, and ``components`` is
-      the release's manifest, which contains ``component``.
+    - ``"activate"``: ``artifact_ref`` is the active view after selecting
+      an existing artifact. One component uses its stored artifact directly,
+      with ``component`` and ``components`` both None. Several components
+      use a local view and persist its complete ``selection``; ``component``
+      names the changed component and ``components`` lists every artifact.
+      Older records may instead refer to a stored combination.
+    - ``"restore"``: restore a previous complete active selection.
+      ``component`` is None, ``selection`` is present, and ``components``
+      lists its artifact ids. The operation creates no artifact.
     - ``"train_from"``: ``artifact_ref`` is the release that holds the new
       training start, as the row that made it records it. ``component``
       names the trainer as its training rows do (``None`` for a lone
@@ -140,13 +146,13 @@ class CommitRecord:
       artifact is the one that it binds as ``component``. In a scenario of
       one component, it is the release that made the artifact, and
       ``component`` and ``components`` are ``None``. In a scenario of
-      several, it is a release that the serve published, and ``component``
-      and ``components`` are as for an ``"activate"`` record.
+      several, it is a local view with the complete ``selection``, and
+      ``component`` and ``components`` are as for an ``"activate"`` record.
     - ``"stop_serving"``: Reef no longer serves the artifact of the
       ``"serve"`` record with the same ``artifact_ref``, ``component`` and
       ``components``.
 
-    An ``"activate"``, ``"train_from"``, ``"import"``, ``"sync"``, ``"serve"`` or
+    An ``"activate"``, ``"restore"``, ``"train_from"``, ``"import"``, ``"sync"``, ``"serve"`` or
     ``"stop_serving"`` record carries no trainer state and is not
     ``activated``: ``algorithm_state`` and
     ``training_job_id`` are ``None``, ``metrics`` is ``None`` except for an
@@ -183,11 +189,20 @@ class CommitRecord:
     #: The component of the trainer that committed this step or takes this training start, or the activated
     #: component; ``None`` in a scenario of one component.
     component: str | None = None
-    #: The content id of every component the published release binds, by
+    #: The artifact id of every component the published release or local view binds, by
     #: name; ``None`` for a flat release and for a step that published none.
     components: Mapping[str, str] | None = None
+    #: Complete component selection for a locally materialized view. These durable locators survive cache loss.
+    selection: ArtifactSelection | None = None
 
     def __post_init__(self) -> None:
+        if self.selection is not None:
+            if not isinstance(self.selection, ArtifactSelection):
+                raise CommitHistoryError("commit record selection must be an ArtifactSelection")
+            if self.components is not None and self.components != self.selection.artifact_ids:
+                raise CommitHistoryError("commit record components must match its selection")
+        if self.artifact_ref.release_id.startswith("selection:") and self.selection is None:
+            raise CommitHistoryError("a materialized selection requires its durable component locators")
         if not isinstance(self.scenario, str) or not self.scenario:
             raise CommitHistoryError("commit record scenario must be a non-empty string")
         if not isinstance(self.step, int) or isinstance(self.step, bool) or self.step < 1:
@@ -259,6 +274,12 @@ class CommitRecord:
                 )
         if self.operation == "train_from" and self.components is not None:
             raise CommitHistoryError("a train_from commit publishes no release and carries no components")
+        if self.operation == "restore" and (
+            self.component is not None or self.selection is None or self.components != self.selection.artifact_ids
+        ):
+            raise CommitHistoryError(
+                "a restore commit requires a complete selection and names no individual component"
+            )
         if self.operation in ("activate", "import", "sync", "serve", "stop_serving") and (
             (self.component is None) != (self.components is None)
             or (self.components is not None and self.component not in self.components)
@@ -301,7 +322,7 @@ class CommitRecord:
     def activates(self) -> bool:
         """Whether ``artifact_ref`` is the active release after this record: an activation, a sync, or a training
         step whose release the activation rule activated."""
-        return self.operation in ("activate", "sync") or self.activated
+        return self.operation in ("activate", "restore", "sync") or self.activated
 
     def to_dict(self) -> dict[str, Any]:
         record_progress: dict[str, Any] = {
@@ -333,11 +354,13 @@ class CommitRecord:
             value["component"] = self.component
         if self.components is not None:
             value["components"] = dict(self.components)
+        if self.selection is not None:
+            value["selection"] = self.selection.to_dict()
         return value
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> CommitRecord:
-        if value.get("record") != RECORD_KIND:
+        if value.get("record") not in ("reef-commit/5", RECORD_KIND):
             raise CommitHistoryError(f"unknown commit record kind: {value.get('record')!r}")
         scenario = value.get("scenario")
         if not isinstance(scenario, str) or not scenario:
@@ -359,6 +382,7 @@ class CommitRecord:
             raise CommitHistoryError("commit record requires record_progress")
         try:
             artifact_ref = decode_artifact_ref(raw_ref)
+            selection = None if value.get("selection") is None else ArtifactSelection.from_dict(value["selection"])
         except ValueError as exc:
             raise CommitHistoryError(f"commit record {exc}") from exc
         try:
@@ -387,6 +411,7 @@ class CommitRecord:
             training_job_id=value.get("training_job_id"),
             component=value.get("component"),
             components=value.get("components"),
+            selection=selection,
         )
 
     def __eq__(self, other: object) -> bool:
@@ -417,7 +442,7 @@ def active_artifact_ref(records: Sequence[CommitRecord], fallback: ArtifactRef) 
 
 
 SCENARIO_METADATA_KEY = "scenario_commit_record"
-SCENARIO_METADATA_KIND = "reef-scenario/5"
+SCENARIO_METADATA_KIND = "reef-scenario/6"
 
 
 def scenario_metadata_for(
@@ -432,6 +457,7 @@ def scenario_metadata_for(
     training_job_id: str | None = None,
     component: str | None = None,
     active_artifact: ArtifactRef | None = None,
+    active_selection: ArtifactSelection | None = None,
 ) -> dict[str, object]:
     """The scenario metadata of a registration (step zero) or of the artifact a training step made.
 
@@ -476,6 +502,10 @@ def scenario_metadata_for(
         metadata["metrics"] = deepcopy(dict(metrics))
     if active_artifact is not None:
         metadata["active_artifact"] = encode_artifact_ref(active_artifact)
+    if active_selection is not None:
+        if active_artifact is None:
+            raise ValueError("active_selection requires active_artifact")
+        metadata["active_selection"] = active_selection.to_dict()
     return metadata
 
 
@@ -489,9 +519,10 @@ def parse_scenario_metadata(
     read from the same release metadata, so a commit rebuilt from it carries what a recorded one does. Raise
     ``ValueError`` for metadata of another format, such as ``reef-scenario/4``, or a malformed value.
     """
-    if value.get("format") != SCENARIO_METADATA_KIND:
+    if value.get("format") not in ("reef-scenario/5", SCENARIO_METADATA_KIND):
         raise ValueError(
-            f"scenario metadata has the format {value.get('format')!r}; this Reef reads only {SCENARIO_METADATA_KIND}, "
+            f"scenario metadata has the format {value.get('format')!r}; this Reef reads {SCENARIO_METADATA_KIND} "
+            "and legacy reef-scenario/5, "
             "so create the scenario again"
         )
     scenario = value.get("scenario")

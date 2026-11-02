@@ -18,6 +18,8 @@ from tests.support._threshold_processor import ThresholdJobData, threshold_pipel
 from tests.support.runtime_stubs import StubTrainingComponent
 from tests.support.samples_service import make_samples
 
+from tests.support.serving import wait_for_serving
+
 from reef.artifact import Artifact, DefaultStart, GitLFSRepositoryBackendFactory, InMemoryRepositoryBackend
 from reef.artifact.artifact import ArtifactValidator
 from reef.artifact.composite import compose_release
@@ -173,13 +175,14 @@ def _root_of(recipe: CompositeRecipe, directory: Path) -> ScenarioRoot:
     )
 
 
-def _serve(recipe: CompositeRecipe, tmp_path: Path) -> Dispatcher:
+def _serve(recipe: CompositeRecipe, tmp_path: Path, *, hold_local_cycles: bool = False) -> Dispatcher:
     return Dispatcher(
         recipe,
         InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
         coordination=memory_coordination(),
+        hold_local_cycles=hold_local_cycles,
     )
 
 
@@ -414,7 +417,7 @@ def test_composite_recipe_reads_components_from_the_file_layout() -> None:
 
 @pytest.mark.unit
 def test_composite_scenario_serves_its_config_and_reports_components(tmp_path: Path) -> None:
-    with closing(_serve(_composite(tmp_path), tmp_path)) as dispatcher:
+    with closing(_serve(_composite(tmp_path), tmp_path, hold_local_cycles=True)) as dispatcher:
         scenario = dispatcher.get_or_create_scenario("agent")
         assert scenario is not None
         artifact = Artifact(scenario.current_artifact_ref(), scenario.repository)
@@ -463,7 +466,7 @@ def test_composite_scenario_serves_its_config_and_reports_components(tmp_path: P
         manifest = RequestService(dispatcher).harness_manifest({"x-reef-scenario": "agent"}, form="source")
         assert manifest["files"] == {"harness.txt": "harness step 1"}
         assert set(manifest["components"]) == {"harness", "config"}
-        assert manifest["components"]["harness"] == checkpoint.artifact.ref.content_id
+        assert manifest["components"]["harness"] == scenario.artifact_status()["harness"]["active"]
 
 
 @dataclass(frozen=True)
@@ -596,6 +599,7 @@ def test_an_evaluation_call_is_served_and_kept_by_nobody(tmp_path: Path) -> None
         headers = {"x-reef-scenario": "agent"}
         # A rollout runs for a loaded scenario's step, so its calls find the scenario loaded.
         assert dispatcher.get_or_create_scenario("agent") is not None
+        wait_for_serving(dispatcher, "agent")
 
         async def run() -> None:
             async with TestClient(TestServer(create_app(dispatcher, inference_handler=_EchoHandler()))) as client:
@@ -649,6 +653,7 @@ def test_a_flat_scenario_without_a_durable_log_still_serves_its_head(tmp_path: P
 def test_the_evaluation_route_names_the_scenario_in_its_path(tmp_path: Path) -> None:
     with closing(_serve(_served_composite(tmp_path), tmp_path)) as dispatcher:
         assert dispatcher.get_or_create_scenario("agent") is not None
+        wait_for_serving(dispatcher, "agent")
 
         async def run() -> None:
             async with TestClient(TestServer(create_app(dispatcher, inference_handler=_EchoHandler()))) as client:

@@ -107,6 +107,21 @@ subclass. Reef calls its ``from_config(upstream_url, *, model_path, timeout_s,
 **config)`` class method; arbitrary functions are not accepted. Handlers injected
 directly into ``create_app`` or ``build_app`` need only implement the inference methods.
 
+A scenario's `serving config <http-api.rst#serving-config>`__ reaches three
+methods. Each has a default for a handler or runtime without serving fields:
+
+- ``InferenceHandler.serving_config(override)`` and
+  ``InferenceRuntime.serving_config(override)`` return the effective value of
+  each serving field under one scenario's ``override``, and raise ``ValueError``
+  for a field or value that they do not take. Control calls the runtime's method
+  to check an update. The runtime's default gives its handler's fields.
+- ``InferenceHandler.request_payload(payload, *, serving_config)`` gets the
+  scenario's override with each request. It applies its own fields and leaves
+  the rest.
+- ``InferenceRuntime.apply_serving_config(scenario, override)`` applies the
+  engine fields. The inference worker calls it before each activation and when
+  only the override changed.
+
 Streaming handlers return ``InferenceStream``; its ``record_response`` and
 ``record_response_pending`` fields carry buffered or deferred recording state.
 Implementations and test doubles must initialize these fields through the
@@ -541,10 +556,15 @@ The session contract is:
    * - ``close()``
      - Release the session's record and commit resources; repeated calls are safe.
 
-``CommitRecord`` carries the operation (``training``, ``activate``,
-``train_from``, ``import`` or ``sync``; a ``sync`` activates its release and
-makes it the component's training start in one commit), the artifact ref, algorithm state, record watermark,
-consumed IDs, checkpoint/pending flags, metrics, and training job identity.
+``CommitRecord`` carries the operation, component selection, private storage
+locator, algorithm state, record watermark, consumed IDs, checkpoint/pending
+flags, metrics and training job identity. Operations include ``training``,
+``activate``, ``train_from``, ``import``, ``sync``, ``serve``,
+``stop_serving`` and ``restore``. Restore records a complete prior active
+selection and leaves training starts unchanged. A sync selects its new
+artifact for serving and training in one commit. Activation and serving record a complete selection without
+publishing another artifact snapshot. Older records without a selection
+remain readable through their stored artifact references.
 An ``activate`` or ``train_from`` record carries no trainer state. The store must atomically validate
 the current step before accepting a new successor: two different commits
 prepared from the same step cannot both succeed. An identical recorded retry
@@ -721,14 +741,17 @@ changes: the JSON object of a trajectory or a record, or the directory of a
 task, which the task file store keeps in the owner's partition. Its metadata
 is a JSON object. Reef reads ``kind`` (``trajectory``, ``task`` or
 ``record``), ``owner``, ``scenarios`` (scenario name to ``train`` or
-``eval``) and, for a record, ``origin`` (``{scenario, release_id,
-load_id}``). ``kind``, ``owner`` and ``origin`` never change. A deployment
+``eval``) and, for a record or artifact, ``origin``
+(``{scenario, artifact_id}``). Older origin metadata can carry ``release_id``;
+the input boundary accepts it for compatibility. ``kind``, ``owner`` and ``origin`` never change. A deployment
 selects the store in ``storage.data_store``; ``SQLiteDataStore`` and
 ``PostgresDataStore`` (``reef.storage.sql_data``) and ``MemoryDataStore`` are
 built in. Every operation names one owner and reads or writes only its items.
 Every store links the record items of each owner into trajectories, as the
 record stores do. The SQL stores keep only the messages that each item adds;
-reads return the whole content.
+reads return the whole content. With a segment store, the SQL stores keep the
+content of trajectory items and record messages in segments (see `Segment
+stores`_).
 
 .. list-table::
    :header-rows: 1
@@ -736,19 +759,22 @@ reads return the whole content.
 
    * - Member
      - Contract
-   * - ``from_config(config, *, directory, task_files)``
+   * - ``from_config(config, *, directory, task_files, segments)``
      - Class method that builds the store a deployment names. ``directory``
        is ``storage.agent_record_dir``. The caller owns ``task_files``.
+       ``segments`` is the ``storage.segment_backend`` store or ``None``; the
+       data store owns it and closes it.
    * - ``create(owner, items)``
      - Stores ``NewItem`` values, all or none. The same ID and content again
        changes nothing; other content is ``ItemConflict``. Bad metadata is
        ``ValueError``.
    * - ``read(owner, item_id)``
      - The ``StoredItem``, or ``None``.
-   * - ``query(owner, *, kind, scenario, after, limit)``
+   * - ``query(owner, *, kind, scenario, after, limit, content=True)``
      - The owner's items after the sequence ``after``, in arrival order, at
        most ``limit`` (1 to 1000), of ``kind`` and used by ``scenario`` when
-       given.
+       given. With ``content=False``, each item's ``content`` is ``None`` and
+       the store does not read it.
    * - ``update(owner, item_ids, patch)``
      - Applies one JSON merge patch to each item's metadata, all or none.
        Changing ``kind``, ``owner`` or ``origin`` is ``ValueError``; an
@@ -764,11 +790,46 @@ reads return the whole content.
        a call that no stored call names as parent; its calls are
        ``reef.core.trajectory_index.trajectory_calls`` of the path from the
        root. Reports and unknown IDs are left out.
+   * - ``maintain()``
+     - The store's periodic work. The data service calls it every 5 minutes.
+       It changes no item. The default does nothing.
    * - ``close()``
      - Releases the store's resources; a second call does nothing.
 
 The store checks the form of the metadata. The service checks that
 ``scenarios`` names only scenarios of the owner.
+
+Segment stores
+~~~~~~~~~~~~~~
+
+A ``SegmentStore`` (``reef.storage.segments``) keeps segments: immutable
+JSON Lines files, each in one partition. The SQL data stores use one
+partition per owner. A deployment selects the store in
+``storage.segment_backend`` (see `Keep large content in segment files
+<../user-guide/operate.rst#keep-large-content-in-segment-files>`__).
+``LocalSegmentStore`` is the built-in store.
+
+.. list-table::
+   :header-rows: 1
+   :widths: 45 55
+
+   * - Member
+     - Contract
+   * - ``from_config(config, *, directory)``
+     - Class method that builds the store a deployment names. ``directory``
+       is ``<storage.agent_record_dir>/segments``. A remote store can use it
+       as a local cache.
+   * - ``put(partition, segment_id, data)``
+     - Store the bytes ``data``. The segment is durable when the method
+       returns. The data store never puts one ID twice.
+   * - ``read(partition, lines)``
+     - The bytes of each ``SegmentLine`` (``segment_id``, ``offset``,
+       ``length``), in order. Raise ``SegmentNotFound`` for a missing
+       segment or a line past its end.
+   * - ``delete(partition, segment_id)``
+     - Remove the segment. A missing segment is not an error.
+   * - ``close()``
+     - Release the resources of the store.
 
 Artifact backends
 -----------------
@@ -793,8 +854,13 @@ plugin implements one class method:
 - ``context`` is a ``RepositoryBackendContext``. ``work_dir`` and ``cache_dir``
   are ``storage.artifact_work_dir`` and ``storage.artifact_cache_dir``.
 
-Every scenario owns its root release, which Reef writes when it creates the
-scenario (`The root release <../user-guide/operate.rst#the-root-release>`__).
+Repository backends use *release* to mean a durable storage snapshot. Its
+revision and checksum are private locators; the public identity belongs to
+each component's ``artifact_id``. Activating or serving an existing artifact
+updates scenario selections without calling ``publish``.
+
+Every scenario owns its root snapshot, which Reef writes when it creates the
+scenario (`Starting artifacts <../user-guide/operate.rst#starting-artifacts>`__).
 A backend shares no release between scenarios. It must:
 
 - Implement ``register(root, *, metadata)``. ``root`` is an unpublished
@@ -1604,12 +1670,19 @@ objective set what the component may do with the job's data:
 A job's optional ``scheduling`` parameter is a ``StepScheduling``
 (``reef.train.algos.schedule``) as an object:
 
-.. config::
+.. container:: config
 
-   epochs | 1 | the passes over the job's data, a positive int
-   shuffle | ``false`` | reorder the rollouts in every pass, deterministically from the data's rows
-   remainder | ``"partial"`` | a last step with fewer rollouts (or packs) than the batch size: ``"partial"`` trains it as a smaller step, ``"drop"`` leaves it out, ``"error"`` refuses the job's data
-   packing_length | ``null`` | pack the rollouts into packs of at most this many tokens (``training["tokens"]`` of each trajectory) before the steps are cut; one step then trains batch-size packs. A pack never splits a rollout, and a longer rollout is a pack of its own. ``shuffle`` and ``remainder`` apply to the packs.
+   ``epochs`` : 1
+       the passes over the job's data, a positive int
+
+   ``shuffle`` : ``false``
+       reorder the rollouts in every pass, deterministically from the data's rows
+
+   ``remainder`` : ``"partial"``
+       a last step with fewer rollouts (or packs) than the batch size: ``"partial"`` trains it as a smaller step, ``"drop"`` leaves it out, ``"error"`` refuses the job's data
+
+   ``packing_length`` : ``null``
+       pack the rollouts into packs of at most this many tokens (``training["tokens"]`` of each trajectory) before the steps are cut; one step then trains batch-size packs. A pack never splits a rollout, and a longer rollout is a pack of its own. ``shuffle`` and ``remainder`` apply to the packs.
 
 A component reads a job's ``method`` and ``scheduling`` parameters with
 ``reef.train.algos.registry.job_training(parameters)``. It raises
@@ -1962,9 +2035,9 @@ Neither inherits from the other, and no trainer holds a serving engine.
   default, for full weights, or ``model_adapter`` for a LoRA adapter on its
   base model. A runtime that serves adapters must override it.
   ``served_artifact(artifact_id, scenario)`` gives the engine's HTTP(S) URL
-  and the model name (``served_model_name(scenario)``) that control writes to
+  and the model name (``served_model_name(scenario)``) that inference writes to
   ``served_models`` for the scenario. It returns None when the engine has no
-  such URL; the scenario then serves no model on the inference routes.
+  such URL; startup then fails without publishing a route.
   ``artifact_model(artifact)`` is the ``PolicyModel`` that the runtime serves
   for an artifact on request, without loading it, or None, the default, for a
   runtime that serves only its loaded artifact. A runtime whose handler answers
@@ -1975,14 +2048,23 @@ Neither inherits from the other, and no trainer holds a serving engine.
   ``capabilities`` read.
   ``shared_by_training_scenarios`` is true for a runtime that serves each
   training scenario its own weights.
-* ``ScenarioCommitter`` orders both around each commit. It publishes a
-  saved checkpoint, has the runtime serve it when the activation rule activates it
-  (``WeightRuntime.activate_checkpoint``), and then writes the commit record.
-  A failed publication therefore leaves serving unchanged. For an activation
-  it has the runtime serve the release that binds the artifact, then writes
-  an ``activate`` record; in a scenario of several components it first
-  publishes that release, with no new content. For a ``train-from`` it has
-  the trainer import the artifact, then writes a ``train_from`` record.
+* ``ScenarioCommitter`` publishes checkpoints and records artifact selections.
+  A dispatcher queues each selection for the inference worker. The worker
+  opens the runtime, loads the published release, and publishes routes when
+  activation returns. Route publication and startup completion share one
+  transaction. A superseded request cannot publish routes.
+  A standalone scenario keeps synchronous activation by default.
+  ``train-from`` still imports the artifact into the trainer before it writes
+  a ``train_from`` record.
+
+``Scenario.serving_artifact_id()`` names the selected artifact.
+``Scenario.served_artifact_id()`` reads the published route when a dispatcher
+owns the scenario. Training staleness checks use this served identity.
+Automatic weight training waits while the selected artifact has no matching
+served route. Standalone scenarios and deployments without inference keep
+their existing training behavior.
+Startup status is available through the inference service's
+``GET /reef/scenarios/{scenario}/inference/status`` route.
 
 ``reef.runtime.serving`` holds the two runtimes for saved weights, both over an
 ``InferenceBackend``:

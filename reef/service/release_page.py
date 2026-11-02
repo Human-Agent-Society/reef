@@ -361,7 +361,7 @@ def why_html(row: Mapping[str, Any], metrics: Mapping[str, Any]) -> str:
             f"<p class=\"text\">{escape(request['text'])}</p>"
             f'<p class="origin"><span>Request <span class="id">{escape(request.get("id"))}</span></span>'
             f'<span>Session <span class="id">{escape(request.get("session"))}</span></span>'
-            f'<span>Filed on release <span class="id">{escape(request.get("release_id"))}</span></span></p>'
+            f'<span>Filed on artifact <span class="id">{escape(request.get("artifact_id", request.get("release_id")))}</span></span></p>'
         )
     return "<p>A failure in the job data; no request asked for this step.</p>"
 

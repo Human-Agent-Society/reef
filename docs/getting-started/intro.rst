@@ -6,24 +6,11 @@ harness and the model that harness calls. It records each request, its
 response, and the feedback about the response. Reef then use these signal to
 produce a better version of the model weights or of the agent's harness.
 
-.. diagram::
-   :caption: Reef serves the model, loads new weights into the engine, and sends a new harness tree to the agent.
+.. figure:: ../assets/reef-overview-light.svg
+   :alt: Reef between the harness and the model: requests and feedback in, answers and a new harness tree back; inference and new weights to the model
 
-   <div class="fig-lane">
-     <div class="fig-node">The harness<span class="fig-node-caption">runs the control loop, prompts, skills, tools, and config</span></div>
-     <div class="fig-edge">
-       <span>requests and feedback</span>
-       <svg class="fig-arrow fig-arrow-next" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h13"/><path d="m13 7 5 5-5 5"/></svg>
-       <svg class="fig-arrow fig-arrow-back" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 12H6"/><path d="m11 7-5 5 5 5"/></svg>
-       <span>answers and a <strong>new harness tree</strong></span>
-     </div>
-     <div class="fig-node fig-emphasis">Reef<span class="fig-node-caption">serves requests, records results, trains weights, and evolves the harness</span></div>
-     <div class="fig-edge">
-       <span>inference and <strong>new weights</strong></span>
-       <svg class="fig-arrow fig-arrow-next" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h13"/><path d="m13 7 5 5-5 5"/></svg>
-     </div>
-     <div class="fig-node">The model<span class="fig-node-caption">runs the weights: local engine or hosted API</span></div>
-   </div>
+   Reef serves the model, loads new weights into the engine, and sends a new
+   harness tree to the agent.
 
 Why Reef
 --------
@@ -37,13 +24,21 @@ Reef eliminates this friction. By integrating continual learning directly into
 the serving lifecycle, Reef drastically reduces the complexity of maintaining
 offline pipelines.
 
-.. flow::
-   :loop: the next request is served by the new version
+.. container:: flow
 
-   Serve :: forward the request and keep the exchange
-   Record :: store the release that produced the response
-   Learn* :: the recipe uses records to create a candidate version
-   Publish :: an accepted candidate becomes the active release
+   Serve
+       forward the request and keep the exchange
+
+   Record
+       store the release that produced the response
+
+   **Learn**
+       the recipe uses records to create a candidate version
+
+   Publish
+       an accepted candidate becomes the active release
+
+   :Loop: the next request is served by the new version
 
 Existing inference engines and RL frameworks cover parts of that loop, but not
 the whole thing:

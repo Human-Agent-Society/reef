@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import importlib
 import importlib.util
 import sys
@@ -183,7 +184,7 @@ def test_engine_extension_preserves_version_and_lora_request_schemas(monkeypatch
 
     def request(route, payload=None, **_kwargs):
         calls.append((route, payload or {}))
-        return [True] if route == "set_internal_state" else {"success": True}
+        return {"success": True}
 
     engine.node_rank = 0
     engine._make_request = request
@@ -211,10 +212,6 @@ def test_engine_extension_preserves_version_and_lora_request_schemas(monkeypatch
         (
             "update_weight_version",
             {"new_version": "deployment:2", "abort_all_requests": False},
-        ),
-        (
-            "set_internal_state",
-            {"server_args": {"weight_version": "deployment:2"}},
         ),
         (
             "load_lora_adapter_from_tensors",
@@ -281,11 +278,15 @@ def test_engine_preflights_scheduler_runtime_load_id_tracking_before_registratio
     engine.node_rank = 0
     engine.worker_type = "regular"
     engine.get_runtime_load_id = lambda: "engine:3"
-    engine._make_request = lambda endpoint, payload, **_kwargs: events.append((endpoint, payload)) or [True]
+    engine._make_request = lambda endpoint, payload, **_kwargs: events.append((endpoint, payload)) or {"success": True}
 
     engine.router_ip = None
     assert engine._register_to_router({"model_path": "model"}) is None
-    assert events == [("set_internal_state", {"server_args": {"weight_version": "engine:3"}})]
+    assert events == [("update_weight_version", {"new_version": "engine:3", "abort_all_requests": False})]
+    # An engine that does not take the version, such as one without Reef's plugin, fails registration.
+    engine._make_request = lambda endpoint, payload, **_kwargs: {"success": False, "message": "refused"}
+    with pytest.raises(RuntimeError, match="did not accept the runtime-load-ID"):
+        engine._register_to_router({"model_path": "model"})
 
 
 @pytest.mark.unit
@@ -355,6 +356,40 @@ def test_reef_engine_carries_lora_server_args_across_ray_process(monkeypatch):
     assert engine.config.options["max_loaded_loras"] == 1
     assert engine.config.options["tokenizer_worker_num"] == 1
     assert engine.sglang_overrides == {"mem_fraction_static": 0.5}
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("kind", ["dataclass", "struct"])
+def test_server_options_keep_only_the_fields_of_either_server_args_kind(monkeypatch, kind):
+    """SGLang 0.5.21 made ServerArgs a msgspec Struct; earlier versions declare a dataclass. Both name their fields."""
+    module = _load_sglang_engine_module(monkeypatch)
+    names = (
+        "model_path",
+        "host",
+        "port",
+        "nccl_port",
+        "node_rank",
+        "nnodes",
+        "dist_init_addr",
+        "tp_size",
+        "pp_size",
+        "base_gpu_id",
+        "gpu_id_step",
+        "mem_fraction_static",
+    )
+    if kind == "dataclass":
+        server_args = dataclasses.make_dataclass(
+            "ServerArgs", [(name, object, dataclasses.field(default=None)) for name in names]
+        )
+    else:
+        server_args = type("ServerArgs", (), {"__struct_fields__": names})
+    monkeypatch.setattr(sys.modules["sglang.srt.server_args"], "ServerArgs", server_args)
+    monkeypatch.setattr(module, "local_gpu_id", lambda gpu: gpu)
+    config = SGLangConfig("model", 1, 1, 1, options={"mem_fraction_static": 0.5, "not_a_server_arg": 1})
+    options = module.ReefSGLangEngine(config, 0)._server_options("10.0.0.1:5000", 30000, None, "10.0.0.1", None)
+    assert set(options) <= set(names)
+    assert "not_a_server_arg" not in options
+    assert (options["mem_fraction_static"], options["tp_size"], options["port"]) == (0.5, 1, 30000)
 
 
 def test_reef_engine_rejects_conflicting_lora_override(monkeypatch):

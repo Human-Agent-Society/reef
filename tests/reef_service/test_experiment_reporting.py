@@ -88,12 +88,13 @@ def test_local_tracker_read_locks(tmp_path, monkeypatch, callback, failing):
     """A blocked ``record`` holds up nothing. ``correlation_metrics`` runs before the commit record is written,
     under the operation lock only, so release reads still answer."""
     tracker = _RecordingTracker()
-    # Loading a scenario wakes its workers: hold them, so that this test runs the one cycle.
+    # Run the cycle explicitly; sample notifications must not start competing workers.
     value, _ = _dispatcher(tmp_path, experiment_tracker=tracker, hold_local_cycles=True)
+    monkeypatch.setattr(value.local_workers, "start", lambda scenario, component=None: None)
+    value.local_workers.open()
     scenario = _scenario(value, 1)
     # The rows went to the store directly: make their samples, as the samples service does.
     make_samples(scenario)
-    value.local_workers.open()
     entered, release = Event(), Event()
 
     def blocked(event):

@@ -21,12 +21,14 @@ from reef.core.errors import ReefError, ScenarioCapacityFull, UnknownScenario
 from reef.core.job_data import TrajectorySample
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.served_models import CACHE_SECONDS
+from reef.core.serving_config import ServingConfig
 from reef.dispatcher import ingest
 from reef.dispatcher.data_sync_worker import DataSyncWorker, ItemSync
 from reef.dispatcher.errors import TrainingErrors
 from reef.dispatcher.local_workers import LocalTrainingWorkers
 from reef.dispatcher.samples import LocalSampleProducers
 from reef.dispatcher.served import ControlInstance, ServedModelsPublisher, take_control_lease
+from reef.dispatcher.serving import ServingWorker
 from reef.dispatcher.status import TrainingStatus
 from reef.dispatcher.store_changes import StoreChanges, StoreChangesWatcher
 from reef.dispatcher.work_retention import EndedWorkSweeper
@@ -139,7 +141,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
 
         ``components``: the services that this process runs (``SERVICE_COMPONENTS``). With ``control``, the
         constructor first waits for the control lease, while another control instance holds it; then the
-        dispatcher writes ``served_models``, watches the shared store, and runs the trainers' local workers, which
+        dispatcher queues serving requests, watches the shared store, and runs the trainers' local workers, which
         add the training jobs. With ``samples``, it runs the samples worker; without ``control``, that worker loads
         each scenario on demand and leaves the jobs to control.
 
@@ -159,6 +161,7 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         self.services = ServiceSet.of(components)
         #: The work queue of the samples, jobs and evaluations queues.
         self.queue = coordination.work_queue
+        self.work_retention_seconds = work_retention_seconds
         # Every job component's jobs go through the jobs queue: the weight trainer's and a harness's alike. The
         # training service runs one worker for each of them.
         job_components = recipe.job_components()
@@ -196,14 +199,14 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
             experiment_tracker=self.experiment_tracker,
             admission=scenario_admission,
             lifecycle=self,
-            # Only control activates a scenario's artifact on the engines when it loads the scenario.
-            activates_runtime=self.services.runs_control,
+            activates_runtime=False,
+            served_models=coordination.served_models,
             instructions=InstructionQueue(self.queue),
         )
         self.errors = TrainingErrors()
         self.background_threads = BackgroundThreads()
         self.local_workers = LocalTrainingWorkers(self.registry, self.errors, held=hold_local_cycles)
-        #: The writer of ``served_models``, when this process runs control.
+        #: The writer of serving requests, when this process runs control.
         self.publisher: ServedModelsPublisher | None = None
         #: Set when another control instance took the lease (``control_lease_lost``).
         self.lease_lost = Event()
@@ -220,26 +223,27 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
                 coordination,
                 self,
                 lease,
-                runtime=runtime,
                 instance_id=lease.instance_id,
                 stop_delay_seconds=CACHE_SECONDS + request_timeout_seconds,
             )
             self.workers.add(publisher)
             self.publisher = publisher
-            if runtime is not None:
-                # Only control changes the engines. It takes them over, and does not activate again at start-up what
-                # they still serve: the runtime adopts each value that served_models names for its engine, before
-                # any scenario loads.
-                runtime.open()
-                for served in coordination.served_models.all_served():
-                    if served.url == runtime.base_url:
-                        runtime.adopt(served)
             # The publisher extends the lease; it starts now, so a slow start-up does not let the lease expire.
             publisher.start()
             self.workers.add(StoreChangesWatcher(self.registry, coordination.work_queue, self))
             self.workers.add(EndedWorkSweeper(coordination.work_queue, retention_seconds=work_retention_seconds))
             if data_store is not None:
                 self.workers.add(DataSyncWorker(coordination.work_queue, self, worker_id=instance_id("data-sync")))
+        if self.services.runs_inference and recipe.runtime is not None and recipe.runtime.serves_requests:
+            self.workers.add(
+                ServingWorker(
+                    recipe,
+                    backend_factory,
+                    coordination,
+                    worker_id=instance_id("inference-startup"),
+                    local_artifact_dir=local_artifact_dir,
+                )
+            )
         if self.services.runs_samples:
             self.workers.add(
                 SamplesWorker(
@@ -530,6 +534,8 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
         with self.registry.lock_for(scenario):
             current = self.registry.require(scenario)
             changed = current.activate(artifact_id, component)
+            if self.publisher is not None:
+                self.publisher.publish(current, retry_failed=True)
             self.scenario_committed(current)
             return changed
 
@@ -540,6 +546,16 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
             changed = current.serve(artifact_id, component)
             self.scenario_committed(current)
             return changed
+
+    def restore(self, scenario: str, step: int) -> Mapping[str, str]:
+        """Restore the complete selection at a recorded scenario step and queue its serving startup."""
+        with self.registry.lock_for(scenario):
+            current = self.registry.require(scenario)
+            selection = current.restore(step)
+            if self.publisher is not None:
+                self.publisher.publish(current, retry_failed=True)
+            self.scenario_committed(current)
+            return selection
 
     def stop_serving(self, scenario: str, artifact_id: str) -> ServedBesideArtifact:
         """Stop serving ``artifact_id`` beside the active release of ``scenario``; the active release stays."""
@@ -777,6 +793,19 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
             scenario, artifact_evaluation=artifact_evaluation, activation=activation
         )
 
+    def set_serving_config(self, scenario: str, update: Mapping[str, object]) -> dict[str, Any]:
+        """Change the serving config of ``scenario`` by ``update`` (``ScenarioRegistry.set_serving_config``) and
+        queue a serving request that carries it, so inference applies it without an activation. Return the stored
+        ``serving_config`` and the ``effective_serving_config``."""
+        with self.registry.lock_for(scenario):
+            current = self.registry.set_serving_config(scenario, update)
+            if self.publisher is not None:
+                self.publisher.publish(current)
+            return {
+                "serving_config": current.serving_config.to_json(),
+                "effective_serving_config": current.effective_serving_config(current.serving_config),
+            }
+
     def stored_settings(self, scenario: str) -> ScenarioSettings:
         """The settings stored for ``scenario``; defaults when none are stored."""
         return self.registry.stored_settings(scenario)
@@ -786,16 +815,26 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
 
         ``training_mode`` is what the loaded scenario runs. ``artifact_evaluation`` and
         ``activation`` are the stored settings, or None. ``effective_activation`` is the rule that applies: the
-        scenario's ``activation``, else the deployment's. Raise ``UnknownScenario`` for an unknown scenario.
+        scenario's ``activation``, else the deployment's. ``serving_config`` is the stored serving config, and
+        ``effective_serving_config`` the serving fields of each component with the values that the scenario serves
+        with (``Scenario.effective_serving_config``): those of the stored config, which control may have changed
+        after this process loaded the scenario, or the deployment's when the runtime refuses the stored config, as
+        a load does. Raise ``UnknownScenario`` for an unknown scenario.
         """
         with self.locked_scenario(scenario) as current:
             settings = self.registry.stored_settings(scenario)
+            try:
+                effective_serving = current.effective_serving_config(settings.serving_config)
+            except ValueError:
+                effective_serving = current.effective_serving_config(ServingConfig())
             return {
                 "scenario": scenario,
                 "training_mode": current.training_mode,
                 "artifact_evaluation": settings.artifact_evaluation,
                 "activation": settings.activation,
                 "effective_activation": self.registry.effective_activation(settings),
+                "serving_config": settings.serving_config.to_json(),
+                "effective_serving_config": effective_serving,
             }
 
     def imported_tasks(self, scenario: str) -> tuple[StoredSample, ...]:

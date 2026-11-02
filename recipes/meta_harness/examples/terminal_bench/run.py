@@ -1,12 +1,10 @@
-"""Drive the pinned Terminal-Bench search through Reef scenario commits."""
+"""Run the pinned Terminal-Bench search: one Reef training request per step, each step a durable scenario commit."""
 
 from __future__ import annotations
 
 import argparse
-import dataclasses
 import hashlib
 import json
-import math
 import os
 import shutil
 import time
@@ -18,10 +16,8 @@ from harness import benchmark
 from recipes.meta_harness import MetaHarness
 from recipes.meta_harness.method import search_population
 from reef.artifact import GitLFSRepositoryBackend
-from reef.core import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher
 from reef.evaluation.harness import History
-from reef.harness import run_task
 from reef.harness.adapters import get_adapter
 from reef.harness.tree import HarnessTree, render_tree
 from reef.inference.http import InferenceProxyRuntime
@@ -39,10 +35,14 @@ from reef.train.jobs import JobLoopState
 HERE = Path(__file__).resolve().parent
 SCENARIO = "terminal-bench"
 SEED = HERE / "seed"
+#: The text of each step's training request, which the proposer reads as its instruction.
+STEP_REQUEST = "Propose the next candidate of the search."
+#: The steps a run takes unless --iterations says otherwise, as in the comparison: four full-history iterations.
+DEFAULT_STEPS = 4
 
 
-def configuration(tasks: tuple[str, ...], iterations: int | None, repeats: int | None) -> dict[str, Any]:
-    """Fill the stack's dataset and keep the evaluation run budget consistent with it."""
+def configuration(tasks: tuple[str, ...], repeats: int | None) -> dict[str, Any]:
+    """The deployment's recipe sections with the seed path, the selected tasks and the repeats filled in."""
     sections = recipe_config_from_file_layout(load_config(HERE / "terminal_bench.yaml"))
     evolution = sections["evolution"]
     evaluation = evolution["evaluation"]
@@ -50,17 +50,11 @@ def configuration(tasks: tuple[str, ...], iterations: int | None, repeats: int |
     evaluation["tasks"] = list(tasks)
     if repeats is not None:
         evaluation["repeats"] = repeats
-    method = evolution["method"]["config"]
-    if iterations is not None:
-        method["max_candidates"] = iterations
-        evolution["max_steps"] = 2 * iterations
-    # The cache keeps the incumbent's scores: the seed runs once, then each candidate once.
-    method["max_target_runs"] = len(tasks) * evaluation["repeats"] * (method["max_candidates"] + 1)
     return sections
 
 
 def campaign_id(sections: Mapping[str, Any]) -> str:
-    """Different tasks, models, seeds, or budgets must never share search state."""
+    """Different tasks, models, seeds, or search settings must never share search state; more steps continue one."""
     identity = json.loads(json.dumps(sections))
     identity["evolution"]["seed"] = HarnessTree.read(SEED).checksum()
     identity["target_url"] = os.environ["REEF_UPSTREAM_URL"]
@@ -91,7 +85,7 @@ def open_campaign(recipe: HarnessEvolutionRecipe, directory: Path) -> Dispatcher
     The recipe's seed is the root release of a new scenario, as the service makes it, so the search starts there.
 
     ``search`` prepares and commits every step itself, so the dispatcher runs no training cycle of its own: a
-    cycle that its preload starts would commit the same replayed step a second time.
+    cycle would commit the same step a second time.
     """
     return Dispatcher(
         recipe,
@@ -146,63 +140,6 @@ def served_tree(scenario: Scenario) -> HarnessTree:
     return HarnessTree(component_files(scenario.surface, artifact, scenario.surface.files_component or "harness"))
 
 
-def record_run(scenario: Scenario, recipe: HarnessEvolutionRecipe) -> None:
-    """Record one real served-harness run and its verifier feedback.
-
-    Stable ids let a restart finish an interrupted report without rerunning an
-    already recorded run. The next task is a function of the committed step.
-    """
-    if recipe.scorer is None:
-        raise ValueError("the example scores its runs with evolution.evaluation.scorer, which is not set")
-    step = steps_done(scenario)
-    tasks = recipe.configured_tasks()
-    task = tasks[step % len(tasks)]
-    inference_id = f"terminal-bench-run-{step}"
-    inference = scenario.records.get(scenario.name, inference_id)
-    if inference is None:
-        descriptor = get_adapter(recipe.evolution.adapter)
-        tree = served_tree(scenario)
-        files = render_tree(tree, descriptor, recipe.model_binding().config_overlays(descriptor))
-        result = run_task(
-            descriptor,
-            files,
-            task,
-            binary=recipe.evolution.binary,
-            timeout=recipe.evaluation.task_timeout_s,
-            executor=recipe.executor,
-        )
-        littered = recipe.evaluation.forbid_residue and bool(result.residue)
-        score = 0.0 if littered else float(recipe.scorer.score(task, result))
-        if not math.isfinite(score):
-            raise ValueError("run scorer returned a non-finite score")
-        inference = scenario.records.append(
-            AgentRecord.create(
-                scenario=scenario.name,
-                agent_record_id=inference_id,
-                request_type=RequestType.INFERENCE,
-                payload={
-                    "source": "terminus_run",
-                    "task": task,
-                    "tree": dict(tree.files),
-                    "run": dataclasses.asdict(result),
-                    "score": score,
-                },
-            )
-        )
-    scenario.records.append(
-        AgentRecord.create(
-            scenario=scenario.name,
-            agent_record_id=f"terminal-bench-report-{step}",
-            request_type=RequestType.REPORT,
-            payload={
-                "score": inference.payload["score"],
-                "feedback": {"task": task, "source": "Harbor verifier"},
-                "references": [inference.agent_record_id],
-            },
-        )
-    )
-
-
 def write_summary(scenario: Scenario, recipe: HarnessEvolutionRecipe, directory: Path) -> dict[str, Any]:
     """Rebuild a disposable summary from the latest durable commit and the history of the steps it covers."""
     done = steps_done(scenario)
@@ -236,24 +173,20 @@ def write_summary(scenario: Scenario, recipe: HarnessEvolutionRecipe, directory:
     return summary
 
 
-def search(scenario: Scenario, recipe: HarnessEvolutionRecipe, directory: Path) -> dict[str, Any]:
-    """Resume pending feedback, then request bounded proposal and evaluation steps."""
-    method = recipe.method
-    if not isinstance(method, MetaHarness):
-        raise TypeError("the example drives the Meta-Harness method")
+def search(dispatcher: Dispatcher, scenario: Scenario, recipe: HarnessEvolutionRecipe, directory: Path, steps: int):
+    """Run the search until ``steps`` steps ended: queue one training request per step and commit its job.
+
+    Each request has the ID of its step. A restarted process queues the request of an unfinished step again, which
+    returns the request already queued, and ``commit_job`` finishes a job that a previous process started.
+    """
     summary = write_summary(scenario, recipe, directory)
-    while steps_done(scenario) < recipe.evolution.max_steps:
-        # The method's own budget check, before a run is spent on a step that would propose nothing.
-        if method.spent_budget(search_history(scenario, recipe), steps_done(scenario) + 1) is not None:
-            break
-        # A previous process may have recorded the report but not committed its
-        # step, or started its job. Let Reef replay it before spending on another run.
-        scenario.produce_samples()
+    while steps_done(scenario) < steps:
+        step = steps_done(scenario) + 1
+        dispatcher.accept_instruction(
+            scenario.name, {"text": STEP_REQUEST, "session": "", "release_id": ""}, request_id=f"step-{step}"
+        )
         if not commit_job(scenario):
-            record_run(scenario, recipe)
-            scenario.produce_samples()
-            if not commit_job(scenario):
-                raise RuntimeError("the recorded run did not produce a training step")
+            raise RuntimeError(f"the training request of step {step} started no job")
         summary = write_summary(scenario, recipe, directory)
         print(
             json.dumps({key: summary[key] for key in ("step", "generated_candidates", "evaluation_runs", "served_id")})
@@ -274,28 +207,25 @@ def main() -> None:
         "--tasks-root", type=Path, default=Path(os.environ.get("REEF_TERMINAL_BENCH_DIR", "/opt/terminal-bench-2"))
     )
     parser.add_argument("--task", action="append", help="run a smaller suite using names from the pinned manifest")
-    parser.add_argument("--iterations", type=positive_int)
+    parser.add_argument(
+        "--iterations", type=positive_int, default=DEFAULT_STEPS, help="the steps the search takes in all"
+    )
     parser.add_argument("--repeats", type=positive_int)
     parser.add_argument(
         "--dry-run", action="store_true", help="validate tasks and render the seed without model calls"
     )
     args = parser.parse_args()
     tasks = benchmark.task_paths(args.tasks_root, args.task)
-    sections = configuration(tasks, args.iterations, args.repeats)
+    sections = configuration(tasks, args.repeats)
     directory = Path(os.environ["REEF_WORK"]).resolve() / campaign_id(sections)
-    descriptor = get_adapter("terminus")
-    files = render_tree(HarnessTree.read(SEED), descriptor)
-    evolution = sections["evolution"]
-    method = evolution["method"]["config"]
+    files = render_tree(HarnessTree.read(SEED), get_adapter("terminus"))
     print(
         json.dumps(
             {
                 "directory": str(directory),
                 "tasks": len(tasks),
-                "repeats": evolution["evaluation"]["repeats"],
-                "candidate_limit": method["max_candidates"],
-                "evaluation_run_limit": method["max_target_runs"],
-                "run_limit": evolution["max_steps"],
+                "repeats": sections["evolution"]["evaluation"]["repeats"],
+                "steps": args.iterations,
                 "seed_files": sorted(files),
             },
             indent=2,
@@ -313,7 +243,7 @@ def main() -> None:
         scenario = dispatcher.get_or_create_scenario(SCENARIO)
         if scenario is None:
             raise RuntimeError("Reef did not create the campaign scenario")
-        search(scenario, recipe, directory)
+        search(dispatcher, scenario, recipe, directory, args.iterations)
     finally:
         dispatcher.close()
 

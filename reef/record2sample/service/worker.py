@@ -67,16 +67,26 @@ class ProducedSamples:
     new training instruction; ``background`` is whether background work of the stages still runs, so the samples
     service looks again later.
 
+    Counts describe this completed attempt only, not earlier failed attempts. None means unavailable.
+    ``records_read`` counts replayed records, including ignored records; ``samples_created`` counts new inserts.
+
     Purpose: ``SampleProducers.produce`` returns it; the samples worker writes it as the selection's result, and
     control wakes the trainer's worker only when ``changed`` is true.
     """
 
     changed: bool
     background: bool
+    records_read: int | None = None
+    samples_created: int | None = None
 
     def __post_init__(self) -> None:
+        for count in (self.records_read, self.samples_created):
+            if count is not None and (type(count) is not int or count < 0):
+                raise ValueError("sample processing counts must be non-negative integers or None")
         if not isinstance(self.changed, bool) or not isinstance(self.background, bool):
             raise TypeError("changed and background are booleans")
+        if self.samples_created and not self.changed:
+            raise ValueError("new samples must change the trainer's input")
 
 
 class SampleProducers(ABC):
@@ -113,7 +123,12 @@ class SamplesWorker(QueueWorker):
         if not isinstance(component, str) or not component:
             raise ValueError("a record selection names its component")
         produced = self.producers.produce(item.scenario, component)
-        return {"changed": produced.changed, "background": produced.background}
+        return {
+            "changed": produced.changed,
+            "background": produced.background,
+            "records_read": produced.records_read,
+            "samples_created": produced.samples_created,
+        }
 
     def item_finished(self, item: WorkItem, result: Mapping[str, JsonValue]) -> None:
         # The next selection is a new item: the finished one keeps its ID until it ends, and an add of the same ID

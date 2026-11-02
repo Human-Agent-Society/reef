@@ -1,11 +1,11 @@
-"""The inference service: answers model requests from ``served_models`` and the record store alone.
+"""The inference service: answers model requests and reports artifact startup.
 
 An inference replica holds no scenario. For each request it reads the ``ServedArtifact`` of the request's
 ``ScenarioModel`` from ``served_models``, keeps it for the whole request, sends the request to the engine at its URL
 under its model name (``EngineClients``), appends the request's ``AgentRecord`` to the scenario's record store, and
 returns the answer with the record's ID. The request that it sends and records is the body that the engine's handler
-gives for the client's body (``InferenceHandler.request_payload``). Control is needed only to change ``served_models``. The one-process layout
-runs the same routes in control's app.
+gives for the client's body (``InferenceHandler.request_payload``). Control selects artifacts; the inference
+worker starts them and writes ``served_models``. The one-process layout runs the same routes.
 
 Routes:
 
@@ -17,12 +17,13 @@ Routes:
   evaluation rollout's call to the active model; no record.
 - ``/reef/scenarios/{s}/artifacts/{a}/v1/...``: a recorded call to the row named ``a``;
   ``/reef/scenarios/{s}/artifacts/{a}/evaluation/v1/...``: the same call, unrecorded.
+- ``GET /reef/scenarios/{s}/inference/status?model=active``: the current artifact's startup state.
 
 Rules:
 
 - A body that the engine's handler refuses (``request_payload``): 400.
-- No row: 404. A replica that cannot read ``served_models`` and has no read from the last ``max_cache_age_seconds``:
-  503.
+- No row: 503 while its artifact starts or after startup fails; 404 for an unknown model.
+  A replica that cannot read ``served_models`` and has no recent cached read answers 503.
 - An engine that fails or cannot be reached: 502; one that does not answer within the timeout: 504.
 - An answer that the engine aborted is retried once after the replica reads the row again; then 409.
 - A record that cannot be appended: 503. A replica never answers a recorded request without its record. A stream goes
@@ -48,6 +49,7 @@ from reef.core.artifact_ref import ArtifactRef
 from reef.core.errors import ReefError
 from reef.core.records_types import ROLLOUT_HEADER, AgentRecord, RequestType
 from reef.core.served_models import ACTIVE, CACHE_SECONDS, ServedArtifact
+from reef.core.values import JsonValue
 from reef.inference.provider_protocol import SSEFrameDecoder
 from reef.runtime.interfaces import (
     INFERENCE_ABORT_ERROR,
@@ -73,6 +75,8 @@ logger = logging.getLogger(__name__)
 #: The header that carries the ID of the request's record.
 RECORD_HEADER = "x-reef-agent-record-id"
 #: The header that carries the ID of the artifact that answered.
+ARTIFACT_HEADER = "x-reef-artifact-id"
+# Kept for clients deployed before artifact identity became the public contract.
 RELEASE_HEADER = "x-reef-release-id"
 #: The model routes that an inference replica answers.
 INFERENCE_PATHS = ("/v1/chat/completions", "/v1/responses", "/v1/messages", "/v1/messages/count_tokens")
@@ -93,31 +97,45 @@ class ServedModelsCache:
     Values: ``table`` is the table; ``cache_seconds`` is how long a read stays fresh while the table's
     ``changed_sequence`` stays the same, so a change reaches the next request at once; ``max_cache_age_seconds`` is
     how long the replica serves from an old read while the table cannot be read; ``rows`` holds each scenario's
-    rows with the time and the table sequence of their read.
+    rows and serving config with the time and the table sequence of their read.
 
-    Purpose: each request of a replica reads its ``ServedArtifact`` through it (``read``).
+    Purpose: each request of a replica reads its ``ServedArtifact`` (``read``) and the serving config that its
+    handler applies (``serving_config``) through it.
     """
 
     table: ServedModels
     cache_seconds: float = CACHE_SECONDS
     max_cache_age_seconds: float = 300.0
-    rows: dict[str, tuple[float, int, Mapping[str, ServedArtifact]]] = field(default_factory=dict)
+    rows: dict[str, tuple[float, int, Mapping[str, ServedArtifact], Mapping[str, JsonValue]]] = field(
+        default_factory=dict
+    )
 
-    def scenario_rows(self, scenario: str, *, refresh: bool = False) -> Mapping[str, ServedArtifact]:
+    def scenario_read(
+        self, scenario: str, *, refresh: bool = False
+    ) -> tuple[Mapping[str, ServedArtifact], Mapping[str, JsonValue]]:
+        """The rows of ``scenario`` and its serving config, from the cache while they are fresh."""
         now = time.monotonic()
         held = self.rows.get(scenario)
         try:
             sequence = self.table.changed_sequence()
             if held is not None and not refresh and now - held[0] < self.cache_seconds and sequence == held[1]:
-                return held[2]
+                return held[2], held[3]
             rows = self.table.read_scenario(scenario)
+            serving_config = self.table.read_serving_config(scenario)
         except (SQLAlchemyError, ReefError, OSError) as exc:
             if held is not None and now - held[0] < self.max_cache_age_seconds:
                 logger.warning("serving %s from a cached read of served_models: %s", scenario, exc)
-                return held[2]
+                return held[2], held[3]
             raise StaleServedModels(f"served_models cannot be read: {exc}") from exc
-        self.rows[scenario] = (now, sequence, rows)
-        return rows
+        self.rows[scenario] = (now, sequence, rows, serving_config)
+        return rows, serving_config
+
+    def scenario_rows(self, scenario: str, *, refresh: bool = False) -> Mapping[str, ServedArtifact]:
+        return self.scenario_read(scenario, refresh=refresh)[0]
+
+    def serving_config(self, scenario: str) -> Mapping[str, JsonValue]:
+        """The override that ``scenario``'s routes serve with (``ServedModels.read_serving_config``)."""
+        return self.scenario_read(scenario)[1]
 
     def read(self, scenario: str, model: object, *, refresh: bool = False) -> ServedArtifact:
         """The ``ServedArtifact`` that answers a request for ``model`` of ``scenario``."""
@@ -139,8 +157,9 @@ class ServedModelsCache:
 class ArtifactRefs:
     """The release of each artifact that a replica serves, read once from the scenario's commit history.
 
-    The release of ``artifact_id`` is the newest committed release that binds it: one whose manifest
-    (``CommitRecord.components``) names it, or, with one component, the release whose ``release_id`` it is. An
+    A selection supplies the artifact's durable storage reference. Older commits supply the release whose
+    manifest (``CommitRecord.components``) names it, or whose ``release_id`` equals the artifact ID. Local
+    selection caches never enter inference records. An
     artifact that no commit binds, such as the artifact that a scenario started from, has no release here, and its
     records carry no ``artifact_ref``.
 
@@ -163,14 +182,20 @@ class ArtifactRefs:
             history = store.history()
         finally:
             store.close()
-        found = next(
-            (
-                commit.artifact_ref
-                for commit in reversed(history)
-                if artifact_id in (commit.components or {}).values() or commit.artifact_ref.release_id == artifact_id
-            ),
-            None,
-        )
+        found = None
+        for commit in reversed(history):
+            if commit.selection is not None:
+                selected = next(
+                    (item for item in commit.selection.components.values() if item.artifact_id == artifact_id), None
+                )
+                if selected is not None:
+                    found = selected.ref
+                    break
+            if not commit.artifact_ref.release_id.startswith("selection:") and (
+                artifact_id in (commit.components or {}).values() or commit.artifact_ref.release_id == artifact_id
+            ):
+                found = commit.artifact_ref
+                break
         self.known[key] = found
         return found
 
@@ -188,7 +213,9 @@ async def read_object(request: web.Request) -> dict[str, Any]:
 
 def upstream_artifact(served: ServedArtifact, ref: ArtifactRef | None) -> Artifact:
     """The artifact that the engine handler gets for its request headers: the release, or the artifact by its ID."""
-    return Artifact(ref or ArtifactRef(served.artifact_id, served.artifact_id, None), None)
+    return Artifact(
+        ref or ArtifactRef(served.artifact_id, served.artifact_id, None), None, artifact_id=served.artifact_id
+    )
 
 
 def provider_response(response: Mapping[str, Any]) -> dict[str, Any]:
@@ -251,7 +278,7 @@ class InferenceReplica:
     waits for an engine; ``for_codex`` is whether streams are rewritten for a Codex client; ``refs`` resolves the
     release of each served artifact.
 
-    Purpose: ``add_inference_routes`` routes the model requests to ``answer``.
+    Purpose: ``add_inference_routes`` routes model requests to ``answer`` and status reads to ``startup_status``.
     """
 
     cache: ServedModelsCache
@@ -284,11 +311,47 @@ class InferenceReplica:
             store.close()
         return item.agent_record_id
 
+    def startup_status(self, scenario: str, model: str = ACTIVE) -> dict[str, str | None]:
+        """Read the current serving work's artifact, state, and safe error without changing it.
+
+        The model is ``active``, an active artifact alias, or an artifact served beside it.
+        Unknown models answer 404; an unreadable or invalid work item answers 503.
+        """
+        try:
+            item = self.cache.table.current_request(scenario)
+        except (SQLAlchemyError, ReefError, OSError) as exc:
+            logger.warning("Could not read inference startup status for %s: %s", scenario, type(exc).__name__)
+            raise web.HTTPServiceUnavailable(text="Inference startup status is unavailable.") from exc
+        if item is None or not item.payload:
+            raise web.HTTPNotFound(text=f"scenario {scenario!r} has no inference startup request")
+        artifact_id = item.payload.get("artifact_id")
+        if not isinstance(artifact_id, str) or not artifact_id:
+            raise web.HTTPServiceUnavailable(text="Inference startup status is unavailable.")
+        aliases = item.payload.get("aliases", [])
+        beside = item.payload.get("beside", {})
+        if model not in (ACTIVE, artifact_id) and (not isinstance(aliases, list) or model not in aliases):
+            if not isinstance(beside, dict) or model not in beside:
+                raise web.HTTPNotFound(text=f"scenario {scenario!r} serves no model {model!r}")
+            artifact_id = model
+        if item.state == "finished":
+            state = "ready"
+        elif item.state == "failed":
+            state = "failed"
+        elif item.state == "queued" and item.started_at is None and not item.metadata.get("recovery"):
+            state = "pending"
+        else:
+            state = "starting"
+        return {
+            "artifact_id": artifact_id,
+            "state": state,
+            "error": "The inference engine did not start. Check the service logs." if state == "failed" else None,
+        }
+
     async def resolve(
         self, scenario: str, model: object, *, name: str | None, refresh: bool
     ) -> tuple[ServedArtifact, ArtifactRef | None]:
         """The row that answers (``name``, or the one that ``model`` names) and its release, read off the event
-        loop; 404 when the scenario serves no such row, 503 when ``served_models`` cannot be read."""
+        loop. A missing route answers 503 during startup or after failure, and 404 for an unknown model."""
         try:
             if name is None:
                 served = await asyncio.to_thread(self.cache.read, scenario, model, refresh=refresh)
@@ -296,7 +359,21 @@ class InferenceReplica:
                 served = await asyncio.to_thread(self.cache.read_named, scenario, name, refresh=refresh)
             ref = await asyncio.to_thread(self.refs.ref, scenario, served.artifact_id)
         except NotServed as exc:
-            raise web.HTTPNotFound(text=str(exc)) from exc
+            status = await asyncio.to_thread(self.startup_status, scenario, ACTIVE if name is None else name)
+            if status["state"] in ("pending", "starting"):
+                raise web.HTTPServiceUnavailable(
+                    text=json.dumps(
+                        {"error": {"type": "inference_starting", "message": "The inference engine is starting."}}
+                    ),
+                    content_type="application/json",
+                    headers={"Retry-After": "30"},
+                ) from exc
+            if status["state"] == "failed":
+                raise web.HTTPServiceUnavailable(
+                    text=json.dumps({"error": {"type": "inference_start_failed", "message": status["error"]}}),
+                    content_type="application/json",
+                ) from exc
+            raise web.HTTPServiceUnavailable(text="The inference route is unavailable.") from exc
         except StaleServedModels as exc:
             raise web.HTTPServiceUnavailable(text=str(exc)) from exc
         return served, ref
@@ -307,11 +384,15 @@ class InferenceReplica:
         except LookupError as exc:
             raise web.HTTPServiceUnavailable(text=str(exc)) from exc
 
-    def request_payload(self, served: ServedArtifact, payload: Mapping[str, Any]) -> dict[str, Any]:
-        """The body that the engine of ``served`` receives for the client's ``payload``; 400 when its handler refuses
-        it."""
+    def request_payload(self, scenario: str, served: ServedArtifact, payload: Mapping[str, Any]) -> dict[str, Any]:
+        """The body that the engine of ``served`` receives for the client's ``payload`` to ``scenario``, with the
+        scenario's serving config; 400 when its handler refuses it."""
         try:
-            return self.handler(served).request_payload(payload)
+            serving_config = self.cache.serving_config(scenario)
+        except StaleServedModels as exc:
+            raise web.HTTPServiceUnavailable(text=str(exc)) from exc
+        try:
+            return self.handler(served).request_payload(payload, serving_config=serving_config)
         except ValueError as exc:
             raise web.HTTPBadRequest(text=str(exc)) from exc
 
@@ -356,10 +437,10 @@ class InferenceReplica:
         if payload.get("stream") is True:
             if rollout:
                 raise web.HTTPBadRequest(text="a rollout's call does not stream; send it without stream")
-            sent = self.request_payload(served, payload)
+            sent = self.request_payload(parsed.scenario, served, payload)
             return await self.relay_stream(request, path, parsed, sent, served, ref, record=record)
         for attempt in range(2):
-            sent = self.request_payload(served, payload)
+            sent = self.request_payload(parsed.scenario, served, payload)
             response = await self.forward(served, ref, path, sent)
             if not inference_aborted(response):
                 break
@@ -367,7 +448,7 @@ class InferenceReplica:
                 raise web.HTTPConflict(text=INFERENCE_ABORT_ERROR)
             served, ref = await self.resolve(parsed.scenario, payload.get("model"), name=name, refresh=True)
         stamped = {**sent, "artifact_id": served.artifact_id}
-        reply_headers = {RELEASE_HEADER: served.artifact_id}
+        reply_headers = {ARTIFACT_HEADER: served.artifact_id, RELEASE_HEADER: served.artifact_id}
         if record:
             try:
                 reply_headers[RECORD_HEADER] = await asyncio.to_thread(self.record, parsed, stamped, response, ref)
@@ -401,8 +482,10 @@ class InferenceReplica:
         headers = {
             key: value
             for key, value in upstream.headers.items()
-            if key.lower() not in (RECORD_HEADER, RELEASE_HEADER, "content-length", "transfer-encoding")
+            if key.lower()
+            not in (RECORD_HEADER, ARTIFACT_HEADER, RELEASE_HEADER, "content-length", "transfer-encoding")
         }
+        headers[ARTIFACT_HEADER] = served.artifact_id
         headers[RELEASE_HEADER] = served.artifact_id
         content_type = next((value for key, value in headers.items() if key.lower() == "content-type"), "")
         response = web.StreamResponse(status=upstream.status, headers=headers)
@@ -477,6 +560,12 @@ def add_inference_routes(app: web.Application, replica: InferenceReplica) -> Non
 
         return inference
 
+    async def startup_status(request: web.Request) -> web.Response:
+        status = await asyncio.to_thread(
+            replica.startup_status, request.match_info["scenario"], request.query.get("model", ACTIVE)
+        )
+        return web.json_response(status, headers={"Cache-Control": "no-store"})
+
     async def scenario_inference(request: web.Request) -> web.StreamResponse:
         """A call to ``/v1/*`` with the scenario in the path, answered and recorded as the same call to ``/v1/*``.
 
@@ -516,6 +605,7 @@ def add_inference_routes(app: web.Application, replica: InferenceReplica) -> Non
 
     for path in INFERENCE_PATHS:
         app.router.add_post(path, recorded(path))
+    app.router.add_get("/reef/scenarios/{scenario}/inference/status", startup_status)
     app.router.add_post("/reef/scenarios/{scenario}/v1/{route:.+}", scenario_inference)
     app.router.add_post("/reef/scenarios/{scenario}/evaluation/v1/{route:.+}", evaluation)
     app.router.add_post("/reef/scenarios/{scenario}/components/{component}/evaluation/v1/{route:.+}", evaluation)
@@ -536,8 +626,7 @@ def build_inference_app(
     timeout_seconds: float = 300.0,
     for_codex: bool = False,
 ) -> web.Application:
-    """The HTTP app of one separate inference replica: the model routes and ``/healthz``, behind the service
-    tokens."""
+    """The inference HTTP app: model routes, startup status, and ``/healthz`` behind the service tokens."""
     replica = InferenceReplica(
         ServedModelsCache(served_models, max_cache_age_seconds=max_cache_age_seconds),
         storage,
@@ -551,6 +640,7 @@ def build_inference_app(
 
 
 __all__ = [
+    "ARTIFACT_HEADER",
     "INFERENCE_PATHS",
     "RECORD_HEADER",
     "RELEASE_HEADER",

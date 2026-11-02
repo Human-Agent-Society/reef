@@ -9,6 +9,7 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 from tests.support.artifact_backend_plugin import MemoryArtifactBackend
+from tests.support.inference import wait_for_inference
 
 from reef.artifact import GitLFSRepositoryBackendFactory, RepositoryBackendContext, git_lfs
 from reef.runtime.interfaces import InferenceHandler
@@ -73,6 +74,7 @@ def test_build_app_serves_through_an_injected_handler_and_exposes_its_dispatcher
     async def run() -> None:
         authorization = {"Authorization": "Bearer secret"}
         async with TestClient(TestServer(app)) as client:
+            await wait_for_inference(client, "math", headers=authorization)
             response = await client.post(
                 "/v1/chat/completions",
                 headers={**authorization, "x-reef-scenario": "math"},

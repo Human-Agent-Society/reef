@@ -35,14 +35,24 @@ response from somewhere else such as a reference solution or a stronger
 model. It reports the demonstration against the request's receipt. With a
 ``job_samples`` and a batch size of 1, each report is one training step.
 
-.. flow::
-   :loop: the next request is served by the updated weights
+.. container:: flow
 
-   Rollout :: the student answers a request
-   Demonstration :: a reference response for the same request
-   Report :: the demonstration as ``teacher_context`` against the rollout's receipt
-   Step* :: distil the demonstration-conditioned teacher on the student's own tokens
-   Version :: publish the updated weights to the engine
+   Rollout
+       the student answers a request
+
+   Demonstration
+       a reference response for the same request
+
+   Report
+       the demonstration as ``teacher_context`` against the rollout's receipt
+
+   **Step**
+       distil the demonstration-conditioned teacher on the student's own tokens
+
+   Version
+       publish the updated weights to the engine
+
+   :Loop: the next request is served by the updated weights
 
 How Reef implements it
 ----------------------
@@ -142,13 +152,22 @@ Reef checks each stage's config when it loads the recipe. A bad
 stage key under ``recipe.config`` also fails it, and the error names the
 key's place in ``pipeline``.
 
-.. config::
+.. container:: config
 
-   pipeline.record2sample.config.max_teacher_tokens | 0 | the training component leaves out a sample with a longer teacher sequence and counts it in ``unrenderable_samples``. 0 disables the check. Set it to the trainer's window.
-   pipeline.record2sample.config.context_template | the reference's block | the text added to the final user message. ``{context}`` marks where the demonstration goes.
-   pipeline.sample2job.config.job_samples | required | rollouts in one job. Set it to ``training.config.global_batch_size`` so that one job is one optimizer step.
-   training.config.global_batch_size | rollouts in one optimizer step. Reef passes it to Slime as ``--global-batch-size``. Each sample is its own data-parallel unit.
-   pipeline.record2sample.config.max_staleness | 0 | accepted lag, in artifacts that the scenario served, between the producing and served artifact.
+   ``pipeline.record2sample.config.max_teacher_tokens`` : 0
+       the training component leaves out a sample with a longer teacher sequence and counts it in ``unrenderable_samples``. 0 disables the check. Set it to the trainer's window.
+
+   ``pipeline.record2sample.config.context_template`` : the reference's block
+       the text added to the final user message. ``{context}`` marks where the demonstration goes.
+
+   ``pipeline.sample2job.config.job_samples`` : required
+       rollouts in one job. Set it to ``training.config.global_batch_size`` so that one job is one optimizer step.
+
+   ``training.config.global_batch_size``
+       rollouts in one optimizer step. Reef passes it to Slime as ``--global-batch-size``. Each sample is its own data-parallel unit.
+
+   ``pipeline.record2sample.config.max_staleness`` : 0
+       accepted lag, in artifacts that the scenario served, between the producing and served artifact.
 
 ``SDFTSamples`` also takes the sample assembly's keys
 (``accept_multi_turn_policy_samples``, ``realign_threshold`` and
@@ -161,14 +180,25 @@ serving engine's chat template arguments (`Chat template arguments
 <../../reference/configuration.rst#chat-template-arguments>`__). The family
 adds its own flags:
 
-.. config::
+.. container:: config
 
-   --sdft-teacher | self | who scores the samples. ``self`` is the model itself reading the demonstration. ``separate`` is another checkpoint of the same architecture set by ``--sdft-teacher-checkpoint``.
-   --sdft-divergence | forward | ``forward`` is KL(teacher || student). ``reverse`` is KL(student || teacher). ``jsd`` is the generalized Jensen-Shannon divergence and ``--sdft-jsd-beta`` sets the teacher's mixture weight with a default of 0.5.
-   --sdft-top-k | 0 | keep the teacher's top-K log-probs and its log-prob at the sampled token. 0 keeps the whole distribution.
-   --sdft-teacher-update-rate | 0.01 | fraction of the current policy mixed into the teacher's weights after every step. 1 makes the current policy the teacher and 0 freezes the initial weights.
-   --sdft-importance-sampling-cap | 2.0 | cap of the truncated importance-sampling weight. 0 disables the correction.
-   --sdft-skip-response-tokens | 0 | response tokens at the start of every sample left out of the loss. The paper's runs used 3.
+   ``--sdft-teacher`` : self
+       who scores the samples. ``self`` is the model itself reading the demonstration. ``separate`` is another checkpoint of the same architecture set by ``--sdft-teacher-checkpoint``.
+
+   ``--sdft-divergence`` : forward
+       ``forward`` is KL(teacher \|\| student). ``reverse`` is KL(student \|\| teacher). ``jsd`` is the generalized Jensen-Shannon divergence and ``--sdft-jsd-beta`` sets the teacher's mixture weight with a default of 0.5.
+
+   ``--sdft-top-k`` : 0
+       keep the teacher's top-K log-probs and its log-prob at the sampled token. 0 keeps the whole distribution.
+
+   ``--sdft-teacher-update-rate`` : 0.01
+       fraction of the current policy mixed into the teacher's weights after every step. 1 makes the current policy the teacher and 0 freezes the initial weights.
+
+   ``--sdft-importance-sampling-cap`` : 2.0
+       cap of the truncated importance-sampling weight. 0 disables the correction.
+
+   ``--sdft-skip-response-tokens`` : 0
+       response tokens at the start of every sample left out of the loss. The paper's runs used 3.
 
 The teacher pass keeps one float16 block per sample on the host between the
 pass and the step. The block has one row per response token and one column

@@ -9,10 +9,9 @@ each request to the engine that ``served_models`` names (see `Run the services
 in separate processes
 <../user-guide/operate.rst#run-the-services-in-separate-processes>`__).
 
-.. page::
-   :for: recipe authors deciding what a served artifact can do, and anyone reading ``reef/surface/``
-   :needs: the ``Surface`` fields from `Python API <../reference/python-api.rst#surface>`__
-   :outcome: which call site invokes each capability, what the bundled surfaces bind, and how to build one
+:For: recipe authors deciding what a served artifact can do, and anyone reading ``reef/surface/``
+:Before you start: the ``Surface`` fields from `Python API <../reference/python-api.rst#surface>`__
+:You will have: which call site invokes each capability, what the bundled surfaces bind, and how to build one
 
 Scope
 -----
@@ -32,28 +31,22 @@ GPU placement, or adapter caches. Those live in ``train/``, ``artifact/``,
 Components
 ----------
 
-A release binds named components: ``weights``, ``harness``, ``config``, or
-whatever a recipe declares. ``Surface.components`` maps each name to a
-``ComponentSurface`` holding that component's ``validator``, ``loader``,
-and ``files`` tree. Every shipped recipe declares one
-component, so its releases keep the flat layout: the whole artifact is the
-component, and nothing about serving changes. A recipe that declares several
-components serves a release whose files sit in one directory per component,
-described by a manifest in the release metadata; ``Artifact.component(name)``
-returns that component's view, and the surface routes each capability to
-it. See `state model <../advanced_topics/state-model.rst>`__ for how such a
-release is committed and activated.
+A scenario selects an artifact for each named component: ``weights``,
+``harness``, ``config`` or another recipe-defined name. ``Surface.components``
+maps each name to a ``ComponentSurface`` with its ``validator``, ``loader``
+and ``files`` tree. At most one component loads into a runtime, and at most
+one exposes a client-pulled file tree.
 
-At most one component may load into a runtime and at most one may expose a
-client-pulled file tree.
+Each selected artifact keeps its own ``artifact_id``. ``Artifact.component``
+provides the view consumed by a component capability. A single-component
+artifact uses a flat layout; a local view of several components has one
+directory per component. That view does not create a new artifact identity.
 
-A step of a release with several components runs the release's own check and
-the check of the component it publishes; the other components are carried as
-they were admitted, or as the seed wrote them, which no check judges (a
-component whose recipe seeds nothing starts empty). An activation runs on
-its release the checks that the release's commit ran: the release's own check
-and the check of the component that commit published, never a carried
-component's, so it can activate every release its commit admitted.
+Publication admits the changed component and carries the others as previously
+admitted. Activation validates the target component and changes the complete
+scenario selection atomically. It does not publish a repository snapshot.
+The loader runs only when the component it loads changed. See the
+`state model <../advanced_topics/state-model.rst>`__ for ordering and recovery.
 
 Capabilities and call sites
 ---------------------------

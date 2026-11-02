@@ -26,6 +26,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from reef.artifact.artifact import Artifact
+from reef.core.values import JsonValue
 from reef.inference.http import HttpInferenceHandler, RequestHeadersFactory
 from reef.inference.provider_protocol import SSE_DONE, SSEFrameDecoder, frame_data, usage_of
 from reef.runtime.interfaces import InferenceStream
@@ -546,6 +547,11 @@ class RolloutPrefix:
             raise ValueError("a rollout prefix requires a validated chat request with messages")
 
 
+#: The sampling fields that a scenario may set for the token-native chat handler (RFC #1097). OpenAI chat and
+#: Anthropic messages requests both carry them, so a scenario's value applies alike to either protocol.
+SERVING_SAMPLING_FIELDS = ("temperature", "top_p", "top_k")
+
+
 class TokenNativeChatHandler(HttpInferenceHandler):
     """Serve OpenAI or Anthropic chat over an engine's token-native generate API.
 
@@ -622,6 +628,42 @@ class TokenNativeChatHandler(HttpInferenceHandler):
     @property
     def model_path(self) -> str:
         return self._model_path
+
+    def serving_config(self, override: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
+        """The sampling fields ``temperature``, ``top_p`` and ``top_k``, the ones that both chat protocols carry:
+        the override's value of each, else the handler's ``sampling_defaults`` value.
+
+        ``temperature`` is a number of at least 0, ``top_p`` a number in (0, 1], and ``top_k`` -1 (no limit) or a
+        positive integer. ``ValueError`` for another field or value."""
+        unknown = sorted(set(override) - set(SERVING_SAMPLING_FIELDS))
+        if unknown:
+            raise ValueError(
+                f"unknown serving fields {unknown}: the chat handler takes {list(SERVING_SAMPLING_FIELDS)}"
+            )
+        for name, value in override.items():
+            number = value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+            if name == "temperature" and not (number is not None and number >= 0):
+                raise ValueError("serving field temperature must be a number of at least 0")
+            if name == "top_p" and not (number is not None and 0 < number <= 1):
+                raise ValueError("serving field top_p must be a number in (0, 1]")
+            if name == "top_k" and not (isinstance(number, int) and (number == -1 or number > 0)):
+                raise ValueError("serving field top_k must be -1 or a positive integer")
+        return {
+            name: override.get(name, self._sampling_defaults.get(name))
+            for name in SERVING_SAMPLING_FIELDS
+            if name in override or name in self._sampling_defaults
+        }
+
+    def request_payload(
+        self, payload: Mapping[str, Any], *, serving_config: Mapping[str, JsonValue]
+    ) -> dict[str, Any]:
+        """``payload`` with each sampling field of ``serving_config`` that the client did not set: the scenario's
+        value is a default, as ``sampling_defaults`` is."""
+        body = dict(payload)
+        for name in SERVING_SAMPLING_FIELDS:
+            if name in serving_config and body.get(name) is None:
+                body[name] = serving_config[name]
+        return body
 
     def address_model(self, payload: Mapping[str, Any], model_name: str) -> dict[str, Any]:
         """The engine serves the base model under its path and each adapter under its own name, which a native

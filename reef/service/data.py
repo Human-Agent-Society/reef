@@ -89,11 +89,14 @@ class DataAccess:
 
 def item_json(item: StoredItem, *, content: bool) -> dict[str, Any]:
     """An item as JSON: ``{id, sequence, digest, metadata}``, and ``content`` when asked (null for a task)."""
+    metadata = dict(item.metadata)
+    if "origin" in metadata:
+        metadata["origin"] = {key: value for key, value in metadata["origin"].items() if key != "release_id"}
     value: dict[str, Any] = {
         "id": item.item_id,
         "sequence": item.sequence,
         "digest": item.digest,
-        "metadata": dict(item.metadata),
+        "metadata": metadata,
     }
     if content:
         value["content"] = None if item.content is None else dict(item.content)
@@ -299,7 +302,9 @@ def query_items(
     if kind is not None and kind not in KINDS:
         raise ValueError(f"kind must be one of {', '.join(ITEM_KINDS)}, got {kind!r}")
     checked_kind = None if kind is None else KINDS[kind]
-    found = data.require_store().query(owner, kind=checked_kind, scenario=scenario, after=after, limit=limit)
+    found = data.require_store().query(
+        owner, kind=checked_kind, scenario=scenario, after=after, limit=limit, content=content
+    )
     return {
         "owner": owner,
         "items": [item_json(item, content=content) for item in found],
