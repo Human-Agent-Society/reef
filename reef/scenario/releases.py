@@ -314,9 +314,11 @@ class ScenarioReleases:
         """
         served: dict[str, set[str]] = {name: set() for name in components}
         selections = [self.creation_components(scenario_step) or {}, self.active_components(scenario_step) or {}]
-        for record in self.records():
-            if record.activates:
-                selections.append(self.bound_artifact_ids(record.snapshot.revision, components, scenario_step))
+        selections.extend(
+            self.bound_artifact_ids(record.snapshot.revision, components, scenario_step)
+            for record in self.records()
+            if record.activates
+        )
         for selection in selections:
             for name, artifact_id in selection.items():
                 if name in served:
