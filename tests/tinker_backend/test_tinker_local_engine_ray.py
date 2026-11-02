@@ -343,8 +343,8 @@ def wait_for_serving(dispatcher: Dispatcher, inference: AdapterServingRuntime) -
     deadline = time.monotonic() + (1500 if REAL else 120)
     while time.monotonic() < deadline:
         item = dispatcher.coordination.served_models.current_request(SCENARIO)
-        selected = dispatcher.get_or_create_scenario(SCENARIO).current_artifact_ref().release_id
-        if item is not None and item.payload.get("release_id") == selected:
+        selected = dispatcher.get_or_create_scenario(SCENARIO).artifact_selection().to_dict()
+        if item is not None and item.payload.get("selection") == selected:
             # A restart can read the prior worker's completed request before recovering its adapter.
             if item.state == "finished" and inference.serving_adapter_runtime_load_id(SCENARIO) is not None:
                 return

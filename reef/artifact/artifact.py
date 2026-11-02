@@ -127,7 +127,8 @@ class Artifact:
         """
         if self._artifact_id is not None:
             return self._artifact_id
-        manifest = self.materialize().components
+        # Provider calls can carry a ref without local files or a repository.
+        manifest = self.components if self.repository is None else self.materialize().components
         if manifest is None:
             return self.ref.release_id
         if not manifest.single:

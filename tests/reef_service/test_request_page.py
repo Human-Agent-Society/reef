@@ -150,7 +150,7 @@ def test_a_queued_request_reloads_and_says_no_step_has_taken_it() -> None:
     assert f'<p class="text">{TEXT}</p>' in request
     assert f'<dt>Request ID</dt><dd class="id">{RECORD_ID}</dd>' in request
     assert f'<dt>Session</dt><dd class="id">{SESSION}</dd>' in request
-    assert '<dt>Base release</dt><dd class="id">rel-0</dd>' in request
+    assert '<dt>Base artifact</dt><dd class="id">rel-0</dd>' in request
     assert '<time datetime="1970-01-01T00:16:40+00:00">01 Jan 1970, 00:16:40 UTC</time>' in request
     progress = _section(page, "Progress")
     assert '<span class="queued">Queued</span>' in progress

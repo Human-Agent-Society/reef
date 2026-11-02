@@ -28,6 +28,7 @@ from tests.support.serving import wait_for_serving
 
 from reef.artifact import ArtifactRef, InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
+from reef.core.artifact_selection import ArtifactSelection, SelectedArtifact
 from reef.core.errors import ReefError
 from reef.core.trajectories import source_record_id
 from reef.dispatcher import Dispatcher, local_workers
@@ -119,6 +120,34 @@ def test_commit_record_detaches_nested_metrics() -> None:
     encoded["metrics"]["selection"]["selected"] = False
 
     assert record.metrics == {"selection": {"selected": True}}
+
+
+@pytest.mark.unit
+def test_new_records_read_legacy_history_and_keep_selection_locators(open_history) -> None:
+    legacy = sample_record().to_dict()
+    legacy["record"] = "reef-commit/5"
+    assert CommitRecord.from_dict(legacy) == sample_record()
+    reference = ArtifactRef("model-content", "stored-model", None)
+    selected = ArtifactSelection({"model": SelectedArtifact("stored-model", reference)})
+    restored = CommitRecord(
+        scenario="math",
+        step=1,
+        artifact_ref=reference,
+        checkpoint=False,
+        algorithm_state=None,
+        high_water_sequence=0,
+        high_water_offset=0,
+        operation="restore",
+        components=selected.artifact_ids,
+        selection=selected,
+    )
+    open_history().append(restored)
+    assert open_history().records() == (restored,)
+    assert restored.to_dict()["record"] == "reef-commit/6"
+    encoded = restored.to_dict()
+    encoded["selection"]["model"]["artifact_id"] = "another-model"
+    with pytest.raises(CommitHistoryError, match="components must match"):
+        CommitRecord.from_dict(encoded)
 
 
 @pytest.mark.unit
