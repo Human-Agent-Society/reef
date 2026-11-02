@@ -140,6 +140,10 @@ Routes
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/scenarios/{scenario}/samples``                                       | the scenario's training samples, in store order   |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/scenarios/{scenario}/sample-processing``                             | the scenario's sample processing tasks and counts |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/scenarios/{scenario}/sample-processing/{task_id}``                   | one sample processing task of the scenario        |
++----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/scenarios/{scenario}/buffer``                                        | the samples that the next job trains              |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/scenarios/{scenario}/buffer/insert``                                | add samples to the manual buffer; manual mode     |
@@ -2528,3 +2532,39 @@ Reef does not join these endpoints into learning links or assign learning
 states, human-readable explanations, policy capability flags, or evaluation
 results. The console owns that interpretation. Consumption is not proof that a
 release made from the records serves.
+
+
+Sample processing tasks
+-----------------------
+
+``GET /reef/scenarios/{scenario}/sample-processing`` reads the samples queue through the data service.
+The scenario must exist. It does not start processing.
+
+Optional query parameters are ``state``, ``before`` and ``limit``.
+``state`` is ``queued``, ``assigned``, ``running``, ``finished`` or ``failed``.
+``before`` excludes creation sequences at or above its positive integer value.
+``limit`` is 1 to 100, with default 50. Tasks appear newest first.
+
+The response includes ``scenario``, ``enabled``, ``read_at``, ``retention_seconds``, ``counts``, ``tasks`` and ``next``.
+``enabled`` means the scenario has a trainer that generates samples.
+It does not report worker health. ``counts`` covers all retained tasks, independent of pagination and state filters.
+``next`` is the next page's ``before`` value, or null.
+Reads of the page and counts are separate snapshots; tasks can change between them.
+
+``GET /reef/scenarios/{scenario}/sample-processing/{task_id}`` returns one task.
+An unknown task, or a task of another scenario, returns 404.
+
+Each task has ``id``, ``component``, ``state``, ``attempt_count``, ``created_at``, ``started_at``,
+``ended_at``, ``available_at``, ``error``, ``changed``, ``background``, ``records_read`` and ``samples_created``.
+Times are Unix seconds. Unavailable fields are null.
+``started_at`` is the first attempt's start. ``error`` can describe a queued task's previous failed attempt.
+
+Processing counts describe the completed attempt only; they exclude earlier failed attempts.
+``records_read`` includes records that replay read but the pipeline ignored.
+``samples_created`` counts new inserts, excluding duplicate writes.
+Legacy results report null counts.
+``changed`` can also mean a new training instruction, without new samples.
+``background=true`` means work remained active when the task finished; later tasks check it.
+
+Control removes ended tasks after ``storage.work_retention_s``, which defaults to seven days.
+This removes task history, not stored samples. Active tasks do not expire through this retention policy.
