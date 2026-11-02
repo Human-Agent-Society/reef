@@ -35,8 +35,8 @@ SKIPPED = {"skipped": "the method left the head tree unchanged"}
 NO_PUBLISH = (REJECTED, SKIPPED, SKIPPED)
 PUBLISHED = {"selected": True, "wins": 1, "losses": 0, "ties": 2, "candidate_score": 3.0, "current_score": 2.0}
 #: The release a fresh scenario serves before any step publishes, and the one a publishing step leaves behind.
-SEED_RELEASE = "seed-release"
-PUBLISHED_RELEASE = "published-release"
+SEED_ARTIFACT = "artifact:seed"
+PUBLISHED_ARTIFACT = "artifact:published"
 #: The route that reports whether inference serves the scenario's model yet.
 STARTUP_STATUS = "/reef/scenarios/harness-evolve-demo/inference/status"
 
@@ -53,7 +53,7 @@ class StubReefClient:
     before it waits for the step results see the seed and no further.
 
     ``reads`` is every route read the runner makes, in order, as ``("catalog", {"rows": n, "published": bool})``
-    for ``/reef/harness/releases`` and ``("manifest", release_id)`` for ``/reef/harness``. It says whether the
+    for ``/reef/harness/releases`` and ``("manifest", artifact_id)`` for ``/reef/harness``. It says whether the
     manifest was read because a step result was on the record, or polled before there was one to read.
 
     ``posts`` is every low-level ``post`` the run makes, in order, as ``(path, scenario, payload)``; the run uses it
@@ -68,7 +68,7 @@ class StubReefClient:
         self,
         *args: object,
         results: tuple[dict, ...] = (),
-        head: str = PUBLISHED_RELEASE,
+        head: str = PUBLISHED_ARTIFACT,
         startup: tuple[str, ...] = ("ready",),
         **kwargs: object,
     ) -> None:
@@ -87,7 +87,7 @@ class StubReefClient:
 
     def _step_rows(self) -> list[dict]:
         return [
-            {"release_id": f"release-{index}", "operation": "training", "metrics": {"steps": index, **result}}
+            {"artifact_id": f"artifact:step-{index}", "operation": "training", "metrics": {"steps": index, **result}}
             for index, result in enumerate(self.results[: len(self.reports)], start=1)
         ]
 
@@ -112,7 +112,7 @@ class StubReefClient:
             self.reads.append(("startup", state))
             self.is_inference_ready = state == "ready"
             return {
-                "artifact_id": SEED_RELEASE,
+                "artifact_id": SEED_ARTIFACT,
                 "state": state,
                 "error": "engine failed" if state == "failed" else None,
             }
@@ -123,11 +123,11 @@ class StubReefClient:
             self.reads.append(("catalog", {"rows": len(rows), "published": published}))
             return {"releases": rows}
         if path == "/reef/harness":
-            release = self.head if self.published_seen else SEED_RELEASE
+            release = self.head if self.published_seen else SEED_ARTIFACT
             self.reads.append(("manifest", release))
             return {
-                "release_id": release,
-                "parent_release_id": SEED_RELEASE,
+                "artifact_id": release,
+                "parent_artifact_id": SEED_ARTIFACT,
                 "evaluation": {},
                 "files": {},
             }
@@ -156,7 +156,7 @@ def _stage(
     tmp_path: Path,
     scores: tuple[float, ...],
     results: tuple[dict, ...],
-    head: str = PUBLISHED_RELEASE,
+    head: str = PUBLISHED_ARTIFACT,
     startup: tuple[str, ...] = ("ready",),
 ) -> StubReefClient:
     """Point the runner at ``scores``, one per task, and at ``results`` for the steps those reports trigger."""
@@ -196,7 +196,7 @@ def _stage_native(runner: ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path:
     """
     tree = tmp_path / "tree"
     tree.mkdir()
-    (tree / runner.RELEASE_FILE).write_text(json.dumps({"release_id": SEED_RELEASE}), encoding="utf-8")
+    (tree / runner.RELEASE_FILE).write_text(json.dumps({"artifact_id": SEED_ARTIFACT}), encoding="utf-8")
     monkeypatch.setattr(runner, "TREE_DIR", tree)
     monkeypatch.setattr(runner, "SCRATCH_DIR", tmp_path / "scratch")
 
@@ -205,9 +205,9 @@ def _stage_native(runner: ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path:
         number = len(client.turns)
         return [], {"text": "9592", "session": "session-1", "turn": number, "exit": 0, "receipts": [f"r{number}"]}
 
-    def mount_events(release_id):
-        client.mounts.append(release_id)
-        return [("native/sessions/serve.jsonl", {"release_id": release_id})]
+    def mount_events(artifact_id):
+        client.mounts.append(artifact_id)
+        return [("native/sessions/serve.jsonl", {"artifact_id": artifact_id})]
 
     monkeypatch.setattr(runner, "turn", turn)
     monkeypatch.setattr(runner, "mount_events", mount_events)
@@ -290,7 +290,7 @@ def test_a_publishing_step_still_reaches_the_manifest(
 
     printed = capsys.readouterr().out
     assert "/reef/harness" in client.requested, "a step published, so the run reads the head it left behind"
-    assert "published: release published-release" in printed
+    assert "published: artifact artifact:published" in printed
 
 
 def test_the_run_sends_no_task_before_inference_serves_the_model(
@@ -379,7 +379,7 @@ def test_the_native_run_follows_a_published_release_through_to_the_second_pass(
     """A native run that does publish: the step results come first, then the head, the mount and the second pass.
 
     The manifest the service serves is a genuinely new release, not the seed, so the run has to reach the
-    published-release path on the strength of this run's step results rather than on a head that never moved.
+    artifact:published path on the strength of this run's step results rather than on a head that never moved.
 
     The contract is an ordering one, so it is asserted on the recorded route reads, not on a clock: the catalog
     has to expose the published row before ``/reef/harness`` is read at all, and the head is then read once. A
@@ -388,7 +388,7 @@ def test_the_native_run_follows_a_published_release_through_to_the_second_pass(
     such a regression fails here instead of blocking on the real deadline.
     """
     client = _stage(
-        runner, monkeypatch, tmp_path, (1.0, 0.0, 1.0), (PUBLISHED, SKIPPED, SKIPPED), head=PUBLISHED_RELEASE
+        runner, monkeypatch, tmp_path, (1.0, 0.0, 1.0), (PUBLISHED, SKIPPED, SKIPPED), head=PUBLISHED_ARTIFACT
     )
     _stage_native(runner, monkeypatch, tmp_path, client)
     monkeypatch.setattr(runner, "PULL_TIMEOUT_S", 5.0)
@@ -408,13 +408,15 @@ def test_the_native_run_follows_a_published_release_through_to_the_second_pass(
     )
     assert len(manifest_reads) == 1, f"the head is read once, after the step results, not polled: {client.reads}"
     assert (
-        first_manifest[1] == PUBLISHED_RELEASE
+        first_manifest[1] == PUBLISHED_ARTIFACT
     ), f"the head the run read is {first_manifest[1]}, not the published one"
 
     assert len(client.reports) == 3, "three turns, three scores reported against their receipts"
     assert "step 1: published" in printed, "the catalog returned this run's steps, one of them published"
-    assert f"published: release {PUBLISHED_RELEASE}" in printed, "the head is a release other than the seed"
-    assert set(client.mounts) == {PUBLISHED_RELEASE}, f"the process mounted the published release, saw {client.mounts}"
+    assert f"published: artifact {PUBLISHED_ARTIFACT}" in printed, "the head is a release other than the seed"
+    assert set(client.mounts) == {
+        PUBLISHED_ARTIFACT
+    }, f"the process mounted the published release, saw {client.mounts}"
     assert len(client.turns) == 4, f"the second pass runs after the run's three turns, saw {len(client.turns)}"
     assert "second pass" in printed
     assert (

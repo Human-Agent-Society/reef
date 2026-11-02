@@ -15,7 +15,7 @@ import pytest
 from tests.support._policy_recipe import TestPolicyRecipe
 from tests.support.runtime_stubs import StubTrainingComponent, runtime_bindings
 
-from reef.artifact import Artifact, ArtifactConflict, ArtifactRef, InMemoryRepositoryBackend, Repository
+from reef.artifact import Artifact, ArtifactConflict, InMemoryRepositoryBackend, Repository, SnapshotRef
 from reef.core import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher, build_default_dispatcher
 from reef.runtime.jobs import SavedCheckpoint, TrainingJob
@@ -121,8 +121,8 @@ def test_activate_requires_the_observed_head(tmp_path) -> None:
     head = backend.register(Artifact.local(initial), metadata={})
     repository = Repository(backend, head, current_artifact=head, checkpoint_artifact=head)
 
-    stale = ArtifactRef(content_id="artifact:stale", release_id="stale", parent_release_id=None)
-    advanced = ArtifactRef(content_id="live:1", release_id="live:proc:w1:1", parent_release_id=head.release_id)
+    stale = SnapshotRef(revision="stale", parent_revision=None)
+    advanced = SnapshotRef(revision="live:proc:w1:1", parent_revision=head.revision)
     with pytest.raises(ArtifactConflict, match="active artifact moved"):
         repository.activate(advanced, expected=stale)
 
@@ -248,7 +248,7 @@ def test_concurrent_checkpoint_commits_form_one_linear_chain(tmp_path) -> None:
     nodes = 0
     while True:
         nodes += 1
-        if node.parent_release_id is None:
+        if node.parent_revision is None:
             break
-        node = backend.resolve_release(node.parent_release_id)
+        node = backend.resolve_snapshot(node.parent_revision)
     assert nodes == total + 1

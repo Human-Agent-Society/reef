@@ -41,7 +41,7 @@ from reef.harness.tree import HarnessTree
 from reef.recipe.harness import HarnessEvolutionRecipe
 from reef.recipe.registry import build_recipe
 from reef.storage.sqlite import SQLiteRecordStore
-from reef.train.backend import ComponentReleases
+from reef.train.backend import ComponentArtifacts
 from reef.train.harness_backend import AgentMethod
 from reef.train.harness_backend.backend import HarnessBackend
 from reef.train.harness_backend.state import HarnessState
@@ -263,7 +263,7 @@ def test_a_deployment_names_the_method_for_any_adapter(tmp_path: Path, adapter: 
     assert isinstance(recipe, HarnessEvolutionRecipe) and isinstance(recipe.method, MetaHarness)
     assert recipe.method.settings == MetaHarnessSettings(mode="incumbent_only", components=("rules",))
     assert recipe.evolution.adapter == adapter and recipe.seed == SEED
-    releases = ComponentReleases(TreeReleases(recipe.seed), COMPONENT)
+    releases = ComponentArtifacts(TreeReleases(recipe.seed), COMPONENT)
     assert isinstance(
         recipe.build("general-task", SQLiteRecordStore(), releases=releases, root=seed_root(recipe)), Trainer
     )

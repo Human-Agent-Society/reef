@@ -16,7 +16,13 @@ from reef.artifact.artifact import Artifact
 from reef.core.config import config_option
 from reef.inference.provider_protocol import provider_headers
 from reef.runtime.deployment import RuntimeFactory, RuntimeRegistry, config_secret, config_string
-from reef.runtime.interfaces import InferenceHandler, InferenceRuntime, InferenceStream, UpstreamStatusError
+from reef.runtime.interfaces import (
+    InferenceArtifact,
+    InferenceHandler,
+    InferenceRuntime,
+    InferenceStream,
+    UpstreamStatusError,
+)
 
 #: Hop-by-hop headers that describe one connection and must not be forwarded.
 HOP_BY_HOP_HEADERS = frozenset(
@@ -43,11 +49,11 @@ class RequestHeadersFactory(ABC):
     """Produce request headers for one artifact-bound upstream call."""
 
     @abstractmethod
-    def headers(self, artifact: Artifact, path: str) -> Mapping[str, str]:
+    def headers(self, artifact: InferenceArtifact, path: str) -> Mapping[str, str]:
         """Return identity and authentication headers for the selected route."""
 
 
-def content_identity_headers(artifact: Artifact) -> dict[str, str]:
+def artifact_identity_headers(artifact: InferenceArtifact) -> dict[str, str]:
     """Reef identity headers for one selected, optionally materialized artifact."""
     headers = {"x-reef-artifact-id": artifact.artifact_id, "x-reef-release-id": artifact.artifact_id}
     if artifact.local_path is not None:
@@ -58,8 +64,8 @@ def content_identity_headers(artifact: Artifact) -> dict[str, str]:
 class ArtifactRequestHeaders(RequestHeadersFactory):
     """Attach the selected Reef artifact identity."""
 
-    def headers(self, artifact: Artifact, path: str) -> Mapping[str, str]:
-        return content_identity_headers(artifact)
+    def headers(self, artifact: InferenceArtifact, path: str) -> Mapping[str, str]:
+        return artifact_identity_headers(artifact)
 
 
 class ProviderRequestHeaders(RequestHeadersFactory):
@@ -77,8 +83,8 @@ class ProviderRequestHeaders(RequestHeadersFactory):
             raise ValueError("api_key must be non-empty")
         self._api_key = api_key
 
-    def headers(self, artifact: Artifact, path: str) -> Mapping[str, str]:
-        return {**content_identity_headers(artifact), **provider_headers(path, self._api_key)}
+    def headers(self, artifact: InferenceArtifact, path: str) -> Mapping[str, str]:
+        return {**artifact_identity_headers(artifact), **provider_headers(path, self._api_key)}
 
 
 def provider_request_headers(api_key: str) -> RequestHeadersFactory:
@@ -123,7 +129,7 @@ class HttpInferenceHandler(InferenceHandler):
             raise ValueError(f"default HTTP inference handler does not accept config keys: {sorted(config)}")
         return cls(upstream_url, timeout_s=timeout_s)
 
-    def _post_arguments(self, artifact: Artifact, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def _post_arguments(self, artifact: InferenceArtifact, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         """Keyword arguments of one ``session.post`` call."""
         return {
             "url": f"{self._upstream_url}{path}",
@@ -134,7 +140,7 @@ class HttpInferenceHandler(InferenceHandler):
     def _status_error(self, status: int, body: str) -> UpstreamStatusError:
         return UpstreamStatusError(f"{self._error_label} returned {status}: {body[:400]}", status=status)
 
-    async def inference(self, artifact: Artifact, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+    async def inference(self, artifact: InferenceArtifact, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         from aiohttp import ClientSession, ClientTimeout
 
         async with (
@@ -148,7 +154,9 @@ class HttpInferenceHandler(InferenceHandler):
             raise TypeError(f"{self._error_label} response must be a JSON object")
         return value
 
-    async def inference_stream(self, artifact: Artifact, path: str, payload: dict[str, Any]) -> InferenceStream:
+    async def inference_stream(
+        self, artifact: InferenceArtifact, path: str, payload: dict[str, Any]
+    ) -> InferenceStream:
         from aiohttp import ClientSession, ClientTimeout
 
         # The session outlives this call: the stream owns it until closed.
@@ -234,7 +242,7 @@ class InferenceProxyRuntime(InferenceRuntime):
         return self._inference_handler
 
     def activate_checkpoint(self, artifact: Artifact, *, scenario: str | None = None) -> str:
-        return artifact.ref.release_id
+        return artifact.artifact_id
 
 
 @dataclass(frozen=True)
@@ -319,7 +327,7 @@ __all__ = [
     "InferenceProxyRuntimeFactory",
     "ProviderRequestHeaders",
     "RequestHeadersFactory",
-    "content_identity_headers",
+    "artifact_identity_headers",
     "provider_request_headers",
     "resolve_proxy_runtime",
 ]

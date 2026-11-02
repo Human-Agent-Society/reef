@@ -75,7 +75,7 @@ from reef.storage.records import RecordStore
 from reef.storage.samples import TrainerSamples
 from reef.storage.tasks import TaskStorage
 from reef.surface.base import ArtifactLayout, Surface
-from reef.train.backend import ComponentReleases
+from reef.train.backend import ComponentArtifacts
 from reef.train.harness_backend.agent.settings import AgentSettings, agent_settings
 from reef.train.harness_backend.backend import HarnessBackend, StepLimits
 from reef.train.harness_backend.component import HISTORY_DIR, STEPS_DIR, HarnessSteps, HarnessTrainingComponent
@@ -196,7 +196,7 @@ class HarnessJobLoop(JobLoop):
         component: TrainingComponent,
         *,
         scenario: str,
-        releases: ComponentReleases,
+        releases: ComponentArtifacts,
         eval_samples: TrainerSamples | None,
         layout: TreeLayout,
     ) -> None:
@@ -206,7 +206,7 @@ class HarnessJobLoop(JobLoop):
         self.layout = layout
 
     def harness_parameters(self, data: JobData, state: JobLoopState) -> dict[str, Any]:
-        """``{component, head_release_id, evaluation_tasks, previous_job}``: the component's name, its head release,
+        """``{component, head_artifact_id, evaluation_tasks, previous_job}``: the component's name, its starting artifact ID,
         the eval split's task paths in arrival order or ``None``, and the ID of the last job that the trainer
         committed the end of (``state.last_job``), whose harness state the job continues, or ``None`` before the
         first."""
@@ -221,7 +221,7 @@ class HarnessJobLoop(JobLoop):
         )
         return {
             "component": self.releases.component,
-            "head_release_id": self.releases.head().release_id,
+            "head_artifact_id": self.releases.head().artifact_id,
             "evaluation_tasks": tasks,
             "previous_job": None if state.last_job is None else state.last_job.job_id,
         }
@@ -589,7 +589,7 @@ class HarnessEvolutionRecipe(Recipe):
         algorithm_state: Mapping[str, Any] | None = None,
         experiment_logger: ExperimentLogger | None = None,
         task_storage: TaskStorage | None = None,
-        releases: ComponentReleases | None = None,
+        releases: ComponentArtifacts | None = None,
         samples: TrainerSamples | None = None,
         root: ScenarioRoot | None = None,
     ) -> Trainer:

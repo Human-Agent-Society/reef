@@ -114,7 +114,7 @@ def main():
         return
 
     manifest = client.get("/reef/harness", extra_headers={"x-reef-scenario": SCENARIO})
-    print(f"published: release {manifest['release_id']} (parent {manifest['parent_release_id']})")
+    print(f"published: artifact {manifest['artifact_id']} (parent {manifest['parent_artifact_id']})")
     # The step's patch maps each tree path it changed to the new text, or to null for a removed file.
     evaluation = dict(manifest["evaluation"])
     patch = evaluation.pop("patch", {})
@@ -184,7 +184,7 @@ def wait_for_steps(client, before, expected, deadline):
         for row in steps[shown:]:
             metrics = row.get("metrics") or {}
             step_result = "published" if metrics.get("selected") else metrics.get("skipped") or "rejected"
-            print(f"step {metrics.get('steps', '?')}: {step_result} (release {row['release_id'][:12]})")
+            print(f"step {metrics.get('steps', '?')}: {step_result} (artifact {row['artifact_id']})")
         shown = max(shown, len(steps))
         if shown - before >= expected:
             return steps[before:]
@@ -218,7 +218,7 @@ def pull():
         json.dumps(binding, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
     SCRATCH_DIR.mkdir(parents=True, exist_ok=True)
-    print(f"scenario {SCENARIO} serves release {manifest['release_id']}; the serve process pulls it")
+    print(f"scenario {SCENARIO} serves artifact {manifest['artifact_id']}; the serve process pulls it")
 
 
 def turn(prompt, session=None):
@@ -242,15 +242,15 @@ def report(client, result, score, feedback):
     )
 
 
-def mount_events(release_id):
-    """Every harness/mount of ``release_id`` the serve process logged, in serve.jsonl or in a session."""
+def mount_events(artifact_id):
+    """Every harness/mount of ``artifact_id`` the serve process logged, in serve.jsonl or in a session."""
     found = []
     for path in sorted((TREE_DIR / "native" / "sessions").rglob("*.jsonl")):
         for line in path.read_text(encoding="utf-8").splitlines():
             if not line.strip():
                 continue
             event = json.loads(line)
-            if event["type"] == "harness/mount" and event["data"].get("release_id") == release_id:
+            if event["type"] == "harness/mount" and event["data"].get("artifact_id") == artifact_id:
                 found.append((path.relative_to(TREE_DIR).as_posix(), event["data"]))
     return found
 
@@ -259,7 +259,7 @@ def native_main():
     tasks = json.loads(TASKS_FILE.read_text())
     client = ReefClient(SERVICE_URL, token=TOKEN, timeout_s=300.0)
     # The pulled tree is the seed: the head moves off it only when a step publishes.
-    seed = json.loads((TREE_DIR / RELEASE_FILE).read_text())["release_id"]
+    seed = json.loads((TREE_DIR / RELEASE_FILE).read_text())["artifact_id"]
 
     before = steps_before(client)
     # turns + report: each task is one turn on the resident process; the score goes against the turn's receipts.
@@ -296,14 +296,14 @@ def native_main():
         )
         return
     manifest = head_manifest(client)
-    release = manifest["release_id"]
+    release = manifest["artifact_id"]
     if release == seed:
         # A result said published, but the head still serves the seed: nothing this run can mount.
         print(
             f"no change passed the evaluation within {PULL_TIMEOUT_S:.0f}s; rerun ./run.sh native for another attempt"
         )
         return
-    print(f"published: release {release} (parent {manifest['parent_release_id']})")
+    print(f"published: artifact {release} (parent {manifest['parent_artifact_id']})")
     print("evaluation metrics (the evolve step that published this release):")
     print(json.dumps(manifest["evaluation"], indent=2, sort_keys=True))
 
