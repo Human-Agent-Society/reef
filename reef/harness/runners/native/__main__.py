@@ -51,8 +51,8 @@ def _parser() -> argparse.ArgumentParser:
     turn.add_argument("--quiet", action="store_true", help="print only the final text")
     turn.add_argument("--socket", type=Path)
 
-    mount = commands.add_parser("mount", help="mount one release on a serve process")
-    mount.add_argument("release_id")
+    mount = commands.add_parser("mount", help="mount one artifact on a serve process")
+    mount.add_argument("artifact_id")
     mount.add_argument("--tree", type=Path, required=True, help=tree_help)
     mount.add_argument("--socket", type=Path)
 

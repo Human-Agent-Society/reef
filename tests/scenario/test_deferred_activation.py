@@ -40,7 +40,7 @@ def test_load_training_activation_and_recovery_do_not_load_an_engine(deferred_fa
     factory, runtime, coordination = deferred_factory
     lease = coordination.control_lease.acquire("test-control")
     with closing(factory.load_or_create("math")) as scenario:
-        root = scenario.current_artifact_ref()
+        root = scenario.current_snapshot()
         assert runtime.activated == []
         for record in _records(1, scenario.serving_artifact_id(), "math"):
             scenario.records.append(record)
@@ -55,13 +55,13 @@ def test_load_training_activation_and_recovery_do_not_load_an_engine(deferred_fa
             result = scenario.prepare_training_step()
             assert result is not None
             scenario.commit(result)
-        assert scenario.current_artifact_ref() != root
-        scenario.activate(root.release_id)
-        assert scenario.current_artifact_ref() == root
+        assert scenario.current_snapshot() != root
+        scenario.activate(scenario.repository.resolve(root).artifact_id)
+        assert scenario.current_snapshot() == root
         assert runtime.activated == []
 
     with closing(factory.load_or_create("math")) as recovered:
-        assert recovered.current_artifact_ref() == root
+        assert recovered.current_snapshot() == root
         assert runtime.activated == []
 
 

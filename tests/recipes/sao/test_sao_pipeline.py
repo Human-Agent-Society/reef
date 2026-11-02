@@ -31,7 +31,7 @@ from tests.support.serving import wait_for_serving
 from recipes.sao import SAORecipe
 from recipes.sao.processor import SAOJobData, SAOSamples
 from reef.artifact import CachedRepositoryBackendFactory, InMemoryRepositoryBackend
-from reef.artifact.artifact import ArtifactRef
+from reef.artifact.artifact import SnapshotRef
 from reef.core import AgentRecord, RequestType
 from reef.core.chat_rendering import rendered_job_data
 from reef.core.reports import ReportValidationError
@@ -78,13 +78,12 @@ def _sao_inference(agent_record_id: str, *, artifact_id: str | None = "artifact-
     # The inference service records the artifact that answered.
     if artifact_id:
         payload["artifact_id"] = artifact_id
-    artifact_ref = ArtifactRef(content_id="math", release_id="release-1", parent_release_id=None)
     return AgentRecord.create(
         scenario="math",
         request_type=RequestType.INFERENCE,
         payload=payload,
         agent_record_id=agent_record_id,
-        artifact_ref=artifact_ref,
+        artifact_id=artifact_id,
         created_at=record.created_at,
     )
 
@@ -240,7 +239,7 @@ def test_processor_reads_the_producing_artifact_from_the_payload_of_a_record_wit
         request_type=RequestType.INFERENCE,
         payload={**conversation("i1", 1).payload, "artifact_id": "artifact-7"},
         agent_record_id="i1",
-        artifact_ref=None,
+        artifact_id=None,
     )
     processor = sao_processor(PipelineContext("math"))
     processor.push(inference)
@@ -482,7 +481,7 @@ def test_an_activation_rule_that_activates_nothing_keeps_the_checkpoint_from_ser
         scenario = dispatcher.get_or_create_scenario("math")
         wait_for_serving(dispatcher)
         base = inference.activated[:]
-        served = scenario.current_artifact_ref()
+        served = scenario.current_snapshot()
         _rollout(dispatcher, 1, 0.9)
 
         _wait_for_finished_jobs(dispatcher, 1)
@@ -498,8 +497,8 @@ def test_an_activation_rule_that_activates_nothing_keeps_the_checkpoint_from_ser
             "event": "checkpoint",
             "step": 0,
         }
-        assert scenario.current_artifact_ref() == served
-        assert scenario.repository.checkpoint_artifact == record.artifact_ref
+        assert scenario.current_snapshot() == served
+        assert scenario.repository.checkpoint_artifact == record.snapshot
     finally:
         dispatcher.close()
 
@@ -528,10 +527,10 @@ def test_sao_train_step_swaps_the_served_artifact(tmp_path) -> None:
         wait_for_serving(dispatcher)
         # The new head is the saved release of the trained checkpoint, and it
         # actually moved off the pre-train head (guards against a constant stub).
-        assert head.release_id != pre_head.release_id
+        assert head.revision != pre_head.revision
         # The runtime loaded the checkpoint once, and the scenario serves its artifact.
-        assert inference.activated == [pre_head.release_id, "w1"]
-        assert pre_served != scenario.serving_artifact_id() == head.release_id
+        assert inference.activated == [pre_head.revision, "w1"]
+        assert pre_served != scenario.serving_artifact_id() == scenario.repository.resolve(head).artifact_id
     finally:
         dispatcher.close()
 
@@ -630,7 +629,7 @@ def test_sao_train_step_recovers_across_a_restart(tmp_path) -> None:
             commit=CommitRecord(
                 scenario="math",
                 step=step,
-                artifact_ref=ArtifactRef("content:base", "release:base", "base"),
+                snapshot=SnapshotRef("release:base", "base"),
                 checkpoint=False,
                 algorithm_state=prepared.algorithm_state,
                 high_water_sequence=prepared.high_water_sequence,

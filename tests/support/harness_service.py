@@ -24,8 +24,8 @@ from tests.support.samples_service import make_samples
 
 from reef.artifact import Artifact, CachedRepositoryBackendFactory, InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
-from reef.core.artifact_ref import RootSource
 from reef.core.evaluation import CandidateEvaluationPlugin
+from reef.core.snapshot import RootSource
 from reef.dispatcher import Dispatcher
 from reef.evaluation.harness import ComparePolicy
 from reef.recipe import Recipe
@@ -192,7 +192,7 @@ def run_step(scenario: Scenario, suffix: str) -> TrainStepResult:
 
 def catalog(scenario: Scenario) -> list[dict[str, Any]]:
     """The catalog rows of ``scenario``, newest first, as ``GET /reef/harness/releases`` lists them."""
-    return RequestService.harness_rows(scenario)
+    return RequestService.legacy_harness_rows(scenario)
 
 
 #: Each backend's scenario step: the steps ``backend_step`` ran on it.

@@ -31,7 +31,7 @@ class WeightLoader(ArtifactLoader):
         """Serve the final release on the runtime before traffic reaches it; without a weight runtime, its release ID."""
         if isinstance(runtime, WeightRuntime):
             return runtime.activate_checkpoint(artifact, scenario=self._scenario)
-        return artifact.ref.release_id
+        return artifact.ref.revision
 
 
 #: The component name a weight surface binds.

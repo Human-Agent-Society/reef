@@ -48,12 +48,12 @@ from reef.artifact.artifact import (
     ArtifactMaterializationError,
     ArtifactNotFound,
     ArtifactPublicationError,
-    ArtifactRef,
     ArtifactSourceError,
     ArtifactValidator,
+    SnapshotRef,
 )
 from reef.artifact.composite import compose_release
-from reef.artifact.files import ArtifactFiles, DirectoryFiles, directory_content_id
+from reef.artifact.files import ArtifactFiles, DirectoryFiles, directory_checksum
 from reef.artifact.git_lfs import GitLFSRepositoryBackend, GitLFSRepositoryBackendFactory
 from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.artifact.peft import AdapterArtifactError, PEFTValidator, read_peft_config
@@ -101,7 +101,6 @@ __all__ = [
     "ArtifactMaterializationError",
     "ArtifactNotFound",
     "ArtifactPublicationError",
-    "ArtifactRef",
     "ArtifactReleaseChain",
     "ArtifactSourceError",
     "ArtifactSourceReader",
@@ -133,10 +132,11 @@ __all__ = [
     "RepositoryBackendFactory",
     "S3PrefixFiles",
     "S3Reader",
+    "SnapshotRef",
     "SourceFiles",
     "StagedReleaseRepositoryBackend",
     "compose_release",
-    "directory_content_id",
+    "directory_checksum",
     "download_huggingface_snapshot",
     "parse_huggingface_source",
     "read_peft_config",
