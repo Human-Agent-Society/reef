@@ -402,7 +402,12 @@ def test_the_trainer_builds_jobs_only_from_samples_that_the_samples_service_made
     assert trainer.pipeline_status()["ready_samples"] == 0
 
     # The samples service makes the samples; the next cycle builds the job from them.
-    assert trainer.produce_samples() == ProducedSamples(changed=True, background=False)
+    assert trainer.produce_samples() == ProducedSamples(
+        changed=True, background=False, records_read=2, samples_created=1
+    )
+    assert trainer.produce_samples() == ProducedSamples(
+        changed=False, background=False, records_read=0, samples_created=0
+    )
     result = trainer.run_once()
     assert result is not None and len(trainer.pending_job_data.samples) == 1
 
