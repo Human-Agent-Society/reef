@@ -331,6 +331,17 @@ def test_provider_cli_serves_and_records_feedback_without_yaml_or_gpu_imports(tm
                     Request(f"{base_url}/reef/scenarios", json.dumps({"name": "demo"}).encode(), headers), timeout=15
                 ) as response:
                     assert response.status == 201
+                deadline = time.monotonic() + 15
+                while True:
+                    with urlopen(
+                        Request(f"{base_url}/reef/scenarios/demo/inference/status", headers=headers), timeout=1
+                    ) as response:
+                        status = json.load(response)
+                    if status["state"] == "ready":
+                        break
+                    assert status["state"] in ("pending", "starting"), status
+                    assert time.monotonic() < deadline, log_path.read_text()
+                    time.sleep(0.01)
                 payload = {"model": "demo", "messages": [{"role": "user", "content": "hello"}], "temperature": 0.3}
                 with urlopen(
                     Request(f"{base_url}/v1/chat/completions", json.dumps(payload).encode(), headers), timeout=15

@@ -7,6 +7,7 @@ import shutil
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Event
 
 import pytest
 
@@ -212,6 +213,51 @@ def test_concurrent_registrations_of_one_scenario_make_one_root(tmp_path: Path, 
     assert len({head.release_id for head in heads}) == 1
     encoded = base64.urlsafe_b64encode(b"scenario").decode().rstrip("=")
     assert run_git("--git-dir", str(remote), "rev-parse", f"refs/reef/scenarios/{encoded}") == heads[0].release_id
+
+
+@pytest.mark.integration
+def test_metadata_and_release_reads_share_one_git_workspace_safely(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_git_lfs: None
+) -> None:
+    remote, work = tmp_path / "artifacts.git", tmp_path / "work"
+    first = GitLFSRepositoryBackend("scenario", remote, work_dir=work, cache_dir=tmp_path / "cache")
+    root = first.register(root_tree(tmp_path / "root"), metadata={"generation": "root"})
+    candidate = root_tree(tmp_path / "candidate", {"rules.md": "new rules"}, content_id="content:new")
+    candidate = Artifact(candidate.ref, None, local_path=candidate.local_path, metadata={"generation": "new"})
+    first.publish(candidate, expected_parent=root)
+    second = GitLFSRepositoryBackend("scenario", remote, work_dir=work / ".", cache_dir=tmp_path / "cache")
+    fetched, release, attempted, second_fetch = Event(), Event(), Event(), Event()
+    fetch_version = first._workspace.fetch_version
+    git = second._git_client.git
+
+    def hold_metadata_fetch(version: str) -> str:
+        resolved = fetch_version(version)
+        fetched.set()
+        assert release.wait(5)
+        return resolved
+
+    def observe_other_fetch(*args: str) -> str:
+        if args[0] == "fetch":
+            second_fetch.set()
+        return git(*args)
+
+    def read_root():
+        attempted.set()
+        return second.resolve_release(root.release_id)
+
+    monkeypatch.setattr(first._workspace, "fetch_version", hold_metadata_fetch)
+    monkeypatch.setattr(second._git_client, "git", observe_other_fetch)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        metadata = executor.submit(first.metadata)
+        try:
+            assert fetched.wait(5)
+            resolved = executor.submit(read_root)
+            assert attempted.wait(5)
+            assert not second_fetch.wait(0.1), "A concurrent fetch replaced metadata's FETCH_HEAD"
+        finally:
+            release.set()
+        assert metadata.result(timeout=5) == {"generation": "new"}
+        assert resolved.result(timeout=5) == root
 
 
 @pytest.mark.integration

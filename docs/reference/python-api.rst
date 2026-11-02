@@ -1969,9 +1969,9 @@ Neither inherits from the other, and no trainer holds a serving engine.
   default, for full weights, or ``model_adapter`` for a LoRA adapter on its
   base model. A runtime that serves adapters must override it.
   ``served_artifact(artifact_id, scenario)`` gives the engine's HTTP(S) URL
-  and the model name (``served_model_name(scenario)``) that control writes to
+  and the model name (``served_model_name(scenario)``) that inference writes to
   ``served_models`` for the scenario. It returns None when the engine has no
-  such URL; the scenario then serves no model on the inference routes.
+  such URL; startup then fails without publishing a route.
   ``artifact_model(artifact)`` is the ``PolicyModel`` that the runtime serves
   for an artifact on request, without loading it, or None, the default, for a
   runtime that serves only its loaded artifact. A runtime whose handler answers
@@ -1982,14 +1982,23 @@ Neither inherits from the other, and no trainer holds a serving engine.
   ``capabilities`` read.
   ``shared_by_training_scenarios`` is true for a runtime that serves each
   training scenario its own weights.
-* ``ScenarioCommitter`` orders both around each commit. It publishes a
-  saved checkpoint, has the runtime serve it when the activation rule activates it
-  (``WeightRuntime.activate_checkpoint``), and then writes the commit record.
-  A failed publication therefore leaves serving unchanged. For an activation
-  it has the runtime serve the release that binds the artifact, then writes
-  an ``activate`` record; in a scenario of several components it first
-  publishes that release, with no new content. For a ``train-from`` it has
-  the trainer import the artifact, then writes a ``train_from`` record.
+* ``ScenarioCommitter`` publishes checkpoints and records artifact selections.
+  A dispatcher queues each selection for the inference worker. The worker
+  opens the runtime, loads the published release, and publishes routes when
+  activation returns. Route publication and startup completion share one
+  transaction. A superseded request cannot publish routes.
+  A standalone scenario keeps synchronous activation by default.
+  ``train-from`` still imports the artifact into the trainer before it writes
+  a ``train_from`` record.
+
+``Scenario.serving_artifact_id()`` names the selected artifact.
+``Scenario.served_artifact_id()`` reads the published route when a dispatcher
+owns the scenario. Training staleness checks use this served identity.
+Automatic weight training waits while the selected artifact has no matching
+served route. Standalone scenarios and deployments without inference keep
+their existing training behavior.
+Startup status is available through the inference service's
+``GET /reef/scenarios/{scenario}/inference/status`` route.
 
 ``reef.runtime.serving`` holds the two runtimes for saved weights, both over an
 ``InferenceBackend``:

@@ -11,6 +11,7 @@ from tests.support._policy_recipe import TestPolicyRecipe
 from tests.support.artifact_versions import ImportingComponent, dispatcher, train
 from tests.support.hugging_face_hub import COMMIT, MemoryHub
 from tests.support.runtime_stubs import runtime_bindings
+from tests.support.serving import wait_for_serving
 
 from reef.artifact import (
     REFERENCE_FILE,
@@ -62,6 +63,7 @@ def store(tmp_path: Path) -> Path:
 def test_an_import_publishes_beside_the_chain_and_changes_nothing_else(tmp_path) -> None:
     value, runtime, backend_factory = dispatcher(tmp_path)
     train(value, 1)
+    wait_for_serving(value)
     scenario = value.get_or_create_scenario("math")
     served = scenario.current_artifact_ref()
     checkpoint = scenario.repository.checkpoint_artifact
@@ -131,8 +133,11 @@ def test_an_import_publishes_beside_the_chain_and_changes_nothing_else(tmp_path)
             "training",
             "creation",
         ]
-        # It serves the activated import and resumes training from the imported start.
-        assert sorted(component.restore_order) == ["inference", "training"]
+        # Control resumes training before inference loads the selected import.
+        wait_for_serving(restarted)
+        assert component.restore_order == ["training", "inference"]
+        request = restarted.coordination.served_models.current_request("math")
+        assert request.payload["artifact_id"] == imported.artifact_id
     finally:
         restarted.close()
 
