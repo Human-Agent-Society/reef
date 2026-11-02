@@ -14,7 +14,7 @@ import logging
 import math
 import time
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from threading import Lock
 from typing import Any
 
@@ -38,35 +38,96 @@ from reef.train.pipeline import TrainingPipeline
 from reef.train.types import JobData, PreparedCommit, TrainStepResult
 
 
-@dataclass
-class _PendingStep:
-    """One commit in preparation: the job data it consumes, if any, and once known its result.
+@dataclass(frozen=True)
+class JobDataReservation:
+    """Job data held while submission runs outside the trainer lock.
 
-    The trainer makes one when it reserves job data or when a running job's
-    poll returns a result, and its commit path reads it. ``data`` is ``None``
-    for a commit about a running job, which consumes no records; such a step
-    is made only with its result, so ``data is None`` implies ``result is not
-    None``. With data, ``result`` stays ``None`` while the step's work runs
-    outside the trainer lock.
+    Values: ``data`` is JobData. ``consumed_ids`` is None while the pipeline holds the reservation. Otherwise,
+    ``data.request`` exists and ``consumed_ids == frozenset({data.request.id})``: a failed instruction released
+    its samples and consumed only that instruction.
+    Purpose: Trainer.reserve_job_data makes this phase; run_once replaces it with PendingTrainingResult once
+    submission or instruction skipping returns. It contains no training result or prepared commit.
+    """
+
+    data: JobData
+    consumed_ids: frozenset[str] | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.data, JobData):
+            raise TypeError("a reservation needs JobData")
+        if self.consumed_ids is not None and (
+            not isinstance(self.consumed_ids, frozenset)
+            or self.data.request is None
+            or self.consumed_ids != frozenset({self.data.request.id})
+        ):
+            raise ValueError("consumed_ids must name only the reserved instruction, or be None")
+
+    @property
+    def data_id(self) -> str:
+        """The ID of the reserved data."""
+        return self.data.data_id
+
+
+@dataclass(frozen=True)
+class PendingTrainingResult:
+    """A completed submission or job update awaiting its durable scenario commit.
+
+    Values: ``result`` is TrainStepResult. ``data`` is the reserved JobData for a submission or None for a polled
+    job update. ``ended`` is a JobOutcome only for a polled job end, otherwise None. ``consumed_ids`` is None,
+    or ``data.request`` exists and ``consumed_ids == frozenset({data.request.id})`` for a skipped instruction.
+    ``earlier_results`` is an
+    ordered, possibly empty tuple of TrainStepResult values replaced by metric annotation; duplicates are allowed.
+    Purpose: Trainer.run_once makes this phase. prepare_commit acknowledges its data once and creates
+    PreparedTrainingResult. Annotation replaces the result while retaining its earlier identities.
     """
 
     data: JobData | None
-    result: TrainStepResult | None
-    prepared_commit: PreparedCommit | None = None
-    #: The outcome of the job whose end this commit records, which the pipeline learns once it is durable.
+    result: TrainStepResult
     ended: JobOutcome | None = None
-    # Set once the pipeline has the job data back and the step consumed these ids on its own, so no acknowledgement.
     consumed_ids: frozenset[str] | None = None
-    #: The values ``result`` held before commit metrics replaced it: a caller may still hold one.
     earlier_results: tuple[TrainStepResult, ...] = ()
 
     def __post_init__(self) -> None:
-        if self.data is None and self.result is None:
-            raise ValueError("a pending step without job data must carry its result")
+        if self.data is not None and not isinstance(self.data, JobData):
+            raise TypeError("data must be JobData or None")
+        if not isinstance(self.result, TrainStepResult):
+            raise TypeError("a pending result needs TrainStepResult")
+        if self.ended is not None and (not isinstance(self.ended, JobOutcome) or self.data is not None):
+            raise ValueError("only a polled job update can carry its job outcome")
+        if self.consumed_ids is not None and (
+            self.data is None
+            or not isinstance(self.consumed_ids, frozenset)
+            or self.data.request is None
+            or self.consumed_ids != frozenset({self.data.request.id})
+        ):
+            raise ValueError("consumed_ids must name only the reserved instruction, or be None")
+        if not isinstance(self.earlier_results, tuple) or not all(
+            isinstance(result, TrainStepResult) for result in self.earlier_results
+        ):
+            raise TypeError("earlier_results must be a tuple of TrainStepResult values")
 
     @property
     def data_id(self) -> str | None:
+        """The ID of the submission's data, or None for a polled job update."""
         return None if self.data is None else self.data.data_id
+
+
+@dataclass(frozen=True)
+class PreparedTrainingResult(PendingTrainingResult):
+    """A pending result whose commit snapshot has been prepared.
+
+    Values: every PendingTrainingResult invariant holds, and ``prepared_commit`` is PreparedCommit. It is the
+    cached snapshot from the first preparation; later annotation retains that snapshot as it retains result
+    identities. Purpose: Trainer.prepare_commit makes it after acknowledgment. Retrying preparation returns that
+    exact snapshot; Trainer.commit reads it only after scenario settlement and then clears the pending phase.
+    """
+
+    prepared_commit: PreparedCommit = field(kw_only=True)
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if not isinstance(self.prepared_commit, PreparedCommit):
+            raise TypeError("prepared_commit must be PreparedCommit")
 
 
 @dataclass(frozen=True)
@@ -209,7 +270,7 @@ class Trainer:
         self._data_sequence = 0
         self.consumed_record_ids: set[str] = set()
         self.skipped_record_ids: set[str] = set()
-        self._pending: _PendingStep | None = None
+        self.pending_step: JobDataReservation | PendingTrainingResult | None = None
         # The result values of the last pending step a commit put on record: committing one again is a second step.
         self.recorded_results: tuple[TrainStepResult, ...] = ()
         self._lock = Lock()
@@ -240,7 +301,9 @@ class Trainer:
             values["records/oldest_unread_age_seconds"] = (
                 max(0.0, time.time() - oldest[0][1].created_at) if oldest else 0.0
             )
-            values["training/reserved_job_data"] = int(self._pending is not None and self._pending.data is not None)
+            values["training/reserved_job_data"] = int(
+                self.pending_step is not None and self.pending_step.data is not None
+            )
             values["training/auto_enabled"] = int(self._pipeline.training_mode == "auto")
             pipeline_metrics = {
                 **self._pipeline.status(),
@@ -282,8 +345,8 @@ class Trainer:
     def fail_pending_instruction(self, error: str) -> bool:
         """Mark the reserved instruction as failed, so its next job data is a skip row; False when none is reserved."""
         with self._lock:
-            pending = self._pending
-            if pending is None or pending.result is not None or pending.data is None or pending.data.request is None:
+            pending = self.pending_step
+            if not isinstance(pending, JobDataReservation) or pending.data.request is None:
                 return False
             self._pipeline.mark_request_failed(pending.data.request.id, error)
             return True
@@ -379,17 +442,17 @@ class Trainer:
     def has_pending_commit(self) -> bool:
         """Whether a commit is in preparation: reserved job data, or a job commit not yet recorded."""
         with self._lock:
-            return self._pending is not None
+            return self.pending_step is not None
 
     @property
     def pending_job_data(self) -> JobData | None:
         with self._lock:
-            return None if self._pending is None else self._pending.data
+            return None if self.pending_step is None else self.pending_step.data
 
     def job_data_ready(self) -> bool:
         """Whether reserved or buildable job data is waiting; a pending job commit holds no job data."""
         with self._lock:
-            if self._pending is not None and self._pending.data is not None:
+            if self.pending_step is not None and self.pending_step.data is not None:
                 return True
             return self.trains and self._pipeline.holds_job_data(self.job_samples)
 
@@ -405,7 +468,7 @@ class Trainer:
             return False
         with self._lock:
             if (
-                self._pending is not None
+                self.pending_step is not None
                 or self._pipeline.background_jobs_running()
                 or self._pipeline.holds_job_data(self.job_samples)
             ):
@@ -552,8 +615,8 @@ class Trainer:
             if not self.trains:
                 self.read_records()
                 return None
-            if self._pending is not None and self._pending.result is not None:
-                return self._pending.result
+            if isinstance(self.pending_step, PendingTrainingResult):
+                return self.pending_step.result
             observed_state = self._state
             loop_state = None if self._job_loop is None else JobLoopState.from_dict(observed_state)
             job = None if loop_state is None else loop_state.job
@@ -571,7 +634,7 @@ class Trainer:
                 result, ended = (None, None) if polled is None else (polled.result, polled.ended)
             elif data.request is not None and failure is not None:
                 # Committed without a job: the failed instruction is consumed alone and the catalog row names why.
-                result = self._skip_failed_instruction(data, data.request, failure)
+                result = self.skip_failed_instruction(data, data.request, failure)
             else:
                 parameters = self._pipeline.sample2job.job_parameters(data)
                 result = (
@@ -582,21 +645,26 @@ class Trainer:
                 # A new training start set meanwhile replaced the state this poll read: its result is stale.
                 if result is None or self._state is not observed_state:
                     return None
-                self._pending = _PendingStep(data=None, result=result, ended=ended)
+                self.pending_step = PendingTrainingResult(data=None, result=result, ended=ended)
             else:
-                if self._pending is None or self._pending.data_id != data.data_id:
+                reservation = self.pending_step
+                if not isinstance(reservation, JobDataReservation) or reservation.data_id != data.data_id:
                     raise RuntimeError("trainer reservation changed while its step was being prepared")
-                self._pending.result = result
+                if result is None:
+                    raise RuntimeError("submitting reserved job data returned no result")
+                self.pending_step = PendingTrainingResult(
+                    data=data, result=result, consumed_ids=reservation.consumed_ids
+                )
             return result
 
-    def _skip_failed_instruction(self, data: JobData, request: TrainingRequest, error: str) -> TrainStepResult:
+    def skip_failed_instruction(self, data: JobData, request: TrainingRequest, error: str) -> TrainStepResult:
         """Consume the instruction alone; the samples of its job data stay in the buffer."""
         with self._lock:
-            pending = self._pending
-            if pending is None or pending.data_id != data.data_id:
+            pending = self.pending_step
+            if not isinstance(pending, JobDataReservation) or pending.data_id != data.data_id:
                 raise RuntimeError("trainer reservation changed while its instruction was being skipped")
             self._pipeline.release_job_data(data.data_id)
-            pending.consumed_ids = self._pipeline.discard_request(request.id)
+            self.pending_step = replace(pending, consumed_ids=self._pipeline.discard_request(request.id))
         return TrainStepResult(dict(self._state), {"skipped": "instruction failed", "error": error})
 
     def reserve_job_data(self, serving_artifact_id: str | None) -> JobData | None:
@@ -605,15 +673,15 @@ class Trainer:
         ``serving_artifact_id`` is the artifact that serves the scenario now.
         The staleness check of the pipeline measures the lag of each buffered record sample against it.
         """
-        if self._pending is not None:
-            return self._pending.data
+        if self.pending_step is not None:
+            return self.pending_step.data
         if serving_artifact_id is not None:
             self._pipeline.observe_serving_artifact_id(serving_artifact_id)
         # The samples service makes the samples (``produce_samples``); the cycle only reads the sample store.
         if not self.pipeline_ready():
             return None
         data = self._build_validated_job_data()
-        self._pending = _PendingStep(data=data, result=None)
+        self.pending_step = JobDataReservation(data)
         return data
 
     def prepare_commit(self, result: TrainStepResult | None) -> PreparedCommit:
@@ -626,7 +694,7 @@ class Trainer:
         record settle.
         """
         with self._lock:
-            if self._pending is None:
+            if self.pending_step is None:
                 if any(result is recorded for recorded in self.recorded_results):
                     raise RuntimeError("training result is on record already: committing it again is a second step")
                 return PreparedCommit(
@@ -634,16 +702,19 @@ class Trainer:
                     high_water_sequence=self._data_sequence,
                     high_water_offset=self._data_offset,
                 )
-            if self._pending.result is not result:
-                raise RuntimeError("training result does not match the pending step")
-            if self._pending.prepared_commit is not None:
-                return self._pending.prepared_commit
-            data_id, result = self._pending.data_id, self._pending.result
-            if result is None:
+            pending = self.pending_step
+            if isinstance(pending, JobDataReservation):
+                if result is not None:
+                    raise RuntimeError("training result does not match the pending step")
                 raise RuntimeError("trainer pending job data has no result")
+            if pending.result is not result:
+                raise RuntimeError("training result does not match the pending step")
+            if isinstance(pending, PreparedTrainingResult):
+                return pending.prepared_commit
+            data_id, result = pending.data_id, pending.result
             if not isinstance(result.state, Mapping):
                 raise TypeError("training step state must be a mapping")
-            consumed = self._pending.consumed_ids
+            consumed = pending.consumed_ids
             if consumed is None:
                 # A commit about a running job consumes no job data.
                 consumed = frozenset() if data_id is None else self._pipeline.acknowledge(data_id)
@@ -652,7 +723,7 @@ class Trainer:
             metrics = dict(result.metrics)
             if loss.record_count > 0:
                 metrics.update({"records/evicted_count": loss.record_count, "records/data_incomplete": 1})
-            request = None if self._pending.data is None else self._pending.data.request
+            request = None if pending.data is None else pending.data.request
             if request is not None:
                 # The step's own dict, when it wrote one, carries what its method added to ``requires``.
                 metrics.setdefault("training_request", {"id": request.id, **request.to_dict()})
@@ -665,26 +736,35 @@ class Trainer:
                 metrics=metrics or None,
                 training_job_id=result.training_job_id,
             )
-            self._pending.prepared_commit = prepared
+            self.pending_step = PreparedTrainingResult(
+                data=pending.data,
+                result=pending.result,
+                ended=pending.ended,
+                consumed_ids=pending.consumed_ids,
+                earlier_results=pending.earlier_results,
+                prepared_commit=prepared,
+            )
             return prepared
 
     def commit(self, prepared: PreparedCommit) -> None:
         """Expose one prepared state after its scenario commit has settled."""
         with self._lock:
-            if self._pending is None:
+            if self.pending_step is None:
                 return
-            if self._pending.prepared_commit is not prepared:
+            if (
+                not isinstance(self.pending_step, PreparedTrainingResult)
+                or self.pending_step.prepared_commit is not prepared
+            ):
                 raise RuntimeError("prepared commit does not match the pending training step")
             self._pipeline.release_records(prepared.released_ids)
-            if self._pending.ended is not None:
+            if self.pending_step.ended is not None:
                 # The job's end is durable: the pipeline learns its outcome, such as a task job's rewards.
-                self._pipeline.job_ended(self._pending.ended)
+                self._pipeline.job_ended(self.pending_step.ended)
             self._state = dict(prepared.algorithm_state)
             self.consumed_record_ids.update(prepared.consumed_ids)
             self.skipped_record_ids.difference_update(prepared.consumed_ids)
-            held = self._pending.result
-            self.recorded_results = (*self._pending.earlier_results, *(() if held is None else (held,)))
-            self._pending = None
+            self.recorded_results = (*self.pending_step.earlier_results, self.pending_step.result)
+            self.pending_step = None
 
     def add_commit_metrics(self, result: TrainStepResult, metrics: Mapping[str, Any]) -> TrainStepResult:
         """Attach provider correlation fields to the exact pending result.
@@ -696,13 +776,14 @@ class Trainer:
         if not metrics:
             return result
         with self._lock:
-            if self._pending is None or self._pending.result is None:
+            if not isinstance(self.pending_step, PendingTrainingResult):
                 raise RuntimeError("cannot annotate a training result without a pending step")
-            if self._pending.result is not result:
+            if self.pending_step.result is not result:
                 raise RuntimeError("cannot annotate a result that is not the pending training step")
             annotated = replace(result, metrics={**dict(result.metrics), **dict(metrics)})
-            self._pending.earlier_results = (*self._pending.earlier_results, result)
-            self._pending.result = annotated
+            self.pending_step = replace(
+                self.pending_step, result=annotated, earlier_results=(*self.pending_step.earlier_results, result)
+            )
             return annotated
 
     def cancel_job(self) -> None:
@@ -726,7 +807,7 @@ class Trainer:
         if tree is None:
             raise TrainingStartRefused(f"artifact {artifact.ref.revision!r} has no local files to train from")
         with self._lock:
-            if self._pending is not None:
+            if self.pending_step is not None:
                 raise CommitPending("cannot set the training start while a training result waits for its commit")
             observed_state = self._state
         job_loop = self._job_loop
@@ -738,7 +819,7 @@ class Trainer:
         except ValueError as exc:
             raise TrainingStartRefused(f"scenario {self.scenario!r} cannot train from this artifact: {exc}") from exc
         with self._lock:
-            if self._pending is not None or self._state is not observed_state:
+            if self.pending_step is not None or self._state is not observed_state:
                 raise CommitPending("a training result reached its commit while the training start was being set")
             # The running job is cancelled only once the new start is sure to apply.
             self._state = job_loop.started_from(JobLoopState.from_dict(self._state), imported).to_dict()
