@@ -431,7 +431,9 @@ def test_serving_routes_and_the_finished_request_commit_together_and_survive_ret
     assert table.read_scenario("s") == {}
     item = queue.take(SERVING_QUEUE, "inference", [SERVING_KIND], now=1)
     served = ServedArtifact("a", "http://engine-a", "model-a")
-    done = table.complete_request(item, "inference", {"active": served, "a": served}, stop_delay_seconds=10, now=2)
+    done = table.complete_request(
+        item, "inference", {"active": served, "a": served}, serving_config={}, stop_delay_seconds=10, now=2
+    )
     assert done.state == "finished"
     assert done.result == {"active": served.to_json(), "a": served.to_json()}
     assert table.current_request("s").id == done.id
@@ -453,7 +455,12 @@ def test_new_selection_waits_for_held_engine_work_but_rejects_its_obsolete_route
     assert queue.get(SERVING_QUEUE, old.id).state == "assigned"
     assert queue.take(SERVING_QUEUE, "second", [SERVING_KIND], now=4) is None
     obsolete = table.complete_request(
-        old, "first", {"active": ServedArtifact("a", "http://old", "a")}, stop_delay_seconds=10, now=4
+        old,
+        "first",
+        {"active": ServedArtifact("a", "http://old", "a")},
+        serving_config={},
+        stop_delay_seconds=10,
+        now=4,
     )
     assert obsolete.state == "finished" and obsolete.result == {}
     assert table.read_scenario("s") == {}
@@ -471,16 +478,23 @@ def test_withdrawal_removes_routes_and_cannot_be_undone_by_a_running_start(open_
     served = ServedArtifact("a", "http://engine", "a")
     table.request("s", {"artifact_id": "a"}, control_lease_number=lease.number, now=0)
     first = queue.take(SERVING_QUEUE, "worker", [SERVING_KIND], now=1)
-    table.complete_request(first, "worker", {"active": served}, stop_delay_seconds=10, now=2)
+    before = table.changed_sequence()
+    table.complete_request(
+        first, "worker", {"active": served}, serving_config={"temperature": 0.3}, stop_delay_seconds=10, now=2
+    )
+    assert table.read_serving_config("s") == {"temperature": 0.3}
+    assert table.changed_sequence() > before
     table.request("s", {"artifact_id": "b"}, control_lease_number=lease.number, now=3)
     running = queue.take(SERVING_QUEUE, "worker", [SERVING_KIND], now=4)
     withdrawn = table.request("s", {}, control_lease_number=lease.number, stop_delay_seconds=10, now=5)
     assert withdrawn.state == "finished" and withdrawn.payload == {}
-    assert table.read_scenario("s") == {}
+    assert table.read_scenario("s") == {} and table.read_serving_config("s") == {}
     assert table.due_stops(14) == ()
     assert table.due_stops(15) == (ScheduledStop(served, 15),)
-    table.complete_request(running, "worker", {"active": served}, stop_delay_seconds=10, now=6)
-    assert table.read_scenario("s") == {}
+    table.complete_request(
+        running, "worker", {"active": served}, serving_config={"temperature": 0.9}, stop_delay_seconds=10, now=6
+    )
+    assert table.read_scenario("s") == {} and table.read_serving_config("s") == {}
     again = table.request("s", {"artifact_id": "a"}, control_lease_number=lease.number, now=7)
     assert again.id not in {first.id, running.id, withdrawn.id}
     assert table.current_request("s").id == again.id
@@ -497,13 +511,15 @@ def test_serving_completion_rejects_old_attempt_and_rolls_back_bad_routes(open_c
     queue.requeue_expired(now=12)
     current = queue.take(SERVING_QUEUE, "worker", [SERVING_KIND], now=13)
     with pytest.raises(WorkLeaseLost, match="later attempt"):
-        table.complete_request(old_attempt, "worker", {"active": served}, stop_delay_seconds=10, now=14)
+        table.complete_request(
+            old_attempt, "worker", {"active": served}, serving_config={}, stop_delay_seconds=10, now=14
+        )
     before = table.changed_sequence()
     with pytest.raises(ValueError, match="model name"):
-        table.complete_request(current, "worker", {"": served}, stop_delay_seconds=10, now=14)
+        table.complete_request(current, "worker", {"": served}, serving_config={}, stop_delay_seconds=10, now=14)
     assert table.changed_sequence() == before and table.read_scenario("s") == {}
     assert table.current_request("s").state == "assigned"
-    table.complete_request(current, "worker", {"active": served}, stop_delay_seconds=10, now=15)
+    table.complete_request(current, "worker", {"active": served}, serving_config={}, stop_delay_seconds=10, now=15)
     assert table.current_request("s").state == "finished"
 
 
@@ -542,7 +558,7 @@ def test_replaced_routes_stop_only_when_unreferenced_and_cleanup_keeps_a_newer_s
     for scenario in ("s", "t"):
         table.request(scenario, {"artifact_id": "a"}, control_lease_number=lease.number, now=0)
         item = queue.take(SERVING_QUEUE, "worker", [SERVING_KIND], now=1)
-        table.complete_request(item, "worker", {"active": served}, stop_delay_seconds=10, now=2)
+        table.complete_request(item, "worker", {"active": served}, serving_config={}, stop_delay_seconds=10, now=2)
     table.request("s", {}, control_lease_number=lease.number, stop_delay_seconds=10, now=3)
     assert table.due_stops(100) == ()
     table.request("t", {}, control_lease_number=lease.number, stop_delay_seconds=10, now=4)
@@ -563,7 +579,7 @@ def test_a_new_inference_owner_recovers_only_completed_current_selections(open_c
     served = ServedArtifact("a", "http://engine", "a")
     ready = table.request("ready", {"artifact_id": "a"}, control_lease_number=lease.number, now=0)
     running = queue.take(SERVING_QUEUE, "worker", [SERVING_KIND], now=1)
-    table.complete_request(running, "worker", {"active": served}, stop_delay_seconds=10, now=2)
+    table.complete_request(running, "worker", {"active": served}, serving_config={}, stop_delay_seconds=10, now=2)
     failed = table.request("failed", {"artifact_id": "b"}, control_lease_number=lease.number, now=0)
     queue.take(SERVING_QUEUE, "worker", [SERVING_KIND], now=1)
     queue.fail(SERVING_QUEUE, failed.id, "worker", "cannot load", retryable=False, now=2)
@@ -603,13 +619,19 @@ def test_startup_and_cleanup_completion_require_the_current_runtime_owner(open_c
     startup = queue.take(SERVING_QUEUE, "worker", [SERVING_KIND], now=1)
     queue.extend_lease(SERVING_QUEUE, startup.id, "worker", now=9)
     with pytest.raises(WorkLeaseLost):
-        table.complete_request(startup, "worker", {"active": served}, owner=owner, stop_delay_seconds=10, now=11)
+        table.complete_request(
+            startup, "worker", {"active": served}, owner=owner, serving_config={}, stop_delay_seconds=10, now=11
+        )
     assert table.read_scenario("s") == {} and table.current_request("s").state == "assigned"
     queue.requeue_expired(now=11)
     current_owner = queue.take(INFERENCE_OWNER_QUEUE, "worker", [INFERENCE_OWNER_QUEUE], now=12)
     with pytest.raises(WorkLeaseLost, match="later attempt"):
-        table.complete_request(startup, "worker", {"active": served}, owner=owner, stop_delay_seconds=10, now=13)
-    table.complete_request(startup, "worker", {"active": served}, owner=current_owner, stop_delay_seconds=10, now=13)
+        table.complete_request(
+            startup, "worker", {"active": served}, owner=owner, serving_config={}, stop_delay_seconds=10, now=13
+        )
+    table.complete_request(
+        startup, "worker", {"active": served}, owner=current_owner, serving_config={}, stop_delay_seconds=10, now=13
+    )
 
     stop = ScheduledStop(ServedArtifact("old", "http://engine", "old"), 14)
     table.schedule_stop(stop, control_lease_number=lease.number)
@@ -632,7 +654,7 @@ def test_replacing_an_artifact_at_the_same_endpoint_does_not_stop_that_endpoint(
     for index, served in enumerate((previous, current)):
         table.request("s", {"artifact_id": served.artifact_id}, control_lease_number=lease.number, now=index)
         item = queue.take(SERVING_QUEUE, "worker", [SERVING_KIND], now=index)
-        table.complete_request(item, "worker", {"active": served}, stop_delay_seconds=10, now=index)
+        table.complete_request(item, "worker", {"active": served}, serving_config={}, stop_delay_seconds=10, now=index)
     assert table.read_scenario("s") == {"active": current}
     assert table.is_referenced(previous) and table.due_stops(100) == ()
     table.request("s", {}, control_lease_number=lease.number, stop_delay_seconds=10, now=2)

@@ -791,6 +791,19 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
             scenario, artifact_evaluation=artifact_evaluation, activation=activation
         )
 
+    def set_serving_config(self, scenario: str, update: Mapping[str, object]) -> dict[str, Any]:
+        """Change the serving config of ``scenario`` by ``update`` (``ScenarioRegistry.set_serving_config``) and
+        queue a serving request that carries it, so inference applies it without an activation. Return the stored
+        ``serving_config`` and the ``effective_serving_config``."""
+        with self.registry.lock_for(scenario):
+            current = self.registry.set_serving_config(scenario, update)
+            if self.publisher is not None:
+                self.publisher.publish(current)
+            return {
+                "serving_config": current.serving_config.to_json(),
+                "effective_serving_config": current.effective_serving_config(current.serving_config),
+            }
+
     def stored_settings(self, scenario: str) -> ScenarioSettings:
         """The settings stored for ``scenario``; defaults when none are stored."""
         return self.registry.stored_settings(scenario)
@@ -800,7 +813,9 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
 
         ``training_mode`` is what the loaded scenario runs. ``artifact_evaluation`` and
         ``activation`` are the stored settings, or None. ``effective_activation`` is the rule that applies: the
-        scenario's ``activation``, else the deployment's. Raise ``UnknownScenario`` for an unknown scenario.
+        scenario's ``activation``, else the deployment's. ``serving_config`` is the stored serving config, and
+        ``effective_serving_config`` the serving fields of each component with the values that the scenario serves
+        with (``Scenario.effective_serving_config``). Raise ``UnknownScenario`` for an unknown scenario.
         """
         with self.locked_scenario(scenario) as current:
             settings = self.registry.stored_settings(scenario)
@@ -810,6 +825,8 @@ class Dispatcher(ScenarioLifecycle, StoreChanges, ControlInstance, ItemSync, Can
                 "artifact_evaluation": settings.artifact_evaluation,
                 "activation": settings.activation,
                 "effective_activation": self.registry.effective_activation(settings),
+                "serving_config": settings.serving_config.to_json(),
+                "effective_serving_config": current.effective_serving_config(current.serving_config),
             }
 
     def imported_tasks(self, scenario: str) -> tuple[StoredSample, ...]:

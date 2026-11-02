@@ -91,13 +91,14 @@ from reef.storage.work_queue import (
 class CoordinationTables:
     """The tables of one coordination database.
 
-    Values: six ``Table`` objects of one ``MetaData``, defined by ``coordination_tables``.
+    Values: seven ``Table`` objects of one ``MetaData``, defined by ``coordination_tables``.
 
     Purpose: a ``CoordinationDatabase`` makes it; the coordination stores query it.
     """
 
     sequence: Table
     served_model: Table
+    serving_config: Table
     scheduled_stop: Table
     control_lease: Table
     work_item: Table
@@ -121,6 +122,13 @@ def coordination_tables(metadata: MetaData) -> CoordinationTables:
         Column("url", Text, nullable=False),
         Column("model_name", Text, nullable=False),
         PrimaryKeyConstraint("scenario", "name"),
+    )
+    # The override of the served component that each scenario's routes serve with (RFC #1097); no row is no field.
+    serving_config = Table(
+        "serving_config",
+        metadata,
+        Column("scenario", Text, primary_key=True),
+        Column("value_json", Text, nullable=False),
     )
     scheduled_stop = Table(
         "scheduled_stop",
@@ -171,7 +179,7 @@ def coordination_tables(metadata: MetaData) -> CoordinationTables:
         Column("name", Text, primary_key=True),
         Column("value", BigInteger, nullable=False),
     )
-    return CoordinationTables(sequence, served_model, scheduled_stop, control_lease, work_item, mark)
+    return CoordinationTables(sequence, served_model, serving_config, scheduled_stop, control_lease, work_item, mark)
 
 
 #: The counter row that numbers the changes of the work queues.
@@ -460,6 +468,7 @@ class SQLServedModels(ServedModelsWriter):
             if payload:
                 return item
             self.replace_routes(connection, served_counter, scenario, {}, moment + stop_delay_seconds)
+            self.replace_serving_config(connection, served_counter, scenario, {})
             return self.work.save(connection, counter, item, moment, state="finished", result={}, ended_at=moment)
 
     def replace_routes(
@@ -482,6 +491,20 @@ class SQLServedModels(ServedModelsWriter):
                 insert(table).values(scenario=scenario, name=require_text(name, "model name"), **served.to_json())
             )
         self.schedule_unreferenced(connection, counter, set(previous.values()) - set(models.values()), stop_after)
+        counter.next()
+
+    def replace_serving_config(
+        self, connection: Connection, counter: SequenceCounter, scenario: str, serving_config: Mapping[str, JsonValue]
+    ) -> None:
+        """Make ``serving_config`` the scenario's override in the caller's transaction; an empty one removes it."""
+        table = self.tables.serving_config
+        stored = connection.execute(select(table.c.value_json).where(table.c.scenario == scenario)).scalar()
+        value_json = canonical_json(dict(serving_config)) if serving_config else None
+        if stored == value_json:
+            return
+        connection.execute(delete(table).where(table.c.scenario == scenario))
+        if value_json is not None:
+            connection.execute(insert(table).values(scenario=scenario, value_json=value_json))
         counter.next()
 
     def schedule_unreferenced(
@@ -514,6 +537,7 @@ class SQLServedModels(ServedModelsWriter):
         worker_id: str,
         models: Mapping[str, ServedArtifact],
         *,
+        serving_config: Mapping[str, JsonValue],
         stop_delay_seconds: float,
         owner: WorkItem | None = None,
         now: float | None = None,
@@ -534,6 +558,7 @@ class SQLServedModels(ServedModelsWriter):
             with self.database.counter(connection, SERVED_SEQUENCE) as served_counter:
                 if current is not None and current.id == item.id:
                     self.replace_routes(connection, served_counter, item.scenario, models, moment + stop_delay_seconds)
+                    self.replace_serving_config(connection, served_counter, item.scenario, serving_config)
                     result = {name: dict(served.to_json()) for name, served in models.items()}
                 else:
                     self.schedule_unreferenced(
@@ -672,6 +697,12 @@ class SQLServedModels(ServedModelsWriter):
         with self.database.read() as connection:
             rows = connection.execute(select(table).where(table.c.scenario == scenario)).mappings().all()
         return {row["name"]: served_from_row(row) for row in rows}
+
+    def read_serving_config(self, scenario: str) -> Mapping[str, JsonValue]:
+        table = self.tables.serving_config
+        with self.database.read() as connection:
+            value_json = connection.execute(select(table.c.value_json).where(table.c.scenario == scenario)).scalar()
+        return {} if value_json is None else cast(dict[str, JsonValue], json.loads(value_json))
 
     def changed_sequence(self) -> int:
         with self.database.read() as connection:

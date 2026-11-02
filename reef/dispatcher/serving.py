@@ -47,6 +47,15 @@ class ServingLease(LeaseExtender):
             self.runtime.shutdown()
 
 
+def serving_config_of(payload: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
+    """The override of the served component that a serving request carries (RFC #1097); ``{}`` when it carries
+    none, so the scenario serves with the deployment's values."""
+    value = payload.get("serving_config", {})
+    if not isinstance(value, dict):
+        raise ValueError("a serving request's serving_config must be a JSON object")
+    return dict(value)
+
+
 class ServingWorker(QueueWorker):
     """Start queued releases and retire unused endpoints in the inference service.
 
@@ -173,6 +182,8 @@ class ServingWorker(QueueWorker):
             reference = backend.resolve_release(require_text(item.payload.get("release_id"), "release_id"))
             artifact = Artifact(reference, repository)
         surface = self.recipe.serving_surface(item.scenario)
+        # Before the activation, so that an engine that starts for the artifact starts with the override.
+        runtime.apply_serving_config(item.scenario, serving_config_of(item.payload))
         current_route = self.routes.read(ScenarioModel(item.scenario))
         if current_route is None or current_route.artifact_id != artifact_id:
             surface.activate(artifact, runtime)
@@ -222,6 +233,7 @@ class ServingWorker(QueueWorker):
                 item,
                 self.worker_id,
                 {name: ServedArtifact.from_json(value) for name, value in result.items()},
+                serving_config=serving_config_of(item.payload),
                 stop_delay_seconds=self.stop_delay_seconds,
                 owner=self.owner.item,
             )

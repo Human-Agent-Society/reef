@@ -49,6 +49,7 @@ from reef.core.artifact_ref import ArtifactRef
 from reef.core.errors import ReefError
 from reef.core.records_types import ROLLOUT_HEADER, AgentRecord, RequestType
 from reef.core.served_models import ACTIVE, CACHE_SECONDS, ServedArtifact
+from reef.core.values import JsonValue
 from reef.inference.provider_protocol import SSEFrameDecoder
 from reef.runtime.interfaces import (
     INFERENCE_ABORT_ERROR,
@@ -96,31 +97,45 @@ class ServedModelsCache:
     Values: ``table`` is the table; ``cache_seconds`` is how long a read stays fresh while the table's
     ``changed_sequence`` stays the same, so a change reaches the next request at once; ``max_cache_age_seconds`` is
     how long the replica serves from an old read while the table cannot be read; ``rows`` holds each scenario's
-    rows with the time and the table sequence of their read.
+    rows and serving config with the time and the table sequence of their read.
 
-    Purpose: each request of a replica reads its ``ServedArtifact`` through it (``read``).
+    Purpose: each request of a replica reads its ``ServedArtifact`` (``read``) and the serving config that its
+    handler applies (``serving_config``) through it.
     """
 
     table: ServedModels
     cache_seconds: float = CACHE_SECONDS
     max_cache_age_seconds: float = 300.0
-    rows: dict[str, tuple[float, int, Mapping[str, ServedArtifact]]] = field(default_factory=dict)
+    rows: dict[str, tuple[float, int, Mapping[str, ServedArtifact], Mapping[str, JsonValue]]] = field(
+        default_factory=dict
+    )
 
-    def scenario_rows(self, scenario: str, *, refresh: bool = False) -> Mapping[str, ServedArtifact]:
+    def scenario_read(
+        self, scenario: str, *, refresh: bool = False
+    ) -> tuple[Mapping[str, ServedArtifact], Mapping[str, JsonValue]]:
+        """The rows of ``scenario`` and its serving config, from the cache while they are fresh."""
         now = time.monotonic()
         held = self.rows.get(scenario)
         try:
             sequence = self.table.changed_sequence()
             if held is not None and not refresh and now - held[0] < self.cache_seconds and sequence == held[1]:
-                return held[2]
+                return held[2], held[3]
             rows = self.table.read_scenario(scenario)
+            serving_config = self.table.read_serving_config(scenario)
         except (SQLAlchemyError, ReefError, OSError) as exc:
             if held is not None and now - held[0] < self.max_cache_age_seconds:
                 logger.warning("serving %s from a cached read of served_models: %s", scenario, exc)
-                return held[2]
+                return held[2], held[3]
             raise StaleServedModels(f"served_models cannot be read: {exc}") from exc
-        self.rows[scenario] = (now, sequence, rows)
-        return rows
+        self.rows[scenario] = (now, sequence, rows, serving_config)
+        return rows, serving_config
+
+    def scenario_rows(self, scenario: str, *, refresh: bool = False) -> Mapping[str, ServedArtifact]:
+        return self.scenario_read(scenario, refresh=refresh)[0]
+
+    def serving_config(self, scenario: str) -> Mapping[str, JsonValue]:
+        """The override that ``scenario``'s routes serve with (``ServedModels.read_serving_config``)."""
+        return self.scenario_read(scenario)[1]
 
     def read(self, scenario: str, model: object, *, refresh: bool = False) -> ServedArtifact:
         """The ``ServedArtifact`` that answers a request for ``model`` of ``scenario``."""
@@ -369,11 +384,15 @@ class InferenceReplica:
         except LookupError as exc:
             raise web.HTTPServiceUnavailable(text=str(exc)) from exc
 
-    def request_payload(self, served: ServedArtifact, payload: Mapping[str, Any]) -> dict[str, Any]:
-        """The body that the engine of ``served`` receives for the client's ``payload``; 400 when its handler refuses
-        it."""
+    def request_payload(self, scenario: str, served: ServedArtifact, payload: Mapping[str, Any]) -> dict[str, Any]:
+        """The body that the engine of ``served`` receives for the client's ``payload`` to ``scenario``, with the
+        scenario's serving config; 400 when its handler refuses it."""
         try:
-            return self.handler(served).request_payload(payload)
+            serving_config = self.cache.serving_config(scenario)
+        except StaleServedModels as exc:
+            raise web.HTTPServiceUnavailable(text=str(exc)) from exc
+        try:
+            return self.handler(served).request_payload(payload, serving_config=serving_config)
         except ValueError as exc:
             raise web.HTTPBadRequest(text=str(exc)) from exc
 
@@ -418,10 +437,10 @@ class InferenceReplica:
         if payload.get("stream") is True:
             if rollout:
                 raise web.HTTPBadRequest(text="a rollout's call does not stream; send it without stream")
-            sent = self.request_payload(served, payload)
+            sent = self.request_payload(parsed.scenario, served, payload)
             return await self.relay_stream(request, path, parsed, sent, served, ref, record=record)
         for attempt in range(2):
-            sent = self.request_payload(served, payload)
+            sent = self.request_payload(parsed.scenario, served, payload)
             response = await self.forward(served, ref, path, sent)
             if not inference_aborted(response):
                 break
