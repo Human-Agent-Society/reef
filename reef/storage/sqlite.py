@@ -14,6 +14,7 @@ from contextlib import closing, contextmanager
 from pathlib import Path
 from threading import RLock
 from typing import Any, Self
+from weakref import WeakValueDictionary
 
 from sqlalchemy import REAL, URL, Column, Index, Integer, MetaData, Table, Text, create_engine, inspect
 from sqlalchemy.engine import Connection
@@ -47,6 +48,10 @@ from reef.storage.sql_records import (
 from reef.storage.sql_samples import SQLSampleStore, manual_buffer_table, sample_table, sample_train_count_table
 from reef.storage.sql_tasks import SQLTaskStorage, task_tables
 from reef.storage.tasks import LocalTaskFileStore, TaskFileStore
+
+# Named memory databases share table locks; weak references release locks after their last store is gone.
+memory_locks: WeakValueDictionary[str, RLock] = WeakValueDictionary()
+memory_locks_lock = RLock()
 
 _METADATA = MetaData()
 _AGENT_RECORD = Table(
@@ -182,13 +187,21 @@ class SQLiteRecordStore(SQLRecordStore):
     def __init__(self, database: str | Path | None = None, *, memory_name: str | None = None) -> None:
         """``database`` is the file; without it the store is in memory. ``memory_name`` names a shared in-memory
         database: every store of one name in this process reads and writes the same records while one of them is
-        open."""
+        open. Transactions on one named memory database share a process-local lock across all store instances."""
         if memory_name is not None and database is not None:
             raise ValueError("a store is in a file or in a named memory database, not both")
         self._database = ":memory:" if database is None else str(database)
         if self._database != ":memory:":
             Path(self._database).parent.mkdir(parents=True, exist_ok=True)
-        self._lock = RLock()
+        if memory_name is None:
+            self.transaction_lock = RLock()
+        else:
+            with memory_locks_lock:
+                shared_lock = memory_locks.get(memory_name)
+                if shared_lock is None:
+                    shared_lock = RLock()
+                    memory_locks[memory_name] = shared_lock
+                self.transaction_lock = shared_lock
         super().__init__(_TABLES)
         url = (
             URL.create("sqlite+pysqlite", database=self._database)
@@ -228,7 +241,7 @@ class SQLiteRecordStore(SQLRecordStore):
         )
 
     def _initialize(self) -> None:
-        with self._lock:
+        with self.transaction_lock:
             if self._database != ":memory:":
                 self._enable_wal()
                 self._connection.exec_driver_sql("PRAGMA synchronous = FULL")
@@ -259,7 +272,7 @@ class SQLiteRecordStore(SQLRecordStore):
 
     @contextmanager
     def _transaction(self, *, write: bool) -> Iterator[Connection]:
-        with self._lock, self._connection.begin():
+        with self.transaction_lock, self._connection.begin():
             # The driver's legacy mode does not begin a transaction for SELECT.
             # Writes also lock before reading retry state across connections.
             self._connection.exec_driver_sql("BEGIN IMMEDIATE" if write else "BEGIN")
@@ -297,7 +310,7 @@ class SQLiteRecordStore(SQLRecordStore):
         )
 
     def close(self) -> None:
-        with self._lock:
+        with self.transaction_lock:
             self._connection.close()
             self._engine.dispose()
 
