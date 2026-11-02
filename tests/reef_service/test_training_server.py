@@ -535,7 +535,8 @@ def test_status_reports_the_running_job_the_finished_jobs_and_the_served_adapter
             if (
                 block["finished_jobs"] == finished_jobs
                 and (block["training_job"] is not None) == running
-                and block["served_artifact_id"] == dispatcher.get_or_create_scenario("math").serving_artifact_id()
+                and block["served_artifact_id"]
+                == dispatcher.get_or_create_scenario("math").current_artifact_ref().release_id
             ):
                 return block
             await asyncio.sleep(0.01)
