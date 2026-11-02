@@ -491,6 +491,13 @@ Both handlers accept ``tool_call_parser`` (the engine's parser name),
 unknown and fails the handler's start. Per-request sampling extras pass through
 ``sglang_sampling_params`` or ``vllm_sampling_params``.
 
+A scenario can set ``temperature``, ``top_p`` and ``top_k`` over
+``sampling_defaults`` while it serves, with its
+`serving config <http-api.rst#serving-config>`__. A scenario's value is a
+default as well: it applies when a request does not set that field. Both chat
+protocols carry these three fields, so a value applies alike to OpenAI chat and
+Anthropic messages requests.
+
 ``chat_template_kwargs`` renders a request that omits them, for example
 ``{enable_thinking: false}`` for a hybrid-thinking model served without
 reasoning; a request's own ``chat_template_kwargs`` win key by key.

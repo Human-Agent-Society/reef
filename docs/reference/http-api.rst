@@ -1286,6 +1286,8 @@ body holds one or more of these settings. Reef rejects other fields:
 - ``artifact_evaluation``: the settings that Reef evaluates each new artifact
   with (`Automatic evaluation`_).
 - ``activation``: the scenario's activation rule, below.
+- ``serving_config``: the serving fields that the scenario sets over the
+  deployment's values (`Serving config`_).
 
 The response holds the scenario name and each setting that the request
 changed. To change the data processor's mode:
@@ -1352,6 +1354,40 @@ never activates an existing artifact. Under ``evaluated``, Reef activates an
 artifact when an evaluation of it finishes after the change with a
 ``mean_score`` of at least ``min_mean_score``.
 
+Serving config
+~~~~~~~~~~~~~~
+
+The ``serving_config`` setting changes how the scenario is served while it
+serves, without a restart or an activation. It maps a component name to the
+fields that the scenario sets for that component:
+
+.. code:: json
+
+   {"serving_config": {"weights": {"temperature": 0.6, "top_p": 0.95}}}
+
+Reef merges the request into the stored config field by field. A value sets
+the field. ``null`` removes the field, so the field takes the deployment's
+value again. Fields that the request leaves out keep their stored values. The
+response holds the stored ``serving_config`` and the
+``effective_serving_config``, as `Read the settings`_ describes.
+
+Only the component that the inference runtime serves has serving fields. The
+runtime and its request handler define the fields and check their values. Reef
+answers HTTP 400 and stores nothing for a field that they do not have, for a
+value that a field does not take, or for another component. The token-native
+chat handlers have ``temperature``, ``top_p`` and ``top_k``
+(`native backend options <configuration.rst#native-backend-options>`__). A runtime can
+add engine fields, such as a number of replicas.
+
+Inference applies a change within a few seconds. Each inference replica sends
+the request fields with each later request. The runtime applies its engine
+fields to the engine that serves the scenario and to each engine that starts
+for it later. A field that takes effect only when an engine starts, such as a
+GPU type, stays in the deployment configuration. Reef stores the config with
+the scenario's settings, so a reload and a restart keep it. A stored field that
+the deployment no longer accepts is ignored with a warning, and the scenario
+serves with the deployment's values until a person changes the config.
+
 Read the settings
 ~~~~~~~~~~~~~~~~~
 
@@ -1365,7 +1401,9 @@ scenario:
      "training_mode": "auto",
      "artifact_evaluation": {"harness": {"name": "terminus-2"}, "rollouts_per_task": 2},
      "activation": {"module": "evaluated", "config": {"min_mean_score": 0.8}},
-     "effective_activation": {"module": "evaluated", "config": {"min_mean_score": 0.8}}
+     "effective_activation": {"module": "evaluated", "config": {"min_mean_score": 0.8}},
+     "serving_config": {"weights": {"temperature": 0.6}},
+     "effective_serving_config": {"weights": {"temperature": 0.6, "top_p": 0.95}}
    }
 
 - ``training_mode`` is what the scenario runs.
@@ -1373,6 +1411,10 @@ scenario:
 - ``effective_activation`` is the rule that applies: the scenario's
   ``activation``, else the deployment's. When the deployment names a rule
   class of its own, ``module`` is the ``package.module:ClassName`` of that class.
+- ``serving_config`` is the stored `serving config <#serving-config>`__, ``{}``
+  when the scenario sets no field.
+- ``effective_serving_config`` maps the served component to each of its serving
+  fields that has a value: the scenario's value, else the deployment's.
 
 An unknown scenario returns ``404``.
 

@@ -9,12 +9,13 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Self
 
 from reef.core.errors import ReefError
 from reef.core.plugins import Plugin
+from reef.core.serving_config import ServingConfig
 from reef.storage.commits import CommitRecord
 from reef.storage.data import check_owner
 from reef.storage.evaluations import EvaluationStore
@@ -40,7 +41,9 @@ class ScenarioSettings:
     registry checks the rule before it stores it. ``owner`` is the data store
     owner whose items the scenario uses (RFC #1028), a name that passes
     ``check_owner``. It is ``None`` only for a scenario that the data sync has
-    not opened yet; the first open sets it. Construction checks these types.
+    not opened yet; the first open sets it. ``serving_config`` is the serving fields that the scenario sets over
+    the deployment's values (RFC #1097); the scenario registry checks it with the runtime before it stores it.
+    Construction checks these types.
 
     Purpose: the scenario registry and the dispatcher write the settings
     through ``ScenarioStorage.write_settings`` and read them back when a
@@ -51,6 +54,7 @@ class ScenarioSettings:
     artifact_evaluation: Mapping[str, object] | None = None
     activation: Mapping[str, object] | None = None
     owner: str | None = None
+    serving_config: ServingConfig = field(default_factory=ServingConfig)
 
     def __post_init__(self) -> None:
         if self.training_mode is not None and not isinstance(self.training_mode, str):
@@ -61,6 +65,8 @@ class ScenarioSettings:
             raise ValueError("scenario settings activation must be an object or null")
         if self.owner is not None:
             check_owner(self.owner)
+        if not isinstance(self.serving_config, ServingConfig):
+            raise ValueError("scenario settings serving_config must be a ServingConfig")
 
 
 class ScenarioStore(ABC):

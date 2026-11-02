@@ -369,6 +369,21 @@ class ScenarioRegistry:
             current.set_activation_rule(rule)
         return stored_activation
 
+    def set_serving_config(self, scenario: str, update: Mapping[str, object]) -> Scenario:
+        """Change the stored serving config of an existing scenario by ``update`` (``ServingConfig.updated``),
+        check it with the scenario's runtime, and serve with it from the next serving request on.
+
+        ``ValueError`` for an update that the config or the runtime refuses; then nothing is stored.
+        """
+        with self.lock_for(scenario):
+            current = self.require(scenario)
+            settings = self._storage.read_settings(scenario)
+            config = settings.serving_config.updated(update)
+            current.effective_serving_config(config)
+            self._storage.write_settings(scenario, replace(settings, serving_config=config))
+            current.set_serving_config(config)
+            return current
+
     def stored_settings(self, scenario: str) -> ScenarioSettings:
         """The settings stored for ``scenario``; defaults when none are stored."""
         return self._storage.read_settings(scenario)
@@ -452,15 +467,17 @@ class ScenarioRegistry:
             return tuple(self._scenarios.values())
 
     def apply_stored_settings(self, instance: Scenario) -> None:
-        """Select the training mode and the activation rule a person stored for the scenario on a newly built
-        instance.
+        """Select the training mode, the activation rule and the serving config a person stored for the scenario
+        on a newly built instance.
 
         A mode the recipe no longer supports, or that Reef no longer has (such as
         ``hybrid``), keeps the recipe's default, so the scenario still loads and
         a person can select another mode. A scenario
         whose rule is ``evaluated`` without ``artifact_evaluation`` loads with a
-        warning: it activates no new artifact. Any other failure closes the
-        instance.
+        warning: it activates no new artifact. A serving config that the runtime
+        now refuses loads with a warning: the scenario serves with the
+        deployment's values, and the stored config stays for a person to change.
+        Any other failure closes the instance.
         """
         settings = self._storage.read_settings(instance.name)
         try:
@@ -476,6 +493,14 @@ class ScenarioRegistry:
                     )
             rule = self.activation_rule(settings)
             instance.set_activation_rule(rule)
+            try:
+                instance.set_serving_config(settings.serving_config)
+            except ValueError as exc:
+                logger.warning(
+                    "Scenario %r serves with the deployment's values: its stored serving config is refused (%s)",
+                    instance.name,
+                    exc,
+                )
         except BaseException:
             instance.close()
             raise

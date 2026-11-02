@@ -202,6 +202,7 @@ def test_startup_status_follows_work_and_a_retry_remains_starting(tmp_path: Path
                     taken,
                     "worker",
                     {ACTIVE: ServedArtifact("release-1", "http://engine", "math")},
+                    serving_config={},
                     stop_delay_seconds=60,
                 )
                 response = await client.get(path, headers=HEADERS)

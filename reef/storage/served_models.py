@@ -30,10 +30,13 @@ class ControlLeaseConflict(ReefError):
 class ServedModels(ABC):
     """Read access to ``served_models``.
 
-    Values: the state is a partial function from ``ScenarioModel`` to ``ServedArtifact``, a finite set of
-    ``ScheduledStop`` rows, and ``changed_sequence``, an integer that increases at each change of either.
+    Values: the state is a partial function from ``ScenarioModel`` to ``ServedArtifact``, a function from scenario
+    name to the override that its routes serve with (a JSON object, empty when the scenario sets no serving field), a
+    finite set of ``ScheduledStop`` rows, and ``changed_sequence``, an integer that increases at each change of any
+    of them.
 
-    Purpose: inference replicas read the served artifact of a request's key (``read``).
+    Purpose: inference replicas read the served artifact of a request's key (``read``) and the override that the
+    handler applies to the request (``read_serving_config``).
     Readers find route changes by ``changed_sequence`` and startup work by ``current_request``.
     """
 
@@ -44,6 +47,11 @@ class ServedModels(ABC):
     @abstractmethod
     def read_scenario(self, scenario: str) -> Mapping[str, ServedArtifact]:
         """Every row of ``scenario``, by name."""
+
+    @abstractmethod
+    def read_serving_config(self, scenario: str) -> Mapping[str, JsonValue]:
+        """The override of the served component that ``scenario``'s routes serve with (RFC #1097): what the last
+        published request carried, and ``{}`` before one or after a withdrawal."""
 
     @abstractmethod
     def changed_sequence(self) -> int:
@@ -114,7 +122,7 @@ class ServedModelsWriter(ServedModels):
         such key, so its count is 0.
         A new request cancels earlier queued work and gets a new ID. Held work finishes without publishing.
         All serving work shares one serial key, because runtimes can share an engine across scenarios.
-        An empty payload withdraws the routes immediately and records a completed request.
+        An empty payload withdraws the routes and the serving config immediately and records a completed request.
         Unreferenced withdrawn routes stop after the finite, non-negative ``stop_delay_seconds``.
         """
 
@@ -125,11 +133,13 @@ class ServedModelsWriter(ServedModels):
         worker_id: str,
         models: Mapping[str, ServedArtifact],
         *,
+        serving_config: Mapping[str, JsonValue],
         stop_delay_seconds: float,
         owner: WorkItem | None = None,
         now: float | None = None,
     ) -> WorkItem:
-        """Publish ``models`` for ``item.scenario`` and finish its serving work in one transaction.
+        """Publish ``models`` and ``serving_config`` for ``item.scenario`` and finish its serving work in one
+        transaction.
 
         The item must be held by ``worker_id`` in the same attempt; otherwise raise ``WorkLeaseLost``.
         When supplied, ``owner`` must also be held in the same attempt.
