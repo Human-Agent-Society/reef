@@ -27,6 +27,8 @@ from reef.storage.records import RecordRetention
 
 logger = logging.getLogger(__name__)
 _RECORD_RETENTION_INTERVAL_SECONDS = 60.0
+#: How often the data service calls ``DataStore.maintain``.
+DATA_STORE_MAINTENANCE_SECONDS = 300.0
 REQUEST_SERVICE_KEY = web.AppKey("reef_request_service", RequestService)
 
 
@@ -52,6 +54,38 @@ async def _maintain_records(dispatcher: Dispatcher, retention: RecordRetention, 
             continue
 
 
+def maintain_data_store(app: web.Application, dispatcher: Dispatcher) -> None:
+    """While ``app`` runs, call ``DataStore.maintain`` every ``DATA_STORE_MAINTENANCE_SECONDS``, when ``dispatcher``
+    runs the data service and has a data store. A failed call is logged, and the next call tries again."""
+    data_store = dispatcher.data_store
+    if not dispatcher.services.runs_data or data_store is None:
+        return
+
+    async def maintain(app: web.Application):
+        stopped = asyncio.Event()
+
+        async def run() -> None:
+            while not stopped.is_set():
+                try:
+                    await asyncio.to_thread(data_store.maintain)
+                except Exception:
+                    logger.exception("data store maintenance failed; will retry on the next run")
+                try:
+                    await asyncio.wait_for(stopped.wait(), timeout=DATA_STORE_MAINTENANCE_SECONDS)
+                except TimeoutError:
+                    continue
+
+        task = asyncio.create_task(run())
+        try:
+            yield
+        finally:
+            # Let a running call finish before the dispatcher closes the data store.
+            stopped.set()
+            await task
+
+    app.cleanup_ctx.append(maintain)
+
+
 def create_data_app(
     dispatcher: Dispatcher,
     *,
@@ -70,6 +104,7 @@ def create_data_app(
     configure_browser_access(app, console_origins)
     app[REQUEST_SERVICE_KEY] = request_service
     register_data_service_routes(app, request_service=request_service, evaluations=ArtifactEvaluations(dispatcher))
+    maintain_data_store(app, dispatcher)
 
     async def cleanup(app: web.Application) -> None:
         await asyncio.to_thread(dispatcher.close)
@@ -182,6 +217,7 @@ def create_app(
             await asyncio.to_thread(artifact_evaluations.close)
 
     app.cleanup_ctx.append(evaluate_new_artifacts)
+    maintain_data_store(app, request_service.dispatcher)
     if record_retention is not None:
 
         async def maintain_records(app: web.Application):
