@@ -126,7 +126,7 @@ class Served(ModelBinding):
 
 #: One queued instruction, as a step's material holds it.
 REQUEST = TrainingRequest(
-    text="Add a skill that runs the tests before answering", session="session-1", release_id="release-1", id="ask-1"
+    text="Add a skill that runs the tests before answering", session="session-1", artifact_id="release-1", id="ask-1"
 )
 
 #: The head tree a request step starts from: the starter skill and one rule.

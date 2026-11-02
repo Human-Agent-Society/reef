@@ -73,7 +73,9 @@ def test_the_route_screens_the_text_and_stores_nothing_for_a_refusal(tmp_path: P
             assert answer["scenario"] == "agents" and answer["request_type"] == "train"
             stored = scenario.instructions.get(answer["agent_record_id"])
             # The queued payload has one shape: a request that named nothing carries an empty ``requires``.
-            assert stored is not None and dict(stored.payload) == {**_request(), "requires": []}
+            expected = _request()
+            expected["artifact_id"] = expected.pop("release_id")
+            assert stored is not None and dict(stored.payload) == {**expected, "requires": []}
             assert await asyncio.to_thread(entered.wait, 5)
         finally:
             release.set()

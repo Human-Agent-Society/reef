@@ -306,9 +306,9 @@ def test_pointer_failure_is_reported_and_repaired_before_next_commit(local_scena
         committed = scenario.current_artifact_ref()
         # The job's submission, then its checkpoint.
         assert scenario.scenario_step == 2
+        assert scenario.repository.checkpoint_artifact == committed
         assert scenario.commit_status["artifact_head_sync"] == {
             "state": "pending",
-            "release_id": committed.release_id,
             "error": "storage unavailable",
         }
         # The job's end is the next commit: it repairs the committed parent first, which fails.
@@ -333,7 +333,6 @@ def test_pointer_failure_is_reported_and_repaired_before_next_commit(local_scena
     assert scenario.repository.checkpoint_artifact == backend.current()
     assert scenario.commit_status["artifact_head_sync"] == {
         "state": "synchronized",
-        "release_id": backend.current().release_id,
         "error": None,
     }
 
@@ -393,7 +392,6 @@ def test_activation_does_no_storage_io(local_scenario, monkeypatch):
     assert backend.current() == tip
     assert scenario.commit_status["artifact_head_sync"] == {
         "state": "synchronized",
-        "release_id": tip.release_id,
         "error": None,
     }
     scenario.commit(_prepare(scenario))
@@ -424,8 +422,8 @@ def test_committed_record_retry_reports_pointer_failure_without_repeating_step(l
     assert len(scenario.store.history()) == 2
     assert scenario.trainer.state == result.state
     assert scenario.current_artifact_ref() == committed.artifact_ref
+    assert scenario.repository.checkpoint_artifact == committed.artifact_ref
     assert scenario.commit_status["artifact_head_sync"] == {
         "state": "pending",
-        "release_id": committed.artifact_ref.release_id,
         "error": "storage unavailable",
     }

@@ -6,6 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from reef.core.artifact_ref import ArtifactRef
+from reef.core.artifact_selection import ArtifactSelection, SelectedArtifact
 from reef.core.served_models import CACHE_SECONDS, ScheduledStop, ServedArtifact
 from reef.dispatcher.served import ControlInstance, ServedModelsPublisher, wait_for_control_lease
 from reef.storage.coordination import Coordination
@@ -44,6 +46,14 @@ class Registry:
             served_component=lambda: "weights",
             serving_artifact_id=lambda: runtime.release,
             current_artifact_ref=lambda: SimpleNamespace(release_id=runtime.release),
+            artifact_selection=lambda ref=None: ArtifactSelection(
+                {
+                    "weights": SelectedArtifact(
+                        runtime.release if ref is None else "older-weights",
+                        ArtifactRef("content", runtime.release if ref is None else ref.release_id, None),
+                    )
+                }
+            ),
             served_beside=dict,
         )
 
@@ -93,7 +103,7 @@ def test_control_queues_the_selected_artifact_without_publishing_a_ready_route()
     assert first.state == "queued" and first.started_at is None
     assert first.payload == {
         "artifact_id": "release-1",
-        "release_id": "release-1",
+        "selection": Registry(runtime).scenario.artifact_selection().to_dict(),
         "aliases": ["release-1"],
         "beside": {},
     }
@@ -122,7 +132,12 @@ def test_control_queues_beside_artifacts_as_references_and_withdraws_the_current
     publisher = ServedModelsPublisher(registry, store, Instance(), lease, instance_id="control", stop_delay_seconds=60)
     publisher.run_once(now=1)
     request = store.served_models.current_request("math")
-    assert request.payload["beside"] == {"older-weights": {"release_id": "release-0", "component": "weights"}}
+    assert request.payload["beside"] == {
+        "older-weights": {
+            "selection": registry.scenario.artifact_selection(SimpleNamespace(release_id="release-0")).to_dict(),
+            "component": "weights",
+        }
+    }
     publisher.withdraw("math", now=2)
     assert store.served_models.current_request("math").payload == {}
     assert store.work_queue.get(request.queue, request.id).state == "failed"
