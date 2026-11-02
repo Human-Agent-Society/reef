@@ -12,10 +12,11 @@ tasks and trains on them.
   gateway that records its model calls on Reef, and the one-reply prompt Designer.
 - ``claude_author``: Claude Code as the agent, in the same sandbox, signed in with its owner's OAuth token; it calls
   Anthropic itself and checks its task with the ``task_check`` command.
-- ``checks``: the task checks: Harbor's oracle and nop agents, the contamination check, the test review, and the
-  solver calibration.
+- ``checks``: the task checks: Harbor's oracle and nop agents, the contamination check, the test review, the
+  solver calibration, and the seed check.
 - ``generator``: ``AutoEnvScalingGenerator``: the sessions walked with a cursor, admission and the history
-  step, the agent's check and the task checks through the generator service, the band and the parents.
+  step, the agent's check and the task checks through the generator service, the band, the parents and the seeds.
+- ``tmax``: the command that converts extracted TMax tasks into seed tasks.
 """
 
 from recipes.beta.autoenvscaling.author import (
@@ -24,6 +25,7 @@ from recipes.beta.autoenvscaling.author import (
     AuthorError,
     CandidateChecks,
     PromptAuthor,
+    SeedVariantAuthor,
     SourceError,
     TaskAuthor,
     TaskVariant,
@@ -37,6 +39,7 @@ from recipes.beta.autoenvscaling.checks import (
     OracleCheck,
     ReviewCheck,
     ReviewFinding,
+    SeedCheck,
     TaskCheck,
 )
 from recipes.beta.autoenvscaling.claude_author import ClaudeCodeAuthor
@@ -59,6 +62,8 @@ __all__ = [
     "Repository",
     "ReviewCheck",
     "ReviewFinding",
+    "SeedCheck",
+    "SeedVariantAuthor",
     "SessionSource",
     "SourceError",
     "TaskAuthor",

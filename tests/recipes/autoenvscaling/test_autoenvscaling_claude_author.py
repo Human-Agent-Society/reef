@@ -519,7 +519,7 @@ def test_claude_vary_gives_claude_code_the_parent_and_the_variant_rules(tmp_path
     rules = (root / "plugin" / "rules.md").read_text()
     assert VARIANT_INPUTS_TEXT.strip() in rules and CLAUDE_CHECK_TEXT.strip() in rules
     assert (root / "inputs" / "parent" / "instruction.md").is_file()
-    assert "(t-0) in 12% of 8 rollouts" in (root / "inputs" / "variant.md").read_text()
+    assert "(t-0) is 0.12 over 8 rollouts" in (root / "inputs" / "variant.md").read_text()
     assert authored.record_ids == () and "port.txt" in authored.reply
 
 

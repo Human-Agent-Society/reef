@@ -248,7 +248,8 @@ def test_the_agent_gets_the_parent_and_its_pass_rate_and_the_variant_rules(
     assert seen["prompt"] == author_module.VARIANT_PROMPT.format(direction="simpler")
     assert {"inputs/parent/instruction.md", "inputs/parent/tests/test.sh", "inputs/variant.md"} <= inputs
     assert seen["variant.md"] == (
-        "The solver passed the task in ../inputs/parent/ (t-0) in 12% of 8 rollouts.\n"
+        "The solver's mean reward on the task in ../inputs/parent/ (t-0) is 0.12 over 8 rollouts; a rollout that "
+        "passes scores 1.\n"
         "Write a simpler task: the solver passes the parent too rarely to learn from it.\n"
     )
 
