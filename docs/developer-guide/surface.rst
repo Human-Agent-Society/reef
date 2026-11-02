@@ -9,10 +9,9 @@ each request to the engine that ``served_models`` names (see `Run the services
 in separate processes
 <../user-guide/operate.rst#run-the-services-in-separate-processes>`__).
 
-.. page::
-   :for: recipe authors deciding what a served artifact can do, and anyone reading ``reef/surface/``
-   :needs: the ``Surface`` fields from `Python API <../reference/python-api.rst#surface>`__
-   :outcome: which call site invokes each capability, what the bundled surfaces bind, and how to build one
+:For: recipe authors deciding what a served artifact can do, and anyone reading ``reef/surface/``
+:Before you start: the ``Surface`` fields from `Python API <../reference/python-api.rst#surface>`__
+:You will have: which call site invokes each capability, what the bundled surfaces bind, and how to build one
 
 Scope
 -----

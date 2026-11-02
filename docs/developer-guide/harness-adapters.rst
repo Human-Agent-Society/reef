@@ -1,10 +1,9 @@
 Harness adapters
 ================
 
-.. page::
-   :for: developers who connect a new agent to Reef
-   :needs: the harness tree and the loop from `Evolve your harness <../user-guide/evolve-your-harness.rst>`__
-   :outcome: an adapter that Reef can render, run in runs and Harbor tasks, and install on a person's machine
+:For: developers who connect a new agent to Reef
+:Before you start: the harness tree and the loop from `Evolve your harness <../user-guide/evolve-your-harness.rst>`__
+:You will have: an adapter that Reef can render, run in runs and Harbor tasks, and install on a person's machine
 
 An adapter connects a harness tree to one agent. It is one file,
 ``reef/harness/adapters/<name>/adapter.yaml``, and an optional ``render.py``
@@ -14,11 +13,12 @@ run loads that plugin, and a person's machine installs it with the
 agent's own command. Reef renders the same tree with the adapter in three
 places:
 
-.. diagram::
-   :caption: The adapter renders one harness tree three ways: as the whole configuration of an evaluation run, inside the container of a Harbor task, and as the agent's plugin on a person's machine.
+.. figure:: ../assets/harness-adapter-modes-light.svg
+   :alt: One adapter.yaml, three ways an agent runs: an evaluation run in Reef, a Harbor task in its container, and the agent's plugin on a person's machine
 
-   <img class="fig-light" src="../assets/harness-adapter-modes-light.svg" alt="One adapter.yaml, three ways an agent runs: an evaluation run in Reef, a Harbor task in its container, and the agent's plugin on a person's machine">
-   <img class="fig-dark" src="../assets/harness-adapter-modes-dark.svg" alt="One adapter.yaml, three ways an agent runs: an evaluation run in Reef, a Harbor task in its container, and the agent's plugin on a person's machine">
+   The adapter renders one harness tree three ways: as the whole configuration
+   of an evaluation run, inside the container of a Harbor task, and as the
+   agent's plugin on a person's machine.
 
 The adapter file
 ----------------
@@ -346,7 +346,7 @@ campaign adds ``terminus`` (`its README
        ``default_instructions.md``.
    * - ``dsh``
      - npm 0.1.2-alpha.5; ``dsh --profile headless``
-     - The config is keyed by plugin id; ``!!js `` strings become
+     - The config is keyed by plugin id; ``!!js`` strings become
        JavaScript. Commands never run on the model's own.
    * - ``hermes``
      - git ``v2026.8.31``; ``hermes chat -Q --oneshot -q``
@@ -505,7 +505,7 @@ adapter without ``layer`` does not run on a person's machine.
 Connect a new agent
 -------------------
 
-.. steps::
+.. container:: steps
 
    #. Write ``adapter.yaml``: ``evolve``, ``install``, ``dirs``,
       ``sessions``, ``model``, ``run``, and ``config`` with the paths alone
