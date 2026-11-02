@@ -96,6 +96,9 @@ Routes
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/scenarios``                                                         | create a scenario explicitly                      |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/scenarios/{scenario}/inference/status``                              | artifact startup state; ``?model=active`` by      |
+|                                                                                  | default                                           |
++----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/scenarios/{scenario}/update``                                       | update a scenario's settings                      |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/scenarios/{scenario}/settings``                                      | read a scenario's settings                        |
@@ -1366,6 +1369,45 @@ An unknown scenario returns ``404``.
 Inference
 ---------
 
+Startup status
+~~~~~~~~~~~~~~
+
+Scenario creation and activation select an artifact without waiting for its
+engine to start. The inference service loads the artifact and publishes its
+route after startup succeeds. Read its state with:
+
+.. code:: bash
+
+   curl -sS http://127.0.0.1:8900/reef/scenarios/hello-reef/inference/status \
+     -H "Authorization: Bearer $REEF_TOKEN"
+
+.. code:: json
+
+   {"artifact_id": "release-1", "state": "starting", "error": null}
+
+``model`` defaults to ``active``. It can also name an active artifact alias
+or an artifact selected for serving beside the active one. An unknown name
+returns 404.
+
+* ``pending``: no worker has taken the startup work.
+* ``starting``: inference has taken it. Downloads, conversion, loading, and
+  retries are part of this state.
+* ``ready``: startup succeeded and inference published the route.
+* ``failed``: startup ended with an error. ``error`` gives a safe message;
+  the service logs hold the diagnostic details.
+
+``error`` is null in every other state. The status describes the selected
+artifact, even while an older route still serves requests. It is a startup
+result, not a continuous health check. Reading it starts no work.
+No startup work returns 404. An unreadable state store returns 503.
+The route requires the same bearer token as inference.
+
+Without a usable route, a pending or starting artifact returns HTTP 503
+with error type ``inference_starting`` and ``Retry-After: 30``.
+A failed startup returns HTTP 503 with type ``inference_start_failed``.
+Both errors use ``{"error": {"type", "message"}}``.
+Control and data operations remain available during startup.
+
 Request
 ~~~~~~~
 
@@ -1881,11 +1923,10 @@ give a large import a long client timeout.
 Activate an artifact
 ~~~~~~~~~~~~~~~~~~~~
 
-Pulling an older release changes only your local copy. Reef serves the
-scenario's *active release*: inference answers from it, and
-``GET /reef/harness`` serves its tree. The active
-release binds the active artifact of each component. To serve another
-artifact, send ``POST /reef/scenarios/{scenario}/activate``:
+Pulling an older release changes only your local copy. The *active release*
+records the selected artifact of each component. ``GET /reef/harness`` serves
+its tree. Inference serves the last route that completed startup.
+To select another artifact, send ``POST /reef/scenarios/{scenario}/activate``:
 
 .. code:: bash
 
@@ -1901,9 +1942,12 @@ The body is ``{"artifact_id": "<id>", "component": "<name>"}``. Leave out
 component, ``release_id`` is the active release afterwards, and
 ``content_id`` is the artifact's content.
 
+The response accepts the selection. Poll `Startup status`_ before sending
+requests that require the new artifact. A repeated activation can retry a
+failed startup without writing another activation record.
+
 - In a scenario of one component, activation writes no artifact or release.
-  It appends an ``activate`` record, and the release that made the artifact
-  serves again.
+  It appends an ``activate`` record and selects the release that made the artifact.
 - In a scenario of several components, activation publishes a release: the
   active release with ``component`` bound to the artifact, and the other
   components as the active release binds them. It makes no new content and

@@ -11,6 +11,8 @@ from aiohttp.test_utils import TestClient, TestServer
 from tests.support._policy_recipe import TestPolicyRecipe
 from tests.support.runtime_stubs import StubInferenceRuntime, StubTrainingComponent, runtime_bindings
 
+from tests.support.serving import wait_for_serving
+
 from reef.artifact import Artifact, ArtifactPublicationError, InMemoryRepositoryBackend
 from reef.core import AgentRecord, ReefError, RequestType
 from reef.core.trajectories import source_record_id
@@ -294,6 +296,7 @@ def test_lost_ack_publication_commits_the_checkpoint_once(start_dispatcher) -> N
     assert len(component.calls) == 1
     published = [row for row in dispatcher.list_artifacts("math") if row["operation"] == "training"]
     assert len(published) == 1
+    wait_for_serving(dispatcher)
     assert component.inference.served == "w1"
 
 
@@ -301,6 +304,7 @@ def test_lost_ack_publication_commits_the_checkpoint_once(start_dispatcher) -> N
 def test_weight_inference_does_not_materialize_its_checkpoint(start_dispatcher, monkeypatch) -> None:
     _, dispatcher = start_dispatcher()
     scenario = dispatcher.get_or_create_scenario("math")
+    wait_for_serving(dispatcher)
     monkeypatch.setattr(
         scenario.repository,
         "resolve",

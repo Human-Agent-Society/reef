@@ -372,10 +372,10 @@ class ScenarioCommitter:
         activation publishes a release: the active release with
         ``component`` bound to the artifact. It reuses the components'
         content, and the chain tip, the parent of the next training
-        publication, stays. No training start changes. The runtime activates
-        the release first, then the ``"activate"`` record lands at the next
-        step, then the active release moves; a crash before the record leaves
-        the active release that the log names. Activating the active artifact
+        publication, stays. No training start changes. A standalone scenario activates the runtime first.
+        A service scenario leaves engine activation to inference after the commit.
+        The ``"activate"`` record lands at the next step, then the active release moves.
+        A crash before the record leaves the active release that the log names. Activating the active artifact
         changes nothing. Raise as :meth:`resolve_artifact` does, and
         ``CommitPending`` while a training result waits for its commit.
         """
@@ -388,7 +388,8 @@ class ScenarioCommitter:
                 return replace(selected, release_id=current_ref.release_id)
             self.require_no_pending_commit("activate an artifact")
             target = self.release_with(served, selected, release)
-            surface.activate(target, self._binding.runtime, previous=served)
+            if self._binding.activates_runtime:
+                surface.activate(target, self._binding.runtime, previous=served)
             record = self.append_operation_record(
                 "activate",
                 target.ref,
@@ -593,9 +594,9 @@ class ScenarioCommitter:
         component as the active release binds it. Its parent is the chain
         tip, and it is published beside the chain, as an import is. The
         surface's admission check runs on the staged release first. The
-        component's trainer then takes the release as its training start
-        (``Trainer.start_from``), the runtime activates it, and one ``"sync"``
-        record with ``metrics`` lands at the next step. The active release
+        component's trainer then takes the release as its training start (``Trainer.start_from``).
+        A standalone scenario activates the runtime before the ``"sync"`` record lands with ``metrics``.
+        A service scenario leaves engine activation to inference after that record. The active release
         moves to it last; a crash before the record leaves the active release
         that the log names. The chain tip and the activation rule stay.
 
@@ -782,7 +783,7 @@ class ScenarioCommitter:
         *,
         activated: bool,
     ) -> None:
-        """Publish a training step's artifact on the chain and record it. When ``activated`` is true, serve it too.
+        """Publish and record a training artifact. When ``activated`` is true, select it for serving too.
 
         Every artifact that training makes becomes the chain tip, the parent of the next publication. Only an
         ``activated`` artifact becomes the active artifact. Any other artifact stays inactive until an activation.
@@ -796,8 +797,7 @@ class ScenarioCommitter:
             publication = SavedArtifactPublication(publication.artifact, component)
         local_artifact = self.stage_publication(next_step, publication, checkpoint)
         try:
-            # As at an activation, the runtime serves the published release once, before the record lands and
-            # before the active release moves.
+            # The durable release must exist before inference can take the committed selection.
             published_ref = artifacts.publish(
                 local_artifact,
                 expected_parent=checkpoint,
@@ -943,6 +943,8 @@ class ScenarioCommitter:
         return staged
 
     def _activate(self, artifact: Artifact, *, source: Artifact | None = None) -> None:
+        if not self._binding.activates_runtime:
+            return
         # A component the engine already serves is not activated again, so a
         # harness release never reloads weights; the active release is compared by
         # identity and materialized only when a composed manifest is needed.
