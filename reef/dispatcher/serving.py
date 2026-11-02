@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import logging
 import threading
 import time
 from collections.abc import Mapping
@@ -21,6 +22,8 @@ from reef.runtime.interfaces import InferenceRuntime
 from reef.storage.coordination import Coordination
 from reef.storage.served_models import INFERENCE_OWNER_QUEUE, SERVING_KIND, SERVING_QUEUE, STOP_SERVING_KIND
 from reef.storage.work_queue import JsonValue, LeaseExtender, NewWork, WorkItem, WorkLeaseLost, WorkQueue
+
+logger = logging.getLogger(__name__)
 
 
 class ServingLease(LeaseExtender):
@@ -101,6 +104,7 @@ class ServingWorker(QueueWorker):
                 self.owner.stop()
             with contextlib.suppress(WorkLeaseLost):
                 self.queue.finish(INFERENCE_OWNER_QUEUE, self.owner.item.id, self.worker_id, {})
+            logger.info("inference worker %s released runtime ownership", self.worker_id)
             self.owner = None
         self.repositories.clear()
 
@@ -119,12 +123,16 @@ class ServingWorker(QueueWorker):
             self.queue.start(INFERENCE_OWNER_QUEUE, item.id, self.worker_id)
             self.owner = ServingLease(self.queue, item, self.worker_id, runtime, self.stopped)
             self.owner.__enter__()
+            logger.info("inference worker %s holds runtime ownership", self.worker_id)
         if self.owner.lease_lost.is_set():
             return False
         if self.recovery_routes is None:
             previous = tuple(self.routes.all_served())
             self.routes.recover_completed(self.owner.item, self.worker_id, stop_delay_seconds=self.stop_delay_seconds)
             self.recovery_routes = previous
+            logger.info(
+                "requeued the serving of every scenario; %d routes from before wait for adoption", len(previous)
+            )
         for stop in self.routes.due_stops(time.time()):
             payload: dict[str, JsonValue] = {"served": dict(stop.served.to_json()), "stop_after": stop.stop_after}
             identifier = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
@@ -149,11 +157,18 @@ class ServingWorker(QueueWorker):
         if self.owner is None or self.owner.lease_lost.is_set():
             raise WorkLeaseLost("the serving worker lost runtime ownership")
         if not self.opened:
+            started = time.monotonic()
             runtime.open()
-            for served in (*(self.recovery_routes or ()), *self.routes.all_served()):
+            adopted = (*(self.recovery_routes or ()), *self.routes.all_served())
+            for served in adopted:
                 runtime.adopt(served)
             self.opened = True
             self.recovery_routes = ()
+            logger.info(
+                "opened the inference runtime and offered it %d routes in %.1f s",
+                len(adopted),
+                time.monotonic() - started,
+            )
         if lease_lost.is_set() or self.owner.lease_lost.is_set():
             raise WorkLeaseLost("the serving worker lost its lease")
         if item.kind == STOP_SERVING_KIND:
@@ -164,6 +179,7 @@ class ServingWorker(QueueWorker):
             )
             if due and not self.routes.is_referenced(served):
                 runtime.stop_serving(served)
+                logger.info("stopped serving artifact %s at %s", served.artifact_id, served.url)
             return {}
         selected = self.routes.current_request(item.scenario)
         if selected is None or selected.id != item.id or not item.payload:
@@ -186,7 +202,13 @@ class ServingWorker(QueueWorker):
         runtime.apply_serving_config(item.scenario, serving_config_of(item.payload))
         current_route = self.routes.read(ScenarioModel(item.scenario))
         if current_route is None or current_route.artifact_id != artifact_id:
+            started = time.monotonic()
             surface.activate(artifact, runtime)
+            logger.info(
+                "scenario %s: activated artifact %s in %.1f s", item.scenario, artifact_id, time.monotonic() - started
+            )
+        else:
+            logger.info("scenario %s: artifact %s serves already", item.scenario, artifact_id)
         if lease_lost.is_set() or self.owner.lease_lost.is_set():
             raise WorkLeaseLost("the serving worker lost its lease")
         active = runtime.served_artifact(artifact_id, item.scenario)
