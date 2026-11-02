@@ -276,11 +276,17 @@ class ServiceWorkers:
                 worker.start()
 
     def stop(self) -> None:
-        """Stop every worker, the last added first, and empty the group."""
+        """Stop every worker, the last added first, and empty the group. Raise the first stop error after all attempts."""
         with self.lock:
             workers, self.workers, self.started = list(self.workers), [], False
+        errors: list[BaseException] = []
         for worker in reversed(workers):
-            worker.stop()
+            try:
+                worker.stop()
+            except BaseException as exc:
+                errors.append(exc)
+        if errors:
+            raise errors[0]
 
 
 __all__ = [
