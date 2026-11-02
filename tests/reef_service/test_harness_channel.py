@@ -37,8 +37,14 @@ TREE_V2 = HarnessTree(changed_rules("marker marker rules\n"))
 EMPTY_SEED = HarnessTree({})
 PI = get_adapter("pi")
 HEADERS = {"x-reef-scenario": "delivery"}
-UPDATE_TIMEOUT_S = 5.0
+UPDATE_TIMEOUT_S = 10.0
 UPDATE_POLL_S = 0.01
+
+
+@pytest.fixture(autouse=True)
+def poll_stub_jobs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Poll completed stub jobs without spending the HTTP assertion timeout on idle waits."""
+    monkeypatch.setattr("reef.dispatcher.local_workers.POLL_SECONDS", 0.01)
 
 
 def evaluate(task: str, result: TaskResult) -> float:

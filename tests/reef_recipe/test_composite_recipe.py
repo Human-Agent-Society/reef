@@ -175,13 +175,14 @@ def _root_of(recipe: CompositeRecipe, directory: Path) -> ScenarioRoot:
     )
 
 
-def _serve(recipe: CompositeRecipe, tmp_path: Path) -> Dispatcher:
+def _serve(recipe: CompositeRecipe, tmp_path: Path, *, hold_local_cycles: bool = False) -> Dispatcher:
     return Dispatcher(
         recipe,
         InMemoryRepositoryBackend.factory(directory=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
         coordination=memory_coordination(),
+        hold_local_cycles=hold_local_cycles,
     )
 
 
@@ -416,7 +417,7 @@ def test_composite_recipe_reads_components_from_the_file_layout() -> None:
 
 @pytest.mark.unit
 def test_composite_scenario_serves_its_config_and_reports_components(tmp_path: Path) -> None:
-    with closing(_serve(_composite(tmp_path), tmp_path)) as dispatcher:
+    with closing(_serve(_composite(tmp_path), tmp_path, hold_local_cycles=True)) as dispatcher:
         scenario = dispatcher.get_or_create_scenario("agent")
         assert scenario is not None
         artifact = Artifact(scenario.current_artifact_ref(), scenario.repository)
